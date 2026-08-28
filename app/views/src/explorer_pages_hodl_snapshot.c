@@ -184,7 +184,7 @@ static bool hodl_view_disk_cache_paths(
     if (n < 0 || n >= HODL_VIEW_DISK_CACHE_PATH_MAX)
         return false;
     char ignored_parent[HODL_VIEW_DISK_CACHE_PATH_MAX];
-    return platform_private_path_resolve(
+    return platform_private_destination_resolve(
         requested, path, HODL_VIEW_DISK_CACHE_PATH_MAX,
         parent ? parent : ignored_parent, HODL_VIEW_DISK_CACHE_PATH_MAX);
 }

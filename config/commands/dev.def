@@ -572,7 +572,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "and released its lock, plus the resulting live loop-status "
     "snapshot; the watcher_id must match exactly.", 0,
     "loop,stop,watcher", "zcl.dev_loop_stop_input.v1",
-    "zcl.dev_loop_status.v1", "watcher_id", "watcher_id",
+    "zcl.dev_loop_status.v1",
+    "watcher_id,group,owner,failure_id,to,relink_generation,reason,confirm",
+    "watcher_id",
     "z23 dev loop stop <watcher-id>",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,

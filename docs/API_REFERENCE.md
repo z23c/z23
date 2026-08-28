@@ -698,7 +698,7 @@ represented by its children's sections.
 | `dev loop status` (aliases: `dev.loop.heartbeat`) | compat 🔧 → `z23-dev dev loop heartbeat` | read / read / operator · instant/low | none | `zcl.dev_loop_status.v1` | `z23 dev loop status` | Read watcher identity, epoch, and latest verdict — *watcher state is available through the dev binary* |
 | `dev loop wait` | compat 🔧 → `z23-dev dev loop wait` | read / read / operator · persistent/low | `after_epoch`, `timeout_ms` | `zcl.dev_cycle.v1` | `z23 dev loop wait --input='{"after_epoch":41}'` | Wait for one verdict after a cycle epoch — *bounded verdict waiting is available through the dev binary* |
 | `dev loop events` | compat 🔧 → `z23-dev dev loop events --format=jsonl` | read / read / operator · persistent/stream | `after`, `heartbeat_ms` | `zcl.dev_loop_event.v1` | `z23-dev dev loop events --after=41 --format=jsonl` | Stream resumable source and cycle events — *resumable event subscription is available through the dev binary* |
-| `dev loop stop` | compat 🔧 → `z23-dev dev loop stop` | mutate / dev-mutation / **owner** · fast/low | **`watcher_id`** | `zcl.dev_loop_status.v1` | `z23 dev loop stop <watcher-id>` | Stop one identified native watcher — *watcher shutdown requires the dev-only executor* |
+| `dev loop stop` | compat 🔧 → `z23-dev dev loop stop` | mutate / dev-mutation / **owner** · fast/low | **`watcher_id`**, `group`, `owner`, `failure_id`, `to`, `relink_generation`, `reason`, `confirm` | `zcl.dev_loop_status.v1` | `z23 dev loop stop <watcher-id>` | Stop one identified native watcher — *watcher shutdown requires the dev-only executor* |
 
 #### `dev.test` — Focused proof selection
 

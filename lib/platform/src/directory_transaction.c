@@ -398,13 +398,15 @@ void platform_directory_lock_release(struct platform_directory_lock *lock)
 bool platform_directory_transaction_list_regular(
     struct platform_directory_transaction *d, struct platform_directory_names *out)
 {
-    if (!d || !out) return false;
-    /* Zero the out-parameter before the resolve below, which can fail
-     * with every argument non-NULL. A caller that frees the name list
-     * on a false return would otherwise free indeterminate pointers. */
+    /* Zero the out-parameter before anything that can fail, including the
+     * resolve below, which fails with every argument non-NULL. A caller
+     * that frees the name list on a false return would otherwise free
+     * indeterminate pointers. The NULL-d check rides after the memset for
+     * the same reason rather than returning ahead of it. */
+    if (!out) return false;
     memset(out, 0, sizeof(*out));
     nt_query_directory_file_fn query = resolve_nt_query_directory_file();
-    if (!query) return false;
+    if (!query || !d) return false;
     BYTE buffer[16384]; bool restart = true;
     for (;;) {
         IO_STATUS_BLOCK status = {0};
@@ -505,7 +507,7 @@ enum platform_directory_result platform_directory_child_unlink_result(struct pla
 bool platform_directory_child_unlink(struct platform_directory_transaction*d,const char*l,bool missing){enum platform_directory_result r=platform_directory_child_unlink_result(d,l);return r==PLATFORM_DIRECTORY_OK||(missing&&r==PLATFORM_DIRECTORY_MISSING);}
 enum platform_directory_result platform_directory_lock_acquire(struct platform_directory_transaction*d,const char*l,bool create,enum platform_directory_lock_mode mode,struct platform_directory_lock*lock){if(!lock||lock->native!=UINTPTR_MAX)return PLATFORM_DIRECTORY_INVALID;struct platform_directory_child f;platform_directory_child_init(&f);enum platform_directory_result r=platform_directory_child_open_result(d,l,create,create,&f,NULL);if(r!=PLATFORM_DIRECTORY_OK)return r;if(flock(ff(&f),(mode==PLATFORM_DIRECTORY_LOCK_EXCLUSIVE?LOCK_EX:LOCK_SH)|LOCK_NB)!=0){platform_directory_child_close(&f);return errno==EWOULDBLOCK||errno==EAGAIN?PLATFORM_DIRECTORY_REFUSED:PLATFORM_DIRECTORY_IO;}lock->native=f.native;f.native=UINTPTR_MAX;return PLATFORM_DIRECTORY_OK;}
 void platform_directory_lock_release(struct platform_directory_lock*l){if(!l||l->native==UINTPTR_MAX)return;(void)flock((int)l->native,LOCK_UN);close((int)l->native);platform_directory_lock_init(l);}
-bool platform_directory_transaction_list_regular(struct platform_directory_transaction*d,struct platform_directory_names*out){if(!d||!out)return false;memset(out,0,sizeof(*out));int dupfd=dup(dd(d));DIR*dir=dupfd>=0?fdopendir(dupfd):NULL;if(!dir){if(dupfd>=0)close(dupfd);return false;}struct dirent*e;while((e=readdir(dir))){struct stat s;if(!valid_leaf(e->d_name)||fstatat(dd(d),e->d_name,&s,AT_SYMLINK_NOFOLLOW)||!S_ISREG(s.st_mode))continue;char*n=zcl_strdup(e->d_name,"directory_transaction_list_name");if(!n){closedir(dir);platform_directory_names_free(out);return false;}char**items=zcl_realloc(out->items,(out->count+1)*sizeof(*items),"directory_transaction_list_items");if(!items){free(n);closedir(dir);platform_directory_names_free(out);return false;}out->items=items;out->items[out->count++]=n;}closedir(dir);qsort(out->items,out->count,sizeof(*out->items),name_compare);return true;}
+bool platform_directory_transaction_list_regular(struct platform_directory_transaction*d,struct platform_directory_names*out){if(!out)return false;memset(out,0,sizeof(*out));if(!d)return false;int dupfd=dup(dd(d));DIR*dir=dupfd>=0?fdopendir(dupfd):NULL;if(!dir){if(dupfd>=0)close(dupfd);return false;}struct dirent*e;while((e=readdir(dir))){struct stat s;if(!valid_leaf(e->d_name)||fstatat(dd(d),e->d_name,&s,AT_SYMLINK_NOFOLLOW)||!S_ISREG(s.st_mode))continue;char*n=zcl_strdup(e->d_name,"directory-child-name");if(!n){closedir(dir);platform_directory_names_free(out);return false;}char**items=zcl_realloc(out->items,(out->count+1)*sizeof(*items),"directory-child-list");if(!items){free(n);closedir(dir);platform_directory_names_free(out);return false;}out->items=items;out->items[out->count++]=n;}closedir(dir);qsort(out->items,out->count,sizeof(*out->items),name_compare);return true;}
 #endif
 
 bool platform_directory_child_read_exact(struct platform_directory_child *f,

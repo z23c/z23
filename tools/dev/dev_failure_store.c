@@ -9,6 +9,9 @@
 #include "crypto/sha3.h"
 #include "json/json.h"
 #include "platform/rng.h"
+#include "platform/directory_transaction.h"
+#include "platform/private_directory.h"
+#include "platform/process_lock.h"
 #include "platform/rename_compat.h"
 #include "platform/time_compat.h"
 
@@ -19,10 +22,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -32,9 +37,26 @@
 #define LATEST_JSON_MAX 2048
 #define OBSERVATION_JSON_MAX 1024
 
+struct failure_dir {
+#if defined(_WIN32)
+    struct platform_directory_transaction value;
+    char path[PATH_MAX];
+#else
+    int value;
+#endif
+};
+
+struct failure_lock {
+#if defined(_WIN32)
+    struct platform_process_lock value;
+#else
+    int value;
+#endif
+};
+
 struct failure_store {
-    int workspace_fd;
-    int failures_fd;
+    struct failure_dir workspace;
+    struct failure_dir failures;
     char workspace_id[ZCL_DEV_FAILURE_HEX_LEN + 1];
 };
 
@@ -199,6 +221,9 @@ bool zcl_dev_failure_compute_id(
 
 static bool mkdirs(const char *path)
 {
+#if defined(_WIN32)
+    return platform_private_directory_ensure(path);
+#else
     char copy[PATH_MAX];
     if (!path || !path[0] || strlen(path) >= sizeof(copy))
         return false;
@@ -212,15 +237,16 @@ static bool mkdirs(const char *path)
         *p = '/';
     }
     return mkdir(copy, 0700) == 0 || errno == EEXIST;
+#endif
 }
 
+#if !defined(_WIN32)
 static bool private_dir_fd(int fd)
 {
     struct stat st;
     return fd >= 0 && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) &&
            st.st_uid == geteuid() && (st.st_mode & 0077) == 0;
 }
-
 static bool private_regular_fd(int fd)
 {
     struct stat st;
@@ -228,17 +254,21 @@ static bool private_regular_fd(int fd)
            st.st_uid == geteuid() && st.st_nlink == 1 &&
            (st.st_mode & 0077) == 0;
 }
+#endif
 
 static void store_close(struct failure_store *store)
 {
     if (!store)
         return;
-    if (store->failures_fd >= 0)
-        close(store->failures_fd);
-    if (store->workspace_fd >= 0)
-        close(store->workspace_fd);
-    store->failures_fd = -1;
-    store->workspace_fd = -1;
+#if defined(_WIN32)
+    platform_directory_transaction_close(&store->failures.value);
+    platform_directory_transaction_close(&store->workspace.value);
+#else
+    if (store->failures.value >= 0) close(store->failures.value);
+    if (store->workspace.value >= 0) close(store->workspace.value);
+    store->failures.value = -1;
+    store->workspace.value = -1;
+#endif
 }
 
 static enum store_open_result store_open(const char *repo_root, bool create,
@@ -246,8 +276,13 @@ static enum store_open_result store_open(const char *repo_root, bool create,
                                          char *why, size_t why_len)
 {
     memset(store, 0, sizeof(*store));
-    store->workspace_fd = -1;
-    store->failures_fd = -1;
+#if defined(_WIN32)
+    platform_directory_transaction_init(&store->workspace.value);
+    platform_directory_transaction_init(&store->failures.value);
+#else
+    store->workspace.value = -1;
+    store->failures.value = -1;
+#endif
     char path[PATH_MAX];
     if (!zcl_devloop_workspace_resolve(repo_root, store->workspace_id,
                                        path, sizeof(path))) {
@@ -258,53 +293,105 @@ static enum store_open_result store_open(const char *repo_root, bool create,
         set_why(why, why_len, "failure_store_workspace_create_failed");
         return STORE_OPEN_INVALID;
     }
-    store->workspace_fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+#if defined(_WIN32)
+    if (strlen(path) >= sizeof(store->workspace.path))
+        return STORE_OPEN_INVALID;
+    (void)snprintf(store->workspace.path, sizeof(store->workspace.path), "%s", path);
+    if (!platform_directory_transaction_open(&store->workspace.value, path)) {
+        if (!create) return STORE_OPEN_ABSENT;
+        set_why(why, why_len, "failure_store_workspace_not_private");
+        return STORE_OPEN_INVALID;
+    }
+    enum platform_directory_result child = platform_directory_transaction_open_child(
+        &store->workspace.value, "failures", create, &store->failures.value);
+    if (child == PLATFORM_DIRECTORY_MISSING && !create) {
+        store_close(store); return STORE_OPEN_ABSENT;
+    }
+    if (child != PLATFORM_DIRECTORY_OK) {
+        set_why(why, why_len, "failure_store_failures_not_private");
+        store_close(store); return STORE_OPEN_INVALID;
+    }
+    int pn = snprintf(store->failures.path, sizeof(store->failures.path),
+                      "%s/failures", path);
+    if (pn <= 0 || (size_t)pn >= sizeof(store->failures.path)) {
+        store_close(store); return STORE_OPEN_INVALID;
+    }
+#else
+    store->workspace.value = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                       O_NOFOLLOW);
-    if (store->workspace_fd < 0 && !create && errno == ENOENT)
+    if (store->workspace.value < 0 && !create && errno == ENOENT)
         return STORE_OPEN_ABSENT;
-    if (!private_dir_fd(store->workspace_fd)) {
+    if (!private_dir_fd(store->workspace.value)) {
         set_why(why, why_len, "failure_store_workspace_not_private");
         store_close(store);
         return STORE_OPEN_INVALID;
     }
-    if (create && mkdirat(store->workspace_fd, "failures", 0700) != 0 &&
+    if (create && mkdirat(store->workspace.value, "failures", 0700) != 0 &&
         errno != EEXIST) {
         set_why(why, why_len, "failure_store_failures_create_failed");
         store_close(store);
         return STORE_OPEN_INVALID;
     }
-    store->failures_fd = openat(store->workspace_fd, "failures",
+    store->failures.value = openat(store->workspace.value, "failures",
                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                     O_NOFOLLOW);
-    if (store->failures_fd < 0 && !create && errno == ENOENT) {
+    if (store->failures.value < 0 && !create && errno == ENOENT) {
         store_close(store);
         return STORE_OPEN_ABSENT;
     }
-    if (!private_dir_fd(store->failures_fd)) {
+    if (!private_dir_fd(store->failures.value)) {
         set_why(why, why_len, "failure_store_failures_not_private");
         store_close(store);
         return STORE_OPEN_INVALID;
     }
+#endif
     return STORE_OPEN_OK;
 }
 
-static int store_lock(const struct failure_store *store, int operation,
-                      bool create, char *why, size_t why_len)
+static bool store_lock(const struct failure_store *store, bool exclusive,
+                       bool create, struct failure_lock *lock,
+                       char *why, size_t why_len)
 {
+#if defined(_WIN32)
+    (void)exclusive;
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/failure-store.lock",
+                     store->workspace.path);
+    platform_process_lock_init(&lock->value);
+    if (n <= 0 || (size_t)n >= sizeof(path) ||
+        !platform_process_lock_try_acquire(&lock->value, path, create)) {
+        set_why(why, why_len, "failure_store_lock_failed");
+        return false;
+    }
+    return true;
+#else
     int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW;
     if (create)
         flags |= O_CREAT;
-    int fd = openat(store->workspace_fd, "failure-store.lock",
+    int fd = openat(store->workspace.value, "failure-store.lock",
                     flags, 0600);
-    if (!private_regular_fd(fd) || flock(fd, operation) != 0) {
+    if (!private_regular_fd(fd) ||
+        flock(fd, exclusive ? LOCK_EX : LOCK_SH) != 0) {
         set_why(why, why_len, "failure_store_lock_failed");
         if (fd >= 0)
             close(fd);
-        return -1;
+        return false;
     }
-    return fd;
+    lock->value = fd;
+    return true;
+#endif
 }
 
+static void store_unlock(struct failure_lock *lock)
+{
+#if defined(_WIN32)
+    platform_process_lock_release(&lock->value);
+#else
+    if (lock->value >= 0) close(lock->value);
+#endif
+}
+
+#if !defined(_WIN32)
 static bool write_all(int fd, const char *body, size_t len)
 {
     size_t off = 0;
@@ -318,10 +405,25 @@ static bool write_all(int fd, const char *body, size_t len)
     }
     return true;
 }
+#endif
 
-static bool write_new_file_at(int dirfd, const char *name,
+static bool write_new_file_at(struct failure_dir *dir, const char *name,
                               const char *body, size_t len)
 {
+#if defined(_WIN32)
+    struct platform_directory_child file;
+    platform_directory_child_init(&file);
+    bool created = platform_directory_child_create(&dir->value, name, &file);
+    bool ok = created && platform_directory_child_write_exact(
+                  &file, body, len, 0) &&
+              platform_directory_child_flush(&file) &&
+              platform_directory_transaction_flush(&dir->value);
+    platform_directory_child_close(&file);
+    if (created && !ok)
+        (void)platform_directory_child_unlink(&dir->value, name, true);
+    return ok;
+#else
+    int dirfd = dir->value;
     int fd = openat(dirfd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
                                      O_NOFOLLOW, 0600);
     if (fd < 0)
@@ -335,6 +437,7 @@ static bool write_new_file_at(int dirfd, const char *name,
         (void)unlinkat(dirfd, name, 0);
     }
     return ok;
+#endif
 }
 
 static bool unique_temp_name(const char *kind, char out[96])
@@ -348,9 +451,30 @@ static bool unique_temp_name(const char *kind, char out[96])
     return n > 0 && n < 96;
 }
 
-static bool atomic_replace_at(int dirfd, const char *final_name,
+static bool atomic_replace_at(struct failure_dir *dir, const char *final_name,
                               const char *kind, const char *body, size_t len)
 {
+#if defined(_WIN32)
+    char temp[96] = {0};
+    struct platform_directory_child file;
+    platform_directory_child_init(&file);
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 8 && !created; attempt++) {
+        if (!unique_temp_name(kind, temp)) return false;
+        created = platform_directory_child_create(&dir->value, temp, &file);
+    }
+    bool ok = created && platform_directory_child_write_exact(
+                  &file, body, len, 0) &&
+              platform_directory_child_flush(&file) &&
+              platform_directory_child_replace(&dir->value, &file,
+                                               final_name, false) &&
+              platform_directory_transaction_flush(&dir->value);
+    platform_directory_child_close(&file);
+    if (created && !ok)
+        (void)platform_directory_child_unlink(&dir->value, temp, true);
+    return ok;
+#else
+    int dirfd = dir->value;
     char temp[96] = {0};
     int fd = -1;
     for (unsigned attempt = 0; attempt < 8; attempt++) {
@@ -374,12 +498,40 @@ static bool atomic_replace_at(int dirfd, const char *final_name,
     if (!ok)
         (void)unlinkat(dirfd, temp, 0);
     return ok;
+#endif
 }
 
-static enum zcl_dev_failure_lookup read_file_at(int dirfd, const char *name,
+static enum zcl_dev_failure_lookup read_file_at(struct failure_dir *dir,
+                                                const char *name,
                                                 char *body, size_t cap,
                                                 size_t *len_out)
 {
+#if defined(_WIN32)
+    struct platform_directory_child file;
+    struct platform_directory_child_info before, after;
+    platform_directory_child_init(&file);
+    enum platform_directory_result opened = platform_directory_child_open_result(
+        &dir->value, name, false, false, &file, NULL);
+    if (opened == PLATFORM_DIRECTORY_MISSING)
+        return ZCL_DEV_FAILURE_LOOKUP_ABSENT;
+    bool ok = opened == PLATFORM_DIRECTORY_OK &&
+        platform_directory_child_info(&file, &before) && before.size > 0 &&
+        before.size < cap && before.current_user_only && before.link_count == 1;
+    if (ok) ok = platform_directory_child_read_exact(
+        &file, body, (size_t)before.size, 0) &&
+        platform_directory_child_info(&file, &after) &&
+        before.volume == after.volume && before.file_low == after.file_low &&
+        before.file_high == after.file_high && before.size == after.size &&
+        before.modified_seconds == after.modified_seconds &&
+        before.modified_nanoseconds == after.modified_nanoseconds &&
+        before.changed_seconds == after.changed_seconds &&
+        before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_directory_child_close(&file);
+    if (!ok) return ZCL_DEV_FAILURE_LOOKUP_INVALID;
+    body[before.size] = 0; *len_out = (size_t)before.size;
+    return ZCL_DEV_FAILURE_LOOKUP_FOUND;
+#else
+    int dirfd = dir->value;
     int fd = openat(dirfd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0 && errno == ENOENT)
         return ZCL_DEV_FAILURE_LOOKUP_ABSENT;
@@ -410,6 +562,7 @@ static enum zcl_dev_failure_lookup read_file_at(int dirfd, const char *name,
     body[off] = 0;
     *len_out = off;
     return ZCL_DEV_FAILURE_LOOKUP_FOUND;
+#endif
 }
 
 static void record_digest(const struct zcl_dev_failure_record *record,
@@ -529,12 +682,13 @@ static bool observation_json(const struct failure_observation *observation,
     return true;
 }
 
-static bool observation_read(int failure_fd, const char *failure_id,
+static bool observation_read(struct failure_dir *failure,
+                             const char *failure_id,
                              struct failure_observation *out)
 {
     char body[OBSERVATION_JSON_MAX];
     size_t len = 0;
-    if (read_file_at(failure_fd, "observations.json", body, sizeof(body),
+    if (read_file_at(failure, "observations.json", body, sizeof(body),
                      &len) != ZCL_DEV_FAILURE_LOOKUP_FOUND)
         return false;
     struct json_value doc;
@@ -570,41 +724,43 @@ static bool observation_read(int failure_fd, const char *failure_id,
     return strcmp(recomputed, out->digest) == 0;
 }
 
-static bool observation_publish(int failure_fd,
+static bool observation_publish(struct failure_dir *failure,
                                 struct failure_observation *observation)
 {
     observation_digest(observation, observation->digest);
     char body[OBSERVATION_JSON_MAX];
     size_t len = 0;
     return observation_json(observation, body, &len) &&
-           atomic_replace_at(failure_fd, "observations.json", "observations",
+           atomic_replace_at(failure, "observations.json", "observations",
                              body, len);
 }
 
-static bool observation_increment(int failure_fd, const char *failure_id,
+static bool observation_increment(struct failure_dir *failure,
+                                  const char *failure_id,
                                   uint64_t *count_out)
 {
     struct failure_observation observation;
-    if (!observation_read(failure_fd, failure_id, &observation) ||
+    if (!observation_read(failure, failure_id, &observation) ||
         observation.count >= INT64_MAX)
         return false;
     observation.count++;
     observation.last_seen_unix_ms = platform_time_realtime_us() / 1000;
     if (observation.last_seen_unix_ms < 0)
         observation.last_seen_unix_ms = 0;
-    if (!observation_publish(failure_fd, &observation))
+    if (!observation_publish(failure, &observation))
         return false;
     *count_out = observation.count;
     return true;
 }
 
-static bool read_record_fd(int failure_fd, const char *expected_id,
+static bool read_record_fd(struct failure_dir *failure,
+                           const char *expected_id,
                            const char *expected_workspace,
                            struct zcl_dev_failure_record *out)
 {
     char body[FAILURE_JSON_MAX];
     size_t len = 0;
-    if (read_file_at(failure_fd, "base.json", body, sizeof(body), &len) !=
+    if (read_file_at(failure, "base.json", body, sizeof(body), &len) !=
         ZCL_DEV_FAILURE_LOOKUP_FOUND)
         return false;
     struct json_value doc;
@@ -671,7 +827,7 @@ static bool read_record_fd(int failure_fd, const char *expected_id,
     record_digest(out, recomputed_record);
     struct failure_observation observation;
     if (strcmp(recomputed_record, out->record_digest) != 0 ||
-        !observation_read(failure_fd, out->failure_id, &observation))
+        !observation_read(failure, out->failure_id, &observation))
         return false;
     out->repeat_count = observation.count;
     return true;
@@ -683,7 +839,20 @@ static enum zcl_dev_failure_lookup record_read_store(
 {
     if (!valid_hex64(failure_id))
         return ZCL_DEV_FAILURE_LOOKUP_INVALID;
-    int fd = openat(store->failures_fd, failure_id,
+#if defined(_WIN32)
+    struct failure_dir failure;
+    platform_directory_transaction_init(&failure.value);
+    enum platform_directory_result opened = platform_directory_transaction_open_child(
+        (struct platform_directory_transaction *)&store->failures.value,
+        failure_id, false, &failure.value);
+    if (opened == PLATFORM_DIRECTORY_MISSING)
+        return ZCL_DEV_FAILURE_LOOKUP_ABSENT;
+    if (opened != PLATFORM_DIRECTORY_OK)
+        return ZCL_DEV_FAILURE_LOOKUP_INVALID;
+    bool ok = read_record_fd(&failure, failure_id, store->workspace_id, out);
+    platform_directory_transaction_close(&failure.value);
+#else
+    int fd = openat(store->failures.value, failure_id,
                     O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0 && errno == ENOENT)
         return ZCL_DEV_FAILURE_LOOKUP_ABSENT;
@@ -692,8 +861,10 @@ static enum zcl_dev_failure_lookup record_read_store(
             close(fd);
         return ZCL_DEV_FAILURE_LOOKUP_INVALID;
     }
-    bool ok = read_record_fd(fd, failure_id, store->workspace_id, out);
+    struct failure_dir failure = {.value = fd};
+    bool ok = read_record_fd(&failure, failure_id, store->workspace_id, out);
     close(fd);
+#endif
     return ok ? ZCL_DEV_FAILURE_LOOKUP_FOUND
               : ZCL_DEV_FAILURE_LOOKUP_INVALID;
 }
@@ -745,7 +916,8 @@ static bool latest_publish(const struct failure_store *store,
     size_t len = 0;
     if (!latest_json(latest, body, &len))
         return false;
-    return atomic_replace_at(store->workspace_fd, "latest-failure.json",
+    return atomic_replace_at((struct failure_dir *)&store->workspace,
+                             "latest-failure.json",
                              "latest", body, len);
 }
 
@@ -755,7 +927,8 @@ static enum zcl_dev_failure_lookup latest_read(
     char body[LATEST_JSON_MAX];
     size_t len = 0;
     enum zcl_dev_failure_lookup read =
-        read_file_at(store->workspace_fd, "latest-failure.json", body,
+        read_file_at((struct failure_dir *)&store->workspace,
+                     "latest-failure.json", body,
                      sizeof(body), &len);
     if (read != ZCL_DEV_FAILURE_LOOKUP_FOUND)
         return read;
@@ -828,19 +1001,33 @@ bool zcl_dev_failure_record_failure(
     struct failure_store store;
     if (store_open(repo_root, true, &store, why, why_len) != STORE_OPEN_OK)
         return false;
-    int lock_fd = store_lock(&store, LOCK_EX, true, why, why_len);
-    if (lock_fd < 0) {
+    struct failure_lock lock;
+    if (!store_lock(&store, true, true, &lock, why, why_len)) {
         store_close(&store);
         return false;
     }
-    int failure_fd = openat(store.failures_fd, id,
+#if defined(_WIN32)
+    struct failure_dir failure;
+    platform_directory_transaction_init(&failure.value);
+    enum platform_directory_result failure_open =
+        platform_directory_transaction_open_child(&store.failures.value, id,
+                                                  false, &failure.value);
+    if (failure_open != PLATFORM_DIRECTORY_OK &&
+        failure_open != PLATFORM_DIRECTORY_MISSING) {
+        set_why(why, why_len, "failure_record_directory_invalid");
+        store_unlock(&lock); store_close(&store); return false;
+    }
+    bool failure_present = failure_open == PLATFORM_DIRECTORY_OK;
+#else
+    int failure_fd = openat(store.failures.value, id,
                             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (failure_fd < 0 && errno != ENOENT) {
         set_why(why, why_len, "failure_record_directory_invalid");
-        close(lock_fd);
+        store_unlock(&lock);
         store_close(&store);
         return false;
     }
+#endif
     bool created = false;
     struct zcl_dev_failure_record record, candidate;
     memset(&candidate, 0, sizeof(candidate));
@@ -869,6 +1056,63 @@ bool zcl_dev_failure_record_failure(
     record_digest(&candidate, candidate.record_digest);
 
     bool ok = true;
+#if defined(_WIN32)
+    if (!failure_present) {
+        char stage[96] = {0};
+        struct failure_dir staged;
+        platform_directory_transaction_init(&staged.value);
+        bool staged_open = false;
+        for (unsigned attempt = 0; attempt < 8 && !staged_open; attempt++) {
+            if (!unique_temp_name("failure", stage)) { ok = false; break; }
+            staged_open = platform_directory_transaction_open_child(
+                &store.failures.value, stage, true, &staged.value) ==
+                PLATFORM_DIRECTORY_OK;
+        }
+        char body[FAILURE_JSON_MAX], observation_body[OBSERVATION_JSON_MAX];
+        size_t len = 0, observation_len = 0;
+        struct failure_observation observation = {0};
+        (void)snprintf(observation.failure_id,
+                       sizeof(observation.failure_id), "%s", id);
+        observation.count = 1;
+        observation.last_seen_unix_ms = candidate.first_seen_unix_ms;
+        observation_digest(&observation, observation.digest);
+        ok = ok && staged_open && record_json(&candidate, body, &len) &&
+            observation_json(&observation, observation_body,
+                             &observation_len) &&
+            write_new_file_at(&staged, "base.json", body, len) &&
+            write_new_file_at(&staged, "observations.json", observation_body,
+                              observation_len) &&
+            platform_directory_transaction_flush(&staged.value);
+        platform_directory_transaction_close(&staged.value);
+        char stage_path[PATH_MAX], final_path[PATH_MAX];
+        int sn = snprintf(stage_path, sizeof(stage_path), "%s/%s",
+                          store.failures.path, stage);
+        int fn = snprintf(final_path, sizeof(final_path), "%s/%s",
+                          store.failures.path, id);
+        if (ok && sn > 0 && (size_t)sn < sizeof(stage_path) && fn > 0 &&
+            (size_t)fn < sizeof(final_path) &&
+            platform_private_directory_publish_no_clobber(stage_path,
+                                                           final_path)) {
+            created = true;
+        }
+        failure_open = platform_directory_transaction_open_child(
+            &store.failures.value, id, false, &failure.value);
+        failure_present = failure_open == PLATFORM_DIRECTORY_OK;
+        if (!created && stage[0]) {
+            struct failure_dir cleanup;
+            platform_directory_transaction_init(&cleanup.value);
+            if (platform_directory_transaction_open(&cleanup.value, stage_path)) {
+                (void)platform_directory_child_unlink(&cleanup.value,
+                                                       "observations.json", true);
+                (void)platform_directory_child_unlink(&cleanup.value,
+                                                       "base.json", true);
+                platform_directory_transaction_close(&cleanup.value);
+                (void)platform_private_directory_remove_empty(stage_path);
+            }
+        }
+        ok = ok && failure_present;
+    }
+#else
     if (failure_fd < 0) {
         char stage[96] = {0};
         int stage_fd = -1;
@@ -877,8 +1121,8 @@ bool zcl_dev_failure_record_failure(
                 ok = false;
                 break;
             }
-            if (mkdirat(store.failures_fd, stage, 0700) == 0) {
-                stage_fd = openat(store.failures_fd, stage,
+            if (mkdirat(store.failures.value, stage, 0700) == 0) {
+                stage_fd = openat(store.failures.value, stage,
                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                       O_NOFOLLOW);
                 break;
@@ -902,18 +1146,20 @@ bool zcl_dev_failure_record_failure(
             ok = record_json(&candidate, body, &len) &&
                  observation_json(&observation, observation_body,
                                   &observation_len) &&
-                 write_new_file_at(stage_fd, "base.json", body, len) &&
-                 write_new_file_at(stage_fd, "observations.json",
+                 write_new_file_at(&(struct failure_dir){.value = stage_fd},
+                                   "base.json", body, len) &&
+                 write_new_file_at(&(struct failure_dir){.value = stage_fd},
+                                   "observations.json",
                                    observation_body, observation_len) &&
                  fsync(stage_fd) == 0;
         if (ok) {
-            if (platform_renameat_noreplace(store.failures_fd, stage,
-                                            store.failures_fd, id) == 0) {
+            if (platform_renameat_noreplace(store.failures.value, stage,
+                                            store.failures.value, id) == 0) {
                 created = true;
                 failure_fd = stage_fd;
                 stage_fd = -1;
                 stage[0] = 0;
-                ok = fsync(store.failures_fd) == 0;
+                ok = fsync(store.failures.value) == 0;
             } else if (errno == EEXIST) {
                 ok = true;
             } else {
@@ -926,30 +1172,41 @@ bool zcl_dev_failure_record_failure(
             close(stage_fd);
         }
         if (stage[0]) {
-            (void)unlinkat(store.failures_fd, stage, AT_REMOVEDIR);
-            (void)fsync(store.failures_fd);
+            (void)unlinkat(store.failures.value, stage, AT_REMOVEDIR);
+            (void)fsync(store.failures.value);
         }
         if (ok && !created)
-            failure_fd = openat(store.failures_fd, id,
+            failure_fd = openat(store.failures.value, id,
                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                     O_NOFOLLOW);
     }
-    if (!ok || !private_dir_fd(failure_fd)) {
+    struct failure_dir failure = {.value = failure_fd};
+#endif
+    if (!ok ||
+#if defined(_WIN32)
+        !failure_present
+#else
+        !private_dir_fd(failure_fd)
+#endif
+    ) {
         set_why(why, why_len, "failure_record_directory_publication_failed");
-        if (failure_fd >= 0)
-            close(failure_fd);
-        close(lock_fd);
+#if defined(_WIN32)
+        platform_directory_transaction_close(&failure.value);
+#else
+        if (failure_fd >= 0) close(failure_fd);
+#endif
+        store_unlock(&lock);
         store_close(&store);
         return false;
     }
     if (created) {
         record = candidate;
     } else {
-        ok = read_record_fd(failure_fd, id, store.workspace_id, &record) &&
+        ok = read_record_fd(&failure, id, store.workspace_id, &record) &&
              strcmp(record.source_id, source_id) == 0 &&
              strcmp(record.phase, phase) == 0 &&
              strcmp(record.first_error, normalized) == 0 &&
-             observation_increment(failure_fd, id, &record.repeat_count);
+             observation_increment(&failure, id, &record.repeat_count);
     }
     struct failure_latest latest = {0};
     if (ok) {
@@ -970,9 +1227,12 @@ bool zcl_dev_failure_record_failure(
         set_why(why, why_len, "failure_record_publication_failed");
     if (ok && out)
         *out = record;
-    if (failure_fd >= 0)
-        close(failure_fd);
-    close(lock_fd);
+#if defined(_WIN32)
+    platform_directory_transaction_close(&failure.value);
+#else
+    if (failure_fd >= 0) close(failure_fd);
+#endif
+    store_unlock(&lock);
     store_close(&store);
     return ok;
 }
@@ -997,8 +1257,8 @@ enum zcl_dev_failure_lookup zcl_dev_failure_read(
     }
     if (opened != STORE_OPEN_OK)
         return ZCL_DEV_FAILURE_LOOKUP_INVALID;
-    int lock_fd = store_lock(&store, LOCK_SH, false, why, why_len);
-    if (lock_fd < 0) {
+    struct failure_lock lock;
+    if (!store_lock(&store, false, false, &lock, why, why_len)) {
         store_close(&store);
         return ZCL_DEV_FAILURE_LOOKUP_INVALID;
     }
@@ -1008,7 +1268,7 @@ enum zcl_dev_failure_lookup zcl_dev_failure_read(
         set_why(why, why_len, "failure_record_absent");
     else if (result == ZCL_DEV_FAILURE_LOOKUP_INVALID)
         set_why(why, why_len, "failure_record_invalid");
-    close(lock_fd);
+    store_unlock(&lock);
     store_close(&store);
     return result;
 }
@@ -1032,8 +1292,8 @@ enum zcl_dev_failure_lookup zcl_dev_failure_read_latest(
     }
     if (opened != STORE_OPEN_OK)
         return ZCL_DEV_FAILURE_LOOKUP_INVALID;
-    int lock_fd = store_lock(&store, LOCK_SH, false, why, why_len);
-    if (lock_fd < 0) {
+    struct failure_lock lock;
+    if (!store_lock(&store, false, false, &lock, why, why_len)) {
         store_close(&store);
         return ZCL_DEV_FAILURE_LOOKUP_INVALID;
     }
@@ -1049,7 +1309,7 @@ enum zcl_dev_failure_lookup zcl_dev_failure_read_latest(
         set_why(why, why_len, "no_failure_recorded");
     else if (result == ZCL_DEV_FAILURE_LOOKUP_INVALID)
         set_why(why, why_len, "latest_failure_invalid");
-    close(lock_fd);
+    store_unlock(&lock);
     store_close(&store);
     return result;
 }
@@ -1076,8 +1336,8 @@ bool zcl_dev_failure_match_latest(
         return false;
     if (opened != STORE_OPEN_OK)
         return false;
-    int lock_fd = store_lock(&store, LOCK_SH, false, why, why_len);
-    if (lock_fd < 0) {
+    struct failure_lock lock;
+    if (!store_lock(&store, false, false, &lock, why, why_len)) {
         store_close(&store);
         return false;
     }
@@ -1086,7 +1346,7 @@ bool zcl_dev_failure_match_latest(
     if (latest_result != ZCL_DEV_FAILURE_LOOKUP_FOUND) {
         if (latest_result == ZCL_DEV_FAILURE_LOOKUP_INVALID)
             set_why(why, why_len, "latest_failure_invalid");
-        close(lock_fd);
+        store_unlock(&lock);
         store_close(&store);
         return false;
     }
@@ -1094,7 +1354,7 @@ bool zcl_dev_failure_match_latest(
         strcmp(latest.source_mutation, source_mutation) != 0 ||
         strcmp(latest.execution_id, execution_id) != 0 ||
         strcmp(latest.phase, phase) != 0) {
-        close(lock_fd);
+        store_unlock(&lock);
         store_close(&store);
         return false;
     }
@@ -1104,7 +1364,7 @@ bool zcl_dev_failure_match_latest(
               strcmp(out->phase, phase) == 0;
     if (!ok)
         set_why(why, why_len, "latest_failure_record_invalid");
-    close(lock_fd);
+    store_unlock(&lock);
     store_close(&store);
     return ok;
 }
@@ -1129,8 +1389,8 @@ bool zcl_dev_failure_note_coalesced(
     struct failure_store store;
     if (store_open(repo_root, false, &store, why, why_len) != STORE_OPEN_OK)
         return false;
-    int lock_fd = store_lock(&store, LOCK_EX, false, why, why_len);
-    if (lock_fd < 0) {
+    struct failure_lock lock;
+    if (!store_lock(&store, true, false, &lock, why, why_len)) {
         store_close(&store);
         return false;
     }
@@ -1142,23 +1402,43 @@ bool zcl_dev_failure_note_coalesced(
               strcmp(latest.source_mutation, source_mutation) == 0 &&
               strcmp(latest.execution_id, execution_id) == 0 &&
               strcmp(latest.phase, phase) == 0;
+#if defined(_WIN32)
+    struct failure_dir failure;
+    platform_directory_transaction_init(&failure.value);
+    enum platform_directory_result opened = ok
+        ? platform_directory_transaction_open_child(&store.failures.value,
+                                                     failure_id, false,
+                                                     &failure.value)
+        : PLATFORM_DIRECTORY_REFUSED;
+    struct zcl_dev_failure_record before;
+    ok = ok && opened == PLATFORM_DIRECTORY_OK &&
+         read_record_fd(&failure, failure_id, store.workspace_id, &before) &&
+         strcmp(before.source_id, source_id) == 0 &&
+         strcmp(before.phase, phase) == 0 &&
+         observation_increment(&failure, failure_id, &before.repeat_count) &&
+         read_record_fd(&failure, failure_id, store.workspace_id, out);
+    platform_directory_transaction_close(&failure.value);
+#else
     int failure_fd = ok
-        ? openat(store.failures_fd, failure_id,
+        ? openat(store.failures.value, failure_id,
                  O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
         : -1;
     struct zcl_dev_failure_record before;
     ok = ok && private_dir_fd(failure_fd) &&
-         read_record_fd(failure_fd, failure_id, store.workspace_id, &before) &&
+         read_record_fd(&(struct failure_dir){.value = failure_fd}, failure_id,
+                        store.workspace_id, &before) &&
          strcmp(before.source_id, source_id) == 0 &&
          strcmp(before.phase, phase) == 0 &&
-         observation_increment(failure_fd, failure_id,
+         observation_increment(&(struct failure_dir){.value = failure_fd}, failure_id,
                                &before.repeat_count) &&
-         read_record_fd(failure_fd, failure_id, store.workspace_id, out);
+         read_record_fd(&(struct failure_dir){.value = failure_fd}, failure_id,
+                        store.workspace_id, out);
     if (!ok)
         set_why(why, why_len, "coalesced_failure_append_failed_or_superseded");
     if (failure_fd >= 0)
         close(failure_fd);
-    close(lock_fd);
+#endif
+    store_unlock(&lock);
     store_close(&store);
     return ok;
 }

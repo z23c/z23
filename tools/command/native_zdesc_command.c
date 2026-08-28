@@ -34,6 +34,10 @@
 #include "crypto/ed25519.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
+#include "platform/directory_transaction.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/rng.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "vcs/package_store.h"
@@ -41,13 +45,17 @@
 #include "zid/zdesc.h"
 #include "zid/zid.h"
 
+#if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define ZDC_DEFAULT_VALIDITY_SECONDS (3 * 86400)
 
@@ -110,35 +118,57 @@ static void zdc_fail(struct zcl_command_reply *reply, const char *code,
 
 /* ── seed loading (0600/0400, cleansed, never logged) ─────────────── */
 
+static bool zdc_read_stable(const char *path, void *out, size_t capacity,
+                            size_t *length)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (length) *length = 0;
+    if (!path || !out || !length || !capacity ||
+        !platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > capacity) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    bool ok = platform_positioned_file_read(
+            &file, out, (size_t)before.size, 0) == (int64_t)before.size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (ok) *length = (size_t)before.size;
+    return ok;
+}
+
 static bool zdc_read_seed(const char *path, uint8_t seed_out[32], char *err,
                           size_t err_size)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        snprintf(err, err_size, "cannot open seed file: %s", strerror(errno));
-        return false;
-    }
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        snprintf(err, err_size, "cannot stat seed file: %s", strerror(errno));
-        close(fd);
-        return false;
-    }
-    unsigned perms = (unsigned)(st.st_mode & 0777u);
-    if (perms != 0600u && perms != 0400u) {
+    struct platform_positioned_file seed;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&seed);
+    bool private_seed = platform_positioned_file_open(&seed, path) &&
+        platform_positioned_file_is_current_user_only(&seed) &&
+        platform_positioned_file_snapshot(&seed, &before) &&
+        (before.size == 64 || before.size == 65);
+    if (!private_seed) {
+        platform_positioned_file_close(&seed);
         snprintf(err, err_size,
-                 "seed file perms are %03o — a master seed must be 0600 "
-                 "(chmod 600 %s)", perms, path);
-        close(fd);
+                 "seed file must be private to the current user%s",
+                 path ? "" : " and have a valid path");
         return false;
     }
     uint8_t raw[65];
-    ssize_t n = read(fd, raw, sizeof(raw));
-    close(fd);
-    if (n < 64 || (n != 64 && !(n == 65 && raw[64] == '\n'))) {
+    size_t n = (size_t)before.size;
+    bool read_ok = platform_positioned_file_read(&seed, raw, n, 0) ==
+                       (int64_t)n &&
+        platform_positioned_file_snapshot(&seed, &after) &&
+        platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&seed);
+    if (!read_ok || n < 64 || (n != 64 && !(n == 65 && raw[64] == '\n'))) {
         memory_cleanse(raw, sizeof(raw));
         snprintf(err, err_size,
-                 "seed file must be exactly 64 hex chars (read %zd bytes)", n);
+                 "seed file must be exactly 64 hex chars (read %zu bytes)", n);
         return false;
     }
     char hex[65];
@@ -168,8 +198,13 @@ static bool zdc_record_dir(const char *datadir, char *out, size_t out_size,
         snprintf(err, err_size, "path too long under datadir");
         return false;
     }
+#if defined(_WIN32)
+    if (!platform_private_directory_ensure(dir)) {
+        snprintf(err, err_size, "private directory refused: %s", dir);
+#else
     if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
         snprintf(err, err_size, "mkdir %s: %s", dir, strerror(errno));
+#endif
         return false;
     }
     n = snprintf(out, out_size, "%s/zcode/descriptors", datadir);
@@ -177,8 +212,13 @@ static bool zdc_record_dir(const char *datadir, char *out, size_t out_size,
         snprintf(err, err_size, "path too long under datadir");
         return false;
     }
+#if defined(_WIN32)
+    if (!platform_private_directory_ensure(out)) {
+        snprintf(err, err_size, "private directory refused: %s", out);
+#else
     if (mkdir(out, 0700) != 0 && errno != EEXIST) {
         snprintf(err, err_size, "mkdir %s: %s", out, strerror(errno));
+#endif
         return false;
     }
     return true;
@@ -196,6 +236,42 @@ static bool zdc_write_record(const char *datadir, const char *key_hex,
         snprintf(err, err_size, "path too long under datadir");
         return false;
     }
+#if defined(_WIN32)
+    char leaf[80], staged_leaf[96];
+    uint8_t nonce[12];
+    char nonce_hex[25];
+    n = snprintf(leaf, sizeof(leaf), "%s.zid", key_hex);
+    bool named = rng_fill(nonce, sizeof(nonce));
+    if (named) HexStr(nonce, sizeof(nonce), false, nonce_hex,
+                      sizeof(nonce_hex));
+    int sn = named ? snprintf(staged_leaf, sizeof(staged_leaf),
+                              ".%s.%s.tmp", key_hex, nonce_hex) : -1;
+    struct platform_directory_transaction directory;
+    struct platform_directory_child file;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&file);
+    enum platform_directory_result opened = n > 0 && (size_t)n < sizeof(leaf) &&
+        sn > 0 && (size_t)sn < sizeof(staged_leaf) &&
+        platform_directory_transaction_open(&directory, dir)
+        ? (platform_directory_child_create(&directory, staged_leaf, &file)
+              ? PLATFORM_DIRECTORY_OK : PLATFORM_DIRECTORY_REFUSED)
+        : PLATFORM_DIRECTORY_REFUSED;
+    size_t len = strlen(doc_hex);
+    bool ok = opened == PLATFORM_DIRECTORY_OK &&
+        platform_directory_child_truncate(&file, 0) &&
+        platform_directory_child_write_exact(&file, doc_hex, len, 0) &&
+        platform_directory_child_write_exact(&file, "\n", 1, len) &&
+        platform_directory_child_flush(&file) &&
+        platform_directory_child_replace(&directory, &file, leaf, false) &&
+        platform_directory_transaction_flush(&directory);
+    platform_directory_child_close(&file);
+    if (opened == PLATFORM_DIRECTORY_OK && !ok)
+        (void)platform_directory_child_unlink(
+            &directory, staged_leaf, true);
+    platform_directory_transaction_close(&directory);
+    if (!ok) snprintf(err, err_size, "private record write refused: %s", path_out);
+    return ok;
+#else
     int fd = open(path_out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
         snprintf(err, err_size, "open %s: %s", path_out, strerror(errno));
@@ -210,6 +286,7 @@ static bool zdc_write_record(const char *datadir, const char *key_hex,
         return false;
     }
     return true;
+#endif
 }
 
 /* Read the doc hex filed under one record key. Returns false when the
@@ -222,12 +299,8 @@ static bool zdc_read_record(const char *datadir, const char *key_hex,
                      datadir, key_hex);
     if (n <= 0 || (size_t)n >= path_size)
         return false;
-    int fd = open(path_out, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return false;
-    ssize_t r = read(fd, hex_out, hex_size - 1);
-    close(fd);
-    if (r <= 0)
+    size_t r = 0;
+    if (!zdc_read_stable(path_out, hex_out, hex_size - 1, &r))
         return false;
     while (r > 0 && (hex_out[r - 1] == '\n' || hex_out[r - 1] == '\r' ||
                      hex_out[r - 1] == ' '))
@@ -350,17 +423,10 @@ static size_t zdc_load_doc_wire(const struct json_value *in,
     }
     static char file_hex[ZID_DOC_MAX * 2 + 2];
     if (!doc_hex || !doc_hex[0]) {
-        int fd = open(file, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
+        size_t n = 0;
+        if (!zdc_read_stable(file, file_hex, sizeof(file_hex) - 1, &n)) {
             zdc_fail(reply, "DOC_UNREADABLE", "normalize",
-                     "cannot open doc file", strerror(errno));
-            return 0;
-        }
-        ssize_t n = read(fd, file_hex, sizeof(file_hex) - 1);
-        close(fd);
-        if (n <= 0) {
-            zdc_fail(reply, "DOC_UNREADABLE", "normalize",
-                     "doc file empty or unreadable", file);
+                     "cannot stably read bounded doc file", file);
             return 0;
         }
         while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
