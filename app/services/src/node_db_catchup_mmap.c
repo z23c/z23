@@ -173,8 +173,14 @@ bool node_db_catchup_test_block_mapping_open(
         return false;
     }
     node_db_catchup_block_mapping_init(mapping);
-    if (!node_db_catchup_block_mapping_open_quiet(
-            mapping, datadir, file_num, error_out)) {
+    /* open_quiet carries its errno in result.code now; the test hook keeps
+     * its int* out-parameter, so translate rather than change the hook's
+     * shape -- lib/test/src/test_node_db_catchup_service.c reads *error_out
+     * to tell a lean hole (ENOENT/ENOTDIR) from a real mapping failure. */
+    struct zcl_result opened = node_db_catchup_block_mapping_open_quiet(
+        mapping, datadir, file_num);
+    if (!opened.ok) {
+        if (error_out) *error_out = opened.code;
         free(mapping);
         return false;
     }
