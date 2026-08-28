@@ -14,6 +14,10 @@
 #include "controllers/explorer_internal.h"
 #include "jobs/reducer_frontier.h"
 #include "models/hodl_wave.h"
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
 
@@ -21,11 +25,10 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 int64_t hodl_view_cap_to_served_tip(int64_t index_tip)
 {
@@ -43,6 +46,7 @@ int64_t hodl_view_cap_to_served_tip(int64_t index_tip)
 #define HODL_VIEW_DISK_CACHE_PATH_MAX 1200
 #define HODL_VIEW_DISK_CACHE_MAGIC "zcl_hodl_snapshot_v1"
 #define HODL_VIEW_DISK_CACHE_FILE "hodl-current-v1.cache"
+#define HODL_VIEW_DISK_CACHE_BYTES_MAX 4096
 #define HODL_VIEW_SYNC_SCAN_DB_BYTES_MAX (128LL * 1024LL * 1024LL)
 
 struct hodl_view_cache_entry {
@@ -160,7 +164,7 @@ bool explorer_test_hodl_view_refresh_active(void)
 static bool hodl_view_disk_cache_paths(
     const char *datadir,
     char path[HODL_VIEW_DISK_CACHE_PATH_MAX],
-    char tmp_path[HODL_VIEW_DISK_CACHE_PATH_MAX])
+    char parent[HODL_VIEW_DISK_CACHE_PATH_MAX])
 {
     char dir[HODL_VIEW_DISK_CACHE_PATH_MAX];
     int n;
@@ -171,21 +175,31 @@ static bool hodl_view_disk_cache_paths(
     n = snprintf(dir, sizeof(dir), "%s/explorer", datadir);
     if (n < 0 || (size_t)n >= sizeof(dir))
         return false;
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+    if (!platform_directory_ensure(dir, 0700))
         return false;
 
-    n = snprintf(path, HODL_VIEW_DISK_CACHE_PATH_MAX, "%s/%s",
+    char requested[HODL_VIEW_DISK_CACHE_PATH_MAX];
+    n = snprintf(requested, sizeof(requested), "%s/%s",
                  dir, HODL_VIEW_DISK_CACHE_FILE);
     if (n < 0 || n >= HODL_VIEW_DISK_CACHE_PATH_MAX)
         return false;
-    if (tmp_path) {
-        n = snprintf(tmp_path, HODL_VIEW_DISK_CACHE_PATH_MAX,
-                     "%s/%s.tmp.%ld", dir, HODL_VIEW_DISK_CACHE_FILE,
-                     (long)getpid());
-        if (n < 0 || n >= HODL_VIEW_DISK_CACHE_PATH_MAX)
-            return false;
-    }
-    return true;
+    char ignored_parent[HODL_VIEW_DISK_CACHE_PATH_MAX];
+    return platform_private_path_resolve(
+        requested, path, HODL_VIEW_DISK_CACHE_PATH_MAX,
+        parent ? parent : ignored_parent, HODL_VIEW_DISK_CACHE_PATH_MAX);
+}
+
+static char *hodl_view_next_line(char **cursor)
+{
+    if (!cursor || !*cursor || !**cursor)
+        return NULL;
+    char *line = *cursor;
+    char *newline = strchr(line, '\n');
+    if (!newline)
+        return NULL;
+    *newline = '\0';
+    *cursor = newline + 1;
+    return line;
 }
 
 void hodl_view_snapshot_base(struct hodl_wave_snapshot *out, int64_t tip)
@@ -207,49 +221,63 @@ static bool hodl_view_disk_cache_read(
     char cached_hash[HODL_VIEW_CACHE_HASH_MAX])
 {
     char path[HODL_VIEW_DISK_CACHE_PATH_MAX];
-    char line[256];
+    char bytes[HODL_VIEW_DISK_CACHE_BYTES_MAX + 1];
     int64_t cached_tip = 0;
     int64_t total_value = 0;
     int64_t total_count = 0;
     int64_t skipped_rows = 0;
     int64_t older_value = 0;
     int64_t older_count = 0;
-    FILE *f;
+    struct platform_positioned_file file;
 
     if (!out || !cached_hash ||
         !hodl_view_disk_cache_paths(datadir, path, NULL))
         return false; // raw-return-ok:cache-miss-not-error
     cached_hash[0] = '\0';
 
-    f = fopen(path, "r");
-    if (!f)
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         return false;
+    uint64_t size = 0;
     bool ok = false;
-    if (!fgets(line, sizeof(line), f) ||
-        strncmp(line, HODL_VIEW_DISK_CACHE_MAGIC,
-                strlen(HODL_VIEW_DISK_CACHE_MAGIC)) != 0)
+    if (!platform_positioned_file_size(&file, &size) || size == 0 ||
+        size > HODL_VIEW_DISK_CACHE_BYTES_MAX ||
+        platform_positioned_file_read(&file, bytes, (size_t)size, 0) !=
+            (int64_t)size)
         goto done;
-    if (!fgets(line, sizeof(line), f) ||
+    bytes[size] = '\0';
+    char *cursor = bytes;
+    char *line = hodl_view_next_line(&cursor);
+    if (!line || strcmp(line, HODL_VIEW_DISK_CACHE_MAGIC) != 0)
+        goto done;
+    line = hodl_view_next_line(&cursor);
+    if (!line ||
         sscanf(line, "tip_height=%" SCNd64, &cached_tip) != 1 ||
         cached_tip < 0)
         goto done;
-    if (!fgets(line, sizeof(line), f) ||
+    line = hodl_view_next_line(&cursor);
+    if (!line ||
         sscanf(line, "tip_hash=%79s", cached_hash) != 1 ||
         !cached_hash[0])
         goto done;
-    if (!fgets(line, sizeof(line), f) ||
+    line = hodl_view_next_line(&cursor);
+    if (!line ||
         sscanf(line, "total_value=%" SCNd64, &total_value) != 1)
         goto done;
-    if (!fgets(line, sizeof(line), f) ||
+    line = hodl_view_next_line(&cursor);
+    if (!line ||
         sscanf(line, "total_count=%" SCNd64, &total_count) != 1)
         goto done;
-    if (!fgets(line, sizeof(line), f) ||
+    line = hodl_view_next_line(&cursor);
+    if (!line ||
         sscanf(line, "skipped_rows=%" SCNd64, &skipped_rows) != 1)
         goto done;
-    if (!fgets(line, sizeof(line), f) ||
+    line = hodl_view_next_line(&cursor);
+    if (!line ||
         sscanf(line, "older_than_1y_value=%" SCNd64, &older_value) != 1)
         goto done;
-    if (!fgets(line, sizeof(line), f) ||
+    line = hodl_view_next_line(&cursor);
+    if (!line ||
         sscanf(line, "older_than_1y_count=%" SCNd64, &older_count) != 1)
         goto done;
 
@@ -264,7 +292,8 @@ static bool hodl_view_disk_cache_read(
         int idx = -1;
         int64_t value = 0;
         int64_t count = 0;
-        if (!fgets(line, sizeof(line), f) ||
+        line = hodl_view_next_line(&cursor);
+        if (!line ||
             sscanf(line, "bucket %d value=%" SCNd64 " count=%" SCNd64,
                    &idx, &value, &count) != 3 ||
             idx != i || value < 0 || count < 0)
@@ -276,7 +305,7 @@ static bool hodl_view_disk_cache_read(
     struct ar_errors errors;
     ok = hodl_wave_validate(out, &errors);
 done:
-    fclose(f);
+    platform_positioned_file_close(&file);
     return ok;
 }
 
@@ -297,60 +326,96 @@ bool hodl_view_disk_cache_load_verified(
     return true;
 }
 
+static bool hodl_view_cache_append(char *bytes, size_t bytes_size,
+                                   size_t *used, const char *format, ...)
+{
+    if (!bytes || !used || *used >= bytes_size)
+        return false;
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(bytes + *used, bytes_size - *used, format, args);
+    va_end(args);
+    if (n < 0 || (size_t)n >= bytes_size - *used)
+        return false;
+    *used += (size_t)n;
+    return true;
+}
+
 void hodl_view_disk_cache_save(const char *datadir, int64_t tip,
                                const char *tip_hash,
                                const struct hodl_wave_snapshot *h)
 {
     char path[HODL_VIEW_DISK_CACHE_PATH_MAX];
+    char parent[HODL_VIEW_DISK_CACHE_PATH_MAX];
     char tmp_path[HODL_VIEW_DISK_CACHE_PATH_MAX];
-    FILE *f;
-    bool ok = false;
+    char bytes[HODL_VIEW_DISK_CACHE_BYTES_MAX];
+    size_t used = 0;
 
     if (!h || !tip_hash || !tip_hash[0] ||
-        !hodl_view_disk_cache_paths(datadir, path, tmp_path))
+        !hodl_view_disk_cache_paths(datadir, path, parent))
         return;
 
-    f = fopen(tmp_path, "w");
-    if (!f) {
-        LOG_WARN("explorer", "hodl disk cache fopen(%s) failed: %s",
-                 tmp_path, strerror(errno));
-        return;
-    }
-
-    ok = fprintf(f, "%s\n", HODL_VIEW_DISK_CACHE_MAGIC) > 0 &&
-         fprintf(f, "tip_height=%" PRId64 "\n", tip) > 0 &&
-         fprintf(f, "tip_hash=%s\n", tip_hash) > 0 &&
-         fprintf(f, "total_value=%" PRId64 "\n", h->total_value) > 0 &&
-         fprintf(f, "total_count=%" PRId64 "\n", h->total_count) > 0 &&
-         fprintf(f, "skipped_rows=%" PRId64 "\n", h->skipped_rows) > 0 &&
-         fprintf(f, "older_than_1y_value=%" PRId64 "\n",
-                 h->older_than_1y_value) > 0 &&
-         fprintf(f, "older_than_1y_count=%" PRId64 "\n",
-                 h->older_than_1y_count) > 0;
+    bool ok = hodl_view_cache_append(bytes, sizeof(bytes), &used, "%s\n",
+                                     HODL_VIEW_DISK_CACHE_MAGIC) &&
+        hodl_view_cache_append(bytes, sizeof(bytes), &used,
+                               "tip_height=%" PRId64 "\n", tip) &&
+        hodl_view_cache_append(bytes, sizeof(bytes), &used, "tip_hash=%s\n",
+                               tip_hash) &&
+        hodl_view_cache_append(bytes, sizeof(bytes), &used,
+                               "total_value=%" PRId64 "\n", h->total_value) &&
+        hodl_view_cache_append(bytes, sizeof(bytes), &used,
+                               "total_count=%" PRId64 "\n", h->total_count) &&
+        hodl_view_cache_append(bytes, sizeof(bytes), &used,
+                               "skipped_rows=%" PRId64 "\n", h->skipped_rows) &&
+        hodl_view_cache_append(bytes, sizeof(bytes), &used,
+                               "older_than_1y_value=%" PRId64 "\n",
+                               h->older_than_1y_value) &&
+        hodl_view_cache_append(bytes, sizeof(bytes), &used,
+                               "older_than_1y_count=%" PRId64 "\n",
+                               h->older_than_1y_count);
     for (int i = 0; ok && i < HODL_WAVE_BUCKETS; i++) {
-        ok = fprintf(f, "bucket %d value=%" PRId64 " count=%" PRId64 "\n",
-                     i, h->buckets[i].value, h->buckets[i].count) > 0;
+        ok = hodl_view_cache_append(
+            bytes, sizeof(bytes), &used,
+            "bucket %d value=%" PRId64 " count=%" PRId64 "\n", i,
+            h->buckets[i].value, h->buckets[i].count);
     }
-    ok = ok && fflush(f) == 0 && fsync(fileno(f)) == 0;
-    if (fclose(f) != 0)
-        ok = false;
     if (!ok) {
-        LOG_WARN("explorer", "hodl disk cache write(%s) failed: %s",
-                 tmp_path, strerror(errno));
-        unlink(tmp_path);
+        LOG_WARN("explorer", "hodl disk cache serialization overflow");
         return;
     }
-    if (rename(tmp_path, path) != 0) {
-        LOG_WARN("explorer", "hodl disk cache rename(%s -> %s) failed: %s",
-                 tmp_path, path, strerror(errno));
-        unlink(tmp_path);
+
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 16 && !created; ++attempt) {
+        uint8_t nonce[16];
+        if (!rng_fill(nonce, sizeof(nonce)))
+            break;
+        char suffix[2 * sizeof(nonce) + 1];
+        for (size_t i = 0; i < sizeof(nonce); ++i)
+            (void)snprintf(suffix + 2 * i, 3, "%02x", nonce[i]);
+        int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%s", path,
+                         suffix);
+        if (n <= 0 || (size_t)n >= sizeof(tmp_path))
+            break;
+        created = platform_private_file_create(tmp_path, &file);
+    }
+    if (!created || !platform_private_file_write_at(&file, bytes, used, 0) ||
+        !platform_private_file_flush(&file) ||
+        !platform_private_file_replace(&file, tmp_path, path) ||
+        !platform_private_parent_flush(parent)) {
+        LOG_WARN("explorer", "hodl disk cache atomic write(%s) failed",
+                 path);
+        if (created)
+            (void)platform_private_file_retire(&file, tmp_path);
+        platform_private_file_close(&file);
     }
 }
 
 bool hodl_view_allow_sync_scan(const char *datadir)
 {
     char dbpath[HODL_VIEW_DISK_CACHE_PATH_MAX];
-    struct stat st;
+    struct platform_positioned_file file;
     int n;
 
     if (!datadir)
@@ -358,9 +423,13 @@ bool hodl_view_allow_sync_scan(const char *datadir)
     n = snprintf(dbpath, sizeof(dbpath), "%s/node.db", datadir);
     if (n < 0 || (size_t)n >= sizeof(dbpath))
         return false;
-    if (stat(dbpath, &st) != 0)
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, dbpath))
         return true;
-    return st.st_size <= HODL_VIEW_SYNC_SCAN_DB_BYTES_MAX;
+    uint64_t size = 0;
+    bool ok = platform_positioned_file_size(&file, &size);
+    platform_positioned_file_close(&file);
+    return ok && size <= HODL_VIEW_SYNC_SCAN_DB_BYTES_MAX;
 }
 
 static void hodl_view_refresh_mark_done(void)
