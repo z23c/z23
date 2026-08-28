@@ -9,16 +9,12 @@
 #include "event/event.h"
 #include "core/utiltime.h"
 
-#include <fcntl.h>
 #include <pthread.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 /* ── Per-rule runtime state ──────────────────────────────────── */
 
@@ -70,6 +66,19 @@ static void sink_webhook(const char *url, const char *rule_name,
 {
     if (!url || !*url) return;
 
+#if defined(_WIN32)
+    /* External notification remains disabled until Windows process launch is
+     * confined by a restricted token and Job Object. The alert has already
+     * reached the in-process log sink; never approximate this with a shell or
+     * allow CreateProcess to escape the node's lifetime/resource policy. */
+    (void)rule_name;
+    (void)payload;
+    fprintf(stderr,
+            "[ALERT] webhook delivery refused on Windows: external process "
+            "sandbox is unavailable\n");
+    return;
+#else
+
     /* Build a small JSON body inline so we don't malloc in the
      * critical section.  Cap at a reasonable size. */
     char body[1024];
@@ -87,6 +96,7 @@ static void sink_webhook(const char *url, const char *rule_name,
                       "best-effort notification; the alert is already in the "
                       "event log and a failed webhook must not stall the "
                       "caller or take a second delivery path");
+#endif
 }
 
 /* ── Core logic ──────────────────────────────────────────────── */
