@@ -7,6 +7,9 @@
 #include "config/runtime.h"
 #include "json/json.h"
 #include "models/database.h"
+#include "platform/directory_compat.h"
+#include "platform/private_directory.h"
+#include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "presentation/model.h"
 #include "services/build_fabric_service.h"
@@ -16,7 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #define NPRC_LEAF "app.presentation.release-confirm"
 #define NPRC_PATH_MAX 4400
@@ -170,6 +175,45 @@ static void nprc_fail(struct zcl_command_reply *reply, const char *code,
         evidence ? evidence : NPRC_LEAF);
 }
 
+static bool nprc_evidence_datadir(const char *requested, const char *task,
+                                  char out[NPRC_PATH_MAX])
+{
+    char candidate[NPRC_PATH_MAX], canonical[NPRC_PATH_MAX];
+    if (requested && requested[0]) {
+        if (!platform_directory_canonical_real(requested, canonical,
+                                               sizeof(canonical)))
+            return false;
+    } else {
+#if defined(_WIN32)
+        char private_root[NPRC_PATH_MAX];
+        int n = platform_state_root(private_root, sizeof(private_root))
+            ? snprintf(candidate, sizeof(candidate),
+                       "%s/zcode-workspaces/%.64s/zbuild", private_root, task)
+            : -1;
+        if (n <= 0 || (size_t)n >= sizeof(candidate) ||
+            !platform_directory_canonical_real(candidate, canonical,
+                                               sizeof(canonical)))
+            return false;
+#else
+        int n = snprintf(candidate, sizeof(candidate),
+                         "/tmp/zclassic23-zcode-workspaces/%lu/%.64s/zbuild",
+                         (unsigned long)getuid(), task);
+        if (n <= 0 || (size_t)n >= sizeof(candidate) ||
+            !platform_directory_canonical_real(candidate, canonical,
+                                               sizeof(canonical)))
+            return false;
+#endif
+    }
+#if defined(_WIN32)
+    uintptr_t directory = 0;
+    if (!platform_private_directory_open_validated(canonical, &directory))
+        return false;
+    platform_private_directory_close(directory);
+#endif
+    int copied = snprintf(out, NPRC_PATH_MAX, "%s", canonical);
+    return copied > 0 && copied < NPRC_PATH_MAX;
+}
+
 static bool nprc_evidence_read(const char *workspace,
                                const struct json_value *status,
                                const char *proof_datadir,
@@ -185,11 +229,8 @@ static bool nprc_evidence_read(const char *workspace,
         return false;
     }
     char datadir[NPRC_PATH_MAX], db_path[NPRC_PATH_MAX];
-    int dn = proof_datadir && proof_datadir[0]
-        ? (realpath(proof_datadir, datadir) ? (int)strlen(datadir) : -1)
-        : snprintf(datadir, sizeof(datadir),
-                   "/tmp/zclassic23-zcode-workspaces/%lu/%.64s/zbuild",
-                   (unsigned long)getuid(), task);
+    int dn = nprc_evidence_datadir(proof_datadir, task, datadir)
+        ? (int)strlen(datadir) : -1;
     int bn = dn > 0 && (size_t)dn < sizeof(datadir)
         ? snprintf(db_path, sizeof(db_path), "%s/node.db", datadir) : -1;
     struct node_db local_ndb = {0};
@@ -252,7 +293,8 @@ void zcl_native_handle_presentation_release_confirm(
         return;
     if (!workspace_arg || !workspace_arg[0]) workspace_arg = ".";
     char workspace[NPRC_PATH_MAX];
-    if (!realpath(workspace_arg, workspace)) {
+    if (!platform_directory_canonical_real(workspace_arg, workspace,
+                                           sizeof(workspace))) {
         nprc_fail(reply, "BAD_WORKSPACE",
                   "workspace must resolve to an existing directory",
                   workspace_arg);

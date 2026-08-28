@@ -71,6 +71,7 @@
 #include "models/database.h"
 #include "models/zid_identity.h"
 #include "platform/time_compat.h"
+#include "platform/positioned_file.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
@@ -79,12 +80,10 @@
 
 #include <sqlite3.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define PCW_LOG "zcode.proof.walk"
 
@@ -992,14 +991,35 @@ static bool pcw_load_doc(const struct json_value *input, struct pcw_walk *w,
                            "saved .zid>");
             return false;
         }
-        int fd = open(doc_file, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
+        struct platform_positioned_file file;
+        struct platform_positioned_file_snapshot snapshot;
+        platform_positioned_file_init(&file);
+        bool opened = platform_positioned_file_open(&file, doc_file) &&
+                      platform_positioned_file_snapshot(&file, &snapshot);
+        if (!opened) {
             (void)snprintf(why, why_size, "cannot open doc_file: %s",
                            strerror(errno));
             return false;
         }
-        ssize_t n = read(fd, file_hex, sizeof(file_hex) - 1);
-        close(fd);
+        if (snapshot.size == 0 || snapshot.size >= sizeof(file_hex)) {
+            platform_positioned_file_close(&file);
+            (void)snprintf(why, why_size,
+                           "doc_file is empty or exceeds the bounded document size");
+            return false;
+        }
+        int64_t n = platform_positioned_file_read(
+            &file, file_hex, (size_t)snapshot.size, 0);
+        struct platform_positioned_file_snapshot after;
+        bool stable = platform_positioned_file_snapshot(&file, &after) &&
+            snapshot.size == after.size && snapshot.volume == after.volume &&
+            snapshot.file_low == after.file_low &&
+            snapshot.file_high == after.file_high &&
+            snapshot.modified_seconds == after.modified_seconds &&
+            snapshot.modified_nanoseconds == after.modified_nanoseconds &&
+            snapshot.changed_seconds == after.changed_seconds &&
+            snapshot.changed_nanoseconds == after.changed_nanoseconds;
+        platform_positioned_file_close(&file);
+        if (!stable || (n >= 0 && (uint64_t)n != snapshot.size)) n = -1;
         if (n <= 0) {
             (void)snprintf(why, why_size, "doc_file is empty or unreadable");
             return false;
