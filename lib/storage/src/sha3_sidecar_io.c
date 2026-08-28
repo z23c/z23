@@ -14,6 +14,8 @@
  */
 
 #include "platform/time_compat.h"
+#include "platform/file_sync.h"
+#include "platform/private_file.h"
 #include "storage/sha3_sidecar_io.h"
 
 #include "crypto/sha3.h"
@@ -98,27 +100,30 @@ struct zcl_result ssio_write_sidecar_raw(const char *datadir,
     hdr.body_size = body_size;
     memcpy(hdr.body_sha3, body_sha3, 32);
 
-    FILE *f = fopen(tmp_path, "wb");
-    if (!f)
-        return ZCL_ERR(-5, "%s: fopen %s: %s", spec->domain, tmp_path,
-                       strerror(errno));
-    if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
-        fclose(f);
-        unlink(tmp_path);
+    (void)platform_private_file_unlink_missing_ok(tmp_path);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    if (!platform_private_file_create(tmp_path, &staged))
+        return ZCL_ERR(-5, "%s: private create %s failed", spec->domain,
+                       tmp_path);
+    if (!platform_private_file_write_at(&staged, &hdr, sizeof(hdr), 0) ||
+        !platform_private_file_truncate(&staged, sizeof(hdr)) ||
+        !platform_private_file_flush(&staged)) {
+        platform_private_file_close(&staged);
+        (void)platform_private_file_unlink_missing_ok(tmp_path);
         return ZCL_ERR(-6, "%s: fwrite failed", spec->domain);
     }
-    fflush(f);
-    int fd = fileno(f);
-    if (fd >= 0) (void)fsync(fd);
-    fclose(f);
-
-    if (rename(tmp_path, side_path) != 0) {
+    if (!platform_private_file_replace(&staged, tmp_path, side_path)) {
+        platform_private_file_close(&staged);
         struct zcl_result r = ZCL_ERR(-7,
-            "%s: rename %s -> %s: %s",
-            spec->domain, tmp_path, side_path, strerror(errno));
-        unlink(tmp_path);
+            "%s: atomic replace %s -> %s failed",
+            spec->domain, tmp_path, side_path);
+        (void)platform_private_file_unlink_missing_ok(tmp_path);
         return r;
     }
+    platform_private_file_close(&staged);
+    if (!platform_private_parent_flush(datadir))
+        return ZCL_ERR(-7, "%s: sidecar parent flush failed", spec->domain);
     return ZCL_OK;
 }
 
@@ -214,7 +219,7 @@ struct zcl_result ssio_write_embedded(
                        spec->domain, strerror(errno));
     }
     int fd = fileno(f);
-    if (fd >= 0) (void)fsync(fd);
+    if (fd >= 0) (void)platform_file_sync(fd);
     fclose(f);
 
     /* ONE atomic rename publishes the body + its integrity header as an
@@ -238,11 +243,15 @@ struct zcl_result ssio_write_embedded(
 
     /* fsync the directory so the rename (the file's new identity) and the
      * sidecar removal are durable across power loss. */
+#ifdef _WIN32
+    (void)platform_private_parent_flush(datadir);
+#else
     int dfd = open(datadir, O_RDONLY | O_DIRECTORY);
     if (dfd >= 0) {
-        (void)fsync(dfd);
+        (void)platform_file_sync(dfd);
         close(dfd);
     }
+#endif
     return ZCL_OK;
 }
 
