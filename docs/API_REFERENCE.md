@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 737 |
+| Registry entries (branches + leaves) | 742 |
 | Top-level roots | 12 |
-| Branches | 172 |
-| Leaves (dispatchable command paths) | 565 |
-| … `ready` (live handler in this build) | 509 |
+| Branches | 173 |
+| Leaves (dispatchable command paths) | 569 |
+| … `ready` (live handler in this build) | 513 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 197 |
+| Leaves with `effect=mutate` | 201 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 113 |
 
@@ -95,12 +95,12 @@ Per source file:
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 49 | 9 | 40 |
+| `config/commands/ops.def` | 48 | 9 | 39 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 237 | 57 | 180 |
+| `config/commands/zcode.def` | 243 | 58 | 185 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -817,7 +817,6 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `ops mesh identity` (aliases: `ops.machine.status`, `machine.status`) | ready | read / read / operator · fast/low | none | `zcl.machine_mesh_identity.v1` | `z23 ops mesh identity` | Report this machine's mesh identity readiness |
 | `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
 | `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
 
@@ -1023,7 +1022,17 @@ represented by its children's sections.
 | `zcode work show` | ready | read / read / operator · fast/low | `workspace`, `work`, `datadir`, `details` | `zcl.zcode_work_status.v1` | `z23-dev zcode work show --input='{"work":"latest"}'` | Show one human-first work result |
 | `zcode work run` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, `datadir`, `details` | `zcl.zcode_work_run.v1` | `z23-dev zcode work run --input='{"work":"latest","adapter":"manual"}'` | Run one contained adapter handoff |
 | `zcode work accept` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `datadir`, `confirmation_identity`, `details` | `zcl.zcode_work_accept.v1` | `z23-dev zcode work accept --input='{"work":"latest"}'` | Accept one exact proven candidate |
+| `zcode work offer` | ready | mutate / app-write / operator · foreground/low | **`package_root`**, `datadir` | `zcl.zcode_work_offer.v1` | `z23 zcode work offer --input='{"package_root":"<64hex>"}'` | Make one accepted solution discoverable by its task |
+| `zcode work pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_work_pull.v1` | `z23 zcode work pull --input='{"task_root":"<64hex>"}'` | Fetch and verify published solutions for one task root |
 | `zcode work review` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, **`verdict`**, **`findings`** | `zcl.zcode_work_review.v1` | `z23-dev zcode work review --input='{"work":"latest","adapter":"manual","verdict":"approve","findings":"No blocking findings."}'` | Review one exact candidate |
+
+#### `zcode.task` — Posted C23 tasks and their transport
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `zcode task offer` | ready | mutate / app-write / operator · foreground/low | **`task_root`**, `datadir` | `zcl.zcode_task_offer.v1` | `z23 zcode task offer --input='{"task_root":"<64hex>"}'` | Bind one task's wires into the transport carrier |
+| `zcode task pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_task_pull.v1` | `z23 zcode task pull --input='{"task_root":"<64hex>"}'` | Fetch and verify posted contexts for one task root |
+| `zcode task board` | ready | read / read / operator · foreground/low | `datadir` | `zcl.zcode_task_board.v1` | `z23 zcode task board` | List task postings this node has seen |
 
 #### `zcode.passport` — Signed C23 module Passports
 
@@ -1402,8 +1411,8 @@ represented by its children's sections.
 | `zcode network records begin` | ready | read / read / operator · fast/low | **`kind`**, **`namespace`**, `semantic_root`, `transport_root`, `include_evidence_wires` | `zcl.zcode_network_records_begin.v1` | `z23 zcode network records begin --input='{"kind":"provider","namespace":"science","transport_root":"<64hex>"}'` | Admit iterative record discovery |
 | `zcode network records poll` | ready | read / read / operator · fast/low | **`lookup_id`**, **`owner_token`** | `zcl.zcode_network_records_poll.v1` | `z23 zcode network records poll --input='{"lookup_id":"<32hex>","owner_token":"<32hex>"}'` | Poll iterative record discovery |
 | `zcode network records cancel` | ready | read / read / operator · fast/low | **`lookup_id`**, **`owner_token`** | `zcl.zcode_network_records_cancel.v1` | `z23 zcode network records cancel --input='{"lookup_id":"<32hex>","owner_token":"<32hex>"}'` | Cancel iterative record discovery |
-| `zcode network records` | ready | read / read / operator · foreground/moderate | **`kind`**, **`namespace`**, `semantic_root`, `transport_root`, `include_evidence_wires` | `zcl.zcode_network_records.v1` | `z23 zcode network records --input='{"kind":"pointer","namespace":"science.study","semantic_root":"<64hex>"}'` | Discover signed DHT records |
-| `zcode network providers` | ready | read / read / operator · foreground/moderate | **`namespace`**, **`transport_root`** | `zcl.zcode_network_providers.v1` | `z23 zcode network providers --input='{"namespace":"science","transport_root":"<64hex>"}'` | List provider hints |
+| `zcode network records` | ready | read / read / operator · foreground/moderate | **`kind`**, **`namespace`**, `semantic_root`, `transport_root`, `include_evidence_wires`, `board` | `zcl.zcode_network_records.v1` | `z23 zcode network records --input='{"kind":"pointer","namespace":"science.study","semantic_root":"<64hex>"}'` | Discover signed DHT records |
+| `zcode network providers` | ready | read / read / operator · foreground/moderate | **`namespace`**, **`transport_root`**, `board` | `zcl.zcode_network_providers.v1` | `z23 zcode network providers --input='{"namespace":"science","transport_root":"<64hex>"}'` | List provider hints |
 | `zcode network publish` | ready | mutate / app-write / operator, plan-commit · fast/low | **`mode`**, **`kind`**, **`namespace`**, `semantic_root`, **`transport_root`**, `owner_group`, **`sequence`**, **`not_before`**, **`expiry`**, `plan_token` | `zcl.zcode_network_publish.v1` | `z23 zcode network publish --input='{"mode":"plan","kind":"provider","namespace":"science","transport_root":"<64hex>","sequence":1,"not_before":1,"expiry":2}'` | Publish a signed DHT record |
 | `zcode network storage_ack` | ready | mutate / app-write / operator, plan-commit · foreground/high | **`mode`**, **`namespace`**, `semantic_root`, **`transport_root`**, `owner_group`, **`sequence`**, **`not_before`**, **`expiry`**, `plan_token` | `zcl.zcode_network_storage_ack.v1` | `z23 zcode network storage_ack --input='{"mode":"plan","namespace":"science","transport_root":"<64hex>","sequence":1,"not_before":1,"expiry":2}'` | Publish a possession-backed storage ACK |
 | `zcode network policy list` | ready | read / read / operator · fast/low | `datadir` | `zcl.zcode_network_policy_list.v1` | `z23 zcode network policy list` | Inspect local policy summary |
@@ -1620,8 +1629,6 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.mirror` | `ops.debug.dash.mirror` |
 | `selfheal` | `ops.debug.dash.selfheal` |
 | `ops.selfheal` | `ops.debug.dash.selfheal` |
-| `ops.machine.status` | `ops.mesh.identity` |
-| `machine.status` | `ops.mesh.identity` |
 | `dev.change.cycle` | `dev.change.apply` |
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
