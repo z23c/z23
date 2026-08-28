@@ -8,6 +8,7 @@
  * existing directory, which is what makes this create atomic: the create
  * call IS the existence test, so there is no window between the two for
  * another process to plant the name. */
+#include "base/hex.h"
 #include "platform/temp_directory.h"
 
 #include "platform/private_directory.h"
@@ -87,25 +88,19 @@ bool platform_temp_directory_create(const char *name_prefix, char *out_path,
         return false;
     }
 
-    static const char hex[16] = "0123456789abcdef";
     for (unsigned attempt = 0; attempt < 64u; attempt++) {
-        /* Sixteen hex digits of CSPRNG plus two of the attempt counter. The
-         * counter is not decoration: a deterministic simulator may have
-         * installed a fixed rng_fill(), and without it every retry inside
+        /* Eight bytes of CSPRNG plus the attempt counter, hex-encoded as one
+         * slice. The counter is not decoration: a deterministic simulator may
+         * have installed a fixed rng_fill(), and without it every retry inside
          * one call would re-propose the one name that just collided. */
-        uint8_t nonce[8];
-        char leaf[sizeof(nonce) * 2u + 3u];
-        if (!rng_fill(nonce, sizeof(nonce))) {
+        uint8_t nonce[9];
+        char leaf[sizeof(nonce) * 2u + 1u];
+        if (!rng_fill(nonce, sizeof(nonce) - 1u)) {
             errno = EIO;
             return false;
         }
-        for (size_t i = 0; i < sizeof(nonce); i++) {
-            leaf[2u * i] = hex[nonce[i] >> 4];
-            leaf[2u * i + 1u] = hex[nonce[i] & 0x0fu];
-        }
-        leaf[sizeof(nonce) * 2u] = hex[(attempt >> 4) & 0x0fu];
-        leaf[sizeof(nonce) * 2u + 1u] = hex[attempt & 0x0fu];
-        leaf[sizeof(nonce) * 2u + 2u] = '\0';
+        nonce[sizeof(nonce) - 1u] = (uint8_t)attempt;
+        zcl_hex_encode(nonce, sizeof(nonce), leaf);
 
         char candidate[PLATFORM_TEMP_PATH_MAX];
         int written = snprintf(candidate, sizeof(candidate), "%s%c%s%s",
