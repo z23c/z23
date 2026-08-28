@@ -5,20 +5,28 @@
 
 #include "base/hex.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
+#include "platform/directory_transaction.h"
+#include "platform/positioned_file.h"
+#include "platform/private_file.h"
 #include "util/safe_alloc.h"
 #include "vcs/source_bundle.h"
 #include "vcs/source_package_checkout.h"
 #include "vcs/package_store.h"
 #include "vcs/vcs.h"
 
+#if !defined(_WIN32)
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define ZSB_PATH_MAX 4400
 
@@ -52,35 +60,46 @@ static bool zsb_named_root(const struct json_value *input, const char *key,
 static bool zsb_paths_disjoint(const char *left, const char *right)
 {
     size_t left_len = strlen(left), right_len = strlen(right);
+#if defined(_WIN32)
+    return _stricmp(left, right) != 0 &&
+        !(left_len < right_len && _strnicmp(left, right, left_len) == 0 &&
+          (right[left_len] == '/' || right[left_len] == '\\')) &&
+        !(right_len < left_len && _strnicmp(right, left, right_len) == 0 &&
+          (left[right_len] == '/' || left[right_len] == '\\'));
+#else
     return strcmp(left, right) != 0 &&
         !(left_len < right_len && strncmp(left, right, left_len) == 0 &&
           right[left_len] == '/') &&
         !(right_len < left_len && strncmp(right, left, right_len) == 0 &&
           left[right_len] == '/');
+#endif
 }
 
 static uint8_t *zsb_read(const char *path, size_t *len_out)
 {
     *len_out = 0;
-    struct stat st;
-    if (!path || lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size <= 0 ||
-        (uint64_t)st.st_size > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!path || !platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES) {
+        platform_positioned_file_close(&file);
         return NULL;
-    size_t len = (size_t)st.st_size;
+    }
+    size_t len = (size_t)before.size;
     uint8_t *bytes = zcl_malloc(len, "zcode.workspace.source.bundle.read");
-    if (!bytes) return NULL;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) { free(bytes); return NULL; }
+    if (!bytes) { platform_positioned_file_close(&file); return NULL; }
     size_t off = 0;
     while (off < len) {
-        ssize_t got = read(fd, bytes + off, len - off);
-        if (got < 0 && errno == EINTR) continue;
+        int64_t got = platform_positioned_file_read(
+            &file, bytes + off, len - off, off);
         if (got <= 0) break;
         off += (size_t)got;
     }
-    bool ok = off == len;
-    if (close(fd) != 0) ok = false;
+    bool ok = off == len && platform_positioned_file_snapshot(&file, &after) &&
+        platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
     if (!ok) { free(bytes); return NULL; }
     *len_out = len;
     return bytes;
@@ -89,6 +108,31 @@ static uint8_t *zsb_read(const char *path, size_t *len_out)
 static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
                                 size_t len)
 {
+#if defined(_WIN32)
+    char resolved[ZSB_PATH_MAX], parent[ZSB_PATH_MAX];
+    if (!path || !bytes || !platform_private_path_resolve(
+            path, resolved, sizeof(resolved), parent, sizeof(parent)))
+        return false;
+    const char *slash = strrchr(resolved, '\\');
+    if (!slash) slash = strrchr(resolved, '/');
+    const char *leaf = slash ? slash + 1 : NULL;
+    struct platform_directory_transaction directory;
+    struct platform_directory_child file;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&file);
+    bool created = leaf && leaf[0] &&
+        platform_directory_transaction_open(&directory, parent) &&
+        platform_directory_child_create(&directory, leaf, &file);
+    bool ok = created &&
+        platform_directory_child_write_exact(&file, bytes, len, 0) &&
+        platform_directory_child_flush(&file) &&
+        platform_directory_transaction_flush(&directory);
+    platform_directory_child_close(&file);
+    if (created && !ok)
+        (void)platform_directory_child_unlink(&directory, leaf, true);
+    platform_directory_transaction_close(&directory);
+    return ok;
+#else
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                   0400);
     if (fd < 0) return false;
@@ -104,10 +148,18 @@ static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
     if (close(fd) != 0) ok = false;
     if (!ok) (void)unlink(path);
     return ok;
+#endif
 }
 
 static bool zsb_empty_dir(const char *path)
 {
+#if defined(_WIN32)
+    /* The current retained enumeration API intentionally omits reparse
+     * points, so it cannot prove an attacker-controlled directory empty.
+     * Refuse until an all-entry retained enumeration is available. */
+    (void)path;
+    return false;
+#else
     DIR *dir = opendir(path);
     if (!dir) return false;
     bool empty = true;
@@ -120,6 +172,7 @@ static bool zsb_empty_dir(const char *path)
         }
     }
     return closedir(dir) == 0 && empty;
+#endif
 }
 
 static void zsb_render(struct json_value *out, const uint8_t root[32],
@@ -152,7 +205,8 @@ void zcl_native_handle_zcode_source_capture(
     const char *workspace_arg = zsb_str(request->input, "workspace");
     char workspace[ZSB_PATH_MAX];
     uint8_t root[32];
-    if (!workspace_arg || !realpath(workspace_arg, workspace) ||
+    if (!workspace_arg || !platform_directory_canonical_real(
+            workspace_arg, workspace, sizeof(workspace)) ||
         vcs_tree_capture_path(workspace, root) != VCS_OK) {
         zsb_fail(reply, "SOURCE_CAPTURE_REFUSED", "capture",
                  "workspace must resolve and remain byte-stable through the complete ZVCS capture");
@@ -258,7 +312,8 @@ void zcl_native_handle_zcode_source_bundle_import(
     uint8_t root[32];
     if (!bundle || !workspace || !zsb_root(request->input, root) ||
         !zcl_native_zcode_workspace_is_explicit_scratch(workspace) ||
-        !realpath(workspace, workspace_real)) {
+        !platform_directory_canonical_real(
+            workspace, workspace_real, sizeof(workspace_real))) {
         zsb_fail(reply, "BAD_SOURCE_BUNDLE_IMPORT_INPUT", "validate",
                  "bundle, source_root and an explicit scratch workspace are required");
         return;
@@ -294,8 +349,10 @@ void zcl_native_handle_zcode_source_bundle_checkout(
         !zsb_root(request->input, root) ||
         !zcl_native_zcode_workspace_is_explicit_scratch(workspace) ||
         !zcl_native_zcode_workspace_is_explicit_scratch(destination) ||
-        !realpath(workspace, workspace_real) ||
-        !realpath(destination, destination_real) ||
+        !platform_directory_canonical_real(
+            workspace, workspace_real, sizeof(workspace_real)) ||
+        !platform_directory_canonical_real(
+            destination, destination_real, sizeof(destination_real)) ||
         strcmp(workspace_real, destination_real) == 0 ||
         !zsb_empty_dir(destination_real)) {
         zsb_fail(reply, "BAD_SOURCE_BUNDLE_CHECKOUT_INPUT", "validate",
@@ -342,8 +399,10 @@ void zcl_native_handle_zcode_source_package_checkout(
         zsb_root(request->input, source_root) &&
         zcl_native_zcode_workspace_is_explicit_scratch(workspace) &&
         zcl_native_zcode_workspace_is_explicit_scratch(destination) &&
-        realpath(workspace, workspace_real) &&
-        realpath(destination, destination_real) &&
+        platform_directory_canonical_real(
+            workspace, workspace_real, sizeof(workspace_real)) &&
+        platform_directory_canonical_real(
+            destination, destination_real, sizeof(destination_real)) &&
         zsb_paths_disjoint(workspace_real, destination_real) &&
         zsb_empty_dir(destination_real);
     if (!valid) {
