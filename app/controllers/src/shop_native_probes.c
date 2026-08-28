@@ -83,8 +83,8 @@ static bool shp_write_file_atomic(const char *path, const char *bytes,
                                   size_t len)
 {
     char installed[1100], parent[1100];
-    if (!platform_private_path_resolve(path, installed, sizeof(installed),
-                                       parent, sizeof(parent)))
+    if (!platform_private_destination_resolve(
+            path, installed, sizeof(installed), parent, sizeof(parent)))
         LOG_FAIL(SHOP_TAG, "cannot resolve atomic-write parent: %s", path);
     char tmp[1200];
     struct platform_private_file file;

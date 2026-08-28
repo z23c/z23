@@ -140,9 +140,17 @@ static bool build_sha3_file(const char *path, uint8_t out[32],
 static bool build_resolve_file(const char *candidate, char resolved[PATH_MAX],
                                struct platform_positioned_file_snapshot *stamp)
 {
+    if (!candidate)
+        return false;
+#if !defined(_WIN32)
+    char canonical[PATH_MAX];
+    if (!realpath(candidate, canonical))
+        return false;
+    candidate = canonical;
+#endif
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
-    bool ok = candidate && platform_positioned_file_open(&file, candidate) &&
+    bool ok = platform_positioned_file_open(&file, candidate) &&
               platform_positioned_file_path(&file, resolved, PATH_MAX) &&
               (!stamp || platform_positioned_file_snapshot(&file, stamp));
     platform_positioned_file_close(&file);

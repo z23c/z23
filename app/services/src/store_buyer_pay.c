@@ -390,8 +390,8 @@ static bool sb_write_atomic(const char *path, const uint8_t *data, size_t len)
     errno = 0;
     char installed[STORE_PURCHASE_PATH_MAX + 1];
     char parent[STORE_PURCHASE_PATH_MAX + 1];
-    if (!platform_private_path_resolve(path, installed, sizeof(installed),
-                                       parent, sizeof(parent))) {
+    if (!platform_private_destination_resolve(
+            path, installed, sizeof(installed), parent, sizeof(parent))) {
         errno = EINVAL;
         return false;
     }

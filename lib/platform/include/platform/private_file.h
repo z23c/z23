@@ -56,6 +56,13 @@ bool platform_private_file_identity(struct platform_private_file *file,
 bool platform_private_path_resolve(const char *path, char *resolved,
                                    size_t resolved_size, char *parent,
                                    size_t parent_size);
+/* Resolve a destination whose existing real parent may be relative to the
+ * current working directory. The parent is first canonicalized to an
+ * absolute, non-link directory, then the strict resolver above validates and
+ * appends the original leaf. */
+bool platform_private_destination_resolve(
+    const char *path, char *resolved, size_t resolved_size, char *parent,
+    size_t parent_size);
 bool platform_private_path_absent(const char *path);
 bool platform_private_file_link_no_clobber(
     const char *source, const char *destination,
