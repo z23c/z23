@@ -79,16 +79,15 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
 
 bool platform_positioned_file_open_beneath(
     struct platform_positioned_file *file, const char *root,
-    const char *leaf)
+    const char *relative)
 {
-    if (!file || !root || !leaf || !leaf[0] || strchr(leaf, '/') ||
-        strchr(leaf, '\\') || strcmp(leaf, ".") == 0 ||
-        strcmp(leaf, "..") == 0)
+    if (!file || !root || !relative || !relative[0] || relative[0] == '/' ||
+        relative[0] == '\\' || strchr(relative, '\\'))
         return false;
-    wchar_t root_wide[32768], leaf_wide[32768];
+    wchar_t root_wide[32768], relative_wide[32768];
     if (!positioned_wide(root, root_wide) ||
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, leaf, -1,
-                            leaf_wide, 32768) <= 0)
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative, -1,
+                            relative_wide, 32768) <= 0)
         return false;
     HANDLE directory = CreateFileW(
         root_wide, FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
@@ -110,23 +109,46 @@ bool platform_positioned_file_open_beneath(
     nt_create_file_fn create_file = ntdll
         ? (nt_create_file_fn)(void *)GetProcAddress(ntdll, "NtCreateFile")
         : NULL;
-    size_t leaf_length = wcslen(leaf_wide);
-    UNICODE_STRING name = {
-        .Length = (USHORT)(leaf_length * sizeof(*leaf_wide)),
-        .MaximumLength = (USHORT)(leaf_length * sizeof(*leaf_wide)),
-        .Buffer = leaf_wide,
-    };
-    OBJECT_ATTRIBUTES attributes;
-    InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE,
-                               directory, NULL);
-    IO_STATUS_BLOCK status = {0};
     HANDLE handle = INVALID_HANDLE_VALUE;
-    NTSTATUS result = create_file ? create_file(
-        &handle, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
-        FILE_OPEN_REPARSE_POINT | FILE_NON_DIRECTORY_FILE,
-        NULL, 0) : (NTSTATUS)-1;
+    HANDLE current = directory;
+    wchar_t *part = relative_wide;
+    NTSTATUS result = (NTSTATUS)-1;
+    while (create_file) {
+        wchar_t *slash = wcschr(part, L'/');
+        size_t length = slash ? (size_t)(slash - part) : wcslen(part);
+        if (!length || length > UINT16_MAX / sizeof(*part) ||
+            (length == 1 && part[0] == L'.') ||
+            (length == 2 && part[0] == L'.' && part[1] == L'.'))
+            break;
+        bool leaf = slash == NULL;
+        UNICODE_STRING name = {.Length = (USHORT)(length * sizeof(*part)),
+            .MaximumLength = (USHORT)(length * sizeof(*part)), .Buffer = part};
+        OBJECT_ATTRIBUTES attributes;
+        InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE,
+                                   current, NULL);
+        IO_STATUS_BLOCK status = {0};
+        result = create_file(&handle,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE |
+                (leaf ? FILE_READ_DATA : FILE_TRAVERSE),
+            &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT |
+                (leaf ? FILE_NON_DIRECTORY_FILE : FILE_DIRECTORY_FILE),
+            NULL, 0);
+        if (result < 0) break;
+        BY_HANDLE_FILE_INFORMATION component = {0};
+        bool valid = GetFileInformationByHandle(handle, &component) &&
+            !(component.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+            (leaf ? !(component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                  : (component.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY));
+        if (!valid) { CloseHandle(handle); handle = INVALID_HANDLE_VALUE; break; }
+        if (current != directory) CloseHandle(current);
+        current = handle;
+        if (leaf) break;
+        handle = INVALID_HANDLE_VALUE;
+        part = slash + 1;
+    }
+    if (current != directory && current != handle) CloseHandle(current);
     CloseHandle(directory);
     BY_HANDLE_FILE_INFORMATION info = {0};
     if (result < 0 || handle == INVALID_HANDLE_VALUE ||
@@ -373,17 +395,32 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
 
 bool platform_positioned_file_open_beneath(
     struct platform_positioned_file *file, const char *root,
-    const char *leaf)
+    const char *relative)
 {
-    if (!file || !root || !leaf || !leaf[0] || strchr(leaf, '/') ||
-        strcmp(leaf, ".") == 0 || strcmp(leaf, "..") == 0)
+    if (!file || !root || !relative || !relative[0] || relative[0] == '/' ||
+        strchr(relative, '\\'))
         return false;
-    int directory = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                               O_NOFOLLOW);
-    if (directory < 0) return false;
-    int fd = openat(directory, leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    close(directory);
+    int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
+    char path[4096];
+    size_t length = strlen(relative);
+    if (length >= sizeof(path)) { close(fd); return false; }
+    memcpy(path, relative, length + 1);
+    char *part = path;
+    for (;;) {
+        char *slash = strchr(part, '/');
+        if (slash) *slash = '\0';
+        if (!part[0] || strcmp(part, ".") == 0 || strcmp(part, "..") == 0) {
+            close(fd); return false;
+        }
+        int next = openat(fd, part, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
+                          (slash ? O_DIRECTORY : 0));
+        close(fd);
+        if (next < 0) return false;
+        fd = next;
+        if (!slash) break;
+        part = slash + 1;
+    }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         close(fd);

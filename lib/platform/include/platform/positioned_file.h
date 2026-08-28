@@ -29,8 +29,8 @@ struct platform_positioned_file_snapshot {
 void platform_positioned_file_init(struct platform_positioned_file *file);
 bool platform_positioned_file_open(struct platform_positioned_file *file,
                                    const char *utf8_path);
-/* Open one leaf relative to a trusted real directory without following a
- * symlink/reparse point at either boundary. */
+/* Open a slash-separated relative path beneath a trusted real directory,
+ * without following a symlink/reparse point at any component. */
 bool platform_positioned_file_open_beneath(
     struct platform_positioned_file *file, const char *root_utf8,
     const char *leaf_utf8);
