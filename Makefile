@@ -98,9 +98,12 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # stamps and links nothing at all, so every parse-time input this set skips is
 # input it could not consume. It is the first command an agent types about the
 # loop, so it has to answer in ~2 s, not ~13 s.
+# `build/bin/zhello` is spelled out literally because ZHELLO_BIN is defined
+# further down, after this list is consulted.
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	presentation-lib presentation-demo presentation-relaunch \
-	presentation-desktop-install presentation-portability
+	presentation-desktop-install presentation-portability \
+	zhello zhello-selftest zhello-clean build/bin/zhello
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
 # hotswap-module-so compiles exactly one TU via a direct $(CC) shell command in
@@ -1555,6 +1558,57 @@ presentation-portability: presentation-demo
 	else \
 		printf '%s\n' 'presentation-portability: MinGW unavailable (Windows cross-link skipped)'; \
 	fi
+
+# ── zhello: the prompt-to-pixel loop ─────────────────────────────────────
+# `make zhello` opens a real window on this host and prints the timestamp it
+# presented its first frame; `make zhello-selftest` replays the same painter
+# headless (no window, no RGFW call) so a machine without a WindowServer can
+# still prove the frame code runs. One package, two C23 TUs, no node objects:
+# the whole build is two zcc-cached compiles and one link.
+ZHELLO_DIR := packages/zhello
+ZHELLO_BIN := $(BIN_DIR)/zhello
+ZHELLO_BUILD_DIR := $(BUILD_DIR)/zhello
+# Host seams: RGFW needs Cocoa on macOS and loads X11 at runtime on Linux, so
+# the per-host link inputs live here rather than in the source (same shape as
+# ZCL_TOOL_SANDBOX_SRC above; lib/presentation carries the same table).
+ZHELLO_HOST_CPPFLAGS := -D_POSIX_C_SOURCE=200809L
+ZHELLO_HOST_LIBS := -ldl -lm
+ifeq ($(ZCL_HOST_OS),Darwin)
+ZHELLO_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
+	-framework QuartzCore -framework CoreVideo
+else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
+ZHELLO_HOST_LIBS := -lgdi32 -luser32 -lshell32 -lole32
+endif
+ZHELLO_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(ZCL_WARN_STRINGOP_OVERFLOW) $(ZHELLO_HOST_CPPFLAGS) \
+	$(ZCL_PLATFORM_CPPFLAGS) \
+	-I$(ZHELLO_DIR)/include -Ivendor/rgfw
+
+$(ZHELLO_BUILD_DIR)/zhello.o: $(ZHELLO_DIR)/src/zhello.c \
+		$(ZHELLO_DIR)/include/zhello/zhello.h
+	@mkdir -p $(dir $@)
+	$(CC) $(ZHELLO_CFLAGS) -c $< -o $@
+
+$(ZHELLO_BUILD_DIR)/main.o: $(ZHELLO_DIR)/app/main.c \
+		$(ZHELLO_DIR)/include/zhello/zhello.h vendor/rgfw/RGFW.h
+	@mkdir -p $(dir $@)
+	$(CC) $(ZHELLO_CFLAGS) -c $< -o $@
+
+$(ZHELLO_BIN): $(ZHELLO_BUILD_DIR)/zhello.o $(ZHELLO_BUILD_DIR)/main.o
+	@mkdir -p $(dir $@)
+	$(CC) $(ZHELLO_CFLAGS) $^ $(ZHELLO_HOST_LIBS) -o $@
+
+.PHONY: zhello zhello-selftest zhello-clean
+# Run the window. `make zhello ZHELLO_ARGS=--seconds=2` returns on its own;
+# otherwise Esc or the window close button ends it.
+zhello: $(ZHELLO_BIN)
+	$(ZHELLO_BIN) $(ZHELLO_ARGS)
+# The headless gate: presents N logical frames, prints per-frame present
+# times, exits 0. No window is ever created.
+zhello-selftest: $(ZHELLO_BIN)
+	$(ZHELLO_BIN) --frames=120 --quiet
+zhello-clean:
+	rm -f $(BIN_DIR)/zhello $(ZHELLO_BUILD_DIR)/*.o
 
 .PHONY: worktree-prime
 # Formalizes the "cp -a vendor/lib before a fresh worktree can link" tribal
