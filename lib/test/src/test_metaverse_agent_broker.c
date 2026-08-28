@@ -924,8 +924,15 @@ static int mb_socket_identity(void)
     char dir[320];
     mb_subdir(dir, sizeof(dir), "listener");
 
-    char sock[400];
-    snprintf(sock, sizeof(sock), "%s/agent.sock", dir);
+    /* AF_UNIX caps a bound path at sizeof(sun_path) (108) and
+     * agent_broker_listen() refuses a longer one outright — correctly. The
+     * audit log can sit at any depth, but the socket cannot, so it gets its
+     * own short-named directory instead of nesting under the group root;
+     * otherwise a deep checkout path alone defeats the identity round. */
+    char sockdir[PATH_MAX], sock[PATH_MAX];
+    test_fmt_tmpdir(sockdir, sizeof(sockdir), "mvs", "l");
+    (void)mkdir(sockdir, 0700);
+    snprintf(sock, sizeof(sock), "%s/a.sock", sockdir);
     int lfd = agent_broker_listen(sock);
     if (lfd < 0) {
         printf("agent_broker: cannot listen on %s — skipping the socket "
@@ -968,6 +975,7 @@ static int mb_socket_identity(void)
 
     (void)close(lfd);
     (void)unlink(sock);
+    (void)rmdir(sockdir);
 
     /* Both refusals are on the record, and the record still verifies. */
     struct agent_audit_verdict v;

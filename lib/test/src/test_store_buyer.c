@@ -182,32 +182,18 @@ static bool tsb_attach_blob(struct node_db *ndb, int64_t product_id,
     return db_store_product_save_content(ndb, product_id, hash);
 }
 
-/* Make a fixture datadir under ./test-tmp and hand it back as an ABSOLUTE
- * path.
+/* Make a fixture datadir under test-tmp.
  *
- * test_make_tmpdir spells the directory relative to the working directory
- * ("./test-tmp/store_buyer_<pid>_<tag>"). store_buyer_collect writes the
- * delivered payload through sb_write_atomic -> platform_private_path_resolve,
- * which realpath()s the destination's parent and refuses any pathname that
- * does not start at the root ("destination parent is not a safe real
- * directory"). A relative output path is rejected before a byte is written,
- * so the fixture must anchor the same in-tree directory at the working
- * directory. */
+ * The absolute spelling matters here: the handlers write through
+ * platform_private_path_resolve, which realpath()s the destination's parent
+ * and refuses any pathname that does not start at the root ("destination
+ * parent is not a safe real directory"). test_make_tmpdir now hands back an
+ * absolute path, so this is a straight pass-through; it used to prepend the
+ * working directory itself, which after that change produced a doubled
+ * prefix and a datadir that did not exist. */
 static void tsb_tmpdir(char *dir, size_t dir_size, const char *tag)
 {
-    char rel[192];
-    test_make_tmpdir(rel, sizeof(rel), "store_buyer", tag);
-
-    const char *leaf = rel;
-    if (leaf[0] == '.' && leaf[1] == '/')
-        leaf += 2;
-
-    char cwd[256];
-    if (!getcwd(cwd, sizeof(cwd))) {
-        (void)snprintf(dir, dir_size, "%s", rel);  /* write fails loudly */
-        return;
-    }
-    (void)snprintf(dir, dir_size, "%s/%s", cwd, leaf);
+    test_make_tmpdir(dir, dir_size, "store_buyer", tag);
 }
 
 static bool tsb_file_exists(const char *path)

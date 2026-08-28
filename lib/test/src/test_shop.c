@@ -58,32 +58,18 @@
 
 /* ── fixture helpers ────────────────────────────────────────────────── */
 
-/* Make a fixture datadir under ./test-tmp and hand it back as an ABSOLUTE
- * path.
+/* Make a fixture datadir under test-tmp.
  *
- * test_make_tmpdir spells the directory relative to the working directory
- * ("./test-tmp/shop_<pid>_<tag>"). The shop handlers write products.json and
- * the /directory apps.csv row through shp_write_file_atomic ->
+ * The absolute spelling matters here: the handlers write through
  * platform_private_path_resolve, which realpath()s the destination's parent
  * and refuses any pathname that does not start at the root ("destination
- * parent is not a safe real directory"). A relative datadir is rejected
- * before a byte is written, so the fixture must hand the handlers the
- * absolute spelling of the same in-tree directory. */
+ * parent is not a safe real directory"). test_make_tmpdir now hands back an
+ * absolute path, so this is a straight pass-through; it used to prepend the
+ * working directory itself, which after that change produced a doubled
+ * prefix and a datadir that did not exist. */
 static void sh_tmpdir(char *dir, size_t dir_size, const char *tag)
 {
-    char rel[192];
-    test_make_tmpdir(rel, sizeof(rel), "shop", tag);
-
-    const char *leaf = rel;
-    if (leaf[0] == '.' && leaf[1] == '/')
-        leaf += 2;
-
-    char cwd[256];
-    if (!getcwd(cwd, sizeof(cwd))) {
-        (void)snprintf(dir, dir_size, "%s", rel);  /* write fails loudly */
-        return;
-    }
-    (void)snprintf(dir, dir_size, "%s/%s", cwd, leaf);
+    test_make_tmpdir(dir, dir_size, "shop", tag);
 }
 
 /* Create <dir> with a migrated node.db inside it. */

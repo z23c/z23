@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <sqlite3.h>
@@ -50,12 +51,31 @@ static inline void test_cleanup_tmpdir(const char *path)
     rmdir(path);
 }
 
-/* Build "./test-tmp/<prefix>_<pid>_<tag>" into buf (snprintf-only, no
- * directory creation). Shared by the per-stage *_tmpdir helpers. */
+/* Build "<cwd>/test-tmp/<prefix>_<pid>_<tag>" into buf (snprintf-only, no
+ * directory creation). Shared by the per-stage *_tmpdir helpers.
+ *
+ * Absolute, not "./test-tmp/...": platform_private_path_resolve() refuses any
+ * parent that is not absolute (lib/platform/src/private_file.c), so every
+ * production atomic write a fixture drives through this directory fails with
+ * "destination parent is not a safe real directory" while the path is spelled
+ * relatively. It names the same directory either way — cwd is the repo root
+ * the suite already creates ./test-tmp under — so only the spelling changes. */
 static inline void test_fmt_tmpdir(char *buf, size_t n,
                                    const char *prefix, const char *tag)
 {
-    snprintf(buf, n, "./test-tmp/%s_%d_%s", prefix, (int)getpid(), tag);
+    char cwd[PATH_MAX];
+    int wrote = getcwd(cwd, sizeof(cwd))
+                    ? snprintf(buf, n, "%s/test-tmp/%s_%d_%s", cwd, prefix,
+                               (int)getpid(), tag)
+                    : -1;
+    /* A truncated tmpdir aliases two fixtures onto one path, or names a parent
+     * that does not exist. Either way the group's assertions stop meaning
+     * anything, so name the short caller and stop rather than grade it. */
+    if (wrote < 0 || (size_t)wrote >= n) {
+        fprintf(stderr, "test_fmt_tmpdir: no absolute path for %s_%s in a "
+                        "%zu-byte buffer\n", prefix, tag, n);
+        abort();
+    }
 }
 
 /* Shared helper functions */
@@ -71,7 +91,7 @@ void test_rm_rf(const char *dir);
  * Returns the rmdir/unlink result of the top-level path. */
 int test_rm_rf_recursive(const char *path);
 
-/* Build "./test-tmp/<prefix>_<pid>_<tag>" into buf, clean any stale
+/* Build "<cwd>/test-tmp/<prefix>_<pid>_<tag>" into buf, clean any stale
  * directory at that path, then mkdir test-tmp and the dir itself. */
 void test_make_tmpdir(char *buf, size_t n, const char *prefix,
                       const char *tag);
