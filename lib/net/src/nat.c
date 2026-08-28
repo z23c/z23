@@ -59,7 +59,24 @@ static int nat_receive_datagram(platform_socket_t socket, void *data,
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  Gateway discovery via /proc/net/route
+ *  Gateway discovery
+ *
+ *  Three arms, one output contract: gw_out holds the 4 IPv4 address bytes
+ *  in NETWORK byte order (gw_out[0] is the leading dotted-quad octet),
+ *  which is what natpmp_send_recv() copies into sin_addr.
+ *
+ *    _WIN32   — GetBestRoute2, sin_addr copied verbatim.
+ *    __APPLE__ — the PF_ROUTE/NET_RT_DUMP sysctl (nat_route_dump.c);
+ *                macOS has no /proc/net/route at all, so before this arm
+ *                existed the fopen below simply failed and a Mac node
+ *                could not map an inbound port.
+ *    Linux    — /proc/net/route. The kernel prints each address as the
+ *               host-order value of a network-order in_addr, so a plain
+ *               4-byte copy of the parsed word yields network order on
+ *               either endianness.
+ *
+ *  A platform matching none of these REFUSES rather than falling through
+ *  to a Linux-only path.
  * ════════════════════════════════════════════════════════════════ */
 
 bool nat_get_gateway(uint8_t gw_out[4])
@@ -78,7 +95,10 @@ bool nat_get_gateway(uint8_t gw_out[4])
         return false;
     memcpy(gw_out, &route.NextHop.Ipv4.sin_addr, 4);
     return true;
-#else
+#elif defined(__APPLE__)
+    if (!gw_out) LOG_FAIL("nat", "gateway output buffer is NULL");
+    return nat_route_dump_default_gateway(gw_out);
+#elif defined(__linux__) || defined(__CYGWIN__)
     FILE *f = fopen("/proc/net/route", "r");
     if (!f) LOG_FAIL("nat", "cannot open /proc/net/route");
 
@@ -107,6 +127,12 @@ bool nat_get_gateway(uint8_t gw_out[4])
     }
     fclose(f);
     LOG_FAIL("nat", "no default gateway found in /proc/net/route");
+#else
+    /* No routing-table reader for this platform. Report unavailable — a
+     * fabricated or zero gateway would send NAT-PMP at nothing and make an
+     * unsupported platform look supported. */
+    (void)gw_out;
+    LOG_FAIL("nat", "gateway discovery is not implemented on this platform");
 #endif
 }
 

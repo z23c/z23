@@ -132,6 +132,7 @@ int test_rpc(void);
 int test_transaction(void);
 int test_net(void);
 int test_netbase_split_host_port(void);
+int test_nat_route_dump(void);
 int test_activerecord(void);
 int test_sapling_crypto(void);
 int test_groth16_msm_parity(void);
