@@ -1460,7 +1460,14 @@ void hotswap_activation_reset_for_testing(void)
     atomic_store(&g_dlclose_count, 0);
 }
 
-#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
+/* Dynamic activation lives behind the plain `#ifdef ZCL_DEV_BUILD` region
+ * this file has always used: a release build must link zero dl* code, and
+ * the check-hotswap-dev-only gate reads that exact toggle. Host exclusions
+ * nest INSIDE it (same shape as the __APPLE__ branches below) so folding
+ * one into the outer condition can never move a dl* call site out of the
+ * dev-only region. */
+#ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -2213,7 +2220,11 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     return true;
 }
 
-#else /* release or Windows: no dynamic activation surface */
+#endif /* !_WIN32 */
+#endif /* ZCL_DEV_BUILD */
+
+#if !defined(ZCL_DEV_BUILD) || defined(_WIN32)
+/* release or Windows: no dynamic activation surface */
 
 #if defined(_WIN32)
 #define HOTSWAP_UNAVAILABLE_STAGE "windows"
@@ -2314,4 +2325,4 @@ bool hotswap_rollback(const char *source_tu,
 #undef HOTSWAP_UNAVAILABLE_STAGE
 #undef HOTSWAP_UNAVAILABLE_REASON
 
-#endif /* ZCL_DEV_BUILD && !_WIN32 */
+#endif /* !ZCL_DEV_BUILD || _WIN32 */

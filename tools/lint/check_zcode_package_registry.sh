@@ -4,11 +4,23 @@
 set -euo pipefail
 
 checker="build/bin/zcode-package-registry-check"
+# The registry .def files are pulled into this checker at COMPILE time by an
+# X-macro (tools/zcode_package_registry_check.c), so the binary carries a
+# snapshot of them. Grading with whatever binary happens to sit in build/bin
+# therefore says nothing about the .def on disk: a registry file overwritten
+# with all-zero roots still passed here. Build it first, so the verdict is
+# about the tree being gated. tools/scripts/zcode_registry_rederive.sh has
+# always done this; only the lint side was missing it. Do not swap this for
+# an mtime comparison -- the binary also embeds config/zcode_c23_commons_app.def
+# and lib/vcs/src/package_*.c, so only make knows the real prerequisite set.
+if ! make -s --no-print-directory "$checker" >/dev/null 2>&1; then
+    echo "check-zcode-package-registry: FAIL — could not build $checker" >&2
+    exit 1
+fi
 if [[ ! -x "$checker" ]]; then
     echo "check-zcode-package-registry: FAIL — missing $checker" >&2
     exit 1
 fi
-
 "$checker"
 
 mapfile -t package_dirs < <(

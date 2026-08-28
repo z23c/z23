@@ -414,7 +414,11 @@ bool hotswap_dump_state_json(struct json_value *out, const char *key)
     return true;
 }
 
-#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
+/* Host exclusions nest INSIDE the plain `#ifdef ZCL_DEV_BUILD` region so a
+ * dl* call site can never leave the dev-only region (check-hotswap-dev-only
+ * reads that exact toggle; a release build must link zero dl* code). */
+#ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
 
 #include <dlfcn.h>
 
@@ -811,7 +815,11 @@ bool hotswap_load_leaves(const char *so_path,
     return true;
 }
 
-#else /* release build or native Windows (fail closed) */
+#endif /* !_WIN32 */
+#endif /* ZCL_DEV_BUILD */
+
+#if !defined(ZCL_DEV_BUILD) || defined(_WIN32)
+/* release build or native Windows (fail closed) */
 
 bool hotswap_load_leaves(const char *so_path,
                          const char *datadir,
@@ -844,4 +852,4 @@ bool hotswap_load_leaves(const char *so_path,
     return false;
 }
 
-#endif /* ZCL_DEV_BUILD */
+#endif /* !ZCL_DEV_BUILD || _WIN32 */

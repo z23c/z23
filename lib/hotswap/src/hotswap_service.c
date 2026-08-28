@@ -377,7 +377,11 @@ bool zcl_hotswap_service_publish(
     return true;
 }
 
-#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
+/* Host exclusions nest INSIDE the plain `#ifdef ZCL_DEV_BUILD` region so a
+ * dl* call site can never leave the dev-only region (check-hotswap-dev-only
+ * reads that exact toggle; a release build must link zero dl* code). */
+#ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
 struct service_handle_slot {
     char service_id[96];
     void *handle;
@@ -494,7 +498,10 @@ bool zcl_hotswap_service_activate_so(
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
 }
-#else
+#endif /* !_WIN32 */
+#endif /* ZCL_DEV_BUILD */
+
+#if !defined(ZCL_DEV_BUILD) || defined(_WIN32)
 bool zcl_hotswap_service_activate_so_any(
     const char *so_path, const char *resolved_datadir, bool request_activate,
     const struct zcl_hotswap_service_contract *const *contracts,
@@ -525,4 +532,4 @@ bool zcl_hotswap_service_activate_so(
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
 }
-#endif
+#endif /* !ZCL_DEV_BUILD || _WIN32 */

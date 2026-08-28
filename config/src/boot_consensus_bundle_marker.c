@@ -24,12 +24,12 @@ static bool marker_path(char *out, size_t cap, const char *datadir)
 {
     if (!out || cap == 0 || !datadir || !datadir[0])
         return false;
-    int n = snprintf(out, cap,
 #if defined(_WIN32)
-                     "%s\\%s",
+    const char *fmt = "%s\\%s";
 #else
-                     "%s/%s",
+    const char *fmt = "%s/%s";
 #endif
+    int n = snprintf(out, cap, fmt,
                      datadir,
                      BOOT_CONSENSUS_BUNDLE_MARKER_NAME);
     return n > 0 && (size_t)n < cap;

@@ -774,14 +774,15 @@ static void crash_emit_to(int fd, int sig, void *const *frames, int nframes)
     /* snprintf is technically not POSIX async-signal-safe but glibc's
      * bounded numeric variant is lock-free; the alternative (hand-rolled
      * itoa) doesn't meaningfully improve safety here. Trade-off acknowledged. */
+#if defined(_WIN32)
+    int pid = _getpid();
+#else
+    int pid = (int)getpid();
+#endif
     int n = snprintf(buf, sizeof(buf),
                      "\n\n*** FATAL SIGNAL %d (pid=%d t=%ld) ***\n",
                      sig,
-#if defined(_WIN32)
-                     _getpid(),
-#else
-                     (int)getpid(),
-#endif
+                     pid,
                      (long)time(NULL));  // platform-ok:async-signal-safe-crash-handler (platform.clock may lock)
     if (n > 0) crash_write_fd(fd, buf, (size_t)n);
     n = snprintf(buf, sizeof(buf),
