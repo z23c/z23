@@ -230,6 +230,16 @@ bool platform_private_file_retire(struct platform_private_file *f,
   return true;
 }
 
+bool platform_private_file_retire_if_identity(
+    struct platform_private_file *f, const char *path,
+    const struct platform_private_file_identity *expected) {
+  struct platform_private_file_identity actual;
+  if (!expected || !platform_private_file_identity(f, &actual) ||
+      actual.volume != expected->volume || actual.file != expected->file)
+    return false;
+  return platform_private_file_retire(f, path);
+}
+
 bool platform_private_file_identity(struct platform_private_file *f,
                                     struct platform_private_file_identity *id) {
   BY_HANDLE_FILE_INFORMATION i;
@@ -401,6 +411,14 @@ bool platform_private_parent_flush(const char *parent) {
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <stdatomic.h>
+#include <sys/syscall.h>
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1u << 0)
+#endif
+long syscall(long number, ...);
+#endif
 
 /* realpath() is POSIX but glibc hides its declaration when a strict C23
  * translation unit selects only _POSIX_C_SOURCE. Keep the platform seam
@@ -499,6 +517,43 @@ bool platform_private_file_retire(struct platform_private_file *f,
                                   const char *path) {
   (void)f;
   return unlink(path) == 0 || errno == ENOENT;
+}
+bool platform_private_file_retire_if_identity(
+    struct platform_private_file *f, const char *path,
+    const struct platform_private_file_identity *expected) {
+  struct platform_private_file_identity actual;
+  if (!path || !expected || !platform_private_file_identity(f, &actual) ||
+      actual.volume != expected->volume || actual.file != expected->file)
+    return false;
+#if defined(__linux__) && defined(SYS_renameat2)
+  static _Atomic unsigned long long sequence;
+  char quarantine[4096];
+  unsigned long long value = atomic_fetch_add_explicit(
+      &sequence, 1, memory_order_relaxed);
+  int n = snprintf(quarantine, sizeof(quarantine), "%s.z23-retire.%ld.%llu",
+                   path, (long)getpid(), value);
+  if (n <= 0 || (size_t)n >= sizeof(quarantine))
+    return false;
+  if (syscall(SYS_renameat2, AT_FDCWD, path, AT_FDCWD, quarantine,
+              RENAME_NOREPLACE) != 0)
+    return false;
+  struct stat moved, held;
+  bool same = lstat(quarantine, &moved) == 0 && fstat(pf_fd(f), &held) == 0 &&
+              S_ISREG(moved.st_mode) && moved.st_dev == held.st_dev &&
+              moved.st_ino == held.st_ino;
+  if (same)
+    return unlink(quarantine) == 0;
+  /* A substituted pathname was moved, not deleted. Restore it only without
+   * clobbering any concurrently recreated original name. */
+  (void)syscall(SYS_renameat2, AT_FDCWD, quarantine, AT_FDCWD, path,
+                RENAME_NOREPLACE);
+  errno = ESTALE;
+  return false;
+#else
+  (void)path;
+  errno = ENOTSUP;
+  return false;
+#endif
 }
 bool platform_private_file_identity(struct platform_private_file *f,
                                     struct platform_private_file_identity *i) {
