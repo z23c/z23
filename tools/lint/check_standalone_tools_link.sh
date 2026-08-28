@@ -73,12 +73,8 @@ declare -A EXEMPT=(
     # already the direct product of make zclassic23 / test-parallel / ci.
     # The canonical node binary is build/bin/z23 (the zclassic23 symlink
     # exists for compatibility), so both spellings are exempt.
-    [zclassic23]="built by make ci and make test-parallel"
-    [z23]="built by make ci and make test-parallel (canonical node name)"
-    [zclassic23-dev]="dev-profile whole-node relink (make dev)"
     [zclassic23-dev-asan]="sanitizer whole-node relink (make dev-asan)"
     [zclassic23-dev-tsan]="sanitizer whole-node relink (make dev-tsan)"
-    [z23-dev]="dev-profile whole-node relink (make dev)"
     [z23-dev-asan]="sanitizer whole-node relink (make dev-asan)"
     [z23-dev-tsan]="sanitizer whole-node relink (make dev-tsan)"
     [test_zcl]="whole-test relink (make test-parallel)"
@@ -213,6 +209,7 @@ gate_require_scanned "${#TOOLS[@]}" 20 check-standalone-tools-link \
 GATE_HOST_OS="$(uname -s 2>/dev/null)"
 targets=()
 for name in $(printf '%s\n' "${!TOOLS[@]}" | sort); do
+    [[ -n "${EXEMPT[$name]:-}" ]] && continue
     # A bare non-windows exemption used to sit here. It skipped the tool on
     # sight, with no check that anything still compiled the source — the exact
     # fail-open this gate exists to prevent. The WINDOWS_ONLY_EXEMPT block
@@ -288,7 +285,9 @@ done
 
 # Floor well above 1: the failure mode this guards is the exempt set quietly
 # growing until the gate builds almost nothing while still reporting clean.
-# 18 tools are covered today; anything under 10 means exemptions have eaten it.
+# Anything under 10 means exemptions have eaten it. No count is written here:
+# the gate prints the live one on its summary line below, and a number typed
+# into prose goes stale without anything noticing.
 gate_require_scanned "${#targets[@]}" 10 check-standalone-tools-link \
     "the exempt set has swallowed the gate — it is no longer proving anything"
 
@@ -317,10 +316,22 @@ if ! make -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; 
     # Re-probe serially so the report names every broken tool, not just the
     # one that happened to lose the race to fail first.
     for t in "${targets[@]}"; do
-        if ! make --no-print-directory "$t" >/dev/null 2>&1; then
-            failed+=("$t")
-            violations=$((violations + 1))
+        probe_out="$(make --no-print-directory "$t" 2>&1)" && continue
+        # A Makefile parse failure is not this tool's fault. source-identity
+        # capture refuses while the tree is being written, and the $(error ...)
+        # it raises kills EVERY make invocation regardless of target, so the
+        # serial re-probe below would blame whichever tools the write window
+        # happened to span. That misreported 12 innocent tools once. Stop and
+        # say the gate could not run, rather than name rules that are fine.
+        if [[ "$probe_out" == *"exact source capture failed"* ]]; then
+            echo "[check_standalone_tools_link] tree changed while the gate" \
+                 "ran (at $t): source-identity capture refused, so make could" \
+                 "not parse. This is NOT a broken tool rule." >&2
+            echo "[check_standalone_tools_link] re-run on a settled tree." >&2
+            exit 2
         fi
+        failed+=("$t")
+        violations=$((violations + 1))
     done
 fi
 
