@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: KATs and adversarial economics/moderation tests for Commons v2. */
+ * Purpose: KATs and adversarial economics/moderation tests for the Living
+ * Commons family. */
 #include "test/test_core.h"
 
 #include "base/hex.h"
@@ -12,7 +13,7 @@
 #include "services/zcode_c23_economics_service.h"
 #include "services/zcode_moderation_view_service.h"
 #include "vcs/zcode_c23_corpus.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include <string.h>
 
@@ -155,7 +156,7 @@ static bool cv2_policy(struct vcs_zcode_policy_candidate_v2 *policy,
     uint8_t family_root[32];
     vcs_zcode_family_policy_v1_default(family);
     if (vcs_zcode_family_policy_v1_root(family, family_root) !=
-        VCS_ZCODE_COMMONS_V2_OK)
+        VCS_ZCODE_COMMONS_OK)
         return false;
     uint8_t network[32], qualification[32], backlog[32];
     cv2_fill(network, 0x21); cv2_fill(qualification, 0x22);
@@ -163,7 +164,7 @@ static bool cv2_policy(struct vcs_zcode_policy_candidate_v2 *policy,
     vcs_zcode_policy_candidate_v2_init(policy, network, family_root,
                                        qualification, backlog);
     return vcs_zcode_policy_candidate_v2_validate(policy) ==
-           VCS_ZCODE_COMMONS_V2_OK;
+           VCS_ZCODE_COMMONS_OK;
 }
 
 static int test_v2_policy_kats(void)
@@ -175,13 +176,13 @@ static int test_v2_policy_kats(void)
         ASSERT(cv2_policy(&policy, &family));
         uint8_t policy_root[32], family_root[32], expected[32];
         ASSERT_EQ(vcs_zcode_policy_candidate_v2_root(&policy, policy_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(vcs_zcode_family_policy_v1_root(&family, family_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         char phex[65], fhex[65];
         zcl_hex_encode(policy_root, 32, phex);
         zcl_hex_encode(family_root, 32, fhex);
-        printf("commons v2 policy=%s family-c23.v1=%s\n", phex, fhex);
+        printf("policy_candidate.v2 policy=%s family-c23.v1=%s\n", phex, fhex);
         ASSERT(zcl_hex_decode(policy_root_kat, expected, 32));
         ASSERT(memcmp(policy_root, expected, 32) == 0);
         ASSERT(zcl_hex_decode(family_root_kat, expected, 32));
@@ -197,11 +198,11 @@ static int test_v2_policy_kats(void)
         struct vcs_zcode_policy_candidate_v2 changed = policy;
         changed.award_atoms[0]--;
         ASSERT_EQ(vcs_zcode_policy_candidate_v2_validate(&changed),
-                  VCS_ZCODE_COMMONS_V2_AMOUNT);
+                  VCS_ZCODE_COMMONS_AMOUNT);
         struct vcs_zcode_family_policy_v1 weakened = family;
         weakened.excluded_reason_mask &= ~VCS_ZCODE_FAMILY_TARGETED_HATE;
         ASSERT_EQ(vcs_zcode_family_policy_v1_validate(&weakened),
-                  VCS_ZCODE_COMMONS_V2_POLICY);
+                  VCS_ZCODE_COMMONS_POLICY);
         PASS();
     } _test_next:;
     return failures;
@@ -213,7 +214,7 @@ static int test_v2_truthful_activation_status(void)
     TEST("Family policy selection is not reported as effective enforcement") {
         char backlog_workspace[256];
         test_make_tmpdir(backlog_workspace, sizeof(backlog_workspace),
-                         "zcode_commons_v2", "backlog");
+                         "zcode_commons", "backlog");
         zcl_hotswap_service_reset();
         struct json_value input;
         json_init(&input);
@@ -1121,7 +1122,7 @@ static void cv2_claim(struct vcs_zcode_creation_claim_v2 *claim,
                       uint8_t id, uint16_t category)
 {
     memset(claim, 0, sizeof(*claim));
-    claim->schema_version = VCS_ZCODE_COMMONS_V2_VERSION;
+    claim->schema_version = VCS_ZCODE_CREATION_CLAIM_V2_VERSION;
     claim->flags = VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS;
     claim->category = category;
     cv2_fill(claim->claim_root, id);
@@ -1164,7 +1165,7 @@ static int test_v2_epoch_selection(void)
         };
         struct vcs_zcode_epoch_selection_result_v2 result;
         ASSERT_EQ(vcs_zcode_epoch_select_v2(&input, &policy, &result),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(result.first_category, 0);
         ASSERT_EQ(result.recipient_cap_atoms, UINT64_C(100000000));
         ASSERT(result.selected_atoms <= input.epoch_capacity_atoms);
@@ -1179,7 +1180,7 @@ static int test_v2_epoch_selection(void)
         input.claims = reversed;
         struct vcs_zcode_epoch_selection_result_v2 repeated;
         ASSERT_EQ(vcs_zcode_epoch_select_v2(&input, &policy, &repeated),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT(memcmp(result.epoch_creation_root,
                       repeated.epoch_creation_root, 32) == 0);
         ASSERT_EQ(result.selected_atoms, repeated.selected_atoms);
@@ -1189,7 +1190,7 @@ static int test_v2_epoch_selection(void)
         input.claims = claims;
         cv2_fill(input.previous_epoch_root, 2);
         ASSERT_EQ(vcs_zcode_epoch_select_v2(&input, &policy, &repeated),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(repeated.first_category, 3);
         ASSERT(memcmp(result.epoch_creation_root,
                       repeated.epoch_creation_root, 32) != 0);
@@ -1197,7 +1198,7 @@ static int test_v2_epoch_selection(void)
         claims[2].flags |= VCS_ZCODE_CLAIM_V2_REORGED;
         memset(input.previous_epoch_root, 0, 32);
         ASSERT_EQ(vcs_zcode_epoch_select_v2(&input, &policy, &repeated),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT(repeated.invalid_count > result.invalid_count);
         PASS();
     } _test_next:;
@@ -1210,7 +1211,7 @@ static int test_v2_workspace_objects(void)
     TEST("workspace, asset, passport, quality, mission and split objects fail closed") {
         struct vcs_zcode_typed_asset_manifest_v1 asset = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
             .kind = VCS_ZCODE_ASSET_IMAGE,
             .license = VCS_ZCODE_ASSET_LICENSE_CC_BY_4_0,
             .byte_count = 12345,
@@ -1222,21 +1223,21 @@ static int test_v2_workspace_objects(void)
         cv2_fill(asset.signer_root, 0x15);
         cv2_fill(asset.signature, 0x16);
         ASSERT_EQ(vcs_zcode_typed_asset_manifest_v1_validate(&asset),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         uint8_t asset_root[32], workspace_root[32], expected[32];
         ASSERT_EQ(vcs_zcode_typed_asset_manifest_v1_root(&asset, asset_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         struct vcs_zcode_typed_asset_manifest_v1 bad_asset = asset;
         memset(bad_asset.attribution_root, 0, 32);
         ASSERT_EQ(vcs_zcode_typed_asset_manifest_v1_validate(&bad_asset),
-                  VCS_ZCODE_COMMONS_V2_POLICY);
+                  VCS_ZCODE_COMMONS_POLICY);
         bad_asset = asset; bad_asset.license = 3; /* NC/ND/SA are unrepresentable. */
         ASSERT_EQ(vcs_zcode_typed_asset_manifest_v1_validate(&bad_asset),
-                  VCS_ZCODE_COMMONS_V2_ENUM);
+                  VCS_ZCODE_COMMONS_ENUM);
 
         struct vcs_zcode_quality_profile_v1 quality = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
             .field = VCS_ZCODE_QUALITY_CRYPTOGRAPHY,
             .required_check_mask = VCS_ZCODE_QUALITY_UNIVERSAL_MASK |
                                    (UINT64_C(1) << 10),
@@ -1244,14 +1245,14 @@ static int test_v2_workspace_objects(void)
         cv2_fill(quality.universal_profile_root, 0x21);
         cv2_fill(quality.additive_rules_root, 0x22);
         ASSERT_EQ(vcs_zcode_quality_profile_v1_validate(&quality),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         quality.required_check_mask = UINT64_C(1) << 10;
         ASSERT_EQ(vcs_zcode_quality_profile_v1_validate(&quality),
-                  VCS_ZCODE_COMMONS_V2_POLICY);
+                  VCS_ZCODE_COMMONS_POLICY);
 
         struct vcs_zcode_module_passport_v1 passport = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
         };
         uint8_t *passport_roots[] = {
             passport.stable_api_root, passport.recipe_root,
@@ -1264,7 +1265,7 @@ static int test_v2_workspace_objects(void)
             cv2_fill(passport_roots[i], (uint8_t)(0x30u + i));
         cv2_fill(passport.signature, 0x3f);
         ASSERT_EQ(vcs_zcode_module_passport_v1_validate(&passport),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         uint8_t passport_seed[32], passport_secret[32], passport_wire[
             VCS_ZCODE_MODULE_PASSPORT_V1_WIRE_BYTES];
         uint8_t passport_payload[
@@ -1275,7 +1276,7 @@ static int test_v2_workspace_objects(void)
         size_t passport_payload_len = 0;
         ASSERT_EQ(vcs_zcode_module_passport_v1_signing_payload(
                       &passport, passport_payload, sizeof(passport_payload),
-                      &passport_payload_len), VCS_ZCODE_COMMONS_V2_OK);
+                      &passport_payload_len), VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(passport_payload_len,
                   VCS_ZCODE_MODULE_PASSPORT_V1_SIGNING_PAYLOAD_BYTES);
         ASSERT(memcmp(passport_payload,
@@ -1286,17 +1287,17 @@ static int test_v2_workspace_objects(void)
         ASSERT_EQ(vcs_zcode_module_passport_v1_signing_payload(
                       &passport, passport_payload,
                       sizeof(passport_payload) - 1u, &refused_payload_len),
-                  VCS_ZCODE_COMMONS_V2_SIZE);
+                  VCS_ZCODE_COMMONS_SIZE);
         ASSERT_EQ(refused_payload_len, 0u);
         ed25519_sign(passport.signature, passport_payload,
                      passport_payload_len, passport_secret,
                      passport.signer_root);
         ASSERT_EQ(vcs_zcode_module_passport_v1_verify(&passport),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         size_t passport_wire_len = 0;
         ASSERT_EQ(vcs_zcode_module_passport_v1_encode(
                       &passport, passport_wire, sizeof(passport_wire),
-                      &passport_wire_len), VCS_ZCODE_COMMONS_V2_OK);
+                      &passport_wire_len), VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(passport_wire_len,
                   VCS_ZCODE_MODULE_PASSPORT_V1_WIRE_BYTES);
         char passport_hex[VCS_ZCODE_MODULE_PASSPORT_V1_WIRE_BYTES * 2u + 1u];
@@ -1387,16 +1388,16 @@ static int test_v2_workspace_objects(void)
         memcpy(passport_entry.module_release_root, workspace_release_root, 32);
         ASSERT_EQ(vcs_zcode_module_passport_v1_root(
                       &passport, passport_entry.module_passport_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         memcpy(passport_entry.semantic_fingerprint_root,
                passport.semantic_fingerprint_root, 32);
         memcpy(passport_entry.source_assignment_root,
                passport.source_assignment_root, 32);
         ASSERT_EQ(vcs_zcode_workspace_entry_v1_validate(&passport_entry),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(vcs_zcode_workspace_entry_v1_root(
                       &passport_entry, workspace_binding_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
 
         char workspace_release_hex[65], workspace_binding_hex[65];
         zcl_hex_encode(workspace_release_root, 32, workspace_release_hex);
@@ -1556,26 +1557,26 @@ static int test_v2_workspace_objects(void)
         struct vcs_zcode_module_passport_v1 passport_decoded;
         ASSERT_EQ(vcs_zcode_module_passport_v1_decode(
                       &passport_decoded, passport_wire, passport_wire_len),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT(memcmp(&passport, &passport_decoded, sizeof(passport)) == 0);
         ASSERT_EQ(vcs_zcode_module_passport_v1_decode(
                       &passport_decoded, passport_wire,
-                      passport_wire_len - 1u), VCS_ZCODE_COMMONS_V2_SIZE);
+                      passport_wire_len - 1u), VCS_ZCODE_COMMONS_SIZE);
         passport_wire[0] ^= 1u;
         ASSERT_EQ(vcs_zcode_module_passport_v1_decode(
                       &passport_decoded, passport_wire, passport_wire_len),
-                  VCS_ZCODE_COMMONS_V2_MAGIC);
+                  VCS_ZCODE_COMMONS_MAGIC);
         passport_wire[0] ^= 1u;
         passport_wire[40] ^= 1u;
         ASSERT_EQ(vcs_zcode_module_passport_v1_decode(
                       &passport_decoded, passport_wire, passport_wire_len),
-                  VCS_ZCODE_COMMONS_V2_SIGNATURE);
+                  VCS_ZCODE_COMMONS_SIGNATURE);
         struct vcs_zcode_module_passport_v1 empty_passport = {0};
         ASSERT(memcmp(&passport_decoded, &empty_passport,
                       sizeof(passport_decoded)) == 0);
         memset(passport.tests_root, 0, 32);
         ASSERT_EQ(vcs_zcode_module_passport_v1_validate(&passport),
-                  VCS_ZCODE_COMMONS_V2_ROOT);
+                  VCS_ZCODE_COMMONS_ROOT);
 
         struct vcs_zcode_workspace_entry_v1 entries[3] = {0};
         for (size_t i = 0; i < 3; i++) {
@@ -1597,7 +1598,7 @@ static int test_v2_workspace_objects(void)
         uint8_t asset_roots[1][32]; memcpy(asset_roots[0], asset_root, 32);
         struct vcs_zcode_workspace_manifest_v1 workspace = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
             .sequence = 1,
             .entries = entries,
             .entry_count = 3,
@@ -1609,9 +1610,9 @@ static int test_v2_workspace_objects(void)
         cv2_fill(workspace.signer_root, 0x71);
         cv2_fill(workspace.signature, 0x72);
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_validate(&workspace),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_root(
-                      &workspace, workspace_root), VCS_ZCODE_COMMONS_V2_OK);
+                      &workspace, workspace_root), VCS_ZCODE_COMMONS_OK);
         char ahex[65], whex[65];
         zcl_hex_encode(asset_root, 32, ahex);
         zcl_hex_encode(workspace_root, 32, whex);
@@ -1632,14 +1633,14 @@ static int test_v2_workspace_objects(void)
         uint8_t workspace_unsigned_root[32];
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_unsigned_root(
                       &signed_workspace, workspace_unsigned_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         uint8_t workspace_payload[
             VCS_ZCODE_WORKSPACE_MANIFEST_V1_SIGNING_PAYLOAD_BYTES];
         size_t workspace_payload_len = 0;
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_signing_payload(
                       &signed_workspace, workspace_payload,
                       sizeof(workspace_payload), &workspace_payload_len),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(workspace_payload_len, sizeof(workspace_payload));
         ASSERT(memcmp(workspace_payload + workspace_payload_len - 32u,
                       workspace_unsigned_root, 32) == 0);
@@ -1653,11 +1654,11 @@ static int test_v2_workspace_objects(void)
                      workspace_payload_len, workspace_secret,
                      signed_workspace.signer_root);
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_verify(&signed_workspace),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         size_t workspace_wire_size = 0, workspace_wire_len = 0;
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_wire_size(
                       &signed_workspace, &workspace_wire_size),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(workspace_wire_size,
                   VCS_ZCODE_WORKSPACE_MANIFEST_V1_WIRE_BASE_BYTES +
                   3u * VCS_ZCODE_WORKSPACE_MANIFEST_V1_ENTRY_WIRE_BYTES +
@@ -1669,20 +1670,20 @@ static int test_v2_workspace_objects(void)
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_encode(
                       &signed_workspace, workspace_wire,
                       workspace_wire_size, &workspace_wire_len),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(workspace_wire_len, workspace_wire_size);
         ASSERT(memcmp(workspace_wire, "ZCWM1\0\0\0", 8) == 0);
         struct vcs_zcode_workspace_manifest_v1_decoded decoded_workspace = {0};
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_decode(
                       &decoded_workspace, workspace_wire,
-                      workspace_wire_len), VCS_ZCODE_COMMONS_V2_OK);
+                      workspace_wire_len), VCS_ZCODE_COMMONS_OK);
         uint8_t signed_workspace_root[32], decoded_workspace_root[32];
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_root(
                       &signed_workspace, signed_workspace_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_root(
                       &decoded_workspace.manifest, decoded_workspace_root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT(memcmp(signed_workspace_root, decoded_workspace_root, 32) == 0);
         uint8_t *workspace_reencoded = zcl_malloc(
             workspace_wire_size, "test_workspace_manifest_reencode");
@@ -1691,33 +1692,33 @@ static int test_v2_workspace_objects(void)
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_encode(
                       &decoded_workspace.manifest, workspace_reencoded,
                       workspace_wire_size, &workspace_reencoded_len),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(workspace_reencoded_len, workspace_wire_len);
         ASSERT(memcmp(workspace_reencoded, workspace_wire,
                       workspace_wire_len) == 0);
         vcs_zcode_workspace_manifest_v1_decoded_free(&decoded_workspace);
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_decode(
                       &decoded_workspace, workspace_wire,
-                      workspace_wire_len - 1u), VCS_ZCODE_COMMONS_V2_SIZE);
+                      workspace_wire_len - 1u), VCS_ZCODE_COMMONS_SIZE);
         workspace_wire[0] ^= 1u;
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_decode(
                       &decoded_workspace, workspace_wire,
-                      workspace_wire_len), VCS_ZCODE_COMMONS_V2_MAGIC);
+                      workspace_wire_len), VCS_ZCODE_COMMONS_MAGIC);
         workspace_wire[0] ^= 1u;
         workspace_wire[100] ^= 1u;
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_decode(
                       &decoded_workspace, workspace_wire,
-                      workspace_wire_len), VCS_ZCODE_COMMONS_V2_SIGNATURE);
+                      workspace_wire_len), VCS_ZCODE_COMMONS_SIGNATURE);
         workspace_wire[100] ^= 1u;
         free(workspace_reencoded);
         free(workspace_wire);
         signed_workspace.signature[0] ^= 1u;
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_verify(&signed_workspace),
-                  VCS_ZCODE_COMMONS_V2_SIGNATURE);
+                  VCS_ZCODE_COMMONS_SIGNATURE);
         signed_workspace.signature[0] ^= 1u;
         entries[0].sequence++;
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_verify(&signed_workspace),
-                  VCS_ZCODE_COMMONS_V2_SIGNATURE);
+                  VCS_ZCODE_COMMONS_SIGNATURE);
         entries[0].sequence--;
 
         struct vcs_zcode_workspace_edge_v1 cycle[2] = {
@@ -1726,16 +1727,16 @@ static int test_v2_workspace_objects(void)
         };
         workspace.edges = cycle;
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_validate(&workspace),
-                  VCS_ZCODE_COMMONS_V2_POLICY);
+                  VCS_ZCODE_COMMONS_POLICY);
         workspace.edges = edges;
         memcpy(entries[2].semantic_fingerprint_root,
                entries[0].semantic_fingerprint_root, 32);
         ASSERT_EQ(vcs_zcode_workspace_manifest_v1_validate(&workspace),
-                  VCS_ZCODE_COMMONS_V2_DUPLICATE);
+                  VCS_ZCODE_COMMONS_DUPLICATE);
 
         struct vcs_zcode_mission_v1 mission = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
             .created_height = 100,
             .created_mtp = 200,
         };
@@ -1744,11 +1745,11 @@ static int test_v2_workspace_objects(void)
         cv2_fill(mission.goal_text_root, 0x83);
         cv2_fill(mission.signature, 0x84);
         ASSERT_EQ(vcs_zcode_mission_v1_validate(&mission),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
 
         struct vcs_zcode_contribution_split_v1 split = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
             .total_award_atoms = UINT64_C(100000000),
             .entry_count = 2,
         };
@@ -1760,10 +1761,10 @@ static int test_v2_workspace_objects(void)
         split.entries[0].award_atoms = UINT64_C(40000000);
         split.entries[1].award_atoms = UINT64_C(60000000);
         ASSERT_EQ(vcs_zcode_contribution_split_v1_validate(&split),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         split.entries[1].award_atoms--;
         ASSERT_EQ(vcs_zcode_contribution_split_v1_validate(&split),
-                  VCS_ZCODE_COMMONS_V2_AMOUNT);
+                  VCS_ZCODE_COMMONS_AMOUNT);
         PASS();
     } _test_next:;
     return failures;
@@ -1812,7 +1813,7 @@ static int test_v2_coverage_and_receipt(void)
 
         struct vcs_zcode_classification_receipt_v1 receipt = {0};
         receipt.schema_version = 1;
-        receipt.flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+        receipt.flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
         cv2_fill(receipt.request_root, 0x31);
         cv2_fill(receipt.content_root, 0x32);
         cv2_fill(receipt.policy_root, 0x33);
@@ -1827,10 +1828,10 @@ static int test_v2_coverage_and_receipt(void)
         receipt.completed_mtp = 8000;
         cv2_fill(receipt.signature, 0x37);
         ASSERT_EQ(vcs_zcode_classification_receipt_v1_validate(&receipt),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         uint8_t root[32], expected[32];
         ASSERT_EQ(vcs_zcode_classification_receipt_v1_root(&receipt, root),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         char hex[65]; zcl_hex_encode(root, 32, hex);
         printf("classification_receipt.v1=%s\n", hex);
         ASSERT(zcl_hex_decode(receipt_root_kat, expected, 32));
@@ -1870,7 +1871,7 @@ static int test_v2_panels(void)
             struct vcs_zcode_classification_panel_v1 panel;
             ASSERT_EQ(vcs_zcode_classification_panel_v1_select(
                           services, roster_sizes[i], future_hash, false,
-                          &panel), VCS_ZCODE_COMMONS_V2_OK);
+                          &panel), VCS_ZCODE_COMMONS_OK);
             ASSERT_EQ(panel.selected_count, expected_seats[i]);
             ASSERT_EQ(panel.required_votes, expected_quorum[i]);
             if (roster_sizes[i] >= 3)
@@ -1879,7 +1880,7 @@ static int test_v2_panels(void)
         struct vcs_zcode_classification_panel_v1 panel;
         ASSERT_EQ(vcs_zcode_classification_panel_v1_select(
                       services, 16, future_hash, false, &panel),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(panel.eligible_operator_groups, 15);
         enum vcs_zcode_moderation_vote_v1 votes[7] = {
             VCS_ZCODE_MODERATION_VOTE_PASS,
@@ -1910,10 +1911,10 @@ static int test_v2_panels(void)
 
         ASSERT_EQ(vcs_zcode_classification_panel_v1_select(
                       services, 10, future_hash, true, &panel),
-                  VCS_ZCODE_COMMONS_V2_QUORUM);
+                  VCS_ZCODE_COMMONS_QUORUM);
         ASSERT_EQ(vcs_zcode_classification_panel_v1_select(
                       services, 12, future_hash, true, &panel),
-                  VCS_ZCODE_COMMONS_V2_OK);
+                  VCS_ZCODE_COMMONS_OK);
         ASSERT_EQ(panel.selected_count, 11);
         ASSERT_EQ(panel.required_votes, 8);
         PASS();
@@ -1921,7 +1922,7 @@ static int test_v2_panels(void)
     return failures;
 }
 
-int test_zcode_commons_v2(void)
+int test_zcode_commons(void)
 {
     int failures = test_v2_policy_kats() +
                    test_v2_truthful_activation_status() +
@@ -1933,17 +1934,17 @@ int test_zcode_commons_v2(void)
                    test_v2_epoch_selection() +
                    test_v2_workspace_objects() +
                    test_v2_coverage_and_receipt() + test_v2_panels();
-    TEST("Commons v2 authorities fail closed and remain simulation-only") {
+    TEST("Commons authorities fail closed and remain simulation-only") {
         uint8_t root[32];
         struct vcs_zcode_epoch_selection_result_v2 result;
         ASSERT_EQ(vcs_zcode_policy_candidate_v2_root(NULL, root),
-                  VCS_ZCODE_COMMONS_V2_NULL);
+                  VCS_ZCODE_COMMONS_NULL);
         ASSERT_EQ(vcs_zcode_epoch_select_v2(NULL, NULL, &result),
-                  VCS_ZCODE_COMMONS_V2_NULL);
+                  VCS_ZCODE_COMMONS_NULL);
         ASSERT(!vcs_zcode_commons_admission_is_default_visible_v1(
             VCS_ZCODE_ADMISSION_UNKNOWN, true, true));
         PASS();
     } _test_next:;
-    printf("=== zcode_commons_v2: %d failures ===\n", failures);
+    printf("=== zcode_commons: %d failures ===\n", failures);
     return failures;
 }

@@ -8,31 +8,33 @@
  * IDENTICAL workload twice in one process — once clean, once with a real
  * O(1)->O(n) regression armed in the UTXO map (coins/coins_fault.h: the bucket
  * hash collapses to a single bucket, so every find/insert/erase walks one long
- * probe chain) — and requires:
+ * probe chain) — and requires, IN SUITE:
  *
- *   1. the budget PASSES on the clean run,
- *   2. the SAME budget FAILS on the armed run,
- *   3. the armed growth is at least 1.8x the clean growth measured on this same
- *      machine under this same load (the load-normalized form of 1+2: a fixed
- *      threshold can be squeezed by scheduler contention, this comparison
- *      cannot, because both measurements ride the same contention),
- *   4. the two runs folded the SAME number of transactions and ended with the
+ *   1. the armed arm's per-transaction fold cost exceeds the clean arm's by
+ *      >= 4x at EVERY ladder point (per-scale same-window A/B: both arms fold
+ *      byte-identical blocks seconds apart on the same cores, so scheduler
+ *      load moves both arms together; the calibration margin is ~13x),
+ *   2. the two runs folded the SAME number of transactions and ended with the
  *      SAME UTXO count and tip height — i.e. the injected regression is
  *      completely invisible to every count-based check, which is exactly why a
  *      cost detector has to exist. This is the QAP-matrix lesson in miniature:
  *      a checker that only counts results reports green while the code is
  *      genuinely wrong.
  *
- * Assertions 1 and 2 are the same `expect METRIC OP VALUE` comparison the
- * chaos DSL uses (docs/CHAOS_HARNESS.md), evaluated through
- * simnet_perf_expect(), so the test and the tool gate on one shared mechanism
- * and one shared threshold constant.
+ * The ABSOLUTE growth budgets (clean passes / armed fails, both metrics) are
+ * idle-machine measurements and are asserted by the dedicated lanes
+ * `make sim-perf` / `make sim-perf-teeth`, not in here: a mixed 32-worker
+ * suite inflates the clean growth ratio past the budget and compresses the
+ * armed/clean growth discrimination below the idle-regime margin, so no
+ * growth assertion survives contact with a parallel run. The suite prints
+ * the budget line informationally; docs/SIMNET_PERF.md carries the
+ * calibration, both directions, and the 2026-08-28 incident that moved the
+ * absolute assertions out of suite.
  *
- * Runtime note: the armed direction is quadratic BY CONSTRUCTION, so this
- * group deliberately runs a quarter-size workload (SIMNET_PERF_SELFTEST_BLOCKS)
- * to stay ~1 s inside a 32-worker suite run. The full-size calibration lives in
- * `make sim-perf` / `make sim-perf-teeth` and docs/SIMNET_PERF.md.
- */
+ * Runtime note: the group runs the DEFAULT calibrated workload. The
+ * quarter-size (96-block) ladder it used before 2026-08-28 was retired after
+ * the healthy-tree false positive above; the default points are long enough
+ * that scheduler contention averages out within a point. */
 
 #include "test/test_core.h"
 
@@ -54,8 +56,28 @@ static void sp_config(struct simnet_perf_config *cfg,
                       enum simnet_perf_inject inject)
 {
     simnet_perf_config_defaults(cfg);
-    cfg->blocks = SIMNET_PERF_SELFTEST_BLOCKS;
     cfg->inject = inject;
+}
+
+/* Per-scale same-window teeth: at every ladder point the armed arm's
+ * per-transaction fold cost must beat the clean arm's by min_ratio/10 x
+ * (fixed-point, so 40 means 4.0x). Both arms fold byte-identical blocks
+ * seconds apart on the same cores, so scheduler load moves both; only an
+ * injection-shaped collapse (or bimodal contention) crosses the ratio. */
+static bool sp_arms_discriminate(const struct simnet_perf_result *clean,
+                                 const struct simnet_perf_result *armed,
+                                 int64_t min_ratio_times_ten)
+{
+    if (!clean || !armed || clean->point_count == 0 ||
+        clean->point_count != armed->point_count)
+        return false;
+    for (size_t i = 0; i < clean->point_count; i++) {
+        int64_t c = clean->points[i].fold_ns_per_tx;
+        int64_t a = armed->points[i].fold_ns_per_tx;
+        if (c <= 0 || a <= 0 || a * 10 < c * min_ratio_times_ten)
+            return false;
+    }
+    return true;
 }
 
 int test_simnet_perf(void)
@@ -88,39 +110,36 @@ int test_simnet_perf(void)
     printf("  regression-armed:\n");
     simnet_perf_print(&armed, stdout);
 
-    /* ── 1+2: the same assertion must pass clean and fail armed ─────── */
+    /* ── 1+2: the budgets are printed, not asserted, in here ────────── */
+    /* The absolute growth budgets are idle-machine measurements and their
+     * enforcement home is `make sim-perf` / `make sim-perf-teeth` on a quiet
+     * host. A mixed 32-worker suite is a different contention regime: it
+     * inflates the clean growth ratio past the budget (observed 2604 vs a
+     * solo 1068 on the same binary and tree) AND compresses the growth-ratio
+     * discrimination (armed/clean 1.47x vs the 1.8x the idle regime shows),
+     * so no growth assertion is honest inside a parallel run. What IS honest
+     * is the per-scale same-window A/B below: both ladders fold
+     * byte-identical blocks seconds apart, and at calibration the armed
+     * arm's per-transaction fold cost sits ~13x above the clean arm's at
+     * every scale. 4x survives that much asymmetric scheduler noise; if it
+     * ever fires, either the injection arm broke or the box is pathologically
+     * bimodal — run the dedicated lane before concluding either. The budget
+     * line stays printed so drift stays visible to a reader of the log. */
     int64_t clean_growth = -1, armed_growth = -1;
-    int clean_rc = simnet_perf_expect(&clean, "fold_growth_permille", "<=",
-                                     SIMNET_PERF_GROWTH_BUDGET_PERMILLE,
-                                     &clean_growth);
-    int armed_rc = simnet_perf_expect(&armed, "fold_growth_permille", "<=",
-                                     SIMNET_PERF_GROWTH_BUDGET_PERMILLE,
-                                     &armed_growth);
-    printf("  budget: fold_growth_permille <= %d  clean=%lld armed=%lld\n",
+    (void)simnet_perf_expect(&clean, "fold_growth_permille", "<=",
+                             SIMNET_PERF_GROWTH_BUDGET_PERMILLE,
+                             &clean_growth);
+    (void)simnet_perf_expect(&armed, "fold_growth_permille", "<=",
+                             SIMNET_PERF_GROWTH_BUDGET_PERMILLE,
+                             &armed_growth);
+    printf("  budget (informational in-suite): fold_growth_permille <= %d  "
+           "clean=%lld armed=%lld\n",
            SIMNET_PERF_GROWTH_BUDGET_PERMILLE, (long long)clean_growth,
            (long long)armed_growth);
 
-    SP_CHECK("clean tree PASSES the growth budget", clean_rc == 0);
-    SP_CHECK("regression-armed run FAILS the same growth budget",
-             armed_rc == -1);
-
-    /* Same for the total-cost metric, so a future stage split cannot leave one
-     * of the two gated metrics silently toothless. */
-    int64_t clean_total = -1, armed_total = -1;
-    SP_CHECK("clean tree PASSES the total-cost budget",
-             simnet_perf_expect(&clean, "total_growth_permille", "<=",
-                                SIMNET_PERF_GROWTH_BUDGET_PERMILLE,
-                                &clean_total) == 0);
-    SP_CHECK("regression-armed run FAILS the total-cost budget",
-             simnet_perf_expect(&armed, "total_growth_permille", "<=",
-                                SIMNET_PERF_GROWTH_BUDGET_PERMILLE,
-                                &armed_total) == -1);
-
-    /* ── 3: load-normalized discrimination ─────────────────────────── */
-    /* Leave 10% headroom for asymmetric scheduler contention in the parallel
-     * suite. The primary teeth remain the clean-pass/armed-fail budget above. */
-    SP_CHECK("armed growth is >= 1.8x clean growth on this same machine",
-             clean_growth > 0 && armed_growth * 10 >= clean_growth * 18);
+    /* ── 3: per-scale same-window discrimination ───────────────────── */
+    SP_CHECK("armed per-tx fold cost exceeds clean at every ladder point",
+             sp_arms_discriminate(&clean, &armed, 40));
 
     /* ── 4: the regression is invisible to every count-based check ──── */
     SP_CHECK("both runs folded the same transaction count",

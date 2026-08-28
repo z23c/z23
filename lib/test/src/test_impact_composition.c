@@ -786,7 +786,7 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
             ASSERT(service.action == ZCL_DEVLOOP_HOTSWAP);
             ASSERT(ic_group_in(service.path_groups,
                                service.path_groups_len,
-                               "zcode_commons_v2"));
+                               "zcode_commons"));
 
             char service_body[ZCL_DEVLOOP_PLAN_WIRE_MAX + 1];
             size_t service_n = zcl_devloop_plan_json(

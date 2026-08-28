@@ -11,7 +11,7 @@
 #include "vcs/package_mapping.h"
 #include "vcs/vcs_devloop.h"
 #include "vcs/vcs_object.h"
-#include "vcs/zcode_commons_v2.h"
+#include "vcs/zcode_commons.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -73,7 +73,7 @@ static bool workspace_binding_parse(
                               sizeof(passport_wire)) ||
         vcs_zcode_module_passport_v1_decode(
             passport, passport_wire, sizeof(passport_wire)) !=
-            VCS_ZCODE_COMMONS_V2_OK) {
+            VCS_ZCODE_COMMONS_OK) {
         workspace_binding_fail(reply, "WORKSPACE_PASSPORT_INVALID", phase,
                                "Passport decoding or Ed25519 verification failed");
         return false;
@@ -113,7 +113,7 @@ static bool workspace_binding_parse(
     memcpy(service_input.predecessor_release_root,
            entry->predecessor_release_root, 32);
     struct vcs_zcode_workspace_entry_v1 expected = *entry;
-    enum vcs_zcode_commons_v2_error error =
+    enum vcs_zcode_commons_error error =
         vcs_zcode_module_passport_v1_root(
             passport, expected.module_passport_root);
     memcpy(expected.semantic_fingerprint_root,
@@ -121,11 +121,11 @@ static bool workspace_binding_parse(
     memcpy(expected.source_assignment_root,
            passport->source_assignment_root, 32);
     uint8_t expected_root[32];
-    if (error == VCS_ZCODE_COMMONS_V2_OK)
+    if (error == VCS_ZCODE_COMMONS_OK)
         error = vcs_zcode_workspace_entry_v1_root(&expected, expected_root);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         workspace_binding_fail(reply, "WORKSPACE_BINDING_INVALID", phase,
-                               vcs_zcode_commons_v2_error_string(error));
+                               vcs_zcode_commons_error_string(error));
         return false;
     }
     struct zcl_hotswap_service_lease lease = {0};
@@ -314,7 +314,7 @@ static bool workspace_manifest_parse(
     }
     memset(manifest, 0, sizeof(*manifest));
     manifest->schema_version = 1;
-    manifest->flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS;
+    manifest->flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS;
     manifest->sequence = (uint64_t)sequence->val.i;
     manifest->entries = entry;
     manifest->entry_count = 1;
@@ -481,9 +481,9 @@ static bool workspace_manifest_store_verified(
             workspace, root, wire_len, &stored, &stored_len) == 0 &&
         stored_len == wire_len && memcmp(stored, wire, wire_len) == 0 &&
         vcs_zcode_workspace_manifest_v1_decode(
-            &decoded, stored, stored_len) == VCS_ZCODE_COMMONS_V2_OK &&
+            &decoded, stored, stored_len) == VCS_ZCODE_COMMONS_OK &&
         vcs_zcode_workspace_manifest_v1_root(
-            &decoded.manifest, checked_root) == VCS_ZCODE_COMMONS_V2_OK &&
+            &decoded.manifest, checked_root) == VCS_ZCODE_COMMONS_OK &&
         memcmp(checked_root, root, 32) == 0;
     vcs_zcode_workspace_manifest_v1_decoded_free(&decoded);
     free(stored);
@@ -535,16 +535,16 @@ void zcl_native_handle_zcode_workspace_manifest_plan(
     uint8_t payload[
         VCS_ZCODE_WORKSPACE_MANIFEST_V1_SIGNING_PAYLOAD_BYTES];
     size_t payload_len = 0;
-    enum vcs_zcode_commons_v2_error error =
+    enum vcs_zcode_commons_error error =
         vcs_zcode_workspace_manifest_v1_unsigned_root(
             &manifest, unsigned_root);
-    if (error == VCS_ZCODE_COMMONS_V2_OK)
+    if (error == VCS_ZCODE_COMMONS_OK)
         error = vcs_zcode_workspace_manifest_v1_signing_payload(
             &manifest, payload, sizeof(payload), &payload_len);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         workspace_manifest_fail(reply, "WORKSPACE_MANIFEST_PLAN_INVALID",
                                 "plan",
-                                vcs_zcode_commons_v2_error_string(error));
+                                vcs_zcode_commons_error_string(error));
         return;
     }
     struct zcode_workspace_view_result_v1 view;
@@ -593,9 +593,9 @@ void zcl_native_handle_zcode_workspace_manifest_commit(
     if (!workspace_manifest_job_preflight(
             request, reply, &manifest, &entry, &binding))
         return;
-    enum vcs_zcode_commons_v2_error error =
+    enum vcs_zcode_commons_error error =
         vcs_zcode_workspace_manifest_v1_verify(&manifest);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         workspace_manifest_fail(
             reply, "WORKSPACE_MANIFEST_SIGNATURE_INVALID", "verify",
             "the external signature does not verify the exact manifest plan");
@@ -603,10 +603,10 @@ void zcl_native_handle_zcode_workspace_manifest_commit(
     }
     uint8_t manifest_root[32];
     error = vcs_zcode_workspace_manifest_v1_root(&manifest, manifest_root);
-    if (error != VCS_ZCODE_COMMONS_V2_OK) {
+    if (error != VCS_ZCODE_COMMONS_OK) {
         workspace_manifest_fail(reply, "WORKSPACE_MANIFEST_ROOT_FAILED",
                                 "root",
-                                vcs_zcode_commons_v2_error_string(error));
+                                vcs_zcode_commons_error_string(error));
         return;
     }
     uint8_t wire[VCS_ZCODE_WORKSPACE_MANIFEST_V1_WIRE_BASE_BYTES +
@@ -614,10 +614,10 @@ void zcl_native_handle_zcode_workspace_manifest_commit(
     size_t wire_len = 0;
     error = vcs_zcode_workspace_manifest_v1_encode(
         &manifest, wire, sizeof(wire), &wire_len);
-    if (error != VCS_ZCODE_COMMONS_V2_OK || wire_len != sizeof(wire)) {
+    if (error != VCS_ZCODE_COMMONS_OK || wire_len != sizeof(wire)) {
         workspace_manifest_fail(reply, "WORKSPACE_MANIFEST_ENCODE_FAILED",
                                 "encode",
-                                vcs_zcode_commons_v2_error_string(error));
+                                vcs_zcode_commons_error_string(error));
         return;
     }
     struct zcode_workspace_view_result_v1 view;
@@ -723,7 +723,7 @@ static bool workspace_view_frozen_kat(const void *opaque, char *why,
         .sequence = 1,
         .passport = {
             .schema_version = 1,
-            .flags = VCS_ZCODE_COMMONS_V2_REQUIRED_FLAGS,
+            .flags = VCS_ZCODE_COMMONS_REQUIRED_FLAGS,
         },
     };
     memset(input.module_release_root, 0x41, 32);
@@ -755,9 +755,9 @@ static bool workspace_view_frozen_kat(const void *opaque, char *why,
         !service->render_status || !service->render_manifest ||
         vcs_zcode_module_passport_v1_root(
             &input.passport, expected.module_passport_root) !=
-            VCS_ZCODE_COMMONS_V2_OK ||
+            VCS_ZCODE_COMMONS_OK ||
         vcs_zcode_workspace_entry_v1_root(&expected, expected_root) !=
-            VCS_ZCODE_COMMONS_V2_OK ||
+            VCS_ZCODE_COMMONS_OK ||
         !service->derive_binding(&input, &actual) || !actual.valid ||
         memcmp(&actual.entry, &expected, sizeof(expected)) != 0 ||
         memcmp(actual.binding_root, expected_root, 32) != 0) {
