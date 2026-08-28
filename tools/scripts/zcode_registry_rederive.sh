@@ -86,6 +86,7 @@ stored_field() {
 }
 
 changed_any=0
+prev_name=""
 for round in $(seq 1 "$MAX_ROUNDS"); do
     rebuild
     if out=$("$BIN" 2>&1); then
@@ -122,6 +123,27 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     fi
 
     old_content=$(stored_field "$name" 1)
+
+    # Non-progress, caught on the round it happens rather than after
+    # MAX_ROUNDS. Rewriting a row with the values it already holds cannot
+    # move the checker, so the same name coming back with old == new means
+    # the mismatch is NOT this row's digests. In practice it is a dependent
+    # whose zcode-package.json pins a root that is neither this package's
+    # old value nor its new one -- the cascade below rewrites pins by
+    # substituting the OLD string, so a third value is invisible to it and
+    # updates 0 pins forever. Spinning to MAX_ROUNDS and blaming a
+    # "dependency cycle" sends the reader to the wrong place entirely.
+    if [ "$name" = "$prev_name" ] && [ "$old_content" = "$content" ]; then
+        echo "FAIL: $name re-derived to the root it already records" >&2
+        echo "      ($content)." >&2
+        echo "      Its digests are correct, so the mismatch is elsewhere:" >&2
+        echo "      look for a dependencies[].root in a zcode-package.json" >&2
+        echo "      that names none of the current registry roots." >&2
+        echo "      Compare: grep -rn '\"root\"' --include=zcode-package.json ." >&2
+        echo "      against the content column of config/*.def." >&2
+        exit 2
+    fi
+    prev_name=$name
 
     # 1. the registry row, in whichever .def actually declares it. A row
     #    we cannot locate is a hard failure, never a skipped edit: a
