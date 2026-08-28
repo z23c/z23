@@ -101,7 +101,29 @@ BASELINE="tools/lint/windows_platform_seam_baseline.txt"
 # "clean" verdict off that would be hollow, not honest.
 SRC_FLOOR=8
 
-WARN_FLAGS=(-std=c2x -fsyntax-only)
+# The Windows preprocessor flags come from the Makefile, never from a
+# copy kept here. The build compiles the Windows target at
+# ZCL_PLATFORM_CPPFLAGS -- notably -D_WIN32_WINNT=0x0600 -- and mingw
+# gates real API surface on that macro: GetActiveProcessorCount and
+# ALL_PROCESSOR_GROUPS, for instance, are declared only at 0x0601 and
+# up. Compiling here at mingw's permissive default therefore asks a
+# DIFFERENT and easier question than the build asks, and answers OK
+# for a file that cannot build for the product's actual Windows
+# target. That is a false green, and this gate existed to prevent
+# exactly that, so the floor is read from the Makefile and drifts
+# with it by construction.
+mapfile -t PLATFORM_DEFINES < <(
+    awk '/^ZCL_PLATFORM_CPPFLAGS[ \t]*=/ { inblock = 1 }
+         inblock { line = line " " $0; if ($0 !~ /\\$/) { print line; exit } }
+        ' Makefile | tr ' \t\\' '\n\n\n' | LC_ALL=C grep '^-D' )
+if [ "${#PLATFORM_DEFINES[@]}" -eq 0 ]; then
+    echo "  $GATE: FAIL — could not read ZCL_PLATFORM_CPPFLAGS from the" >&2
+    echo "      Makefile. Refusing to cross-compile at a guessed API" >&2
+    echo "      floor, which would silently grade an easier question." >&2
+    exit 1
+fi
+
+WARN_FLAGS=(-std=c2x -fsyntax-only "${PLATFORM_DEFINES[@]}")
 
 echo "══ LINT: Windows platform-seam cross-compile (mingw -fsyntax-only) ══"
 
