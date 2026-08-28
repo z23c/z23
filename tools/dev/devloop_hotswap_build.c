@@ -423,6 +423,13 @@ static bool hs_deps_unchanged(const struct hs_dep *before, size_t before_n,
                               const struct hs_dep *after, size_t after_n,
                               char *why, size_t why_len)
 {
+    if (before_n != after_n) {
+        if (why && why_len)
+            (void)snprintf(why, why_len,
+                           "dependency closure size changed: %zu -> %zu",
+                           before_n, after_n);
+        return false;
+    }
     for (size_t i = 0; i < after_n; i++) {
         const struct hs_dep *old = hs_dep_find(before, before_n, after[i].path);
         if (!old) {
@@ -1290,8 +1297,70 @@ bool zcl_devloop_hotswap_build(
         hs_why(why, why_len, "compiler produced no valid bounded depfile");
         goto fail;
     }
-    /* Refresh the next edit's dependency baseline even when this first/new
-     * dependency observation is refused. rename is confined to build/. */
+    /* A cold watcher has no dependency baseline. Discover the exact closure,
+     * bind its cache key, then either reuse a verified artifact or compile a
+     * second time in this same bounded action. The second depfile proves that
+     * the accepted object was built from the closure just observed; requiring
+     * another filesystem save adds operator latency without adding evidence. */
+    if (!have_baseline) {
+        memcpy(before, after, after_n * sizeof(*after));
+        before_n = after_n;
+        if (!hs_cache_key(&plan, root, owner, before, before_n,
+                          receipt->artifact_cache_key) ||
+            !hs_cache_root(cache_root)) {
+            free(before);
+            free(after);
+            hs_why(why, why_len,
+                   "could not bind cold dependency closure");
+            goto fail;
+        }
+        cache_fd = hs_cache_lock(cache_root, receipt->artifact_cache_key,
+                                 cache_obj, cache_so, cache_hash);
+        if (cache_fd >= 0 &&
+            hs_cache_lookup(root, safe, cache_obj, cache_so, cache_hash,
+                            receipt)) {
+            receipt->artifact_cache_hit = true;
+            receipt->dependency_count = (uint32_t)before_n;
+            (void)unlink(cached_dep);
+            if (rename(tmp_d, cached_dep) != 0) {
+                free(before);
+                free(after);
+                hs_why(why, why_len,
+                       "could not publish cold dependency baseline");
+                goto fail;
+            }
+            tmp_d[0] = 0;
+            (void)snprintf(receipt->source_tu,
+                           sizeof(receipt->source_tu), "%s", owner);
+            receipt->publish_us = platform_time_monotonic_us() - started -
+                                  receipt->plan_load_us -
+                                  receipt->compile_us;
+            receipt->total_us = platform_time_monotonic_us() - started;
+            free(before);
+            free(after);
+            (void)flock(cache_fd, LOCK_UN);
+            (void)close(cache_fd);
+            (void)unlink(tmp_o);
+            (void)unlink(tmp_so);
+            return true;
+        }
+        if (cache_fd >= 0) {
+            (void)unlink(cache_so);
+            (void)unlink(cache_obj);
+            (void)unlink(cache_hash);
+        }
+        int64_t stable_compile_us = 0;
+        receipt->compiler_processes++;
+        if (!hs_run_compile(&plan, root, owner, compile_input, tmp_o, tmp_d,
+                            process, &stable_compile_us, why, why_len) ||
+            !hs_depfile_read(root, tmp_d, after, &after_n, true)) {
+            free(before);
+            free(after);
+            goto fail;
+        }
+        receipt->compile_us += stable_compile_us;
+    }
+    /* Publish the dependency proof for exact reuse by later saves. */
     (void)unlink(cached_dep);
     if (rename(tmp_d, cached_dep) != 0) {
         free(before);
@@ -1301,8 +1370,8 @@ bool zcl_devloop_hotswap_build(
     }
     tmp_d[0] = 0;
     receipt->dependency_count = (uint32_t)after_n;
-    bool stable = have_baseline &&
-        hs_deps_unchanged(before, before_n, after, after_n, why, why_len);
+    bool stable = hs_deps_unchanged(before, before_n, after, after_n,
+                                    why, why_len);
     char post_key[65] = {0};
     if (stable && receipt->artifact_cache_key[0] &&
         (!hs_cache_key(&plan, root, owner, after, after_n, post_key) ||
@@ -1314,9 +1383,6 @@ bool zcl_devloop_hotswap_build(
     free(before);
     free(after);
     if (!stable) {
-        if (!have_baseline)
-            hs_why(why, why_len,
-                   "dependency baseline initialized; save once more to activate");
         goto fail;
     }
     receipt->linker_processes = 1;

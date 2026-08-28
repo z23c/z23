@@ -212,7 +212,11 @@ gate_require_scanned "${#TOOLS[@]}" 20 check-standalone-tools-link \
 GATE_HOST_OS="$(uname -s 2>/dev/null)"
 targets=()
 for name in $(printf '%s\n' "${!TOOLS[@]}" | sort); do
-    [[ -n "${EXEMPT[$name]:-}" ]] && continue
+    # A bare non-windows exemption used to sit here. It skipped the tool on
+    # sight, with no check that anything still compiled the source — the exact
+    # fail-open this gate exists to prevent. The WINDOWS_ONLY_EXEMPT block
+    # below does the same skip, but only after confirming the replacement
+    # check is real, and refuses outright when it is not.
     if [[ "$GATE_HOST_OS" == Darwin && -n "${DARWIN_EXEMPT[$name]:-}" ]]; then
         echo "[check_standalone_tools_link] darwin-exempt $name: ${DARWIN_EXEMPT[$name]}" >&2
         continue
