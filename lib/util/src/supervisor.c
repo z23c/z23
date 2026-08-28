@@ -24,6 +24,7 @@
 #include "json/json.h"
 #include "util/blocker.h"
 #include "util/thread_registry.h"
+#include "util/thread_work_probe.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -104,6 +105,11 @@ static void note_stall_fire(struct liveness_contract *c,
  * INLINE so children are never silently un-driven. */
 #define SUPERVISOR_TICK_RUNNER_DEADLINE_SECS 30
 static _Atomic bool   g_runner_running    = false;
+/* Published by the runner thread from its own entry point (0 until it runs).
+ * Lets a liveness gate ask the kernel whether the runner is working while it
+ * sits inside one child's on_tick, rather than reading a stale heartbeat as
+ * death. */
+static _Atomic long   g_runner_tid       = 0;
 static _Atomic bool   g_runner_enabled    = false;
 static pthread_t      g_runner_thread_id;
 static _Atomic bool   g_runner_handle_set = false;
@@ -771,6 +777,7 @@ static void sweep_once(void)
 static void *supervisor_tick_runner_main(void *arg)
 {
     (void)arg;
+    atomic_store(&g_runner_tid, thread_work_probe_self_tid());
     atomic_store(&g_runner_contract.last_tick_us,
                  platform_time_monotonic_us());
     while (atomic_load(&g_runner_running) &&
@@ -1035,6 +1042,11 @@ uint32_t supervisor_tick_runner_stall_fires(void)
 bool supervisor_tick_runner_running(void)
 {
     return atomic_load(&g_runner_running);
+}
+
+long supervisor_tick_runner_tid(void)
+{
+    return atomic_load(&g_runner_tid);
 }
 
 const char *supervisor_active_callback_name(void)

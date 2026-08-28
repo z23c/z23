@@ -2,6 +2,12 @@
  *
  * os_proc — Linux procfs and native Darwin process implementations. */
 
+/* syscall(SYS_gettid) for os_proc_self_tid(): glibc guards it behind
+ * __USE_MISC, which an explicit -D_POSIX_C_SOURCE would otherwise switch off. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "platform/os_proc.h"
 
 #include <stdatomic.h>
@@ -18,6 +24,11 @@
 
 #if !defined(__APPLE__) && !defined(_WIN32)
 #include <dirent.h>
+#endif
+
+#if defined(__linux__)
+#include <sys/syscall.h>   /* SYS_gettid, for os_proc_self_tid() */
+#include <unistd.h>
 #endif
 
 #if defined(__APPLE__)
@@ -481,3 +492,118 @@ bool os_proc_open_fd_count(size_t *out)
     return true;
 #endif
 }
+
+/* ── Per-thread kernel work counters ──────────────────────────────────────
+ * The shim for these reads lives here precisely so no caller outside
+ * lib/platform/ opens /proc itself. */
+
+long os_proc_self_tid(void)
+{
+#if defined(__linux__)
+    return (long)syscall(SYS_gettid);
+#else
+    return 0; // raw-return-ok:platform-has-no-thread-id
+#endif
+}
+
+#if defined(__linux__)
+
+/* /proc/<pid>/stat field order is stable, but field 2 (comm) is the thread
+ * name in parentheses and may itself contain spaces AND parentheses, so the
+ * only safe anchor is the LAST ')' in the line. Field 3 (state) is a letter,
+ * not a number, so it is skipped as a token rather than parsed. Numbering the
+ * remaining space-separated numeric fields from ppid (field 4) as index 0:
+ * majflt is field 12, utime field 14, stime field 15. */
+#define OS_PROC_TW_MAJFLT (12 - 4)
+#define OS_PROC_TW_UTIME  (14 - 4)
+#define OS_PROC_TW_STIME  (15 - 4)
+
+static bool os_proc_tw_parse_stat(const char *line,
+                                  struct os_proc_thread_work *out)
+{
+    const char *p = strrchr(line, ')');
+    if (!p)
+        return false; // raw-return-ok:platform-cannot-answer
+    p++;
+    while (*p == ' ')                 /* state: a letter, not a number */
+        p++;
+    while (*p != '\0' && *p != ' ')
+        p++;
+    uint64_t majflt = 0, utime = 0, stime = 0;
+    for (int idx = 0; idx <= OS_PROC_TW_STIME; idx++) {
+        while (*p == ' ')
+            p++;
+        if (*p == '\0')
+            return false; // raw-return-ok:platform-cannot-answer
+        char *end = NULL;
+        unsigned long long v = strtoull(p, &end, 10);
+        if (end == p)
+            return false; // raw-return-ok:platform-cannot-answer
+        if (idx == OS_PROC_TW_MAJFLT) majflt = (uint64_t)v;
+        if (idx == OS_PROC_TW_UTIME)  utime  = (uint64_t)v;
+        if (idx == OS_PROC_TW_STIME)  stime  = (uint64_t)v;
+        p = end;
+    }
+    out->major_faults = majflt;
+    out->cpu_ticks    = utime + stime;
+    return true;
+}
+
+/* read_bytes/write_bytes need CONFIG_TASK_IO_ACCOUNTING. When the file is
+ * missing the thread is still observable through CPU and major faults, so a
+ * failure here leaves io_bytes at zero rather than failing the whole read. */
+static void os_proc_tw_read_io(long tid, struct os_proc_thread_work *out)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/io", tid);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return;
+    char line[256];
+    uint64_t total = 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *v = NULL;
+        if (strncmp(line, "read_bytes:", 11) == 0)
+            v = line + 11;
+        else if (strncmp(line, "write_bytes:", 12) == 0)
+            v = line + 12;
+        if (v)
+            total += strtoull(v, NULL, 10);
+    }
+    fclose(f);
+    out->io_bytes = total;
+}
+
+bool os_proc_thread_work_read(long tid, struct os_proc_thread_work *out)
+{
+    if (!out)
+        return false; // raw-return-ok:platform-cannot-answer
+    memset(out, 0, sizeof(*out));
+    if (tid <= 0)
+        return false; // raw-return-ok:platform-cannot-answer
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/stat", tid);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false; // raw-return-ok:platform-cannot-answer
+    char line[1024];
+    char *got = fgets(line, sizeof(line), f);
+    fclose(f);
+    if (!got || !os_proc_tw_parse_stat(line, out))
+        return false; // raw-return-ok:platform-cannot-answer
+    os_proc_tw_read_io(tid, out);
+    return true;
+}
+
+#else /* !__linux__ */
+
+bool os_proc_thread_work_read(long tid, struct os_proc_thread_work *out)
+{
+    (void)tid;
+    if (!out)
+        return false; // raw-return-ok:platform-cannot-answer
+    memset(out, 0, sizeof(*out));
+    return false; // raw-return-ok:platform-cannot-answer
+}
+
+#endif /* __linux__ */

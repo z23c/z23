@@ -142,6 +142,37 @@ void os_proc_mem_set_override(const struct os_proc_mem *forced);
  * two censuses taken the same way are directly comparable. */
 bool os_proc_open_fd_count(size_t *out);
 
+/* ── Per-THREAD kernel work counters ─────────────────────────────────────
+ *
+ * The counters a liveness check needs in order to tell a thread that is
+ * merely SLOW from one that is WEDGED. Every field is monotonic within a
+ * thread's life; only differences between two reads of the same tid mean
+ * anything, never the absolute values.
+ *
+ * Per-thread and never per-process on purpose: a process-wide counter stays
+ * warm off whichever threads are still running, so one deadlocked thread
+ * would read as healthy and the wedge detector built on it would be dead
+ * code that nobody noticed.
+ *
+ * Linux: utime+stime, majflt and read_bytes+write_bytes from
+ * /proc/self/task/<tid>/{stat,io}. Elsewhere: unavailable, and the caller
+ * must treat "cannot see" as "no evidence", never as "healthy". */
+struct os_proc_thread_work {
+    uint64_t cpu_ticks;     /* utime + stime, clock ticks */
+    uint64_t major_faults;  /* faults that needed a disk read */
+    uint64_t io_bytes;      /* bytes actually issued to a block device */
+};
+
+/* This thread's OS-level thread id, or 0 where the platform has none. */
+long os_proc_self_tid(void);
+
+/* Read `tid`'s work counters. `tid` must name a thread of THIS process.
+ * Returns false when the platform cannot answer, leaving `*out` zeroed.
+ * Reads only kernel-generated pseudo-files: no filesystem lock, no
+ * block-device I/O, so it is safe on a thread that must stay responsive
+ * while the rest of the process is stuck on storage. */
+bool os_proc_thread_work_read(long tid, struct os_proc_thread_work *out);
+
 #ifdef __cplusplus
 }
 #endif
