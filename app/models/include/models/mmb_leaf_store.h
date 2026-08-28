@@ -17,15 +17,18 @@
 
 #include "chain/mmb.h"
 #include "models/activerecord.h"
+#include "platform/read_mapping.h"
 #include <stdint.h>
 #include <stdbool.h>
 
 struct mmb_leaf_store {
-    char     path[256];
+    char     path[256];    /* UTF-8; overlong paths are rejected, not cut */
     int      fd;
-    uint8_t *map;          /* mmap'd leaf hashes, 32 bytes each */
+    const uint8_t *map;    /* read-only mapped leaf hashes, 32 bytes each */
+    struct platform_read_mapping mapping;
     uint64_t num_leaves;
     uint64_t capacity;     /* file size / 32 */
+    bool     dirty;        /* descriptor writes await a durability sync */
     bool     open;
 };
 

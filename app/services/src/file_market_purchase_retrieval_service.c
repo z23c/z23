@@ -10,18 +10,14 @@
 #include "models/file_offer.h"
 #include "models/market_download.h"
 #include "models/vault_intent.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 enum file_market_delivery_status market_purchase_fetch_endpoint(
     void *ctx, const uint8_t peer_ip[16], uint16_t peer_port,
@@ -55,65 +51,48 @@ static bool mp_private_paths(const uint8_t plan_id[32],
                              char staging[MARKET_DOWNLOAD_PATH_MAX],
                              char parent[MARKET_DOWNLOAD_PATH_MAX])
 {
-    if (!plan_id || !destination || destination[0] != '/' ||
+    if (!plan_id || !destination ||
         strnlen(destination, MARKET_DOWNLOAD_PATH_MAX) >=
             MARKET_DOWNLOAD_PATH_MAX)
         return false; // raw-return-ok:pure bounded path parser
     const char *slash = strrchr(destination, '/');
+#ifdef _WIN32
+    const char *backslash = strrchr(destination, '\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
     const char *base = slash ? slash + 1 : NULL;
     if (!slash || !base || !base[0] || strcmp(base, ".") == 0 ||
         strcmp(base, "..") == 0)
         return false; // raw-return-ok:pure bounded path parser
-    char parent_input[MARKET_DOWNLOAD_PATH_MAX];
-    size_t parent_len = (size_t)(slash - destination);
-    if (parent_len == 0) parent_len = 1;
-    if (parent_len >= sizeof(parent_input))
-        return false; // raw-return-ok:pure bounded path parser
-    memcpy(parent_input, destination, parent_len);
-    parent_input[parent_len] = '\0';
-    if (!realpath(parent_input, parent))
+    if (!platform_private_path_resolve(destination, canonical,
+                                       MARKET_DOWNLOAD_PATH_MAX, parent,
+                                       MARKET_DOWNLOAD_PATH_MAX))
         return false; // raw-return-ok:caller returns private-path-safe error
-    int n = snprintf(canonical, MARKET_DOWNLOAD_PATH_MAX, "%s/%s",
-                     strcmp(parent, "/") == 0 ? "" : parent, base);
     char plan_hex[65];
     zcl_hex_encode(plan_id, 32, plan_hex);
     int s = snprintf(staging, MARKET_DOWNLOAD_PATH_MAX,
-                     "%s/.zclassic23-market-%s.part",
-                     strcmp(parent, "/") == 0 ? "" : parent, plan_hex);
-    return n > 0 && n < (int)MARKET_DOWNLOAD_PATH_MAX &&
-           s > 0 && s < (int)MARKET_DOWNLOAD_PATH_MAX;
+                     "%s%c.zclassic23-market-%s.part", parent,
+#ifdef _WIN32
+                     '\\',
+#else
+                     '/',
+#endif
+                     plan_hex);
+    return s > 0 && s < (int)MARKET_DOWNLOAD_PATH_MAX;
 }
 
-static bool mp_read_exact_at(int fd, uint8_t *out, size_t size,
+static bool mp_read_exact_at(struct platform_private_file *file,
+                             uint8_t *out, size_t size,
                              uint64_t offset)
 {
-    size_t done = 0;
-    while (done < size) {
-        ssize_t got = pread(fd, out + done, size - done,
-                            (off_t)(offset + done));
-        if (got < 0 && errno == EINTR)
-            continue;
-        if (got <= 0)
-            return false; // raw-return-ok:caller reports bounded IO failure
-        done += (size_t)got;
-    }
-    return true;
+    return platform_private_file_read_at(file, out, size, offset);
 }
 
-static bool mp_write_exact_at(int fd, const uint8_t *data, size_t size,
+static bool mp_write_exact_at(struct platform_private_file *file,
+                              const uint8_t *data, size_t size,
                               uint64_t offset)
 {
-    size_t done = 0;
-    while (done < size) {
-        ssize_t wrote = pwrite(fd, data + done, size - done,
-                               (off_t)(offset + done));
-        if (wrote < 0 && errno == EINTR)
-            continue;
-        if (wrote <= 0)
-            return false; // raw-return-ok:caller reports bounded IO failure
-        done += (size_t)wrote;
-    }
-    return true;
+    return platform_private_file_write_at(file, data, size, offset);
 }
 
 static uint32_t mp_chunk_size(const struct file_offer *offer, uint32_t index)
@@ -142,15 +121,15 @@ static bool mp_deadline_active(int64_t deadline_ms)
 
 static bool mp_verify_staged(struct node_db *ndb,
                              const struct market_download_record *download,
-                             int fd)
+                             struct platform_private_file *file)
 {
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0)
+    uint64_t file_size;
+    if (!platform_private_file_size(file, &file_size))
         return false; // raw-return-ok:caller names staging verification error
-    if ((uint64_t)st.st_size > download->bytes_received &&
-        ftruncate(fd, (off_t)download->bytes_received) != 0)
+    if (file_size > download->bytes_received &&
+        !platform_private_file_truncate(file, download->bytes_received))
         return false; // raw-return-ok:caller names staging verification error
-    if ((uint64_t)st.st_size < download->bytes_received ||
+    if (file_size < download->bytes_received ||
         db_market_download_chunk_count(ndb, download->plan_id) !=
             (int)download->chunks_received)
         return false; // raw-return-ok:caller names staging verification error
@@ -166,7 +145,7 @@ static bool mp_verify_staged(struct node_db *ndb,
                                      "market download resume buffer");
         if (!buffer)
             return false; // raw-return-ok:caller names bounded allocation error
-        bool read_ok = mp_read_exact_at(fd, buffer, chunk.size_bytes, offset);
+        bool read_ok = mp_read_exact_at(file, buffer, chunk.size_bytes, offset);
         uint8_t digest[32];
         if (read_ok) sha3_256(buffer, chunk.size_bytes, digest);
         memory_cleanse(buffer, chunk.size_bytes);
@@ -198,16 +177,6 @@ static bool mp_manifest_root(struct node_db *ndb,
     return true;
 }
 
-static bool mp_fsync_parent(const char *parent)
-{
-    int fd = open(parent, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
-    if (fd < 0)
-        return false; // raw-return-ok:caller reports atomic publish failure
-    bool ok = fsync(fd) == 0;
-    close(fd);
-    return ok;
-}
-
 static struct zcl_result mp_download_initialize(
     const struct market_purchase_runtime *rt,
     const struct vault_intent_row *row, const struct file_offer *offer,
@@ -229,14 +198,13 @@ static struct zcl_result mp_download_initialize(
             return ZCL_ERR(-61, "purchase download is already bound to different immutable terms");
         return ZCL_OK;
     }
-    struct stat existing;
-    if (lstat(canonical, &existing) == 0 || errno != ENOENT)
+    if (!platform_private_path_absent(canonical))
         return ZCL_ERR(-62, "destination already exists or cannot be inspected");
-    int fd = open(staging, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC |
-                           O_NOFOLLOW, 0600);
-    if (fd < 0)
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_create(staging, &file))
         return ZCL_ERR(-63, "private staging file could not be created");
-    close(fd);
+    platform_private_file_close(&file);
     memset(download, 0, sizeof(*download));
     memcpy(download->plan_id, row->plan_id, 32);
     memcpy(download->offer_id, offer->offer_id, 32);
@@ -251,7 +219,7 @@ static struct zcl_result mp_download_initialize(
     download->created_at = rt->now_unix;
     download->updated_at = rt->now_unix;
     if (!db_market_download_save(rt->node_db, download)) {
-        (void)unlink(staging);
+        (void)platform_private_file_unlink_missing_ok(staging);
         return ZCL_ERR(-64, "durable download could not be initialized");
     }
     return ZCL_OK;
@@ -287,37 +255,35 @@ static struct zcl_result mp_download_record_chunk(
 
 static struct zcl_result mp_publish_download(
     const struct market_purchase_runtime *rt,
-    struct market_download_record *download, int fd, const char *parent)
+    struct market_download_record *download,
+    struct platform_private_file *file, const char *parent)
 {
     uint8_t root[32];
     if (download->chunks_received != download->num_chunks ||
         download->bytes_received != download->size_bytes ||
         !mp_manifest_root(rt->node_db, download, root) ||
         memcmp(root, download->root_hash, 32) != 0 ||
-        ftruncate(fd, (off_t)download->size_bytes) != 0 || fsync(fd) != 0)
+        !platform_private_file_truncate(file, download->size_bytes) ||
+        !platform_private_file_flush(file))
         return ZCL_ERR(-67, "complete downloaded manifest failed verification");
 
-    struct stat staging_stat, destination_stat;
-    if (fstat(fd, &staging_stat) != 0)
+    struct platform_private_file_identity staging_identity;
+    if (!platform_private_file_identity(file, &staging_identity))
         return ZCL_ERR(-68, "private staging identity is unavailable");
-    bool linked = link(download->private_staging,
-                       download->private_destination) == 0;
-    if (!linked) {
-        if (errno != EEXIST ||
-            lstat(download->private_destination, &destination_stat) != 0 ||
-            destination_stat.st_dev != staging_stat.st_dev ||
-            destination_stat.st_ino != staging_stat.st_ino)
-            return ZCL_ERR(-69, "destination publication conflicted");
-    }
-    if (!mp_fsync_parent(parent))
+    bool already_same = false;
+    if (!platform_private_file_link_no_clobber(
+            download->private_staging, download->private_destination,
+            &staging_identity, &already_same))
+        return ZCL_ERR(-69, "destination publication conflicted");
+    if (!platform_private_parent_flush(parent))
         return ZCL_ERR(-70, "destination directory durability failed");
     download->state = MARKET_DOWNLOAD_COMPLETE;
     download->updated_at = rt->now_unix;
     if (!db_market_download_save(rt->node_db, download))
         return ZCL_ERR(-71, "published destination state could not be persisted");
-    if (unlink(download->private_staging) != 0 && errno != ENOENT)
+    if (!platform_private_file_retire(file, download->private_staging))
         return ZCL_ERR(-72, "published staging reference could not be retired");
-    if (!mp_fsync_parent(parent))
+    if (!platform_private_parent_flush(parent))
         return ZCL_ERR(-73, "published directory cleanup was not durable");
     return ZCL_OK;
 }
@@ -382,11 +348,11 @@ struct zcl_result market_purchase_retrieve(
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_OK;
     }
-    int fd = open(download.private_staging,
-                  O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0 ||
-        !mp_verify_staged(rt->node_db, &download, fd)) {
-        if (fd >= 0) close(fd);
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked(download.private_staging, &file) ||
+        !mp_verify_staged(rt->node_db, &download, &file)) {
+        platform_private_file_close(&file);
         memory_cleanse(plain, sizeof(plain));
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-75, "durable staging bytes failed restart verification");
@@ -400,7 +366,7 @@ struct zcl_result market_purchase_retrieve(
         offer.endpoint_type == FILE_MARKET_ENDPOINT_ONION;
     if (onion_endpoint && offer.num_chunks > download.chunks_received &&
         (!rt->onion_transport_ready || !rt->fetch_onion)) {
-        close(fd);
+        platform_private_file_close(&file);
         memory_cleanse(plain, sizeof(plain));
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-78, "signed offer names an onion endpoint but the embedded Tor client is not running (start the node with -tor)");
@@ -410,7 +376,7 @@ struct zcl_result market_purchase_retrieve(
         if (retrieve_started_ms <= 0 ||
             retrieve_started_ms >
                 INT64_MAX - MARKET_PURCHASE_RETRIEVE_BUDGET_MS) {
-            close(fd);
+            platform_private_file_close(&file);
             memory_cleanse(plain, sizeof(plain));
             memory_cleanse(&payload, sizeof(payload));
             return ZCL_ERR(-76, "seller delivery is %s",
@@ -462,8 +428,8 @@ struct zcl_result market_purchase_retrieve(
             break;
         }
         uint64_t offset = (uint64_t)i * FILE_MARKET_CHUNK_SIZE;
-        if (!mp_write_exact_at(fd, chunk.data, chunk.size, offset) ||
-            fsync(fd) != 0) {
+        if (!mp_write_exact_at(&file, chunk.data, chunk.size, offset) ||
+            !platform_private_file_flush(&file)) {
             mp_chunk_discard(&chunk);
             result = ZCL_ERR(-77, "downloaded chunk could not be durably staged");
             break;
@@ -484,8 +450,8 @@ struct zcl_result market_purchase_retrieve(
         }
     }
     if (result.ok)
-        result = mp_publish_download(rt, &download, fd, parent);
-    close(fd);
+        result = mp_publish_download(rt, &download, &file, parent);
+    platform_private_file_close(&file);
     market_purchase_view_add_download(&download, out);
     memory_cleanse(plain, sizeof(plain));
     memory_cleanse(&payload, sizeof(payload));

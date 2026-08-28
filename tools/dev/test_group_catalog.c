@@ -2,8 +2,8 @@
  * purpose: Resolve canonical test IDs and exact proof execution sets. */
 
 #include "test_group_catalog.h"
+#include "platform/glob_match.h"
 
-#include <fnmatch.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -156,7 +156,8 @@ static bool declared_family_selects(const char *plan_id, const char *full_id)
     for (size_t i = 0; i < sizeof(g_proof_families) /
                             sizeof(g_proof_families[0]); i++) {
         if (strcmp(g_proof_families[i].plan_id, plan_id) == 0 &&
-            fnmatch(g_proof_families[i].full_id_glob, full_id, 0) == 0)
+            platform_glob_match(g_proof_families[i].full_id_glob,
+                                full_id, false))
             return true;
     }
     return false;

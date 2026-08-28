@@ -8,11 +8,17 @@
 #ifndef ZCL_PLATFORM_FILE_SYNC_H
 #define ZCL_PLATFORM_FILE_SYNC_H
 
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 static inline int platform_data_sync(int fd)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    return _commit(fd);
+#elif defined(__APPLE__)
     return fsync(fd);
 #else
     return fdatasync(fd);
