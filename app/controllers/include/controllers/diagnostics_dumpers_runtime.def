@@ -59,6 +59,13 @@
                  "(boot/restore/reconcile/degraded_serving/syncing/"
                  "healthy/repairing) + last transition reason",
                  "lib/util/src/service_state.c", DIAG_TEST_DEFAULT),
+    DIAG_RUNTIME("machine_identity", machine_identity_dump_state_json,
+                 "redacted local-machine capsule: exact source and running "
+                 "binary identities, native platform, encrypted transport, "
+                 "authenticated DHT identity, confinement, hot-swap "
+                 "capability, and named blockers; grants no machine access",
+                 "app/controllers/src/diagnostics_machine_identity.c",
+                 "lib/test/src/test_syncdiag_network.c"),
     DIAG_ENTRY("service_bindings", service_token_gate_dump_state_json,
                "declared services (zcl.service_binding.v1): per-service ZSLP "
                "token gate — genesis txid, whether it is the unminted "
