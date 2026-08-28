@@ -15,7 +15,6 @@
  */
 
 #include "platform/time_compat.h"
-#include "platform/file_compat.h"
 #include "controllers/diagnostics_internal.h"
 
 #include "json/json.h"
@@ -377,7 +376,7 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
                                                   : (size_t)pos;
         off_t start = pos - (off_t)want;
         char buf[NODELOG_CHUNK_SIZE + 1];
-        ssize_t got = platform_file_pread(fd, buf, want, start);
+        ssize_t got = pread(fd, buf, want, start);
         if (got <= 0) break;
         buf[got] = '\0';
         scanned += got;

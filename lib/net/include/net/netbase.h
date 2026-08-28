@@ -19,7 +19,6 @@ typedef int zcl_socket_t;
 #define ZCL_SOCKET_ERROR (-1)
 #else
 #include <winsock2.h>
-#include <ws2tcpip.h>
 typedef SOCKET zcl_socket_t;
 #define ZCL_INVALID_SOCKET INVALID_SOCKET
 #define ZCL_SOCKET_ERROR SOCKET_ERROR
