@@ -5686,6 +5686,11 @@ static int test_zd_async_no_peer_next(void)
         ASSERT(strstr(next, "z23 join") != NULL);
         ASSERT(strstr(next, "-packagehost") == NULL);
         ASSERT(strstr(next, "-buildworker") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* The task-context carrier: the same three wires (task, goal preimage,
  * proof policy) verify at export, persist as one ordinary content.v2
  * package, and re-verify from stored bytes at admit — with the goal text
