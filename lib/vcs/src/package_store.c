@@ -23,13 +23,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/file.h>
+#endif
 #include <unistd.h>
 
 #define STORE_LOG "vcs.store"
 
 static bool store_process_lock(struct vcs_package_store *store)
 {
+#ifdef _WIN32
+    (void)store;
+    return false;
+#else
     if (!store || store->process_lock_fd < 0)
         return false;
     int rc;
@@ -37,12 +43,17 @@ static bool store_process_lock(struct vcs_package_store *store)
         rc = flock(store->process_lock_fd, LOCK_EX);
     } while (rc != 0 && errno == EINTR);
     return rc == 0;
+#endif
 }
 
 static void store_process_unlock(struct vcs_package_store *store)
 {
+#ifdef _WIN32
+    (void)store;
+#else
     if (store && store->process_lock_fd >= 0)
         (void)flock(store->process_lock_fd, LOCK_UN);
+#endif
 }
 
 const char *vcs_package_store_result_string(
@@ -283,6 +294,15 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
 {
     if (!datadir)
         LOG_NULL(STORE_LOG, "null datadir");
+#ifdef _WIN32
+    (void)quota_bytes;
+    /* Refuse before allocating, creating the root, opening recovery state, or
+     * taking a pathname lock. Native admission requires a retained private
+     * root capability and a process-wide handle lock that survives recovery. */
+    LOG_NULL(STORE_LOG,
+             "Windows package store disabled pending retained-root and "
+             "process-lock qualification");
+#else
     struct vcs_package_store *store =
         zcl_malloc(sizeof(*store), "vcs_package_store");
     if (!store)
@@ -341,6 +361,7 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
              store->pkg_count, store->cas_count,
              (unsigned long long)store->gc_orphans_total);
     return store;
+#endif
 }
 
 void vcs_package_store_close(struct vcs_package_store *store)
