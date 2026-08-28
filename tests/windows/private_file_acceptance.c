@@ -1,5 +1,6 @@
 /* Focused native acceptance test for the private-file publication seam. */
 #include "platform/private_file.h"
+#include "platform/positioned_file.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <stdio.h>
@@ -58,6 +59,12 @@ int main(void) {
   if (!platform_private_file_create(stage, &file))
     return fail("exclusive create");
   platform_private_file_close(&file);
+  struct platform_positioned_file reader;
+  platform_positioned_file_init(&reader);
+  if (!platform_positioned_file_open(&reader, stage) ||
+      !platform_positioned_file_is_private(&reader))
+    return fail("private ACL validation");
+  platform_positioned_file_close(&reader);
   if (platform_private_file_create(stage, &file))
     return fail("create clobbered existing file");
   if (!platform_private_file_open_locked(stage, &file))
