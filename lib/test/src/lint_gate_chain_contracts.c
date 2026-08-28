@@ -472,15 +472,25 @@ int t_block_index_flat_atomic_save_contract(void)
         free(buf);
         buf = NULL;
 
-        /* The atomic publish (tmp, fsync, single rename) lives in the
-         * shared embedded writer. */
+        /* The atomic publish (tmp, sync, single rename) lives in the
+         * shared embedded writer.
+         *
+         * The sync is pinned by its PORTABLE spelling: platform_file_sync()
+         * (lib/platform/include/platform/file_sync.h) is `fsync(fd)`
+         * everywhere but Windows, where fsync(2) does not exist and the
+         * durable equivalent is `_commit(fd)`. Pinning the raw `fsync(` call
+         * would force the writer to be non-portable to keep this contract,
+         * so the pin names the seam instead. The contract itself is
+         * unchanged and just as strict: the tmp descriptor must be flushed
+         * to stable storage, and that flush must sit strictly between the
+         * fopen and the publishing rename. */
         ASSERT(repo_path(path, sizeof(path),
                          "lib/storage/src/sha3_sidecar_io.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
         char *fn        = strstr(buf, "ssio_write_embedded(");
         ASSERT(fn != NULL);
         char *open_tmp  = strstr(fn, "fopen(tmp_path, \"wb\")");
-        char *fsync_fd  = strstr(fn, "(void)fsync(fd)");
+        char *fsync_fd  = strstr(fn, "(void)platform_file_sync(fd)");
         char *rename_tmp = strstr(fn, "rename(tmp_path, body_path)");
         char *unlink_err = strstr(fn, "unlink(tmp_path)");
         ASSERT(open_tmp != NULL);

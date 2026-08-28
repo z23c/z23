@@ -50,7 +50,7 @@ lib/rpc/src/httpserver.c 1654
 lib/sapling/src/circuit_gadgets.c 1053
 lib/sapling/src/circuit_spend.c 959
 lib/sapling/src/groth16_prover.c 1203
-lib/sapling/src/incremental_merkle_tree.c 1033
+lib/sapling/src/incremental_merkle_tree.c 1029
 lib/sapling/src/sapling.c 1220
 lib/sim/src/postmortem.c 1265
 lib/sim/src/simnet_cluster.c 873
