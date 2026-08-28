@@ -179,7 +179,8 @@ ZCL_WINDOWS_ACCEPTANCE_log_level_SOURCES := \
 	lib/base/src/log_level.c
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_SOURCES := \
 	lib/test/src/mint_anchor_export_windows_refusal_acceptance.c \
-	config/src/boot_mint_anchor.c
+	config/src/boot_mint_anchor.c \
+	config/src/boot_mint_anchor_bundle_export.c
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_FLAGS := \
 	-ffunction-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_export_refusal_LIBS := \
@@ -211,7 +212,8 @@ ZCL_WINDOWS_ACCEPTANCE_pagelocker_SOURCES := \
 	lib/base/src/cleanse.c
 ZCL_WINDOWS_ACCEPTANCE_positioned_file_SOURCES := \
 	lib/platform/tests/positioned_file_windows_acceptance.c \
-	lib/platform/src/positioned_file.c
+	lib/platform/src/positioned_file.c \
+	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_positioned_io_SOURCES := \
 	lib/platform/tests/positioned_io_windows_acceptance.c \
 	lib/platform/src/positioned_io.c
