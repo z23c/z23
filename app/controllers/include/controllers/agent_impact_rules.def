@@ -1022,6 +1022,12 @@ AGENT_IMPACT_RULE("tools/command/native_zcode_swarm_command.c|tools/command/nati
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_score_receipt.h|lib/vcs/src/zcode_score_receipt.c|tools/command/native_zcode_score_command.c|lib/test/src/test_zcode_score_receipt.c|config/commands/zcode.def", "zcode_score_receipt command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_shadow*.h|lib/vcs/src/zcode_shadow*.c|lib/vcs/include/vcs/zcode_reproduction*.h|lib/vcs/src/zcode_reproduction*.c|lib/test/src/test_zcode_shadow*.c|tools/command/native_zcode_reproduction_command.c|tools/fuzz/fuzz_zcode_commons.c", "zcode_shadow_policy zcode_score_receipt command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("config/zcode_package_registry.def|config/zcode_c23_commons_app.def|tools/zcode_package_registry_check.c|lib/test/src/test_zcode_package_registry.c|lib/base/zcode-package.json|lib/sha3/zcode-package.json|lib/codec/zcode-package.json|lib/json/zcode-package.json|lib/encoding/zcode-package.json|lib/presentation/zcode-package.json|lib/platform/zcode-package.json|lib/crypto/zcode-package.json|lib/vcs/zcode-package.json|lib/commons_demo/zcode-package.json", "zcode_package_registry zcode_package_dev zcode_swarm_net make_lint_gates")
+/* The registry def is a projection of the ten packaged libraries' CONTENT:
+ * a bytes-only edit to any packaged source moves its derived roots exactly
+ * like a manifest change does, so it must re-derive through the same proof
+ * (the 2026-08-28 platform drift shipped six content commits past the last
+ * repin because only the def side was mapped). */
+AGENT_IMPACT_RULE("lib/base/src/*|lib/base/include/*|lib/sha3/src/*|lib/sha3/include/*|lib/codec/src/*|lib/codec/include/*|lib/json/src/*|lib/json/include/*|lib/encoding/src/*|lib/encoding/include/*|lib/presentation/src/*|lib/presentation/include/*|lib/platform/src/*|lib/platform/include/*|lib/crypto/src/*|lib/crypto/include/*|lib/vcs/src/*|lib/vcs/include/*|lib/commons_demo/src/*|lib/commons_demo/include/*", "zcode_package_registry zcode_swarm_net make_lint_gates")
 /* Scientific study/evidence wires and closed benchmark action identities
  * compose with, but do not mutate, the byte-stable development objects. */
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_science.h|lib/vcs/src/zcode_science.c|lib/test/src/test_zcode_science.c|lib/vcs/include/vcs/build_action.h|lib/vcs/src/build_action.c", "zcode_science zcode_dev_objects build_fabric make_lint_gates")
