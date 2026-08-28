@@ -9,6 +9,8 @@
 #include "jobs/reducer_frontier.h"
 #include "jobs/refold_progress.h"
 #include "jobs/tip_finalize_stage.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
@@ -17,12 +19,9 @@
 #include "services/sync_trust_policy.h"
 #include "util/log_macros.h"
 
-#include <errno.h>
 #include <limits.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #define EXPORT_PROOF_SUBSYS "consensus_bundle_export"
 
@@ -36,8 +35,16 @@ static bool digest_nonzero(const uint8_t digest[32])
 
 static bool running_binary_digest(uint8_t out[32])
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
+    char path[PATH_MAX];
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    platform_positioned_file_init(&file);
+    if (!os_proc_exe_path(path, sizeof(path)) ||
+        !platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0) {
+        platform_positioned_file_close(&file);
         LOG_WARN(EXPORT_PROOF_SUBSYS, "running executable open failed");
         return false;
     }
@@ -45,21 +52,29 @@ static bool running_binary_digest(uint8_t out[32])
     sha3_256_init(&ctx);
     uint8_t buffer[32768];
     bool ok = true;
-    for (;;) {
-        ssize_t n = read(fd, buffer, sizeof(buffer));
-        if (n > 0) {
-            sha3_256_write(&ctx, buffer, (size_t)n);
-            continue;
-        }
-        if (n == 0)
+    uint64_t offset = 0;
+    while (offset < before.size) {
+        size_t want = before.size - offset < sizeof(buffer)
+                          ? (size_t)(before.size - offset)
+                          : sizeof(buffer);
+        int64_t got =
+            platform_positioned_file_read(&file, buffer, want, offset);
+        if (got != (int64_t)want) {
+            ok = false;
             break;
-        if (errno == EINTR)
-            continue;
-        ok = false;
-        break;
+        }
+        sha3_256_write(&ctx, buffer, want);
+        offset += want;
     }
-    if (close(fd) != 0)
-        ok = false;
+    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
+         before.size == after.size && before.volume == after.volume &&
+         before.file_low == after.file_low &&
+         before.file_high == after.file_high &&
+         before.modified_seconds == after.modified_seconds &&
+         before.modified_nanoseconds == after.modified_nanoseconds &&
+         before.changed_seconds == after.changed_seconds &&
+         before.changed_nanoseconds == after.changed_nanoseconds;
+    platform_positioned_file_close(&file);
     if (ok)
         sha3_256_finalize(&ctx, out);
     else
