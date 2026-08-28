@@ -73,6 +73,7 @@
  * with 0600/0400 perms; the seed is memory_cleanse'd after use and is
  * NEVER logged or echoed. */
 
+#include "platform/socket_compat.h" /* Winsock must precede windows.h users. */
 #include "command/native_command.h"
 
 #include "base/log_macros.h"
@@ -81,6 +82,9 @@
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "models/database.h"
+#include "platform/directory_transaction.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "vcs/package_store.h"
@@ -89,16 +93,22 @@
 #include "zid/zendp.h"
 #include "zid/zid.h"
 
-#include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#if !defined(_WIN32)
 #include <fcntl.h>
+#endif
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <process.h>
+#endif
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define ZEC_DEFAULT_VALIDITY_SECONDS (3 * 86400)
 
@@ -163,7 +173,7 @@ static void zec_fail(struct zcl_command_reply *reply, const char *code,
  * disagree with the rule that produced the refusal. */
 static const char *zec_window_too_long_message(void)
 {
-    static char msg[320];
+    static char msg[384];
     if (msg[0] == '\0')
         snprintf(msg, sizeof(msg),
                  "the signed validity window is longer than this node will "
@@ -176,6 +186,40 @@ static const char *zec_window_too_long_message(void)
                  (unsigned long long)(ZENDP_MAX_WINDOW_SECONDS / 86400u));
     return msg;
 }
+
+#if defined(_WIN32)
+static bool zec_snapshot_same(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+        a->file_low == b->file_low && a->file_high == b->file_high &&
+        a->modified_seconds == b->modified_seconds &&
+        a->modified_nanoseconds == b->modified_nanoseconds &&
+        a->changed_seconds == b->changed_seconds &&
+        a->changed_nanoseconds == b->changed_nanoseconds;
+}
+
+static bool zec_stable_read(const char *path, void *bytes, size_t capacity,
+                            size_t *size_out, bool private_file)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+        (!private_file || platform_positioned_file_is_private(&file)) &&
+        platform_positioned_file_snapshot(&file, &before) &&
+        before.size <= capacity;
+    int64_t got = ok ? platform_positioned_file_read(
+                           &file, bytes, (size_t)before.size, 0) : -1;
+    ok = ok && got >= 0 && (uint64_t)got == before.size &&
+        platform_positioned_file_snapshot(&file, &after) &&
+        zec_snapshot_same(&before, &after);
+    platform_positioned_file_close(&file);
+    if (ok && size_out) *size_out = (size_t)before.size;
+    return ok;
+}
+#endif
 
 /* Every library refusal gets its own operator-facing code and sentence.
  * The four chain outcomes stay four outcomes: "the chain could not be
@@ -287,6 +331,16 @@ static void zec_fail_result(struct zcl_command_reply *reply,
 static bool zec_read_seed(const char *path, uint8_t seed_out[32], char *err,
                           size_t err_size)
 {
+#if defined(_WIN32)
+    uint8_t raw[65];
+    size_t raw_size = 0;
+    if (!zec_stable_read(path, raw, sizeof(raw), &raw_size, true)) {
+        snprintf(err, err_size,
+                 "seed file must be a stable private 64-hex file");
+        return false;
+    }
+    ssize_t n = (ssize_t)raw_size;
+#else
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         snprintf(err, err_size, "cannot open seed file: %s", strerror(errno));
@@ -309,6 +363,7 @@ static bool zec_read_seed(const char *path, uint8_t seed_out[32], char *err,
     uint8_t raw[65];
     ssize_t n = read(fd, raw, sizeof(raw));
     close(fd);
+#endif
     if (n < 64 || (n != 64 && !(n == 65 && raw[64] == '\n'))) {
         memory_cleanse(raw, sizeof(raw));
         snprintf(err, err_size,
@@ -348,19 +403,33 @@ static bool zec_record_dir(const char *datadir, char *out, size_t out_size,
         snprintf(err, err_size, "path too long under datadir");
         return false;
     }
+#if defined(_WIN32)
+    if (!platform_private_directory_ensure(dir)) {
+        snprintf(err, err_size, "unsafe private directory %s", dir);
+        return false;
+    }
+#else
     if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
         snprintf(err, err_size, "mkdir %s: %s", dir, strerror(errno));
         return false;
     }
+#endif
     n = snprintf(out, out_size, "%s/zcode/endpoints", datadir);
     if (n <= 0 || (size_t)n >= out_size) {
         snprintf(err, err_size, "path too long under datadir");
         return false;
     }
+#if defined(_WIN32)
+    if (!platform_private_directory_ensure(out)) {
+        snprintf(err, err_size, "unsafe private directory %s", out);
+        return false;
+    }
+#else
     if (mkdir(out, 0700) != 0 && errno != EEXIST) {
         snprintf(err, err_size, "mkdir %s: %s", out, strerror(errno));
         return false;
     }
+#endif
     return true;
 }
 
@@ -376,6 +445,35 @@ static bool zec_write_record(const char *datadir, const char *key_hex,
         snprintf(err, err_size, "path too long under datadir");
         return false;
     }
+#if defined(_WIN32)
+    struct platform_directory_transaction directory;
+    struct platform_directory_child staged;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&staged);
+    char destination[80], temporary[80];
+    int dn = snprintf(destination, sizeof(destination), "%s.zid", key_hex);
+    int tn = snprintf(temporary, sizeof(temporary), ".endpoint.%ld.tmp",
+                      (long)_getpid());
+    bool staged_created = false;
+    size_t len = strlen(doc_hex);
+    bool ok = dn > 0 && (size_t)dn < sizeof(destination) &&
+        tn > 0 && (size_t)tn < sizeof(temporary) &&
+        platform_directory_transaction_open(&directory, dir) &&
+        platform_directory_child_create(&directory, temporary, &staged) &&
+        (staged_created = true) &&
+        platform_directory_child_write_exact(&staged, doc_hex, len, 0) &&
+        platform_directory_child_write_exact(&staged, "\n", 1, len) &&
+        platform_directory_child_flush(&staged) &&
+        platform_directory_child_replace(&directory, &staged, destination,
+                                         false) &&
+        platform_directory_transaction_flush(&directory);
+    platform_directory_child_close(&staged);
+    if (!ok && staged_created)
+        (void)platform_directory_child_unlink(&directory, temporary, true);
+    platform_directory_transaction_close(&directory);
+    if (!ok) snprintf(err, err_size, "atomic endpoint write failed");
+    return ok;
+#else
     int fd = open(path_out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
         snprintf(err, err_size, "open %s: %s", path_out, strerror(errno));
@@ -390,6 +488,7 @@ static bool zec_write_record(const char *datadir, const char *key_hex,
         return false;
     }
     return true;
+#endif
 }
 
 /* Read the doc hex filed under one record key. Returns false when the
@@ -402,6 +501,13 @@ static bool zec_read_record(const char *datadir, const char *key_hex,
                      datadir, key_hex);
     if (n <= 0 || (size_t)n >= path_size)
         return false;
+#if defined(_WIN32)
+    size_t size = 0;
+    if (!zec_stable_read(path_out, hex_out, hex_size - 1u, &size, true) ||
+        size == 0)
+        return false;
+    ssize_t r = (ssize_t)size;
+#else
     int fd = open(path_out, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return false;
@@ -409,6 +515,7 @@ static bool zec_read_record(const char *datadir, const char *key_hex,
     close(fd);
     if (r <= 0)
         return false;
+#endif
     while (r > 0 && (hex_out[r - 1] == '\n' || hex_out[r - 1] == '\r' ||
                      hex_out[r - 1] == ' '))
         r--;
@@ -519,14 +626,14 @@ static void zec_push_endpoint_into(struct json_value *obj,
         json_push_kv_int(obj, "onion_port", ep->onion_port);
     }
     if (ep->flags & ZENDP_HAS_IPV4) {
-        char buf[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, ep->ipv4, buf, sizeof(buf)))
+        char buf[PLATFORM_IPV4_ADDRESS_TEXT_SIZE];
+        if (platform_socket_format_address(AF_INET, ep->ipv4, buf, sizeof(buf)))
             json_push_kv_str(obj, "ipv4", buf);
         json_push_kv_int(obj, "ipv4_port", ep->ipv4_port);
     }
     if (ep->flags & ZENDP_HAS_IPV6) {
-        char buf[INET6_ADDRSTRLEN];
-        if (inet_ntop(AF_INET6, ep->ipv6, buf, sizeof(buf)))
+        char buf[PLATFORM_IPV6_ADDRESS_TEXT_SIZE];
+        if (platform_socket_format_address(AF_INET6, ep->ipv6, buf, sizeof(buf)))
             json_push_kv_str(obj, "ipv6", buf);
         json_push_kv_int(obj, "ipv6_port", ep->ipv6_port);
     }
@@ -587,7 +694,7 @@ static bool zec_build_endpoint(const struct json_value *in,
 
     const char *ipv4 = zec_input_str(in, "ipv4");
     if (ipv4 && ipv4[0]) {
-        if (inet_pton(AF_INET, ipv4, ep->ipv4) != 1) {
+        if (platform_socket_parse_address(AF_INET, ipv4, ep->ipv4) != 1) {
             zec_fail(reply, "BAD_IPV4", "normalize",
                      "ipv4 must be a dotted-quad address", ipv4);
             return false;
@@ -604,7 +711,7 @@ static bool zec_build_endpoint(const struct json_value *in,
 
     const char *ipv6 = zec_input_str(in, "ipv6");
     if (ipv6 && ipv6[0]) {
-        if (inet_pton(AF_INET6, ipv6, ep->ipv6) != 1) {
+        if (platform_socket_parse_address(AF_INET6, ipv6, ep->ipv6) != 1) {
             zec_fail(reply, "BAD_IPV6", "normalize",
                      "ipv6 must be a colon-separated address", ipv6);
             return false;
@@ -665,6 +772,17 @@ static size_t zec_load_doc_wire(const struct json_value *in,
                      "saved .zid>", cmd);
             return 0;
         }
+#if defined(_WIN32)
+        size_t file_size = 0;
+        if (!zec_stable_read(path, file_hex, sizeof(file_hex) - 1u,
+                             &file_size, false) || file_size == 0) {
+            zec_fail(reply, "FILE_UNREADABLE", "normalize",
+                     "record file is empty, unsafe, unstable or unreadable",
+                     path);
+            return 0;
+        }
+        ssize_t r = (ssize_t)file_size;
+#else
         int fd = open(path, O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             zec_fail(reply, "FILE_UNREADABLE", "normalize",
@@ -678,6 +796,7 @@ static size_t zec_load_doc_wire(const struct json_value *in,
                      "the record file is empty", path);
             return 0;
         }
+#endif
         while (r > 0 && (file_hex[r - 1] == '\n' || file_hex[r - 1] == '\r' ||
                          file_hex[r - 1] == ' '))
             r--;
