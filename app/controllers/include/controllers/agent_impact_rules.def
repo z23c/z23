@@ -1898,8 +1898,13 @@ AGENT_IMPACT_RULE("lib/test/src/test_store_buyer.c", "store_buyer make_lint_gate
  * lib/platform/tests/windows_acceptance.mk. Changes that still name the OLD
  * path are deletions from that rename, and the thing that observes them is
  * the lint tier: check-windows-acceptance cross-compiles every program the
- * catalog declares and fails closed on one that is not declared. That is a
- * real observer, not a shape check. */
+ * catalog declares, and -- since tools/lint/check_windows_acceptance.sh
+ * landed -- RECONCILES the other direction too, failing closed on any program on disk that the catalog does
+ * not declare, that is not a registered suite group, and that carries no
+ * written exemption. Until that reconcile step existed the second half of
+ * this sentence was an overclaim: nothing checked it, and two probe programs
+ * sat unread under lib/platform/tests for exactly that reason. It is a real
+ * observer now, not a shape check. */
 
 /* The DERIVATION half of the independent replay receipt, split out of
  * consensus_state_replay_receipt.c at the E1 file-size seam. Mapped by
@@ -2191,16 +2196,28 @@ AGENT_IMPACT_RULE("lib/platform/tests/cli_render_env_windows_acceptance.c|lib/pl
  * assertions into a registered lib/test/src group. */
 AGENT_IMPACT_RULE("lib/platform/tests/thread_join_windows_acceptance.c", "make_lint_gates")
 
-/* Two probe programs under lib/platform/tests that NOTHING READS AT ALL --
- * weaker than the acceptance programs above, which at least cross-compile.
- * Verified three ways: neither appears in windows_acceptance.mk, neither is
- * named by any Makefile rule, and neither is in the files list of
- * lib/platform/zcode-package.json (which lists only tests/test_platform.c).
- * They drive platform_directory_watcher_open and
- * platform_watcher_record_parse, and their subjects are themselves
- * uncalled on POSIX (see the watcher-family rule below). Closing this means
- * either a windows_acceptance.mk row or a registered lib/test/src group. */
-AGENT_IMPACT_RULE("lib/platform/tests/test_directory_watcher.c|lib/platform/tests/test_watcher_record.c", "make_lint_gates")
+/* Two probe programs that arrived under lib/platform/tests with NO reader at
+ * all -- weaker than the acceptance programs above, which at least
+ * cross-compile. Verified three ways at the time: neither appeared in
+ * windows_acceptance.mk, neither was named by any Makefile rule, and neither
+ * was in the files list of lib/platform/zcode-package.json (which lists only
+ * tests/test_platform.c). Both are now REHOMED into lib/test/src as
+ * registered catalog groups, assertions verbatim, so each one executes on
+ * every suite run. Each file defines the int test_<name>(void) entry named by
+ * its own ZCL_TEST_GROUP row, and a test source's own group is the only group
+ * that executes it, so each rule names exactly that group and the lint tier.
+ *
+ * What each one drives: directory_watcher opens a scratch root through
+ * platform_directory_watcher_open, asserts the stop predicate returns
+ * STOPPED, then asserts a create and a rename+unlink each report CHANGED --
+ * the only exercise the inotify arm of directory_watcher.c gets anywhere;
+ * watcher_record serializes a record, asserts the re-encode is byte-identical
+ * to the first, refuses six malformed encodings (short length, leading-zero
+ * pid, bad mode token, trailing corruption, magic corruption, over-long
+ * length) and asserts a binding differing in any single member does not
+ * match. */
+AGENT_IMPACT_RULE("lib/test/src/test_directory_watcher.c", "directory_watcher make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_watcher_record.c", "watcher_record make_lint_gates")
 
 /* Eight probe programs that the merge REHOMED out of the old tools/tests
  * directory into lib/test/src, where each became a registered catalog group.
@@ -2406,24 +2423,46 @@ AGENT_IMPACT_RULE("app/services/src/build_fabric_worker_windows.c|app/services/s
  * watcher, the watcher lease and launch handoff, the watcher record codec,
  * the watcher store, the process lifecycle wrapper, the directory
  * transaction, and platform_state_root, each with the public header the merge
- * added beside it. NOTHING EXECUTES ANY OF THEM ON THIS HOST, and unlike the
- * stub rule above that is not because the code is Windows-only -- these files
- * have real POSIX arms. It is because every CALLER is Windows-only. Checked
- * call site by call site with the preprocessor state tracked: each use of
- * platform_state_root, platform_watcher_*, platform_process_start_hidden and
- * the platform_directory_transaction and platform_directory_child families in
- * tools/command and tools/dev sits inside an #if defined(_WIN32) arm --
- * including the two that DO reach the test binary through
- * TEST_DEV_EXECUTOR_SRCS, rr_copy_publish in devloop_restart_build.c and
- * store_open in dev_failure_store.c, both of which take a plain POSIX path
- * here. The only unguarded consumers are in devloop_cli.c and
- * devloop_watch.c, which are DEV_ONLY_SRCS: linked into the dev binary only,
- * never the test binary, and zcl_devloop_cli_main is named nowhere under
- * lib/test/src. What DOES read them is check-windows-platform-seam, an
- * -fsyntax-only mingw pass over the lib/platform src directory that IS in
- * LINT_FAST_GATES; the two watcher-family programs under lib/platform/tests
- * are dead (see their rule above). Closing this needs a registered
- * lib/test/src group driving the POSIX arms directly -- open a temp
- * directory, publish and re-read a watcher record, take and release the store
- * lock -- the way test_read_mapping_positioned.c now does for read_mapping. */
-AGENT_IMPACT_RULE("lib/platform/src/directory_watcher.c|lib/platform/include/platform/directory_watcher.h|lib/platform/src/watcher_lease.c|lib/platform/include/platform/watcher_lease.h|lib/platform/src/watcher_record.c|lib/platform/include/platform/watcher_record.h|lib/platform/src/watcher_store.c|lib/platform/include/platform/watcher_store.h|lib/platform/src/process_lifecycle.c|lib/platform/include/platform/process_lifecycle.h|lib/platform/src/directory_transaction.c|lib/platform/src/state_root.c|lib/platform/include/platform/state_root.h", "make_lint_gates")
+ * added beside it. NO PRODUCTION CALLER OF ANY OF THEM EXECUTES ON THIS
+ * HOST, and unlike the stub rule above that is not because the code is
+ * Windows-only -- these files have real POSIX arms. It is because every
+ * CALLER is Windows-only. Checked call site by call site with the
+ * preprocessor state tracked: each use of platform_state_root,
+ * platform_watcher_*, platform_process_start_hidden and the
+ * platform_directory_transaction and
+ * platform_directory_child families in tools/command and tools/dev sits
+ * inside an #if defined(_WIN32) arm -- including the two that DO reach the
+ * test binary through TEST_DEV_EXECUTOR_SRCS, rr_copy_publish in
+ * devloop_restart_build.c and store_open in dev_failure_store.c, both of
+ * which take a plain POSIX path here. The only unguarded consumers are in
+ * devloop_cli.c and devloop_watch.c, which are DEV_ONLY_SRCS: linked into the
+ * dev binary only, never the test binary, and zcl_devloop_cli_main is named
+ * nowhere under lib/test/src.
+ *
+ * Two of the family are now covered by execution rather than by a caller. The
+ * two probe programs that used to sit dead under lib/platform/tests were
+ * rehomed into lib/test/src as registered groups (see their rule above), and
+ * each drives exactly one member of this family directly:
+ *
+ *   directory_watcher.c  -- the directory_watcher group opens a scratch root
+ *     through platform_directory_watcher_open, takes the STOPPED verdict from
+ *     the stop predicate, and asserts CHANGED for a create and again for a
+ *     rename+unlink. That is the inotify arm of this file end to end.
+ *   watcher_record.c     -- the watcher_record group serializes, re-encodes
+ *     byte-identically, parses, refuses six malformed encodings, and walks
+ *     every member of the binding for a mismatch. The module is pure and has
+ *     no _WIN32 arm, so this is the whole file.
+ *
+ * Named by execution only: neither group so much as links a symbol from
+ * watcher_lease.c, watcher_store.c, process_lifecycle.c,
+ * directory_transaction.c or state_root.c, so those keep the lint tier
+ * alone. What reads THEM is check-windows-platform-seam, an -fsyntax-only
+ * mingw pass over the lib/platform src directory that IS in
+ * LINT_FAST_GATES, plus their
+ * cross-compiled rows in lib/platform/tests/windows_acceptance.mk -- a
+ * compile, not an execution. Closing the rest needs registered lib/test/src
+ * groups driving those POSIX arms directly -- take and release the store
+ * lock, acquire and drop a lease -- the way the two above now do. */
+AGENT_IMPACT_RULE("lib/platform/src/directory_watcher.c|lib/platform/include/platform/directory_watcher.h", "directory_watcher make_lint_gates")
+AGENT_IMPACT_RULE("lib/platform/src/watcher_record.c|lib/platform/include/platform/watcher_record.h", "watcher_record make_lint_gates")
+AGENT_IMPACT_RULE("lib/platform/src/watcher_lease.c|lib/platform/include/platform/watcher_lease.h|lib/platform/src/watcher_store.c|lib/platform/include/platform/watcher_store.h|lib/platform/src/process_lifecycle.c|lib/platform/include/platform/process_lifecycle.h|lib/platform/src/directory_transaction.c|lib/platform/src/state_root.c|lib/platform/include/platform/state_root.h", "make_lint_gates")

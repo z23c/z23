@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Verify the bounded cross-platform thread join seam. */
+ * Headless acceptance for the bounded cross-platform thread join seam. */
 
 /* pthread_timedjoin_np is a glibc extension, so the Linux arm of
  * platform_thread_join_until() is invisible under a strict
@@ -80,15 +80,13 @@ int main(void)
 
     struct timespec short_deadline = deadline_after_ms(20);
     if (platform_thread_join_until(thread, NULL, &short_deadline) != ETIMEDOUT) {
-        fprintf(stderr,  // obs-ok:acceptance-failure-exits-synchronously
-                "thread join did not honor short deadline\n");
+        fprintf(stderr, "thread join did not honor short deadline\n");
         return 2;
     }
 
     struct timespec long_deadline = deadline_after_ms(2000);
     if (platform_thread_join_until(thread, NULL, &long_deadline) != 0) {
-        fprintf(stderr,  // obs-ok:acceptance-failure-exits-synchronously
-                "thread join did not reap completed worker\n");
+        fprintf(stderr, "thread join did not reap completed worker\n");
         return 3;
     }
 
