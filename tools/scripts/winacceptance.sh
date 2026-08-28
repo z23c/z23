@@ -216,7 +216,7 @@ MANIFEST=(
   "tools/tests/test_running_image_positioned.c|run|lib/platform/src/os_proc.c lib/platform/src/positioned_file.c"
   "tools/tests/test_boot_refusal_identity.c|run|config/src/boot_error.c config/src/boot_refusal_reports.c lib/platform/src/current_identity.c"
   "tools/tests/test_boot_shutdown_marker_persistence.c|run|config/src/boot_shutdown_marker.c lib/platform/src/clock.c lib/platform/src/file_metadata.c lib/platform/src/positioned_file.c lib/platform/src/private_directory.c lib/platform/src/private_file.c"
-  "tools/tests/test_file_ops_copy.c|run|config/src/file_ops.c lib/platform/src/directory_compat.c lib/platform/src/positioned_file.c lib/platform/src/private_directory.c lib/platform/src/private_file.c lib/base/src/safe_alloc.c"
+  "tools/tests/test_file_ops_copy.c|run|config/src/file_ops.c lib/platform/src/directory_compat.c lib/platform/src/positioned_file.c lib/platform/src/private_directory.c lib/platform/src/private_file.c lib/platform/src/file_metadata.c lib/base/src/safe_alloc.c"
 
   # ── Wave 3: the 21-commit Windows/macOS merge ──────────────────────────
   # --- win: <windows.h> unconditionally, and its assertions ARE the
@@ -229,6 +229,25 @@ MANIFEST=(
   # VirtualFree directly. Every assertion is about the Win32 page-locking
   # seam, so there is nothing for this host to execute -- compile check only.
   "tools/winacceptance/pagelocker_acceptance.c|win|"
+
+  # ── Wave 5: the 33-commit retained-directory / ACL-unification merge ────
+  # --- win: includes <windows.h> unconditionally and drives the Win32
+  # retained-transaction handles directly.
+  "tools/winacceptance/directory_transaction_acceptance.c|win|"
+  # --- win: no <windows.h>, but the whole body is behind #if defined(_WIN32)
+  # and the #else arm is `return 77`. This gate grades a 77 skip as a FAILURE
+  # (correctly — a skip is not a pass), so it can only ever compile here.
+  "tools/winacceptance/os_proc_pid_image_acceptance.c|win|"
+  # --- noexec: asserts that every sd_notify entry point does NOTHING, which
+  # is the Windows contract. Linux is the platform where sd_notify really
+  # works, so running it here grades the absence of NOTIFY_SOCKET rather than
+  # the refusal it exists to pin — a pass for the wrong reason.
+  "tools/winacceptance/sd_notify_unsupported_acceptance.c|noexec|"
+  # --- run: genuinely cross-platform. The assertions are that a short
+  # deadline returns ETIMEDOUT and a long one reaps the worker, and on Linux
+  # pthread_timedjoin_np is what enforces that — so this host executes the
+  # real thing. Header-only seam, so no extra sources to link.
+  "tools/winacceptance/thread_join_acceptance.c|run|"
 
   # --- run: portable, meaningful, and actually executed on this host ------
   # No <windows.h> and no _WIN32 split anywhere: it drives rng_fill() through

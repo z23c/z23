@@ -28,9 +28,25 @@ static inline int platform_thread_join_until(pthread_t thread,
 #if defined(_WIN32)
     if (!deadline)
         return EINVAL;
-    struct timespec now;
-    if (timespec_get(&now, TIME_UTC) != TIME_UTC)
-        return EINVAL;
+    /* Win32 epoch time directly, not timespec_get(): that is a C11
+     * function mingw-w64 declares only under _UCRT, so on a msvcrt
+     * target it does not exist at all and this arm would not compile.
+     * GetSystemTimeAsFileTime is always present and needs nothing
+     * beyond the <windows.h> this arm already includes. */
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER ticks = { .LowPart = ft.dwLowDateTime,
+                             .HighPart = ft.dwHighDateTime };
+    /* FILETIME counts 100ns ticks from 1601-01-01; shift to the Unix
+     * epoch so the caller-supplied deadline is on the same scale. */
+    const uint64_t kUnixEpochTicks = UINT64_C(116444736000000000);
+    uint64_t unix_ticks = ticks.QuadPart < kUnixEpochTicks
+                              ? 0
+                              : ticks.QuadPart - kUnixEpochTicks;
+    struct timespec now = {
+        .tv_sec = (time_t)(unix_ticks / UINT64_C(10000000)),
+        .tv_nsec = (long)((unix_ticks % UINT64_C(10000000)) * 100),
+    };
     int64_t remaining_ns =
         ((int64_t)deadline->tv_sec - (int64_t)now.tv_sec) * INT64_C(1000000000) +
         ((int64_t)deadline->tv_nsec - (int64_t)now.tv_nsec);

@@ -5901,7 +5901,7 @@ THREAD_JOIN_ACCEPTANCE_BIN := $(BIN_DIR)/thread-join-acceptance
 test-windows-thread-join-acceptance: $(THREAD_JOIN_ACCEPTANCE_BIN)
 	@$(THREAD_JOIN_ACCEPTANCE_BIN)
 
-$(THREAD_JOIN_ACCEPTANCE_BIN): tests/windows/thread_join_acceptance.c \
+$(THREAD_JOIN_ACCEPTANCE_BIN): tools/winacceptance/thread_join_acceptance.c \
 		lib/platform/include/platform/thread_compat.h
 	@mkdir -p $(dir $@)
 	$(CC) $(ZCL_PLATFORM_CPPFLAGS) -std=c23 -Wall -Wextra -Werror -pedantic \
