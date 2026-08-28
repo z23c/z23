@@ -22,12 +22,26 @@ green build.
 One limit is worth stating plainly, because it decides where the work can
 happen rather than whether it works. The vendored third-party archives —
 SQLite, OpenSSL, libsecp256k1, zlib, LevelDB, and the Tor stub — build
-natively under UCRT64, and that is the only way they can be built. There is
-no path to cross-build them from Linux, because `tools/scripts/build_vendor.sh`
-decides POSIX-versus-Windows from `uname -s`, the machine it is running on,
-rather than from the target of the compiler it was handed in `VENDOR_CC`. So
-a Windows artifact needs a Windows machine, and a Linux host cannot stand in
-for one.
+natively under UCRT64, and that is the only supported way to build them. A
+Windows artifact needs a Windows machine; a Linux host cannot stand in for
+one.
+
+That is deliberate, and it is more than one line of shell. `build_vendor.sh`
+does read `uname -s` rather than the target of the compiler in `VENDOR_CC`,
+but changing only that would be the worst possible half-measure: OpenSSL,
+zlib, libevent, LevelDB and libsecp256k1 are each configured with no target
+at all, `VENDOR_AR` is the host archiver, and there is no `VENDOR_CXX`, so
+the script would select Windows behaviour while still building host objects.
+The result links, and is mixed-ABI. Underneath that, `vendor/lib` and
+`vendor/include` hold one slot per archive name with no target segment, and
+`opensslconf.h` and `event2/event-config.h` are generated per target — so two
+targets cannot coexist in one checkout even if every recipe were fixed.
+
+Hence the rule already stated below: never reuse `vendor/lib` or `build`
+across UCRT64 and WSL. Cross-building would require a per-target vendor
+layout, which reaches source identity, the link lines, and the reproduce and
+provenance paths. Requiring a Windows box is the cheaper correct answer, and
+one is needed to run the acceptance tests regardless.
 
 ## Native UCRT64 lane
 

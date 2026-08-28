@@ -88,6 +88,38 @@ export TZ=UTC LC_ALL=C
 ARFLAGS_DET="Dcr"   # D = deterministic (zero mtime/uid/gid) when supported
 VENDOR_CC="${VENDOR_CC:-cc}"
 VENDOR_AR="${VENDOR_AR:-ar}"
+
+# Every archive in vendor/lib must be built by ONE toolchain targeting ONE
+# machine. Nothing downstream can tell otherwise: vendor/lib holds a single
+# slot per archive name with no target segment, so a host-built libz.a and a
+# cross-built libz.a occupy the same path and link into the same binary. The
+# checks below refuse the mixed-toolchain cases that are otherwise silent.
+vendor_cc_machine()
+{
+    # Only a selector input is derived here. vp_compiler_identity_sha folds
+    # -dumpmachine into the provenance hash too, but it deliberately swallows
+    # failure into an empty string, which is fine for a hash and useless for a
+    # decision. So probe separately and fail closed.
+    "$1" -dumpmachine 2>/dev/null | sed -n '1p'
+}
+
+VENDOR_CC_MACHINE="$(vendor_cc_machine "$VENDOR_CC")"
+
+# LevelDB is the one C++ archive. leveldb_cxx_compiler() falls back to $CXX,
+# then c++, then g++ -- none of which consults VENDOR_CC. Setting VENDOR_CC to
+# a cross compiler and leaving CXX unset therefore produced a host-targeted
+# libleveldb.a beside cross-targeted C archives, with no diagnostic anywhere.
+vendor_require_same_machine()
+{
+    local what="$1" tool="$2" machine
+    [ -n "$VENDOR_CC_MACHINE" ] || return 0
+    command -v "$tool" >/dev/null 2>&1 || return 0
+    machine="$(vendor_cc_machine "$tool")"
+    [ -n "$machine" ] || return 0
+    [ "$machine" = "$VENDOR_CC_MACHINE" ] && return 0
+    die "$what ($tool) targets $machine but VENDOR_CC ($VENDOR_CC) targets \
+$VENDOR_CC_MACHINE -- vendor/lib cannot hold two targets at once"
+}
 LIBEVENT_CPPFLAGS="-I$INC"
 LIBEVENT_THREAD_ARCHIVE="libevent_pthreads.a"
 LEVELDB_PLATFORM="LEVELDB_PLATFORM_POSIX; env_posix.cc"
@@ -561,14 +593,17 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
 leveldb_cxx_compiler() {
     if [[ -n "${CXX:-}" ]]; then
         command -v "$CXX" >/dev/null 2>&1 || die "CXX not found: $CXX"
+        vendor_require_same_machine "CXX" "$CXX"
         printf '%s' "$CXX"
         return
     fi
     if command -v c++ >/dev/null 2>&1; then
+        vendor_require_same_machine "c++" c++
         printf '%s' c++
         return
     fi
     if command -v g++ >/dev/null 2>&1; then
+        vendor_require_same_machine "g++" g++
         printf '%s' g++
         return
     fi
@@ -734,6 +769,18 @@ build_secp_native() {
 
 # --- orchestration ----------------------------------------------------------
 need "$VENDOR_CC"; need "$VENDOR_AR"; need sha256sum; need tar; need make
+
+# ar carries no -dumpmachine, so its target can only be read from its name.
+# A cross VENDOR_CC left beside the host's plain `ar` is silent today: ar
+# writes an archive index in the host's format and the cross linker rejects
+# or misreads it. Refuse the mismatch rather than discover it at link time.
+if [ -n "$VENDOR_CC_MACHINE" ] && [ "$VENDOR_CC_MACHINE" != "$(vendor_cc_machine cc)" ]; then
+    case "$(basename "$VENDOR_AR")" in
+        "$VENDOR_CC_MACHINE"-*) ;;
+        *) die "VENDOR_CC targets $VENDOR_CC_MACHINE but VENDOR_AR is \
+'$VENDOR_AR' -- pass the matching ${VENDOR_CC_MACHINE}-ar" ;;
+    esac
+fi
 mkdir -p "$LIB" "$INC" "$WORK"
 acquire_vendor_lock
 
@@ -787,12 +834,11 @@ fi
 
 # Build order: openssl before libevent (libevent_openssl needs its headers).
 ALL=(build_tor_stub build_zlib build_sqlite build_openssl build_libevent build_leveldb)
-if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
-    ALL+=(build_secp_native)
-elif [[ "$(uname -s 2>/dev/null)" == MINGW* ||
-        "$(uname -s 2>/dev/null)" == MSYS* ]]; then
-    ALL+=(build_secp_native)
-fi
+# Darwin and Windows both need secp built here; Linux takes the pinned
+# archive. One condition, because both arms appended the same builder.
+case "$(uname -s 2>/dev/null)" in
+    Darwin|MINGW*|MSYS*) ALL+=(build_secp_native) ;;
+esac
 
 # Map .a names -> builder for the subset form.
 declare -A BUILDER=(
