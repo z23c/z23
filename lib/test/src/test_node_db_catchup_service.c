@@ -60,26 +60,25 @@ int test_node_db_catchup_service(void)
     node_db_catchup_block_mapping_init(&bm);
 
     bm.mapping.size = 99;
-    int err = 0;
-    bool opened = node_db_catchup_block_mapping_open_quiet(&bm, dir, 7, &err);
+    struct zcl_result opened =
+        node_db_catchup_block_mapping_open_quiet(&bm, dir, 7);
     const uint8_t *data = bm.mapping.data;
     size_t sz = bm.mapping.size;
     node_db_catchup_block_mapping_close(&bm);
     NDC_CHECK("missing block file is quiet ENOENT",
-              !opened && data == NULL && sz == 0 && err == ENOENT);
+              !opened.ok && data == NULL && sz == 0 && opened.code == ENOENT);
 
     char path[512];
     snprintf(path, sizeof(path), "%s/blk00008.dat", blocks);
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) close(fd);
     bm.mapping.size = 99;
-    err = 0;
-    opened = node_db_catchup_block_mapping_open_quiet(&bm, dir, 8, &err);
+    opened = node_db_catchup_block_mapping_open_quiet(&bm, dir, 8);
     data = bm.mapping.data;
     sz = bm.mapping.size;
     node_db_catchup_block_mapping_close(&bm);
     NDC_CHECK("empty block file is quiet EINVAL",
-              !opened && data == NULL && sz == 0 && err == EINVAL);
+              !opened.ok && data == NULL && sz == 0 && opened.code == EINVAL);
 
     snprintf(path, sizeof(path), "%s/blk00009.dat", blocks);
     fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -87,12 +86,11 @@ int test_node_db_catchup_service(void)
     bool wrote = fd >= 0 &&
         write(fd, bytes, sizeof(bytes)) == (ssize_t)sizeof(bytes);
     if (fd >= 0) close(fd);
-    err = 0;
-    opened = node_db_catchup_block_mapping_open_quiet(&bm, dir, 9, &err);
+    opened = node_db_catchup_block_mapping_open_quiet(&bm, dir, 9);
     data = bm.mapping.data;
     sz = bm.mapping.size;
-    bool mapped = wrote && opened && data != NULL && sz == sizeof(bytes) &&
-                  err == 0 && memcmp(data, bytes, sizeof(bytes)) == 0;
+    bool mapped = wrote && opened.ok && data != NULL && sz == sizeof(bytes) &&
+                  opened.code == 0 && memcmp(data, bytes, sizeof(bytes)) == 0;
     node_db_catchup_block_mapping_close(&bm);
     NDC_CHECK("valid block file maps", mapped);
     /* The close above must release the descriptor the mapping owns, not just

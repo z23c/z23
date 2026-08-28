@@ -472,23 +472,23 @@ int node_db_catchup_service_run(struct node_db *ndb,
         /* Map a new file if needed. */
         if (pindex->nFile != cached_file) {
             node_db_catchup_block_mapping_close(&cached_mapping);
-            int mapping_errno = 0;
-            bool mapped = node_db_catchup_block_mapping_open_quiet(
-                &cached_mapping, datadir, pindex->nFile, &mapping_errno);
-            cached_file = mapped ? pindex->nFile : -1;
-            if (!mapped) {
+            struct zcl_result mapped =
+                node_db_catchup_block_mapping_open_quiet(
+                    &cached_mapping, datadir, pindex->nFile);
+            cached_file = mapped.ok ? pindex->nFile : -1;
+            if (!mapped.ok) {
                 missing_file_holes++;
                 if (first_missing_file_h < 0) {
                     first_missing_file_h = h;
                     first_missing_file_num = pindex->nFile;
                 }
-                if (mapping_errno != ENOENT && mapping_errno != ENOTDIR) {
+                if (mapped.code != ENOENT && mapped.code != ENOTDIR) {
                     suspicious_lean_holes++;
                     if (suspicious_lean_holes <= 3)
                         LOG_WARN("catchup",
                                  "catchup: mapping failed for blk%05d.dat "
                                  "(errno=%d) — skipping its blocks",
-                                 pindex->nFile, mapping_errno);
+                                 pindex->nFile, mapped.code);
                 }
                 skip_file = pindex->nFile;
                 if (++lean_holes == 1) first_hole_h = h;
