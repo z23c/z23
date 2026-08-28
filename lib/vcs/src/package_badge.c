@@ -12,6 +12,11 @@
 
 #include "crypto/sha3.h"
 #include "base/hex.h"
+#include "platform/directory_compat.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -19,15 +24,15 @@
 
 #include <secp256k1.h>
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define BADGE_LOG "vcs.badge"
 
@@ -416,6 +421,9 @@ bool vcs_badge_policy_load(const char *zcode_dir,
 
 static bool badge_mkdir_p(const char *path)
 {
+#if defined(_WIN32)
+    return platform_private_directory_ensure(path);
+#else
     char buf[4400];
     size_t len = strlen(path);
     if (len == 0 || len >= sizeof(buf))
@@ -430,6 +438,7 @@ static bool badge_mkdir_p(const char *path)
         *p = '/';
     }
     return mkdir(buf, 0700) == 0 || errno == EEXIST;
+#endif
 }
 
 /* Durable write: temp sibling + fsync + atomic rename. A crash leaves
@@ -440,40 +449,36 @@ static bool badge_atomic_write(const char *path, const uint8_t *data,
     static _Atomic uint64_t g_seq = 0;
     uint64_t seq = atomic_fetch_add(&g_seq, 1);
     char tmp[4400];
-    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.%llu", path,
-                      (long)getpid(), (unsigned long long)seq);
+    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu.%llu", path,
+                      (unsigned long long)os_proc_current_pid(),
+                      (unsigned long long)seq);
     if (tn <= 0 || (size_t)tn >= sizeof(tmp))
         LOG_FAIL(BADGE_LOG, "temp path too long for %s", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0)
-        LOG_FAIL(BADGE_LOG, "open temp %s: %s", tmp, strerror(errno));
-    size_t off = 0;
-    while (off < data_len) {
-        ssize_t w = write(fd, data + off, data_len - off);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            close(fd);
-            unlink(tmp);
-            LOG_FAIL(BADGE_LOG, "write temp %s: %s", tmp, strerror(errno));
-        }
-        off += (size_t)w;
-    }
-    if (fsync(fd) != 0) {
-        close(fd);
-        unlink(tmp);
-        LOG_FAIL(BADGE_LOG, "fsync temp %s: %s", tmp, strerror(errno));
-    }
-    if (close(fd) != 0) {
-        unlink(tmp);
-        LOG_FAIL(BADGE_LOG, "close temp %s: %s", tmp, strerror(errno));
-    }
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
-        LOG_FAIL(BADGE_LOG, "rename %s -> %s: %s", tmp, path,
-                 strerror(errno));
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool ok = platform_private_file_create(tmp, &file) &&
+              platform_private_file_write_at(&file, data, data_len, 0) &&
+              platform_private_file_truncate(&file, data_len) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, tmp, path);
+    if (!ok) {
+        platform_private_file_close(&file);
+        (void)platform_private_file_unlink_missing_ok(tmp);
+        LOG_FAIL(BADGE_LOG, "durable replace %s -> %s failed", tmp, path);
     }
     return true;
+}
+
+static bool badge_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
 /* Read a whole bounded file. NULL when missing, empty, oversize, or
@@ -482,28 +487,43 @@ static uint8_t *badge_read_file(const char *path, size_t cap,
                                 size_t *out_len)
 {
     *out_len = 0;
-    struct stat st;
-    if (stat(path, &st) != 0)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot stamp;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &stamp)) {
+        platform_positioned_file_close(&file);
         return NULL;
-    if (st.st_size <= 0 || (uint64_t)st.st_size > cap)
+    }
+    if (stamp.size == 0 || stamp.size > cap) {
+        platform_positioned_file_close(&file);
         return NULL;
-    size_t len = (size_t)st.st_size;
+    }
+    size_t len = (size_t)stamp.size;
     uint8_t *buf = zcl_malloc(len, "badge_read_file");
     if (!buf)
         LOG_NULL(BADGE_LOG, "alloc %zu for %s", len, path);
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    if (platform_positioned_file_read(&file, buf, len, 0) != (int64_t)len) {
+        platform_positioned_file_close(&file);
         free(buf);
         return NULL;
     }
-    if (fread(buf, 1, len, f) != len) {
-        fclose(f);
-        free(buf);
-        return NULL;
-    }
-    fclose(f);
+    struct platform_positioned_file_snapshot after;
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+                  badge_snapshot_equal(&stamp, &after);
+    platform_positioned_file_close(&file);
+    if (!stable) { free(buf); return NULL; }
     *out_len = len;
     return buf;
+}
+
+static bool badge_file_exists(const char *path)
+{
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    bool exists = platform_positioned_file_open(&file, path);
+    platform_positioned_file_close(&file);
+    return exists;
 }
 
 /* ── the store ──────────────────────────────────────────────────────── */
@@ -625,15 +645,15 @@ static void badge_scan_dir(struct vcs_badge_store *s, const char *dir,
                                       const char *name,
                                       const uint8_t *wire, size_t len))
 {
-    DIR *d = opendir(dir);
-    if (!d)
+    struct platform_directory_list list = {0};
+    if (!platform_directory_list_regular_sorted(dir, &list))
         return; /* a missing dir is an empty store, never an error */
     size_t seen = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.')
+    for (size_t entry = 0; entry < list.count; entry++) {
+        const char *name = list.entries[entry].name;
+        if (name[0] == '.')
             continue;
-        if (strstr(ent->d_name, ".tmp."))
+        if (strstr(name, ".tmp."))
             continue; /* a leftover atomic-write temp is never a valid
                          object (crash artifact, not corruption) */
         if (seen >= max_files) {
@@ -643,14 +663,11 @@ static void badge_scan_dir(struct vcs_badge_store *s, const char *dir,
             break;
         }
         char path[4400];
-        int n = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
         if (n <= 0 || (size_t)n >= sizeof(path)) {
             s->corrupt++;
             continue;
         }
-        struct stat st;
-        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
-            continue; /* subdirectories (plans/, commits/) are not wires */
         seen++;
         size_t wire_len = 0;
         uint8_t *wire = badge_read_file(path, wire_cap, &wire_len);
@@ -659,10 +676,10 @@ static void badge_scan_dir(struct vcs_badge_store *s, const char *dir,
             LOG_ERROR(BADGE_LOG, "badge wire %s unreadable/oversize", path);
             continue;
         }
-        cb(s, ent->d_name, wire, wire_len);
+        cb(s, name, wire, wire_len);
         free(wire);
     }
-    closedir(d);
+    platform_directory_list_free(&list);
 }
 
 static void badge_load_one(struct vcs_badge_store *s, const char *name,
@@ -751,15 +768,17 @@ struct vcs_badge_store *vcs_badge_store_load(const char *zcode_dir)
         LOG_RETURN(NULL, BADGE_LOG, "badge store path too long");
     }
     char dir[4400];
-    snprintf(dir, sizeof(dir), "%s", s->root);
+    (void)snprintf(dir, sizeof(dir), "%s", s->root);
     badge_scan_dir(s, dir, VCS_PACKAGE_BADGE_WIRE_BYTES,
                    VCS_BADGE_MAX_BADGES, badge_load_one);
-    snprintf(dir, sizeof(dir), "%s/plans", s->root);
-    badge_scan_dir(s, dir, VCS_BADGE_MAX_PLAN_WIRE_BYTES,
-                   VCS_BADGE_MAX_PLANS, badge_load_plan_id);
-    snprintf(dir, sizeof(dir), "%s/commits", s->root);
-    badge_scan_dir(s, dir, VCS_BADGE_MAX_COMMIT_WIRE_BYTES,
-                   VCS_BADGE_MAX_COMMITS, badge_load_commit_id);
+    int dn = snprintf(dir, sizeof(dir), "%s/plans", s->root);
+    if (dn > 0 && (size_t)dn < sizeof(dir))
+        badge_scan_dir(s, dir, VCS_BADGE_MAX_PLAN_WIRE_BYTES,
+                       VCS_BADGE_MAX_PLANS, badge_load_plan_id);
+    dn = snprintf(dir, sizeof(dir), "%s/commits", s->root);
+    if (dn > 0 && (size_t)dn < sizeof(dir))
+        badge_scan_dir(s, dir, VCS_BADGE_MAX_COMMIT_WIRE_BYTES,
+                       VCS_BADGE_MAX_COMMITS, badge_load_commit_id);
     return s;
 }
 
@@ -939,8 +958,7 @@ enum vcs_badge_persist_error vcs_badge_store_persist(
         LOG_ERROR(BADGE_LOG, "badge path too long");
         return VCS_BADGE_PERSIST_IO;
     }
-    struct stat st;
-    if (stat(path, &st) != 0) {
+    if (!badge_file_exists(path)) {
         uint8_t wire[VCS_PACKAGE_BADGE_WIRE_BYTES];
         if (vcs_badge_serialize(badge, wire, sizeof(wire)) !=
                 VCS_BADGE_OK ||
@@ -1137,8 +1155,7 @@ enum vcs_badge_plan_persist_error vcs_badge_plan_persist(
         LOG_ERROR(BADGE_LOG, "plan path too long");
         return VCS_BADGE_PLAN_PERSIST_IO;
     }
-    struct stat st;
-    if (stat(path, &st) == 0)
+    if (badge_file_exists(path))
         return VCS_BADGE_PLAN_PERSIST_DUPLICATE;
     if (s->plan_count >= VCS_BADGE_MAX_PLANS)
         return VCS_BADGE_PLAN_PERSIST_FULL;
