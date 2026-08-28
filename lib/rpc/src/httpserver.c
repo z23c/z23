@@ -4,6 +4,7 @@
 
 #include "platform/time_compat.h"
 #include "platform/socket_compat.h"
+#include "platform/private_file.h"
 #include "rpc/httpserver.h"
 #include "httpserver_transport.h"
 #include "rpc/http_middleware.h"
@@ -1048,27 +1049,34 @@ static SSL_CTX *tls_init(const char *cert_path, const char *key_path)
     return ctx;
 }
 
-/* ── Cookie file write (atomic, owner-only) ─────────────────────────
- * Create the RPC cookie restrictively in one step instead of
- * fopen("w") (which honors the umask → typically world-readable) THEN
- * chmod(0600): that create-then-chmod leaves a window where any local
- * user can read the credentials, which grant full wallet access
- * (including dumpprivkey/z_exportkey). open(O_CREAT|O_EXCL, 0600)
- * guarantees the file is owner-only from the instant it exists; we
- * unlink first so O_EXCL succeeds on rotation/restart. Returns NULL on
- * failure (caller logs context). */
-static FILE *rpc_cookie_fopen_secure(const char *path)
+/* ── Cookie file write (single-step, owner-private) ─────────────────
+ * The cookie grants full wallet access (dumpprivkey / z_exportkey), so it
+ * must never exist — not even for an instant — readable by anyone but the
+ * user running the node. It is created restrictively in ONE step, never
+ * create-then-tighten, and any stale cookie is dropped first so the
+ * exclusive create wins on rotation. Returns false on failure.
+ *   open(path, O_CREAT|O_EXCL, 0600) is that guarantee on POSIX but NOT on
+ * Windows, where the CRT `pmode` sets only the read-only ATTRIBUTE and no
+ * ACL — the cookie would be readable by everyone the parent directory
+ * admits. platform_private_file_create() means the same on both: POSIX
+ * open(O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW, 0600); Windows
+ * CreateFileW with an explicit D:P(A;;FA;;;SY)(A;;FA;;;<user>) descriptor —
+ * owner plus SYSTEM only, from the instant the file exists. */
+static bool rpc_cookie_write_secure(const char *path, const char *user,
+                                    const char *password)
 {
-    /* Drop any stale cookie so O_EXCL can win the create race; O_EXCL
-     * refuses to follow a symlink an attacker may have planted. */
-    unlink(path);
-    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0)
-        return NULL;
-    FILE *f = fdopen(fd, "w");
-    if (!f)
-        close(fd);
-    return f;
+    char body[sizeof(g_rpc_user) + sizeof(g_rpc_password) + 2];
+    int n = snprintf(body, sizeof(body), "%s:%s", user, password);
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    (void)platform_private_file_unlink_missing_ok(path);
+    bool ok = n > 0 && (size_t)n < sizeof(body) &&
+              platform_private_file_create(path, &file) &&
+              platform_private_file_write_at(&file, body, (size_t)n, 0);
+    platform_private_file_close(&file);
+    memory_cleanse(body, sizeof(body));
+    if (!ok) (void)platform_private_file_unlink_missing_ok(path);
+    return ok;
 }
 
 /* ── Cookie rotation ────────────────────────────────────────────── */
@@ -1092,14 +1100,10 @@ void rpc_http_cookie_rotate(void)
              "%016llx%016llx",
              (unsigned long long)r1, (unsigned long long)r2);
 
-    /* Write new cookie to disk (owner-only, no world-readable window) */
-    if (g_cookie_file[0]) {
-        FILE *f = rpc_cookie_fopen_secure(g_cookie_file);
-        if (f) {
-            fprintf(f, "%s:%s", g_rpc_user, g_rpc_password);
-            fclose(f);
-        }
-    }
+    /* Write new cookie to disk (owner-private, no wider-access window) */
+    if (g_cookie_file[0])
+        (void)rpc_cookie_write_secure(g_cookie_file, g_rpc_user,
+                                      g_rpc_password);
     pthread_mutex_unlock(&g_cookie_mutex);
     printf("RPC cookie rotated\n");
 }
@@ -1176,26 +1180,21 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
 
         snprintf(g_cookie_file, sizeof(g_cookie_file),
                  "%s/.cookie", datadir);
-        /* Create owner-only (0600) atomically — never a world-readable
-         * window between create and chmod. */
-        FILE *f = rpc_cookie_fopen_secure(g_cookie_file);
-        if (f) {
-            fprintf(f, "%s:%s", g_rpc_user, g_rpc_password);
-            fclose(f);
+        if (rpc_cookie_write_secure(g_cookie_file, g_rpc_user,
+                                    g_rpc_password))
             printf("RPC cookie written to %s\n", g_cookie_file);
-        }
 
         /* Record the bound RPC port alongside the cookie. NOT secret (the
          * port is visible to anyone who can already reach the loopback
-         * listener), so a plain world-readable file is fine — no
-         * rpc_cookie_fopen_secure() needed. This is what lets a CLI
-         * invocation of the form `-rpcport=<N>` (no `-datadir=`) find the
-         * right sibling datadir by scanning `<HOME>/.zclassic-c23*` for one
-         * whose recorded port matches (see cli_autodiscover_datadir_for_port
-         * in src/main.c) instead of guessing the default datadir's cookie
-         * and getting an indistinguishable 401. Best-effort like the cookie
-         * write above: a failure here only degrades auto-discovery, it
-         * never blocks RPC startup. */
+         * listener), so a plain world-readable file is fine — no private
+         * create needed. This is what lets a CLI invocation of the form
+         * `-rpcport=<N>` (no `-datadir=`) find the right sibling datadir by
+         * scanning `<HOME>/.zclassic-c23*` for one whose recorded port
+         * matches (see cli_autodiscover_datadir_for_port in src/main.c)
+         * instead of guessing the default datadir's cookie and getting an
+         * indistinguishable 401. Best-effort like the cookie write above: a
+         * failure here only degrades auto-discovery, it never blocks RPC
+         * startup. */
         snprintf(g_rpc_port_file, sizeof(g_rpc_port_file),
                  "%s/.rpcport", datadir);
         FILE *pf = fopen(g_rpc_port_file, "w");
@@ -1313,9 +1312,8 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                 g_tls_listen_fd = platform_socket_open(
                     AF_INET, SOCK_STREAM, 0, true, false);
                 if (g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
-                    int topt = 1;
-                    (void)platform_socket_set_reuse_address(g_tls_listen_fd,
-                                                            topt != 0);
+                    char terr[32]; /* Winsock errors have no strerror() */
+                    (void)platform_socket_set_reuse_address(g_tls_listen_fd, true);
 
                     struct sockaddr_in taddr;
                     memset(&taddr, 0, sizeof(taddr));
@@ -1326,12 +1324,14 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                     if (platform_socket_bind(g_tls_listen_fd,
                             (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
                         fprintf(stderr, "RPC TLS: bind port %u failed: %s\n",  // obs-ok:helper-context-logged
-                                g_tls_port, strerror(errno));
+                                g_tls_port, platform_socket_error_string(
+                                    platform_socket_last_error(), terr, sizeof(terr)));
                         platform_socket_close(g_tls_listen_fd);
                         g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
                     } else if (platform_socket_listen(g_tls_listen_fd, 8) < 0) {
                         fprintf(stderr, "RPC TLS: listen failed: %s\n",  // obs-ok:helper-context-logged
-                                strerror(errno));
+                                platform_socket_error_string(
+                                    platform_socket_last_error(), terr, sizeof(terr)));
                         platform_socket_close(g_tls_listen_fd);
                         g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
                     }

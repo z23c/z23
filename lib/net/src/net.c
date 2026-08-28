@@ -1216,7 +1216,6 @@ void socket_send_data(struct p2p_node *node)
     while (node->send_head) {
         struct send_segment *seg = node->send_head;
         size_t remain = seg->size - node->send_offset;
-
         ssize_t sent = send(node->socket,
                             (const char *)(seg->data + node->send_offset),
                             remain, MSG_NOSIGNAL | MSG_DONTWAIT);
@@ -1237,8 +1236,9 @@ void socket_send_data(struct p2p_node *node)
             }
         } else {
             if (sent < 0) {
-                int err = errno;
-                if (err != EAGAIN && err != EWOULDBLOCK && err != EINTR && err != EINPROGRESS)
+                int err = platform_socket_last_error(); /* Winsock reports here, never errno */
+                if (!platform_socket_error_would_block(err) && !platform_socket_error_interrupted(err) &&
+                    !platform_socket_error_in_progress(err))
                     p2p_node_close_socket(node);
             }
             break;

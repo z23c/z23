@@ -2139,6 +2139,12 @@ AGENT_IMPACT_RULE("lib/storage/src/disk_block_io_repair.c|lib/storage/src/disk_b
  * reducer_frontier, always_sync_lifecycle) belong to the faults that stayed
  * in the parent and are deliberately not inherited here. */
 AGENT_IMPACT_RULE("lib/sim/src/simnet_chaos_faults_rom.c|lib/sim/src/simnet_chaos_faults_download.c|lib/sim/src/simnet_chaos_faults_internal.h", "always_sync_chaos make_lint_gates")
+/* The portable scratch-directory create the ROM-artifact faults above stand
+ * their server and client trees in — the mkdtemp(3) replacement, since that
+ * symbol does not exist in the mingw CRT. simnet_chaos_faults_rom.c is its
+ * only caller today, so it rides exactly that file's group; widen this row
+ * when a second caller appears. */
+AGENT_IMPACT_RULE("lib/platform/src/temp_directory.c|lib/platform/include/platform/temp_directory.h", "always_sync_chaos make_lint_gates")
 
 /* The stage-log fixture builders, split out of simnet_chaos_faults.c.
  * Two groups execute them, not one: test_always_sync_chaos.c drives them
