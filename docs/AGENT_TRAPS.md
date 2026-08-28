@@ -72,9 +72,9 @@ historical fixture passes, then deploy/restart intentionally.
   wallet/key/crypto state, reducers, and process ownership are
   `reload_required`. Never widen the allowlist to silence that blocker.
 - **Do not interpret a contained hot-swap call as a transport failure.**
-  `make hotswap` and `tools/dev/hotswap-running-dev.sh` refuse before
-  `dlopen` or resident RPC mutation. There is no exit-69 reload fallback and
-  no successful committed generation to inspect during containment. This does
+  `make hotswap` refuses before `dlopen` or resident RPC mutation. There is no
+  automatic reload fallback and no successful committed generation to inspect
+  during containment. This does
   NOT apply to the swappable-leaf module path: `dev.hotswap.probe`
   (verify-only, throwaway CLI process) works, and `dev.hotswap.apply`
   live-commits one allowlisted read-only leaf in the armed `zcl23-dev` node.

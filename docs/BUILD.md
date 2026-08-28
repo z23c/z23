@@ -269,8 +269,8 @@ make t ONLY=hotswap_loader
 make hotswap-sim
 ```
 
-`make hotswap` and `tools/dev/hotswap-running-dev.sh` always refuse. The live
-runtime surface is `make hotswap-try HANDLER=<leaf> ARGS="<cmd>"` (rebuilds
+`make hotswap` always refuses. The live runtime surface is
+`make hotswap-try HANDLER=<leaf> ARGS="<cmd>"` (rebuilds
 one swappable leaf into a module `.so`, runs the command in a one-shot CLI via
 `ZCL_HOTSWAP_PRELOAD`) and `make hotswap-apply HANDLER=<leaf>` (commits the
 override in the running `zcl23-dev` node, gated on `-hotswap-activate` +
@@ -712,7 +712,8 @@ make z23     # full link
 ## Build, test, deploy
 
 ```bash
-make -j"$(getconf _NPROCESSORS_ONLN)"   # test_zcl + z23 + zclassic-cli
+make -j"$(getconf _NPROCESSORS_ONLN)" z23  # public node only (the default goal)
+make -j"$(getconf _NPROCESSORS_ONLN)" all  # test harness + node + auxiliary tools
 make -j"$(getconf _NPROCESSORS_ONLN)" dev-bin  # fast local node executable, not for deploy/release
 make -j"$(getconf _NPROCESSORS_ONLN)" test     # full parallel suite via the cached per-TU test_parallel
 make -j"$(getconf _NPROCESSORS_ONLN)" test_parallel_wpo  # whole-program LTO test binary (debug per-TU/LTO divergence)

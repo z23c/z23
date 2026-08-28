@@ -237,8 +237,8 @@ one probe leaf the loader dispatches before it publishes anything; most of
 them are RPC front doors and so need a running node to probe, while
 `zcode.package.policy.limits` is a pure decision leaf that probes in-process
 with no node and no datadir. The release build keeps a refusal stub.
-`tools/dev/hotswap-running-dev.sh` is a contained former persistent transport;
-it always refuses. There is no auto-reload fallback during containment.
+There is no watcher-owned resident transport or automatic reload fallback
+during containment.
 
 ---
 
@@ -822,7 +822,6 @@ then exactly one of `ALL TESTS PASSED`, `ALL TESTS PASSED (CACHED)`, or
 | `make hotswap` | Phase-0 contained: refuses and directs the caller to `make hotswap-so` plus build/test verification. Whole-generation runtime publication stays contained; the live runtime path is the swappable-leaf module loop below. |
 | `make hotswap-try HANDLER=<leaf> ARGS="<cmd>"` | The observable seconds-scale dev loop: rebuild one swappable leaf's module `.so` (`hotswap-module-so`), then run ARGS in a short-lived child CLI with `ZCL_HOTSWAP_PRELOAD` against the dev lane and print the result. Read-only leaves on `config/hotswap_swappable.def` only; the override dies with the child process. |
 | `make hotswap-apply HANDLER=<leaf>` | Resident activation: commit the rebuilt leaf override in the RUNNING `zcl23-dev` service via `dev hotswap apply`. Gated inside the node on `-hotswap-activate` + `ZCL_HOTSWAP_ACTIVATE=1` + the exact dev datadir; refuses otherwise, and the canonical `z23` is never eligible. |
-| `tools/dev/hotswap-running-dev.sh` | Phase-0 contained direct transport: always refuses before RPC or loader activity. |
 | `make test-full` | Runs the `test_zcl` monolith (sequential). |
 | `make lint` | Every gate in the Makefile's `LINT_GATES` list (that variable is the count — never hand-pin a number). Must pass before tests. HARD gates fail the build; RATCHET gates compare to a shrink-only baseline. Always runs every gate cold — the canonical gate never accepts a cached verdict. |
 | `make lint-cached` | Same gates, but one whose entire scannable input is byte-identical to the last time it passed is skipped. Helps only when nothing changed; after any edit every gate re-runs, because the key is the whole tree. Gates that build things, run compilers, or read build output / git config / `/proc` / untracked state are never cached and always run — see the reasons in `tools/lint/lint_cache.sh`. |

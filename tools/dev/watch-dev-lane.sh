@@ -3,10 +3,8 @@
 #
 # Save-driven development loop for the isolated zcl23-dev lane.
 #
-# The loop classifies every save before activation.  A manifest-eligible,
-# stateless app-layer change may use a caller-supplied persistent hot-swap
-# transport; every other code change crosses the safe process-reload boundary.
-# Canonical and soak targets never appear in an activation command.
+# The loop classifies every save before verification. Runtime publication is
+# contained; the separate typed hot-swap command owns eligible leaf activation.
 
 set -uo pipefail
 
@@ -30,8 +28,6 @@ CHECK_COMMAND="${ZCL_DEV_WATCH_CHECK_COMMAND:-}"
 REBUILD_COMMAND="${ZCL_DEV_WATCH_REBUILD_COMMAND:-}"
 DEPLOY_COMMAND="${ZCL_DEV_WATCH_DEPLOY_COMMAND:-}"
 STAGE_COMMAND="${ZCL_DEV_WATCH_STAGE_COMMAND:-}"
-HOTSWAP_COMMAND="${ZCL_DEV_WATCH_HOTSWAP_COMMAND-$ROOT/tools/dev/hotswap-running-dev.sh}"
-HOTSWAP_MANIFEST="${ZCL_DEV_WATCH_HOTSWAP_MANIFEST:-$ROOT/config/hotswap_eligible.def}"
 DEFAULT_STATE_DIR="$HOME/.local/state/zclassic23-dev"
 STATE_DIR="${ZCL_DEV_WATCH_STATE_DIR:-$DEFAULT_STATE_DIR}"
 PREACTIVATE_COMMAND="${ZCL_DEV_WATCH_PREACTIVATE_COMMAND:-}"
@@ -50,7 +46,6 @@ CLASSIFICATION_REASON=""
 OBSERVED_FILES_FILE=""
 IMPACT_PLAN=""
 HEARTBEAT="$STATE_DIR/watcher-heartbeat.json"
-HOTSWAP_RESULT_FILE="${ZCL_DEV_HOTSWAP_RESULT:-$STATE_DIR/hotswap-latest.json}"
 LAST_CYCLE_RECORD=""
 LAST_OUTCOME="starting"
 
@@ -214,12 +209,6 @@ write_cycle_record()
     now="$(date -u +%FT%TZ)"
     total_ms=$(( $(clock_ms) - CYCLE_STARTED_MS ))
     impact_plan_is_json && impact="$(cat "$IMPACT_PLAN")"
-    if [ -r "$HOTSWAP_RESULT_FILE" ] &&
-       grep -q '"schema"[[:space:]]*:[[:space:]]*"zcl.dev_hotswap_result.v1"' "$HOTSWAP_RESULT_FILE" &&
-       [ "$(json_string_field_from_file "$HOTSWAP_RESULT_FILE" cycle_id)" = "$CYCLE_ID" ]; then
-        hotswap="$(cat "$HOTSWAP_RESULT_FILE")"
-    fi
-
     CANDIDATE_GENERATION="$(json_string_field_from_file "$activation_state" candidate_generation)"
     RUNNING_GENERATION="$(json_string_field_from_file "$activation_state" running_generation)"
     LAST_GOOD_GENERATION="$(json_string_field_from_file "$activation_state" last_good_generation)"
@@ -298,7 +287,6 @@ validate_options()
     [ -z "${ZCL_DEV_WATCH_REBUILD_COMMAND+x}" ] &&
     [ -z "${ZCL_DEV_WATCH_DEPLOY_COMMAND+x}" ] &&
     [ -z "${ZCL_DEV_WATCH_STAGE_COMMAND+x}" ] &&
-    [ -z "${ZCL_DEV_WATCH_HOTSWAP_COMMAND+x}" ] &&
     [ -z "${ZCL_DEV_WATCH_PREACTIVATE_COMMAND+x}" ] ||
         fail "ZCL_DEV_WATCH_*_COMMAND overrides are confined to --self-test"
     case "$BACKEND" in
@@ -733,12 +721,6 @@ run_activation_command()
                     tools/dev/deploy-dev-lane.sh)
             fi
             ;;
-        hotswap)
-            export ZCL_DEV_HOTSWAP_FILES_FILE="$ZCL_FAST_CHANGED_FILES_FILE"
-            export ZCL_DEV_HOTSWAP_PROBE="$SELECTED_PROBE"
-            export ZCL_DEV_SOURCE_ID="$SOURCE_ID"
-            (cd "$ROOT" && /bin/sh -c "$HOTSWAP_COMMAND")
-            ;;
         rejected)
             return 2
             ;;
@@ -747,29 +729,6 @@ run_activation_command()
             return 2
             ;;
     esac
-}
-
-schedule_async_immutable_build()
-{
-    local log_path="$STATE_DIR/async-immutable-build.log" source_id="$SOURCE_ID"
-    local source_clean="$SOURCE_CLEAN" source_mutation="$SOURCE_MUTATION"
-    mkdir -p "$STATE_DIR"
-    (
-        # Do not let the convergence worker inherit/extend the watcher's
-        # singleton flock after the foreground watcher exits. The activation
-        # script opens its own independent fd 9 for the generation lock.
-        exec 9>&- 2>/dev/null || true
-        cd "$ROOT" || exit 1
-        ZCL_DEV_WATCH_LANE=1 make --no-print-directory fast-rebuild > "$log_path" 2>&1 &&
-        "$SCRIPT_DIR/source-identity.sh" verify-record \
-            "$source_id" "$source_clean" "$source_mutation" \
-            >> "$log_path" 2>&1 &&
-        ZCL_DEV_SOURCE_ID="$source_id" ZCL_DEV_DEPLOY_BUILD=fast \
-            ZCL_DEV_USE_PREBUILT=1 \
-            ZCL_DEV_BUILD_ARTIFACT="$ROOT/build/bin/zclassic23-dev" \
-            tools/dev/deploy-dev-lane.sh --stage >> "$log_path" 2>&1
-    ) &
-    log "scheduled async immutable dev binary build+preflight stage pid=$! log=$log_path"
 }
 
 schedule_codeindex_warm()
@@ -842,7 +801,6 @@ run_cycle()
     export ZCL_FAST_LIVE=0
     export ZCL_DEV_ACTIVATION_RESULT="${ZCL_DEV_ACTIVATION_RESULT:-$HOME/.zclassic-c23-dev/agent-deploy.json}"
     export ZCL_DEV_CYCLE_ID="$CYCLE_ID"
-    export ZCL_DEV_HOTSWAP_RESULT="$HOTSWAP_RESULT_FILE"
 
     classify_cycle "$changed_file"
     log "cycle=$CYCLE check files=$count mode=$MODE path=$SELECTED_PATH"
@@ -974,43 +932,6 @@ run_cycle()
     else
         ACTIVATION_RESULT="$([ "$rc" -eq 0 ] && printf passed || printf failed)"
     fi
-    if [ "$rc" -eq 69 ] && [ "$SELECTED_PATH" = "hotswap" ] &&
-       [ "$MODE" = "auto" ]; then
-        log "cycle=$CYCLE persistent hot-swap transport unavailable; falling back to transactional reload"
-        SELECTED_PATH="reload"
-        SELECTION_REASON="reload_required: persistent dev-node hot-swap RPC unavailable at runtime"
-        phase_started="$(clock_ms)"
-        run_rebuild_command
-        rc=$?
-        LINK_MS=$(( $(clock_ms) - phase_started ))
-        LINK_RESULT="$([ "$rc" -eq 0 ] && printf passed || printf failed)"
-        if [ "$rc" -ne 0 ]; then
-            FAILURE_PHASE="link"
-            FAILURE_DETAIL="hot-swap fallback dev rebuild failed with exit $rc"
-            AGENT_NEXT_ACTION="MODE=reload ZCL_DEV_WATCH_ONCE_FILES_FILE=$changed_file make dev-watch-once"
-            write_cycle_record "$changed_file" rejected
-            return 1
-        fi
-        if ! source_still_matches "$expected_manifest"; then
-            FAILURE_PHASE="superseded"
-            FAILURE_DETAIL="source changed during hot-swap reload fallback"
-            AGENT_NEXT_ACTION="MODE=$MODE ZCL_DEV_WATCH_ONCE_FILES_FILE=$changed_file make dev-watch-once"
-            write_cycle_record "$changed_file" superseded
-            return 3
-        fi
-        if ! verify_source_epoch; then
-            FAILURE_PHASE="source_epoch_cas"
-            FAILURE_DETAIL="$SOURCE_GATE_DETAIL"
-            AGENT_NEXT_ACTION="coalesce the newest exact source epoch and rerun verify"
-            write_cycle_record "$changed_file" superseded
-            return 3
-        fi
-        phase_started="$(clock_ms)"
-        run_activation_command
-        rc=$?
-        ACTIVATE_MS=$(( ACTIVATE_MS + $(clock_ms) - phase_started ))
-        ACTIVATION_RESULT="$([ "$rc" -eq 0 ] && printf passed || printf failed)"
-    fi
     if [ "$rc" -ne 0 ]; then
         FAILURE_PHASE="activation"
         FAILURE_DETAIL="$SELECTED_PATH activation failed with exit $rc"
@@ -1037,10 +958,6 @@ run_cycle()
         reload) log "cycle=$CYCLE ready isolated-dev-lane elapsed_s=$(elapsed_seconds "$started")" ;;
         stage) log "cycle=$CYCLE staged-for-next-dev-restart elapsed_s=$(elapsed_seconds "$started")" ;;
         check) log "cycle=$CYCLE green checks-only elapsed_s=$(elapsed_seconds "$started")" ;;
-        hotswap)
-            log "cycle=$CYCLE committed hot-swap elapsed_s=$(elapsed_seconds "$started")"
-            schedule_async_immutable_build
-            ;;
     esac
     return 0
 }
@@ -1107,7 +1024,6 @@ self_test()
     WORK="$sandbox/work"
     STATE_DIR="$sandbox/state"
     HEARTBEAT="$STATE_DIR/watcher-heartbeat.json"
-    HOTSWAP_RESULT_FILE="$STATE_DIR/hotswap-latest.json"
     command_log="$sandbox/commands.log"
     export ZCL_WATCH_TEST_LOG="$command_log"
     mkdir -p "$ROOT/app" "$ROOT/core/consensus" "$ROOT/docs" \
@@ -1173,24 +1089,12 @@ self_test()
         selftest_fail "source-record refusal omitted the bounded-worker reason" || {
             rm -rf "$sandbox"; return 1;
         }
-    if HOME="$sandbox/home" "$SCRIPT_DIR/hotswap-running-dev.sh" \
-        >"$sandbox/public-hotswap.out" 2>&1; then
-        selftest_fail "direct resident hot-swap was not contained" || {
-            rm -rf "$sandbox"; return 1;
-        }
-    fi
-    grep -q 'runtime publication.*contained' "$sandbox/public-hotswap.out" ||
-        selftest_fail "direct hot-swap refusal omitted containment reason" || {
-            rm -rf "$sandbox"; return 1;
-        }
-
     refresh_watch_paths
     WARM_CODEINDEX=0
     CHECK_COMMAND="printf 'check\\n' >> '$command_log'"
     REBUILD_COMMAND="printf 'rebuild\\n' >> '$command_log'"
     DEPLOY_COMMAND="printf 'deploy\\n' >> '$command_log'"
     STAGE_COMMAND="printf 'stage\\n' >> '$command_log'"
-    HOTSWAP_COMMAND="printf 'hotswap\\n' >> '$command_log'"
     PREACTIVATE_COMMAND=""
 
     # The manifest detects modified/deleted/created paths without consulting

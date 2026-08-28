@@ -448,13 +448,12 @@ ZCLASSIC23_CHAOS_BIN = $(BIN_DIR)/zclassic23-chaos
 CHAOS_SEEDS ?= 64
 CHAOS_SWEEP_SCENARIO ?= tools/sim/scenarios/seeded_peer_churn.scenario
 
-# The make-vendor merge introduced the `vendor:` target ahead of `all:`, which
-# made `vendor` the implicit first target (and thus the default goal). A bare
-# `make` would then only build the vendored libs, never the binary. Pin the
-# default goal back to `all` so `git clone && make vendor && make` (and a plain
-# `make`) builds the node as expected; the auto-vendor prerequisite machinery
-# still pulls missing archives in transparently.
-.DEFAULT_GOAL := all
+# A bare `make` builds the public node only. The previous `all` default also
+# linked the monolithic test harness and every auxiliary tool, making the
+# obvious first-run command pay for artifacts it did not ask for. `make all`
+# retains that complete bundle; test and tool targets remain explicit. The
+# auto-vendor prerequisite machinery still supplies missing pinned archives.
+.DEFAULT_GOAL := z23
 
 # App layer (MVC)
 APP_DIRS = models controllers views services supervisors conditions jobs

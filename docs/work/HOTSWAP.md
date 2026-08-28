@@ -631,10 +631,10 @@ build/bin/z23-dev -datadir="$HOME/.zclassic-c23-dev" \
 make hotswap-sim
 ```
 
-For the manifest/staging mechanism, `make hotswap` and
-`tools/dev/hotswap-running-dev.sh` remain contained: both refuse before
-building, loading, forwarding, or registry replacement, and the staging path
-itself stops before the commit. `dev.hotswap.apply` and `dev.hotswap.probe`
+For the manifest/staging mechanism, `make hotswap` remains contained: it
+refuses before building, loading, forwarding, or registry replacement, and
+the staging path itself stops before the commit. `dev.hotswap.apply` and
+`dev.hotswap.probe`
 are NOT staging entry points — they are the live module-ABI commands
 described under "Real module ABI" above. Use the simulation and focused
 loader tests as the staging mechanism's end-to-end proof surfaces.
@@ -718,9 +718,9 @@ Its fixed-argv service-control timeout is longer than that unit's
 Its 120-second readiness window also exceeds the measured 67.6-second
 schema-59 recovery boot; the prior 60-second window rejected that healthy boot.
 
-Only `make hotswap` and `tools/dev/hotswap-running-dev.sh` remain typed
-containment refusals; the manifest/staging publication path likewise stops
-before the commit. Re-enable staging publication only with a disposable
+`make hotswap` remains the typed containment refusal; the manifest/staging
+publication path likewise stops before the commit. Re-enable staging
+publication only with a disposable
 worker, pre-load sidecar/ELF/import policy, an immutable artifact receipt,
 and bounded fixtures.
 
