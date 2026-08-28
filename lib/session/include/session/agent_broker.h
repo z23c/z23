@@ -54,6 +54,15 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#if defined(_WIN32)
+/* Storage-only placeholders while the agent adapter is hard-disabled on
+ * Windows. Authorization must use token SIDs, never these numeric fields;
+ * keeping a fixed-width representation lets the node compile without
+ * pretending that Unix UID/GID checks provide a Windows security boundary. */
+typedef uint32_t uid_t;
+typedef uint32_t gid_t;
+#endif
+
 /* ── the grant (broker-side only; never crosses to the child) ───────────── */
 
 #define AGENT_GRANT_ID_MAX      32

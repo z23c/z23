@@ -977,7 +977,8 @@ int postmortem_capture_write(const struct postmortem_capture_opts *opts,
     return 0;
 }
 
-static void postmortem_crash_hook(int sig, siginfo_t *info, void *ucontext,
+static void postmortem_crash_hook(int sig, zcl_signal_info_t *info,
+                                  void *ucontext,
                                   void *ctx)
 {
     (void)ctx;

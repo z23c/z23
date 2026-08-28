@@ -9,7 +9,11 @@
 #include "platform/time_compat.h"
 
 #include <errno.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <execinfo.h>
+#endif
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
@@ -21,7 +25,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__linux__)
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 enum { DBLT_PATH_MAX = 1024, DBLT_OWNER_MAX = 80, DBLT_ENTRIES = 128 };
@@ -74,6 +80,8 @@ static unsigned long long lifetime_tid(void)
            (unsigned long long)tid : 0u;
 #elif defined(__linux__)
     return (unsigned long long)syscall(SYS_gettid);
+#elif defined(_WIN32)
+    return (unsigned long long)GetCurrentThreadId();
 #else
 #error "lifetime_tid requires a native thread identifier"
 #endif
@@ -168,6 +176,9 @@ static struct db_lifetime_entry *lifetime_entry_locked(const char *path,
 
 static void lifetime_backtrace(char out[1024])
 {
+#if defined(_WIN32)
+    snprintf(out, 1024, "%s", "unavailable-on-windows");
+#else
     void *frames[12];
     int count = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
     char **symbols = count > 0 ? backtrace_symbols(frames, count) : NULL;
@@ -184,6 +195,7 @@ static void lifetime_backtrace(char out[1024])
         out[used] = '\0';
     }
     free(symbols);
+#endif
 }
 
 static void lifetime_log(const char *event, const char *path,
@@ -301,6 +313,7 @@ static bool lifetime_delete_unauthorized(const char *path,
  * calls as the final ownership boundary so no raw SQLite caller or helper can
  * evade the same generation/refcount audit.  The syscall forms avoid calling
  * back through libc and therefore cannot recurse into these wrappers. */
+#if !defined(_WIN32)
 static int lifetime_os_remove(const char *event, int dirfd, const char *path,
                               int flags)
 {
@@ -372,6 +385,11 @@ int renameat(int olddirfd, const char *oldpath,
     return lifetime_os_rename("os_renameat", olddirfd, oldpath,
                               newdirfd, newpath);
 }
+#else
+/* SQLite's Win32 VFS does not call the Unix unlink/rename symbols. Native
+ * Windows lifecycle enforcement belongs in the Win32 VFS wrapper; package
+ * and canonical runtime acceptance remain blocked until that hook is wired. */
+#endif
 
 static struct db_lifetime_file *lifetime_file(sqlite3_file *file)
 {

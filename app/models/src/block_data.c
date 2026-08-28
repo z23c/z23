@@ -4,6 +4,7 @@
 #include "util/file_tree_ops.h"
 #include "util/log_macros.h"
 #include <dirent.h>
+#include "platform/directory_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,7 +90,7 @@ bool block_data_save(struct block_data *bd)
 
     struct stat st;
     if (stat(bd->dst_dir, &st) != 0)
-        mkdir(bd->dst_dir, 0700);
+        platform_directory_create(bd->dst_dir, 0700);
 
     /* `cp -au 'src'/blk*.dat 'dst'/` — copy newer-or-missing blk*.dat files,
      * preserving their timestamps (cp -a), via the single fd-based walker with

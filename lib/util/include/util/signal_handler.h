@@ -26,12 +26,24 @@
 
 #include <signal.h>
 
+#if defined(_WIN32)
+/* Windows console and exception handlers do not expose POSIX siginfo_t.
+ * Keep the hook ABI explicit and opaque on that platform; the native crash
+ * backend supplies exception detail through its own durable report. */
+typedef struct zcl_signal_info {
+    int code;
+    void *address;
+} zcl_signal_info_t;
+#else
+typedef siginfo_t zcl_signal_info_t;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef void (*signal_handler_crash_hook_fn)(int sig,
-                                             siginfo_t *info,
+                                             zcl_signal_info_t *info,
                                              void *ucontext,
                                              void *ctx);
 
@@ -71,7 +83,8 @@ void signal_handler_clear_crash_hook(void);
 
 /* Shared hook entry point for other fatal handlers that own the active
  * sigaction chain, such as the event-log crash dumper. */
-void signal_handler_run_crash_hook(int sig, siginfo_t *info, void *ucontext);
+void signal_handler_run_crash_hook(int sig, zcl_signal_info_t *info,
+                                   void *ucontext);
 
 #ifdef __cplusplus
 }
