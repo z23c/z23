@@ -15,6 +15,7 @@
  */
 
 #include "platform/time_compat.h"
+#include "platform/positioned_file.h"
 #include "controllers/diagnostics_internal.h"
 
 #include "json/json.h"
@@ -30,10 +31,7 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <time.h>
-#include <unistd.h>
-#include <sys/stat.h>
 #include <sys/types.h>
-#include <fcntl.h>
 
 #define NODELOG_DEFAULT_SINCE_SECS    300
 #define NODELOG_MAX_SINCE_SECS       86400
@@ -322,15 +320,17 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
     char log_path[1280];
     snprintf(log_path, sizeof(log_path), "%s/node.log", datadir);
 
-    int fd = open(log_path, O_RDONLY);
-    if (fd < 0) {
+    struct platform_positioned_file log_file;
+    platform_positioned_file_init(&log_file);
+    if (!platform_positioned_file_open(&log_file, log_path)) {
         json_set_str(result, "getnodelog: cannot open node.log");
         LOG_FAIL("diag", "getnodelog: cannot open %s", log_path);
     }
 
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        close(fd);
+    uint64_t log_size = 0;
+    if (!platform_positioned_file_size(&log_file, &log_size) ||
+        log_size > INT64_MAX) {
+        platform_positioned_file_close(&log_file);
         json_set_str(result, "getnodelog: fstat failed on node.log");
         LOG_FAIL("diag", "getnodelog: fstat failed on %s", log_path);
     }
@@ -340,7 +340,7 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
     if (rc != 0) {
         char errbuf[128];
         regerror(rc, &re, errbuf, sizeof(errbuf));
-        close(fd);
+        platform_positioned_file_close(&log_file);
         json_set_str(result, "getnodelog: bad regex");
         LOG_FAIL("diag", "getnodelog: bad regex '%s': %s",
                  pattern, errbuf);
@@ -358,7 +358,7 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
     int emitted = 0;
     bool truncated = false;
     int64_t scanned = 0;
-    off_t pos = st.st_size;
+    int64_t pos = (int64_t)log_size;
     int timestamped_candidates = 0;
     int timestamped_lines_skipped = 0;
     int undated_lines_included = 0;
@@ -374,9 +374,10 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
            scanned < NODELOG_MAX_SCAN_BYTES) {
         size_t want = (pos > NODELOG_CHUNK_SIZE) ? NODELOG_CHUNK_SIZE
                                                   : (size_t)pos;
-        off_t start = pos - (off_t)want;
+        int64_t start = pos - (int64_t)want;
         char buf[NODELOG_CHUNK_SIZE + 1];
-        ssize_t got = pread(fd, buf, want, start);
+        int64_t got = platform_positioned_file_read(
+            &log_file, buf, want, (uint64_t)start);
         if (got <= 0) break;
         buf[got] = '\0';
         scanned += got;
@@ -488,6 +489,6 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
                       since_secs == 0 || undated_lines_included == 0);
 
     regfree(&re);
-    close(fd);
+    platform_positioned_file_close(&log_file);
     return true;
 }

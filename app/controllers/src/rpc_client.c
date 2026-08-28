@@ -13,17 +13,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <unistd.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <time.h>
-#include <sys/time.h>
-#include <sys/socket.h>
 
 #include "platform/time_compat.h"
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "platform/socket_compat.h"
 
 #include "util/safe_alloc.h"
 
@@ -82,41 +76,75 @@ static int64_t rpc_now_ms(void)
 
 /* Non-blocking connect bounded by `budget_ms`. Returns 0 on success, or a
  * negative code the caller maps to a typed error body: -1 refused, -2 timed
- * out, -3 other. The socket is left blocking on success. */
-static int rpc_connect_deadline(int sock, const struct sockaddr_in *addr,
+ * out, -3 other. The socket remains nonblocking on success so every later
+ * send and receive can be governed by the same hard outer deadline. */
+static int rpc_connect_deadline(platform_socket_t sock,
+                                const struct sockaddr_in *addr,
                                 long budget_ms)
 {
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0)
-        return -3;
+    int rc = platform_socket_connect(sock, (const struct sockaddr *)addr,
+                                     sizeof(*addr));
+    if (rc == 0) return 0;
+    int error = platform_socket_last_error();
+    if (!platform_socket_error_in_progress(error))
+        return platform_socket_error_refused(error) ? -1 : -3;
 
-    int rc = connect(sock, (const struct sockaddr *)addr, sizeof(*addr));
-    if (rc == 0) {
-        (void)fcntl(sock, F_SETFL, flags);
-        return 0;
-    }
-    if (errno != EINPROGRESS)
-        return errno == ECONNREFUSED ? -1 : -3;
-
-    struct pollfd pfd = { .fd = sock, .events = POLLOUT };
     int pr;
     do {
-        pr = poll(&pfd, 1, (int)budget_ms);
-    } while (pr < 0 && errno == EINTR);
+        pr = platform_socket_wait_writable(sock, (int)budget_ms);
+    } while (pr < 0 && platform_socket_error_interrupted(
+                         platform_socket_last_error()));
     if (pr == 0)
         return -2; /* connect timed out */
     if (pr < 0)
         return -3;
 
     int soerr = 0;
-    socklen_t slen = sizeof(soerr);
-    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0)
+    if (platform_socket_pending_error(sock, &soerr) < 0)
         return -3;
     if (soerr != 0)
-        return soerr == ECONNREFUSED ? -1 : -3;
+        return platform_socket_error_refused(soerr) ? -1 : -3;
 
-    (void)fcntl(sock, F_SETFL, flags);
     return 0;
+}
+
+static bool rpc_send_deadline(platform_socket_t sock, const void *data,
+                              size_t size, int64_t deadline_ms)
+{
+    const unsigned char *bytes = data;
+    size_t sent = 0;
+    while (sent < size) {
+        int64_t remaining = deadline_ms - rpc_now_ms();
+        if (remaining <= 0) return false;
+        int wait_ms = remaining > INT32_MAX ? INT32_MAX : (int)remaining;
+        int ready = platform_socket_wait_writable(sock, wait_ms);
+        if (ready == 0) return false;
+        if (ready < 0) {
+            if (platform_socket_error_interrupted(platform_socket_last_error()))
+                continue;
+            return false;
+        }
+        size_t chunk = size - sent;
+        int part = chunk > INT32_MAX ? INT32_MAX : (int)chunk;
+#if defined(_WIN32)
+        int n = send(sock, (const char *)bytes + sent, part, 0);
+#else
+        int send_flags = 0;
+#ifdef MSG_NOSIGNAL
+        send_flags = MSG_NOSIGNAL;
+#endif
+        int n = (int)send(sock, bytes + sent, (size_t)part, send_flags);
+#endif
+        if (n > 0) { sent += (size_t)n; continue; }
+        if (n < 0) {
+            int error = platform_socket_last_error();
+            if (platform_socket_error_interrupted(error) ||
+                platform_socket_error_would_block(error))
+                continue;
+        }
+        return false;
+    }
+    return true;
 }
 
 static char *rpc_transport_error(const char *reason)
@@ -229,17 +257,22 @@ bool node_rpc_port_listening(int rpc_port, long connect_ms)
 {
     if (rpc_port < 1 || rpc_port > 65535)
         return false;
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0)
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                   true, true);
+    if (sock == PLATFORM_SOCKET_INVALID)
         return false;
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons((uint16_t)rpc_port),
     };
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (platform_socket_parse_address(AF_INET, "127.0.0.1",
+                                      &addr.sin_addr) != 1) {
+        platform_socket_close(sock);
+        return false;
+    }
     int rc = rpc_connect_deadline(sock, &addr,
                                   rpc_clamp_ms(connect_ms, 1, 60000));
-    close(sock);
+    platform_socket_close(sock);
     return rc == 0;
 }
 
@@ -276,15 +309,20 @@ static char *node_rpc_call_http_impl(const char *method,
 
     const int64_t deadline_ms = rpc_now_ms() + total_ms;
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0)
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                   true, true);
+    if (sock == PLATFORM_SOCKET_INVALID)
         return rpc_transport_error("socket failed");
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons((uint16_t)rpc_port),
     };
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (platform_socket_parse_address(AF_INET, "127.0.0.1",
+                                      &addr.sin_addr) != 1) {
+        platform_socket_close(sock);
+        return rpc_transport_error("invalid loopback address");
+    }
 
     /* Bound the connect so a firewalled/hung local port cannot block the whole
      * command. Never wait past the overall deadline. */
@@ -296,7 +334,7 @@ static char *node_rpc_call_http_impl(const char *method,
         connect_budget = remaining;
     int crc = rpc_connect_deadline(sock, &addr, connect_budget);
     if (crc != 0) {
-        close(sock);
+        platform_socket_close(sock);
         if (crc == -1)
             return rpc_transport_error(
                 "cannot connect to node (connection refused) — is the node "
@@ -306,21 +344,6 @@ static char *node_rpc_call_http_impl(const char *method,
                 "cannot connect to node (connect timed out) — the RPC port "
                 "is not accepting connections; check -rpcport and the node");
         return rpc_transport_error("cannot connect to node");
-    }
-
-    /* Past connect, a hang means "accepted but not answering" (busy/wedged).
-     * SO_RCVTIMEO/SO_SNDTIMEO bound each syscall; the outer deadline below
-     * bounds the total so slow trickles cannot outlast the budget either. */
-    {
-        long rem = (long)(deadline_ms - rpc_now_ms());
-        if (rem < 1)
-            rem = 1;
-        struct timeval tv = {
-            .tv_sec = rem / 1000,
-            .tv_usec = (rem % 1000) * 1000,
-        };
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     }
 
     char auth_b64[512];
@@ -339,16 +362,16 @@ static char *node_rpc_call_http_impl(const char *method,
     /* MSG_NOSIGNAL: a peer reset mid-send must return EPIPE, not raise
      * SIGPIPE and kill the caller. Treat any short/failed write as
      * fatal for this request — a truncated POST yields a bogus reply. */
-    if (send(sock, header, (size_t)hlen, MSG_NOSIGNAL) != (ssize_t)hlen ||
-        send(sock, body,   (size_t)blen, MSG_NOSIGNAL) != (ssize_t)blen) {
-        close(sock);
+    if (!rpc_send_deadline(sock, header, (size_t)hlen, deadline_ms) ||
+        !rpc_send_deadline(sock, body, (size_t)blen, deadline_ms)) {
+        platform_socket_close(sock);
         return strdup("{\"error\":{\"code\":-32603,"
                       "\"message\":\"failed to send request to node\"}}");
     }
 
     size_t cap = 65536, len = 0;
     char *buf = zcl_malloc(cap, "rpc response buf");
-    if (!buf) { close(sock); return NULL; }
+    if (!buf) { platform_socket_close(sock); return NULL; }
     bool timed_out = false;
     for (;;) {
         if (rpc_now_ms() >= deadline_ms) {
@@ -358,23 +381,37 @@ static char *node_rpc_call_http_impl(const char *method,
         if (len + 4096 > cap) {
             size_t newcap = cap * 2;
             char *tmp = zcl_realloc(buf, newcap, "rpc response buf");
-            if (!tmp) { free(buf); close(sock); return NULL; }
+            if (!tmp) { free(buf); platform_socket_close(sock); return NULL; }
             buf = tmp;
             cap = newcap;
         }
-        ssize_t n = recv(sock, buf + len, cap - len - 1, 0);
+        int64_t wait_remaining = deadline_ms - rpc_now_ms();
+        if (wait_remaining <= 0) { timed_out = true; break; }
+        int wait_ms = wait_remaining > INT32_MAX ? INT32_MAX :
+                      (int)wait_remaining;
+        int ready = platform_socket_wait_readable(sock, wait_ms);
+        if (ready == 0) { timed_out = true; break; }
+        if (ready < 0) {
+            if (platform_socket_error_interrupted(platform_socket_last_error()))
+                continue;
+            break;
+        }
+        int n = platform_socket_receive(sock, buf + len, cap - len - 1);
         if (n < 0) {
             /* SO_RCVTIMEO fired (EAGAIN/EWOULDBLOCK) or a real read error —
              * either way this request is done; a partial read yields a bogus
              * reply, so surface a timeout rather than parse garbage. */
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            int error = platform_socket_last_error();
+            if (platform_socket_error_would_block(error) ||
+                platform_socket_error_timed_out(error) ||
+                platform_socket_error_interrupted(error))
                 timed_out = true;
             break;
         }
         if (n == 0) break;
         len += (size_t)n;
     }
-    close(sock);
+    platform_socket_close(sock);
 
     if (timed_out && len == 0) {
         free(buf);

@@ -50,6 +50,12 @@ static inline bool platform_socket_runtime_init(void)
 }
 #endif
 
+/* Includes space for the terminating NUL.  Keep address text sizing in the
+ * platform boundary so application code does not depend on which socket
+ * headers expose the POSIX INET_* constants. */
+#define PLATFORM_IPV4_ADDRESS_TEXT_SIZE 16U
+#define PLATFORM_IPV6_ADDRESS_TEXT_SIZE 46U
+
 static inline platform_socket_t platform_socket_open(int domain, int type,
                                                       int protocol,
                                                       bool close_on_exec,
@@ -139,6 +145,36 @@ static inline bool platform_socket_error_timed_out(int error)
 #endif
 }
 
+static inline bool platform_socket_error_would_block(int error)
+{
+#if defined(_WIN32)
+    return error == WSAEWOULDBLOCK;
+#else
+    return error == EAGAIN || error == EWOULDBLOCK;
+#endif
+}
+
+static inline bool platform_socket_error_interrupted(int error)
+{
+#if defined(_WIN32)
+    return error == WSAEINTR;
+#else
+    return error == EINTR;
+#endif
+}
+
+static inline int platform_socket_connect(platform_socket_t sock,
+                                           const struct sockaddr *address,
+                                           size_t address_size)
+{
+#if defined(_WIN32)
+    if (address_size > INT32_MAX) return SOCKET_ERROR;
+    return connect(sock, address, (int)address_size);
+#else
+    return connect(sock, address, (socklen_t)address_size);
+#endif
+}
+
 static inline const char *platform_socket_error_string(int error, char *out,
                                                        size_t out_size)
 {
@@ -180,6 +216,23 @@ static inline int platform_socket_wait_writable(platform_socket_t sock,
     return select(0, NULL, &writable, NULL, &timeout);
 #else
     return select(sock + 1, NULL, &writable, NULL, &timeout);
+#endif
+}
+
+static inline int platform_socket_wait_readable(platform_socket_t sock,
+                                                 int timeout_ms)
+{
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(sock, &readable);
+    struct timeval timeout = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+#if defined(_WIN32)
+    return select(0, &readable, NULL, NULL, &timeout);
+#else
+    return select(sock + 1, &readable, NULL, NULL, &timeout);
 #endif
 }
 

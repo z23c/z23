@@ -51,7 +51,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -70,25 +69,59 @@ extern volatile sig_atomic_t g_shutdown_requested;
 
 /* Index drop/rebuild delegated to node_db_ibd_turbo_mode/normal_mode. */
 
-/* Helper: mmap a block file, returning mapped data or NULL. */
-uint8_t *sync_controller_mmap_block_file(const char *datadir, int file_num,
-                                         size_t *out_size)
+void sync_block_file_mapping_init(struct sync_block_file_mapping *mapping)
 {
+    if (!mapping) return;
+    mapping->fd = -1;
+    platform_read_mapping_init(&mapping->view);
+}
+
+void sync_block_file_mapping_close(struct sync_block_file_mapping *mapping)
+{
+    if (!mapping) return;
+    platform_read_mapping_close(&mapping->view);
+    if (mapping->fd >= 0) close(mapping->fd);
+    sync_block_file_mapping_init(mapping);
+}
+
+bool sync_block_file_mapping_open(struct sync_block_file_mapping *mapping,
+                                  const char *datadir, int file_num)
+{
+    if (!mapping || !datadir || file_num < 0) return false;
+    sync_block_file_mapping_close(mapping);
+
     char path[512];
-    snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-             datadir, file_num);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) LOG_NULL("sync", "mmap_block_file: open failed for %s", path);
+    int path_len = snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
+                            datadir, file_num);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+        LOG_WARN("sync", "map_block_file: path too long for file %d", file_num);
+        return false;
+    }
+    int flags = O_RDONLY;
+#ifdef O_BINARY
+    flags |= O_BINARY;
+#endif
+    int fd = open(path, flags);
+    if (fd < 0) {
+        LOG_WARN("sync", "map_block_file: open failed for %s", path);
+        return false;
+    }
     struct stat fst;
-    if (fstat(fd, &fst) != 0) { close(fd); LOG_NULL("sync", "mmap_block_file: fstat failed for %s", path); }
-    uint8_t *data = mmap(NULL, (size_t)fst.st_size,
-                         PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (data == MAP_FAILED) LOG_NULL("sync", "mmap_block_file: mmap failed for file %d", file_num);
-    *out_size = (size_t)fst.st_size;
-    posix_madvise(data, *out_size, POSIX_MADV_SEQUENTIAL);
-    posix_madvise(data, *out_size, POSIX_MADV_WILLNEED);
-    return data;
+    if (fstat(fd, &fst) != 0 || fst.st_size <= 0 ||
+        (uintmax_t)fst.st_size > (uintmax_t)SIZE_MAX) {
+        close(fd);
+        LOG_WARN("sync", "map_block_file: invalid size for %s", path);
+        return false;
+    }
+    if (!platform_read_mapping_open(&mapping->view, fd,
+                                    (size_t)fst.st_size)) {
+        close(fd);
+        LOG_WARN("sync", "map_block_file: mapping failed for file %d", file_num);
+        return false;
+    }
+    mapping->fd = fd;
+    platform_read_mapping_advise_sequential(&mapping->view);
+    return true;
 }
 
 /* catchup_try_sapling_decrypt (try-decrypt Sapling outputs into SQLite)

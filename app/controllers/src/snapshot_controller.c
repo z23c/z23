@@ -18,6 +18,7 @@
 
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
 #include "controllers/snapshot_controller.h"
 #include "snapshot_controller_internal.h"
 #include "config/file_ops.h"
@@ -25,9 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include "util/log_macros.h"
 
 /* ZCL_MAGIC used in legacy_import.c, not needed here. */
@@ -86,38 +84,47 @@ void snapshot_tx_rollback_best_effort(struct node_db *ndb,
 
 /* ---- Snapshot directory management ---- */
 
+static bool snapshot_name_valid(const char *name)
+{
+    if (!name || strlen(name) != 15 || name[8] != '_') return false;
+    for (size_t i = 0; i < 15; ++i) {
+        if (i == 8) continue;
+        if (name[i] < '0' || name[i] > '9') return false;
+    }
+    return true;
+}
+
 static void rotate_snapshots(const char *snapshots_dir, int max_keep)
 {
-    struct dirent **entries;
-    int n = scandir(snapshots_dir, &entries, NULL, alphasort);
-    if (n < 0) return;
+    struct platform_directory_list list;
+    if (!platform_directory_list_real_sorted(snapshots_dir, &list)) return;
 
     /* Count real snapshot dirs (YYYYMMDD_HHMMSS format) */
     int count = 0;
-    for (int i = 0; i < n; i++) {
-        if (entries[i]->d_name[0] != '.' && strlen(entries[i]->d_name) == 15)
+    for (size_t i = 0; i < list.count; i++) {
+        if (snapshot_name_valid(list.entries[i].name))
             count++;
     }
 
     /* Remove oldest if over limit */
     int to_remove = count - max_keep;
     if (to_remove > 0) {
-        for (int i = 0; i < n && to_remove > 0; i++) {
-            if (entries[i]->d_name[0] == '.' ||
-                strlen(entries[i]->d_name) != 15)
+        for (size_t i = 0; i < list.count && to_remove > 0; i++) {
+            if (!snapshot_name_valid(list.entries[i].name))
                 continue;
             char path[1024];
-            snprintf(path, sizeof(path), "%s/%s",
-                     snapshots_dir, entries[i]->d_name);
+            int path_len = snprintf(path, sizeof(path), "%s/%s",
+                                    snapshots_dir, list.entries[i].name);
+            if (path_len <= 0 || (size_t)path_len >= sizeof(path))
+                continue;
             printf("snapshot: removing old snapshot %s\n",
-                   entries[i]->d_name);
+                   list.entries[i].name);
             dir_remove_tree(path);
             to_remove--;
         }
     }
 
-    for (int i = 0; i < n; i++) free(entries[i]);
-    free(entries);
+    platform_directory_list_free(&list);
 }
 
 const char *snapshot_create(const char *legacy_datadir,
@@ -130,7 +137,7 @@ const char *snapshot_create(const char *legacy_datadir,
     char snapshots_dir[2048];
     snprintf(snapshots_dir, sizeof(snapshots_dir),
              "%s/snapshots", c23_datadir);
-    mkdir(snapshots_dir, 0700);
+    if (!platform_directory_ensure(snapshots_dir, 0700)) return NULL;
 
     /* Rotate old snapshots first */
     rotate_snapshots(snapshots_dir, max_keep);
@@ -142,7 +149,7 @@ const char *snapshot_create(const char *legacy_datadir,
     char ts[16];
     strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm);
     snprintf(snap_dir, sizeof(snap_dir), "%s/%s", snapshots_dir, ts);
-    mkdir(snap_dir, 0700);
+    if (!platform_directory_ensure(snap_dir, 0700)) return NULL;
 
     struct timespec t0;
     platform_time_monotonic_timespec(&t0);
@@ -150,7 +157,10 @@ const char *snapshot_create(const char *legacy_datadir,
     /* Hard-link block files (instant — same filesystem) */
     char src[2048], dst[2048];
     snprintf(dst, sizeof(dst), "%s/blocks", snap_dir);
-    mkdir(dst, 0700);
+    if (!platform_directory_ensure(dst, 0700)) {
+        dir_remove_tree(snap_dir);
+        return NULL;
+    }
 
     printf("snapshot: copying block files...\n");
     fflush(stdout);

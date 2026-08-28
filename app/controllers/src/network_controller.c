@@ -2,6 +2,7 @@
  * MIT software license; see COPYING or opensource.org/license/mit. */
 
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 #include "controllers/agent_controller.h"
 #include "controllers/agent_security_posture.h"
 #include "controllers/network_controller.h"
@@ -292,7 +293,7 @@ static bool rpc_getnetworkinfo(const struct json_value *params, bool help,
 
     json_push_kv_real(result, "relayfee", 0.00000100);
 
-    char ext_ip[INET_ADDRSTRLEN] = {0};
+    char ext_ip[PLATFORM_IPV4_ADDRESS_TEXT_SIZE] = {0};
     uint16_t ext_port = 0;
     msg_version_get_external_ip(ext_ip, sizeof(ext_ip), &ext_port);
     json_push_localaddresses(result, "localaddresses", ext_ip, ext_port);
@@ -354,7 +355,7 @@ static bool rpc_bootstrapstatus(const struct json_value *params, bool help,
     struct network_counts counts;
     network_counts_collect(ctx->connman, &counts);
 
-    char ext_ip[INET_ADDRSTRLEN] = {0};
+    char ext_ip[PLATFORM_IPV4_ADDRESS_TEXT_SIZE] = {0};
     uint16_t ext_port = 0;
     bool has_external_ip =
         msg_version_get_external_ip(ext_ip, sizeof(ext_ip), &ext_port);
