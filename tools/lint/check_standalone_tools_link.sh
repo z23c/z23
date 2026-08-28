@@ -104,6 +104,7 @@ declare -A EXEMPT=(
 # other host the tool keeps being built exactly as before.
 declare -A DARWIN_EXEMPT=(
     [zcl-portfwd]="event loop sits on sys/epoll.h (Linux kernel API)"
+    [z23-headless-run.exe]="Win32 PE launcher; #include <windows.h> + -municode, and its rule is inside ifeq (\$(ZCL_HOST_WINDOWS),1) so it does not exist on this host"
     [native_ui_driver]="X11 UI transport; links -Wl,-l:libX11.so.6"
     [fuzz_zcode_commons]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
     [fuzz_zcode_dht]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
