@@ -465,8 +465,11 @@ endif
 LIB_INCLUDES = $(foreach m,$(LIB_MODULES),-Ilib/$(m)/include)
 LIB_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(foreach m,$(LIB_MODULES),$(wildcard lib/$(m)/src/*.c)))
-ifeq ($(ZCL_HOST_OS),Linux)
+ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
+	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
+else ifeq ($(ZCL_HOST_WINDOWS),1)
+LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
 	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
