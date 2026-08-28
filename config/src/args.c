@@ -493,7 +493,9 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
          * derive gate is set here (pre-boot) so the reducer activation fold sees
          * the derived cadence. */
         else if (strcmp(argv[i], "-prefetch-blocks") == 0) ctx->prefetch_blocks = true;
-        else if (strcmp(argv[i], "-pv-lookahead") == 0) ctx->pv_lookahead = true;
+        else if (strcmp(argv[i], "-pv-lookahead") == 0 ||
+                 strcmp(argv[i], "-pv-lookahead=1") == 0) ctx->pv_lookahead = true;
+        else if (strcmp(argv[i], "-pv-lookahead=0") == 0) ctx->pv_lookahead = false;
         else if (strcmp(argv[i], "-derive-drain-batch") == 0) hw_profile_set_derive_drain_batch(true);
         else if (strcmp(argv[i], "-sandbox=steady") == 0) ctx->sandbox_steady = true;
         else if (strcmp(argv[i], "-sandbox=off") == 0) ctx->sandbox_steady = false;
