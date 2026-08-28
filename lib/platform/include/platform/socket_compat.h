@@ -33,6 +33,7 @@ static inline bool platform_socket_runtime_init(void)
                                NULL, NULL) != 0;
 }
 #else
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/select.h>
@@ -262,6 +263,20 @@ static inline int platform_socket_receive(platform_socket_t sock, void *data,
         result = (int)recv(sock, data, (size_t)part, 0);
     } while (result < 0 && errno == EINTR);
     return result;
+#endif
+}
+
+/* Parse one numeric network address without exposing the platform-specific
+ * inet_pton declaration or its Windows startup requirement to callers. */
+static inline int platform_socket_parse_address(int family, const char *text,
+                                                 void *address)
+{
+    if (!text || !address || !platform_socket_runtime_init())
+        return 0;
+#if defined(_WIN32)
+    return InetPtonA(family, text, address);
+#else
+    return inet_pton(family, text, address);
 #endif
 }
 
