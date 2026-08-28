@@ -25,7 +25,7 @@ lib/crypto/src/ed25519.c 1033
 lib/codeindex/src/codeindex_build.c 991
 lib/codeindex/src/codeindex_scan.c 971
 lib/codeindex/src/codeindex_store.c 935
-lib/event/src/event.c 956
+lib/event/src/event.c 969
 lib/hotswap/src/hotswap_loader.c 817
 lib/kernel/src/command_registry.c 2289
 lib/metrics/src/prometheus_metrics.c 1100
@@ -34,24 +34,24 @@ lib/net/src/connman.c 2929
 lib/net/src/download.c 1623
 lib/net/src/fast_sync.c 1904
 lib/net/src/file_service.c 2255
-lib/net/src/https_server.c 984
+lib/net/src/https_server.c 979
 lib/net/src/msg_blocks.c 913 # getblocks pre-handshake service gate (defense-in-depth)
 lib/net/src/msg_headers.c 2066
 lib/net/src/msgprocessor.c 2817
-lib/net/src/msgprocessor_snapshot.c 2014
+lib/net/src/msgprocessor_snapshot.c 1948
 lib/net/src/msgprocessor_snapshot_serve.c 1114
 lib/net/src/net.c 1973
 lib/net/src/onion_directory.c 865
 lib/net/src/onion_service.c 1225
 lib/net/src/peer_lifecycle.c 1856
-lib/net/src/rom_fetch.c 1709
+lib/net/src/rom_fetch.c 1694
 lib/net/src/rom_seed.c 1111
 lib/platform/src/os_sandbox_linux.c 1526
-lib/rpc/src/httpserver.c 1654
+lib/rpc/src/httpserver.c 1592
 lib/sapling/src/circuit_gadgets.c 1053
 lib/sapling/src/circuit_spend.c 959
 lib/sapling/src/groth16_prover.c 1203
-lib/sapling/src/incremental_merkle_tree.c 1033
+lib/sapling/src/incremental_merkle_tree.c 1029
 lib/sapling/src/sapling.c 1220
 lib/sim/src/postmortem.c 1444
 lib/sim/src/simnet_cluster.c 873
@@ -61,7 +61,7 @@ lib/storage/src/coins_kv.c 1363
 lib/storage/src/consensus_db.c 883
 lib/storage/src/disk_block_io.c 973
 lib/storage/src/peers_projection.c 1304
-lib/storage/src/progress_store.c 881
+lib/storage/src/progress_store.c 880
 lib/storage/src/coins_ram.c 1406
 lib/storage/src/coins_view_sqlite.c 1247
 lib/validation/src/chainstate.c 1038
@@ -76,10 +76,10 @@ src/main_cli_modes.c 4275
 lib/hotswap/src/hotswap_activate.c 948
 lib/vcs/src/package_store.c 1132
 lib/vcs/src/package_score.c 845
-lib/vcs/src/package_reward.c 2094
+lib/vcs/src/package_reward.c 2092
 lib/vcs/src/fastobj_carrier.c 915
 lib/codeindex/src/codeindex_merkle.c 1069
-lib/vcs/src/package_badge.c 1299
+lib/vcs/src/package_badge.c 1296
 lib/vcs/src/package_badge_eligible.c 817
 lib/vcs/src/package_swarm_node.c 1840
 lib/vcs/src/package_service.c 1040
@@ -90,7 +90,7 @@ lib/vcs/src/zcode_contributor_binding.c 980
 # assemble -> compute pipeline over the CAS that must stay together;
 # baselined at creation per the zcode_science.c precedent.
 lib/vcs/src/zcode_discovery_projection.c 1112
-lib/vcs/src/zcode_science.c 1405
+lib/vcs/src/zcode_science.c 1301
 lib/zswap/src/zswap_ceremony.c 853
 
 # Arrived on origin/main already oversized and unrecorded, so the WARN tier
@@ -107,5 +107,5 @@ lib/vcs/src/zcode_workspace_manifest.c 846
 # landed at triple the ceiling and zcode_dht_service.c just past it, both
 # already on main and unrecorded, tripping the E1 self-test for the next
 # pusher. Held here at today's size per the rule above.
-lib/hotswap/src/hotswap_elf_probe.c 1231
+lib/hotswap/src/hotswap_elf_probe.c 1230
 lib/vcs/src/zcode_dht_service.c 833
