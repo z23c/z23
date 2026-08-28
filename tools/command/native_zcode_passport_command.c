@@ -6,6 +6,7 @@
 #include "base/hex.h"
 #include "hotswap/hotswap_service.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 #include "services/zcode_passport_view_service.h"
 #include "vcs/package_mapping.h"
 #include "vcs/package_release.h"
@@ -185,8 +186,9 @@ static bool passport_job_preflight(
     struct vcs_devloop_publication_receipt progress, passport_receipt;
     struct vcs_devloop_publication_receipt release, mapping;
     uint8_t progress_root[32];
-    bool valid = workspace && job_hex && realpath(
-            workspace, binding->workspace) != NULL &&
+    bool valid = workspace && job_hex &&
+        platform_directory_canonical_real(
+            workspace, binding->workspace, sizeof(binding->workspace)) &&
         strlen(job_hex) == 64u &&
         zcl_hex_decode_lower(job_hex, binding->job_root, 32) &&
         vcs_devloop_publication_job_load(
