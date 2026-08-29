@@ -120,6 +120,12 @@ mesh_private_object_offer_request_id_v1_derive(
 enum mesh_private_object_proto_error
 mesh_private_object_offer_key_context_v1(
     const struct mesh_private_object_offer_v1 *offer, uint8_t out[32]);
+/* Stable across a new Noise transcript, offer window, and delegated online
+ * signing key. It binds the stable encryption context plus ciphertext root,
+ * so an exact claimed transfer can resume on a newly authenticated session. */
+enum mesh_private_object_proto_error
+mesh_private_object_offer_transfer_id_v1(
+    const struct mesh_private_object_offer_v1 *offer, uint8_t out[32]);
 enum mesh_private_object_proto_error mesh_private_object_offer_v1_validate(
     const struct mesh_private_object_offer_v1 *offer);
 enum mesh_private_object_proto_error mesh_private_object_offer_v1_sign(

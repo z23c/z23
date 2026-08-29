@@ -510,8 +510,12 @@ installation authority. Exact claims resume across database reopen; a
 different transfer and post-claim revocation are refused. The allocation-free
 chunk codec uses X25519-safe, HKDF-SHA3-256, and ChaCha20-Poly1305 with a
 per-offer key context and per-index nonce. Offer admission rechecks signature,
-session transcript and generation, delegated source, pairing, target, grant,
-time, limits, and the grant-nonce-derived request before claim. Focused
+session transcript and generation, chain-active delegated source, pairing,
+target, grant, time, limits, and the grant-nonce-derived request before claim.
+The encryption context and transfer identity exclude transient session,
+window, and online-key fields, so a newly authenticated re-offer resumes the
+same exact ciphertext while an old offer still fails the new session check.
+Focused
 `mesh_capability_grant`, `db_migration_idempotent`,
 `mesh_private_object_proto`, `mesh_private_object_crypto`, and
 `mesh_private_object_admission` groups passed with `groups_failed=0` and

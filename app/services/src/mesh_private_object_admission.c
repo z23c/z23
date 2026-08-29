@@ -4,13 +4,11 @@
 #include "services/mesh_private_object_admission.h"
 
 #include "base/hex.h"
-#include "crypto/sha3.h"
 #include "models/mesh_pairing.h"
+#include "services/mesh_pairing_service.h"
 
+#include <limits.h>
 #include <string.h>
-
-static const uint8_t transfer_id_domain[] =
-    "zcl.mesh.private-object.transfer-id.v1";
 
 const char *mesh_private_object_admission_reason_string(
     enum mesh_private_object_admission_reason reason)
@@ -59,16 +57,16 @@ static bool admission_session_matches(
 
 static bool admission_delegation_matches(
     const struct mesh_private_object_offer_v1 *offer,
-    const struct vcs_zcode_dht_delegation *delegation, uint64_t now)
+    const struct vcs_zcode_dht_delegation *delegation)
 {
-    return vcs_zcode_dht_delegation_verify(
-               delegation, offer->network_genesis,
-               offer->source_noise_static, 0, NULL, now) ==
-               VCS_ZCODE_DHT_DELEGATION_OK &&
+    return memcmp(delegation->network_genesis,
+                  offer->network_genesis, 32) == 0 &&
            memcmp(delegation->doc.master_pubkey,
                   offer->source_master_pubkey, 32) == 0 &&
            memcmp(delegation->online_pubkey,
-                  offer->source_online_pubkey, 32) == 0;
+                  offer->source_online_pubkey, 32) == 0 &&
+           memcmp(delegation->noise_static_pubkey,
+                  offer->source_noise_static, 32) == 0;
 }
 
 static bool admission_pairing_matches(
@@ -111,13 +109,14 @@ static bool admission_grant_exact(
            grant->deny_mask == offer->deny_mask;
 }
 
-static void admission_transfer_id(const uint8_t offer_root[32], uint8_t out[32])
+static bool admission_delegation_authority_failure(
+    enum mesh_pairing_reason reason)
 {
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, transfer_id_domain, sizeof(transfer_id_domain) - 1u);
-    sha3_256_write(&sha, offer_root, 32);
-    sha3_256_finalize(&sha, out);
+    return reason == MESH_PAIRING_NETWORK_MISMATCH ||
+           reason == MESH_PAIRING_MASTER_INACTIVE ||
+           reason == MESH_PAIRING_BEACON_UNAVAILABLE ||
+           reason == MESH_PAIRING_BEACON_PROVISIONAL ||
+           reason == MESH_PAIRING_DELEGATION_INVALID;
 }
 
 struct zcl_result mesh_private_object_admit_offer(
@@ -133,7 +132,8 @@ struct zcl_result mesh_private_object_admit_offer(
     memset(out, 0, sizeof(*out));
     out->reason = MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT;
     if (!ndb || !ndb->open || !offer || !session || !source_delegation ||
-        !local_master_pubkey || !local_noise_static || now_unix == 0)
+        !local_master_pubkey || !local_noise_static || now_unix == 0 ||
+        now_unix > (uint64_t)INT64_MAX)
         return ZCL_ERR(-1, "private-object admission context unavailable");
     if (mesh_private_object_offer_v1_validate(offer) !=
         MESH_PRIVATE_OBJECT_PROTO_OK)
@@ -141,7 +141,7 @@ struct zcl_result mesh_private_object_admit_offer(
     if (!admission_session_matches(offer, session))
         return admission_refuse(
             out, MESH_PRIVATE_OBJECT_ADMISSION_SESSION_MISMATCH);
-    if (!admission_delegation_matches(offer, source_delegation, now_unix))
+    if (!admission_delegation_matches(offer, source_delegation))
         return admission_refuse(
             out, MESH_PRIVATE_OBJECT_ADMISSION_DELEGATION_INVALID);
 
@@ -153,6 +153,15 @@ struct zcl_result mesh_private_object_admit_offer(
             offer, &pairing, source_delegation, now_unix))
         return admission_refuse(
             out, MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID);
+    enum mesh_pairing_reason delegated =
+        mesh_pairing_service_authorize_delegation(
+            ndb, pairing_id, source_delegation,
+            offer->source_noise_static, (int64_t)now_unix);
+    if (delegated != MESH_PAIRING_OK)
+        return admission_refuse(
+            out, admission_delegation_authority_failure(delegated)
+                     ? MESH_PRIVATE_OBJECT_ADMISSION_DELEGATION_INVALID
+                     : MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID);
     char grant_id[MESH_CAPABILITY_GRANT_ID_HEX + 1];
     zcl_hex_encode(offer->grant_id, 32, grant_id);
     struct db_mesh_capability_grant grant;
@@ -180,7 +189,9 @@ struct zcl_result mesh_private_object_admit_offer(
     if (mesh_private_object_offer_v1_root(offer, out->offer_root) !=
         MESH_PRIVATE_OBJECT_PROTO_OK)
         return ZCL_ERR(-1, "private-object offer root failed after validation");
-    admission_transfer_id(out->offer_root, out->transfer_id);
+    if (mesh_private_object_offer_transfer_id_v1(
+            offer, out->transfer_id) != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return ZCL_ERR(-1, "private-object transfer id failed after validation");
     out->pairing_revocation_generation = pairing.revocation_generation;
     out->grant_revocation_generation = grant.revocation_generation;
     enum mesh_capability_claim_result claimed = db_mesh_capability_grant_claim(

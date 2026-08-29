@@ -310,6 +310,58 @@ static int expectation_binding(void)
     return failures;
 }
 
+static int stable_reconnect_identity(void)
+{
+    int failures = 0;
+    TEST_CASE("private object transfer identity survives reconnect") {
+        uint8_t seed[32], grant_nonce[32];
+        uint8_t context[32], transfer[32], trial_context[32], trial_id[32];
+        struct mesh_private_object_offer_v1 offer, trial;
+        fill32(seed, 0x55);
+        fill32(grant_nonce, 0x15);
+        ASSERT(make_offer(&offer, seed, grant_nonce));
+        ASSERT_EQ(mesh_private_object_offer_key_context_v1(&offer, context),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT_EQ(mesh_private_object_offer_transfer_id_v1(&offer, transfer),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+
+        trial = offer;
+        trial.source_online_pubkey[0] ^= 1;
+        trial.transcript_hash[0] ^= 1;
+        trial.connection_generation++;
+        trial.pairing_revocation_generation++;
+        trial.issued_unix++;
+        trial.expires_unix++;
+        trial.request_id[0] ^= 1;
+        trial.signature[0] ^= 1;
+        ASSERT_EQ(mesh_private_object_offer_key_context_v1(
+                      &trial, trial_context),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT_EQ(mesh_private_object_offer_transfer_id_v1(
+                      &trial, trial_id),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT(memcmp(context, trial_context, 32) == 0);
+        ASSERT(memcmp(transfer, trial_id, 32) == 0);
+
+        trial.target_master_pubkey[0] ^= 1;
+        ASSERT_EQ(mesh_private_object_offer_key_context_v1(
+                      &trial, trial_context),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT(memcmp(context, trial_context, 32) != 0);
+        trial = offer;
+        trial.ciphertext_root[0] ^= 1;
+        ASSERT_EQ(mesh_private_object_offer_key_context_v1(
+                      &trial, trial_context),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT_EQ(mesh_private_object_offer_transfer_id_v1(
+                      &trial, trial_id),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT(memcmp(context, trial_context, 32) == 0);
+        ASSERT(memcmp(transfer, trial_id, 32) != 0);
+    } TEST_END
+    return failures;
+}
+
 int test_mesh_private_object_proto(void)
 {
     int failures = 0;
@@ -317,5 +369,6 @@ int test_mesh_private_object_proto(void)
     failures += strict_wire_and_signature();
     failures += shape_limits_and_downgrade();
     failures += expectation_binding();
+    failures += stable_reconnect_identity();
     return failures;
 }
