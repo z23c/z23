@@ -20,8 +20,19 @@
 # macOS is NOT packaged here and cannot be: a Mach-O needs the macOS SDK,
 # which no Linux host may redistribute. See docs/work/BOOTSTRAP_PLAN.md.
 #
+# --front-door is the other half of a cut: it packages `z23-bootstrap` under
+# bootstrap/<triple>/ and writes its SHA-256 into COPIES of the two shims
+# served at the domain, so the served copies name real bytes while the copies
+# in this repository stay all-zero refusals. See package_front_door below.
+#   z23-bootstrap    make z23-bootstrap        (linux-x86_64 only: the
+#                                               bootstrap is POSIX and has no
+#                                               Windows build)
+#
 # Usage:
 #   packaging/release/build_release.sh [--bin DIR] [--out DIR] [--platform P]
+#   packaging/release/build_release.sh --front-door [--bin DIR] [--out DIR]
+#   packaging/release/build_release.sh --print-runtime-platforms
+#   packaging/release/build_release.sh --print-bootstrap-platforms
 #   packaging/release/build_release.sh --selftest
 #
 # Default --bin is <repo>/build/bin; default --out is
@@ -72,15 +83,26 @@ platform_of_binary() {
     esac
 }
 
+# The EXACT closed set of platform triples a RUNTIME is packaged for. Written
+# out as a list rather than a case pattern because it is also an answer this
+# script has to give to other programs: tools/lint/check_published_platforms.sh
+# reads it back through --print-runtime-platforms rather than re-deriving it
+# with a regex, so there is one authority for what a release contains and no
+# second copy to drift.
+runtime_platforms() {
+    printf '%s\n' linux-x86_64 windows-x86_64
+}
+
 # Split out from the call site so the refusal message can be selftested on any
 # host: package_from_bin cannot be run to completion for an unsupported
 # platform to observe its own message, because it also cannot produce a
 # package there.
 platform_supported() {
-    case "$1" in
-        linux-x86_64|windows-x86_64) return 0 ;;
-        *) return 1 ;;
-    esac
+    local known
+    for known in $(runtime_platforms); do
+        [ "$known" = "$1" ] && return 0
+    done
+    return 1
 }
 
 # The executable-name suffix for a platform. A Windows release member is
@@ -346,6 +368,167 @@ package_from_bin() {
     say "packed $out_dir for $platform ($(printf '%s, ' $members)AGENT_CARD.md, SHA256SUMS)"
 }
 
+# ── The front door ────────────────────────────────────────────────────────
+# A release directory is not reachable until something tells a stranger's
+# machine where to get it, and that something is the pair of shims served at
+# the project domain plus the one small binary they fetch:
+#
+#   <origin>/                              packaging/install/install.sh
+#   <origin>/install.ps1                   packaging/install/install.ps1
+#   <origin>/bootstrap/<triple>/z23-bootstrap
+#
+# Each shim does one thing before anything has been verified: name the
+# machine, fetch that binary, compare its SHA-256 against a digest baked into
+# the shim's own bytes, and run it. So the digest is the release cutter's
+# output, not a constant — and until a cut has actually happened it is the
+# all-zero SENTINEL, which both shims refuse on before touching a network.
+#
+# THIS STAGE NEVER WRITES INTO THE CHECKOUT. It packages the bootstrap and
+# writes the digests into COPIES of both shims placed beside it in the output
+# directory. That is deliberate and it is the whole safety argument: the
+# copies that get served name real bytes, and the copies in this repository
+# stay all-zero refusals, so no cut can leave a permissive default committed
+# and no half-finished cut can turn a refusal into a broken install.
+# tools/lint/check_published_platforms.sh enforces the second half of that
+# from the other side.
+
+# The EXACT closed set of platform triples a z23-bootstrap can be produced
+# for, written out for the same reason release_binaries() is: a set derived
+# from what happens to be on disk is not a claim about anything.
+#
+# It is linux-x86_64 alone, and NOT the same set as the platforms whose
+# RUNTIME is packaged (platform_supported above also accepts windows-x86_64).
+# tools/install/z23_bootstrap.c is POSIX — uname(2), a UDP socket for the DNS
+# pin channel, fork/exec for the handoff — and has no Windows build, so a
+# Windows front door has nothing to fetch even though a Windows node exists.
+# The two sets are allowed to differ; what is NOT allowed is a shim claiming a
+# platform that is absent from this one.
+bootstrap_platforms() {
+    printf '%s\n' linux-x86_64
+}
+
+# The published file name, which carries the platform's executable suffix for
+# the same reason every other release member does.
+bootstrap_member() {
+    printf 'z23-bootstrap%s' "$(platform_exe_suffix "$1")"
+}
+
+# linux-x86_64 -> LINUX_X86_64, the BOOT_* variable name install.sh bakes its
+# digest into. One transformation, so the shim and the cutter cannot disagree
+# about what a row is called.
+bootstrap_var_name() {
+    printf 'BOOT_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"
+}
+
+# What the POSIX shim CLAIMS, read out of the shim itself rather than
+# duplicated here.
+posix_shim_platforms() {
+    sed -n 's/^PUBLISHED_PLATFORMS="\(.*\)"[[:space:]]*$/\1/p' "$1" | tr -s ' ' '\n' \
+        | sed '/^$/d'
+}
+
+# What the PowerShell shim CLAIMS: the keys of its $BootPins table. An empty
+# table (`@{}`) claims nothing, which is today's state.
+windows_shim_platforms() {
+    sed -n "s/^[[:space:]]*'\([a-z0-9][a-z0-9_.-]*\)'[[:space:]]*=[[:space:]]*'[0-9a-f]\{64\}'.*$/\1/p" "$1"
+}
+
+# Rewrite one BOOT_<PLATFORM> assignment in a COPY of the POSIX shim. The
+# match is anchored on the exact assignment line, and a platform whose line is
+# absent is a hard refusal rather than a silent skip: a shim that claims a
+# platform it has no row for would fetch with an unset digest.
+stamp_posix_shim() {
+    local src="$1" dst="$2" digest_dir="$3"
+    local platform var digest tmp
+    cp -f -- "$src" "$dst" || die "could not copy $src"
+    for platform in $(posix_shim_platforms "$src"); do
+        digest="$(cat "$digest_dir/$platform" 2>/dev/null || true)"
+        [ -n "$digest" ] \
+            || die "install.sh publishes $platform but no bootstrap was packaged for it"
+        var="$(bootstrap_var_name "$platform")"
+        grep -q "^$var=" "$dst" \
+            || die "install.sh publishes $platform but has no $var= row"
+        tmp="$dst.stamp"
+        sed "s|^$var=.*$|$var=$digest|" "$dst" >"$tmp" || die "stamp failed for $platform"
+        mv -f -- "$tmp" "$dst"
+        grep -q "^$var=$digest\$" "$dst" \
+            || die "stamping $var into $dst did not take"
+    done
+    sh -n "$dst" || die "the stamped $dst is not valid POSIX sh"
+}
+
+# The PowerShell twin. Its table is keyed, not one variable per platform, so a
+# row is rewritten in place and a claimed platform with no packaged bootstrap
+# is the same hard refusal.
+stamp_windows_shim() {
+    local src="$1" dst="$2" digest_dir="$3"
+    local platform digest tmp
+    cp -f -- "$src" "$dst" || die "could not copy $src"
+    for platform in $(windows_shim_platforms "$src"); do
+        digest="$(cat "$digest_dir/$platform" 2>/dev/null || true)"
+        [ -n "$digest" ] \
+            || die "install.ps1 publishes $platform but no bootstrap was packaged for it"
+        tmp="$dst.stamp"
+        sed "s|^\([[:space:]]*'$platform'[[:space:]]*=[[:space:]]*'\)[0-9a-f]\{64\}'|\1$digest'|" \
+            "$dst" >"$tmp" || die "stamp failed for $platform"
+        mv -f -- "$tmp" "$dst"
+        grep -q "'$platform'[[:space:]]*=[[:space:]]*'$digest'" "$dst" \
+            || die "stamping $platform into $dst did not take"
+    done
+}
+
+# bin_dir -> out_dir/bootstrap/<triple>/z23-bootstrap plus stamped shims.
+# POSIX_SHIM/WINDOWS_SHIM are variables so the selftest can drive this over
+# fixture copies; the defaults are the two files actually served.
+POSIX_SHIM="$REPO_ROOT/packaging/install/install.sh"
+WINDOWS_SHIM="$REPO_ROOT/packaging/install/install.ps1"
+package_front_door() {
+    local bin_dir="$1" out_dir="$2"
+    local platform exe member src got strip_tool digests packaged=""
+    [ -d "$bin_dir" ] || die "binary dir missing: $bin_dir"
+    [ -f "$POSIX_SHIM" ] || die "missing $POSIX_SHIM"
+    [ -f "$WINDOWS_SHIM" ] || die "missing $WINDOWS_SHIM"
+    mkdir -p "$out_dir" || die "could not create $out_dir"
+    digests="$out_dir/.digests"
+    rm -rf "$digests"
+    mkdir -p "$digests"
+
+    for platform in $(bootstrap_platforms); do
+        exe="$(platform_exe_suffix "$platform")"
+        member="$(bootstrap_member "$platform")"
+        src="$bin_dir/$member"
+        [ -f "$src" ] \
+            || die "no $member in $bin_dir — build first: make z23-bootstrap"
+        # Same rule as the runtime: the BINARY says what platform it is, not
+        # the machine running this script and not the directory it sat in.
+        got="$(platform_of_binary "$src")" || got=""
+        [ "$got" = "$platform" ] \
+            || die "$src is ${got:-a format with no release contract}, not $platform"
+        strip_tool="$(platform_strip "$platform")"
+        command -v "$strip_tool" >/dev/null 2>&1 || die "$strip_tool not found"
+        mkdir -p "$out_dir/bootstrap/$platform"
+        rm -f "$out_dir/bootstrap/$platform/$member" \
+              "$out_dir/bootstrap/$platform/SHA256SUMS"
+        "$strip_tool" --strip-unneeded -o "$out_dir/bootstrap/$platform/$member" "$src" \
+            || die "strip failed for $member"
+        chmod 755 "$out_dir/bootstrap/$platform/$member"
+        # A one-member closed manifest beside the binary. The shim's baked
+        # digest is what actually gates the fetch; this is for an operator or
+        # a mirror checking what it is serving.
+        (cd "$out_dir/bootstrap/$platform" && sha256sum "$member" >SHA256SUMS) \
+            || die "could not write SHA256SUMS for $platform"
+        (cd "$out_dir/bootstrap/$platform" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+            || die "SHA256SUMS does not match the packaged bootstrap for $platform"
+        cut -d' ' -f1 <"$out_dir/bootstrap/$platform/SHA256SUMS" >"$digests/$platform"
+        packaged="$packaged $platform"
+    done
+
+    stamp_posix_shim "$POSIX_SHIM" "$out_dir/install.sh" "$digests"
+    stamp_windows_shim "$WINDOWS_SHIM" "$out_dir/install.ps1" "$digests"
+    rm -rf "$digests"
+    say "packed front door in $out_dir (bootstrap for$packaged, install.sh, install.ps1)"
+}
+
 selftest() {
     local tmp rc name
     tmp="$(mktemp -d /tmp/zcl-build-release-selftest.XXXXXX)" || die "mktemp failed"
@@ -569,6 +752,132 @@ selftest() {
     cmp -s "$tmp/card/srcdir/AGENT_CARD.md" "$tmp/card/withcard/AGENT_CARD.md" \
         || die "selftest: copy_agent_card did not copy the real card bytes"
 
+    # ── The front-door stage ──────────────────────────────────────────────
+    # What this has to prove is narrow and important: the cut turns the
+    # sentinel into the digest of the exact bytes it packaged, it does that
+    # in a COPY and never in the checkout, and it REFUSES a shim that claims
+    # a platform no bootstrap was produced for. Every case below runs over
+    # fixture shims, so a real digest never reaches packaging/install/.
+    [ "$(bootstrap_platforms | tr '\n' ' ')" = "linux-x86_64 " ] \
+        || die "selftest: the bootstrap platform set changed"
+    [ "$(bootstrap_member linux-x86_64)" = "z23-bootstrap" ] \
+        || die "selftest: the Linux bootstrap member name changed"
+    [ "$(bootstrap_member windows-x86_64)" = "z23-bootstrap.exe" ] \
+        || die "selftest: a Windows bootstrap member would need the .exe suffix"
+    [ "$(bootstrap_var_name linux-x86_64)" = "BOOT_LINUX_X86_64" ] \
+        || die "selftest: the shim variable name for linux-x86_64 changed"
+
+    # The real shims must claim only platforms the cutter can produce, and
+    # must be checked in carrying the sentinel. This is the same invariant
+    # tools/lint/check_published_platforms.sh enforces; asserting it here too
+    # means a cut cannot be attempted against a shim that already drifted.
+    local shim_platform known
+    for shim_platform in $(posix_shim_platforms "$POSIX_SHIM") \
+                         $(windows_shim_platforms "$WINDOWS_SHIM"); do
+        known=0
+        for name in $(bootstrap_platforms); do
+            [ "$name" = "$shim_platform" ] && known=1
+        done
+        [ "$known" -eq 1 ] \
+            || die "selftest: a shim publishes $shim_platform, which no bootstrap is produced for"
+    done
+
+    mkdir -p "$tmp/fd/bin"
+    # A REAL ELF, for the same reason the runtime fixtures above use one:
+    # package_front_door asks the binary what platform it is, and a shell
+    # script would be refused for its format and stop grading anything.
+    cp -f -- "$(command -v sha256sum)" "$tmp/fd/bin/z23-bootstrap"
+    chmod 755 "$tmp/fd/bin/z23-bootstrap"
+
+    # Missing bootstrap: refuse by name, before anything is written.
+    mkdir -p "$tmp/fd/emptybin"
+    rc=0
+    (package_front_door "$tmp/fd/emptybin" "$tmp/fd/out-missing") \
+        >/dev/null 2>"$tmp/fd-missing.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: a missing bootstrap must exit 1, got $rc"
+    grep -q 'no z23-bootstrap in' "$tmp/fd-missing.err" \
+        || die "selftest: the missing-bootstrap refusal must name the member"
+
+    # The happy path, over fixture shims.
+    mkdir -p "$tmp/fd/shims"
+    cp -f -- "$POSIX_SHIM" "$tmp/fd/shims/install.sh"
+    cp -f -- "$WINDOWS_SHIM" "$tmp/fd/shims/install.ps1"
+    ( POSIX_SHIM="$tmp/fd/shims/install.sh" \
+      WINDOWS_SHIM="$tmp/fd/shims/install.ps1" \
+      package_front_door "$tmp/fd/bin" "$tmp/fd/out" ) >/dev/null 2>&1 \
+        || die "selftest: the front-door stage refused a complete input"
+    [ -f "$tmp/fd/out/bootstrap/linux-x86_64/z23-bootstrap" ] \
+        || die "selftest: no bootstrap was packaged at bootstrap/<triple>/"
+    (cd "$tmp/fd/out/bootstrap/linux-x86_64" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+        || die "selftest: the packaged bootstrap does not match its own manifest"
+    local cut_sha
+    cut_sha="$(sha256sum "$tmp/fd/out/bootstrap/linux-x86_64/z23-bootstrap" | cut -d' ' -f1)"
+    grep -q "^BOOT_LINUX_X86_64=$cut_sha\$" "$tmp/fd/out/install.sh" \
+        || die "selftest: the cut shim does not name the bytes that were packaged"
+    if grep -q '^BOOT_LINUX_X86_64="\$BOOT_ZERO"$' "$tmp/fd/out/install.sh"; then
+        die "selftest: the cut shim still carries the sentinel"
+    fi
+    sh -n "$tmp/fd/out/install.sh" \
+        || die "selftest: the cut shim is not valid POSIX sh"
+    # ...and the fixture it was cut FROM is untouched, which is the property
+    # that keeps a real cut from ever writing into packaging/install/.
+    cmp -s "$POSIX_SHIM" "$tmp/fd/shims/install.sh" \
+        || die "selftest: the front-door stage modified the shim it read"
+    cmp -s "$WINDOWS_SHIM" "$tmp/fd/shims/install.ps1" \
+        || die "selftest: the front-door stage modified the PowerShell shim it read"
+    grep -q '^BOOT_LINUX_X86_64="\$BOOT_ZERO"$' "$POSIX_SHIM" \
+        || die "selftest: the checked-in shim no longer carries the sentinel"
+
+    # A shim that claims a platform with no bootstrap must REFUSE the cut.
+    # This is the failure the whole stage exists to make impossible: a name
+    # in PUBLISHED_PLATFORMS with nothing behind it turns an honest refusal
+    # into a 404 on a stranger's machine.
+    sed 's|^PUBLISHED_PLATFORMS=.*$|PUBLISHED_PLATFORMS=" linux-x86_64 darwin-aarch64 "|' \
+        "$POSIX_SHIM" >"$tmp/fd/shims/claims-more.sh"
+    rc=0
+    ( POSIX_SHIM="$tmp/fd/shims/claims-more.sh" \
+      WINDOWS_SHIM="$tmp/fd/shims/install.ps1" \
+      package_front_door "$tmp/fd/bin" "$tmp/fd/out-overclaim" ) \
+        >/dev/null 2>"$tmp/fd-overclaim.err" || rc=$?
+    [ "$rc" -eq 1 ] \
+        || die "selftest: a shim claiming an unproduced platform must refuse (rc=$rc)"
+    grep -q 'install.sh publishes darwin-aarch64' "$tmp/fd-overclaim.err" \
+        || die "selftest: the over-claim refusal must name the platform"
+
+    # The same, one level down: a platform that IS produced but has no BOOT_*
+    # row would otherwise fetch against an unset digest.
+    sed '/^BOOT_LINUX_X86_64=/d' "$POSIX_SHIM" >"$tmp/fd/shims/no-row.sh"
+    rc=0
+    ( POSIX_SHIM="$tmp/fd/shims/no-row.sh" \
+      WINDOWS_SHIM="$tmp/fd/shims/install.ps1" \
+      package_front_door "$tmp/fd/bin" "$tmp/fd/out-norow" ) \
+        >/dev/null 2>"$tmp/fd-norow.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: a claimed platform with no digest row must refuse"
+    grep -q 'has no BOOT_LINUX_X86_64= row' "$tmp/fd-norow.err" \
+        || die "selftest: the missing-row refusal must name the row"
+
+    # The PowerShell twin: a Windows row would be stamped the same way, and
+    # refused the same way when nothing was produced for it. $BootPins is
+    # empty today, so build the row to prove the machinery, not the claim.
+    local zero_sha row
+    zero_sha="$(printf '0%.0s' $(seq 64))"
+    row="\$BootPins = @{\\n    'windows-x86_64' = '$zero_sha'\\n}"
+    sed "s|^[\$]BootPins = @{}\$|$row|" "$WINDOWS_SHIM" \
+        >"$tmp/fd/shims/win-row.ps1"
+    [ "$(windows_shim_platforms "$tmp/fd/shims/win-row.ps1")" = "windows-x86_64" ] \
+        || die "selftest: a \$BootPins row must be read back as a claimed platform"
+    [ -z "$(windows_shim_platforms "$WINDOWS_SHIM")" ] \
+        || die "selftest: the checked-in PowerShell shim must claim no platform"
+    rc=0
+    ( POSIX_SHIM="$tmp/fd/shims/install.sh" \
+      WINDOWS_SHIM="$tmp/fd/shims/win-row.ps1" \
+      package_front_door "$tmp/fd/bin" "$tmp/fd/out-win" ) \
+        >/dev/null 2>"$tmp/fd-win.err" || rc=$?
+    [ "$rc" -eq 1 ] \
+        || die "selftest: a Windows row with no Windows bootstrap must refuse (rc=$rc)"
+    grep -q 'install.ps1 publishes windows-x86_64' "$tmp/fd-win.err" \
+        || die "selftest: the Windows over-claim refusal must name the platform"
+
     say "selftest PASS"
     trap - EXIT
     rm -rf "$tmp"
@@ -577,10 +886,16 @@ selftest() {
 BIN_DIR="$REPO_ROOT/build/bin"
 OUT_DIR=""
 WANT_PLATFORM=""
+FRONT_DOOR=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) selftest; exit 0 ;;
+        --front-door) FRONT_DOOR=1; shift ;;
+        # Queries, so a gate can ask this script what it produces instead of
+        # keeping a second copy of the answer.
+        --print-runtime-platforms) runtime_platforms; exit 0 ;;
+        --print-bootstrap-platforms) bootstrap_platforms; exit 0 ;;
         --bin) [ $# -ge 2 ] || die "--bin needs a directory"; BIN_DIR="$2"; shift 2 ;;
         --out) [ $# -ge 2 ] || die "--out needs a directory"; OUT_DIR="$2"; shift 2 ;;
         --platform)
@@ -591,12 +906,24 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         -h|--help)
-            sed -n '2,22p' "$0"
+            sed -n '2,36p' "$0"
             exit 0
             ;;
         *) die "unknown argument: $1" ;;
     esac
 done
+
+# The front door is one tree for every platform, not one per platform: the
+# shims are the same two files whatever machine asks, and the per-platform
+# split lives under bootstrap/<triple>/ inside it.
+if [ "$FRONT_DOOR" -eq 1 ]; then
+    [ -z "$WANT_PLATFORM" ] \
+        || die "--front-door packages every platform with a bootstrap; --platform selects nothing"
+    [ -n "$OUT_DIR" ] || OUT_DIR="$REPO_ROOT/build/release/front-door"
+    assert_no_docker
+    package_front_door "$BIN_DIR" "$OUT_DIR"
+    exit 0
+fi
 
 # --out defaults per platform, so packaging two targets from one checkout
 # cannot silently overwrite the first with the second. The platform is read

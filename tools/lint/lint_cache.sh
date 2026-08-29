@@ -128,6 +128,7 @@ check-c23-only
 check-no-python
 check-no-trust-state-ordering check-no-gnu-va-args check-no-warning-suppression
 check-result-discard
+check-published-platforms
 "
 
 # Why each never-cached gate can never be cached. A reason is MANDATORY —

@@ -2122,6 +2122,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-verification-coverage \
         check-ship-remote-transaction \
         check-z23-release-install \
+        check-published-platforms \
         check-identity-parser-single \
         check-source-identity-authority \
         check-status-reason-single \
@@ -10525,6 +10526,21 @@ check-z23-release-install: $(BIN_DIR)/z23-bootstrap
 	@bash tools/scripts/install_z23.sh --selftest
 	@bash tools/scripts/deploy_z23_release.sh --selftest
 
+# Gate — every platform the install front door CLAIMS must be one the release
+# process actually produces. Widening packaging/install/install.sh's
+# PUBLISHED_PLATFORMS (or install.ps1's $$BootPins, or FD_PUBLISHED in
+# lib/install) is a one-word edit; producing that platform's artifact is a
+# toolchain, a second-stage installer and a service lifecycle. A name with
+# nothing behind it turns an honest refusal into a 404 on a stranger's
+# machine, so the claim is measured against what
+# packaging/release/build_release.sh reports it can cut. The same gate holds
+# the all-zero sentinel as the checked-in default: real digests belong only in
+# the copies `build_release.sh --front-door` publishes.
+check-published-platforms:
+	@echo "══ LINT: published platforms match what the release cutter produces ══"
+	@./tools/lint/check_published_platforms.sh --selftest
+	@./tools/lint/check_published_platforms.sh
+
 # Gate — stop a tenth copy of the source-identity JSON parser from growing
 # back. tools/scripts/source_identity_lib.sh is the one canonical reader
 # (anchored on the FIRST "source_id_sha256" occurrence — a greedy copy
@@ -11139,6 +11155,7 @@ LINT_GATES := \
     check-verification-coverage \
     check-ship-remote-transaction \
     check-z23-release-install \
+    check-published-platforms \
     check-identity-parser-single \
     check-source-identity-authority \
     check-status-reason-single \
