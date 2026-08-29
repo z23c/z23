@@ -38,10 +38,35 @@ struct stopwatch_skip_class_row {
 static const struct stopwatch_skip_class_row g_class_rows[] = {
 #define STOPWATCH_SKIP_CLASS(name_, thr_, match_) { (name_), (thr_), (match_) },
 #define STOPWATCH_SKIP_FALLBACK(name_, thr_)      { (name_), (thr_), NULL },
+#define STOPWATCH_NO_PASS_THRESHOLD(n_)
 #include "services/stopwatch_skip_classes.def"
+#undef STOPWATCH_NO_PASS_THRESHOLD
 #undef STOPWATCH_SKIP_FALLBACK
 #undef STOPWATCH_SKIP_CLASS
 };
+
+/* Second pass over the SAME table for its one non-class row. An enum, not a
+ * #define, on purpose: a table carrying two STOPWATCH_NO_PASS_THRESHOLD rows
+ * is a duplicate enumerator (build error) and a table carrying none leaves
+ * the name undeclared (build error). Exactly one row is the only thing that
+ * compiles, so the shell parser's `head -n1` can never disagree with the C. */
+enum {
+#define STOPWATCH_SKIP_CLASS(name_, thr_, match_)
+#define STOPWATCH_SKIP_FALLBACK(name_, thr_)
+#define STOPWATCH_NO_PASS_THRESHOLD(n_) STOPWATCH_NO_PASS_THRESHOLD_VALUE = (n_)
+#include "services/stopwatch_skip_classes.def"
+#undef STOPWATCH_NO_PASS_THRESHOLD
+#undef STOPWATCH_SKIP_FALLBACK
+#undef STOPWATCH_SKIP_CLASS
+};
+
+/* A 0 here would not mean "benign", it would mean "mute the no-pass alarm" —
+ * the exact defect this rung exists to end. Refuse it at BUILD time rather
+ * than discovering the silence in production. */
+static_assert(STOPWATCH_NO_PASS_THRESHOLD_VALUE >= 1,
+              "STOPWATCH_NO_PASS_THRESHOLD must be >= 1: 0 would silence the "
+              "no-pass alarm, and a non-pass is never benign: the harness "
+              "had something to prove and did not prove it");
 
 #define STOPWATCH_CLASS_ROW_COUNT \
     (sizeof(g_class_rows) / sizeof(g_class_rows[0]))
@@ -111,11 +136,16 @@ bool stopwatch_skip_classify(const char *reason, bool reason_field_present,
 /* ── scan ───────────────────────────────────────────────────────────── */
 
 /* Running state the per-row folder needs beyond the report itself: whether
- * the MOST RECENT skip row carried a skip_reason field at all, and whether it
- * named an artifact dir. Both feed classification once the fold ends. */
+ * the MOST RECENT skip row carried a skip_reason field at all, whether it
+ * named an artifact dir, and whether every row of the CURRENT no-pass streak
+ * has been a benign skip. The first two feed classification once the fold
+ * ends; the third is the one carve-out on the no-pass alarm and has to be
+ * accumulated per row, because only the trailing SKIP is classified at the
+ * end and a streak of 34 stalled runs contains no skip at all. */
 struct scan_state {
     bool last_reason_present;
     bool last_has_artifact;
+    bool no_pass_all_benign;
 };
 
 static void scan_init(struct stopwatch_skip_report *out,
@@ -125,6 +155,9 @@ static void scan_init(struct stopwatch_skip_report *out,
     out->last_ts = -1;
     out->last_pass_ts = -1;
     memset(st, 0, sizeof(*st));
+    /* Vacuously true over an empty streak; scan_finish refuses to report it
+     * as benign unless the streak is non-empty. */
+    st->no_pass_all_benign = true;
 }
 
 static void scan_row(const char *row, size_t rlen,
@@ -153,12 +186,17 @@ static void scan_row(const char *row, size_t rlen,
         out->skip_streak = 0;
         out->no_pass_streak = 0;
         out->last_pass_ts = ts;
+        st->no_pass_all_benign = true;   /* the streak restarts empty */
         return;
     }
 
     out->no_pass_streak++;
     if (strcmp(verdict, "skip") != 0) {
         out->skip_streak = 0;
+        /* fail / seam / stalled-named / error: the harness RAN. It had
+         * something to prove and did not prove it, so nothing about this row
+         * is benign and the carve-out below is over for this streak. */
+        st->no_pass_all_benign = false;
         return;
     }
 
@@ -173,11 +211,32 @@ static void scan_row(const char *row, size_t rlen,
     evidence_copy_bounded(out->skip_reason, sizeof(out->skip_reason),
                  st->last_reason_present ? reason : "",
                  st->last_reason_present ? strlen(reason) : 0);
+
+    /* Is THIS skip one the class table calls benign (threshold 0 — "nothing
+     * was configured, so there was nothing to prove")? Asked per row, off the
+     * fields just parsed, because a streak mixes kinds and only the LAST skip
+     * is classified at the end. An unclassifiable row is never benign. */
+    char cls[STOPWATCH_SKIP_CLASS_MAX];
+    unsigned thr = 0;
+    if (!stopwatch_skip_classify(st->last_reason_present ? reason : "",
+                                 st->last_reason_present, st->last_has_artifact,
+                                 cls, sizeof(cls), &thr) ||
+        thr != 0)
+        st->no_pass_all_benign = false;
 }
 
 static bool scan_finish(struct stopwatch_skip_report *out,
                         const struct scan_state *st)
 {
+    /* The no-pass rung is computed FIRST and unconditionally, because the
+     * whole defect being fixed here is that it used to live behind
+     * `skip_streak > 0` and a 34-deep streak of stalled runs has
+     * skip_streak == 0. */
+    out->no_pass_threshold = (unsigned)STOPWATCH_NO_PASS_THRESHOLD_VALUE;
+    out->no_pass_all_benign = out->no_pass_streak > 0 && st->no_pass_all_benign;
+    out->no_pass_alarm = out->no_pass_streak >= out->no_pass_threshold &&
+                         !out->no_pass_all_benign;
+
     if (out->skip_streak == 0)
         return true;
     if (!stopwatch_skip_classify(out->skip_reason, st->last_reason_present,
@@ -285,6 +344,22 @@ bool stopwatch_skip_resolve_ledger(const char *which, char *out, size_t cap)
     return true;
 }
 
+/* How old the last pass is, expressed against the NEWEST ledger row rather
+ * than against wall-clock now: this module has no clock (see the header's
+ * "Pure file-scan observer"), and inventing one here would make the same
+ * report line answer differently on two readers of the same file. The label
+ * spells that out so nobody reads it as "seconds ago". */
+static void last_pass_age_text(const struct stopwatch_skip_report *r,
+                               char *buf, size_t cap)
+{
+    if (r->last_pass_ts < 0 || r->last_ts < 0 || r->last_ts < r->last_pass_ts) {
+        snprintf(buf, cap, "last_pass=never_in_ledger_tail");
+        return;
+    }
+    snprintf(buf, cap, "last_pass_age=%llds-before-newest-row",
+             (long long)(r->last_ts - r->last_pass_ts));
+}
+
 const char *stopwatch_skip_alarm_text(const struct stopwatch_skip_report *r,
                                       char *buf, size_t cap)
 {
@@ -299,26 +374,61 @@ const char *stopwatch_skip_alarm_text(const struct stopwatch_skip_report *r,
                  "written a row on this host");
         return buf;
     }
+
+    char age[64];
+    last_pass_age_text(r, age, sizeof(age));
+
     if (r->skip_streak == 0) {
+        /* No skips at all in the trailing run. Either nothing is wrong, or
+         * the proof RAN every scheduled time and never passed — which is the
+         * more damning of the two conditions this module reports, and is the
+         * one that used to print the word "quiet" with no_pass_streak=34
+         * sitting inside the line. */
+        if (r->no_pass_alarm) {
+            snprintf(buf, cap,
+                     "ALARM no_pass_streak=%u no_pass_threshold=%u "
+                     "last_verdict=%s %s — this proof RAN on every one of "
+                     "those consecutive scheduled attempts and never once "
+                     "passed, so the claim it exists to prove is unproven; "
+                     "fix the failing verdict, do not wait for the score to "
+                     "move",
+                     r->no_pass_streak, r->no_pass_threshold,
+                     r->last_verdict[0] ? r->last_verdict : "-", age);
+            return buf;
+        }
         snprintf(buf, cap,
-                 "quiet last_verdict=%s skip_streak=0 no_pass_streak=%u",
+                 "quiet last_verdict=%s skip_streak=0 no_pass_streak=%u "
+                 "no_pass_threshold=%u %s",
                  r->last_verdict[0] ? r->last_verdict : "-",
-                 r->no_pass_streak);
+                 r->no_pass_streak, r->no_pass_threshold, age);
         return buf;
     }
+
+    /* A trailing SKIP run. The class alarm below is unchanged. The no-pass
+     * alarm can still be the reason this line is loud — a streak of fails
+     * capped by one benign skip must not read as quiet — so it is checked
+     * after the class alarm and before the benign note. */
+    const char *tail;
+    if (r->alarm)
+        tail = " — this proof has not run for that many consecutive "
+               "scheduled attempts";
+    else if (r->no_pass_alarm)
+        tail = " — the trailing SKIP run does not itself cross its class "
+               "threshold, but this proof RAN and never once passed across "
+               "the whole no_pass_streak above; the claim is unproven";
+    else if (r->threshold == 0)
+        tail = " — benign: nothing was configured, so there was nothing "
+               "to prove";
+    else
+        tail = "";
+
     snprintf(buf, cap,
              "%s class=%s skip_streak=%u threshold=%u no_pass_streak=%u "
-             "reason=\"%s\"%s",
-             r->alarm ? "ALARM" : "quiet",
+             "no_pass_threshold=%u reason=\"%s\"%s",
+             (r->alarm || r->no_pass_alarm) ? "ALARM" : "quiet",
              r->skip_class[0] ? r->skip_class : "-", r->skip_streak,
-             r->threshold, r->no_pass_streak,
-             r->skip_reason[0] ? r->skip_reason : "-",
-             r->threshold == 0
-                 ? " — benign: nothing was configured, so there was nothing "
-                   "to prove"
-                 : (r->alarm ? " — this proof has not run for that many "
-                               "consecutive scheduled attempts"
-                             : ""));
+             r->threshold, r->no_pass_streak, r->no_pass_threshold,
+             r->skip_reason[0] ? r->skip_reason : "-", tail);
     return buf;
 }
 
@@ -358,6 +468,9 @@ static void push_ledger_json(struct json_value *parent, const char *which)
                      rep.skip_reason[0] ? rep.skip_reason : "-");
     json_push_kv_int(&obj, "alarm_threshold", rep.threshold);
     json_push_kv_bool(&obj, "alarm", rep.alarm);
+    json_push_kv_int(&obj, "no_pass_threshold", rep.no_pass_threshold);
+    json_push_kv_bool(&obj, "no_pass_all_benign", rep.no_pass_all_benign);
+    json_push_kv_bool(&obj, "no_pass_alarm", rep.no_pass_alarm);
 
     char text[STOPWATCH_SKIP_ALARM_MAX];
     json_push_kv_str(&obj, "summary",
@@ -399,7 +512,12 @@ bool stopwatch_evidence_dump_state_json(struct json_value *out,
     int alarms = 0;
     size_t n = ledgers ? json_size(ledgers) : 0;
     for (size_t i = 0; i < n; i++) {
-        if (json_get_bool(json_get(json_at(ledgers, i), "alarm")))
+        /* EITHER rung counts. Rolling up only "alarm" would put the
+         * no-pass rung on the typed surface and still leave the top-level
+         * answer green, which is the same silence one level up. */
+        const struct json_value *led = json_at(ledgers, i);
+        if (json_get_bool(json_get(led, "alarm")) ||
+            json_get_bool(json_get(led, "no_pass_alarm")))
             alarms++;
     }
     json_push_kv_int(out, "alarm_count", alarms);

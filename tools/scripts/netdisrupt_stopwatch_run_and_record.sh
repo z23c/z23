@@ -27,6 +27,12 @@
 #   --client-rpc and no upstream pid means there was nothing to prove), which
 #   is exactly why its reason has to be recorded: without it the benign class
 #   could never be told apart from a dead fixture in production.
+#   Two alarms are emitted after the append, both on stderr + syslog only and
+#   neither touching the exit code: a consecutive-SKIP run of a class with a
+#   non-zero threshold ("this proof could not run at all"), and a consecutive
+#   NON-PASS run reaching STOPWATCH_NO_PASS_THRESHOLD ("this proof RAN and
+#   never once passed"). A streak of purely benign not_configured skips
+#   reaches neither.
 #
 # Env (forwarded straight through to network_disruption_recovery_stopwatch.sh):
 #   ZCL_ND_NODE_BIN            client CLI binary (default $REPO_ROOT/build/bin/zclassic23)
@@ -189,4 +195,47 @@ if [ "$skip_streak" -gt 0 ] && [ "$SKIP_CLASS_OK" = "1" ]; then
         echo "netdisrupt-stopwatch-run: WARN class=$skip_class skip_streak=$skip_streak threshold=$skip_threshold reason=\"$skip_reason\" — one more skipped run raises an alarm" >&2
     fi
 fi
+
+# ── no-pass alarm (the SECOND rung) ─────────────────────────────────────
+# Same containment as the block above: STDERR + syslog only, never stdout,
+# never a VERDICT= token, never the exit code. This collector exits 0
+# whatever it finds — the ledger append must never be lost to a failed
+# escalation — so the loudness lives here and in the judge, not in $?.
+#
+# WHY THIS EXISTS. The block above only ever asks "could the proof RUN".
+# Measured 2026-08-29 on the C3 ledger: 34 consecutive scheduled runs, none
+# of them skipped, none of them passing (the last 17 `stalled-named` with the
+# node under test at zero blocks synced) — skip_streak was 0 the whole time,
+# so nothing above fired and the typed report called that state "quiet".
+# A proof that runs and never succeeds is the more damning of the two
+# conditions, and it was the silent one.
+#
+# The ONE carve-out is narrow on purpose: a streak made ENTIRELY of skips the
+# class table calls benign (threshold 0 — nothing configured, nothing to
+# prove) stays quiet. A single fail/seam/stalled-named/unclassified row in
+# the streak ends it, so it can never mute a real fault. There is deliberately
+# no env knob and no threshold of 0: a non-pass is never benign, the harness
+# had something to prove and did not prove it.
+if [ "$SKIP_CLASS_OK" = "1" ] && [ "$no_pass_streak" -gt 0 ]; then
+    no_pass_threshold="$(stopwatch_no_pass_threshold)"
+    no_pass_benign="$(stopwatch_no_pass_all_benign "$HISTORY_FILE")"
+    # Same guard the C reader uses: a "-" (no pass in the tail) and a clock
+    # that went backwards both report unknown rather than a negative age.
+    if [ "$prior_last_pass" = "-" ] || [ "$ts" -lt "$prior_last_pass" ]; then
+        no_pass_age_note="last_pass=never_in_ledger_tail"
+    else
+        no_pass_age_note="last_pass_age=$((ts - prior_last_pass))s-before-newest-row"
+    fi
+    if [ "$no_pass_benign" = "1" ]; then
+        echo "netdisrupt-stopwatch-run: note no_pass_streak=$no_pass_streak — benign (every run in the streak had nothing configured to prove); no alarm" >&2
+    elif [ "$no_pass_streak" -ge "$no_pass_threshold" ]; then
+        no_pass_msg="netdisrupt-stopwatch-run: ALARM no_pass_streak=$no_pass_streak no_pass_threshold=$no_pass_threshold last_verdict=$verdict $no_pass_age_note — this proof RAN on every one of those consecutive scheduled attempts and never once passed, so the claim it exists to prove is unproven; fix the failing verdict, do not wait for the score to move"
+        echo "$no_pass_msg" >&2
+        command -v logger >/dev/null 2>&1 && \
+            logger -t stopwatch-gate "$no_pass_msg" 2>/dev/null || true
+    else
+        echo "netdisrupt-stopwatch-run: WARN no_pass_streak=$no_pass_streak no_pass_threshold=$no_pass_threshold last_verdict=$verdict — this proof has run and not passed that many times in a row; $((no_pass_threshold - no_pass_streak)) more raises an alarm" >&2
+    fi
+fi
+
 exit 0
