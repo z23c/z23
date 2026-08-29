@@ -103,3 +103,4 @@ Subsequent fixes:
 - `394921b08` — fix LaunchAgent flag syntax (`-datadir=DIR`, `-operator-lane=NAME`).
 - `f6afd6ed5` — support `ZCL_SERVICE_EXTRA_FLAGS` and document fast-sync snapshot option.
 - `47cc9e78a` — add `ZCL_SERVICE_FILESERVICE_PEER` so Mac nodes can bootstrap from another z23 node's file service.
+- `ad42404bc` — treat `-addnode=HOST:8033` peers as file-service snapshot seeds without forcing connect-only mode, so z23 nodes help each other bootstrap while keeping normal peer discovery.
