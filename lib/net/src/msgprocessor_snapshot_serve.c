@@ -306,10 +306,7 @@ void msg_processor_invalidate_block_manifest(void)
 
 uint64_t msg_processor_block_manifest_cache_version(void)
 {
-    pthread_mutex_lock(&g_block_manifest_mutex);
-    uint64_t version = g_cached_block_manifest_version;
-    pthread_mutex_unlock(&g_block_manifest_mutex);
-    return version;
+    return atomic_load(&g_cached_block_manifest_version);
 }
 
 bool msg_processor_get_block_manifest_header(struct block_piece_manifest *out,
@@ -335,7 +332,8 @@ bool msg_processor_get_block_manifest_header(struct block_piece_manifest *out,
 }
 
 static bool msg_processor_copy_block_manifest(struct block_piece_manifest *out,
-                                              int32_t *built_at_height)
+                                              int32_t *built_at_height,
+                                              uint64_t *version_out)
 {
     if (!out)
         LOG_FAIL("net", "block manifest copy output pointer is NULL");
@@ -351,6 +349,7 @@ static bool msg_processor_copy_block_manifest(struct block_piece_manifest *out,
         return false;
 
     pthread_mutex_lock(&g_block_manifest_mutex);
+    uint64_t version = atomic_load(&g_cached_block_manifest_version);
     bool ok = atomic_load(&g_cached_block_manifest_valid) &&
               g_cached_block_manifest.piece_hashes &&
               g_cached_block_manifest.num_pieces > 0;
@@ -371,6 +370,8 @@ static bool msg_processor_copy_block_manifest(struct block_piece_manifest *out,
     } else if (built_at_height) {
         *built_at_height = 0;
     }
+    if (version_out)
+        *version_out = version;
     pthread_mutex_unlock(&g_block_manifest_mutex);
     return ok;
 }
@@ -472,13 +473,27 @@ void push_block_manifest(struct msg_processor *mp,
 {
     struct block_piece_manifest m;
 
-    if (node->blk_manifest_sent)
+    uint64_t current_version = msg_processor_block_manifest_cache_version();
+    if (node->blk_manifest_sent &&
+        node->blk_manifest_sent_version == current_version)
         return;
     if (!peer_supports_fast_sync(node->services))
         return; /* guard: only send to ZCL23 peers */
 
-    if (!msg_processor_copy_block_manifest(&m, NULL))
+    uint64_t copied_version = 0;
+    if (!msg_processor_copy_block_manifest(&m, NULL, &copied_version)) {
+        node->blk_manifest_sent_version = current_version;
         return;
+    }
+    if (node->blk_manifest_sent &&
+        node->blk_manifest_sent_version == copied_version) {
+        block_piece_manifest_free(&m);
+        return;
+    }
+
+    int32_t start_height = m.start_height;
+    int32_t end_height = m.end_height;
+    uint32_t num_pieces = m.num_pieces;
 
     struct byte_stream s;
     size_t hashes_len = (size_t)m.num_pieces * 32;
@@ -499,8 +514,19 @@ void push_block_manifest(struct msg_processor *mp,
     block_piece_manifest_free(&m);
 
     node->blk_manifest_sent = true;
+    node->blk_manifest_sent_version = copied_version;
     printf("Peer %s: sent block manifest (h=%d..%d, %u pieces)\n",
-           node->addr_name, m.start_height, m.end_height, m.num_pieces);
+           node->addr_name, start_height, end_height, num_pieces);
+}
+
+void push_block_manifest_if_ready(struct msg_processor *mp,
+                                  struct p2p_node *node)
+{
+    /* The first manifest may be published long after version handshake. */
+    if (node->blk_manifest_advertise_armed &&
+        node->state >= PEER_HANDSHAKE_COMPLETE &&
+        peer_supports_fast_sync(node->services))
+        push_block_manifest(mp, node);
 }
 
 static bool build_block_piece_payloads(struct msg_processor *mp,
