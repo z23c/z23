@@ -7,6 +7,13 @@
  * `max_lines` or the scan-byte cap. Bounded memory (one chunk plus an
  * accumulator) so it is cheaper than reading the whole multi-MB log.
  *
+ * The regex is util/ere_match.h, the node's own matcher, not the
+ * platform's libc <regex.h>: that header does not exist on Windows, which
+ * made this the one file in the tree that could not build there, and
+ * leaning on a host library is what the no-external-dependency rule
+ * exists to avoid. The contract the help text states is unchanged; see
+ * that header for the exact grammar and for what it refuses.
+ *
  * Level detection: log lines from LOG_FAIL / LOG_ERR / LOG_NULL all
  * start with `[domain] file:line function(): message` where `domain`
  * is e.g. "validation", "sync", "net". This handler also recognises
@@ -24,7 +31,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
-#include <regex.h>
+#include "util/ere_match.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -101,7 +108,7 @@ static int current_utc_year(int64_t now)
 {
     time_t t = (time_t)now;
     struct tm tmv;
-    if (!gmtime_r(&t, &tmv))
+    if (!platform_time_utc_tm(t, &tmv))
         return 1970;
     return tmv.tm_year + 1900;
 }
@@ -269,7 +276,12 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
 {
     RPC_HELP(help, result,
         "getnodelog <pattern> [since_secs=300] [max_lines=50] [level=all]\n"
-        "\nReverse-scan node.log. `pattern` is POSIX-extended regex.\n"
+        "\nReverse-scan node.log. `pattern` is a POSIX-extended regular\n"
+        "expression, matched byte-wise by the node's own matcher: literals,\n"
+        "'.', '*', '+', '?', '{n}', '{n,}', '{n,m}', '|', '(...)', '^', '$',\n"
+        "and bracket expressions with ranges, negation and [:classes:].\n"
+        "A backslash escapes a punctuation metacharacter; the GNU-only\n"
+        "escapes (\\w \\d \\s \\b) are refused, never reinterpreted.\n"
         "`level` one of: all, info, warn, error, fatal.\n"
         "`since_secs` filters lines with parseable timestamps; undated "
         "legacy lines remain eligible and are counted in "
@@ -335,11 +347,18 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
         LOG_FAIL("diag", "getnodelog: fstat failed on %s", log_path);
     }
 
-    regex_t re;
-    int rc = regcomp(&re, pattern, REG_EXTENDED | REG_NOSUB);
-    if (rc != 0) {
-        char errbuf[128];
-        regerror(rc, &re, errbuf, sizeof(errbuf));
+    /* ~30 KB of compiled NFA and simulation scratch; this frame already
+     * carries two 64 KB chunk buffers, so it lives on the heap. */
+    struct zcl_ere *re = zcl_malloc(sizeof(*re), "diagnostics.node_log.regex");
+    if (!re) {
+        platform_positioned_file_close(&log_file);
+        json_set_str(result, "getnodelog: out of memory");
+        LOG_FAIL("diag", "getnodelog: cannot allocate the pattern matcher");
+    }
+    if (!zcl_ere_compile(re, pattern)) {
+        char errbuf[ZCL_ERE_ERROR_SIZE];
+        snprintf(errbuf, sizeof(errbuf), "%s", zcl_ere_error(re));
+        free(re);
         platform_positioned_file_close(&log_file);
         json_set_str(result, "getnodelog: bad regex");
         LOG_FAIL("diag", "getnodelog: bad regex '%s': %s",
@@ -417,8 +436,7 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
                             memcpy(line, combined + start_off, llen);
                             line[llen] = '\0';
                             /* Filter by regex + level. */
-                            bool match = (regexec(&re, line, 0,
-                                                  NULL, 0) == 0);
+                            bool match = zcl_ere_search(re, line, llen);
                             enum log_level lvl = line_level(line);
                             bool level_ok = (want_level == LL_ALL) ||
                                             (lvl >= want_level);
@@ -488,7 +506,7 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
     json_push_kv_bool(result, "since_filter_complete",
                       since_secs == 0 || undated_lines_included == 0);
 
-    regfree(&re);
+    free(re);
     platform_positioned_file_close(&log_file);
     return true;
 }

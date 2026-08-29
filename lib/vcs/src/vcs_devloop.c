@@ -21,20 +21,20 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
+#include "platform/directory_compat.h"
+#include "platform/private_file.h"
+#include "platform/process_lock.h"
 #include "platform/time_compat.h"
 #include "storage/event_log.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 bool vcs_devloop_hex32_decode(const char *hex, uint8_t out[32])
 {
@@ -178,6 +178,19 @@ static bool publication_queue_path(const char *repo_root, const char *name,
     return true;
 }
 
+/* Take .zvcs/publication.lock, creating it if absent, and WAIT for a
+ * concurrent holder instead of failing. The publication queue is a durable
+ * cross-process work list: a caller that gave up on contention would drop the
+ * queue mutation it was asked to make, so every queue writer serializes here.
+ * The lock is a retained owner-private file, released by the operating system
+ * if this process dies while holding it. */
+static bool publication_queue_lock_acquire(struct platform_process_lock *lock,
+                                           const char *lock_path)
+{
+    platform_process_lock_init(lock);
+    return platform_process_lock_acquire(lock, lock_path, true);
+}
+
 bool vcs_devloop_publication_job_is_queued(
     const char *repo_root, const uint8_t job_root[32])
 {
@@ -221,9 +234,8 @@ bool vcs_devloop_publication_job_requeue(
         !publication_queue_path(repo_root, "publication.log", log_path,
                                 sizeof(log_path)))
         return false;
-    int lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!publication_queue_lock_acquire(&queue_lock, lock_path)) {
         LOG_WARN("vcs.devloop", "publication requeue: lock failed");
         return false;
     }
@@ -235,8 +247,7 @@ bool vcs_devloop_publication_job_requeue(
         ok = event_log_append(log, EV_VCS_PUBLICATION_JOB, job_root, 32) !=
              UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     if (!ok) {
         LOG_WARN("vcs.devloop", "publication requeue: durable append failed");
         return false;
@@ -538,9 +549,8 @@ bool vcs_devloop_publication_advance_waiting_acceptance(
         !publication_queue_path(repo_root, "publication.receipts.log",
                                 log_path, sizeof(log_path)))
         return false;
-    int lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!publication_queue_lock_acquire(&queue_lock, lock_path)) {
         return false;
     }
     struct vcs_devloop_publication_receipt current;
@@ -568,8 +578,7 @@ bool vcs_devloop_publication_advance_waiting_acceptance(
              VCS_DEVLOOP_PUBLICATION_PHASE_SOURCE_REPRODUCED)) {
         memcpy(receipt_root_out, current_root, 32);
         if (reused_out) *reused_out = true;
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return true;
     }
     struct vcs_devloop_publication_receipt receipt = {
@@ -589,8 +598,7 @@ bool vcs_devloop_publication_advance_waiting_acceptance(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     return ok;
 }
 
@@ -627,9 +635,8 @@ bool vcs_devloop_publication_advance_proven_work(
         !publication_queue_path(repo_root, "publication.receipts.log",
                                 log_path, sizeof(log_path)))
         return false;
-    int lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!publication_queue_lock_acquire(&queue_lock, lock_path)) {
         return false;
     }
     struct vcs_devloop_publication_receipt current;
@@ -661,8 +668,7 @@ bool vcs_devloop_publication_advance_proven_work(
             if (reused_out) *reused_out = true;
         }
         vcs_package_mapping_set_free(&set);
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return same;
     }
     if (have_current && current.phase ==
@@ -676,8 +682,7 @@ bool vcs_devloop_publication_advance_proven_work(
             if (reused_out) *reused_out = true;
         }
         vcs_package_mapping_set_free(&set);
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return same;
     }
     if (have_current && current.phase ==
@@ -688,14 +693,12 @@ bool vcs_devloop_publication_advance_proven_work(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return same;
     }
     if (!have_current || current.phase !=
             VCS_DEVLOOP_PUBLICATION_PHASE_WAITING_ACCEPTANCE) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return false;
     }
     struct vcs_devloop_publication_receipt receipt = {
@@ -715,8 +718,7 @@ bool vcs_devloop_publication_advance_proven_work(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     return ok;
 }
 
@@ -776,10 +778,8 @@ bool vcs_devloop_publication_advance_package_mapping(
             repo_root, "publication.lock", lock_path, sizeof(lock_path)) &&
         publication_queue_path(repo_root, "publication.receipts.log",
                                log_path, sizeof(log_path));
-    int lock_fd = paths
-        ? open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!paths || !publication_queue_lock_acquire(&queue_lock, lock_path)) {
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -807,8 +807,7 @@ bool vcs_devloop_publication_advance_package_mapping(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return same;
     }
@@ -819,8 +818,7 @@ bool vcs_devloop_publication_advance_package_mapping(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return same;
     }
@@ -828,8 +826,7 @@ bool vcs_devloop_publication_advance_package_mapping(
             VCS_DEVLOOP_PUBLICATION_PHASE_ACCEPTED_LANE_BOUND &&
         memcmp(current.artifact_root, set.lane_receipt_root, 32) == 0;
     if (!accepted) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -853,8 +850,7 @@ bool vcs_devloop_publication_advance_package_mapping(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     vcs_package_mapping_set_free(&set);
     return ok;
 }
@@ -879,10 +875,8 @@ bool vcs_devloop_publication_advance_release(
             repo_root, "publication.lock", lock_path, sizeof(lock_path)) &&
         publication_queue_path(repo_root, "publication.receipts.log",
                                log_path, sizeof(log_path));
-    int lock_fd = paths
-        ? open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!paths || !publication_queue_lock_acquire(&queue_lock, lock_path)) {
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -911,8 +905,7 @@ bool vcs_devloop_publication_advance_release(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return same;
     }
@@ -920,8 +913,7 @@ bool vcs_devloop_publication_advance_release(
             VCS_DEVLOOP_PUBLICATION_PHASE_PACKAGE_MAPPING_READY &&
         memcmp(current.artifact_root, mapping_set_root, 32) == 0;
     if (!mapped) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -945,8 +937,7 @@ bool vcs_devloop_publication_advance_release(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     vcs_package_mapping_set_free(&set);
     return ok;
 }
@@ -973,10 +964,8 @@ bool vcs_devloop_publication_advance_passport(
             repo_root, "publication.lock", lock_path, sizeof(lock_path)) &&
         publication_queue_path(repo_root, "publication.receipts.log",
                                log_path, sizeof(log_path));
-    int lock_fd = paths
-        ? open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!paths || !publication_queue_lock_acquire(&queue_lock, lock_path)) {
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -1006,8 +995,7 @@ bool vcs_devloop_publication_advance_passport(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return same;
     }
@@ -1022,8 +1010,7 @@ bool vcs_devloop_publication_advance_passport(
             VCS_DEVLOOP_PUBLICATION_PHASE_PACKAGE_MAPPING_READY &&
         memcmp(mapping_receipt.artifact_root, mapping_set_root, 32) == 0;
     if (!released) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -1047,8 +1034,7 @@ bool vcs_devloop_publication_advance_passport(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     vcs_package_mapping_set_free(&set);
     return ok;
 }
@@ -1076,10 +1062,8 @@ bool vcs_devloop_publication_advance_workspace(
             repo_root, "publication.lock", lock_path, sizeof(lock_path)) &&
         publication_queue_path(repo_root, "publication.receipts.log",
                                log_path, sizeof(log_path));
-    int lock_fd = paths
-        ? open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!paths || !publication_queue_lock_acquire(&queue_lock, lock_path)) {
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -1110,8 +1094,7 @@ bool vcs_devloop_publication_advance_workspace(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return same;
     }
@@ -1123,8 +1106,7 @@ bool vcs_devloop_publication_advance_workspace(
         memcmp(chain.release.artifact_root, release_root, 32) == 0 &&
         memcmp(chain.mapping.artifact_root, mapping_set_root, 32) == 0;
     if (!passported) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -1148,8 +1130,7 @@ bool vcs_devloop_publication_advance_workspace(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     vcs_package_mapping_set_free(&set);
     return ok;
 }
@@ -1302,10 +1283,8 @@ bool vcs_devloop_publication_advance_provider(
             repo_root, "publication.lock", lock_path, sizeof(lock_path)) &&
         publication_queue_path(repo_root, "publication.receipts.log",
                                log_path, sizeof(log_path));
-    int lock_fd = paths
-        ? open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!paths || !publication_queue_lock_acquire(&queue_lock, lock_path)) {
         return false;
     }
     struct vcs_devloop_publication_receipt current;
@@ -1323,8 +1302,7 @@ bool vcs_devloop_publication_advance_provider(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return same;
     }
     if (have_current && current.phase ==
@@ -1335,15 +1313,13 @@ bool vcs_devloop_publication_advance_provider(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return same;
     }
     if (!have_current || current.phase !=
             VCS_DEVLOOP_PUBLICATION_PHASE_WORKSPACE_PUBLISHED ||
         memcmp(current_root, observed_root, 32) != 0) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return false;
     }
     struct vcs_devloop_publication_receipt receipt = {
@@ -1368,8 +1344,7 @@ bool vcs_devloop_publication_advance_provider(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     return ok;
 }
 
@@ -1535,10 +1510,8 @@ bool vcs_devloop_publication_advance_storage_acks(
             repo_root, "publication.lock", lock_path, sizeof(lock_path)) &&
         publication_queue_path(repo_root, "publication.receipts.log",
                                log_path, sizeof(log_path));
-    int lock_fd = paths
-        ? open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!paths || !publication_queue_lock_acquire(&queue_lock, lock_path)) {
         return false;
     }
     struct vcs_devloop_publication_receipt current;
@@ -1559,15 +1532,13 @@ bool vcs_devloop_publication_advance_storage_acks(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return same;
     }
     if (!have_current || current.phase !=
             VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED ||
         memcmp(current_root, observed_root, 32) != 0) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return false;
     }
     struct vcs_devloop_publication_receipt receipt = {
@@ -1593,8 +1564,7 @@ bool vcs_devloop_publication_advance_storage_acks(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     return ok;
 }
 
@@ -1768,10 +1738,8 @@ bool vcs_devloop_publication_advance_source_reproduction_ack(
             repo_root, "publication.lock", lock_path, sizeof(lock_path)) &&
         publication_queue_path(repo_root, "publication.receipts.log",
                                log_path, sizeof(log_path));
-    int lock_fd = paths
-        ? open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
-    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
-        if (lock_fd >= 0) close(lock_fd);
+    struct platform_process_lock queue_lock;
+    if (!paths || !publication_queue_lock_acquire(&queue_lock, lock_path)) {
         return false;
     }
     struct vcs_devloop_publication_receipt current;
@@ -1786,15 +1754,13 @@ bool vcs_devloop_publication_advance_source_reproduction_ack(
             memcpy(receipt_root_out, current_root, 32);
             if (reused_out) *reused_out = true;
         }
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return same;
     }
     if (!have_current || current.phase !=
             VCS_DEVLOOP_PUBLICATION_PHASE_STORAGE_ACKNOWLEDGED ||
         memcmp(current_root, observed_root, 32) != 0) {
-        (void)flock(lock_fd, LOCK_UN);
-        close(lock_fd);
+        platform_process_lock_release(&queue_lock);
         return false;
     }
     struct vcs_devloop_publication_receipt receipt = {
@@ -1819,8 +1785,7 @@ bool vcs_devloop_publication_advance_source_reproduction_ack(
             log, EV_VCS_PUBLICATION_RECEIPT, receipt_root_out, 32) !=
             UINT64_MAX;
     if (log) event_log_close(log);
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&queue_lock);
     return ok;
 }
 
@@ -1995,22 +1960,33 @@ static void anchor_cycle_sync(const char *repo_root,
     LOG_WARN("vcs.devloop", "anchor_cycle: vcs_snapshot failed rc=%d", rc);
 }
 
-/* Open (creating if absent) .zvcs/bootstrap.lock for the baseline
- * singleton. Returns -1 on any setup failure. Never spawns a process —
- * open()/mkdir() only (the ZVCS-sovereignty lint gate requires lib/vcs,
- * being release-linkable, to stay process-spawn free). */
-static int open_bootstrap_lock(const char *repo_root, char *lock_path,
-                               size_t lock_path_sz)
+/* Name .zvcs/bootstrap.lock for the baseline singleton, creating the
+ * directory and the lock file if absent. Returns false on any setup failure.
+ * Never spawns a process — the platform file/directory seams only (the
+ * ZVCS-sovereignty lint gate requires lib/vcs, being release-linkable, to
+ * stay process-spawn free). Creating the file is separate from locking it so
+ * the caller can still tell "cannot set up the lock" (an error) from
+ * "another caller holds it" (a deferral). */
+static bool bootstrap_lock_path(const char *repo_root, char *lock_path,
+                                size_t lock_path_sz)
 {
     char dir[PATH_MAX];
     int n = snprintf(dir, sizeof(dir), "%s/.zvcs", repo_root);
     if (n <= 0 || (size_t)n >= sizeof(dir) ||
-        (mkdir(dir, 0700) != 0 && errno != EEXIST))
-        return -1;
+        !platform_directory_ensure(dir, 0700))
+        return false;
     n = snprintf(lock_path, lock_path_sz, "%s/bootstrap.lock", dir);
     if (n <= 0 || (size_t)n >= lock_path_sz)
-        return -1;
-    return open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        return false;
+    if (platform_private_path_absent(lock_path)) {
+        struct platform_private_file created;
+        platform_private_file_init(&created);
+        /* Losing this create race is not an error: the file exists either
+         * way and the exclusive lock below decides the singleton. */
+        if (platform_private_file_create(lock_path, &created))
+            platform_private_file_close(&created);
+    }
+    return !platform_private_path_absent(lock_path);
 }
 
 /* The first snapshot is generation-neutral bootstrap work: it may need to
@@ -2036,16 +2012,16 @@ void vcs_devloop_run_initial_baseline(const char *repo_root,
     }
 
     char lock_path[PATH_MAX];
-    int lock_fd = open_bootstrap_lock(repo_root, lock_path, sizeof(lock_path));
-    if (lock_fd < 0) {
+    if (!bootstrap_lock_path(repo_root, lock_path, sizeof(lock_path))) {
         snprintf(out->error, sizeof(out->error),
                  "could not open .zvcs/bootstrap.lock under %s", repo_root);
         LOG_WARN("vcs.devloop", "run_initial_baseline: lock open failed root=%s",
                  repo_root);
         return;
     }
-    if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
-        close(lock_fd);
+    struct platform_process_lock baseline_lock;
+    platform_process_lock_init(&baseline_lock);
+    if (!platform_process_lock_try_acquire(&baseline_lock, lock_path, false)) {
         out->status = VCS_DEVLOOP_ANCHOR_DEFERRED;
         snprintf(out->error, sizeof(out->error),
                  "another caller already holds the initial ZVCS baseline lock");
@@ -2065,8 +2041,7 @@ void vcs_devloop_run_initial_baseline(const char *repo_root,
         LOG_WARN("vcs.devloop", "run_initial_baseline: failed root=%s: %s",
                  repo_root, out->error[0] ? out->error : "unknown error");
 
-    (void)flock(lock_fd, LOCK_UN);
-    close(lock_fd);
+    platform_process_lock_release(&baseline_lock);
 }
 
 static bool durable_history_present(const char *repo_root)
@@ -2086,16 +2061,18 @@ static bool initial_baseline_running(const char *repo_root)
                      repo_root);
     if (n <= 0 || (size_t)n >= sizeof(path))
         return false;
-    int fd = open(path, O_RDWR | O_CLOEXEC);
-    if (fd < 0)
+    if (platform_private_path_absent(path))
         return false;
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        bool running = errno == EWOULDBLOCK || errno == EAGAIN;
-        close(fd);
-        return running;
-    }
-    (void)flock(fd, LOCK_UN);
-    close(fd);
+    /* The lock file exists, so a refused exclusive acquisition means another
+     * caller holds the baseline. A refusal for any other reason (the file is
+     * unreadable, or is not the real regular file it must be) is reported as
+     * running too: deferring is the safe direction, running a second baseline
+     * concurrently is not. */
+    struct platform_process_lock probe;
+    platform_process_lock_init(&probe);
+    if (!platform_process_lock_try_acquire(&probe, path, false))
+        return true;
+    platform_process_lock_release(&probe);
     return false;
 }
 

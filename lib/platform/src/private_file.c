@@ -102,7 +102,7 @@ void platform_private_file_init(struct platform_private_file *file) {
   }
 }
 
-static bool pf_open(const char *path, DWORD creation,
+static bool pf_open(const char *path, DWORD creation, DWORD share,
                     struct platform_private_file *file) {
   wchar_t wide[32768];
   if (!file || !pf_wide(path, wide))
@@ -115,7 +115,7 @@ static bool pf_open(const char *path, DWORD creation,
     security.lpSecurityDescriptor = descriptor;
   }
   HANDLE h = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE | DELETE,
-                         FILE_SHARE_READ, descriptor ? &security : NULL,
+                         share, descriptor ? &security : NULL,
                          creation,
                          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
                              FILE_FLAG_OVERLAPPED,
@@ -137,12 +137,12 @@ static bool pf_open(const char *path, DWORD creation,
 
 bool platform_private_file_create(const char *path,
                                   struct platform_private_file *file) {
-  return pf_open(path, CREATE_NEW, file);
+  return pf_open(path, CREATE_NEW, FILE_SHARE_READ, file);
 }
 
 bool platform_private_file_open_locked(const char *path,
                                        struct platform_private_file *file) {
-  if (!pf_open(path, OPEN_EXISTING, file))
+  if (!pf_open(path, OPEN_EXISTING, FILE_SHARE_READ, file))
     return false;
   OVERLAPPED ov = {0};
   if (!LockFileEx(pf_handle(file),
@@ -169,6 +169,57 @@ bool platform_private_file_open_locked_create(
     return false;
   }
   return platform_private_file_open_locked(path, file);
+}
+
+/* Waiting exclusive acquisition.  The nonblocking pair above gets its
+ * exclusion from the CreateFileW share mode, so a second opener is refused at
+ * open time and never reaches the byte-range lock — there is nothing to wait
+ * on.  A waiting lock must therefore let other writers open the same file and
+ * take its exclusion solely from the whole-file LockFileEx range.  The handle
+ * is FILE_FLAG_OVERLAPPED, so a lock that cannot be granted immediately
+ * returns ERROR_IO_PENDING and completes asynchronously; wait on the event
+ * rather than assuming LockFileEx blocked.  A waited lock file must never be
+ * mixed with the nonblocking pair on the same path: the two share modes are
+ * mutually incompatible and the second opener would fail. */
+static bool pf_lock_wait(struct platform_private_file *file) {
+  HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+  if (!event)
+    return false;
+  OVERLAPPED ov = {.hEvent = event};
+  BOOL locked = LockFileEx(pf_handle(file), LOCKFILE_EXCLUSIVE_LOCK, 0,
+                           UINT32_MAX, UINT32_MAX, &ov);
+  if (!locked && GetLastError() == ERROR_IO_PENDING) {
+    DWORD transferred = 0;
+    locked = WaitForSingleObject(event, INFINITE) == WAIT_OBJECT_0 &&
+             GetOverlappedResult(pf_handle(file), &ov, &transferred, FALSE);
+  }
+  CloseHandle(event);
+  if (!locked)
+    return false;
+  file->locked = true;
+  return true;
+}
+
+bool platform_private_file_open_locked_wait(
+    const char *path, struct platform_private_file *file) {
+  if (!pf_open(path, OPEN_EXISTING, FILE_SHARE_READ | FILE_SHARE_WRITE, file))
+    return false;
+  if (!pf_lock_wait(file)) {
+    platform_private_file_close(file);
+    return false;
+  }
+  return true;
+}
+
+bool platform_private_file_open_locked_create_wait(
+    const char *path, struct platform_private_file *file) {
+  if (pf_open(path, CREATE_NEW, FILE_SHARE_READ | FILE_SHARE_WRITE, file)) {
+    if (pf_lock_wait(file))
+      return true;
+    platform_private_file_close(file);
+    return false;
+  }
+  return platform_private_file_open_locked_wait(path, file);
 }
 
 void platform_private_file_close(struct platform_private_file *file) {
@@ -543,6 +594,41 @@ bool platform_private_file_open_locked_create(
     return false;
   }
   return platform_private_file_open_locked(p, f);
+}
+/* Waiting exclusive acquisition: the same advisory whole-file flock as the
+ * nonblocking pair, without LOCK_NB, retried across signal interruption.  The
+ * kernel still releases it if the holder dies. */
+static bool pf_lock_wait(struct platform_private_file *f) {
+  int rc;
+  do {
+    rc = flock(pf_fd(f), LOCK_EX);
+  } while (rc != 0 && errno == EINTR);
+  if (rc != 0)
+    return false;
+  f->locked = true;
+  return true;
+}
+bool platform_private_file_open_locked_wait(const char *p,
+                                            struct platform_private_file *f) {
+  int fd = open(p, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0)
+    return false;
+  f->native = (uintptr_t)fd;
+  if (!pf_lock_wait(f)) {
+    platform_private_file_close(f);
+    return false;
+  }
+  return true;
+}
+bool platform_private_file_open_locked_create_wait(
+    const char *p, struct platform_private_file *f) {
+  if (platform_private_file_create(p, f)) {
+    if (pf_lock_wait(f))
+      return true;
+    platform_private_file_close(f);
+    return false;
+  }
+  return platform_private_file_open_locked_wait(p, f);
 }
 void platform_private_file_close(struct platform_private_file *f) {
   if (f && (int)f->native >= 0) {
