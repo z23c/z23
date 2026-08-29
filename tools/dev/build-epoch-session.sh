@@ -221,11 +221,32 @@ export ZCL_SOURCE_IDENTITY_SESSION="$OWNER_PID:$OWNER_START"
 verify_authority
 [ "$MODE" = verify ] && { check_stamp; exit 0; }
 
-command -v flock >/dev/null 2>&1 || fail 'flock is required for epoch leases'
-
 mkdir -p "$OBJECT_ROOT/epochs/$EPOCH/.leases"
-exec 9> "$OBJECT_ROOT/.epoch-gc.lock"
-flock -x 9
+
+# Portable epoch-GC lock.  MSYS2/Git Bash environments often lack a working
+# `flock` (the util-linux binary uses a different Cygwin runtime than Git
+# Bash and fails on inherited file descriptors).  mkdir is atomic on the
+# local filesystem and is enough to serialize epoch GC across concurrent
+# builds.
+EPOCH_GC_LOCK="$OBJECT_ROOT/.epoch-gc.lock"
+acquire_epoch_gc_lock()
+{
+    local deadline
+    deadline=$(($(date +%s) + 30))
+    while ! mkdir "$EPOCH_GC_LOCK" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            fail "could not acquire epoch GC lock $EPOCH_GC_LOCK (another build holding it?)"
+        fi
+        sleep 0.2
+    done
+}
+release_epoch_gc_lock()
+{
+    rmdir "$EPOCH_GC_LOCK" 2>/dev/null || true
+}
+trap 'release_epoch_gc_lock; cleanup' EXIT
+trap 'exit 2' HUP INT TERM
+acquire_epoch_gc_lock
 
 tmp_session="$(mktemp "$(dirname "$SESSION")/.build-session.XXXXXX")"
 cp -- "$EXPECTED" "$tmp_session"
