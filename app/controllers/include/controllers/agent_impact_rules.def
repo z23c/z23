@@ -2587,6 +2587,9 @@ AGENT_IMPACT_RULE("lib/platform/src/process_lock.c|lib/platform/include/platform
  * observes an edit here -- weaker than a group, and said plainly rather than
  * dressed up. The lint tier alone is the honest answer. */
 AGENT_IMPACT_RULE("lib/platform/tests/windows_acceptance.mk", "make_lint_gates")
+/* This headless program is compiled only by the Windows acceptance catalog;
+ * the lint tier reconciles and cross-links that catalog fail-closed. */
+AGENT_IMPACT_RULE("lib/platform/tests/datadir_privacy_windows_acceptance.c", "make_lint_gates")
 
 /* The zcode sovereignty-policy test's own source. zcode_sovereignty_policy is
  * a registered group -- tools/dev/test_group_catalog.def carries the
