@@ -7867,6 +7867,17 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# From here through verification there are no recursive Make parses. Freeze
 	@# one candidate, prove its baked source identity against the outer record,
 	@# install those exact bytes, and pass that same artifact hash to the verifier.
+	@# Both systemctl restarts below are bounded by timeout(1) (restart_timeout).
+	@# The unit is Type=notify, so `systemctl --user restart` blocks until the
+	@# new boot sends READY=1. A boot that never does — the canonical case is a
+	@# PRIOR binary parked at node_db_unopened because the candidate already
+	@# migrated node.db forward — never sends it, and the unbounded wait held
+	@# this recipe (and the repo tree) open forever; seen live 2026-08-29 when
+	@# a rollback restart hung indefinitely on exactly that park. timeout
+	@# converts the hang into rc=124, which takes the CRITICAL branch:
+	@# automation stops, the tree frees, and recovery is forward-only. 180s is
+	@# ~3x the worst observed READY latency (RPC ~25s, Tor descriptor ~31s on
+	@# a cold 7200rpm boot).
 	@set -eu; \
 	. tools/scripts/source_identity_lib.sh; \
 	command -v timeout >/dev/null 2>&1 || { \
@@ -7877,6 +7888,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	fleet_manifest_tmp=""; \
 	rollback_dropin_present=0; rollback_armed=0; rollback_complete=0; \
 	rollback_source_id=""; rollback_artifact_sha256=""; SERVICE_BIN=""; dropin=""; \
+	restart_timeout=180; \
 	cleanup_deploy() { \
 	    deploy_rc=$$?; \
 	    trap - EXIT HUP INT TERM; \
@@ -7891,7 +7903,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	            rm -f "$$dropin"; rollback_dropin_rc=$$?; \
 	        fi; \
 	        systemctl --user daemon-reload; rollback_reload_rc=$$?; \
-	        systemctl --user restart zclassic23; rollback_restart_rc=$$?; \
+	        timeout $$restart_timeout systemctl --user restart zclassic23; rollback_restart_rc=$$?; \
 	        rollback_verify_rc=1; \
 	        if [ "$$rollback_install_rc" -eq 0 ] && \
 	           [ "$$rollback_dropin_rc" -eq 0 ] && \
@@ -8055,7 +8067,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    fi; \
 	    echo "deploy: refreshed PATH shadow $(HOME)/bin/zclassic23 -> $$SERVICE_BIN"; \
 	fi; \
-	systemctl --user restart zclassic23; \
+	timeout $$restart_timeout systemctl --user restart zclassic23; \
 	set +e; \
 	ZCL_DEPLOY_STAGE="$(DEPLOY_VERIFY_STAGE)" \
 	ZCL_DEPLOY_EXPECT_SOURCE_ID="$(BUILD_SOURCE_ID)" \
@@ -8064,7 +8076,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	verify_rc=$$?; \
 	set -e; \
 	if [ "$$verify_rc" -eq 3 ]; then \
-	    echo "deploy: SLOW BOX — verification window expired while the new node was still making observable progress. The candidate stays installed and NOTHING is rolled back: a slow disk is not a failed deploy. Keep watching with ZCL_DEPLOY_VERIFY_WAIT=1 ZCL_DEPLOY_EXPECT_SOURCE_ID=$(BUILD_SOURCE_ID) ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256=$$artifact_sha256 ./tools/deploy_verify.sh" >&2; \
+	    echo "deploy: SLOW BOX or IDLE TIP — verification window expired without a contract pass: either the node was still making observable progress (a slow disk is not a failed deploy) or it was synced and idle at the network tip with a live RPC (an idle tip is not a wedge). The candidate stays installed and NOTHING is rolled back. The verifier's own output above says which. Keep watching with ZCL_DEPLOY_VERIFY_WAIT=1 ZCL_DEPLOY_EXPECT_SOURCE_ID=$(BUILD_SOURCE_ID) ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256=$$artifact_sha256 ./tools/deploy_verify.sh" >&2; \
 	    rollback_armed=0; \
 	    rm -f "$$candidate"; candidate=""; \
 	    rm -f "$$rollback_bin" "$$rollback_dropin"; rollback_bin=""; rollback_dropin=""; \
