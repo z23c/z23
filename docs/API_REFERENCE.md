@@ -84,7 +84,7 @@ z23 discover schema <path> --side=input|output
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
 | Leaves with `effect=mutate` | 206 |
 | Leaves with `effect=destructive` | 4 |
-| Leaves requiring **owner** authority | 116 |
+| Leaves requiring **owner** authority | 117 |
 
 Per source file:
 
