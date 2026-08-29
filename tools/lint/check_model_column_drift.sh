@@ -71,7 +71,9 @@ st_expect() {
         printf '%s\n' "$out" | sed 's/^/    /'
         return 1
     fi
-    if [ -n "$needle" ] && ! printf '%s' "$out" | grep -qF -- "$needle"; then
+    # Here-string, not a pipeline: under pipefail a MATCH in `printf | grep -q`
+    # can surface printf's SIGPIPE 141 instead of grep's 0.
+    if [ -n "$needle" ] && ! grep -qF -- "$needle" <<<"$out"; then
         echo "SELFTEST FAIL: $label — verdict never named '$needle'"
         printf '%s\n' "$out" | sed 's/^/    /'
         return 1
