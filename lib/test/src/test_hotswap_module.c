@@ -3,6 +3,9 @@
  * Tests for the REAL (activatable) Tier-1 hot-swap module ABI + the
  * command-registry epoch/refcount drain that makes dlclose-after-swap safe.
  *
+ * _GNU_SOURCE is required before sys/mman.h so glibc exposes MAP_ANONYMOUS
+ * under strict feature-test builds (-D_POSIX_C_SOURCE).
+ *
  * The test binary compiles ONE translation unit — the loader,
  * lib/hotswap/src/hotswap_activate.c — with -DZCL_DEV_BUILD, so `make
  * t-hotswap` can run a real test group against a hot-swapped module through
@@ -17,6 +20,8 @@
  * no dlopen required. The live swap + epoch-quiesce drain is proven against
  * the real command-registry override layer with function-pointer handlers
  * (the same mechanism hotswap_activate's commit_cb publishes into). */
+
+#define _GNU_SOURCE
 
 #include "test/test_core.h"
 
