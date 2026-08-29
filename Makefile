@@ -7818,6 +7818,65 @@ endef
 install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign
 	@$(INSTALL_C23_PRODUCTS)
 
+# ── macOS launchd service (the launchd equivalent of systemd linger) ──
+# Installs a LaunchAgent plist that keeps the z23 node running in the
+# background with auto-restart on crash, starts at login, and logs to
+# the datadir. Uses launchd — the native macOS service manager — so no
+# Xcode, Homebrew services, or third-party tools are needed.
+#
+#   make service-install        # production path: uses $(PREFIX)/bin/z23
+#   make dev-service-install    # development path: uses build/bin/z23
+#
+# The production path requires 'make install' first so the plist points
+# at a stable installed binary, not a build directory that may relink.
+
+ZCL_LAUNCHD_DIR  = $(HOME)/Library/LaunchAgents
+ZCL_LAUNCHD_LABEL = org.z23.zclassic
+ZCL_LAUNCHD_PLIST = $(ZCL_LAUNCHD_DIR)/$(ZCL_LAUNCHD_LABEL).plist
+ZCL_DATADIR = $(or $(ZCL_NODE_DATADIR),$(HOME)/.zclassic-c23)
+
+.PHONY: service-install
+service-install:
+	@test -x "$(PREFIX)/bin/z23" || { \
+	    echo "service-install: $(PREFIX)/bin/z23 not found." >&2; \
+	    echo "  Run 'make install' first, or use 'make dev-service-install'" >&2; \
+	    echo "  to run from the build directory ($(BIN_DIR)/z23)." >&2; \
+	    exit 1; }
+	@$(MAKE) __service-install ZCL_SERVICE_Z23_BIN="$(PREFIX)/bin/z23"
+
+.PHONY: dev-service-install
+dev-service-install: | $(BIN_DIR)/z23
+	@$(MAKE) __service-install ZCL_SERVICE_Z23_BIN="$(abspath $(BIN_DIR)/z23)"
+
+.PHONY: __service-install
+__service-install:
+	@mkdir -p $(ZCL_LAUNCHD_DIR) "$(ZCL_DATADIR)"
+	@sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
+	     -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
+	    config/launchd/org.z23.zclassic.plist.template \
+	    > "$(ZCL_LAUNCHD_PLIST)"
+	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
+	@launchctl load "$(ZCL_LAUNCHD_PLIST)"
+	@echo "service-install: LaunchAgent loaded ($(ZCL_LAUNCHD_LABEL))"
+	@echo "  binary:  $(ZCL_SERVICE_Z23_BIN)"
+	@echo "  datadir: $(ZCL_DATADIR)"
+	@echo "  logs:    $(ZCL_DATADIR)/z23.{stdout,stderr}.log"
+	@echo "  stop:    launchctl unload $(ZCL_LAUNCHD_PLIST)"
+	@echo "  start:   launchctl load $(ZCL_LAUNCHD_PLIST)"
+
+.PHONY: service-uninstall
+service-uninstall:
+	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
+	@rm -f "$(ZCL_LAUNCHD_PLIST)"
+	@echo "service-uninstall: LaunchAgent unloaded and removed"
+
+.PHONY: service-status
+service-status:
+	@launchctl list | LC_ALL=C grep z23 || echo "  (not loaded)"
+	@test -f "$(ZCL_LAUNCHD_PLIST)" && echo "  plist: $(ZCL_LAUNCHD_PLIST)" \
+	    || echo "  (not installed)"
+
+
 # Same installation surface, but every copied product was freshly built and
 # audited by the pinned old-glibc front door above. Keeping the copy recipe
 # shared prevents portable installation from becoming a second package path.
