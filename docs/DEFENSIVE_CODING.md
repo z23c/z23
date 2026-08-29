@@ -197,6 +197,27 @@ site). The same gate ratchets that the plaintext model saves never return.
 | mempool_entry | Validate fee + size envelope | (none) |
 | tx_index | Validate txid + block height | (none) |
 
+### after_commit — for anything an observer can see
+
+`after_save` fires when the **statement** steps, not when the **transaction**
+commits. Saves do happen inside transactions
+(`app/services/src/blog_publication.c` wraps `db_blog_post_save` in
+`db_txn_begin`/`db_txn_commit`) and some `after_save` hooks have effects the
+database cannot take back — `wallet_tx_after_save` emits `EV_WALLET_TX_SAVED`
+and pushes a wallet projection. Put those together and an external observer
+can be told about a row a later `ROLLBACK` erases.
+
+`ar_register_after_commit(cbs, fn, sizeof(*record))`
+(`app/models/include/models/ar_after_commit.h`) queues a hook instead: it
+fires once, in registration order, after the **outermost** transaction
+commits, and not at all if the transaction rolls back. Outside a transaction
+it fires immediately after the statement succeeds. A queued hook is handed a
+copy of the record, which is why the size is mandatory; a save whose hook can
+neither fire nor be queued **returns false** rather than skipping an observer.
+`after_save` is unchanged — a model with no `after_commit` hook behaves
+exactly as before. Use `after_commit`, not `after_save`, for an emitted event,
+a pushed projection, or any other notification that leaves the process.
+
 ---
 
 ## 7. CI gates — the final enforcer
