@@ -44,7 +44,7 @@ export PATH="$TMP/bin:/usr/bin:/bin"
 for i in $(seq -w 1 12); do
     log="$TMP/state/logs/fuzz-2026-07-14T${i}0000Z.log"
     printf 'fixture %s\n' "$i" > "$log"
-    touch -d "2026-07-14 00:$i:00 UTC" "$log"
+    TZ=UTC touch -t "2026071400${i}.00" "$log"
 done
 printf 'test fixture\n' > "$TMP/state/logs/tests-2026-07-14T000000Z.log"
 printf '{"status":"fixture"}\n' > "$TMP/state/status/fuzz.json"
@@ -72,7 +72,7 @@ grep -q '"status":"fixture"' "$TMP/state/status/fuzz.json"
 for i in 1 2 3; do
     log="$TMP/state/logs/coverage-2026-07-14T0${i}0000Z.log"
     truncate -s 600000 "$log"
-    touch -d "2026-07-14 01:0$i:00 UTC" "$log"
+    TZ=UTC touch -t "20260714010${i}.00" "$log"
 done
 "$TMP/scripts/quality_log_retention.sh" coverage
 [ "$(find "$TMP/state/logs" -maxdepth 1 -type f -name 'coverage-*.log' | wc -l)" -eq 1 ]
