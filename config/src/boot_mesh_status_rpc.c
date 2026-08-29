@@ -143,8 +143,6 @@ static void receipt_view_json(struct json_value *result,
     json_push_kv_str(result, "capsule_root", hex);
     json_push_kv_int(result, "connection_generation",
                      (int64_t)receipt->connection_generation);
-    json_push_kv_int(result, "connection_serial",
-                     (int64_t)receipt->connection_serial);
     json_push_kv_int(result, "revocation_generation",
                      (int64_t)receipt->revocation_generation);
     json_push_kv_int(result, "observed_unix", (int64_t)receipt->observed_unix);

@@ -279,8 +279,8 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_trusted_peer_stall_guard_contract),
     S_(t_gap_fill_wakes_connman_dispatch_contract),
     S_(t_msg_process_yields_to_send_phase_contract),
-    S_(t_e1_file_size_ceiling),
-    S_(t_e1_lib_warn_tier),
+    S_(t_e1_file_size_bands),
+    S_(t_e1_file_size_baseline_and_hollow_scan),
     S_(t_long_functions_enforced_ratchet),
     S_(t_long_functions_lib_warn_tier),
     S_(t_no_new_repair_rung),
@@ -392,8 +392,8 @@ static int lint_entry_weight(lint_gate_fn fn)
     if (fn == t_slow_disk_progress_verdicts_contract)    return 15500;
     if (fn == t_lint_gates_fail_loud_on_empty_scan)      return 21827;
     if (fn == t_gate22_framework_filename_suffix)        return 12435;
-    if (fn == t_e1_file_size_ceiling)                    return 10960;
-    if (fn == t_e1_lib_warn_tier)                        return 7211;
+    if (fn == t_e1_file_size_bands)                      return 10960;
+    if (fn == t_e1_file_size_baseline_and_hollow_scan)   return 7211;
     if (fn == t_long_functions_enforced_ratchet)         return 5180;
     if (fn == t_baseline_passes)                         return 4893;
     if (fn == t_gate_recovers_after_removal)             return 4889;
@@ -509,6 +509,14 @@ static int lint_run_owned(int owner)
  * changes the live inode ctime and falsely supersedes source proof epochs;
  * fixture chmod/write would be worse. test-tmp is created fresh. Returns 0.
  *
+ * build/ is skipped wholesale (gigabytes of objects and node binaries) with
+ * ONE exception: build/bin/file_size_policy, the E1 file-size gate. E1 is a
+ * compiled C23 binary rather than a script, so unlike every other gate it
+ * does not ride into the sandbox with the source tree, and its self-test
+ * would exec a path that does not exist. The copy is best-effort — a tree
+ * where it was never built must not fail every shard's sandbox
+ * construction; t_e1_file_size_bands checks for it and says so instead.
+ *
  * Uses fork_with_retry(), not a bare fork(): this runs once per shard (up to
  * LINT_GATE_SHARD_COUNT times concurrently) from the same large test_zcl
  * process the run_gate_script* family forks from, so it is exposed to the
@@ -534,7 +542,8 @@ static int lint_sandbox_build(const char *real_root, const char *sb_root)
             "  case \"$b\" in build|.git|.cache|test-tmp|.claude) continue;; esac\n"
             "  cp -a --reflink=auto \"$e\" \"$2\"/\n"
             "done\n"
-            "mkdir -p \"$2\"/test-tmp\n";
+            "mkdir -p \"$2\"/test-tmp \"$2\"/build/bin\n"
+            "cp -a --reflink=auto \"$1\"/build/bin/file_size_policy \"$2\"/build/bin/ 2>/dev/null || :\n";
         execl("/bin/sh", "sh", "-c", script, "sh",
               real_root, sb_root, (char *)NULL);
         _exit(127);

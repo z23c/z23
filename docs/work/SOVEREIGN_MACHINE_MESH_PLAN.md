@@ -42,12 +42,15 @@ ops mesh machines
 ops mesh file offer|fetch|status|cancel
 ops mesh task submit|status|cancel|result
 ops mesh tunnel open|status|renew|close
+ops mesh terminal open|status|renew|close
 ops mesh service plan|commit|health|rollback
 ```
 
 Every mutating family uses plan/commit where the consequence survives the
-request. No command accepts a shell command, ambient environment, unrestricted
-path, wallet secret, canonical datadir, or arbitrary executable.
+request. Typed task and service commands never accept a shell command, ambient
+environment, unrestricted path, wallet secret, canonical datadir, or arbitrary
+executable. An interactive terminal is a separate, explicitly granted byte
+stream to one configured confined worker; it does not widen task authority.
 
 ## Architecture
 
@@ -86,12 +89,12 @@ bundles never ride inside control messages.
 | Capability | Current state | What remains before a product claim |
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
-| Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, sticky revocation, and owner-facing `ops mesh pair plan|commit|list|revoke` with mandatory out-of-band fingerprint | Two-sided wire ceremony; each host still pairs the other independently |
+| Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
 | Fleet view | Wire connected: pairing-bound signed status request/receipt over Noise plus active ZID delegation, revocation races fail closed | Local online/offline projection (`ops mesh machines`) and independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
-| Interactive access | Not implemented | Capability-gated tunnels to existing SSH, RDP, or screen-sharing services |
+| Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
 | Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
 | macOS | Native C23 development/application path exists; node support must report embedded Tor unavailable | Native node/session receipts and truthful confinement/tunnel capability probes |
@@ -104,7 +107,8 @@ machine happened to work.
 ## Security boundary
 
 The mesh carries narrowly typed requests, immutable objects, and signed
-receipts. It does not expose an arbitrary remote shell in the initial product.
+receipts. Interactive terminal access is absent until its separate owner-only
+capability, confinement, revocation, and resource acceptance are complete.
 Network membership, a human-readable name, possession of a content hash, a
 transfer receipt, and a build attestation each prove only their stated fact;
 none grants execution, installation, wallet, consensus, deployment, or custody
@@ -213,6 +217,12 @@ signed receipt for the exact accepted or refused operation. Revocation is a
 local, durable state transition and takes effect for new requests and renewed
 sessions. Expiry is mandatory even when revocation distribution is delayed.
 
+The transcript hash and transcript-derived connection generation are shared
+session evidence. The transport's process-local connection serial is never a
+wire field, signature input, replay key, or cross-peer comparison: honest ends
+of one session intentionally assign different serials. Status-request replay is
+instead keyed by the request id within the authenticated transcript generation.
+
 ## Pairing and recovery
 
 Pairing is an explicit two-sided ceremony. The owner compares a short
@@ -269,22 +279,30 @@ versions fail closed.
 
 ## Interactive remote access
 
-Interactive access reuses the operating system's maintained local service
-instead of adding a second shell or desktop protocol to Z23. A paired owner may
-open an authenticated, capability-gated tunnel to one explicitly named local
-service such as SSH, Remote Desktop, or a screen-sharing server. The service
-stays bound to loopback or its existing private interface; Z23 does not publish
-an unrestricted listener.
+Interactive access uses a small encrypted terminal protocol carried by the
+same authenticated Z23 session. Z23 implements terminal framing, resize, flow
+control, expiry, revocation, quotas, and receipts in C23; it does not parse
+shell syntax. Windows connects the confined worker to ConPTY and
+`CreateProcessW`; Linux and macOS connect it to a PTY and a descriptor-safe
+spawn primitive. The worker launches only the locally configured shell or
+agent entry point. No separately installed SSH server is required.
 
-Each tunnel grant binds the target machine, subject identity, service kind,
-local endpoint, direction, connection count, byte and bandwidth limits, idle
-timeout, hard expiry, and current Noise connection generation. It grants no
-filesystem, process, wallet, deployment, or capability-delegation authority of
-its own. The target's native service performs its normal user authentication
-inside the encrypted tunnel. Closing, expiry, revocation, identity mismatch,
-transport downgrade, or Noise rekey failure tears down the tunnel and emits a
-bounded signed receipt. Relay and rendezvous peers forward opaque ciphertext
-only and never acquire endpoint credentials or access authority.
+The worker runs under a dedicated unprivileged identity or an equivalently
+proven restricted token, in a separately owned workspace. It cannot read the
+node datadir, wallet, RPC cookie, deployment credentials, identity keys, or
+canonical checkout. A platform that cannot prove those restrictions refuses
+terminal activation. Optional tunnels to existing SSH, Remote Desktop, or
+screen-sharing services remain a second access mode, not a prerequisite.
+
+Each terminal or tunnel grant binds the target machine, subject identity,
+service or terminal kind, connection count, byte and bandwidth limits, idle
+timeout, hard expiry, and current Noise connection generation. A tunnel also
+binds its local endpoint and direction. Neither grant conveys wallet,
+deployment, custody, or capability-delegation authority. Closing, expiry,
+revocation, identity mismatch, transport downgrade, or Noise rekey failure
+tears down access and emits a bounded signed receipt. Relay and rendezvous
+peers forward opaque ciphertext only and never acquire endpoint credentials or
+access authority.
 
 ## Hot-swap taxonomy
 
@@ -330,10 +348,10 @@ portable; native artifacts are platform- and toolchain-bound.
 
 The phases below are delivered in this dependency order:
 
-1. correct the local identity capsule so it reports the pairing authority that
+1. completed: the local identity capsule reports the pairing authority that
    exists without claiming a remote protocol;
-2. expose pairing list/revoke locally, without creating a way to bypass the
-   authenticated-session acceptance service;
+2. completed: pairing list/revoke is owner-visible locally without creating a
+   way to bypass the authenticated-session acceptance service;
 3. define and fuzz the bounded status request/response wire, transcript binding,
    nonce, expiry, and signed receipt;
 4. connect the wire only after Noise plus active ZID authentication and prove
@@ -415,17 +433,19 @@ bounded; fetched code cannot acquire node, wallet, or deployment authority.
 
 ### Phase 4: secure interactive access
 
-- Add typed tunnel open, status, renew, and close operations for explicitly
-  enabled local SSH, Remote Desktop, and screen-sharing services.
-- Keep each native service's own authentication, authorization, and audit
-  boundary; do not implement a Z23 shell or desktop server.
+- Add typed terminal open, status, renew, and close operations over an embedded
+  C23 framing protocol, backed by ConPTY on Windows and PTYs on POSIX hosts.
+- Spawn only a configured shell or agent entry point under a dedicated
+  unprivileged identity or proven restricted token and isolated workspace.
+- Add optional tunnel operations for explicitly enabled local SSH, Remote
+  Desktop, and screen-sharing services.
 - Add direct-path, onion-path, and opaque-relay routing without granting the
   rendezvous or relay peer machine authority.
 
-Exit: a paired owner reaches an opted-in local service on Linux, macOS, and
-Windows without opening that service to the public Internet; expiry,
-revocation, path substitution, relay compromise, and disconnect close access
-without affecting node synchronization.
+Exit: a paired owner opens a confined terminal on Linux, macOS, and Windows
+without installing a separate remote-shell server or opening one to the public
+Internet; expiry, revocation, path substitution, relay compromise, and
+disconnect close access without exposing node secrets or affecting sync.
 
 ### Phase 5: service-island and cartridge activation
 
@@ -527,6 +547,14 @@ peers, never production wallet state.
   completed 10,000 iterations across the full maximum bound without a finding.
   The wire remains disconnected from Noise, DHT, and peer handlers; it grants
   no remote status authority and does not advance queue item 4.
+- 2026-08-28T23:26:48-04:00 / 2026-08-29T03:26:48Z: local owners gained a
+  bounded redacted pairing list and an explicit 60-second, generation-bound
+  revoke plan/commit. Tampered or expired unused confirmations made no write;
+  successful revoke replay remained idempotent after database reopen; and the
+  RPC registry exposed no accept, create, or capability-widening method. The
+  `mesh_pairing_controller`, `command_registry_catalog`, `native_api_contract`,
+  and nine selected `rpc` groups passed cold with zero skips. Remote status and
+  remote-control authority remain unavailable.
 - 2026-08-29: queue item 4 connected the wire. `ZMSTAT`-prefixed
   request/receipt frames multiplex on the frozen `zpkgswm` P2P message — no
   new wire message, listener, or port — and are answered only on an
@@ -551,30 +579,34 @@ peers, never production wallet state.
   `zcode_swarm`, `command_registry`, `syncdiag_rpc`, `native_api_contract`,
   and `rpc` groups all passed with zero skips, and `make lint-fast` and
   `make lint` both passed. This is in-process proof; independent-host
-  receipts remain for the phase exit.
+  receipts remain for the phase exit. A later proto revision removed the
+  per-side connection serial from the request and receipt (the shared
+  transcript and generation remain the session binding).
 - 2026-08-29: queue item 2 exposed the pairing ceremony to the operator.
-  `ops mesh pair plan|commit|list|revoke` (RPC methods `mesh_pairing_plan` /
-  `mesh_pairing_commit` / `mesh_pairing_list` / `mesh_pairing_revoke`) drive
-  the existing `mesh_pairing_service` accept/revoke authority — no path
-  bypasses the authenticated-session acceptance service, and all durable
-  writes go through its ActiveRecord lifecycle. plan renders a no-write
-  preview from a live re-derivation (established v2 session narrowed by an
+  `ops mesh pair plan|commit` (RPC methods `mesh_pairing_plan` /
+  `mesh_pairing_commit`) are the only path that creates pairings, driving
+  the existing `mesh_pairing_service_accept` authority — no path bypasses
+  the authenticated-session acceptance service, and all durable writes go
+  through its ActiveRecord lifecycle. plan renders a no-write preview from a
+  live re-derivation (established v2 session narrowed by an
   address-substring or fingerprint-prefix selector, held ZID delegation,
   status-read-only capability, default 7-day expiry, derived pairing id);
   commit makes `--fingerprint` mandatory (the out-of-band compared value),
-  re-derives everything live, clamps the lifetime to [1, 30] days, and maps
-  every `mesh_pairing_reason` refusal to a named code that writes nothing;
-  list projects the durable records with state derived from now (revocation
-  sticky and winning over expiry); revoke is direct, idempotent, and sticky.
-  No command ever dials: a peer without a live session is
-  PEER_NOT_CONNECTED, more than one match is AMBIGUOUS_PEER. The ceremony
-  remains per-machine local — each host pairs the other independently;
-  there is no two-sided wire ceremony yet. The `mesh_pairing` group gained
-  the pure-layer proofs (days default/bounds/rejection, selector matching,
-  state derivation, canonical fingerprint decode, distinct reason→code
-  mapping); `mesh`, `command_registry`, `native_api_contract`, and `rpc`
-  groups all passed with zero skips, and `make lint-fast` and `make lint`
-  both passed.
+  re-derives everything live, clamps the lifetime to [1, 30] days, maps
+  every `mesh_pairing_reason` refusal to a named code that writes nothing,
+  and renders the stored record through the same redacted public view as
+  `ops mesh pair list`. Inspection and revocation ride the controller's
+  redacted `ops mesh pair list` and confirmation-bound `ops mesh pair
+  revoke`; the direct-revoke RPC method was retired in favor of that
+  generation-bound flow. No command ever dials: a peer without a live
+  session is PEER_NOT_CONNECTED, more than one match is AMBIGUOUS_PEER. The
+  ceremony remains per-machine local — each host pairs the other
+  independently; there is no two-sided wire ceremony yet. The
+  `mesh_pairing` group gained the pure-layer proofs (days
+  default/bounds/rejection, selector matching, state derivation, canonical
+  fingerprint decode, distinct reason→code mapping); `mesh`,
+  `command_registry`, `native_api_contract`, and `rpc` groups all passed
+  with zero skips, and `make lint-fast` and `make lint` both passed.
 
 ## Completion rule
 

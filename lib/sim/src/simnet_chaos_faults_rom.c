@@ -128,7 +128,6 @@ void sfm_capsule_init(struct sync_fault_capsule *out, uint64_t seed)
     out->base.hstar_after = -1;
     out->seed = seed;
 }
-
 /* mirrors chaos_note() above, writing into the embedded base.note. */
 void sfm_note(struct sync_fault_capsule *out, const char *fmt, ...)
 {
@@ -783,4 +782,3 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
     rom_peer_scoring_test_reset();
     return true;
 }
-

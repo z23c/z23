@@ -29,6 +29,9 @@
 #include "net/rom_seed.h"
 #include "config/rom_bundle_admission.h"
 #include "net/https_server.h"
+#include "net/acme_arm_file.h"
+#include "net/acme_challenge.h"
+#include "net/acme_selfsigned.h"
 #include "util/util.h"
 #include "net/onion_service.h"
 #include "net/tor_integration.h"
@@ -39,6 +42,7 @@
 #include "script/standard.h"
 #include "vcs/package_store.h"
 #include "config/boot_zcode_swarm.h"
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -239,35 +243,121 @@ static void boot_api_cache_stop(void *ctx)
     api_stop_cache();
 }
 
+/* The clearnet certificate lives under <datadir>/ssl, and which file is
+ * which is the whole point:
+ *
+ *   fullchain.pem / privkey.pem
+ *       the CA-issued pair. Written ONLY by `zclassic23-acme`. Preferred
+ *       whenever it is readable, and adopted with no restart the moment it
+ *       appears or is renewed (https_server_watch_certificate).
+ *   self-signed-placeholder.pem / self-signed-placeholder-key.pem
+ *       the certificate the node signs for itself. It exists to break the
+ *       bootstrap deadlock below, and it is deliberately NOT written to the
+ *       two names above, so no reader on disk can mistake one for the other.
+ *   acme-challenge
+ *       the one line the worker hands the node during a validation
+ *       (net/acme_arm_file.h).
+ *
+ * THE BOOTSTRAP DEADLOCK. TLS-ALPN-01 is answered by this very listener, and
+ * a listener needs key material to bind. No certificate, no listener; no
+ * listener, no validation; no validation, no certificate. A brand-new host
+ * could never get its first certificate without a human hand-placing one.
+ * The self-signed pair breaks that cycle and nothing else: the challenge
+ * response does not need the placeholder to be trusted — the certificate
+ * authority is handed a challenge certificate built on the spot for the
+ * duration of that one handshake — it needs only a listener to be there to
+ * do the handing.
+ *
+ * A PLACEHOLDER IS NEVER QUIETLY PASSED OFF AS THE REAL THING. It is at a
+ * different path, its subject says what it is in words, and the front door
+ * announces at start (and on every swap) whether what it serves names itself
+ * as its own issuer — see net/acme_selfsigned.h. */
 static bool boot_https_explorer_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
     if (!svc || !svc->app_ctx || !boot_profile_has_explorer(svc->app_ctx))
         return true;
 
-    char cert_path[1024], key_path[1024];
+    char ssl_dir[1024], cert_path[1024], key_path[1024];
+    char placeholder_cert[1024], placeholder_key[1024], handoff_path[1024];
+    snprintf(ssl_dir, sizeof(ssl_dir), "%s/ssl", svc->datadir);
     snprintf(cert_path, sizeof(cert_path), "%s/ssl/fullchain.pem",
              svc->datadir);
     snprintf(key_path, sizeof(key_path), "%s/ssl/privkey.pem",
              svc->datadir);
-    if (access(cert_path, R_OK) != 0 || access(key_path, R_OK) != 0) {
-        printf("HTTPS: no cert at %s - block explorer not on clearnet\n",
-               cert_path);
+    snprintf(placeholder_cert, sizeof(placeholder_cert),
+             "%s/ssl/self-signed-placeholder.pem", svc->datadir);
+    snprintf(placeholder_key, sizeof(placeholder_key),
+             "%s/ssl/self-signed-placeholder-key.pem", svc->datadir);
+    snprintf(handoff_path, sizeof(handoff_path), "%s/ssl/%s", svc->datadir,
+             ACME_HANDOFF_FILENAME);
+    if (mkdir(ssl_dir, 0700) != 0 && errno != EEXIST) {
+        printf("HTTPS: cannot create %s - block explorer not on clearnet\n",
+               ssl_dir);
         return true;
     }
 
+    /* Point the TLS-ALPN-01 responder at the file the worker writes. The
+     * responder reads it lazily and only when a client has already
+     * negotiated "acme-tls/1", so an ordinary browser handshake never
+     * touches the filesystem. Without this call the node's half of the
+     * challenge is inert and every order fails validation. */
+    acme_alpn_challenge_set_handoff_file(handoff_path);
+
+    /* Optional TLS servername (-httpsdomain=). NULL is fine: with a single
+     * cert the server presents that cert regardless of SNI. */
+    const char *https_domain = svc->app_ctx->https_domain;
+
+    /* The access() check is not weakened: whatever pair is chosen below is
+     * still required to be readable before a listener is started. What
+     * changed is that there is now a second pair to fall back to, not that
+     * a listener may start with nothing. */
+    const char *serve_cert = cert_path;
+    const char *serve_key = key_path;
+    if (access(cert_path, R_OK) != 0 || access(key_path, R_OK) != 0) {
+        if (!acme_selfsigned_ensure(placeholder_cert, placeholder_key,
+                                    https_domain) ||
+            access(placeholder_cert, R_OK) != 0 ||
+            access(placeholder_key, R_OK) != 0) {
+            printf("HTTPS: no certificate at %s and no self-signed "
+                   "placeholder could be placed at %s - block explorer not "
+                   "on clearnet, and this host cannot answer a TLS-ALPN-01 "
+                   "challenge to obtain one\n", cert_path, placeholder_cert);
+            return true;
+        }
+        serve_cert = placeholder_cert;
+        serve_key = placeholder_key;
+        printf("HTTPS: no certificate authority has issued anything for this "
+               "host yet (%s absent).\n"
+               "HTTPS: starting on the self-signed placeholder at %s so the\n"
+               "HTTPS: TLS-ALPN-01 challenge can be answered. To get a real\n"
+               "HTTPS: certificate with no restart afterwards, run:\n"
+               "HTTPS:   zclassic23-acme obtain --domain %s --agree-tos \\\n"
+               "HTTPS:     --account %s/ssl/account.pem --cert %s \\\n"
+               "HTTPS:     --key %s --handoff %s\n",
+               cert_path, placeholder_cert,
+               (https_domain && https_domain[0]) ? https_domain
+                                                 : "<your.domain>",
+               svc->datadir, cert_path, key_path, handoff_path);
+    }
+
     boot_configure_frontend_rpc(svc);
+
+    /* Watch the CA-ISSUED pair regardless of which pair is being served. If
+     * the placeholder is on the wire, this is how the first real certificate
+     * replaces it; if a real certificate is on the wire, this is how the
+     * worker's ninety-day renewal reaches the listener. Set before start so
+     * the start path records the watched pair's identity as of now rather
+     * than defaulting the watch to whatever it was handed. */
+    https_server_watch_certificate(cert_path, key_path);
 
     int chain_tip_h = active_chain_height(&svc->state->chain_active);
     int best_header = svc->state->pindex_best_header ?
         svc->state->pindex_best_header->nHeight : chain_tip_h;
     bool near_tip = (best_header - chain_tip_h < 1000) &&
                     (chain_tip_h > g_deferred_proof_validation_below_height - 10000);
-    /* Optional TLS servername (-httpsdomain=). NULL is fine: with a single
-     * cert the server presents that cert regardless of SNI. */
-    const char *https_domain = svc->app_ctx->https_domain;
     if (near_tip) {
-        https_server_start_on_port(cert_path, key_path, https_domain,
+        https_server_start_on_port(serve_cert, serve_key, https_domain,
                                    svc->app_ctx->https_port,
                                    svc->app_ctx->https_port - 363);
     } else {
@@ -275,8 +365,8 @@ static bool boot_https_explorer_start(void *ctx)
                "behind=%d). Will start when near tip.\n",
                chain_tip_h, best_header, best_header - chain_tip_h);
         static char s_cert[1024], s_key[1024];
-        memcpy(s_cert, cert_path, strlen(cert_path) + 1u);
-        memcpy(s_key, key_path, strlen(key_path) + 1u);
+        memcpy(s_cert, serve_cert, strlen(serve_cert) + 1u);
+        memcpy(s_key, serve_key, strlen(serve_key) + 1u);
         https_deferred_set(s_cert, s_key, https_domain);
     }
     return true;

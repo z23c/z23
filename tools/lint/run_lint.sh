@@ -188,7 +188,7 @@ gate_command() {
         check-file-purpose)                echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh' ;;
         check-group-purpose)               echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_group_purpose.sh' ;;
         check-no-orphan-placement)         echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_orphan_placement.sh' ;;
-        check-file-size-ceiling)           echo './tools/scripts/check_file_size_ceiling.sh' ;;
+        check-file-size-ceiling)           echo '"$ZCL_LINT_BIN_DIR/file_size_policy"' ;;
         check-operator-needed-sink)        echo './tools/scripts/check_operator_needed_sink.sh' ;;
         check-systemd-memory-budget)       echo './tools/scripts/check_systemd_memory_budget.sh' ;;
         check-condition-cooldown)          echo './tools/scripts/check_condition_cooldown.sh' ;;

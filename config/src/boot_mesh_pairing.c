@@ -131,6 +131,8 @@ const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason)
     case MESH_PAIRING_EXPIRED: return "EXPIRED";
     case MESH_PAIRING_SESSION_MISMATCH: return "SESSION_MISMATCH";
     case MESH_PAIRING_AUTHORITY_CHANGED: return "AUTHORITY_CHANGED";
+    case MESH_PAIRING_CONFIRMATION_INVALID: return "CONFIRMATION_INVALID";
+    case MESH_PAIRING_PLAN_EXPIRED: return "PLAN_EXPIRED";
     }
     return "BAD_ARGUMENT";
 }
@@ -304,7 +306,7 @@ static enum boot_mesh_pairing_plan_result mesh_pair_derive(
     return MESH_PAIR_PLAN_OK;
 }
 
-/* ── Plan / commit / list / revoke ───────────────────────────────────── */
+/* ── Plan / commit ───────────────────────────────────────────────────── */
 
 enum boot_mesh_pairing_plan_result boot_mesh_pairing_plan(
     const char *selector, struct boot_mesh_pairing_plan *out)
@@ -396,29 +398,4 @@ enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
         return MESH_PAIR_COMMIT_SERVICE_REFUSED;
     }
     return MESH_PAIR_COMMIT_OK;
-}
-
-int boot_mesh_pairing_list(struct db_mesh_pairing *out, size_t max)
-{
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
-        LOG_ERROR("net.mesh_pairing", "list: node_db unavailable");
-        return -1;
-    }
-    return db_mesh_pairing_list(ndb, out, max);
-}
-
-enum mesh_pairing_reason boot_mesh_pairing_revoke(const char *pairing_id)
-{
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
-        LOG_ERROR("net.mesh_pairing", "revoke: node_db unavailable");
-        return MESH_PAIRING_BAD_ARGUMENT;
-    }
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    if (now <= 0) {
-        LOG_ERROR("net.mesh_pairing", "revoke: wall clock unavailable");
-        return MESH_PAIRING_BAD_ARGUMENT;
-    }
-    return mesh_pairing_service_revoke(ndb, pairing_id, now);
 }

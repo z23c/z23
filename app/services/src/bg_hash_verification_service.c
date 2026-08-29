@@ -298,7 +298,24 @@ void bg_hash_verify_init(struct bg_hash_verification_service *svc,
     memset(svc, 0, sizeof(*svc));
     svc->ms = ms;
     svc->ndb = ndb;
-    svc->datadir = datadir;
+    /* Retain the BYTES, never the caller's pointer: boot resolves the
+     * net-specific directory into a stack buffer that is gone by the time the
+     * worker thread preads a body (a dangling pointer formatted straight into
+     * the blk path, which reads as a missing body rather than as a defect). */
+    int datadir_len = datadir
+        ? snprintf(svc->datadir_storage, sizeof(svc->datadir_storage),
+                   "%s", datadir)
+        : -1;
+    if (datadir_len > 0 &&
+        (size_t)datadir_len < sizeof(svc->datadir_storage)) {
+        svc->datadir = svc->datadir_storage;
+    } else {
+        svc->datadir_storage[0] = '\0';
+        svc->datadir = NULL;
+        LOG_ERROR("bg",
+                  "bg_hash_verify_init: datadir is empty or exceeds %zu bytes",
+                  sizeof(svc->datadir_storage) - 1u);
+    }
     svc->params = params;
     bg_hash_verify_store_sqlite_bind(ndb, &svc->progress_store);
     atomic_store(&svc->stop_requested, false);
@@ -307,10 +324,15 @@ void bg_hash_verify_init(struct bg_hash_verification_service *svc,
 
 struct zcl_result bg_hash_verify_start(struct bg_hash_verification_service *svc)
 {
-    if (!svc || !svc->ms || svc->thread_started)
+    /* No datadir => every pread misses and the walk would report
+     * "0 mismatches" over blocks it never read. Refuse instead of publishing
+     * that false green (bg_validation_start refuses on the same ground). */
+    if (!svc || !svc->ms || !svc->datadir || svc->thread_started)
         return ZCL_ERR(-1,
-            "bg_hash_verify_start: null svc=%d ms=%d or already started=%d",
-            !svc, svc ? !svc->ms : 1, svc ? svc->thread_started : 0);
+            "bg_hash_verify_start: null svc=%d ms=%d datadir=%d or already "
+            "started=%d",
+            !svc, svc ? !svc->ms : 1, svc ? !svc->datadir : 1,
+            svc ? svc->thread_started : 0);
 
     struct zcl_result sup_r = bg_hash_verify_register_supervisor(svc);
     if (!sup_r.ok)

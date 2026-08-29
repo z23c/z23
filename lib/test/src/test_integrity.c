@@ -497,6 +497,40 @@ static int test_integrity_bg_hash_verify_init(void)
     return failures;
 }
 
+static int test_integrity_bg_hash_verify_owns_datadir(void)
+{
+    int failures = 0;
+
+    TEST("integrity: bg_hash_verify owns the caller's datadir bytes") {
+        /* Boot resolves the net-specific datadir into a stack buffer that is
+         * gone before the worker preads a body. Retaining that pointer aliased
+         * a dead frame straight into the blk path. */
+        char caller_path[512];
+        snprintf(caller_path, sizeof(caller_path), "%s", "/tmp");
+        struct bg_hash_verification_service svc;
+        bg_hash_verify_init(&svc, NULL, NULL, caller_path, NULL);
+        memset(caller_path, 0xA5, sizeof(caller_path));
+        ASSERT(svc.datadir == svc.datadir_storage);
+        ASSERT_STR_EQ(svc.datadir, "/tmp");
+
+        /* No datadir => refuse, rather than walk every height, read nothing,
+         * and publish "0 mismatches". */
+        char oversized[sizeof(svc.datadir_storage) + 1u];
+        memset(oversized, 'x', sizeof(oversized) - 1u);
+        oversized[sizeof(oversized) - 1u] = '\0';
+        struct main_state ms;
+        main_state_init(&ms);
+        bg_hash_verify_init(&svc, &ms, NULL, oversized, NULL);
+        ASSERT(svc.datadir == NULL);
+        ASSERT(svc.datadir_storage[0] == '\0');
+        ASSERT(!bg_hash_verify_start(&svc).ok);
+        ASSERT(!svc.thread_started);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_integrity_bg_hash_verify_state_names(void)
 {
     int failures = 0;
@@ -902,6 +936,7 @@ int test_integrity(void)
 
     /* bg_hash_verification_service */
     failures += test_integrity_bg_hash_verify_init();
+    failures += test_integrity_bg_hash_verify_owns_datadir();
     failures += test_integrity_bg_hash_verify_state_names();
     failures += test_integrity_bg_hash_verify_no_start_without_ms();
     failures += test_integrity_bg_hash_verify_supervisor_contract();

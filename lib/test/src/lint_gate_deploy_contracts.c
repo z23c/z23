@@ -380,7 +380,11 @@ int t_dev_lane_deploy_contract(void)
                       "GNU make returns 2 for a failed recipe") != NULL);
         ASSERT(strstr(coldstart, "SRC_BUNDLE_SNAP_CANDIDATES") != NULL);
         ASSERT(strstr(coldstart, "-load-snapshot-at-own-height") != NULL);
-        ASSERT(strstr(coldstart, "grep -m1 -F -- \"$BUNDLE_SUCCESS_PATTERN\"")
+        /* -a is load-bearing, not style: node.log can carry a NUL byte, and
+         * plain grep then prints NOTHING and exits 0, so `hit` comes back
+         * empty and the cold-start probe reports the bundle marker ABSENT on
+         * a run that actually succeeded. Pin the -a so it cannot regress. */
+        ASSERT(strstr(coldstart, "grep -am1 -F -- \"$BUNDLE_SUCCESS_PATTERN\"")
                != NULL);
         ASSERT(strstr(coldstart, "fast_rebuild_authority_ready") != NULL);
         ASSERT(strstr(coldstart, "consensus_snapshot.db above the compiled checkpoint")

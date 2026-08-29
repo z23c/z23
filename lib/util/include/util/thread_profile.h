@@ -3,7 +3,8 @@
  * In-process thread CPU profiler — the C primitive behind `zclassic23 profile`.
  *
  * Samples the process's threads twice, `sample_ms` apart (per-thread
- * /proc/self/task/<tid>/stat on Linux; Mach thread_info on Darwin), and
+ * /proc/self/task/<tid>/stat on Linux, Mach thread_info on Darwin, and
+ * retained Toolhelp thread handles plus GetThreadTimes on Windows), and
  * reports the per-thread user+system CPU-time delta over the window, each
  * thread's name and current kernel wait channel (wchan), and a one-line
  * verdict classifying where the process spends the window (cpu-bound in a
@@ -40,8 +41,8 @@ struct thread_profile_opts {
  *     threads: [ { tid, name, cpu_ms, cpu_fraction, wchan }, ... ] }
  * Threads are sorted by descending cpu_ms. Returns true on success; false and
  * an empty object only if the thread list is unreadable (/proc/self/task on
- * Linux, the Mach thread list on Darwin). Never crashes on a thread that
- * races the sample. */
+ * Linux, the Mach thread list on Darwin, or the Toolhelp snapshot on
+ * Windows). Never crashes on a thread that races the sample. */
 bool thread_profile_sample(const struct thread_profile_opts *opts,
                            struct json_value *out);
 

@@ -92,7 +92,6 @@ simulation until the owner explicitly promotes it.
   earns ZC23 as the preservation class — guiding principle: incentivize
   the P2P ecosystem. Rules: [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md)
   six-point decision list for C2
-- [ ] C2. Owner picks the rules
 - [ ] C3. Implementation plan written (simulation-first, no consensus path)
 
 ## Standing rules for this checklist

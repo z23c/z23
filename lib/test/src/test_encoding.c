@@ -19,6 +19,8 @@
 #include "util/noui.h"
 #include "util/timedata.h"
 
+#include <errno.h>
+
 int test_encoding(void)
 {
     int failures = 0;
@@ -495,6 +497,33 @@ int test_encoding(void)
         ParseParameters(1, empty_argv);
         ClearDataDirCache();
         (void)test_rm_rf_recursive(datadir);
+    }
+
+    printf("SetDataDir refuses a symlinked directory... ");
+    {
+        char root[512], target[600], datadir[600];
+        test_make_tmpdir(root, sizeof(root), "encoding_datadir", "symlink");
+        snprintf(target, sizeof(target), "%s/target", root);
+        snprintf(datadir, sizeof(datadir), "%s/selected", root);
+        bool fixture_ready = mkdir(target, 0700) == 0 &&
+                             symlink(target, datadir) == 0;
+        errno = 0;
+        bool refused = fixture_ready && !SetDataDir(datadir) &&
+                       errno == EACCES;
+        bool recovered = unlink(datadir) == 0 && mkdir(datadir, 0700) == 0 &&
+                         SetDataDir(datadir);
+
+        if (refused && recovered)
+            printf("OK\n");
+        else {
+            printf("FAIL: fixture=%d refused=%d recovered=%d errno=%d\n",
+                   fixture_ready, refused, recovered, errno);
+            failures++;
+        }
+
+        SetDataDir("");
+        ClearDataDirCache();
+        (void)test_rm_rf_recursive(root);
     }
 
     printf("GetNumCores... ");

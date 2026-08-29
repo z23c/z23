@@ -60,6 +60,10 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 want="tools/githooks"
 
+hook_is_executable() {
+    [[ "${ZCL_HOOK_EXECUTABLE_FOR_TEST:-1}" != "0" && -x "$1" ]]
+}
+
 ##############################################################################
 # Self-test — a throwaway repository per decision branch of the logic above.
 ##############################################################################
@@ -102,6 +106,7 @@ selftest_run() {
     local rc=0
     env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
         ZCL_HOOKS_SELFTEST_CHILD=1 ZCL_HOOKS_NO_AUTOARM= \
+        ZCL_HOOK_EXECUTABLE_FOR_TEST= \
         ZCL_GIT_HOOKS_PATH_FOR_TEST= ZCL_GIT_HOOK_FILE_FOR_TEST= "$@" \
         "$repo/tools/scripts/check_git_hooks_installed.sh" \
         >/dev/null 2>&1 || rc=$?
@@ -150,8 +155,7 @@ run_self_test() {
 
     # (3) armed, but the hook is not executable -> hard FAIL.
     selftest_repo "$tmp/notexec" || selftest_fail "could not build the 'notexec' fixture"
-    chmod -x "$tmp/notexec/$want/pre-push"
-    rc="$(selftest_run "$tmp/notexec")"
+    rc="$(selftest_run "$tmp/notexec" ZCL_HOOK_EXECUTABLE_FOR_TEST=0)"
     [[ "$rc" != "0" ]] || selftest_fail "a non-executable pre-push hook must FAIL (got exit 0)"
 
     # (4) opt-out + unset -> passes the content checks, writes NOTHING.
@@ -170,8 +174,8 @@ run_self_test() {
 
     # (6) opt-out must NOT skip a content check.
     selftest_repo "$tmp/optout_notexec" || selftest_fail "could not build the 'optout_notexec' fixture"
-    chmod -x "$tmp/optout_notexec/$want/pre-commit"
-    rc="$(selftest_run "$tmp/optout_notexec" ZCL_HOOKS_NO_AUTOARM=1)"
+    rc="$(selftest_run "$tmp/optout_notexec" ZCL_HOOKS_NO_AUTOARM=1 \
+        ZCL_HOOK_EXECUTABLE_FOR_TEST=0)"
     [[ "$rc" != "0" ]] || selftest_fail "opt-out must not skip the hook content checks (got exit 0)"
 
     # (7) linked worktree whose SHARED config carries the primary checkout's
@@ -195,10 +199,9 @@ run_self_test() {
 
         # (9) the accepted primary hooks must still be present and executable.
         selftest_git -C "$tmp/primary" config core.hooksPath "$tmp/primary/$want"
-        chmod -x "$tmp/primary/$want/pre-commit"
-        rc="$(selftest_run "$tmp/primary_wt")"
+        rc="$(selftest_run "$tmp/primary_wt" \
+            ZCL_HOOK_EXECUTABLE_FOR_TEST=0)"
         [[ "$rc" != "0" ]] || selftest_fail "a non-executable hook in the primary checkout must FAIL from a worktree (got exit 0)"
-        chmod +x "$tmp/primary/$want/pre-commit"
     else
         echo "check_git_hooks_installed: SELF-TEST NOTE — skipped the linked-worktree cases (fixture build failed)" >&2
     fi
@@ -349,7 +352,7 @@ elif [[ "$actual" != "$want" ]]; then
         # assertions below still run, against THIS checkout's tracked hooks —
         # exactly the files this branch is responsible for.
         for h in pre-push pre-commit; do
-            if [[ ! -x "$resolved/$h" ]]; then
+            if ! hook_is_executable "$resolved/$h"; then
                 echo "check_git_hooks_installed: FAIL — $resolved/$h is missing or not executable" >&2
                 echo "  These are the hooks git runs for this worktree (core.hooksPath is shared config)." >&2
                 echo "  Run, in the primary checkout: chmod +x $want/$h && make install-hooks" >&2
@@ -374,7 +377,7 @@ fi
 # and wake the live development watcher. Production calls leave the override
 # unset and therefore continue to verify the armed, tracked hook exactly.
 hook="${ZCL_GIT_HOOK_FILE_FOR_TEST:-$want/pre-push}"
-if [[ ! -x "$hook" ]]; then
+if ! hook_is_executable "$hook"; then
     echo "check_git_hooks_installed: FAIL — $hook is missing or not executable" >&2
     echo "  Run: chmod +x $hook && make install-hooks" >&2
     exit 1
@@ -382,7 +385,12 @@ fi
 
 if ! awk '
     /^[[:space:]]*#/ { next }
-    /^[[:space:]]*CMD="\$\{ZCL_PREPUSH_CMD:-make pre-push-ci\}"[[:space:]]*$/ { default_cmd=1 }
+    /^[[:space:]]*default_cmd="make pre-push-ci"[[:space:]]*$/ { posix_default=1 }
+    /MINGW\*\|MSYS\*/ { windows_host=1 }
+    /^[[:space:]]*MINGW\*\|MSYS\*\)[[:space:]]+default_cmd="make windows-acceptance"[[:space:]]*;;[[:space:]]*$/ { windows_default=1 }
+    /^[[:space:]]*CMD="\$\{ZCL_PREPUSH_CMD:-\$default_cmd\}"[[:space:]]*$/ { default_cmd=1 }
+    /Z23_PREPUSH_UCRT64/ { windows_reentry_guard=1 }
+    /exec "\$windows_msys2_bash" "\$0" "\$@"/ { windows_reentry=1 }
     /refs\/heads\/main/ { main_only=1 }
     /git cat-file -e "\$\{rsha\}\^\{commit\}"/ { remote_tip_loaded=1 }
     /git fetch --no-tags --quiet "\$remote_name" "\$rref"/ { fetches_advertised_ref=1 }
@@ -398,7 +406,9 @@ if ! awk '
     /^[[:space:]]*ZCL_FAST_CHANGED_FILES_FILE="\$changed_files"[[:space:]]+ZCL_FAST_CHANGED_FILES_ONLY=1[[:space:]]+\$CMD([[:space:]]*>[^|]*)?[[:space:]]*\|\|[[:space:]]*rc=\$\?[[:space:]]*$/ { invokes_cmd=1 }
     /^[[:space:]]*if[[:space:]]+![[:space:]]+ZCL_FAST_CHANGED_FILES_FILE="\$changed_files"[[:space:]]+ZCL_FAST_CHANGED_FILES_ONLY=1[[:space:]]+\$CMD;[[:space:]]*then[[:space:]]*$/ { invokes_cmd=1 }
     /rc"?[[:space:]]*-ne[[:space:]]*0/ { checks_rc=1 }
-    END { exit !(default_cmd && main_only && remote_tip_loaded &&
+    END { exit !(posix_default && windows_host && windows_default &&
+                 default_cmd && windows_reentry_guard && windows_reentry &&
+                 main_only && remote_tip_loaded &&
                  fetches_advertised_ref && proves_remote_ancestor &&
                  names_remote_divergence && range_diff && changed_env &&
                  changed_only_env && invokes_cmd && checks_rc) }
@@ -429,7 +439,7 @@ fi
 # Self-tests point the override at an isolated fixture, same convention as the
 # pre-push check above.
 precommit="${ZCL_GIT_HOOK_PRECOMMIT_FILE_FOR_TEST:-$want/pre-commit}"
-if [[ ! -x "$precommit" ]]; then
+if ! hook_is_executable "$precommit"; then
     echo "check_git_hooks_installed: FAIL — $precommit is missing or not executable" >&2
     echo "  Run: chmod +x $precommit && make install-hooks" >&2
     exit 1

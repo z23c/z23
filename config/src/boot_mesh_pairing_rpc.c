@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Local pairing ceremony RPC adapter (plan/commit/list/revoke).
+ * purpose: Local pairing ceremony RPC adapter (plan/commit). Inspection and
+ * revocation belong to the mesh pairing controller's list/revoke methods.
  * Mirrors the boot_mesh_status_rpc.c precedent: every refusal carries an
  * explanatory body, every durable write goes through mesh_pairing_service
  * (ActiveRecord lifecycle) — never raw SQL here. */
@@ -9,9 +10,9 @@
 #include "config/runtime.h"
 #include "base/hex.h"
 #include "json/json.h"
-#include "net/v2_identity.h"
 #include "platform/time_compat.h"
 #include "rpc/server.h"
+#include "util/log_macros.h"
 
 #include <string.h>
 
@@ -52,44 +53,58 @@ static void rpc_error(struct json_value *result, const char *code,
     json_push_kv_str(result, "message", message);
 }
 
-/* Stored pairing record view: public keys, fingerprints, capability mask,
- * derived state, and times. Never private material or local paths. */
-static void pairing_record_json(struct json_value *value,
-                                const struct db_mesh_pairing *row, int64_t now)
+/* Redacted owner view of a durable record, identical in shape to the
+ * controller's `ops mesh pair list` rows: domain-separated fingerprints and
+ * local policy only, never raw public keys. */
+static void pairing_view_json(struct json_value *value,
+                              const struct mesh_pairing_public_view *view)
 {
-    char hex[65];
     json_set_object(value);
-    json_push_kv_str(value, "pairing_id", row->pairing_id);
-    zcl_hex_encode(row->peer_master_pubkey, 32, hex);
-    json_push_kv_str(value, "peer_master_pubkey", hex);
-    zcl_hex_encode(row->peer_noise_pubkey, 32, hex);
-    json_push_kv_str(value, "peer_noise_pubkey", hex);
-    uint8_t fingerprint[32];
-    if (v2_identity_public_fingerprint(row->peer_noise_pubkey, fingerprint)) {
-        zcl_hex_encode(fingerprint, 32, hex);
-        json_push_kv_str(value, "peer_noise_fingerprint_sha3", hex);
-    }
-    json_push_kv_int(value, "capability_mask", (int64_t)row->capability_mask);
-    if (row->capability_mask & MESH_PAIRING_CAP_STATUS_READ) {
-        struct json_value caps;
-        json_init(&caps);
-        json_set_array(&caps);
-        struct json_value cap;
-        json_init(&cap);
-        json_set_str(&cap, "status-read");
-        json_push_back(&caps, &cap);
-        json_free(&cap);
-        json_push_kv(value, "capabilities", &caps);
-        json_free(&caps);
-    }
-    json_push_kv_str(value, "state", boot_mesh_pairing_state(row, now));
+    json_push_kv_str(value, "pairing_id", view->pairing_id);
+    json_push_kv_str(value, "peer_master_fingerprint",
+                     view->peer_master_fingerprint);
+    json_push_kv_str(value, "peer_noise_fingerprint",
+                     view->peer_noise_fingerprint);
+    json_push_kv_int(value, "capability_mask", (int64_t)view->capability_mask);
+    json_push_kv_str(value, "capability", "status_read");
     json_push_kv_int(value, "delegation_sequence",
-                     (int64_t)row->delegation_sequence);
-    json_push_kv_int(value, "paired_at", row->paired_at);
-    json_push_kv_int(value, "expires_at", row->expires_at);
-    json_push_kv_int(value, "revoked_at", row->revoked_at);
+                     (int64_t)view->delegation_sequence);
+    json_push_kv_int(value, "paired_at", view->paired_at);
+    json_push_kv_int(value, "expires_at", view->expires_at);
+    json_push_kv_int(value, "revoked_at", view->revoked_at);
     json_push_kv_int(value, "revocation_generation",
-                     (int64_t)row->revocation_generation);
+                     (int64_t)view->revocation_generation);
+    json_push_kv_str(value, "state", view->state);
+}
+
+/* Re-reads the just-committed record through the service's redacted list
+ * projection so the commit reply renders exactly like a pair list row. */
+static bool pairing_public_view_by_id(const char *pairing_id,
+                                      struct mesh_pairing_public_view *out)
+{
+    struct node_db *ndb = app_runtime_node_db();
+    if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
+        LOG_ERROR("net.mesh_pairing", "commit view: node_db unavailable");
+        return false;
+    }
+    struct mesh_pairing_public_view views[MESH_PAIRING_LIST_MAX];
+    size_t count = 0;
+    struct db_mesh_pairing_counts counts;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    if (!mesh_pairing_service_list(ndb, now, views, MESH_PAIRING_LIST_MAX,
+                                   &count, &counts)) {
+        LOG_ERROR("net.mesh_pairing", "commit view: service list failed");
+        return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(views[i].pairing_id, pairing_id) == 0) {
+            *out = views[i];
+            return true;
+        }
+    }
+    LOG_ERROR("net.mesh_pairing",
+              "commit view: accepted pairing_id missing from list");
+    return false;
 }
 
 static const char *plan_result_message(
@@ -230,89 +245,16 @@ static bool rpc_mesh_pairing_commit(const struct json_value *params, bool help,
     }
     json_set_object(result);
     json_push_kv_bool(result, "ok", true);
-    struct json_value view;
-    json_init(&view);
-    pairing_record_json(&view, &row,
-                        (int64_t)platform_time_wall_time_t());
-    json_push_kv(result, "pairing", &view);
-    json_free(&view);
-    return true;
-}
-
-static bool rpc_mesh_pairing_list(const struct json_value *params, bool help,
-                                  struct json_value *result)
-{
-    if (help) {
-        json_set_str(result,
-                     "mesh_pairing_list — every durable pairing record with "
-                     "derived state (active/expired/revoked)");
-        return true;
-    }
-    (void)params;
-    struct db_mesh_pairing rows[64];
-    int count = boot_mesh_pairing_list(rows, 64);
-    if (count < 0) {
-        rpc_error(result, "UNAVAILABLE", "the node database is unavailable");
-        return true;
-    }
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    json_set_object(result);
-    json_push_kv_bool(result, "ok", true);
-    struct json_value list;
-    json_init(&list);
-    json_set_array(&list);
-    for (int i = 0; i < count; i++) {
-        struct json_value view;
-        json_init(&view);
-        pairing_record_json(&view, &rows[i], now);
-        json_push_back(&list, &view);
-        json_free(&view);
-    }
-    json_push_kv(result, "pairings", &list);
-    json_free(&list);
-    json_push_kv_int(result, "count", count);
-    return true;
-}
-
-static bool rpc_mesh_pairing_revoke(const struct json_value *params, bool help,
-                                    struct json_value *result)
-{
-    if (help) {
-        json_set_str(result,
-                     "mesh_pairing_revoke {\"pairing_id\":\"<64 lowercase "
-                     "hex>\"} — direct, idempotent, sticky");
-        return true;
-    }
-    const struct json_value *in = rpc_input(params);
-    const char *pairing_id = input_str(in, "pairing_id");
-    if (!pairing_id || strlen(pairing_id) != MESH_PAIRING_ID_HEX) {
-        rpc_error(result, "INVALID_PAIRING_ID",
-                  "pairing_id must be 64 canonical lowercase hex chars");
-        return true;
-    }
-    enum mesh_pairing_reason revoked = boot_mesh_pairing_revoke(pairing_id);
-    if (revoked != MESH_PAIRING_OK) {
-        rpc_error(result, boot_mesh_pairing_reason_code(revoked),
-                  revoked == MESH_PAIRING_NOT_FOUND
-                      ? "no durable pairing record has that id"
-                      : "the revocation could not be persisted");
-        return true;
-    }
-    /* Post-revocation view: the sticky record with its new generation. */
-    json_set_object(result);
-    json_push_kv_bool(result, "ok", true);
-    json_push_kv_str(result, "pairing_id", pairing_id);
-    json_push_kv_str(result, "state", "revoked");
-    struct node_db *ndb = app_runtime_node_db();
-    struct db_mesh_pairing row;
-    if (ndb && app_runtime_node_db_handle_open(ndb) &&
-        db_mesh_pairing_find(ndb, pairing_id, &row)) {
-        struct json_value view;
-        json_init(&view);
-        pairing_record_json(&view, &row,
-                            (int64_t)platform_time_wall_time_t());
-        json_push_kv(result, "pairing", &view);
-        json_free(&view);
+    struct mesh_pairing_public_view view;
+    if (pairing_public_view_by_id(row.pairing_id, &view)) {
+        struct json_value record;
+        json_init(&record);
+        pairing_view_json(&record, &view);
+        json_push_kv(result, "pairing", &record);
+        json_free(&record);
+    } else {
+        /* The write landed; only the redacted re-read failed. */
+        json_push_kv_str(result, "pairing_id", row.pairing_id);
     }
     return true;
 }
@@ -322,8 +264,6 @@ void boot_mesh_pairing_register_rpc(struct rpc_table *table)
     const struct rpc_command commands[] = {
         {"mesh", "mesh_pairing_plan", rpc_mesh_pairing_plan, true},
         {"mesh", "mesh_pairing_commit", rpc_mesh_pairing_commit, true},
-        {"mesh", "mesh_pairing_list", rpc_mesh_pairing_list, true},
-        {"mesh", "mesh_pairing_revoke", rpc_mesh_pairing_revoke, true},
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         rpc_table_must_append(table, &commands[i]);

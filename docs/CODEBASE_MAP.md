@@ -167,7 +167,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 993
+test_groups: 998
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
@@ -316,7 +316,7 @@ Use `docs/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
    `make lint` rejects the command.
 
    Worked example of a plan/commit mutating leaf plus its read leaf, with
-   the probe half split into a second TU under the file-size ceiling:
+   the probe half split into a second TU to keep each near the file-size target:
    `app shop init` / `app shop status` — leaf rows in
    `config/commands/store.def` (branch row in `app_features.def`),
    handlers in `app/controllers/src/shop_native_handler.c`, datadir-local

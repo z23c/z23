@@ -77,6 +77,29 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23
 make windows-acceptance
 ```
 
+The tracked pre-push hook re-enters the UCRT64 shell once when Git launches it
+from a minimal MINGW/MSYS environment, then runs `make windows-acceptance` by
+default. Linux and macOS retain `make pre-push-ci`. An explicit
+`ZCL_PREPUSH_CMD` override still receives the exact semantic changed-file list,
+so changing the platform gate cannot turn a range-aware push into a whole-tree
+guess.
+
+Install the audited canonical binary as a supervised per-user Task Scheduler
+job with one command:
+
+```bash
+make windows-service-install
+make windows-service-status
+```
+
+The install is under `%LOCALAPPDATA%\Z23`, restricts that tree to the current
+user and Windows SYSTEM, records and verifies the exact `z23.exe` SHA-256, and
+keeps the node datadir outside the checkout. The task runs with least user
+privilege, starts at logon, and restarts after failure. Its only argument is
+the datadir path; RPC and wallet credentials remain in protected files and do
+not appear in the process command line. `make windows-service-remove` removes
+the task but deliberately preserves the datadir and installed bytes.
+
 Use both native compilers for focused C23 work. For the canonical node, pass
 the compiler explicitly; the build epoch key prevents either lane from reusing
 the other lane's objects:

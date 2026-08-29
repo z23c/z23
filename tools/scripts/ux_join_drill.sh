@@ -384,7 +384,7 @@ else
         while :; do
             if [ -f "$ISO_DD/node.log" ]; then
                 hits=$(tail -c "+$((LOG_MARK + 1))" "$ISO_DD/node.log" 2>/dev/null \
-                    | grep -c "delivery ack from peer" 2>/dev/null || true)
+                    | grep -ac "delivery ack from peer" 2>/dev/null || true)
                 [ "${hits:-0}" -gt 0 ] && ACKED=1 && FIRST_MSG_S=$(elapsed) && break
             fi
             [ "$(now_s)" -ge "$ack_deadline" ] && break

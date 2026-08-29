@@ -740,9 +740,9 @@ if [ -f "$DEST/repro_node.log" ]; then
     # matches.  Appending `|| echo 0` therefore produced "0\n0", corrupting
     # the otherwise machine-readable result JSON on a clean proof.  Preserve
     # grep's count and normalize only a genuine read/tool failure.
-    body_read_fails="$(grep -c 'cannot open .*/blocks/blk' "$DEST/repro_node.log" 2>/dev/null)" ||
+    body_read_fails="$(grep -ac 'cannot open .*/blocks/blk' "$DEST/repro_node.log" 2>/dev/null)" ||
         body_read_fails="${body_read_fails:-0}"
-    if grep -q '\[boot\] -refold-from-anchor: loaded .* coins from the MINTED snapshot' "$DEST/repro_node.log" 2>/dev/null; then
+    if grep -aq '\[boot\] -refold-from-anchor: loaded .* coins from the MINTED snapshot' "$DEST/repro_node.log" 2>/dev/null; then
         refold_snapshot_loaded=1
     fi
 fi

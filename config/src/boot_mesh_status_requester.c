@@ -164,11 +164,9 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
     memcpy(request.requester_master_pubkey, local.doc.master_pubkey, 32);
     memcpy(request.requester_noise_static, mp->net_mgr->identity_pub, 32);
     memcpy(request.pairing_id, pairing_id, 32);
-    /* The request binds OUR side of the session; the responder verifies the
-     * shared transcript/generation and echoes the serial (see the header). */
+    /* The request binds the shared session evidence (see the header). */
     memcpy(request.transcript_hash, session.transcript_hash, 32);
     request.connection_generation = session.connection_generation;
-    request.connection_serial = session.connection_serial;
     request.issued_unix = (uint64_t)now;
     request.expires_unix = (uint64_t)now + MESH_STATUS_REQUEST_LIFETIME_SECONDS;
 

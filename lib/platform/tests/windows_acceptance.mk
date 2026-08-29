@@ -14,6 +14,8 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	consensus_install_refusal \
 	consensus_state_install_runtime_refusal \
 	consensus_state_publication_cas_refusal \
+	database_lifetime \
+	datadir_privacy \
 	directory_compat \
 	directory_transaction \
 	disk_space \
@@ -27,6 +29,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	log_level \
 	mint_anchor_export_refusal \
 	mint_anchor_preflight_refusal \
+	nat_gateway \
 	package_lifecycle_store_refusal \
 	os_binary_slots_refusal \
 	os_proc_pid_image \
@@ -134,8 +137,28 @@ ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_SOURCES := \
 	lib/json/src/json.c \
 	lib/base/src/safe_alloc.c \
 	lib/base/src/result.c
+ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_SOURCES := \
+	lib/platform/tests/datadir_privacy_windows_acceptance.c \
+	lib/util/src/util.c \
+	core/chainparams/src/chainparamsbase.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_FLAGS := \
+	-ffunction-sections -fdata-sections
+ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_LIBS := \
+	-Wl,--gc-sections -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_FLAGS := \
 	-DZCL_TESTING
+
+ZCL_WINDOWS_ACCEPTANCE_database_lifetime_SOURCES := \
+	lib/platform/tests/database_lifetime_windows_acceptance.c \
+	app/models/src/database_lifetime.c \
+	lib/platform/src/clock.c \
+	vendor/sqlite3.c
+ZCL_WINDOWS_ACCEPTANCE_database_lifetime_FLAGS := \
+	-Wno-unused-but-set-variable -Wno-unused-parameter
+ZCL_WINDOWS_ACCEPTANCE_database_lifetime_LIBS := -lpthread
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	lib/platform/tests/directory_compat_windows_acceptance.c \
@@ -238,6 +261,22 @@ ZCL_WINDOWS_ACCEPTANCE_mint_anchor_preflight_refusal_LIBDEPS := \
 	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE)
 ZCL_WINDOWS_ACCEPTANCE_mint_anchor_preflight_refusal_LIBS := \
 	-Wl,--gc-sections $(ZCL_WINDOWS_ACCEPTANCE_SQLITE) -ladvapi32 -lbcrypt
+
+ZCL_WINDOWS_ACCEPTANCE_nat_gateway_SOURCES := \
+	lib/platform/tests/nat_gateway_windows_acceptance.c \
+	lib/net/src/nat.c \
+	lib/util/src/log_json.c \
+	lib/util/src/util.c \
+	core/chainparams/src/chainparamsbase.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/platform/src/clock.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_nat_gateway_FLAGS := \
+	-ffunction-sections -fdata-sections
+ZCL_WINDOWS_ACCEPTANCE_nat_gateway_LIBS := \
+	-Wl,--gc-sections -ladvapi32 -lws2_32 -liphlpapi
+
 ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_SOURCES := \
 	lib/test/src/package_lifecycle_store_windows_refusal_acceptance.c \
 	app/services/src/package_lifecycle_store.c \

@@ -49,8 +49,7 @@ dev.generation.rollback    exempt: dev generation store, contained
 dev.generation.compact     exempt: dev generation store, contained
 dev.generation.activate    receipt:tools/command/native_dev_activation_command.c
 ops.recovery.rebuild       exempt: refold reset, gated by copy-prove doctrine
-ops.mesh.pair_commit       exempt: node.db pairing AR write via mesh_pairing_service, no artifact install
-ops.mesh.pair_revoke       exempt: sticky revocation AR write via mesh_pairing_service, no artifact install
+ops.mesh.pair.commit       exempt: node.db pairing AR write via mesh_pairing_service, no artifact install
 
 # ZCL app-feature writes (config/commands/app_features.def). None of them
 # installs a privileged datadir artifact, so every row stays `exempt` — the
@@ -168,3 +167,4 @@ app.shop.want.fulfill.review  exempt: changes only this node's local moderation 
 dev.begin                   exempt: starts or reattaches only the checkout-local development watcher; installs no privileged artifact and changes no canonical node
 dev.publication.mirror.record exempt: appends optional declared mirror evidence after verified P2P publication; installs no artifact and grants no Git, network, source or publication authority
 dev.publication.collect exempt: appends verified signed storage evidence to an immutable dev publication job; installs no artifact and grants no approval, deployment, wallet or publication authority
+ops.mesh.pair.revoke exempt: removes one target-local status-read authority through bounded plan/commit; it creates no authority and installs no artifact

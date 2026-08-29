@@ -41,7 +41,11 @@
  * c23.compile/.test/.fuzz/.package action; a worker that fails this probe
  * can never execute what those tokens would claim, so it must not
  * advertise them on its durable, signed identity row. */
-static struct zcl_result build_fabric_worker_capabilities(
+/* On Windows the worker identity path is disabled, so this helper is only
+ * reached through the non-Windows branch of identity_load() and through the
+ * test seam. Mark it unused-tolerant so the node build (no ZCL_TESTING) still
+ * compiles with -Werror on Windows. */
+static __attribute__((unused)) struct zcl_result build_fabric_worker_capabilities(
     bool have_toolchain, char *out, size_t out_len)
 {
     if (!have_toolchain)

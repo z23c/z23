@@ -11,6 +11,7 @@
 #include "net/anchor_peers.h"
 #include "net/onion_discovery.h"
 #include "chain/chainparams.h"
+#include "util/thread_work_probe.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -304,6 +305,11 @@ struct connman {
      * disable the wedge detector. */
     _Atomic long     message_thread_tid;
     _Atomic long     dial_thread_tid;
+    /* Explicit lease for an operation that intentionally blocks the dial
+     * loop. Unlike CPU/I/O counters, this remains observable while the kernel
+     * parks the thread; unlike a blanket grace period, it expires at the
+     * operation's declared timeout. */
+    struct thread_bounded_wait dial_bounded_wait;
 };
 
 /* Persist a newly learned NODE_V2TRANSPORT capability in the existing
@@ -438,6 +444,7 @@ struct connman_loop_liveness {
     int64_t dial_last_progress_us;      /* 0 = the loop has never run */
     long    message_tid;                /* 0 = not published yet */
     long    dial_tid;                   /* 0 = not published yet */
+    int64_t dial_bounded_wait_until_us; /* 0 = no declared wait */
 };
 void connman_observe_loop_liveness(struct connman *cm,
                                    struct connman_loop_liveness *out);
@@ -528,10 +535,26 @@ bool connman_outbound_rate_allowed_for_test(bool below_floor,
                                             bool interval_elapsed,
                                             bool dht_hint_pending);
 int connman_addrman_retry_cooldown_for_test(int attempts);
+/* Pure form of the dial scheduler's per-batch concurrency decision. A cold
+ * node (no healthy outbound peers) must ask for a CONCURRENT FAN, not one
+ * candidate at a time: at width 1 three blackholed clearnet seeds cost three
+ * serial DEFAULT_CONNECT_TIMEOUT windows before anything else is tried. The
+ * caps (free outbound slots, remaining max_connections capacity, buffer
+ * bound) must all still bind. */
+size_t connman_dial_scheduler_want_for_test(bool rate_ok,
+                                            size_t outbound_healthy,
+                                            bool below_floor,
+                                            size_t free_slots,
+                                            size_t free_nodes);
 /* Pure seed-thread policy. Raw sockets, inbound peers, and peers without
  * NODE_NETWORK must not suppress cold-start discovery. */
 bool connman_seed_discovery_needed_for_test(size_t healthy_outbound);
 int connman_seed_discovery_interval_for_test(size_t healthy_outbound);
+/* Drive ONE dial batch directly (clamped to the internal batch bound), so a
+ * test can measure that N candidates share a single connect window. */
+void connman_dial_batch_for_test(struct connman *cm,
+                                 struct connman_dial_candidate *batch,
+                                 size_t count);
 #endif
 
 /* Snapshot the currently healthy (handshaked, NODE_NETWORK, non-disconnecting,

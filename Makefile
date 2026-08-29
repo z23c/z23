@@ -32,8 +32,15 @@ CXX ?= g++
 ZCL_PLATFORM_CPPFLAGS = $(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
 	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC
 ZCL_LTO_FLAG = -flto=auto
+# -lshlwapi is required by the vendored Tor on Windows: its own configure
+# sets TOR_LIB_SHLWAPI=-lshlwapi (vendor/tor/configure.ac:856) and a real-Tor
+# link fails without it. It is inert on the stub link -- static linking adds no
+# import for a library nothing references -- so it can sit here ahead of that
+# work. Note the PE dependency audit does NOT pre-authorise shlwapi.dll: if a
+# real-Tor build starts importing it, the audit is meant to fail and make that
+# a deliberate decision with evidence, not one granted in advance.
 ZCL_PLATFORM_NODE_LIBS = -l:libregex.a -l:libtre.a -l:libintl.a \
-	-l:libiconv.a -lws2_32 -liphlpapi -lbcrypt \
+	-l:libiconv.a -lws2_32 -liphlpapi -lbcrypt -lshlwapi \
 	-luserenv -lcrypt32 -lshell32 -lole32 -luuid -lpsapi -lgdi32
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
@@ -470,6 +477,24 @@ ZCL_AGENT_DEV_BIN ?= $(HOME)/.local/bin/zclassic23-dev
 ZCL_AGENT_DEV_DATADIR ?= $(HOME)/.zclassic-c23-dev
 ZCL_AGENT_DEV_RPCPORT ?= 18252
 ZCL_NODECTL_BIN = $(BIN_DIR)/zcl-nodectl
+# Gate E1 file-size policy checker (rule near check-file-size-ceiling below).
+# Declared here because the test binaries take it as an order-only prereq.
+FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
+
+# POSIX-only operator tools: zcl-nodectl uses fork/signals/arpa/inet.h and
+# zclassic-cli uses poll.h. They are not in the native Windows node path, so
+# do not force the test harness or `all` to build them on Windows.
+# zclassic23-acme (the certificate worker) rides here too -- not because it is
+# POSIX-only, but because nothing has yet BUILT it on Windows. Move it out the
+# day someone proves it there; leaving it in `all` unproven would break the
+# native Windows build for everyone else.
+ifeq ($(ZCL_HOST_WINDOWS),1)
+ZCL_POSIX_ONLY_BINS =
+ZCL_NODECTL_DEP =
+else
+ZCL_POSIX_ONLY_BINS = zclassic-cli zcl-nodectl zclassic23-acme
+ZCL_NODECTL_DEP = $(ZCL_NODECTL_BIN)
+endif
 WAL_CHECKPOINT_BIN = $(BIN_DIR)/wal_checkpoint
 SOAK_RUNNER_BIN = $(BIN_DIR)/soak_runner
 CRASH_RECOVERY_TEST_BIN = $(BIN_DIR)/crash_recovery_test
@@ -1669,7 +1694,10 @@ presentation-portability: presentation-demo
 # Defined BEFORE the catalog include: the catalog assigns its per-program
 # variables with :=, so anything it references must already hold a value.
 ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
-ZCL_WINDOWS_ACCEPTANCE_AR ?= x86_64-w64-mingw32-ar
+ZCL_WINDOWS_CROSS_AR := $(shell \
+	command -v x86_64-w64-mingw32-ar 2>/dev/null)
+ZCL_WINDOWS_ACCEPTANCE_AR ?= $(if \
+	$(ZCL_WINDOWS_CROSS_AR),x86_64-w64-mingw32-ar,ar)
 ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 
 # An acceptance program that reaches real sqlite3 needs a mingw archive, and
@@ -1718,7 +1746,10 @@ windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
 windows-acceptance: windows-acceptance-compile
 
 ifeq ($(ZCL_HOST_WINDOWS),1)
+windows-acceptance: windows-headless-run-selftest
+
 	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		"$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
@@ -1731,6 +1762,7 @@ else
 		exit 2; \
 	}; \
 	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		WINEDEBUG=-all wine "$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
@@ -1738,6 +1770,16 @@ else
 	done; \
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 endif
+
+.PHONY: windows-service-install windows-service-status windows-service-remove
+windows-service-install: z23
+	@packaging/windows/install-service.sh install
+
+windows-service-status:
+	@packaging/windows/install-service.sh status
+
+windows-service-remove:
+	@packaging/windows/install-service.sh remove
 
 # ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
 # `make <app>` opens a real window on this host and prints the timestamp it
@@ -1939,8 +1981,8 @@ ifneq ($(ZCL_HOST_WINDOWS),)
 # unconstrained agent adapter merely to make the native node build green.
 ZCL_ADAPTER_RUNNER_TARGET =
 endif
-all: test_zcl zclassic23 zclassic-cli zcl-rpc zcl-nodectl zclassic23-package-verify \
-	$(ZCL_ADAPTER_RUNNER_TARGET)
+all: test_zcl zclassic23 zcl-rpc zclassic23-package-verify \
+	$(ZCL_POSIX_ONLY_BINS) $(ZCL_ADAPTER_RUNNER_TARGET)
 
 # ── Hot-swap ROLLBACK fixture images ──────────────────────────────────────
 # lib/test/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
@@ -2321,7 +2363,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2343,7 +2385,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -3524,7 +3566,7 @@ dev-package-verifier: $(DEV_PACKAGE_VERIFY_BIN)
 	mv -f -- "$$tmp" '$(DEV_PACKAGE_VERIFY_ENSURE_STAMP)'; \
 	trap - EXIT HUP INT TERM
 
-ifeq ($(ZCL_STANDALONE_CLEAN),1)
+ifeq ($(or $(ZCL_STANDALONE_CLEAN),$(ZCL_HOST_WINDOWS)),1)
 dev-package-verifier-ensure:
 	@:
 else
@@ -4160,7 +4202,8 @@ LINT_FAST_GATES := \
     check-framework-shape \
     check-supervisor-registration \
     check-vendor-provenance \
-    check-windows-platform-seam
+    check-windows-platform-seam \
+    check-pipefail-status-pipe
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
@@ -4486,6 +4529,48 @@ mock_rpc: $(BIN_DIR)/mock_rpc
 $(BIN_DIR)/mock_rpc: tools/mock_rpc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread -o $@ $<
+
+# ── The certificate worker ────────────────────────────────────────────────
+# `zclassic23-acme` is the ONLY program in this tree that is a TLS client and
+# the only one that carries a CA trust store. That is not incidental: the node
+# must never be able to be told who to trust by whoever ships a trust store,
+# and lib/test/src/test_cold_join_sovereign.c P2 asserts exactly that by
+# scanning every Z23 object under build/*obj*/epochs for an undefined
+# reference to a TLS-client or trust-store entry point.
+#
+# So this binary is compiled STRAIGHT FROM SOURCE to an executable, with no
+# intermediate object files at all. Nothing it compiles can ever appear in a
+# scanned epoch tree, which is what keeps P2 green honestly rather than by
+# exemption. It shares only four node files, all of them free of client and
+# trust-store symbols: the base64url codec, the node/worker handoff file, the
+# renewal decision, and the JSON reader. The platform clock joins them so the
+# worker keeps the tree's one-clock rule (no raw time() outside lib/platform).
+ACME_WORKER_SRCS = \
+	tools/acme/acme_main.c \
+	tools/acme/acme_client.c \
+	tools/acme/acme_jws.c \
+	tools/acme/acme_protocol.c \
+	tools/acme/tls_client.c \
+	tools/acme/acme_selftest_transport.c \
+	tools/acme/acme_selftest_protocol.c \
+	lib/net/src/acme_arm_file.c \
+	lib/net/src/acme_b64url.c \
+	lib/net/src/acme_renewal.c \
+	lib/json/src/json.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
+ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
+	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+ACME_WORKER_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
+	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
+
+.PHONY: zclassic23-acme
+zclassic23-acme: $(BIN_DIR)/zclassic23-acme
+$(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
+		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))
@@ -7801,6 +7886,68 @@ endef
 install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign
 	@$(INSTALL_C23_PRODUCTS)
 
+# ── macOS launchd service (the launchd equivalent of systemd linger) ──
+# Installs a LaunchAgent plist that keeps the z23 node running in the
+# background with auto-restart on crash, starts at login, and logs to
+# the datadir. Uses launchd — the native macOS service manager — so no
+# Xcode, Homebrew services, or third-party tools are needed.
+#
+#   make service-install        # production path: uses $(PREFIX)/bin/z23
+#   make dev-service-install    # development path: uses build/bin/z23
+#
+# The production path requires 'make install' first so the plist points
+# at a stable installed binary, not a build directory that may relink.
+
+ZCL_LAUNCHD_DIR  = $(HOME)/Library/LaunchAgents
+ZCL_LAUNCHD_LABEL = org.z23.zclassic
+ZCL_LAUNCHD_PLIST = $(ZCL_LAUNCHD_DIR)/$(ZCL_LAUNCHD_LABEL).plist
+ZCL_DATADIR = $(or $(ZCL_NODE_DATADIR),$(HOME)/.zclassic-c23)
+ZCL_SERVICE_EXTRA_FLAGS ?=
+ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)
+
+.PHONY: service-install
+service-install:
+	@test -x "$(PREFIX)/bin/z23" || { \
+	    echo "service-install: $(PREFIX)/bin/z23 not found." >&2; \
+	    echo "  Run 'make install' first, or use 'make dev-service-install'" >&2; \
+	    echo "  to run from the build directory ($(BIN_DIR)/z23)." >&2; \
+	    exit 1; }
+	@$(MAKE) __service-install ZCL_SERVICE_Z23_BIN="$(PREFIX)/bin/z23"
+
+.PHONY: dev-service-install
+dev-service-install: | $(BIN_DIR)/z23
+	@$(MAKE) __service-install ZCL_SERVICE_Z23_BIN="$(abspath $(BIN_DIR)/z23)"
+
+.PHONY: __service-install
+__service-install:
+	@mkdir -p $(ZCL_LAUNCHD_DIR) "$(ZCL_DATADIR)"
+	@sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
+	     -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
+	     -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
+	    config/launchd/org.z23.zclassic.plist.template \
+	    > "$(ZCL_LAUNCHD_PLIST)"
+	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
+	@launchctl load "$(ZCL_LAUNCHD_PLIST)"
+	@echo "service-install: LaunchAgent loaded ($(ZCL_LAUNCHD_LABEL))"
+	@echo "  binary:  $(ZCL_SERVICE_Z23_BIN)"
+	@echo "  datadir: $(ZCL_DATADIR)"
+	@echo "  logs:    $(ZCL_DATADIR)/z23.{stdout,stderr}.log"
+	@echo "  stop:    launchctl unload $(ZCL_LAUNCHD_PLIST)"
+	@echo "  start:   launchctl load $(ZCL_LAUNCHD_PLIST)"
+
+.PHONY: service-uninstall
+service-uninstall:
+	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
+	@rm -f "$(ZCL_LAUNCHD_PLIST)"
+	@echo "service-uninstall: LaunchAgent unloaded and removed"
+
+.PHONY: service-status
+service-status:
+	@launchctl list | LC_ALL=C grep z23 || echo "  (not loaded)"
+	@test -f "$(ZCL_LAUNCHD_PLIST)" && echo "  plist: $(ZCL_LAUNCHD_PLIST)" \
+	    || echo "  (not installed)"
+
+
 # Same installation surface, but every copied product was freshly built and
 # audited by the pinned old-glibc front door above. Keeping the copy recipe
 # shared prevents portable installation from becoming a second package path.
@@ -9073,6 +9220,21 @@ check-observability-pairing: tools/check_observability_pairing
 	@echo "══ LINT: observable stderr diagnostics ══"
 	@$(BIN_DIR)/check_observability_pairing
 
+# Gate E1's binary — the file-size policy checker (see check-file-size-ceiling
+# below). Three sources, no external deps: the tool, lib/platform's UTF-8
+# directory listing (dirent on POSIX, FindFirstFileW on Win32) and the checked
+# allocators that listing uses.
+FILE_SIZE_POLICY_SRCS = tools/file_size_policy.c \
+    lib/platform/src/directory_compat.c lib/base/src/safe_alloc.c
+.PHONY: tools/file_size_policy
+tools/file_size_policy: $(FILE_SIZE_POLICY_BIN)
+$(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Ilib/platform/include -Ilib/base/include \
+	    -o $@ $(FILE_SIZE_POLICY_SRCS)
+
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
 # tables). core_seal is a tiny build-time C tool (no external deps: it links the
@@ -9923,12 +10085,15 @@ check-mint-skip-crypto-offline-only:
 	@echo "══ LINT: fast-mint crypto pass-through is offline-only ══"
 	@./tools/lint/check_mint_skip_crypto_offline_only.sh .
 
-# Gate E1 — file-size ceiling for app/ .c files (RATCHET). Mega-modules
-# cannot hide behind <500-LOC functions; baseline at
-# tools/scripts/file_size_ceiling_baseline.txt may only shrink.
-check-file-size-ceiling:
-	@echo "══ LINT: app/ file-size ceiling (E1) ══"
-	@./tools/scripts/check_file_size_ceiling.sh
+# Gate E1 — the file-size policy for production C (tools/file_size_policy.c).
+# Three bands: 800 is the advisory TARGET, 801..1500 is an ALLOWED buffer that
+# needs no paperwork, over 1500 FAILS. 1500 is the point past which an agent
+# can no longer read the whole file in one tool call. Files already over 1500
+# are carried in tools/lint/file_size_policy_baseline.txt, which may only
+# shrink — nothing is ever added to it.
+check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
+	@echo "══ LINT: file-size policy (E1: target 800 / buffer 1500) ══"
+	@$(FILE_SIZE_POLICY_BIN)
 
 # Rejects dev-history phrasing ("STEP-0 STATUS", "stub bodies"/"stub body",
 # "lane <N><letter>", "future slice") from production contract surfaces
@@ -10265,11 +10430,15 @@ $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	    -Ilib/sapling/include -Ilib/keys/include -Ilib/event/include \
 	    -o $@ $(EQUIHASH_FACT_SRCS)
 
-.PHONY: tools/equihash-params-fact docs-equihash-params
+.PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
 docs-equihash-params: $(EQUIHASH_FACT_TOOL)
 	@$(EQUIHASH_FACT_TOOL) docs/EQUIHASH_PARAMS.md
 	@echo "docs-equihash-params: wrote docs/EQUIHASH_PARAMS.md from the consensus tables"
+
+equihash-facts: docs-equihash-params
+
+equihash-facts-check: check-equihash-params
 
 # Gate — the height-selected Equihash fact cannot drift, in either direction.
 # Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and
@@ -10779,7 +10948,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
@@ -10804,11 +10973,11 @@ endif
 # read build output, git config, /proc, or untracked worktree state. Each
 # carries its reason in tools/lint/lint_cache.sh, and each always runs.
 .PHONY: lint-cached lint-cold-audit
-lint-cached: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
+lint-cached: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
 	@tools/lint/run_lint.sh --cache --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed (cached where inputs were unchanged) ══"
 
-lint-cold-audit: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
+lint-cold-audit: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
 	@tools/lint/run_lint.sh --cold-audit --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed, every cache hit verified against a fresh run ══"
 

@@ -14,8 +14,8 @@
 #define MESH_STATUS_MAX_LIFETIME_SECONDS UINT64_C(60)
 #define MESH_STATUS_CAPSULE_MAX 4096u
 
-#define MESH_STATUS_REQUEST_V1_WIRE_BYTES 276u
-#define MESH_STATUS_RECEIPT_V1_FIXED_BYTES 408u
+#define MESH_STATUS_REQUEST_V1_WIRE_BYTES 268u
+#define MESH_STATUS_RECEIPT_V1_FIXED_BYTES 400u
 #define MESH_STATUS_RECEIPT_V1_MAX_WIRE_BYTES \
     (MESH_STATUS_RECEIPT_V1_FIXED_BYTES + MESH_STATUS_CAPSULE_MAX)
 
@@ -60,7 +60,6 @@ struct mesh_status_request_v1 {
     uint8_t pairing_id[32];
     uint8_t transcript_hash[32];
     uint64_t connection_generation;
-    uint64_t connection_serial;
     uint64_t issued_unix;
     uint64_t expires_unix;
 };
@@ -78,7 +77,6 @@ struct mesh_status_receipt_v1 {
     uint8_t responder_noise_static[32];
     uint8_t transcript_hash[32];
     uint64_t connection_generation;
-    uint64_t connection_serial;
     uint64_t revocation_generation;
     uint64_t observed_unix;
     uint64_t expires_unix;

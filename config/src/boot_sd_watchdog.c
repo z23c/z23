@@ -327,24 +327,24 @@ static bool boot_sd_watchdog_runtime_pillars(bool sweep_alive,
  *     measurement, not a wedge.
  *
  * The fix is not a bigger number; a bigger number is the same defect further
- * away. It is to ask a second question the machine's speed cannot answer:
- * is the KERNEL still doing work on this thread's behalf? CPU time, major
- * faults and block-I/O bytes all advance for a thread that is computing, page
- * faulting under memory pressure, or waiting on a slow device — and none of
- * them advance for a thread deadlocked on a mutex or parked on a futex that
- * will never be posted. A slow machine does less work per second; it never
- * does zero. See util/thread_work_probe.h.
+ * away. The gate asks whether the kernel reports completed work on the thread,
+ * or whether the thread explicitly entered an operation-specific bounded wait.
+ * CPU time, major faults and block-I/O bytes cover computing, paging and
+ * completed device work. A deadline-bound wait lease covers the intentional
+ * interval where a socket poll or device request may complete none of those.
+ * Once that declared deadline passes, silence is dead again. See
+ * util/thread_work_probe.h.
  *
- * So each pillar is now `marker fresh OR that thread is working`, and a
- * pillar is dead only when BOTH are false — which is the definition of the
- * thing this watchdog exists to kill. What this cannot see is a thread
+ * So each pillar is now `marker fresh OR that thread is working OR an explicit
+ * bounded wait is still within its deadline`. What this cannot see is a thread
  * spinning in a livelock: it burns CPU and reads as working. That is a
  * different failure with a different detector (the supervisor tree's
  * NO_PROGRESS contracts) and must never be claimed as covered here. */
 static bool boot_sd_watchdog_pillar_alive(bool marker_fresh,
-                                          bool thread_working)
+                                          bool thread_working,
+                                          bool bounded_wait_active)
 {
-    return marker_fresh || thread_working;
+    return marker_fresh || thread_working || bounded_wait_active;
 }
 
 /* Both connman loops must be alive. The conjunction is safe now that each
@@ -354,10 +354,13 @@ static bool boot_sd_watchdog_pillar_alive(bool marker_fresh,
 static bool boot_sd_watchdog_connman_alive(bool msg_marker_fresh,
                                            bool msg_working,
                                            bool dial_marker_fresh,
-                                           bool dial_working)
+                                           bool dial_working,
+                                           bool dial_bounded_wait_active)
 {
-    return boot_sd_watchdog_pillar_alive(msg_marker_fresh, msg_working) &&
-           boot_sd_watchdog_pillar_alive(dial_marker_fresh, dial_working);
+    return boot_sd_watchdog_pillar_alive(msg_marker_fresh, msg_working,
+                                         false) &&
+           boot_sd_watchdog_pillar_alive(dial_marker_fresh, dial_working,
+                                         dial_bounded_wait_active);
 }
 
 /* One work-probe slot per gated thread. Touched only by the pet thread. */
@@ -415,7 +418,7 @@ static bool boot_sd_watchdog_runtime_alive(void)
     bool tick_alive = !tick_running ||
                       boot_sd_watchdog_pillar_alive(
                           supervisor_tick_runner_last_hb_age_us() < bound_us,
-                          tick_working);
+                          tick_working, false);
 
     struct connman_loop_liveness ll;
     connman_observe_loop_liveness(
@@ -430,12 +433,11 @@ static bool boot_sd_watchdog_runtime_alive(void)
     bool dial_fresh = ll.dial_last_progress_us > 0 &&
                       now_us - ll.dial_last_progress_us >= 0 &&
                       now_us - ll.dial_last_progress_us < bound_us;
+    bool dial_wait_active = ll.dial_bounded_wait_until_us > now_us;
     /* A connman that has not started yet is not a wedge — the same carve-out
      * connman_runtime_progress_fresh() makes for its own callers. */
-    bool connman_alive = !ll.started ||
-                         boot_sd_watchdog_connman_alive(msg_fresh, msg_working,
-                                                        dial_fresh,
-                                                        dial_working);
+    bool connman_alive = !ll.started || boot_sd_watchdog_connman_alive(
+        msg_fresh, msg_working, dial_fresh, dial_working, dial_wait_active);
     return boot_sd_watchdog_runtime_pillars(
         boot_sd_watchdog_supervisor_alive(), tick_alive, connman_alive);
 }
@@ -459,11 +461,12 @@ static void boot_sd_watchdog_describe_pillars(char *out, size_t cap)
     snprintf(out, cap,
              "sweep=%d tick_running=%d tick_hb_age_us=%lld "
              "connman_started=%d msg_age_us=%lld dial_age_us=%lld "
-             "bound_us=%lld work_probe=%d",
+             "dial_wait_until_us=%lld bound_us=%lld work_probe=%d",
              (int)boot_sd_watchdog_supervisor_alive(),
              (int)supervisor_tick_runner_running(),
              (long long)supervisor_tick_runner_last_hb_age_us(),
              (int)ll.started, (long long)msg_age, (long long)dial_age,
+             (long long)ll.dial_bounded_wait_until_us,
              (long long)bound_us, (int)thread_work_probe_supported());
 }
 
@@ -527,18 +530,22 @@ bool boot_sd_watchdog_test_runtime_pillars(bool sweep_alive,
                                             connman_alive);
 }
 
-bool boot_sd_watchdog_test_pillar_alive(bool marker_fresh, bool thread_working)
+bool boot_sd_watchdog_test_pillar_alive(bool marker_fresh, bool thread_working,
+                                        bool bounded_wait_active)
 {
-    return boot_sd_watchdog_pillar_alive(marker_fresh, thread_working);
+    return boot_sd_watchdog_pillar_alive(marker_fresh, thread_working,
+                                         bounded_wait_active);
 }
 
 bool boot_sd_watchdog_test_connman_alive(bool msg_marker_fresh,
                                          bool msg_working,
                                          bool dial_marker_fresh,
-                                         bool dial_working)
+                                         bool dial_working,
+                                         bool dial_bounded_wait_active)
 {
     return boot_sd_watchdog_connman_alive(msg_marker_fresh, msg_working,
-                                          dial_marker_fresh, dial_working);
+                                          dial_marker_fresh, dial_working,
+                                          dial_bounded_wait_active);
 }
 #endif
 

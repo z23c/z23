@@ -88,11 +88,19 @@ configure_opts=(
     --disable-libscrypt
 )
 
-if [ "$HOST_OS" = Darwin ]; then
+case "$HOST_OS" in
+Darwin|MINGW*|MSYS*)
     # Tor's TOR_SEARCH_LIBRARY expands --with-<lib>-dir=D into -ID/include and
     # -LD/lib, which is exactly the shape of this repository's vendor tree. Fail
     # closed on the pieces that must already be there rather than letting
-    # configure fall back to a system library macOS does not have.
+    # configure fall back to a system library.
+    #
+    # Neither macOS nor an MSYS2/mingw Windows host has a system
+    # OpenSSL/libevent/zlib that Tor should be linked against here. On Windows
+    # MSYS2 may well HAVE those packages, which is worse than not having them:
+    # configure would silently pick a different OpenSSL from the one the node
+    # links, and the skew is invisible because both sides compile. Point Tor at
+    # the same vendor tree the node uses, on every host that needs it.
     vendor_missing=""
     for required in \
         vendor/lib/libcrypto.a vendor/lib/libssl.a \
@@ -116,8 +124,8 @@ if [ "$HOST_OS" = Darwin ]; then
         done
     fi
     if [ -n "$vendor_missing" ]; then
-        echo "tor-full: macOS has no system OpenSSL/libevent/zlib to fall back to," >&2
-        echo "tor-full: and the vendored replacements are still absent:$vendor_missing" >&2
+        echo "tor-full: $HOST_OS must link the vendored OpenSSL/libevent/zlib," >&2
+        echo "tor-full: and they are still absent:$vendor_missing" >&2
         echo "tor-full: run tools/scripts/build_vendor.sh and rerun." >&2
         exit 5
     fi
@@ -126,7 +134,8 @@ if [ "$HOST_OS" = Darwin ]; then
         "--with-libevent-dir=$ROOT/vendor"
         "--with-zlib-dir=$ROOT/vendor"
     )
-fi
+    ;;
+esac
 
 configure_args=""
 if [ -x "$TOR_DIR/config.status" ]; then

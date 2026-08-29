@@ -134,12 +134,12 @@ fresh="$(mktemp)"
 trap 'rm -f -- "$fresh"' EXIT
 "$TOOL" "$fresh"
 if [ ! -f "$DOC" ]; then
-    echo "check_equihash_params: FAIL — $DOC is missing; run: make docs-equihash-params" >&2
+    echo "check_equihash_params: FAIL — $DOC is missing; run: make equihash-facts" >&2
     status=1
 elif ! diff -u "$DOC" "$fresh" >/dev/null; then
     echo "check_equihash_params: FAIL — $DOC no longer matches the consensus tables:" >&2
     diff -u "$DOC" "$fresh" | head -40 >&2
-    echo "  regenerate it: make docs-equihash-params" >&2
+    echo "  regenerate it: make equihash-facts" >&2
     status=1
 fi
 

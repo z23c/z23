@@ -61,7 +61,11 @@ if ! "$RETENTION" "$LANE"; then
 fi
 
 set +e
-"$TARGET" "${TARGET_ARGS[@]}"
+if [ ${#TARGET_ARGS[@]} -gt 0 ]; then
+    "$TARGET" "${TARGET_ARGS[@]}"
+else
+    "$TARGET"
+fi
 rc=$?
 set -e
 

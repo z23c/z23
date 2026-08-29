@@ -21,6 +21,7 @@
 #include "base/log_level.h"
 #include "services/wallet_restore_service.h"
 
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -44,19 +45,34 @@ static bool write_sentinel(const char *path, const char *bytes)
     return ok;
 }
 
+static bool format_path(char *out, size_t capacity, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(out, capacity, format, args);
+    va_end(args);
+    return written >= 0 && (size_t)written < capacity;
+}
+
 int main(void)
 {
-    char temp[MAX_PATH], dir[MAX_PATH], sentinel[MAX_PATH];
-    char node_db[MAX_PATH], lock_path[MAX_PATH];
+    char temp[MAX_PATH], dir[MAX_PATH + 64];
+    char sentinel[MAX_PATH + 96], node_db[MAX_PATH + 80];
+    char lock_path[MAX_PATH + 96];
     DWORD n = GetTempPathA(sizeof(temp), temp);
     if (!n || n >= sizeof(temp)) return 2;
-    snprintf(dir, sizeof(dir), "%sz23-wr-refusal-%lu-%llu", temp,
-             (unsigned long)GetCurrentProcessId(),
-             (unsigned long long)GetTickCount64());
+    if (!format_path(dir, sizeof(dir), "%sz23-wr-refusal-%lu-%llu", temp,
+                     (unsigned long)GetCurrentProcessId(),
+                     (unsigned long long)GetTickCount64()))
+        return 2;
     if (!CreateDirectoryA(dir, NULL)) return 3;
-    snprintf(sentinel, sizeof(sentinel), "%s/sentinel.sqlite", dir);
-    snprintf(node_db, sizeof(node_db), "%s/node.db", dir);
-    snprintf(lock_path, sizeof(lock_path), "%s/wallet-recovery.lock", dir);
+    if (!format_path(sentinel, sizeof(sentinel), "%s/sentinel.sqlite", dir) ||
+        !format_path(node_db, sizeof(node_db), "%s/node.db", dir) ||
+        !format_path(lock_path, sizeof(lock_path),
+                     "%s/wallet-recovery.lock", dir)) {
+        RemoveDirectoryA(dir);
+        return 2;
+    }
     const char expected[] = "synthetic-wallet-restore-sentinel";
     if (!write_sentinel(sentinel, expected)) return 4;
 

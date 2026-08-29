@@ -1,14 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Owner-facing local pairing ceremony: plan/commit/list/revoke.
+ * purpose: Owner-facing local pairing ceremony: plan/commit.
  *
  * This is the local half of machine pairing: it exposes the existing
- * mesh_pairing_service accept/revoke authority to the operator without
+ * mesh_pairing_service accept authority to the operator without
  * creating a way to bypass it. plan and commit re-derive EVERYTHING live —
  * the established v2 Noise session, the held ZID delegation, the current
  * time — and commit additionally requires the peer's Noise fingerprint
  * compared out of band (read from `ops mesh pair plan` here and `ops mesh
  * identity` on the other machine). The granted capability is status-read
- * only. Revocation is the safe direction: direct, idempotent, sticky.
+ * only. Inspection and revocation live in the mesh pairing controller
+ * (`ops mesh pair list` / `ops mesh pair revoke`).
  * There is no two-sided wire ceremony yet: each host pairs the other
  * independently, and no dial is ever performed — a peer with no live
  * session is PEER_NOT_CONNECTED.
@@ -120,10 +121,5 @@ enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
     const char *selector, const uint8_t expected_fingerprint[32],
     int64_t days, bool days_given, struct db_mesh_pairing *out,
     enum mesh_pairing_reason *service_reason_out);
-
-/* Returns the record count (<= max), or -1 when the node db is unavailable. */
-int boot_mesh_pairing_list(struct db_mesh_pairing *out, size_t max);
-
-enum mesh_pairing_reason boot_mesh_pairing_revoke(const char *pairing_id);
 
 #endif /* ZCL_CONFIG_BOOT_MESH_PAIRING_H */

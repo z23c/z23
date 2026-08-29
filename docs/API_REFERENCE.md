@@ -74,9 +74,9 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 748 |
+| Registry entries (branches + leaves) | 749 |
 | Top-level roots | 12 |
-| Branches | 173 |
+| Branches | 174 |
 | Leaves (dispatchable command paths) | 575 |
 | … `ready` (live handler in this build) | 519 |
 | … `compat` (metadata only, names a fallback) | 25 |
@@ -95,7 +95,7 @@ Per source file:
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 54 | 9 | 45 |
+| `config/commands/ops.def` | 55 | 10 | 45 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
@@ -821,10 +821,15 @@ represented by its children's sections.
 | `ops mesh status` | ready | read / read / operator · foreground/low | **`pairing_id`** | `zcl.mesh_status_receipt_view.v1` | `z23 ops mesh status --pairing_id=<64hex>` | Request one paired machine's signed status receipt |
 | `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
 | `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
-| `ops mesh pair_plan` | ready | read / read / operator · fast/low | **`peer`** | `zcl.mesh_pairing_plan.v1` | `z23 ops mesh pair_plan --peer=<addr-or-fingerprint-prefix>` | Preview pairing one connected machine |
-| `ops mesh pair_commit` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`peer`**, `fingerprint`, `days` | `zcl.mesh_pairing_record_view.v1` | `z23 ops mesh pair_commit --peer=<selector> --fingerprint=<64hex> [--days=7]` | Pair one connected machine with status-read authority |
-| `ops mesh pair_list` | ready | read / read / operator · fast/low | none | `zcl.mesh_pairing_list.v1` | `z23 ops mesh pair_list` | List every durable machine pairing |
-| `ops mesh pair_revoke` | ready | mutate / app-write / **owner** · foreground/low | **`pairing_id`** | `zcl.mesh_pairing_record_view.v1` | `z23 ops mesh pair_revoke --pairing_id=<64hex>` | Revoke one machine pairing durably |
+
+#### `ops.mesh.pair` — Pairing
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `ops mesh pair plan` | ready | read / read / operator · fast/low | **`peer`** | `zcl.mesh.pairing.plan.v1` | `z23 ops mesh pair plan --peer=<addr-or-fingerprint-prefix>` | Preview pairing one connected machine |
+| `ops mesh pair commit` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`peer`**, `fingerprint`, `days` | `zcl.mesh.pairing.commit.v1` | `z23 ops mesh pair commit --peer=<selector> --fingerprint=<64hex> [--days=7]` | Pair one connected machine with status-read authority |
+| `ops mesh pair list` | ready | read / read / operator · fast/low | none | `zcl.mesh.pairing.list.v1` | `z23 ops mesh pair list` | List this machine's owner-approved pairings |
+| `ops mesh pair revoke` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`pairing_id`**, `confirm` | `zcl.mesh.pairing.revoke.v1` | `z23 ops mesh pair revoke --pairing-id=<64hex>` | Revoke one local machine pairing |
 
 #### `ops.postmortem` — Postmortems
 
@@ -1682,7 +1687,6 @@ promise the same document shape.
 | `zcl.app_swap_contract.v1` | `app.swap.initiate`, `app.swap.participate` |
 | `zcl.rom_seed_status.v1` | `ops.debug.rom_seed.status`, `ops.debug.rom_seed.enable`, `ops.debug.rom_seed.disable` |
 | `zcl.ops_mesh_join_status.v1` | `ops.mesh.join`, `ops.mesh.join_status` |
-| `zcl.mesh_pairing_record_view.v1` | `ops.mesh.pair_commit`, `ops.mesh.pair_revoke` |
 | `zcl.dev_cycle.v1` | `dev.status`, `dev.change.apply`, `dev.loop.wait` |
 | `zcl.dev_hotswap.v1` | `dev.hotswap.apply`, `dev.hotswap.probe` |
 | `zcl.dev_loop_status.v1` | `dev.loop.ensure`, `dev.loop.status`, `dev.loop.stop` |

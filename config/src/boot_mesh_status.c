@@ -112,6 +112,9 @@ static enum mesh_status_receipt_status mesh_status_from_pairing_reason(
     case MESH_PAIRING_WINDOW_INVALID:
     case MESH_PAIRING_IDENTITY_COLLISION:
     case MESH_PAIRING_PERSIST_FAILED:
+    /* Revocation-ceremony verdicts; authorize_status never produces them. */
+    case MESH_PAIRING_CONFIRMATION_INVALID:
+    case MESH_PAIRING_PLAN_EXPIRED:
         return MESH_STATUS_RECEIPT_INTERNAL;
     }
     return MESH_STATUS_RECEIPT_INTERNAL;
@@ -136,8 +139,8 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
     if (now_unix < request->issued_unix || now_unix >= request->expires_unix)
         return MESH_STATUS_RECEIPT_EXPIRED;
     /* Live-session binding: transcript and generation are transcript-derived
-     * and shared by both sides; the serial is per-side and is only echoed
-     * for the requester's own current-session check (see the header). */
+     * and shared by both sides (the per-side serial left the wire in
+     * 2114f5257 — only shared session evidence is bound). */
     if (memcmp(request->transcript_hash, session->transcript_hash, 32) != 0 ||
         request->connection_generation != session->connection_generation ||
         memcmp(request->requester_noise_static, session->remote_static,
@@ -222,7 +225,6 @@ bool boot_mesh_status_compose_receipt(
      * the request's claim. */
     memcpy(out->transcript_hash, session->transcript_hash, 32);
     out->connection_generation = session->connection_generation;
-    out->connection_serial = request->connection_serial;
     out->revocation_generation = revocation_generation;
     out->observed_unix = now_unix;
     uint64_t expires = now_unix + MESH_STATUS_RECEIPT_VALIDITY_SECONDS;
@@ -265,7 +267,6 @@ bool boot_mesh_status_receipt_accept(
      * receipt arriving on a newer or different connection is refused. */
     if (memcmp(receipt->transcript_hash, session->transcript_hash, 32) != 0 ||
         receipt->connection_generation != session->connection_generation ||
-        receipt->connection_serial != session->connection_serial ||
         memcmp(receipt->responder_noise_static, session->remote_static,
                32) != 0 ||
         memcmp(receipt->responder_master_pubkey, expected_responder_master,

@@ -23,6 +23,17 @@ bool platform_process_lock_try_acquire(struct platform_process_lock *lock,
     return ok;
 }
 
+bool platform_process_lock_acquire(struct platform_process_lock *lock,
+                                   const char *path, bool create)
+{
+    if (!lock || !path || !path[0] || lock->held) return false;
+    bool ok = create
+        ? platform_private_file_open_locked_create_wait(path, &lock->file)
+        : platform_private_file_open_locked_wait(path, &lock->file);
+    lock->held = ok;
+    return ok;
+}
+
 void platform_process_lock_release(struct platform_process_lock *lock)
 {
     if (!lock) return;

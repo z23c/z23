@@ -238,6 +238,7 @@ int test_mesh_pairing(void)
             MESH_PAIRING_IDENTITY_COLLISION, MESH_PAIRING_PERSIST_FAILED,
             MESH_PAIRING_NOT_FOUND, MESH_PAIRING_EXPIRED,
             MESH_PAIRING_SESSION_MISMATCH, MESH_PAIRING_AUTHORITY_CHANGED,
+            MESH_PAIRING_CONFIRMATION_INVALID, MESH_PAIRING_PLAN_EXPIRED,
         };
         for (size_t i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++) {
             const char *code = boot_mesh_pairing_reason_code(reasons[i]);
@@ -252,6 +253,11 @@ int test_mesh_pairing(void)
             "FINGERPRINT_MISMATCH");
         ASSERT_STR_EQ(boot_mesh_pairing_reason_code(MESH_PAIRING_NOT_FOUND),
                       "NOT_FOUND");
+        ASSERT_STR_EQ(
+            boot_mesh_pairing_reason_code(MESH_PAIRING_CONFIRMATION_INVALID),
+            "CONFIRMATION_INVALID");
+        ASSERT_STR_EQ(boot_mesh_pairing_reason_code(MESH_PAIRING_PLAN_EXPIRED),
+                      "PLAN_EXPIRED");
         PASS();
     }
 

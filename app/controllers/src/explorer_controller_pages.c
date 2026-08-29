@@ -108,36 +108,31 @@ static int64_t explorer_page_served_tip_height(const char *datadir,
 
 /* ── Disk cache helpers (survive restarts) ────────────────── */
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-
-void cache_save(const char *name, const char *data, size_t len)
+static void stats_cache_save(size_t len)
 {
     struct explorer_assets *assets = explorer_assets();
     if (!assets->explorer_dir[0]) ensure_explorer_dir();
     if (!assets->explorer_dir[0] || len == 0) return;
     char path[1200];
-    snprintf(path, sizeof(path), "%s/%s.cache", assets->explorer_dir, name);
+    snprintf(path, sizeof(path), "%s/stats.cache", assets->explorer_dir);
     FILE *f = fopen(path, "w");
-    if (f) { fwrite(data, 1, len, f); fclose(f); }
+    if (f) { fwrite(g_stats_cache, 1, len, f); fclose(f); }
 }
 
-size_t cache_load(const char *name, char *buf, size_t max)
+static size_t stats_cache_load(void)
 {
     struct explorer_assets *assets = explorer_assets();
     if (!assets->explorer_dir[0]) ensure_explorer_dir();
     if (!assets->explorer_dir[0]) return 0;
     char path[1200];
-    snprintf(path, sizeof(path), "%s/%s.cache", assets->explorer_dir, name);
+    snprintf(path, sizeof(path), "%s/stats.cache", assets->explorer_dir);
     FILE *f = fopen(path, "r");
     if (!f) return 0;
-    size_t len = fread(buf, 1, max - 1, f);
+    size_t len = fread(g_stats_cache, 1, sizeof(g_stats_cache) - 1, f);
     fclose(f);
-    buf[len] = '\0';
+    g_stats_cache[len] = '\0';
     return len;
 }
-
-#pragma GCC diagnostic pop
 
 /* serve_loading_placeholder() and the page renderers (tokens, token detail,
  * hodl, events, names, market, swaps, messages) live in
@@ -161,9 +156,9 @@ void *stats_compute_thread(void *arg)
     }
     /* Load previous cache from disk for instant serving while recomputing */
     if (g_stats_cache_len == 0) {
-        size_t disk_len = cache_load("stats", g_stats_cache, STATS_CACHE_SIZE);
+        size_t disk_len = stats_cache_load();
         if (disk_len > 0) {
-            /* Release: the cache_load() bytes above must be visible before a
+            /* Release: the loaded bytes above must be visible before a
              * reader can observe this nonzero length. */
             atomic_store_explicit(&g_stats_cache_len, disk_len, memory_order_release);
             printf("Stats: loaded %zu bytes from disk cache (instant)\n", disk_len);
@@ -190,7 +185,7 @@ void *stats_compute_thread(void *arg)
             atomic_store_explicit(&g_stats_cache_height, end_tip,
                                   memory_order_release);
             atomic_store_explicit(&g_stats_cache_len, len, memory_order_release);
-            cache_save("stats", g_stats_cache, len);
+            stats_cache_save(len);
         } else {
             printf("Stats background: discarded unstable build "
                    "(start_index=%lld end_index=%lld served=%lld)\n",

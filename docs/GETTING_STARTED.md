@@ -198,7 +198,7 @@ node without them starts normally and reports one named capability blocker:
 [crypto.params] shielded send unavailable — proving parameters not installed
 ```
 
-You will see it in `z23 ops status`. Nothing else is affected: the node still
+You will see it in `z23 status`. Nothing else is affected: the node still
 follows the chain, validates shielded proofs, and relays. If you only run a
 node, you can stop reading here.
 
@@ -435,6 +435,33 @@ after `git clone` into `~/zclassic23`; if you cloned elsewhere, edit the
 [`deploy/zclassic23.env.example`](../deploy/zclassic23.env.example) and edit
 it; the unit sources this file optionally, so a fresh clone without it still
 starts cleanly.
+
+**On macOS**, install the binary once, then use the provided LaunchAgent:
+
+```bash
+make install                              # default PREFIX=/usr/local; use ~/.local for rootless
+make service-install                      # loads ~/Library/LaunchAgents/org.z23.zclassic.plist
+launchctl list | grep org.z23.zclassic    # confirm it is loaded
+```
+
+`make service-install` fails closed if `$(PREFIX)/bin/z23` is missing, so
+run `make install` first or use `make dev-service-install` to run the node
+straight from `build/bin/z23`. The LaunchAgent starts at login, restarts on
+crash, and logs to `~/.zclassic-c23/z23.{stdout,stderr}.log`. Stop it with
+`make service-uninstall` or `launchctl unload ~/Library/LaunchAgents/org.z23.zclassic.plist`.
+
+Pass extra node flags through the service template with
+`ZCL_SERVICE_EXTRA_FLAGS`. For a development machine that should cold-start
+quickly from the clearnet snapshot seeds rather than crawling every historical
+block body from P2P, use:
+
+```bash
+make dev-service-install ZCL_SERVICE_EXTRA_FLAGS="-allow-clearnet-snapshot-fetch"
+```
+
+This is opt-in and unauthenticated: the node still validates the fetched
+snapshot against consensus before trusting it, but the seed itself is not
+signed by the chain. Omit the flag for a from-genesis P2P-only sync.
 
 A minimal from-scratch example, if you'd rather not use the tracked unit
 (substitute your own paths/ports):

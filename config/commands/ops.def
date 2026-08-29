@@ -588,6 +588,89 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_status)
+ZCL_COMMAND_BRANCH("ops.mesh.pair", "ops.mesh", "Pairing",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.pair.plan", "ops.mesh.pair", "",
+    "Preview pairing one connected machine",
+    "Finds the connected peer with an established v2 Noise session "
+    "(optionally narrowed by an address substring or a Noise fingerprint hex "
+    "prefix), pulls its held ZID delegation, and renders what commit would "
+    "record: peer address, Noise fingerprint hex to compare out of band, "
+    "master pubkey, delegation validity window, the status-read-only "
+    "capability, the default expiry, and the pairing id. No durable write. "
+    "Never dials: no matching session peer is PEER_NOT_CONNECTED, more than "
+    "one is AMBIGUOUS_PEER.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,pair,plan,preview,noise,fingerprint,delegation",
+    "zcl.ops_mesh_pair_plan.input.v1", "zcl.mesh.pairing.plan.v1",
+    "peer", "peer",
+    "z23 ops mesh pair plan --peer=<addr-or-fingerprint-prefix>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_pair_plan)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.pair.commit", "ops.mesh.pair", "",
+    "Pair one connected machine with status-read authority",
+    "The ceremony gate. --fingerprint is MANDATORY: the out-of-band compared "
+    "peer Noise fingerprint (ops mesh pair plan here, ops mesh identity on "
+    "the other machine). Re-derives the live session and held delegation at "
+    "commit time, then records a durable pairing with status-read-only "
+    "capability expiring in --days days (default 7, maximum 30). The pairing "
+    "authority rechecks genesis, active ZID projection, finality-delayed "
+    "beacon, delegation signature, and fingerprint binding; every refusal is "
+    "a named code and writes nothing. An identical existing record is "
+    "returned unchanged; a revoked id stays revoked. Never dials.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,pair,commit,noise,fingerprint,ceremony,status-read",
+    "zcl.ops_mesh_pair_commit.input.v1", "zcl.mesh.pairing.commit.v1",
+    "peer,fingerprint,days", "peer",
+    "z23 ops mesh pair commit --peer=<selector> --fingerprint=<64hex> [--days=7]",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_mesh_pair_commit)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.pair.list", "ops.mesh.pair", "",
+    "List this machine's owner-approved pairings",
+    "Lists bounded, redacted local pairing authority. Public master and Noise "
+    "keys are represented only by fingerprints; no private key, endpoint, "
+    "path, capability secret, or remote status is exposed.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,pairing,list,authority,revocation",
+    "zcl.command.empty_input.v1", "zcl.mesh.pairing.list.v1", "", "",
+    "z23 ops mesh pair list",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_pair_list)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.pair.revoke", "ops.mesh.pair", "",
+    "Revoke one local machine pairing",
+    "Plans, then commits, sticky local revocation of exactly one pairing. The "
+    "short-lived confirmation binds the pairing ID and current revocation "
+    "generation. Revocation cannot create, renew, or widen authority.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,pairing,revoke,authority,security",
+    "zcl.mesh.pairing.revoke.input.v1", "zcl.mesh.pairing.revoke.v1",
+    "pairing_id,confirm", "pairing_id",
+    "z23 ops mesh pair revoke --pairing-id=<64hex>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_ops_mesh_pair_revoke)
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.join", "ops.mesh", "",
     "Join a peer from a verified session invite",
@@ -620,91 +703,6 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_join_status)
-ZCL_COMMAND_READY_READ(
-    "ops.mesh.pair_plan", "ops.mesh", "",
-    "Preview pairing one connected machine",
-    "Finds the connected peer with an established v2 Noise session "
-    "(optionally narrowed by an address substring or a Noise fingerprint hex "
-    "prefix), pulls its held ZID delegation, and renders what commit would "
-    "record: peer address, Noise fingerprint hex to compare out of band, "
-    "master pubkey, delegation validity window, the status-read-only "
-    "capability, the default expiry, and the pairing id. No durable write. "
-    "Never dials: no matching session peer is PEER_NOT_CONNECTED, more than "
-    "one is AMBIGUOUS_PEER.",
-    ZCL_COMMAND_RESULT_BUDGET,
-    "mesh,pair,plan,preview,noise,fingerprint,delegation",
-    "zcl.ops_mesh_pair_plan.input.v1", "zcl.mesh_pairing_plan.v1",
-    "peer", "peer",
-    "z23 ops mesh pair_plan --peer=<addr-or-fingerprint-prefix>",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_pair_plan)
-ZCL_COMMAND_READY_COMMAND(
-    "ops.mesh.pair_commit", "ops.mesh", "",
-    "Pair one connected machine with status-read authority",
-    "The ceremony gate. --fingerprint is MANDATORY: the out-of-band compared "
-    "peer Noise fingerprint (ops mesh pair_plan here, ops mesh identity on "
-    "the other machine). Re-derives the live session and held delegation at "
-    "commit time, then records a durable pairing with status-read-only "
-    "capability expiring in --days days (default 7, maximum 30). The pairing "
-    "authority rechecks genesis, active ZID projection, finality-delayed "
-    "beacon, delegation signature, and fingerprint binding; every refusal is "
-    "a named code and writes nothing. An identical existing record is "
-    "returned unchanged; a revoked id stays revoked. Never dials.",
-    ZCL_COMMAND_RESULT_BUDGET,
-    "mesh,pair,commit,noise,fingerprint,ceremony,status-read",
-    "zcl.ops_mesh_pair_commit.input.v1", "zcl.mesh_pairing_record_view.v1",
-    "peer,fingerprint,days", "peer",
-    "z23 ops mesh pair_commit --peer=<selector> --fingerprint=<64hex> [--days=7]",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
-    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
-    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
-    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
-    zcl_native_handle_ops_mesh_pair_commit)
-ZCL_COMMAND_READY_READ(
-    "ops.mesh.pair_list", "ops.mesh", "",
-    "List every durable machine pairing",
-    "Every durable pairing record with public fields only: pairing id, peer "
-    "Noise fingerprint and master pubkey hex, capability mask, derived state "
-    "(active/expired/revoked), times, and sticky revocation generation. "
-    "Never private key material or local paths.",
-    ZCL_COMMAND_RESULT_BUDGET,
-    "mesh,pair,list,pairings,state,revocation",
-    "zcl.command.empty_input.v1", "zcl.mesh_pairing_list.v1",
-    "", "",
-    "z23 ops mesh pair_list",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_pair_list)
-ZCL_COMMAND_READY_COMMAND(
-    "ops.mesh.pair_revoke", "ops.mesh", "",
-    "Revoke one machine pairing durably",
-    "Direct sticky revocation by pairing id: the safe direction, so there is "
-    "no plan step. The first transition increments the durable revocation "
-    "generation; repeating the revoke is idempotent and preserves the "
-    "original timestamp. Projects the post-revocation record view; an "
-    "unknown id is NOT_FOUND and writes nothing.",
-    ZCL_COMMAND_RESULT_BUDGET,
-    "mesh,pair,revoke,revocation,sticky",
-    "zcl.ops_mesh_pair_revoke.input.v1", "zcl.mesh_pairing_record_view.v1",
-    "pairing_id", "pairing_id",
-    "z23 ops mesh pair_revoke --pairing_id=<64hex>",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
-    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
-    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
-    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_CONFIRM_NONE,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    zcl_native_handle_ops_mesh_pair_revoke)
-
 ZCL_COMMAND_BRANCH("ops.postmortem", "ops", "Postmortems",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_READ(

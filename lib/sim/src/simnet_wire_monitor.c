@@ -33,7 +33,6 @@ bool simnet_wire_tip_hash(const struct simnet_wire *wire, struct uint256 *out)
         uint256_set_null(out);
     return true;
 }
-
 bool simnet_wire_coins_digest(const struct simnet_wire *wire,
                               struct utxo_commitment *out)
 {
@@ -235,4 +234,3 @@ bool simnet_wire_apply_scenario_partitions(struct simnet_wire *wire,
     }
     return true;
 }
-

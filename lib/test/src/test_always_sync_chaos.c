@@ -17,10 +17,10 @@
  *     already landed production code (app/services/src/block_index_loader_
  *     rebuild.c); this row is an unconditional regression gate.
  *   - a LIVE-WEDGE-SCALE gap, beyond BLOCK_INDEX_LOADER_SEED_MAX_GAP — this
- *     is the documented, still-open Pillar-0 wedge (docs/HANDOFF.md). This
- *     row SKIPs (does not fail) today, and flips to an unconditional
- *     regression gate the moment a sibling lane's production fix makes the
- *     injector report `ok=true` for an over-cap gap — no edit needed here.
+ *     is the documented, still-open Pillar-0 limit (docs/HANDOFF.md). Until
+ *     recovery lands, the row requires an explicit contained refusal with no
+ *     operator page; it flips to the recovery assertion when the injector
+ *     reports `ok=true`.
  *
  * See lib/sim/include/sim/simnet_chaos_faults.h for what each fault
  * reproduces and app/services/include/services/block_index_loader.h for
@@ -81,24 +81,21 @@ int test_always_sync_chaos(void)
                   r.ok && r.recovered && r.hstar_after == gap);
     }
 
-    /* ── (a-2) G-TIP: live-wedge-scale gap — SKIP-or-ASSERT ─────────────
+    /* ── (a-2) G-TIP: live-wedge-scale gap — REFUSE-or-RECOVER ──────────
      * A gap comfortably beyond MAX_GAP, at the SAME scale relationship the
-     * documented live wedge has to the cap (a multiple of it), kept cheap
-     * for a unit test. If the injector still refuses (today's reality),
-     * this is the known-open Pillar-0 wedge: print SKIP, do not fail. The
-     * moment a sibling lane's fix makes the genesis-root branch resolve an
-     * over-cap gap, `r.ok` flips true here and this row becomes a hard
-     * regression gate with zero changes to this file. */
+     * documented live limit has to the cap (a multiple of it), kept cheap
+     * for a unit test. Until recovery lands, refusal must remain contained
+     * and must not page the operator. The moment the genesis-root branch
+     * resolves an over-cap gap, `r.ok` flips true and the recovery assertion
+     * becomes the hard gate with no test edit. */
     {
         const int gap = BLOCK_INDEX_LOADER_SEED_MAX_GAP + 10000;
         bool harness_ok = chaos_fault_empty_active_chain_window(gap, &r);
         printf("  note: %s\n", r.note);
         ASC_CHECK("gtip live-wedge-scale: harness fixture built", harness_ok);
         if (!r.ok) {
-            printf("always_sync_chaos: gtip live-wedge-scale... "
-                   "SKIP (Pillar-0 unbounded-gap fix not yet landed — "
-                   "MAX_GAP=%d refuses by design; see docs/HANDOFF.md)\n",
-                   BLOCK_INDEX_LOADER_SEED_MAX_GAP);
+            ASC_CHECK("gtip live-wedge-scale: contained refusal, no operator "
+                      "page", !r.recovered && !r.operator_paged);
         } else {
             ASC_CHECK("gtip live-wedge-scale: never pages operator",
                       !r.operator_paged);

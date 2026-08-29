@@ -41,6 +41,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <string.h>
@@ -138,6 +140,39 @@ static bool sdn_confirm_silence(int fd)
 {
     char buf[64];
     return sdn_try_recv(fd, buf, sizeof(buf)) < 0;
+}
+
+struct sdn_blocked_wait {
+    int read_fd;
+    bool publish_lease;
+    _Atomic bool armed;
+    struct thread_bounded_wait lease;
+};
+
+static void *sdn_blocked_wait_main(void *opaque)
+{
+    struct sdn_blocked_wait *wait = opaque;
+    if (wait->publish_lease)
+        (void)thread_bounded_wait_begin_at(
+            &wait->lease, platform_time_monotonic_us(), 500000);
+    atomic_store_explicit(&wait->armed, true, memory_order_release);
+    struct pollfd pfd = {.fd = wait->read_fd, .events = POLLIN};
+    if (poll(&pfd, 1, 400) > 0) {
+        char byte;
+        (void)read(wait->read_fd, &byte, 1);
+    }
+    thread_bounded_wait_end(&wait->lease);
+    return NULL;
+}
+
+static bool sdn_wait_until_armed(struct sdn_blocked_wait *wait)
+{
+    for (int i = 0; i < 100; i++) {
+        if (atomic_load_explicit(&wait->armed, memory_order_acquire))
+            return true;
+        platform_sleep_ms(1);
+    }
+    return false;
 }
 
 /* ── fake root-health callback used by the gate test ────────────── */
@@ -407,38 +442,46 @@ int test_sd_notify(void)
     {
         /* NOT killed: healthy work in flight behind a stale marker. */
         SDN_CHECK("pillar: fresh marker is alive",
-            boot_sd_watchdog_test_pillar_alive(true, false));
+            boot_sd_watchdog_test_pillar_alive(true, false, false));
         SDN_CHECK("pillar: stale marker but the thread is working is alive",
-            boot_sd_watchdog_test_pillar_alive(false, true));
+            boot_sd_watchdog_test_pillar_alive(false, true, false));
+        SDN_CHECK("pillar: explicit bounded wait is alive",
+            boot_sd_watchdog_test_pillar_alive(false, false, true));
 
         /* KILLED: neither evidence. This is the wedge. */
         SDN_CHECK("pillar: stale marker AND no kernel work is DEAD",
-            !boot_sd_watchdog_test_pillar_alive(false, false));
+            !boot_sd_watchdog_test_pillar_alive(false, false, false));
 
         /* The live devfleet failure, verbatim: a node dialing a slow hidden
          * service, whose dial pass legitimately outran the window while both
          * threads kept working. It must survive. */
         SDN_CHECK("connman: slow onion dial + slow disk, both threads working",
-            boot_sd_watchdog_test_connman_alive(false, true, false, true));
+            boot_sd_watchdog_test_connman_alive(false, true, false, true,
+                                                 false));
         SDN_CHECK("connman: both markers fresh",
-            boot_sd_watchdog_test_connman_alive(true, false, true, false));
+            boot_sd_watchdog_test_connman_alive(true, false, true, false,
+                                                 false));
 
         /* KILL PATH. A wedged loop is one that neither turned over nor did
          * any work, and EITHER loop being wedged must still stop the ping —
          * a live message pump must not vouch for a dead dial scheduler, or
          * the other way round. */
         SDN_CHECK("connman: wedged message pump still stops the ping",
-            !boot_sd_watchdog_test_connman_alive(false, false, true, true));
+            !boot_sd_watchdog_test_connman_alive(false, false, true, true,
+                                                  false));
         SDN_CHECK("connman: wedged dial scheduler still stops the ping",
-            !boot_sd_watchdog_test_connman_alive(true, true, false, false));
+            !boot_sd_watchdog_test_connman_alive(true, true, false, false,
+                                                  false));
         SDN_CHECK("connman: both loops wedged stops the ping",
-            !boot_sd_watchdog_test_connman_alive(false, false, false, false));
+            !boot_sd_watchdog_test_connman_alive(false, false, false, false,
+                                                  false));
 
         /* And the whole gate, end to end, for the wedge: a frozen connman
          * with no boot progress must still reach a withheld ping. */
         bool wedged_runtime = boot_sd_watchdog_test_runtime_pillars(
             /*sweep=*/true, /*tick=*/true,
-            boot_sd_watchdog_test_connman_alive(false, false, false, false));
+            boot_sd_watchdog_test_connman_alive(false, false, false, false,
+                                                 false));
         SDN_CHECK("gate: a wedged connman drives runtime_alive false",
             !wedged_runtime);
         SDN_CHECK("gate: wedged connman + no boot progress withholds the ping",
@@ -452,7 +495,8 @@ int test_sd_notify(void)
          * from wedged and is worthless in one direction or the other. */
         bool slow_runtime = boot_sd_watchdog_test_runtime_pillars(
             /*sweep=*/true, /*tick=*/true,
-            boot_sd_watchdog_test_connman_alive(false, true, false, true));
+            boot_sd_watchdog_test_connman_alive(false, true, false, true,
+                                                 false));
         SDN_CHECK("gate: a slow-but-working connman keeps runtime_alive",
             slow_runtime);
         SDN_CHECK("gate: slow node with no boot progress is still petted",
@@ -461,6 +505,71 @@ int test_sd_notify(void)
                     slow_runtime, /*sweep=*/true, /*progress=*/false)));
         SDN_CHECK("gate: slow and wedged must not reach the same verdict",
             slow_runtime != wedged_runtime);
+
+        /* A parked kernel thread has no CPU/I/O delta to offer. The lease is
+         * the explicit evidence that this particular wait is intentional and
+         * bounded. The mirror parks on the same pipe without a lease and must
+         * retain the fail-closed verdict. */
+        int pipe_fd[2] = {-1, -1};
+        bool pipe_ok = pipe(pipe_fd) == 0;
+        struct sdn_blocked_wait bounded = {
+            .read_fd = pipe_ok ? pipe_fd[0] : -1,
+            .publish_lease = true,
+            .lease = THREAD_BOUNDED_WAIT_INIT,
+        };
+        atomic_init(&bounded.armed, false);
+        pthread_t bounded_thread;
+        bool bounded_started = pipe_ok &&
+            pthread_create(&bounded_thread, NULL, sdn_blocked_wait_main,
+                           &bounded) == 0;
+        bool bounded_armed = bounded_started && sdn_wait_until_armed(&bounded);
+        bool bounded_active = bounded_armed && thread_bounded_wait_active_at(
+            &bounded.lease, platform_time_monotonic_us());
+        SDN_CHECK("pipe: controlled bounded wait keeps a stale pillar alive",
+            bounded_active &&
+            boot_sd_watchdog_test_pillar_alive(false, false, bounded_active));
+        if (bounded_started) {
+            (void)write(pipe_fd[1], "x", 1);
+            (void)pthread_join(bounded_thread, NULL);
+        }
+
+        struct sdn_blocked_wait wedged = {
+            .read_fd = pipe_ok ? pipe_fd[0] : -1,
+            .publish_lease = false,
+            .lease = THREAD_BOUNDED_WAIT_INIT,
+        };
+        atomic_init(&wedged.armed, false);
+        pthread_t wedged_thread;
+        bool wedged_started = pipe_ok &&
+            pthread_create(&wedged_thread, NULL, sdn_blocked_wait_main,
+                           &wedged) == 0;
+        bool wedged_armed = wedged_started && sdn_wait_until_armed(&wedged);
+        bool wedged_active = wedged_armed && thread_bounded_wait_active_at(
+            &wedged.lease, platform_time_monotonic_us());
+        SDN_CHECK("pipe: unleased blocked mirror remains dead",
+            wedged_armed && !wedged_active &&
+            !boot_sd_watchdog_test_pillar_alive(false, false, wedged_active));
+        if (wedged_started) {
+            (void)write(pipe_fd[1], "x", 1);
+            (void)pthread_join(wedged_thread, NULL);
+        }
+        if (pipe_ok) {
+            close(pipe_fd[0]);
+            close(pipe_fd[1]);
+        }
+
+        struct thread_bounded_wait policy = THREAD_BOUNDED_WAIT_INIT;
+        int64_t policy_now = platform_time_monotonic_us();
+        bool max_admitted = thread_bounded_wait_begin_at(
+            &policy, policy_now, THREAD_BOUNDED_WAIT_MAX_US);
+        SDN_CHECK("lease: local maximum is admitted and expires exactly",
+            max_admitted && thread_bounded_wait_active_at(&policy, policy_now) &&
+            !thread_bounded_wait_active_at(
+                &policy, policy_now + THREAD_BOUNDED_WAIT_MAX_US));
+        SDN_CHECK("lease: a wait above local policy is refused and cleared",
+            !thread_bounded_wait_begin_at(
+                &policy, policy_now, THREAD_BOUNDED_WAIT_MAX_US + 1) &&
+            !thread_bounded_wait_active_at(&policy, policy_now));
     }
 
     /* ── the work probe itself ──────────────────────────────────────────

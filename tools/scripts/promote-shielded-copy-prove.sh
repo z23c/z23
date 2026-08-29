@@ -292,7 +292,7 @@ else
         > "$PROMOTE_LOG" 2>&1 || promote_rc=$?
 fi
 
-if [ "$promote_rc" != "0" ] || ! grep -qE "$PROMOTE_OK_REGEX" "$PROMOTE_LOG"; then
+if [ "$promote_rc" != "0" ] || ! grep -aqE "$PROMOTE_OK_REGEX" "$PROMOTE_LOG"; then
     echo "======================================================================"
     echo "  promote-shielded-copy-prove VERDICT: FAIL"
     echo "  copy:    $COPY_DIR"

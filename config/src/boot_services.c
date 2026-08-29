@@ -110,6 +110,7 @@
 #include "controllers/name_controller.h"
 #include "controllers/anchor_controller.h"
 #include "controllers/identity_controller.h"
+#include "controllers/mesh_pairing_controller.h"
 #include "controllers/zdir_controller.h"
 #include "controllers/op_return_index_controller.h"
 #include "services/op_return_backfill_service.h"
@@ -1225,10 +1226,10 @@ bool app_init_services(struct app_context *ctx,
     /* Service health and sync detail RPCs */
     rpc_health_set_state(svc->state, &svc->bg_validation, &svc->bg_hash_verify, svc->connman);
     register_health_rpc_commands(svc->rpc_table);
-
     /* Diagnostics RPCs — dumpstate, getnodelog, dbquery */
     diagnostics_controller_set_state(svc->state, ctx->datadir);
     register_diagnostics_rpc_commands(svc->rpc_table);
+    register_mesh_pairing_rpc_commands(svc->rpc_table, boot_node_db(svc));
     boot_zcode_dht_register_rpc(svc->rpc_table);
     boot_mesh_status_register_rpc(svc->rpc_table);
     boot_mesh_pairing_register_rpc(svc->rpc_table);
@@ -1238,7 +1239,6 @@ bool app_init_services(struct app_context *ctx,
         file_controller_init(ctx->datadir);
         register_file_rpc_commands(svc->rpc_table);
     }
-
     /* ZCL Market — crypto-incentivized file sharing */
     if (boot_profile_has_store(ctx)) {
         rpc_market_set_state(boot_node_db(svc));

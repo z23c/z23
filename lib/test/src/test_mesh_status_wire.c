@@ -207,7 +207,7 @@ static void mesh_wire_fixture_close(struct mesh_wire_fixture *f)
 
 /* The request as the requester lane composes it: bound to the REQUESTER's
  * session snapshot (the responder verifies the shared transcript/generation
- * and echoes the per-side serial). */
+ * evidence; per-side serials left the wire in 2114f5257). */
 static void mesh_wire_request(const struct mesh_wire_fixture *f,
                               const uint8_t pairing_id[32],
                               uint64_t issued, uint64_t expires,
@@ -226,7 +226,6 @@ static void mesh_wire_request(const struct mesh_wire_fixture *f,
     memcpy(out->pairing_id, pairing_id, 32);
     memcpy(out->transcript_hash, f->res_snap.transcript_hash, 32);
     out->connection_generation = f->res_snap.connection_generation;
-    out->connection_serial = f->ini_snap.connection_serial;
     out->issued_unix = issued;
     out->expires_unix = expires;
 }
@@ -270,14 +269,13 @@ int test_mesh_status_wire(void)
         ASSERT(mesh_wire_fixture_open(&f, dir));
         fixture_open = true;
         /* The session binding is genuinely shared: transcript and generation
-         * match across sides, serials are per-side, and each side's snapshot
-         * names the other's identity-file public static. */
+         * match across sides, and each side's snapshot names the other's
+         * identity-file public static. */
         ASSERT(f.ini_snap.established && f.res_snap.established);
         ASSERT(memcmp(f.ini_snap.transcript_hash, f.res_snap.transcript_hash,
                       32) == 0);
         ASSERT(f.ini_snap.connection_generation ==
                f.res_snap.connection_generation);
-        ASSERT(f.ini_snap.connection_serial != f.res_snap.connection_serial);
         ASSERT(memcmp(f.res_snap.remote_static, f.peer_noise_pub, 32) == 0);
         ASSERT(memcmp(f.ini_snap.remote_static, f.resp_noise_pub, 32) == 0);
 

@@ -63,8 +63,8 @@
 # needs a human to look. The baseline file is the only route, it is
 # shrink-only, and every change to it is a visible diff in review.
 #
-# RATCHET_CEILING below is the total measured across the baseline: 156 sites in
-# 49 files (see tools/lint/pipefail_status_pipe_baseline.txt for exactly
+# RATCHET_CEILING below is the total measured across the baseline: 133 sites in
+# 45 files (see tools/lint/pipefail_status_pipe_baseline.txt for exactly
 # which). It may only go DOWN. Fixing a site means converting it
 # (str_contains/str_lacks from tools/scripts/sh_str.sh, or extract the match
 # into a variable and test the STRING) and then lowering the number — never
@@ -97,7 +97,7 @@ source tools/lint/gate_lib.sh
 . tools/scripts/sh_str.sh || { echo "check_pipefail_status_pipe: cannot source tools/scripts/sh_str.sh" >&2; exit 2; }
 
 GATE=check_pipefail_status_pipe
-RATCHET_CEILING=156
+RATCHET_CEILING=133
 
 # ── the detector ─────────────────────────────────────────────────────────
 # Emits: path<TAB>count<TAB>first-line-number. See the header for why this is
@@ -571,13 +571,14 @@ if [ "${#violations[@]}" -gt 0 ]; then
     echo ""
     echo "  grep -q writes nothing to stdout, so its exit status IS the decision —"
     echo "  and under pipefail a MATCH can surface printf's SIGPIPE 141 instead of"
-    echo "  grep's 0. Rewrite it one of two ways:"
+    echo "  grep's 0. Rewrite it one of three ways:"
     echo "    . tools/scripts/sh_str.sh   # then str_contains / str_lacks"
+    echo "    grep -qE 'RE' <<<\"\$out\"          # here-string: not a pipeline"
     echo "    hit=\$(printf '%s\\n' \"\$out\" | grep 'RE' || true); [ -n \"\$hit\" ]"
-    echo "  The second keeps your exact regex and is the right choice for an"
-    echo "  anchored or otherwise non-fixed-string match — never rewrite a"
-    echo "  digest/signature validator into a different regex engine to fix a bug"
-    echo "  a short single-value haystack cannot have."
+    echo "  The last two keep your exact regex and engine, and are the right"
+    echo "  choice for an anchored or otherwise non-fixed-string match — never"
+    echo "  rewrite a digest/signature validator into a different regex engine"
+    echo "  to fix a bug a short single-value haystack cannot have."
     echo "  Raising a number in $BASELINE is NOT a fix; counts may only shrink."
     fail=1
 fi

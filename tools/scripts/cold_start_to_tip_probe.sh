@@ -498,15 +498,15 @@ mark_seeded() {
 note_seed_ready() {
     [ "$seeded" = 0 ] || return 0
     if [ "$MODE" = "operator-bundle" ]; then
-        seed_hit=$(grep -m1 -F -- "$BUNDLE_SUCCESS_PATTERN" "$DATADIR/probe.log" 2>/dev/null || true)
+        seed_hit=$(grep -am1 -F -- "$BUNDLE_SUCCESS_PATTERN" "$DATADIR/probe.log" 2>/dev/null || true)
         if [ -n "$seed_hit" ]; then
             mark_seeded
             echo "c3-probe: seed authority ready — $seed_hit"
         fi
     elif [ "$MODE" = "consensus-state-bundle" ]; then
         if [ -f "$DATADIR/$CONSENSUS_BUNDLE_MARKER" ] ||
-           grep -q -F -- "$CONSENSUS_BUNDLE_SUCCESS_PATTERN" "$DATADIR/probe.log" 2>/dev/null ||
-           grep -q -F -- "$CONSENSUS_BUNDLE_REQUEST_PATTERN" "$DATADIR/probe.log" 2>/dev/null; then
+           grep -aq -F -- "$CONSENSUS_BUNDLE_SUCCESS_PATTERN" "$DATADIR/probe.log" 2>/dev/null ||
+           grep -aq -F -- "$CONSENSUS_BUNDLE_REQUEST_PATTERN" "$DATADIR/probe.log" 2>/dev/null; then
             mark_seeded
             echo "c3-probe: seed authority ready — consensus-state-bundle installed"
         fi
@@ -569,7 +569,7 @@ if [ "$seeded" = 1 ]; then
     exit 3
 fi
 if [ "$MODE" = "legacy-consensus-snapshot" ] && \
-   grep -qE 'REFUSING peer snapshot.*above compiled checkpoint' "$DATADIR/probe.log" 2>/dev/null; then
+   grep -aqE 'REFUSING peer snapshot.*above compiled checkpoint' "$DATADIR/probe.log" 2>/dev/null; then
     skip "legacy consensus snapshot is above this binary's compiled checkpoint authority — consensus correctly refused it (stale-fixture/binary mismatch, not a boot regression): remint the operator bundle (make bootstrap) or test a binary whose compiled checkpoints cover the snapshot"
 fi
 die "seed authority itself did not complete (<1M height/UTXOs) in budget"

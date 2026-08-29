@@ -364,9 +364,6 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
     else
         chain_params_select(CHAIN_MAIN);
     boot_apply_regtest_shielded(ctx->regtest_shielded, ctx->regtest);
-    g_datadir = ctx->datadir;
-    g_blog_datadir = ctx->datadir;
-    SetDataDir(ctx->datadir);
     /* Auto-create datadir if it doesn't exist.
      *
      * The mkdir return value used to be discarded and "Created data
@@ -378,13 +375,15 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
      * not a failure: another process (or the stat race) won. */
     struct stat st;
     bool datadir_existed = stat(ctx->datadir, &st) == 0;
-    if (!platform_directory_ensure(ctx->datadir, 0700)) {
+    if (!SetDataDir(ctx->datadir)) {
         int e = errno;
         boot_report_datadir_create_failed(ctx->datadir, e);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                     "datadir_create_failed errno=%d", e);
         return false;
     }
+    g_datadir = ctx->datadir;
+    g_blog_datadir = ctx->datadir;
     if (!datadir_existed)
         printf("Created data directory: %s\n", ctx->datadir);
     /* Now that the datadir is known, point the crash handler at a durable,

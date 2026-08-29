@@ -37,6 +37,7 @@ prune_lane() {
     local oldest_idx i file deleted=0 total_bytes=0 file_bytes
 
     shopt -s nullglob
+    matches=()
     case "$lane" in
         fuzz) matches=("$LOG_DIR"/fuzz-*.log) ;;
         tests) matches=("$LOG_DIR"/tests-*.log) ;;
@@ -49,6 +50,9 @@ prune_lane() {
     esac
     shopt -u nullglob
 
+    # Bash 3.2 (macOS /bin/bash) treats "${empty_array[@]}" as unbound under
+    # set -u; guard every array expansion that may be empty.
+    [ ${#matches[@]} -gt 0 ] || return 0
     for file in "${matches[@]}"; do
         [ -f "$file" ] && [ ! -L "$file" ] && files+=("$file")
     done
@@ -57,9 +61,10 @@ prune_lane() {
     # logs once consumed 5.2 GB. Bound each lane's logical bytes as well,
     # deleting oldest-first while always preserving its newest verdict log.
     # Symlinks and non-regular entries were filtered above and are untouched.
+    [ ${#files[@]} -gt 0 ] || return 0
     for file in "${files[@]}"; do
-        if ! file_bytes=$(stat -c %s -- "$file"); then
-            echo "quality-log-retention: stat failed lane=$lane file=$file" >&2
+        if ! file_bytes=$(wc -c < "$file"); then
+            echo "quality-log-retention: wc failed lane=$lane file=$file" >&2
             return 1
         fi
         total_bytes=$((total_bytes + file_bytes))
@@ -79,14 +84,18 @@ prune_lane() {
             echo "quality-log-retention: internal oldest-log selection failed lane=$lane" >&2
             return 1
         fi
-        if ! file_bytes=$(stat -c %s -- "${files[$oldest_idx]}"); then
-            echo "quality-log-retention: stat failed lane=$lane file=${files[$oldest_idx]}" >&2
+        if ! file_bytes=$(wc -c < "${files[$oldest_idx]}"); then
+            echo "quality-log-retention: wc failed lane=$lane file=${files[$oldest_idx]}" >&2
             return 1
         fi
         rm -f -- "${files[$oldest_idx]}"
         total_bytes=$((total_bytes - file_bytes))
         unset 'files[oldest_idx]'
-        files=("${files[@]}")
+        if [ ${#files[@]} -gt 0 ]; then
+            files=("${files[@]}")
+        else
+            files=()
+        fi
         deleted=$((deleted + 1))
     done
 

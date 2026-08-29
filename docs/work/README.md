@@ -158,51 +158,24 @@ commit — retiring a doc is not finished until its callers are gone too.
   off the v1 path — §9 is the open-item debt board, which self-labels NOT
   the v1 path).
 - **Session entrypoint:** [`../HANDOFF.md`](../HANDOFF.md).
-- **Worker protocol:** this file plus [`agent-protocol.md`](./agent-protocol.md).
+- **Worker protocol:** [`agent-protocol.md`](./agent-protocol.md).
 
 ## Worker protocol
 
-Each assignment lives at `docs/work/wt<N>-<slug>.md` and contains:
-
-- **Branch name** — exact name to create
-- **Scope** — files this assignment owns; files it must NOT touch
-- **Dependencies** — other assignments that must complete first
-- **Tasks** — ordered, testable steps
-- **Acceptance criteria** — concrete tests that prove done
-- **Commit + push instructions** — exact git commands
-- **Completion ritual** — what to append at the end
-
-## Conflict avoidance
-
-- **Disjoint file scope**: each assignment lists exact files it owns; no
-  other assignment may touch those files until it merges.
-- **No concurrent edits to** `../FRAMEWORK.md` §9 (the debt board): only
-  orchestrator writes it. Workers append to their own assignment doc.
-- **Integrate deliberately**: follow the current operator skill and
-  assignment instructions; do not assume every dirty checkout can safely
-  rebase or push.
-
-## Failure modes
-
-- **Worker discovers assignment is wrong or impossible** → worker appends a
-  `BLOCKED` section to its assignment doc with details, pushes, reports to
-  user. Orchestrator session must respond.
-- **Worker's tests fail** → worker does NOT merge; pushes a `WIP` branch +
-  appends a `FAILED` section with the failing test output.
-- **Two workers touch overlapping files (should not happen)** →
-  second-to-merge rebases, orchestrator session resolves.
+Assignment shape, file ownership, integration, failure handling, and completion
+are defined once in [`agent-protocol.md`](./agent-protocol.md).
 
 ## Late-indexed records (reconciled 2026-08-23)
 
 | File | Authority | Purpose |
 |---|---|---|
-| [`C23_LIVING_COMMONS_V2.md`](./C23_LIVING_COMMONS_V2.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
+| [`ZC23_FAMILY_COMMONS.md`](./ZC23_FAMILY_COMMONS.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
 | [`C23_P2P_CORE_INVENTORY.md`](./C23_P2P_CORE_INVENTORY.md) | DESIGN | reviewed P2P core-consolidation code inventory (2026-08-12); a map, not a plan |
-| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | canonical unit reconciliation. Its header says PREPARED, NOT APPLIED, but its own §0 records that another actor applied part of it while the page was being written — so the header understates what is live. Re-read the units with `systemctl --user cat` before acting on any section; never trust this page's inventory as current |
+| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | systemd drop-in reconciliation runbook: lexical apply order, detecting an `ExecStart=` collision, reading `/proc/<pid>/cmdline` for ground truth vs. `systemctl show`, and the hazard of another actor rewriting drop-ins mid-reconciliation |
 | [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](./LIVE_TRANSACTION_DEMONSTRATIONS.md) | LIVE | runbook: which cataloged transaction shapes are demonstrated live, and how |
 | [`REFLEX_REACTOR.md`](./REFLEX_REACTOR.md) | LIVE | local zero-wait reflex reactor: edit C23, receive first exact next-build result |
 | [`REFLEX_SUBSTRATE_AUDIT.md`](./REFLEX_SUBSTRATE_AUDIT.md) | EVIDENCE | measured coverage/latency audit of the merged reflex implementation (2026-08-12) |
-| [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | PLAN | owner-approved `zclassic shop` one-command sovereign storefront specification |
+| [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | PLAN | owner-approved `app shop` one-command sovereign storefront specification |
 | [`TRANSACTION_LAB.md`](./TRANSACTION_LAB.md) | LIVE | transaction laboratory notebook; keeps its two questions separate |
 | [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | PLAN | owner-visible 100-transaction micro lab demonstration plan |
 | [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md) | PLAN | ZC23 distribution rules — phase C2, owner-decided 2026-08-09 |

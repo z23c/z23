@@ -2,8 +2,10 @@
 
 Blog is the reference Rails-style Z23 application:
 
-The canonical public mount is `https://zclnet.net/blog`; the identical
-path is served by every participating node's onion endpoint.
+Every participating node serves the blog at `/blog` on its own HTTPS and
+onion endpoints. There is no canonical mount and no privileged host: the
+path is identical everywhere, and which node you read it from is your
+choice, not the network's.
 
 - **Model:** `BlogPost` and `BlogPublicationReceipt` use the project
   ActiveRecord lifecycle and schema migration v28. Relationships are explicit:

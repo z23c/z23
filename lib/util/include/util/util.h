@@ -94,7 +94,7 @@ void ClearDataDirCache(void);
 
 /* Pin the data directory to `datadir` (overriding args/default), creating
  * it and its network subdir; empty/NULL only clears the cache. */
-void SetDataDir(const char *datadir);
+bool SetDataDir(const char *datadir);
 
 
 

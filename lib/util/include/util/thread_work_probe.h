@@ -15,8 +15,8 @@
  * wearing a liveness costume, and it is how a network quietly evicts its
  * slowest honest members.
  *
- * The discriminator that does NOT depend on machine speed is whether the
- * kernel is still doing work on that thread's behalf:
+ * One discriminator that does NOT depend on machine speed is whether the
+ * kernel reports completed work on that thread's behalf:
  *
  *   - CPU time (utime+stime) advances while the thread computes, and while it
  *     sits in direct reclaim faulting pages back in.
@@ -24,11 +24,12 @@
  *     back from disk — the exact state a thrashing-but-progressing node is in.
  *   - Block I/O bytes advance while the thread waits on a slow device.
  *
- * A thread that is genuinely wedged — deadlocked on a mutex, parked on a
- * futex that will never be posted, blocked on a socket read with no timeout —
- * advances NONE of them. That is the distinction a watchdog needs, and it is
- * the same distinction on a slow box and a fast one: a slow box does less work
- * per second, but it never does zero.
+ * A thread parked in a bounded socket poll can also advance none of them. Such
+ * waits must publish a thread_bounded_wait lease before entering the kernel.
+ * The lease expires at the operation's declared deadline, so an intentional
+ * wait stays alive while a wait that overruns its budget becomes silence. A
+ * thread that publishes neither advancing work nor a live bounded-wait lease
+ * is not assumed healthy.
  *
  * WHAT THIS DELIBERATELY CANNOT DO
  * --------------------------------
@@ -51,6 +52,20 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
+
+/* A bounded wait is explicit evidence that a loop intentionally handed
+ * control to a blocking OS operation. The deadline is load-bearing: if the
+ * operation exceeds the declared budget, the lease expires and cannot hide a
+ * wedge. Five minutes is the local ceiling for one declaration; callers use
+ * their smaller operation-specific timeout. */
+#define THREAD_BOUNDED_WAIT_MAX_US (300LL * 1000000LL)
+
+struct thread_bounded_wait {
+    _Atomic int64_t deadline_us;
+};
+
+#define THREAD_BOUNDED_WAIT_INIT { .deadline_us = 0 }
 
 /* One reading of the kernel's own work counters for one thread. Absolute
  * values are meaningless across boots or platforms; only DIFFERENCES between
@@ -80,5 +95,16 @@ bool thread_work_probe_sample(long tid, struct thread_work_sample *out);
  * `now`. An unobserved sample on either side is NOT work. */
 bool thread_work_probe_advanced(const struct thread_work_sample *prev,
                                 const struct thread_work_sample *now);
+
+/* Publish/clear an intentional blocking wait. `now_us` and `timeout_us` use
+ * the monotonic clock. begin refuses non-positive, overflowing, or
+ * policy-exceeding durations. active is pure apart from the atomic load. */
+bool thread_bounded_wait_begin_at(struct thread_bounded_wait *wait,
+                                  int64_t now_us, int64_t timeout_us);
+void thread_bounded_wait_end(struct thread_bounded_wait *wait);
+bool thread_bounded_wait_active_at(const struct thread_bounded_wait *wait,
+                                   int64_t now_us);
+int64_t thread_bounded_wait_deadline(
+    const struct thread_bounded_wait *wait);
 
 #endif /* ZCL_THREAD_WORK_PROBE_H */

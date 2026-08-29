@@ -12,13 +12,12 @@
  *
  * Session binding note: v2_transport_snapshot's transcript_hash and
  * connection_generation are transcript-derived and identical on both sides;
- * connection_serial is a process-local per-side counter. The requester
- * therefore binds the request to ITS OWN snapshot; the responder verifies
- * transcript/generation/remote-static against its live snapshot and echoes
- * the serial, and the requester verifies the echoed triple against the
- * CURRENT snapshot of the sending node. A receipt arriving on a newer or
- * different connection fails that check and never completes the pending
- * entry. */
+ * the wire binds only that shared session evidence (the process-local
+ * per-side connection_serial left the protocol in 2114f5257). The responder
+ * verifies transcript/generation/remote-static against its live snapshot,
+ * and the requester verifies the receipt's echoed pair against the CURRENT
+ * snapshot of the sending node. A receipt arriving on a newer or different
+ * connection fails that check and never completes the pending entry. */
 
 #ifndef ZCL_CONFIG_BOOT_MESH_STATUS_H
 #define ZCL_CONFIG_BOOT_MESH_STATUS_H

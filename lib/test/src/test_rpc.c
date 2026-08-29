@@ -13,6 +13,7 @@
 #include "rpc/client.h"
 #include "rpc/httpserver.h"
 #include "rpc/legacy_rpc_client.h"
+#include "util/ere_match.h"
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
@@ -845,6 +846,207 @@ int test_rpc(void) {
             rmdir(dir);
         }
 
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    /* The in-tree ERE matcher behind `getnodelog`. Every expectation below
+     * was taken from glibc regcomp/regexec with REG_EXTENDED|REG_NOSUB — the
+     * implementation this replaced — so this pins the contract the help text
+     * states rather than whatever the new code happens to do. The same
+     * comparison was run over 400,000 generated pattern/subject pairs while
+     * developing the matcher; these are the cases worth keeping. */
+    printf("ere matcher: POSIX-extended grammar matches the old contract... ");
+    {
+        static const struct {
+            const char *pattern;
+            const char *subject;
+            bool expect;
+        } cases[] = {
+            /* literals, and an unanchored search */
+            {"", "abc", true}, {"abc", "xxabcxx", true}, {"abc", "abx", false},
+            {"tip_finalize", "[sync] tip_finalize(): done", true},
+            /* '.' is any byte, and a literal dot needs the escape */
+            {"a.c", "abc", true}, {"a.c", "ac", false},
+            {"block_index\\.bin", "block_index.bin", true},
+            {"block_index\\.bin", "block_indexXbin", false},
+            /* quantifiers */
+            {"ab*c", "ac", true}, {"ab*c", "abbbc", true},
+            {"ab+c", "ac", false}, {"ab+c", "abc", true},
+            {"ab?c", "ac", true}, {"ab?c", "abbc", false},
+            {"a{2}", "a", false}, {"a{2}", "aa", true},
+            {"^a{2}$", "aaa", false},
+            {"^ab{2,}$", "abb", true}, {"^ab{2,}$", "ab", false},
+            {"^ab{1,3}$", "abbb", true}, {"^ab{1,3}$", "abbbb", false},
+            {"^a{,2}$", "aa", true}, {"^a{,2}$", "aaa", false},
+            /* alternation and grouping */
+            {"sync|net", "[net] hello", true},
+            {"sync|net", "[rpc] hello", false},
+            {"^(a|b)+c$", "abbac", true}, {"^(a|b)+c$", "abxc", false},
+            {"^(ab){2}$", "abab", true}, {"^(ab){2}$", "aba", false},
+            /* anchors */
+            {"^\\[net\\]", "[net] up", true}, {"^\\[net\\]", " [net] up", false},
+            {"done$", "job done", true}, {"done$", "done job", false},
+            {"^$", "", true}, {"^$", "x", false},
+            /* bracket expressions */
+            {"^[abc]+$", "cab", true}, {"^[abc]+$", "cad", false},
+            {"^[^abc]+$", "xyz", true}, {"^[^abc]+$", "xya", false},
+            {"^[a-c]+$", "abc", true}, {"^[a-c]+$", "abd", false},
+            {"^[]a]+$", "]a]", true}, {"^[a-]+$", "a-a", true},
+            {"^[[:digit:]]+$", "12345", true},
+            {"^[[:digit:]]+$", "12x45", false},
+            {"^[[:alpha:]][[:digit:]]$", "a1", true},
+            {"^[[:alpha:]][[:digit:]]$", "1a", false},
+            {"^[[:space:]]+$", " \t", true},
+            {"^[[:xdigit:]]+$", "9fA", true},
+            {"^[[:xdigit:]]+$", "9gA", false},
+            {"^[[:upper:]]+$", "AB", true}, {"^[[:upper:]]+$", "Ab", false},
+            {"^[[:punct:]]+$", ".,;", true}, {"^[[:punct:]]+$", ".a", false},
+            /* escapes of punctuation metacharacters */
+            {"^\\*$", "*", true}, {"^\\[$", "[", true}, {"^\\{$", "{", true},
+            {"^\\\\$", "\\", true},
+            /* a backslash inside a bracket expression is an ordinary member,
+             * as POSIX specifies and glibc implements */
+            {"^[\\.]+$", "\\.", true}, {"^[\\.]+$", "a", false},
+            /* a lone '}' is an ordinary character */
+            {"^a}$", "a}", true},
+            /* a pattern that can match empty matches every subject */
+            {"x*", "yyy", true},
+            /* no catastrophic backtracking: this returns, it does not hang */
+            {"(a|a)*(a|a)*(a|a)*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
+        };
+        struct zcl_ere *re = malloc(sizeof(*re));
+        bool ok = re != NULL;
+        for (size_t i = 0; ok && i < sizeof(cases) / sizeof(cases[0]); i++) {
+            if (!zcl_ere_compile(re, cases[i].pattern)) {
+                printf("\n  compile refused <%s>: %s ", cases[i].pattern,
+                       zcl_ere_error(re));
+                ok = false;
+                break;
+            }
+            bool got = zcl_ere_search(re, cases[i].subject,
+                                      strlen(cases[i].subject));
+            if (got != cases[i].expect) {
+                printf("\n  <%s> vs <%s>: got %d want %d ", cases[i].pattern,
+                       cases[i].subject, got, cases[i].expect);
+                ok = false;
+                break;
+            }
+        }
+        free(re);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    /* A pattern the matcher cannot honour must be REFUSED with a reason, so
+     * a pattern that used to work never silently stops matching. */
+    printf("ere matcher: an unhonourable pattern is refused, not ignored... ");
+    {
+        static const char *refused[] = {
+            "\\w", "\\d", "\\s", "\\b",   /* GNU-only escapes, never literals */
+            "[a-", "[z-a]", "[[.a.]]", "[[=a=]]", "[[:bogus:]]",
+            "(a", "a)", "*a", "^*", "$?", "a\\",
+            "a{2", "a{}", "a{ }", "{2}x", "a{3,2}", "a{99}",
+        };
+        struct zcl_ere *re = malloc(sizeof(*re));
+        bool ok = re != NULL;
+        for (size_t i = 0; ok && i < sizeof(refused) / sizeof(refused[0]); i++) {
+            if (zcl_ere_compile(re, refused[i])) {
+                printf("\n  <%s> was accepted ", refused[i]);
+                ok = false;
+            } else if (zcl_ere_error(re)[0] == '\0' ||
+                       strcmp(zcl_ere_error(re), "ok") == 0) {
+                printf("\n  <%s> refused without a reason ", refused[i]);
+                ok = false;
+            }
+        }
+        /* An over-long pattern is refused rather than truncated. */
+        if (ok) {
+            char big[ZCL_ERE_MAX_PATTERN + 8];
+            memset(big, 'a', sizeof(big) - 1);
+            big[sizeof(big) - 1] = '\0';
+            ok = !zcl_ere_compile(re, big);
+        }
+        free(re);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("getnodelog accepts a regex and refuses a bad one... ");
+    {
+        char dir_template[] = "/tmp/zcl_nodelog_re_XXXXXX";
+        char *dir = mkdtemp(dir_template);
+        char log_path[1024] = {0};
+        bool ok = dir != NULL;
+        if (ok) {
+            int n = snprintf(log_path, sizeof(log_path), "%s/node.log", dir);
+            ok = n > 0 && (size_t)n < sizeof(log_path);
+        }
+        if (ok) {
+            FILE *fp = fopen(log_path, "w");
+            ok = fp != NULL;
+            if (fp) {
+                ok = fputs("[net] nre_alpha connected\n", fp) >= 0;
+                ok = ok && fputs("[sync] nre_beta stalled\n", fp) >= 0;
+                ok = ok && fputs("[rpc] nre_gamma served\n", fp) >= 0;
+                ok = ok && fclose(fp) == 0;
+            }
+        }
+        if (ok)
+            diagnostics_controller_set_state(NULL, dir);
+
+        /* Alternation + anchor, the shape an operator actually types. */
+        if (ok) {
+            struct json_value params, result, v;
+            json_init(&params);
+            json_init(&result);
+            json_init(&v);
+            json_set_array(&params);
+            json_set_str(&v, "^\\[(net|rpc)\\] nre_");
+            ok = json_push_back(&params, &v);
+            json_set_int(&v, 0);
+            ok = ok && json_push_back(&params, &v);
+            json_set_int(&v, 10);
+            ok = ok && json_push_back(&params, &v);
+            json_free(&v);
+            struct rpc_table tbl;
+            rpc_table_init(&tbl);
+            register_diagnostics_rpc_commands(&tbl);
+            ok = ok && rpc_table_execute(&tbl, "getnodelog", &params, &result);
+            if (ok) {
+                const struct json_value *lines = json_get(&result, "lines");
+                ok = lines && lines->type == JSON_ARR && json_size(lines) == 2;
+                ok = ok && strstr(json_get_str(json_at(lines, 0)),
+                                  "nre_gamma") != NULL;
+                ok = ok && strstr(json_get_str(json_at(lines, 1)),
+                                  "nre_alpha") != NULL;
+            }
+            json_free(&params);
+            json_free(&result);
+        }
+
+        /* An unhonourable pattern is an error, not an empty result set. */
+        if (ok) {
+            struct json_value params, result, v;
+            json_init(&params);
+            json_init(&result);
+            json_init(&v);
+            json_set_array(&params);
+            json_set_str(&v, "nre_\\w+");
+            ok = json_push_back(&params, &v);
+            json_free(&v);
+            struct rpc_table tbl;
+            rpc_table_init(&tbl);
+            register_diagnostics_rpc_commands(&tbl);
+            bool rc = rpc_table_execute(&tbl, "getnodelog", &params, &result);
+            ok = !rc && result.type == JSON_STR &&
+                 strstr(json_get_str(&result), "bad regex") != NULL;
+            json_free(&params);
+            json_free(&result);
+        }
+
+        diagnostics_controller_set_state(NULL, "");
+        if (dir) {
+            unlink(log_path);
+            rmdir(dir);
+        }
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 

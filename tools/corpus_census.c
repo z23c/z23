@@ -213,7 +213,7 @@
 #define CORPUS_CENSUS_ADMISSION_EXPIRY_BLOCKS UINT64_C(525600)
 #define CORPUS_CENSUS_ADMISSION_EXPIRY_MTP_SECONDS INT64_C(31536000)
 
-/* The frozen family-c23.v1 policy root (docs/work/C23_LIVING_COMMONS_V2.md);
+/* The frozen family-c23.v1 policy root (docs/work/ZC23_FAMILY_COMMONS.md);
  * cross-checked at runtime against vcs_zcode_family_policy_v1_default(). */
 #define CORPUS_CENSUS_FAMILY_POLICY_ROOT_HEX \
     "460d650c5be714f27dde287c368eafb781467026a1c06a8215fbe17dc610ea86"
