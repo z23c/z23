@@ -3,6 +3,7 @@
  * Atomically publish a bounded fast-sync artifact from canonical coins_kv. */
 #include "net/fast_sync_coins_artifact.h"
 
+#include "base/serialize_le.h"
 #include "net/fast_sync.h"
 #include "net/fast_sync_coins_export.h"
 #include "platform/private_file.h"
@@ -129,14 +130,14 @@ static bool artifact_reserve_hash(struct artifact_writer *writer)
 
 static void artifact_write_u32(uint8_t **cursor, uint32_t value)
 {
-    for (uint32_t i = 0; i < 4; i++)
-        *(*cursor)++ = (uint8_t)(value >> (8u * i));
+    zcl_write_u32_le(*cursor, value);
+    *cursor += 4;
 }
 
 static void artifact_write_u64(uint8_t **cursor, uint64_t value)
 {
-    for (uint32_t i = 0; i < 8; i++)
-        *(*cursor)++ = (uint8_t)(value >> (8u * i));
+    zcl_write_u64_le(*cursor, value);
+    *cursor += 8;
 }
 
 static void artifact_write_compact_size(uint8_t **cursor, uint16_t value)
@@ -146,8 +147,8 @@ static void artifact_write_compact_size(uint8_t **cursor, uint16_t value)
         return;
     }
     *(*cursor)++ = 253u;
-    *(*cursor)++ = (uint8_t)value;
-    *(*cursor)++ = (uint8_t)(value >> 8);
+    zcl_write_u16_le(*cursor, value);
+    *cursor += 2;
 }
 
 static size_t artifact_encode_chunk(const struct utxo_chunk *chunk,
