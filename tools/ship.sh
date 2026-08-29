@@ -518,21 +518,49 @@ else
     say "gate       make test-parallel"
     suite_log="$(mktemp)"
     make test-parallel >"$suite_log" 2>&1 || true
+    # A failing gate costs ~25 minutes to produce. Deleting its log on the way
+    # out spends that again on the next run: the five lines a `grep | head -5`
+    # can show are rarely the ones that name the cause, and a group that dies
+    # without ever printing a verdict (a SIGSEGV, an OOM, a build failure) shows
+    # nothing at all. So the log SURVIVES every failure at a stable path the
+    # die message names, and is removed only once the suite has passed.
+    keep_suite_log() {
+        mkdir -p "$GATE_CACHE_DIR" 2>/dev/null || return 0
+        mv -f "$suite_log" "$GATE_CACHE_DIR/last-failed-suite.log" 2>/dev/null \
+            && suite_log="$GATE_CACHE_DIR/last-failed-suite.log"
+        printf 'ship: suite log kept at %s\n' "$suite_log" >&2
+    }
     if grep -Eq 'hotswap_module=|HOTSWAP MODULE' "$suite_log"; then
         grep -E 'SUITE VERDICT|HOTSWAP MODULE' "$suite_log" | head -5 >&2
-        rm -f "$suite_log"
+        keep_suite_log
         die "full suite used a hot-swap module — linked candidate remains unproven"
     elif grep -q 'ALL TESTS PASSED' "$suite_log" && \
        ! grep -q 'SOME TESTS FAILED' "$suite_log"; then
         say "gate       $(grep -m1 'ALL TESTS PASSED' "$suite_log")"
         mkdir -p "$GATE_CACHE_DIR"
         [ -n "$SOURCE_ID" ] && date -u +%Y-%m-%dT%H:%M:%SZ > "$gate_stamp"
-    else
-        grep -E 'SUITE VERDICT|repro:' "$suite_log" | head -5 >&2
         rm -f "$suite_log"
-        die "full suite did not pass — nothing ships"
+    else
+        # Show the verdict lines AND the failing group names. When the suite
+        # produced neither (it never got as far as running), say so explicitly
+        # rather than printing an empty block that reads like "no reason".
+        #
+        # Captured into a variable rather than tested as `grep ... | head`:
+        # under the `set -o pipefail` this script runs with, head closing the
+        # pipe early makes grep take SIGPIPE and the whole pipeline report 141
+        # — so a pipeline that DID match would be read as "no match" and print
+        # exactly the wrong explanation. Same hazard the ldd call at the
+        # architecture check documents.
+        suite_head="$(grep -E 'SUITE VERDICT|repro:|FAILED' "$suite_log" 2>/dev/null | head -12 || true)"
+        if [ -n "$suite_head" ]; then
+            printf '%s\n' "$suite_head" >&2
+        else
+            printf 'ship: the suite printed no verdict at all — it did not get as far as running\n' >&2
+        fi
+        tail -20 "$suite_log" >&2
+        keep_suite_log
+        die "full suite did not pass — nothing ships (see $suite_log)"
     fi
-    rm -f "$suite_log"
 fi
 
 # ── 3. Build one candidate ──────────────────────────────────────────────────
