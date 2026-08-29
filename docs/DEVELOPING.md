@@ -70,7 +70,40 @@ integration blackboard.
 
 ## 2. Inspect exact context
 
-Use the in-tree source navigator before broad text search:
+**Before you build any capability, ask whether this tree already has it.**
+`code find` searches symbol NAMES; `code have` searches what code *does*, by
+stemming the query and matching it against symbol names, doc comments, file
+purposes, paths, and groups. Run it first — it is the cheapest step in the
+loop and the one that prevents the most expensive mistake:
+
+```bash
+build/bin/z23 code have --input='{"text":"validation"}'
+```
+
+Real output from this checkout, abridged (warm: ~85 ms):
+
+```json
+{"verdict":"ALREADY EXISTS","capabilities":[
+ {"what":"validation (12 matching symbols)",
+  "header":"core/params/include/consensus/validation.h",
+  "symbol_count":12,"used_by_files":72,
+  "count_basis":"callers-of-matched-symbols"},
+ {"what":"activerecord (24 matching symbols)",
+  "header":"app/models/include/models/activerecord.h",
+  "symbol_count":24,"used_by_files":66,
+  "example_caller":"app/controllers/src/store_controller.c"}]}
+```
+
+`used_by_files` is the field to read: it counts files holding a recorded CALL
+SITE, so it separates a live capability from code somebody left behind. A
+comment that merely names a symbol is not a use. `verdict` is derived from
+those same numbers and is one of `ALREADY EXISTS` / `PARTIAL` / `NOT FOUND`;
+`NOT FOUND` means the recorded names, docs and purposes do not say so — the
+`searched` block reports exactly what was looked at. Usage through function
+pointers or `dlopen` is not a recorded call site, so the count undercounts
+those and never overcounts.
+
+Then use the rest of the in-tree source navigator before broad text search:
 
 ```bash
 build/bin/z23 code map
@@ -83,7 +116,8 @@ build/bin/z23 code find --input='{"text":"<needle>","limit":20}'
 `code capsule` combines identity, definition, direct callers/callees, includes,
 and command routes within a bounded response. `code file` and `code group`
 show a file or directory surface. Ask `discover schema <leaf>` for exact input
-keys rather than guessing.
+keys rather than guessing — and if you guess wrong anyway, the refusal names
+the keys the leaf accepts, so a wrong key costs one call, not a source dive.
 
 When the navigator cannot answer a prose or non-symbol question, use `git grep`
 or `git ls-files`; never recursively scan the repository root. Scratch

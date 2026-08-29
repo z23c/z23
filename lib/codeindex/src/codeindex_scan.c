@@ -541,7 +541,7 @@ static void scan_refs(struct scan_ctx *c)
 void ci_scan_text(const char *src, size_t len, const char *relpath,
                   bool is_header, const char *group,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
-                  char purpose_out[160])
+                  char purpose_out[CI_FILE_PURPOSE_MAX])
 {
     if (purpose_out) purpose_out[0] = '\0';
     if (!src || len == 0 || !relpath || !on_sym || !on_ref) return;
