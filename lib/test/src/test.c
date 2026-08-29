@@ -1234,6 +1234,8 @@ int main(int argc, char **argv)
       failures += test_mesh_private_object_proto(); }
     { extern int test_mesh_private_object_crypto(void);
       failures += test_mesh_private_object_crypto(); }
+    { extern int test_mesh_private_object_root(void);
+      failures += test_mesh_private_object_root(); }
     { extern int test_mesh_private_object_admission(void);
       failures += test_mesh_private_object_admission(); }
     { extern int test_wallet_metadata_encryption(void);

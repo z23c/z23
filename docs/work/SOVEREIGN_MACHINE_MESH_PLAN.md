@@ -515,11 +515,18 @@ target, grant, time, limits, and the grant-nonce-derived request before claim.
 The encryption context and transfer identity exclude transient session,
 window, and online-key fields, so a newly authenticated re-offer resumes the
 same exact ciphertext while an old offer still fails the new session check.
-Focused
+Canonical streaming root derivation now domain-separates plaintext from
+ciphertext and binds the exact object size, ciphertext size, chunk count,
+ordered chunk indices, and per-chunk lengths. It accepts only the fixed
+65,520-byte plaintext / 65,536-byte sealed geometry, including the exact short
+final chunk, and fails closed on incomplete, reordered, oversized, or reused
+streams. Checkpoint measured 2026-08-29T09:22:48-04:00 /
+2026-08-29T13:22:48Z. Focused
 `mesh_capability_grant`, `db_migration_idempotent`,
 `mesh_private_object_proto`, `mesh_private_object_crypto`, and
 `mesh_private_object_admission` groups passed with `groups_failed=0` and
-`self_skips=0`. No network dispatcher, private store, resume journal, or
+`self_skips=0`; the root-specific gate is recorded with the implementing
+change. No network dispatcher, private store, resume journal, or
 independent-host receipt exists yet; private file transfer remains incomplete.
 
 Item 7 records one native-host service receipt per claimed platform containing
