@@ -790,6 +790,12 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "make_fast lint-fast") != NULL);
         ASSERT(strstr(buf, "ZCL_FAST_COMPILE") != NULL);
         ASSERT(strstr(buf, "ZCL_FAST_CHANGED_FILES_ONLY") != NULL);
+        ASSERT(strstr(buf, "pre-push-changed-files.XXXXXX") != NULL);
+        ASSERT(strstr(buf, "pre-push-changed-files.txt") == NULL);
+        ASSERT(strstr(buf, "GENERATED_CHANGED_FILES_FILE") != NULL);
+        ASSERT(strstr(buf, "trap cleanup_generated_changed_files EXIT")
+               != NULL);
+        ASSERT(strstr(buf, "chmod 400 \"$tmp\"") != NULL);
         ASSERT(strstr(buf, "FAST_COMPILE=\"${ZCL_FAST_COMPILE:-changed}\"")
                != NULL);
         ASSERT(strstr(buf, "compile_changed_gate") != NULL);

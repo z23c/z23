@@ -190,7 +190,7 @@ AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_handshake
  * keeps a newly extracted C23 policy/helper from becoming push-time-only
  * mapping work while unmapped files outside this owned family still fail
  * closed. */
-AGENT_IMPACT_RULE("lib/net/src/fast_sync*.c|lib/net/include/net/fast_sync*.h|lib/test/src/test_file_service_pow_gate.c", "fast_sync file_service_pow_gate snapshot_sync_service make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/fast_sync*.c|lib/net/include/net/fast_sync*.h|lib/test/src/test_fast_sync_coins_export.c|lib/test/src/test_file_service_pow_gate.c", "fast_sync fast_sync_coins_export file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/puzzle.c|lib/net/include/net/puzzle.h|lib/test/src/test_puzzle.c", "puzzle net file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/onion_service.c|lib/net/include/net/onion_service.h|lib/net/src/onion_ratelimit.c|lib/net/include/net/onion_ratelimit.h", "net onion_bootstrap tor make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/rom_seed.c|lib/net/src/rom_seed_classify.c|lib/net/src/rom_seed_throttle.c|lib/net/src/rom_seed_report.c|lib/net/src/rom_seed_internal.h|lib/net/include/net/rom_seed.h|lib/test/src/test_rom_seed.c|app/controllers/src/rom_seed_controller.c", "rom_seed rom_manifest file_controller make_lint_gates")
