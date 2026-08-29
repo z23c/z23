@@ -70,6 +70,37 @@ bool mesh_private_object_schedule_v1_complete_chunk(
     return true;
 }
 
+bool mesh_private_object_schedule_v1_accepts_response(
+    const struct mesh_private_object_schedule_v1 *schedule,
+    uint32_t chunk_index, uint64_t request_id)
+{
+    if (!schedule || request_id == 0 ||
+        chunk_index >= schedule->chunk_count || schedule->cancelled)
+        return false;
+    for (size_t i = 0; i < MESH_PRIVATE_OBJECT_REQUEST_WINDOW; i++)
+        if (schedule->slots[i].used &&
+            schedule->slots[i].chunk_index == chunk_index &&
+            schedule->slots[i].request_id == request_id)
+            return true;
+    return false;
+}
+
+bool mesh_private_object_schedule_v1_unissue(
+    struct mesh_private_object_schedule_v1 *schedule, uint64_t request_id)
+{
+    if (!schedule || request_id == 0 || schedule->cancelled) return false;
+    for (size_t i = 0; i < MESH_PRIVATE_OBJECT_REQUEST_WINDOW; i++) {
+        struct mesh_private_object_request_slot *slot = &schedule->slots[i];
+        if (!slot->used || slot->request_id != request_id) continue;
+        if (schedule->attempts[slot->chunk_index] == 0) return false;
+        schedule->next_scan = slot->chunk_index;
+        schedule->attempts[slot->chunk_index]--;
+        schedule_release_slot(schedule, slot);
+        return true;
+    }
+    return false;
+}
+
 static void schedule_expire(
     struct mesh_private_object_schedule_v1 *schedule, uint64_t now_ms)
 {

@@ -121,7 +121,7 @@ onion failover, and relay transport remain acceptance work.
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
 | Fleet view | Wire, durable local projection, and bounded automatic refresh connected: pairing-bound signed status receipts pin the responder's unique active delegated online key; `ops mesh machines` lists bounded redacted pairings from schema-v77 exact receipt evidence as fresh, stale, or unknown without network I/O | Independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
-| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root. An allocation-free scheduler pipelines eight chunks with bounded monotonic retries, out-of-order completion, resume seeding, and cancellation | Private dispatcher and queue, atomic no-clobber plaintext publication, cancellation wiring, signed receipts, and independent-host acceptance |
+| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, and restart resume | Private dispatcher and queue, atomic no-clobber plaintext publication, cancellation wiring, signed receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
@@ -848,9 +848,10 @@ peers, never production wallet state.
   connect a network dispatcher, or establish independent-host acceptance.
 - 2026-08-29T10:39:56-04:00 / 2026-08-29T14:39:56Z: an allocation-free
   private-object request scheduler added an eight-chunk sliding window,
-  five-second monotonic deadlines, five-attempt exhaustion, out-of-order and
-  late-response completion, resume seeding, nonzero wrap-safe correlation ids,
-  and terminal cancellation. Its one focused group ran cold with four cases,
+  five-second monotonic deadlines, five-attempt exhaustion, out-of-order
+  completion, exact in-flight response correlation, resume seeding, nonzero
+  wrap-safe correlation ids, unsent-request rollback, and terminal
+  cancellation. Its one focused group ran cold with five cases,
   zero failures, and zero skips. The scheduler performs no socket, disk,
   authority, or publication operation; dispatcher integration remains open.
 - 2026-08-29T11:03:31-04:00 / 2026-08-29T15:03:31Z: exact Noise-static
@@ -861,6 +862,18 @@ peers, never production wallet state.
   decodes unrelated entries per authenticated request. The cold
   `zcode_dht_service` and `mesh_status_wire` groups passed with zero failures
   and zero skips; `make lint-fast` passed 22/22 gates.
+- 2026-08-29T11:34:37-04:00 / 2026-08-29T15:34:37Z: a serialized private-object
+  receiver composed admission, durable ciphertext staging, and the bounded
+  request scheduler. An offer cannot allocate storage without a matching
+  successful target-local admission capsule. Drive and chunk calls require the
+  same current transfer and revocation generations; chunks require the exact
+  issued request id and route. Local send backpressure rolls back the reserved
+  attempt. Reopen re-authenticates durable chunks, a fully journaled object is
+  root-verified before reporting `staged`, and staged slots are released rather
+  than exhausting the four-transfer cap. All eight `mesh_private_object`
+  groups ran cold with zero failures and zero skips. This proves ciphertext
+  staging only; network dispatch, plaintext-root publication, grant completion,
+  signed receipt, and independent-host acceptance remain open.
 
 ## Completion rule
 

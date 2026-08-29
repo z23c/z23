@@ -57,10 +57,19 @@ bool mesh_private_object_schedule_v1_init(
     uint64_t first_request_id);
 
 /* Mark a chunk already durable, including chunks restored from the staging
- * journal. A valid late response remains useful: completion clears any newer
- * retry for the same exact chunk, independent of its correlation id. */
+ * journal. */
 bool mesh_private_object_schedule_v1_complete_chunk(
     struct mesh_private_object_schedule_v1 *schedule, uint32_t chunk_index);
+
+/* A network response is accepted only while its exact request is in flight. */
+bool mesh_private_object_schedule_v1_accepts_response(
+    const struct mesh_private_object_schedule_v1 *schedule,
+    uint32_t chunk_index, uint64_t request_id);
+
+/* Roll back a locally reserved request that was never emitted. Request ids
+ * stay monotonic, but an unsent request does not consume a retry attempt. */
+bool mesh_private_object_schedule_v1_unissue(
+    struct mesh_private_object_schedule_v1 *schedule, uint64_t request_id);
 
 enum mesh_private_object_schedule_result
 mesh_private_object_schedule_v1_next(

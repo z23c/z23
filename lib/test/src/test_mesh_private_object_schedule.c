@@ -38,10 +38,10 @@ static int schedule_window(void)
     return failures;
 }
 
-static int schedule_resume_and_late_response(void)
+static int schedule_resume_and_correlation(void)
 {
     int failures = 0;
-    TEST_CASE("private object scheduler resumes and accepts useful late chunks") {
+    TEST_CASE("private object scheduler resumes with exact response correlation") {
         struct mesh_private_object_schedule_v1 schedule;
         struct mesh_private_object_scheduled_request first, retry, ignored;
         ASSERT(mesh_private_object_schedule_v1_init(&schedule, 2, 9));
@@ -56,11 +56,36 @@ static int schedule_resume_and_late_response(void)
         ASSERT_EQ(retry.chunk_index, 0);
         ASSERT(retry.request_id != first.request_id);
         ASSERT_EQ(retry.attempt, 2);
+        ASSERT(!mesh_private_object_schedule_v1_accepts_response(
+            &schedule, 0, first.request_id));
+        ASSERT(mesh_private_object_schedule_v1_accepts_response(
+            &schedule, 0, retry.request_id));
         ASSERT(mesh_private_object_schedule_v1_complete_chunk(&schedule, 0));
         ASSERT_EQ(mesh_private_object_schedule_v1_next(
                       &schedule, retry.deadline_ms - 1, &ignored),
                   MESH_PRIVATE_OBJECT_SCHEDULE_COMPLETE);
         ASSERT(mesh_private_object_schedule_v1_complete_chunk(&schedule, 0));
+    } TEST_END
+    return failures;
+}
+
+static int schedule_unissued_request(void)
+{
+    int failures = 0;
+    TEST_CASE("private object scheduler does not charge unsent requests") {
+        struct mesh_private_object_schedule_v1 schedule;
+        struct mesh_private_object_scheduled_request first, second;
+        ASSERT(mesh_private_object_schedule_v1_init(&schedule, 1, 20));
+        ASSERT_EQ(mesh_private_object_schedule_v1_next(&schedule, 10, &first),
+                  MESH_PRIVATE_OBJECT_SCHEDULE_REQUEST);
+        ASSERT(mesh_private_object_schedule_v1_unissue(
+            &schedule, first.request_id));
+        ASSERT(!mesh_private_object_schedule_v1_accepts_response(
+            &schedule, 0, first.request_id));
+        ASSERT_EQ(mesh_private_object_schedule_v1_next(&schedule, 11, &second),
+                  MESH_PRIVATE_OBJECT_SCHEDULE_REQUEST);
+        ASSERT_EQ(second.attempt, 1);
+        ASSERT(second.request_id != first.request_id);
     } TEST_END
     return failures;
 }
@@ -119,6 +144,7 @@ static int schedule_invalid(void)
 
 int test_mesh_private_object_schedule(void)
 {
-    return schedule_window() + schedule_resume_and_late_response() +
-        schedule_retry_and_cancel() + schedule_invalid();
+    return schedule_window() + schedule_resume_and_correlation() +
+        schedule_unissued_request() + schedule_retry_and_cancel() +
+        schedule_invalid();
 }

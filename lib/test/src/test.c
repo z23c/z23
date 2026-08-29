@@ -1242,6 +1242,8 @@ int main(int argc, char **argv)
       failures += test_mesh_private_object_stage(); }
     { extern int test_mesh_private_object_schedule(void);
       failures += test_mesh_private_object_schedule(); }
+    { extern int test_mesh_private_object_receiver(void);
+      failures += test_mesh_private_object_receiver(); }
     { extern int test_mesh_private_object_admission(void);
       failures += test_mesh_private_object_admission(); }
     { extern int test_wallet_metadata_encryption(void);
