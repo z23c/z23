@@ -128,6 +128,18 @@ for name in $git_local_env; do
 done
 unset git_local_env name
 
+# Git for Windows launches hooks with a minimal MSYS environment that may not
+# carry TEMP/TMP into the re-entered UCRT64 shell. Win32 tests and tools call
+# GetTempPathW, which returns an empty path when neither variable is set and
+# the fallback directory is unreachable. Ensure a writable temporary directory
+# is always available.
+if [ -z "${TEMP:-}" ] && [ -z "${TMP:-}" ]; then
+    tmp_root="${TMPDIR:-/tmp}"
+    mkdir -p "$tmp_root" 2>/dev/null || true
+    export TEMP="$tmp_root"
+    export TMP="$tmp_root"
+fi
+
 # Windows (MINGW/MSYS) is a supported native lane, but the full pre-push-ci
 # focused-test set includes POSIX-only tools that do not yet build there.
 # Default to the Windows acceptance gate on that lane; every other host keeps
