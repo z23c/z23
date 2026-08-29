@@ -351,6 +351,54 @@ static bool boot_https_explorer_start(void *ctx)
      * than defaulting the watch to whatever it was handed. */
     https_server_watch_certificate(cert_path, key_path);
 
+    /* ADDITIONAL names on this same listener (-httpsaltdomain=NAME), each
+     * with its own certificate selected by TLS SNI. The pair for a name
+     * lives one directory over from the main one —
+     * <datadir>/ssl/NAME/fullchain.pem and .../privkey.pem — so nothing new
+     * has to be learned to add a second name: it is the same two filenames
+     * `zclassic23-acme` already writes, with --cert/--key pointed at that
+     * directory. Watched, never required: a name whose certificate has not
+     * been issued yet is simply not served from its own certificate yet, and
+     * costs the main name and every other name nothing.
+     *
+     * The directory is created here for the same reason <datadir>/ssl is:
+     * the certificate worker should not have to make it, and an operator
+     * reading the datadir can see which names this node is configured for
+     * before any certificate exists. */
+    for (int i = 0; i < svc->app_ctx->n_https_alt_domains; i++) {
+        const char *alt = svc->app_ctx->https_alt_domains[i];
+        char alt_dir[1024], alt_cert[1152], alt_key[1152];
+        if (!alt || !alt[0])
+            continue;
+        if (snprintf(alt_dir, sizeof(alt_dir), "%s/ssl/%s", svc->datadir,
+                     alt) >= (int)sizeof(alt_dir)) {
+            printf("HTTPS: the path for the extra name %s does not fit; that "
+                   "name is not served from its own certificate\n", alt);
+            continue;
+        }
+        snprintf(alt_cert, sizeof(alt_cert), "%s/fullchain.pem", alt_dir);
+        snprintf(alt_key, sizeof(alt_key), "%s/privkey.pem", alt_dir);
+        if (mkdir(alt_dir, 0700) != 0 && errno != EEXIST) {
+            printf("HTTPS: cannot create %s - %s is not served from its own "
+                   "certificate\n", alt_dir, alt);
+            continue;
+        }
+        if (!https_server_watch_certificate_for_name(alt, alt_cert, alt_key))
+            continue;
+        if (access(alt_cert, R_OK) == 0 && access(alt_key, R_OK) == 0) {
+            printf("HTTPS: also serving %s from %s\n", alt, alt_cert);
+        } else {
+            printf("HTTPS: %s is configured but has no certificate yet. It is "
+                   "served the main certificate until one lands at %s; to get "
+                   "one with no restart, run:\n"
+                   "HTTPS:   zclassic23-acme obtain --domain %s --agree-tos \\\n"
+                   "HTTPS:     --account %s/ssl/account.pem --cert %s \\\n"
+                   "HTTPS:     --key %s --handoff %s\n",
+                   alt, alt_cert, alt, svc->datadir, alt_cert, alt_key,
+                   handoff_path);
+        }
+    }
+
     int chain_tip_h = active_chain_height(&svc->state->chain_active);
     int best_header = svc->state->pindex_best_header ?
         svc->state->pindex_best_header->nHeight : chain_tip_h;
