@@ -506,7 +506,7 @@ pcm_restart_node() {
     # session when the randomized run has no package work: the overlay may
     # legitimately be idle or between bounded reachability attempts, whereas
     # transaction relay requires the two base P2P edges below.
-    # The DHT Noise session and the base P2P v2-upgrade reconnect have
+    # The DHT Noise session and the base P2P noise-upgrade reconnect have
     # independent readiness.  A transaction admitted in the gap is valid but
     # honestly has zero relay peers and is not retroactively announced when
     # the P2P handshakes finish.  Require both physical edges to reach the

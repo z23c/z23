@@ -141,7 +141,7 @@ int onion_directory_chain_height_db(struct sqlite3 *db);
  * is there (docs/work/NAT_AND_ONION_TRANSPORT.md). Even a fully
  * verified, chain-anchored record does NOT prove that whoever answers
  * at that address holds that key: binding the SESSION to a key needs
- * the Noise v2 transport (-v2transport, net/connman.h), which is
+ * the Noise transport (-noisetransport, net/connman.h), which is
  * default OFF because every peer on the live network speaks v1 today.
  *
  * So the discipline, structurally: endpoints from records may only

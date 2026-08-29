@@ -44,7 +44,7 @@
 #include "net/addrman.h"
 #include "net/connman.h"
 #include "net/net.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "net/v2_identity.h"
 #include "net/peer_lifecycle.h"
 #include "services/network_crawler.h"
@@ -260,7 +260,7 @@ bool network_dump_state_json(struct json_value *out, const char *key)
 }
 
 /* "transport" subsystem — per-peer P2P transport mode + frame counters. Walks
- * cm->manager.nodes under cs_nodes and emits {v2_enabled, plaintext_peers,
+ * cm->manager.nodes under cs_nodes and emits {noise_enabled, plaintext_peers,
  * noise_peers, handshaking_peers, peers:[{id, mode, state, ...}]}. A peer with
  * node->transport == NULL is plaintext (every zclassicd peer / default-off
  * node), NAMED and counted so the plaintext floor is never silent. */
@@ -277,10 +277,10 @@ bool net_transport_dump_state_json(struct json_value *out, const char *key)
         return true;
     }
     json_push_kv_bool(out, "wired", true);
-    json_push_kv_bool(out, "v2_enabled", cm->manager.v2_enabled);
+    json_push_kv_bool(out, "noise_enabled", cm->manager.noise_enabled);
     uint8_t identity_fingerprint[32];
     char identity_fingerprint_hex[65] = {0};
-    bool identity_loaded = cm->manager.v2_enabled &&
+    bool identity_loaded = cm->manager.noise_enabled &&
         v2_identity_public_fingerprint(cm->manager.identity_pub,
                                        identity_fingerprint);
     if (identity_loaded)
@@ -302,13 +302,13 @@ bool net_transport_dump_state_json(struct json_value *out, const char *key)
         struct json_value peer = {0};
         if (!node->transport) {
             plaintext_peers++;
-            v2_transport_dump_peer(&peer, NULL);
-        } else if (node->transport->state == V2_ESTABLISHED) {
+            noise_transport_dump_peer(&peer, NULL);
+        } else if (node->transport->state == NOISE_ESTABLISHED) {
             noise_peers++;
-            v2_transport_dump_peer(&peer, node->transport);
+            noise_transport_dump_peer(&peer, node->transport);
         } else {
             handshaking_peers++;
-            v2_transport_dump_peer(&peer, node->transport);
+            noise_transport_dump_peer(&peer, node->transport);
         }
         json_push_kv_int(&peer, "id", (int64_t)node->id);
         json_push_back(&peers, &peer);

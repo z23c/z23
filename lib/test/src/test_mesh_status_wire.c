@@ -4,7 +4,7 @@
  * pairing- and session-bound with sticky revocation, the receipt is signed
  * and request/session-bound, and the requester refuses forged or
  * misdelivered receipts. Uses the real pairing service against a real
- * node.db fixture, real Ed25519 keys, and two real in-process v2 Noise
+ * node.db fixture, real Ed25519 keys, and two real in-process Noise
  * transports driven buffer-to-buffer (no sockets), so the session binding
  * is proven against genuine transcripts. */
 
@@ -21,7 +21,7 @@
 #include "models/database.h"
 #include "models/zid_identity.h"
 #include "net/v2_identity.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "platform/private_directory.h"
 #include "services/mesh_pairing_service.h"
 #include "services/disk_monitor.h"
@@ -66,31 +66,31 @@ static const unsigned char MESH_TEST_MAGIC[4] = {0x24, 0xe9, 0x27, 0x64};
  * private keys; both sides ESTABLISHED on return. */
 static bool mesh_handshake(const uint8_t ini_priv[32],
                            const uint8_t res_priv[32],
-                           struct v2_transport **ini_out,
-                           struct v2_transport **res_out)
+                           struct noise_transport **ini_out,
+                           struct noise_transport **res_out)
 {
     uint8_t *msg1 = NULL, *w1 = NULL, *w2 = NULL, *w3 = NULL, *p = NULL;
     size_t msg1_len = 0, w1l = 0, w2l = 0, w3l = 0, pl = 0;
-    struct v2_transport *ini =
-        v2_transport_begin(true, ini_priv, MESH_TEST_MAGIC, &msg1, &msg1_len);
-    struct v2_transport *res =
-        v2_transport_begin(false, res_priv, MESH_TEST_MAGIC, NULL, NULL);
+    struct noise_transport *ini =
+        noise_transport_begin(true, ini_priv, MESH_TEST_MAGIC, &msg1, &msg1_len);
+    struct noise_transport *res =
+        noise_transport_begin(false, res_priv, MESH_TEST_MAGIC, NULL, NULL);
     bool ok = ini && res && msg1 && msg1_len == 32 &&
-              v2_transport_feed(res, msg1, msg1_len, &w2, &w2l, &p, &pl) &&
+              noise_transport_feed(res, msg1, msg1_len, &w2, &w2l, &p, &pl) &&
               w2l == 96 && pl == 0 &&
-              v2_transport_feed(ini, w2, w2l, &w3, &w3l, &p, &pl) &&
+              noise_transport_feed(ini, w2, w2l, &w3, &w3l, &p, &pl) &&
               w3l == 64 && pl == 0 &&
-              v2_transport_feed(res, w3, w3l, &w1, &w1l, &p, &pl) &&
-              w1l == 0 && pl == 0 && ini->state == V2_ESTABLISHED &&
-              res->state == V2_ESTABLISHED;
+              noise_transport_feed(res, w3, w3l, &w1, &w1l, &p, &pl) &&
+              w1l == 0 && pl == 0 && ini->state == NOISE_ESTABLISHED &&
+              res->state == NOISE_ESTABLISHED;
     free(msg1);
     free(w1);
     free(w2);
     free(w3);
     free(p);
     if (!ok) {
-        v2_transport_free(ini);
-        v2_transport_free(res);
+        noise_transport_free(ini);
+        noise_transport_free(res);
         return false;
     }
     *ini_out = ini;
@@ -100,16 +100,16 @@ static bool mesh_handshake(const uint8_t ini_priv[32],
 
 /* Seal frame bytes on `from` and deliver them to `to`; plaintext must equal
  * the input byte-for-byte with no wire reply. */
-static bool mesh_frame_roundtrip(struct v2_transport *from,
-                                 struct v2_transport *to,
+static bool mesh_frame_roundtrip(struct noise_transport *from,
+                                 struct noise_transport *to,
                                  const uint8_t *frame, size_t frame_len,
                                  uint8_t *delivered, size_t delivered_cap)
 {
     uint8_t *ct = NULL, *pt = NULL, *wire = NULL;
     size_t ct_len = 0, pt_len = 0, wire_len = 0;
-    bool ok = v2_transport_write(from, frame, frame_len, &ct, &ct_len) &&
+    bool ok = noise_transport_write(from, frame, frame_len, &ct, &ct_len) &&
               ct_len > 0 &&
-              v2_transport_feed(to, ct, ct_len, &wire, &wire_len, &pt,
+              noise_transport_feed(to, ct, ct_len, &wire, &wire_len, &pt,
                                 &pt_len) &&
               wire_len == 0 && pt_len == frame_len &&
               pt_len <= delivered_cap &&
@@ -132,10 +132,10 @@ struct mesh_wire_fixture {
     uint8_t resp_online_pub[32];
     uint8_t resp_noise_pub[32];
     struct db_mesh_pairing pairing;
-    struct v2_transport *ini;
-    struct v2_transport *res;
-    struct v2_transport_snapshot ini_snap;
-    struct v2_transport_snapshot res_snap;
+    struct noise_transport *ini;
+    struct noise_transport *res;
+    struct noise_transport_snapshot ini_snap;
+    struct noise_transport_snapshot res_snap;
 };
 
 static bool mesh_wire_fixture_open(struct mesh_wire_fixture *f,
@@ -162,8 +162,8 @@ static bool mesh_wire_fixture_open(struct mesh_wire_fixture *f,
     memory_cleanse(resp_noise_priv, sizeof(resp_noise_priv));
     if (!loaded)
         return false;
-    if (!v2_transport_snapshot(f->ini, &f->ini_snap) ||
-        !v2_transport_snapshot(f->res, &f->res_snap))
+    if (!noise_transport_snapshot(f->ini, &f->ini_snap) ||
+        !noise_transport_snapshot(f->res, &f->res_snap))
         return false;
 
     if (!node_db_open(&f->ndb, path))
@@ -206,8 +206,8 @@ static bool mesh_wire_fixture_open(struct mesh_wire_fixture *f,
 
 static void mesh_wire_fixture_close(struct mesh_wire_fixture *f)
 {
-    v2_transport_free(f->ini);
-    v2_transport_free(f->res);
+    noise_transport_free(f->ini);
+    noise_transport_free(f->res);
     f->ini = NULL;
     f->res = NULL;
     if (f->ndb.open)
@@ -568,20 +568,20 @@ int test_mesh_status_wire(void)
         ASSERT(v2_identity_load_or_create(other_resp, other_res_priv,
                                           other_pub, error,
                                           sizeof(error)));
-        struct v2_transport *ini2 = NULL, *res2 = NULL;
+        struct noise_transport *ini2 = NULL, *res2 = NULL;
         bool second = mesh_handshake(other_ini_priv, other_res_priv, &ini2,
                                      &res2);
         memory_cleanse(other_ini_priv, sizeof(other_ini_priv));
         memory_cleanse(other_res_priv, sizeof(other_res_priv));
         ASSERT(second);
-        struct v2_transport_snapshot other_snap;
-        ASSERT(v2_transport_snapshot(ini2, &other_snap));
+        struct noise_transport_snapshot other_snap;
+        ASSERT(noise_transport_snapshot(ini2, &other_snap));
         ASSERT(!boot_mesh_status_receipt_accept(&receipt, &request,
                                                 &other_snap,
                                                 f.resp_master_pub,
                                                 f.resp_online_pub));
-        v2_transport_free(ini2);
-        v2_transport_free(res2);
+        noise_transport_free(ini2);
+        noise_transport_free(res2);
         PASS();
     }
 
@@ -754,13 +754,13 @@ int test_mesh_status_wire(void)
                       MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
                       &detail),
                   MESH_MACHINE_UNREACHABLE);
-        ASSERT_STR_EQ(detail, "no_live_v2_session");
+        ASSERT_STR_EQ(detail, "no_live_noise_session");
         ASSERT_EQ(mesh_machine_derive_state(
-                      "active", MESH_STATUS_BEGIN_V2_DISABLED,
+                      "active", MESH_STATUS_BEGIN_NOISE_DISABLED,
                       MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
                       &detail),
                   MESH_MACHINE_UNREACHABLE);
-        ASSERT_STR_EQ(detail, "v2_transport_disabled");
+        ASSERT_STR_EQ(detail, "noise_transport_disabled");
         ASSERT_EQ(mesh_machine_derive_state(
                       "active", MESH_STATUS_BEGIN_REVOKED,
                       MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,

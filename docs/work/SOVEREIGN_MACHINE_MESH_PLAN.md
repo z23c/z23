@@ -193,12 +193,12 @@ adopt the same contract as those surfaces are implemented.
 The following components already exist and should be composed rather than
 reimplemented:
 
-- Noise XX and the v2 record layer provide authenticated encryption, transcript
+- Noise XX and the Noise record layer provide authenticated encryption, transcript
   state, directional counters, replay resistance, rekey limits, and a persistent
   node static key. See
   [`lib/noise/include/noise/noise_handshake.h`](../../lib/noise/include/noise/noise_handshake.h),
   [`lib/noise/include/noise/session_transport.h`](../../lib/noise/include/noise/session_transport.h),
-  [`lib/net/include/net/v2_transport.h`](../../lib/net/include/net/v2_transport.h),
+  [`lib/net/include/net/noise_transport.h`](../../lib/net/include/net/noise_transport.h),
   and [`lib/net/include/net/v2_identity.h`](../../lib/net/include/net/v2_identity.h).
 - ZID delegation binds the network genesis, online signing key, Noise static
   key, finality-delayed beacon, and validity interval. The DHT validates signed
@@ -234,7 +234,7 @@ reimplemented:
   [`docs/GETTING_STARTED.md`](../GETTING_STARTED.md). Windows support is not a
   completed or measured production baseline yet.
 
-Important gaps remain. V2 transport is not yet the universal default, static
+Important gaps remain. The Noise transport is not yet the universal default, static
 key pinning is incomplete, the public package swarm does not require Noise,
 and its host-derived peer key is not a machine identity. The legacy file
 service protects against passive observation but does not authenticate an
@@ -591,11 +591,11 @@ observation only; restart stability, four-host distinctness, and native macOS
 and Windows execution still require independent host receipts.
 
 Checkpoint measured 2026-08-28T17:24:08-04:00 / 2026-08-28T21:24:08Z:
-the strict C23 release build and the `v2_transport_parity`, `os_proc`,
+the strict C23 release build and the `noise_transport_parity`, `os_proc`,
 `syncdiag_rpc`, `command_registry_catalog`, `native_api_contract`, and
 `telemetry_network` focused groups passed locally with zero skips.
 
-- Make the authenticated-v2 capability visible and operable on every supported
+- Make the authenticated Noise capability visible and operable on every supported
   platform without claiming unsupported Tor or confinement features.
 - Bind cached peer identity to the active ZID delegation and refuse downgrade
   for sensitive protocols.
@@ -768,7 +768,7 @@ peers, never production wallet state.
 - 2026-08-29: queue item 4 connected the wire. `ZMSTAT`-prefixed
   request/receipt frames multiplex on the frozen `zpkgswm` P2P message — no
   new wire message, listener, or port — and are answered only on an
-  established v2 Noise session whose peer holds a live ZID delegation;
+  established Noise session whose peer holds a live ZID delegation;
   plaintext or mid-handshake sessions are dropped with no receipt, so
   responder keys never cross an unauthenticated channel. The responder
   decides through `mesh_pairing_service_authorize_status` (including its
@@ -784,7 +784,7 @@ peers, never production wallet state.
   the `REMOTE_STATUS_PROTOCOL_UNAVAILABLE` blocker; the test pinning the old
   strings was updated to the new truth. The new `mesh_status_wire` group
   proves the decision and byte-level frame roundtrip between two in-process
-  v2 transports with real Ed25519 keys and a real node.db fixture, including
+  Noise transports with real Ed25519 keys and a real node.db fixture, including
   revoke-after-accept failing closed; `mesh_status_proto`, `mesh_pairing`,
   `zcode_swarm`, `command_registry`, `syncdiag_rpc`, `native_api_contract`,
   and `rpc` groups all passed with zero skips, and `make lint-fast` and
@@ -798,7 +798,7 @@ peers, never production wallet state.
   the existing `mesh_pairing_service_accept` authority — no path bypasses
   the authenticated-session acceptance service, and all durable writes go
   through its ActiveRecord lifecycle. plan renders a no-write preview from a
-  live re-derivation (established v2 session narrowed by an
+  live re-derivation (established Noise session narrowed by an
   address-substring or fingerprint-prefix selector, held ZID delegation,
   status-read-only capability, default 7-day expiry, derived pairing id);
   commit makes `--fingerprint` mandatory (the out-of-band compared value),
@@ -837,7 +837,7 @@ peers, never production wallet state.
   receipt with observed time, responder Noise fingerprint, and a redacted
   capsule summary lifting platform/build/confinement/hotswap, including
   `same_source_as_this_node`), refused:<status> (a signed refusal receipt
-  with its wire token), unreachable (no live v2 session or the v2 transport
+  with its wire token), unreachable (no live Noise session or the Noise transport
   disabled), timeout (request expiry or budget exhaustion), unknown (named
   cause, counted only in `total`), expired, or revoked. The RPC watchdog
   extends only this method's slot to a bounded 20 s

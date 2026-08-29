@@ -515,7 +515,7 @@ Existing (built on): `lib/znam/include/znam/znam.h`,
 `lib/vcs/src/package_swarm.c` + `lib/vcs/include/vcs/package_swarm.h`,
 `lib/net/src/msgprocessor_zcode_swarm.c`,
 `lib/net/src/onion_ratelimit.c`, `lib/net/src/onion_service.c`,
-`lib/net/src/v2_transport.c` + `lib/noise/src/noise_handshake.c`,
+`lib/net/src/noise_transport.c` + `lib/noise/src/noise_handshake.c`,
 `lib/validation/include/validation/main_constants.h` (fee/finality/size
 constants only),
 `lib/validation/include/validation/checkpoint.h` (`reorg_is_allowed` /

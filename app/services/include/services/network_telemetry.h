@@ -11,7 +11,7 @@
  *
  * WHAT IT COVERS. The aggregate connection posture (connman + peer_lifecycle),
  * the embedded onion service, and what the wire actually negotiated for the
- * Noise v2 transport. It deliberately does NOT enumerate peers: the peer set
+ * Noise transport. It deliberately does NOT enumerate peers: the peer set
  * is unbounded and a fixed-offset table has nowhere to put a list, so per-peer
  * detail stays on `ops state --subsystem=connman` / `--subsystem=transport`.
  *

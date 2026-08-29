@@ -8,7 +8,7 @@ This is the operator map for everything **outside consensus** that moves
 bytes between z23 nodes: FlyClient header proofs, the P2P block-piece swarm,
 the file-service overlay, and the onion marketplace. Content hashes and
 session key derivation here are SHA3-256. Block hashes, txids, merkle roots,
-sighashes, Equihash, and the Noise v2 P2P handshake stay SHA-256d /
+sighashes, Equihash, and the Noise P2P handshake stay SHA-256d /
 HKDF-SHA256 so the node remains bit-for-bit consensus-compatible with
 `zclassicd`.
 
@@ -57,7 +57,7 @@ anyone touching `lib/net/src/tor_integration.c`, `onion_service.c`, or
 | Surface | Digest / KDF | Why |
 | --- | --- | --- |
 | Block hash, txid, merkle, sighash, Equihash | SHA-256d / Equihash | Consensus parity with `zclassicd` |
-| Noise v2 P2P transport | HKDF-SHA256 (Noise spec) | Interop with the v2 handshake |
+| Noise P2P transport | HKDF-SHA256 (Noise spec) | Interop with the v2 handshake |
 | FlyClient samples, MMB / MMR nodes | SHA3-256 with domain tags | Overlay proof, not a block hash |
 | Snapshot / chunk / block-piece ids | SHA3-256 | Swarm integrity |
 | File-service session key | X25519 + HKDF-SHA3-256 | Overlay confidentiality |
@@ -144,7 +144,7 @@ experiments.
 ## What this is not
 
 - Not a consensus fork. Do not SHA3 block hashes or Equihash.
-- Not a Noise v2 change. The Bitcoin-compatible v2 transport stays
+- Not a Noise change. The Bitcoin-compatible v2 transport stays
   HKDF-SHA256.
 - Not a grant of wallet, deployment, or datadir authority. Fetching overlay
   bytes is storage; building and testing are separate; installing or

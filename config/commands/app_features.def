@@ -601,7 +601,7 @@ ZCL_COMMAND_READY_COMMAND(
     "app.messaging.send", "app.messaging", "", "Send a message",
     "Plan/commit ZMSG send over one of two channels: p2p writes the serialized "
     "message straight to a connected peer's socket (free, no funds move, "
-    "plaintext on the wire until v2 transport is negotiated); onchain composes "
+    "plaintext on the wire until the Noise transport is negotiated); onchain composes "
     "a shielded Sapling-memo z_sendmany, which SPENDS the dust output plus fee "
     "and needs the Sapling prover ready. Without confirm, a non-mutating plan "
     "whose spends_funds flag says which of the two this call would be; with "

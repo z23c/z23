@@ -1,12 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * v2_transport — Noise_XX handshake driver + record wrapper over the Phase-0
- * session library. See net/v2_transport.h for the contract and
+ * noise_transport — Noise_XX handshake driver + record wrapper over the Phase-0
+ * session library. See net/noise_transport.h for the contract and
  * docs/work/os/A4-noise-transport-p1.md for the design. All new transport logic
  * lives here; it is the taken side of a single `if (node->transport)` on the
  * hot send/recv paths. Plaintext peers (transport==NULL) never reach this TU. */
 
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -33,7 +33,7 @@ static bool buf_append(uint8_t **buf, size_t *len, size_t *cap,
         size_t ncap = *cap ? *cap : 256;
         while (ncap < *len + n)
             ncap *= 2;
-        uint8_t *nb = zcl_realloc(*buf, ncap, "v2_transport.buf");
+        uint8_t *nb = zcl_realloc(*buf, ncap, "noise_transport.buf");
         if (!nb)
             return false;
         *buf = nb;
@@ -48,7 +48,7 @@ static bool buf_append(uint8_t **buf, size_t *len, size_t *cap,
 
 /* Split `buf` into SESSION_MAX_PAYLOAD-byte DATA records; append each sealed
  * wire frame to (*out,*out_len,*out_cap). Caller holds t->lock. */
-static bool seal_locked(struct v2_transport *t, const uint8_t *buf, size_t total,
+static bool seal_locked(struct noise_transport *t, const uint8_t *buf, size_t total,
                         uint8_t **out, size_t *out_len, size_t *out_cap)
 {
     size_t off = 0;
@@ -71,7 +71,7 @@ static bool seal_locked(struct v2_transport *t, const uint8_t *buf, size_t total
 
 /* Split() -> record layer; capture peer static; flush any pending outbound
  * bytes sealed into (*wire,*wlen,*wcap). Caller holds t->lock. */
-static bool establish_and_flush_locked(struct v2_transport *t,
+static bool establish_and_flush_locked(struct noise_transport *t,
                                        uint8_t **wire, size_t *wlen, size_t *wcap)
 {
     uint8_t sk[32], rk[32];
@@ -98,7 +98,7 @@ static bool establish_and_flush_locked(struct v2_transport *t,
             t->connection_generation = 1;
     }
     noise_hs_cleanse(&t->hs);
-    t->state = V2_ESTABLISHED;
+    t->state = NOISE_ESTABLISHED;
 
     if (t->pending_len &&
         !seal_locked(t, t->pending, t->pending_len, wire, wlen, wcap))
@@ -115,7 +115,7 @@ static bool establish_and_flush_locked(struct v2_transport *t,
 
 /* ── begin ────────────────────────────────────────────────────────── */
 
-struct v2_transport *v2_transport_begin(bool is_initiator,
+struct noise_transport *noise_transport_begin(bool is_initiator,
                                         const uint8_t identity_priv[32],
                                         const unsigned char magic[4],
                                         uint8_t **initial_out, size_t *initial_len)
@@ -125,11 +125,11 @@ struct v2_transport *v2_transport_begin(bool is_initiator,
     if (initial_len)
         *initial_len = 0;
     if (!identity_priv || !magic)
-        LOG_NULL("net", "v2_transport_begin: NULL identity/magic");
+        LOG_NULL("net", "noise_transport_begin: NULL identity/magic");
 
-    struct v2_transport *t = zcl_calloc(1, sizeof(*t), "v2_transport");
+    struct noise_transport *t = zcl_calloc(1, sizeof(*t), "noise_transport");
     if (!t)
-        LOG_NULL("net", "v2_transport_begin: calloc failed");
+        LOG_NULL("net", "noise_transport_begin: calloc failed");
     zcl_mutex_init(&t->lock);
     t->is_initiator = is_initiator;
     t->connection_serial = atomic_fetch_add(&g_connection_serial, 1);
@@ -138,16 +138,16 @@ struct v2_transport *v2_transport_begin(bool is_initiator,
     memcpy(t->magic, magic, 4);
     t->hs_started_us = GetTimeMicros();
 
-    uint8_t prologue[V2_TRANSPORT_PROLOGUE_LEN];
+    uint8_t prologue[NOISE_TRANSPORT_PROLOGUE_LEN];
     memcpy(prologue, magic, 4);
-    prologue[4] = V2_TRANSPORT_VERSION_BYTE;
-    prologue[5] = V2_TRANSPORT_SUITE_ID;
+    prologue[4] = NOISE_TRANSPORT_VERSION_BYTE;
+    prologue[5] = NOISE_TRANSPORT_SUITE_ID;
 
     if (!noise_hs_init(&t->hs, noise_pattern_xx(), is_initiator,
                        prologue, sizeof(prologue), identity_priv, NULL)) {
         zcl_mutex_destroy(&t->lock);
         free(t);
-        LOG_NULL("net", "v2_transport_begin: noise_hs_init failed");
+        LOG_NULL("net", "noise_transport_begin: noise_hs_init failed");
     }
 
     if (is_initiator) {
@@ -157,47 +157,47 @@ struct v2_transport *v2_transport_begin(bool is_initiator,
             noise_hs_cleanse(&t->hs);
             zcl_mutex_destroy(&t->lock);
             free(t);
-            LOG_NULL("net", "v2_transport_begin: noise msg1 write failed");
+            LOG_NULL("net", "noise_transport_begin: noise msg1 write failed");
         }
         if (initial_out && initial_len) {
-            uint8_t *m = zcl_malloc(out_len ? out_len : 1, "v2_transport.msg1");
+            uint8_t *m = zcl_malloc(out_len ? out_len : 1, "noise_transport.msg1");
             if (!m) {
                 noise_hs_cleanse(&t->hs);
                 zcl_mutex_destroy(&t->lock);
                 free(t);
-                LOG_NULL("net", "v2_transport_begin: msg1 buffer alloc failed");
+                LOG_NULL("net", "noise_transport_begin: msg1 buffer alloc failed");
             }
             memcpy(m, out, out_len);
             *initial_out = m;
             *initial_len = out_len;
         }
-        t->state = V2_KEY_SENT;
+        t->state = NOISE_KEY_SENT;
     } else {
-        t->state = V2_DETECT;
+        t->state = NOISE_DETECT;
     }
     return t;
 }
 
 /* ── write seam ───────────────────────────────────────────────────── */
 
-bool v2_transport_write(struct v2_transport *t, const uint8_t *buf, size_t total,
+bool noise_transport_write(struct noise_transport *t, const uint8_t *buf, size_t total,
                         uint8_t **out, size_t *out_len)
 {
     if (!t || !out || !out_len)
-        LOG_FAIL("net", "v2_transport_write: NULL argument");
+        LOG_FAIL("net", "noise_transport_write: NULL argument");
     *out = NULL;
     *out_len = 0;
 
     zcl_mutex_lock(&t->lock);
 
-    if (t->state == V2_ESTABLISHED) {
+    if (t->state == NOISE_ESTABLISHED) {
         uint8_t *o = NULL;
         size_t olen = 0, ocap = 0;
         if (!seal_locked(t, buf, total, &o, &olen, &ocap)) {
-            t->state = V2_FAILED;
+            t->state = NOISE_FAILED;
             free(o);
             zcl_mutex_unlock(&t->lock);
-            LOG_FAIL("net", "v2_transport_write: seal failed");
+            LOG_FAIL("net", "noise_transport_write: seal failed");
         }
         *out = o;
         *out_len = olen;
@@ -205,36 +205,36 @@ bool v2_transport_write(struct v2_transport *t, const uint8_t *buf, size_t total
         return true;
     }
 
-    if (t->state == V2_DETECT || t->state == V2_KEY_SENT ||
-        t->state == V2_KEY_RECV) {
+    if (t->state == NOISE_DETECT || t->state == NOISE_KEY_SENT ||
+        t->state == NOISE_KEY_RECV) {
         /* Handshake in flight: buffer the assembled v1 message; it is sealed
          * and flushed on ESTABLISHED (see establish_and_flush_locked). */
         if (!buf_append(&t->pending, &t->pending_len, &t->pending_cap,
                         buf, total)) {
-            t->state = V2_FAILED;
+            t->state = NOISE_FAILED;
             zcl_mutex_unlock(&t->lock);
-            LOG_FAIL("net", "v2_transport_write: pending buffer OOM");
+            LOG_FAIL("net", "noise_transport_write: pending buffer OOM");
         }
         zcl_mutex_unlock(&t->lock);
         return true;
     }
 
-    /* V2_FAILED / V2_PLAINTEXT_FALLBACK — transport unusable. */
+    /* NOISE_FAILED / NOISE_PLAINTEXT_FALLBACK — transport unusable. */
     zcl_mutex_unlock(&t->lock);
-    LOG_FAIL("net", "v2_transport_write: terminal state %d", (int)t->state);
+    LOG_FAIL("net", "noise_transport_write: terminal state %d", (int)t->state);
 }
 
 /* ── read seam ────────────────────────────────────────────────────── */
 
 enum step_result { STEP_CONSUMED, STEP_NEEDMORE, STEP_STOP, STEP_FAIL };
 
-bool v2_transport_feed(struct v2_transport *t,
+bool noise_transport_feed(struct noise_transport *t,
                        const uint8_t *in, size_t n,
                        uint8_t **wire_out, size_t *wire_out_len,
                        uint8_t **plaintext, size_t *plaintext_len)
 {
     if (!t || !wire_out || !wire_out_len || !plaintext || !plaintext_len)
-        LOG_FAIL("net", "v2_transport_feed: NULL argument");
+        LOG_FAIL("net", "noise_transport_feed: NULL argument");
     *wire_out = NULL;
     *wire_out_len = 0;
     *plaintext = NULL;
@@ -263,7 +263,7 @@ bool v2_transport_feed(struct v2_transport *t,
 
         enum step_result r = STEP_NEEDMORE;
         switch (t->state) {
-        case V2_DETECT: {
+        case NOISE_DETECT: {
             if (t->acc_len < 4) { r = STEP_NEEDMORE; break; }
             if (memcmp(t->acc, t->magic, 4) == 0) {
                 /* v1 zclassicd peer: surface the buffered raw bytes as
@@ -272,7 +272,7 @@ bool v2_transport_feed(struct v2_transport *t,
                     r = STEP_FAIL; break;
                 }
                 t->acc_len = 0;
-                t->state = V2_PLAINTEXT_FALLBACK;
+                t->state = NOISE_PLAINTEXT_FALLBACK;
                 r = STEP_STOP;
                 break;
             }
@@ -293,11 +293,11 @@ bool v2_transport_feed(struct v2_transport *t,
             }
             memmove(t->acc, t->acc + 32, t->acc_len - 32);
             t->acc_len -= 32;
-            t->state = V2_KEY_RECV;
+            t->state = NOISE_KEY_RECV;
             r = STEP_CONSUMED;
             break;
         }
-        case V2_KEY_SENT: {
+        case NOISE_KEY_SENT: {
             if (t->acc_len < 96) { r = STEP_NEEDMORE; break; }
             uint8_t payload[NOISE_MAX_MESSAGE];
             size_t payload_len = 0;
@@ -321,7 +321,7 @@ bool v2_transport_feed(struct v2_transport *t,
             r = STEP_CONSUMED;
             break;
         }
-        case V2_KEY_RECV: {
+        case NOISE_KEY_RECV: {
             if (t->acc_len < 64) { r = STEP_NEEDMORE; break; }
             uint8_t payload[NOISE_MAX_MESSAGE];
             size_t payload_len = 0;
@@ -337,7 +337,7 @@ bool v2_transport_feed(struct v2_transport *t,
             r = STEP_CONSUMED;
             break;
         }
-        case V2_ESTABLISHED: {
+        case NOISE_ESTABLISHED: {
             if (t->acc_len < SESSION_FRAME_LEN_BYTES) { r = STEP_NEEDMORE; break; }
             size_t L = (size_t)t->acc[0] |
                        ((size_t)t->acc[1] << 8) |
@@ -364,10 +364,10 @@ bool v2_transport_feed(struct v2_transport *t,
             r = STEP_CONSUMED;
             break;
         }
-        case V2_PLAINTEXT_FALLBACK:
+        case NOISE_PLAINTEXT_FALLBACK:
             r = STEP_STOP;
             break;
-        default: /* V2_FAILED */
+        default: /* NOISE_FAILED */
             r = STEP_FAIL;
             break;
         }
@@ -385,11 +385,11 @@ bool v2_transport_feed(struct v2_transport *t,
     }
 
     if (!ok) {
-        t->state = V2_FAILED;
+        t->state = NOISE_FAILED;
         free(wire);
         free(pt);
         zcl_mutex_unlock(&t->lock);
-        LOG_FAIL("net", "v2_transport_feed: hard failure state=%d", (int)t->state);
+        LOG_FAIL("net", "noise_transport_feed: hard failure state=%d", (int)t->state);
     }
 
     *wire_out = wire;
@@ -402,7 +402,7 @@ bool v2_transport_feed(struct v2_transport *t,
 
 /* ── helpers ──────────────────────────────────────────────────────── */
 
-bool v2_transport_is_plaintext_magic(const uint8_t *first, size_t n,
+bool noise_transport_is_plaintext_magic(const uint8_t *first, size_t n,
                                      const unsigned char magic[4])
 {
     if (!first || !magic || n < 4)
@@ -410,14 +410,14 @@ bool v2_transport_is_plaintext_magic(const uint8_t *first, size_t n,
     return memcmp(first, magic, 4) == 0;
 }
 
-bool v2_transport_snapshot(const struct v2_transport *t,
-                           struct v2_transport_snapshot *out)
+bool noise_transport_snapshot(const struct noise_transport *t,
+                           struct noise_transport_snapshot *out)
 {
     if (!t || !out)
-        LOG_FAIL("net", "v2_transport_snapshot: NULL argument");
+        LOG_FAIL("net", "noise_transport_snapshot: NULL argument");
     memset(out, 0, sizeof(*out));
     zcl_mutex_lock((zcl_mutex_t *)&t->lock);
-    out->established = t->state == V2_ESTABLISHED && t->have_peer_static &&
+    out->established = t->state == NOISE_ESTABLISHED && t->have_peer_static &&
                        t->have_transcript_hash;
     if (out->established) {
         memcpy(out->remote_static, t->peer_static, 32);
@@ -429,7 +429,7 @@ bool v2_transport_snapshot(const struct v2_transport *t,
     return out->established;
 }
 
-void v2_transport_free(struct v2_transport *t)
+void noise_transport_free(struct noise_transport *t)
 {
     if (!t)
         return;
@@ -446,31 +446,31 @@ void v2_transport_free(struct v2_transport *t)
     free(t);
 }
 
-static const char *v2_state_str(enum v2_hs_state s)
+static const char *noise_state_str(enum noise_hs_state s)
 {
     switch (s) {
-    case V2_DETECT:             return "detect";
-    case V2_KEY_SENT:           return "key_sent";
-    case V2_KEY_RECV:           return "key_recv";
-    case V2_ESTABLISHED:        return "established";
-    case V2_PLAINTEXT_FALLBACK: return "plaintext_fallback";
-    case V2_FAILED:             return "failed";
+    case NOISE_DETECT:             return "detect";
+    case NOISE_KEY_SENT:           return "key_sent";
+    case NOISE_KEY_RECV:           return "key_recv";
+    case NOISE_ESTABLISHED:        return "established";
+    case NOISE_PLAINTEXT_FALLBACK: return "plaintext_fallback";
+    case NOISE_FAILED:             return "failed";
     }
     return "unknown";
 }
 
-bool v2_transport_dump_peer(struct json_value *out, const struct v2_transport *t)
+bool noise_transport_dump_peer(struct json_value *out, const struct noise_transport *t)
 {
     if (!out)
-        LOG_FAIL("net", "v2_transport_dump_peer: NULL out");
+        LOG_FAIL("net", "noise_transport_dump_peer: NULL out");
     json_set_object(out);
     if (!t) {
         json_push_kv_str(out, "mode", "plaintext");
         return true;
     }
     json_push_kv_str(out, "mode",
-                     t->state == V2_ESTABLISHED ? "noise_xx" : "handshaking");
-    json_push_kv_str(out, "state", v2_state_str(t->state));
+                     t->state == NOISE_ESTABLISHED ? "noise_xx" : "handshaking");
+    json_push_kv_str(out, "state", noise_state_str(t->state));
     json_push_kv_bool(out, "is_initiator", t->is_initiator);
     json_push_kv_int(out, "send_frames", (int64_t)t->send_frames);
     json_push_kv_int(out, "recv_frames", (int64_t)t->recv_frames);

@@ -139,14 +139,14 @@ static bool push_transport(struct json_value *out, bool *identity_loaded_out)
 {
     struct json_value raw = {0};
     bool collected = net_transport_dump_state_json(&raw, NULL);
-    bool enabled = collected && object_bool(&raw, "v2_enabled");
+    bool enabled = collected && object_bool(&raw, "noise_enabled");
     bool identity_loaded = collected && object_bool(&raw, "identity_loaded");
     if (identity_loaded_out)
         *identity_loaded_out = identity_loaded;
     struct json_value transport = {0};
     json_set_object(&transport);
     json_push_kv_bool(&transport, "observed", collected);
-    json_push_kv_bool(&transport, "v2_enabled", enabled);
+    json_push_kv_bool(&transport, "noise_enabled", enabled);
     json_push_kv_bool(&transport, "identity_loaded", identity_loaded);
     json_push_kv_str(&transport, "local_noise_fingerprint_sha3",
                      object_str(&raw, "local_noise_fingerprint_sha3"));
@@ -242,11 +242,11 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
     push_platform(out);
     bool binary_ready = push_build(out);
     bool noise_identity_ready = false;
-    bool v2_ready = push_transport(out, &noise_identity_ready);
+    bool noise_ready = push_transport(out, &noise_identity_ready);
     bool dht_ready = push_dht(out);
     push_runtime_capabilities(out);
 
-    bool identity_ready = binary_ready && v2_ready && noise_identity_ready &&
+    bool identity_ready = binary_ready && noise_ready && noise_identity_ready &&
                           dht_ready;
     bool pairing_store_ready = push_pairing(out, identity_ready);
 
@@ -254,8 +254,8 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
     json_set_array(&blockers);
     if (!binary_ready)
         push_string_item(&blockers, "BINARY_IDENTITY_UNAVAILABLE");
-    if (!v2_ready)
-        push_string_item(&blockers, "V2_TRANSPORT_DISABLED");
+    if (!noise_ready)
+        push_string_item(&blockers, "NOISE_TRANSPORT_DISABLED");
     if (!noise_identity_ready)
         push_string_item(&blockers, "NOISE_IDENTITY_UNAVAILABLE");
     if (!dht_ready)
@@ -268,6 +268,6 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
         out, "next_action",
         identity_ready
             ? "complete owner-confirmed pairing, then request the paired machine's status with ops mesh status"
-            : "enable v2 and authenticated DHT identity before pairing");
+            : "enable the Noise transport and authenticated DHT identity before pairing");
     return true;
 }

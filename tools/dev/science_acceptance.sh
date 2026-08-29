@@ -230,7 +230,7 @@ sa_spawn() { # $1=datadir $2=p2p $3=rpc $4=fs $5=https $6=connect-target $7=mode
     setsid "$NODE_BIN" \
         -datadir="$dd" -regtest \
         -port="$p2p" -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
-        -connect="$conn" "${service_args[@]}" -v2transport \
+        -connect="$conn" "${service_args[@]}" -noisetransport \
         -operator-lane=dev -wallet-no-phrase-backup \
         -nobgvalidation -nolegacyimport -showmetrics=0 \
         >"$dd/node.log" 2>&1 &

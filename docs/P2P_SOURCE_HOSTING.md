@@ -344,7 +344,7 @@ and no Python path.
 
 HTTPS and onion are transport adapters over the same package/CAS contract;
 both are live as of slice 13. Direct P2P rides the node's existing
-unauthenticated transport: Noise v2 is deliberately **not** armed under the
+unauthenticated transport: Noise is deliberately **not** armed under the
 swarm, because chunk integrity comes from the content.v2 manifest rather than
 from the session. The existing public-UTXO-root-derived file-service key is
 not peer authentication and is not used here. Adding an authenticated session
@@ -637,7 +637,7 @@ review and tests.
 - [ ] Authenticated direct transport plus HTTPS and onion adapters. *Partly
   done, and the remainder is a deliberate reframe rather than pending work.*
   The HTTPS/onion side shipped in slice 13 (`/zcode*` routes,
-  `app/controllers/src/zcode_site_controller.c`). Noise v2 is **not** armed
+  `app/controllers/src/zcode_site_controller.c`). Noise is **not** armed
   under the swarm and is not planned to be: chunk bytes are authenticated
   against the content.v2 manifest before they are ever stored, and the peer's
   33-byte accounting key is an explicitly LOCAL session pseudo-key, not a

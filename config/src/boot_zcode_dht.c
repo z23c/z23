@@ -14,7 +14,7 @@
 #include "net/connman.h"
 #include "net/net.h"
 #include "net/peer_scoring.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/sync.h"
@@ -144,7 +144,7 @@ static struct vcs_zcode_dht_service *dht_create(
     return NULL;
   struct vcs_zcode_dht_service_params params = {
       .datadir = svc->datadir,
-      .transport_enabled = mp->net_mgr->v2_enabled,
+      .transport_enabled = mp->net_mgr->noise_enabled,
       .now = now,
       .chain_verify = dht_chain_verify_external,
       .chain_ctx = svc,
@@ -201,9 +201,9 @@ static void dht_ensure_periodic(struct msg_processor *mp,
 static bool dht_snapshot(struct p2p_node *node,
                          struct vcs_zcode_dht_session *out) {
   memset(out, 0, sizeof(*out));
-  struct v2_transport_snapshot snapshot;
+  struct noise_transport_snapshot snapshot;
   if (!node || !node->transport ||
-      !v2_transport_snapshot(node->transport, &snapshot))
+      !noise_transport_snapshot(node->transport, &snapshot))
     return false;
   out->established = snapshot.established;
   out->generation = snapshot.connection_generation;

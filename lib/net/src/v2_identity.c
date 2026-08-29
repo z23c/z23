@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static _Atomic uint64_t g_v2_identity_temp_sequence;
+static _Atomic uint64_t g_noise_identity_temp_sequence;
 
 bool v2_identity_public_fingerprint(const uint8_t public_key[32],
                                     uint8_t fingerprint_out[32])
@@ -90,7 +90,7 @@ static bool identity_write(const char *dir, const char *path,
     platform_private_file_init(&file);
     bool created = false;
     for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
-        uint64_t seq = atomic_fetch_add(&g_v2_identity_temp_sequence, 1);
+        uint64_t seq = atomic_fetch_add(&g_noise_identity_temp_sequence, 1);
         int n = snprintf(temp, sizeof(temp), "%s.tmp.%llu", path,
                          (unsigned long long)seq);
         if (n <= 0 || (size_t)n >= sizeof(temp))

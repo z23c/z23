@@ -352,10 +352,10 @@ static int t_join_writes_config(void)
               json_get_bool(json_get(swarm, "optional")) == false);
     ZNJ_CHECK("the DHT tier is reported as an OPTIONAL upgrade, not a blocker",
               dht && json_get_bool(json_get(dht, "optional")));
-    ZNJ_CHECK("the DHT tier names -v2transport and the fee-bearing anchor",
+    ZNJ_CHECK("the DHT tier names -noisetransport and the fee-bearing anchor",
               dht && json_get_str(json_get(dht, "requires")) &&
               strstr(json_get_str(json_get(dht, "requires")),
-                     "-v2transport") != NULL &&
+                     "-noisetransport") != NULL &&
               strstr(json_get_str(json_get(dht, "requires")), "fee") != NULL);
     ZNJ_CHECK("join names a restart instead of performing one",
               json_get_bool(json_get(&c.reply.data, "restart_required")) &&

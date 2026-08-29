@@ -86,7 +86,7 @@ names the same join recipe when this process has no live hosting engine.
 The swarm tier — hosting and serving package content over ordinary peers —
 needs only `-packagehost=1`: no coins, no on-chain identity, no invitation. The
 DHT below is a separate, optional upgrade that additionally needs
-`-v2transport` and an active on-chain ZID anchor whose registration spends a
+`-noisetransport` and an active on-chain ZID anchor whose registration spends a
 fee. Not having one is not a blocker.
 
 If the DHT is disabled, `zcode network delegate` names the required active,

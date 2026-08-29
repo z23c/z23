@@ -138,8 +138,9 @@ body; and custody-bearing models retain save hooks.
 
 ### Canonical naming
 
-Version suffixes name wire/format compatibility ladders only (`v2_transport`,
-`creation_claim.v2`); internal package or source families carry no version
+Version suffixes name wire/format compatibility ladders only
+(`benchmark_result.v2`, `creation_claim.v2`); internal package or source
+families carry no version
 suffix (`zcode_commons`, never a numbered sibling) — extract shared helpers
 instead of spawning a numbered copy. See the naming law in
 [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md#naming--role-based-not-birth-order).

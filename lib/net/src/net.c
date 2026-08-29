@@ -5,7 +5,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "net/net.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "net/net_fault.h"
 #include "net/onion_stream.h"
 #include "net/peer_lifecycle.h"
@@ -490,7 +490,7 @@ void p2p_node_free(struct p2p_node *node)
     node->blk_bitmap = NULL;
 
     if (node->transport) {
-        v2_transport_free(node->transport);
+        noise_transport_free(node->transport);
         node->transport = NULL;
     }
 
@@ -545,7 +545,7 @@ const char *p2p_disconnect_reason_name(enum p2p_disconnect_reason reason)
     case P2P_DISCONNECT_FEELER_COMPLETE: return "feeler_complete";
     case P2P_DISCONNECT_FEELER_TIMEOUT: return "feeler_timeout";
     case P2P_DISCONNECT_SELF_CONNECTION: return "self_connection";
-    case P2P_DISCONNECT_V2_UPGRADE: return "v2_upgrade";
+    case P2P_DISCONNECT_NOISE_UPGRADE: return "noise_upgrade";
     case P2P_DISCONNECT_EVICTED: return "evicted";
     case P2P_DISCONNECT_APPLICATION: return "application";
     case P2P_DISCONNECT_LOCAL_SHUTDOWN: return "local_shutdown";
@@ -1100,13 +1100,13 @@ bool p2p_node_end_message(struct p2p_node *node)
                     "%s size=%u", cmd, payload_size);
     }
 
-    /* v2 transport seam: seal below the message layer. The plaintext path
+    /* Noise transport seam: seal below the message layer. The plaintext path
      * (transport == NULL) is the UNCHANGED else — byte-for-byte v1 wire. */
     struct send_segment *seg;
     if (node->transport) {
         uint8_t *ct = NULL;
         size_t ct_len = 0;
-        if (!v2_transport_write(node->transport, buf, total, &ct, &ct_len)) {
+        if (!noise_transport_write(node->transport, buf, total, &ct, &ct_len)) {
             free(ct);
             stream_free(&tls_msg_stream);
             tls_msg_active = false;
@@ -1115,7 +1115,7 @@ bool p2p_node_end_message(struct p2p_node *node)
                 P2P_DISCONNECT_SOURCE_MESSAGE_HANDLER,
                 node->endpoint_generation);
             zcl_mutex_unlock(&node->cs_send);
-            LOG_FAIL("net", "v2 transport write failed node id=%d", (int)node->id);
+            LOG_FAIL("net", "Noise transport write failed node id=%d", (int)node->id);
         }
         stream_free(&tls_msg_stream);
         tls_msg_active = false;
@@ -1155,7 +1155,7 @@ bool p2p_node_end_message(struct p2p_node *node)
     return true;
 }
 
-/* Queue raw bytes (handshake messages, or records already sealed by the v2
+/* Queue raw bytes (handshake messages, or records already sealed by the Noise
  * transport) verbatim onto the node's send stream. Mirrors the tail of
  * p2p_node_end_message but performs no framing/sealing. Lock order: callers on
  * the recv path hold cs_recv first, then this acquires cs_send. */
@@ -1422,13 +1422,13 @@ struct p2p_node *connect_node_from_socket(struct net_manager *nm,
         LOG_NULL("net", "p2p_node_create failed for outbound connection");
     }
 
-    /* v2 transport (default OFF): arm as INITIATOR when enabled and the peer's
-     * advertised services carry NODE_V2TRANSPORT. Queues msg1 (`-> e`) raw; the
+    /* Noise transport (default OFF): arm as INITIATOR when enabled and the peer's
+     * advertised services carry NODE_NOISE_TRANSPORT. Queues msg1 (`-> e`) raw; the
      * subsequent push_version rides sealed once the handshake completes. */
-    if (nm->v2_enabled && (addr_connect->nServices & NODE_V2TRANSPORT)) {
+    if (nm->noise_enabled && (addr_connect->nServices & NODE_NOISE_TRANSPORT)) {
         uint8_t *msg1 = NULL;
         size_t msg1_len = 0;
-        node->transport = v2_transport_begin(true, nm->identity_priv,
+        node->transport = noise_transport_begin(true, nm->identity_priv,
                                              nm->message_start, &msg1, &msg1_len);
         if (node->transport && msg1_len)
             p2p_node_queue_raw(node, msg1, msg1_len);

@@ -23,12 +23,12 @@ enum {
      * advertise this when it can serve getbsman/bsman + getbschk/bschk
      * snapshot messages; do not set it for ordinary block-serving peers. */
     NODE_BOOTSTRAP = (1 << 24),
-    /* zclassic23 v2 Noise-encrypted transport capability. Advertised only when
-     * -v2transport is enabled; a HINT for OUTBOUND gating (the authoritative
+    /* zclassic23 Noise-encrypted transport capability. Advertised only when
+     * -noisetransport is enabled; a HINT for OUTBOUND gating (the authoritative
      * INBOUND discriminator is the 4-byte magic peek, which no gossip can
      * strip). In the zcl23-reserved high range, same family as NODE_BOOTSTRAP;
      * ignored by zclassicd. */
-    NODE_V2TRANSPORT = (1 << 25),
+    NODE_NOISE_TRANSPORT = (1 << 25),
 };
 
 enum {

@@ -7,7 +7,7 @@
  * has no sockets, no threads of its own, and no wall clock — the caller
  * (the transport glue) drives it with explicit tick values, delivers
  * received frames, and drains the bounded outbound queue onto whatever
- * P2P transport the node already runs. The Noise v2 transport is NOT
+ * P2P transport the node already runs. The Noise transport is NOT
  * required and NOT armed by this layer: chunk bytes are authenticated
  * against the content.v2 manifest (SHA3-256 per chunk, root-committed)
  * before they are ever stored, which is what "authenticated package

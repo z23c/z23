@@ -27,7 +27,7 @@
  * config/src/boot_zcode_swarm.c:494 and :776). No coins, no on-chain
  * identity, no invitation. That is the tier `join` actually delivers.
  *
- * DHT additionally needs -v2transport plus an ACTIVE on-chain ZID anchor,
+ * DHT additionally needs -noisetransport plus an ACTIVE on-chain ZID anchor,
  * whose registration spends a fee (chain check
  * config/src/boot_zcode_dht_chain.c:124-155). It is reported as an OPTIONAL
  * named upgrade and is never presented as a blocker for joining: a node that
@@ -523,7 +523,7 @@ void zcl_native_handle_zcode_node_join(
                        "package hosting over ordinary P2P peers; no coins, "
                        "no on-chain identity, no invitation") &&
          znj_push_tier(data, "dht_tier", "dht",
-                       "-v2transport plus an ACTIVE on-chain ZID anchor "
+                       "-noisetransport plus an ACTIVE on-chain ZID anchor "
                        "(its registration spends a fee)", true,
                        "an optional upgrade, never a blocker: a node "
                        "without an anchor is still a full swarm member");

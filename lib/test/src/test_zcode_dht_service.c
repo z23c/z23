@@ -2471,7 +2471,7 @@ static int test_disabled_diagnostics(void) {
       ASSERT_STR_EQ(status.disabled_reason,
                     params.transport_enabled
                         ? "IDENTITY_MATERIAL_UNAVAILABLE"
-                        : "V2_TRANSPORT_DISABLED");
+                        : "NOISE_TRANSPORT_DISABLED");
       ASSERT(memcmp(status.local_node_id, zero_id, sizeof(zero_id)) == 0);
       ASSERT_EQ(status.contacts, 0);
       ASSERT_EQ(status.buckets_used, 0);
@@ -2598,7 +2598,7 @@ static int test_peer_admission_order(void) {
   TEST("zcode dht service: Noise bootstrap waits for version and verack") {
     struct p2p_node node;
     memset(&node, 0, sizeof(node));
-    node.transport = (struct v2_transport *)(uintptr_t)1;
+    node.transport = (struct noise_transport *)(uintptr_t)1;
     atomic_store(&node.state, PEER_VERSION_RECEIVED);
     ASSERT(!boot_zcode_dht_peer_ready(&node));
     atomic_store(&node.state, PEER_HANDSHAKE_COMPLETE);

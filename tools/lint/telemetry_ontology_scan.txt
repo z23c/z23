@@ -56,7 +56,7 @@ connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &addnode addnode.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &zcl23_db zcl23_db.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &reactor reactor.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &v2j v2transport.
+connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &census_j noisetransport.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &msg message_cycle.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &am addrman_summary.
 connman app/controllers/src/diagnostics_connman.c push_connman_floor_json &pf floor.

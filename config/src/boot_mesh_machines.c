@@ -59,11 +59,11 @@ enum mesh_machine_state mesh_machine_derive_state(
         switch (begin) {
         case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED:
             state = MESH_MACHINE_UNREACHABLE;
-            detail = "no_live_v2_session";
+            detail = "no_live_noise_session";
             break;
-        case MESH_STATUS_BEGIN_V2_DISABLED:
+        case MESH_STATUS_BEGIN_NOISE_DISABLED:
             state = MESH_MACHINE_UNREACHABLE;
-            detail = "v2_transport_disabled";
+            detail = "noise_transport_disabled";
             break;
         case MESH_STATUS_BEGIN_REVOKED:
             state = MESH_MACHINE_REVOKED;

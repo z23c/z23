@@ -325,7 +325,7 @@ dht_spawn() {
             setsid "${DHT_REMOTE_DIR[$rpc]}/bin/zclassic23"
             "-datadir=$dd" -regtest "-port=$p2p" "-rpcport=$rpc"
             "-fsport=$fs" "-httpsport=$https")
-        cmd+=("${args[@]}" "-packagehost=$DHT_PACKAGEHOST" -v2transport)
+        cmd+=("${args[@]}" "-packagehost=$DHT_PACKAGEHOST" -noisetransport)
         [ "${#worker_args[@]}" -eq 0 ] || cmd+=("${worker_args[@]}")
         # The params dir is per-host: the remote node gets its own.
         [ -z "$DHT_PARAMS_DIR" ] ||
@@ -343,7 +343,7 @@ dht_spawn() {
     fi
     setsid "$NODE_BIN" -datadir="$dd" -regtest -port="$p2p" \
         -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
-        "${args[@]}" -packagehost="$DHT_PACKAGEHOST" -v2transport \
+        "${args[@]}" -packagehost="$DHT_PACKAGEHOST" -noisetransport \
         "${worker_args[@]}" "${params_args[@]}" \
         -operator-lane=dev -wallet-no-phrase-backup \
         -nobgvalidation -nolegacyimport -showmetrics=0 \

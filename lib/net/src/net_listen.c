@@ -11,7 +11,7 @@
  * ceiling, inbound cap with eviction) and must stay in that order. */
 
 #include "net/net.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "net/peer_lifecycle.h"
 #include "net/peer_scoring.h"
 #include "net/peer_eviction.h"
@@ -344,12 +344,13 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
         LOG_FAIL("net", "p2p_node_create failed for inbound connection");
     }
 
-    /* v2 transport (default OFF): arm as RESPONDER in V2_DETECT when enabled.
-     * The first inbound bytes decide plaintext (v1 magic) vs Noise msg1. */
-    if (nm->v2_enabled) {
+    /* Noise transport (default OFF): arm as RESPONDER in NOISE_DETECT when
+     * enabled. The first inbound bytes decide plaintext (v1 magic) vs Noise
+     * msg1. */
+    if (nm->noise_enabled) {
         uint8_t *unused = NULL;
         size_t unused_len = 0;
-        node->transport = v2_transport_begin(false, nm->identity_priv,
+        node->transport = noise_transport_begin(false, nm->identity_priv,
                                              nm->message_start,
                                              &unused, &unused_len);
         free(unused);

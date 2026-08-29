@@ -25,24 +25,24 @@ raw, and the ciphertext is produced from the exact `struct msg_header` + payload
 observe transport mode. This is the load-bearing claim the byte-parity test (§7)
 proves and the whole design rests on.
 
-## 1. New translation unit — `lib/net/src/v2_transport.c` + `include/net/v2_transport.h`
+## 1. New translation unit — `lib/net/src/noise_transport.c` + `include/net/noise_transport.h`
 
 All new logic lives here. It is a thin driver over Phase-0. `lib/net` already
 lists `session` transitively via LIB_MODULES (both are in `Makefile:169-170`); add
-`-Ilib/session/include` reach is automatic (LIB_INCLUDES foreach). `v2_transport.c`
+`-Ilib/session/include` reach is automatic (LIB_INCLUDES foreach). `noise_transport.c`
 is picked up by the `lib/net/src/*.c` wildcard (`Makefile:173-174`) — no Makefile
 source edit.
 
-### 1.1 Public header `lib/net/include/net/v2_transport.h`
+### 1.1 Public header `lib/net/include/net/noise_transport.h`
 
 ```c
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * v2_transport — per-connection Noise_XX handshake driver + record wrapper that
+ * noise_transport — per-connection Noise_XX handshake driver + record wrapper that
  * sits between p2p_node's message framing and the raw socket. Plaintext peers
  * (transport==NULL) never reach this TU. See docs/work/secure-transport-design.md
  * and docs/work/os/A4-noise-transport-p1.md. */
-#ifndef ZCL_NET_V2_TRANSPORT_H
-#define ZCL_NET_V2_TRANSPORT_H
+#ifndef ZCL_NET_NOISE_TRANSPORT_H
+#define ZCL_NET_NOISE_TRANSPORT_H
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -52,16 +52,16 @@ source edit.
 struct p2p_node;
 struct net_manager;
 
-enum v2_hs_state {
-    V2_DETECT = 0,      /* inbound: awaiting first 4 bytes (magic vs eph pubkey) */
-    V2_KEY_SENT,        /* outbound: our msg1 (`-> e`) queued, awaiting `<- e,ee,s,es` */
-    V2_KEY_RECV,        /* responder consumed msg1, msg2 queued, awaiting `-> s,se` */
-    V2_ESTABLISHED,     /* Split() done; session_transport live */
-    V2_FAILED,          /* abort: caller must drop the peer */
+enum noise_hs_state {
+    NOISE_DETECT = 0,      /* inbound: awaiting first 4 bytes (magic vs eph pubkey) */
+    NOISE_KEY_SENT,        /* outbound: our msg1 (`-> e`) queued, awaiting `<- e,ee,s,es` */
+    NOISE_KEY_RECV,        /* responder consumed msg1, msg2 queued, awaiting `-> s,se` */
+    NOISE_ESTABLISHED,     /* Split() done; session_transport live */
+    NOISE_FAILED,          /* abort: caller must drop the peer */
 };
 
-struct v2_transport {
-    enum v2_hs_state state;
+struct noise_transport {
+    enum noise_hs_state state;
     bool is_initiator;
     struct noise_handshake hs;          /* live only DETECT..pre-ESTABLISHED */
     struct session_transport rec;       /* live only once ESTABLISHED */
@@ -75,41 +75,41 @@ struct v2_transport {
 /* Allocate + arm a transport on `node`. is_initiator = !node->inbound.
  * Loads nothing global; uses nm->identity_priv. Sets node->transport.
  * Returns false (and leaves transport NULL = plaintext) only on OOM. */
-bool v2_transport_begin(struct p2p_node *node, struct net_manager *nm);
+bool noise_transport_begin(struct p2p_node *node, struct net_manager *nm);
 
 /* WRITE seam. Seal one already-assembled v1 message (header+payload,
  * buf[0..total)) into >=1 session records appended to *out (heap, caller frees).
  * Splits at SESSION_MAX_PAYLOAD so a >1535B message becomes N DATA records; the
  * receiver's v1 accumulator reassembles them transparently. Returns false ->
- * node->transport->state=V2_FAILED, caller drops peer. */
-bool v2_transport_seal(struct v2_transport *t, const uint8_t *buf, size_t total,
+ * node->transport->state=NOISE_FAILED, caller drops peer. */
+bool noise_transport_seal(struct noise_transport *t, const uint8_t *buf, size_t total,
                        uint8_t **out, size_t *out_len);
 
 /* READ seam. Feed raw recv bytes in[0..n). Drives the handshake while state <
- * V2_ESTABLISHED (queuing reply bytes to *hs_reply for the caller to send), and
+ * NOISE_ESTABLISHED (queuing reply bytes to *hs_reply for the caller to send), and
  * once ESTABLISHED peels complete records, decrypts DATA channel bytes into
  * *plaintext (heap, caller frees, may be 0 bytes if a record is still partial).
  * Returns false on any AEAD/turn/DoS-budget failure -> caller drops peer. */
-bool v2_transport_feed(struct v2_transport *t,
+bool noise_transport_feed(struct noise_transport *t,
                        const uint8_t *in, size_t n,
                        uint8_t **hs_reply, size_t *hs_reply_len,
                        uint8_t **plaintext, size_t *plaintext_len);
 
 /* Inbound-only first-bytes classifier: peek up to 4 bytes; returns true if they
  * equal the network magic (=> a v1 zclassicd peer; caller frees transport and
- * uses plaintext path). Only consulted in V2_DETECT. */
-bool v2_transport_is_plaintext_magic(const uint8_t *first, size_t n,
+ * uses plaintext path). Only consulted in NOISE_DETECT. */
+bool noise_transport_is_plaintext_magic(const uint8_t *first, size_t n,
                                      const unsigned char magic[4]);
 
-void v2_transport_free(struct v2_transport *t);   /* cleanse + free */
+void noise_transport_free(struct noise_transport *t);   /* cleanse + free */
 
 /* Diagnostics: fill an object for one peer (mode/state/counters). */
 struct json_value;
-bool v2_transport_dump_peer(struct json_value *out, const struct v2_transport *t);
+bool noise_transport_dump_peer(struct json_value *out, const struct noise_transport *t);
 #endif
 ```
 
-### 1.2 Implementation notes (v2_transport.c)
+### 1.2 Implementation notes (noise_transport.c)
 
 - **Handshake driver:** wrap `noise_hs_init(&t->hs, noise_pattern_xx(), is_initiator,
   prologue, prologue_len, nm->identity_priv, NULL)`. Prologue = `magic(4) ‖
@@ -117,7 +117,7 @@ bool v2_transport_dump_peer(struct json_value *out, const struct v2_transport *t
   Drive with `noise_hs_write_message` / `noise_hs_read_message`; on
   `noise_hs_done` call `noise_hs_split(&t->hs, send_key, recv_key)` then
   `session_transport_init(&t->rec, send_key, recv_key)`, `memory_cleanse` the
-  keys, set `V2_ESTABLISHED`, capture `noise_hs_remote_static` into `peer_static`.
+  keys, set `NOISE_ESTABLISHED`, capture `noise_hs_remote_static` into `peer_static`.
 - **Record wrapping (seal):** loop over `buf` in `SESSION_MAX_PAYLOAD`-byte
   slices, each `session_transport_encrypt(&t->rec, SESSION_CH_DATA, slice, len,
   frame, &flen)`, append `frame` to the growth buffer. NO CONT/FINAL flag needed
@@ -140,17 +140,17 @@ bool v2_transport_dump_peer(struct json_value *out, const struct v2_transport *t
 
 `lib/net/include/net/net.h` — `struct p2p_node` ends at **:329**. Add before it:
 ```c
-    struct v2_transport *transport;   /* NULL = plaintext v1 path (zclassicd) */
+    struct noise_transport *transport;   /* NULL = plaintext v1 path (zclassicd) */
 ```
 `p2p_node_create` uses `zcl_calloc` (`net.c:296`) → zero-inits to NULL, no init
 edit. `struct net_manager` ends at **:410**; add before it:
 ```c
-    uint8_t identity_priv[32], identity_pub[32];  /* persistent v2 static id */
-    bool    v2_enabled;                           /* -v2transport flag; default OFF in P1 */
+    uint8_t identity_priv[32], identity_pub[32];  /* persistent Noise static id */
+    bool    noise_enabled;                           /* -noisetransport flag; default OFF in P1 */
 ```
-Add `#include "net/v2_transport.h"` fwd via `struct v2_transport;` already
+Add `#include "net/noise_transport.h"` fwd via `struct noise_transport;` already
 forward-declared — keep net.h free of the session includes (the pointer is opaque
-here; the TU that touches it includes v2_transport.h).
+here; the TU that touches it includes noise_transport.h).
 
 ## 3. WRITE seam — `lib/net/src/net.c:708`
 
@@ -161,13 +161,13 @@ Current (inside `p2p_node_end_message`, holding `node->cs_send`):
 Replace with the guarded form — plaintext path is the UNCHANGED else:
 ```c
     struct send_segment *seg;
-    if (node->transport && node->transport->state == V2_ESTABLISHED) {
+    if (node->transport && node->transport->state == NOISE_ESTABLISHED) {
         uint8_t *ct = NULL; size_t ct_len = 0;
-        if (!v2_transport_seal(node->transport, buf, total, &ct, &ct_len)) {
+        if (!noise_transport_seal(node->transport, buf, total, &ct, &ct_len)) {
             stream_free(&tls_msg_stream); tls_msg_active = false;
             node->disconnect = true;
             zcl_mutex_unlock(&node->cs_send);
-            LOG_FAIL("net", "v2 seal failed node id=%d", (int)node->id);
+            LOG_FAIL("net", "Noise seal failed node id=%d", (int)node->id);
         }
         seg = send_segment_create(ct, ct_len);
         zcl_free(ct);
@@ -178,7 +178,7 @@ Replace with the guarded form — plaintext path is the UNCHANGED else:
 Do NOT touch `socket_send_data` (`net.c:735`): it partial-drains via
 `send_offset` and must stay a pure byte-pump — sealing there would split an AEAD
 tag. Pre-ESTABLISHED handshake bytes for the initiator are queued at
-`v2_transport_begin` time (§5), not here.
+`noise_transport_begin` time (§5), not here.
 
 ## 4. READ seam — `lib/net/src/connman.c:1392`
 
@@ -197,13 +197,13 @@ untouched:
         const char *plain = buf; unsigned int plain_n = (unsigned int)n;
         uint8_t *dec = NULL, *hs_reply = NULL; size_t dec_len = 0, hs_len = 0;
         if (node->transport) {
-            if (!v2_transport_feed(node->transport, (const uint8_t *)buf, (size_t)n,
+            if (!noise_transport_feed(node->transport, (const uint8_t *)buf, (size_t)n,
                                    &hs_reply, &hs_len, &dec, &dec_len)) {
-                connman_note_addnode_prehandshake_disconnect(cm, node, "v2-transport");
+                connman_note_addnode_prehandshake_disconnect(cm, node, "noise-transport");
                 node->disconnect = true; zcl_free(dec); zcl_free(hs_reply);
                 goto after_recv;   /* new label just before the score/last_recv block */
             }
-            if (hs_len) v2_queue_raw(node, hs_reply, hs_len); /* thin: send_segment on raw bytes */
+            if (hs_len) noise_queue_raw(node, hs_reply, hs_len); /* thin: send_segment on raw bytes */
             zcl_free(hs_reply);
             plain = (const char *)dec; plain_n = (unsigned int)dec_len;
         }
@@ -219,7 +219,7 @@ after_recv: ;
         node->recv_bytes += (uint64_t)n;   /* raw wire bytes, unchanged accounting */
         ...
 ```
-`v2_queue_raw` = a 3-line helper appending a `send_segment_create` of raw
+`noise_queue_raw` = a 3-line helper appending a `send_segment_create` of raw
 (un-sealed) handshake bytes to `node->send_*` under `cs_send`; needed because the
 handshake messages precede any `session_transport` and must go out verbatim.
 
@@ -228,21 +228,21 @@ handshake messages precede any `session_transport` and must go out verbatim.
 - **Outbound initiator** — `connect_node`, after `p2p_node_create` at **net.c:915**
   (node is `inbound=false`). Gate on the addrman hint:
   ```c
-  if (nm->v2_enabled && addrman_services_has(nm, &addr_connect->svc, NODE_V2TRANSPORT))
-      v2_transport_begin(node, nm);   /* is_initiator=true; queues msg1 `-> e` raw */
+  if (nm->noise_enabled && addrman_services_has(nm, &addr_connect->svc, NODE_NOISE_TRANSPORT))
+      noise_transport_begin(node, nm);   /* is_initiator=true; queues msg1 `-> e` raw */
   ```
-  `v2_transport_begin` for an initiator immediately produces msg1 via
+  `noise_transport_begin` for an initiator immediately produces msg1 via
   `noise_hs_write_message` and queues it raw (same `v2_queue_raw`), state
-  `V2_KEY_SENT`. The first application message is already `push_version`
+  `NOISE_KEY_SENT`. The first application message is already `push_version`
   (`msg_version.c:382`, outbound branch) → it now flows sealed with no ordering
   change.
 - **Inbound responder** — `accept_connection`, after `p2p_node_create` at
-  **net.c:1561** (`inbound=true`). Arm in `V2_DETECT` only when the flag is on:
+  **net.c:1561** (`inbound=true`). Arm in `NOISE_DETECT` only when the flag is on:
   ```c
-  if (nm->v2_enabled) v2_transport_begin(node, nm);  /* is_initiator=false, V2_DETECT */
+  if (nm->noise_enabled) noise_transport_begin(node, nm);  /* is_initiator=false, NOISE_DETECT */
   ```
-  In `V2_DETECT`, `v2_transport_feed` first calls
-  `v2_transport_is_plaintext_magic(in, n, nm->message_start)`: if the first 4
+  In `NOISE_DETECT`, `noise_transport_feed` first calls
+  `noise_transport_is_plaintext_magic(in, n, nm->message_start)`: if the first 4
   bytes equal the network magic → free the transport, set `transport=NULL`, and
   replay the buffered bytes through the plaintext path (this is the ONLY drop to
   plaintext and it requires the peer to literally speak v1 magic — zclassicd
@@ -256,22 +256,22 @@ handshake messages precede any `session_transport` and must go out verbatim.
 
 ## 6. Negotiation in the version exchange (service bit)
 
-- Add `NODE_V2TRANSPORT = (1 << 25)` to the service-flags enum in
+- Add `NODE_NOISE_TRANSPORT = (1 << 25)` to the service-flags enum in
   `lib/net/include/net/protocol.h` (adjacent to `NODE_BOOTSTRAP = (1<<24)`,
   **protocol.h:25**; free — used bits are 0,2,10,24). Open question §9(1):
   confirm zclassicd ignores 1<<25 (it is in the zcl23-reserved high range, same
   family as the working NODE_BOOTSTRAP).
 - Advertise it in `msg_version_build` beside the existing services OR at
   **msg_version.c:244** (`ver->services = NODE_NETWORK | NODE_ZCL23;`) →
-  `| (nm->v2_enabled ? NODE_V2TRANSPORT : 0)`. It is learned into addrman at the
+  `| (nm->noise_enabled ? NODE_NOISE_TRANSPORT : 0)`. It is learned into addrman at the
   existing `learned.nServices = ver->services` (**msg_version.c:229**) and set on
   the peer at **msg_version.c:344** (`node->services = ver.services`). The bit is
   only a HINT for OUTBOUND gating; the authoritative INBOUND discriminator is the
   4-byte magic peek (§5), which no gossip can strip. Downgrade note: a MITM
   clearing the bit forces v1 (documented residual, same as BIP324); the HSTS
-  "v2-seen" pin closes it in Phase 2, out of scope here.
+  "Noise-seen" pin closes it in Phase 2, out of scope here.
 
-Default OFF: `nm->v2_enabled` is false unless `-v2transport` is passed (add to the
+Default OFF: `nm->noise_enabled` is false unless `-noisetransport` is passed (add to the
 argv loop next to existing net flags). Phase-1 lands dark — the byte-parity floor
 (§7 case 6) is `test_parallel` green with the bit compiled but off.
 
@@ -280,13 +280,13 @@ argv loop next to existing net flags). Phase-1 lands dark — the byte-parity fl
 All four are required by the plan's A4 bar (`think-more-about-our-keen-crown.md`
 OS-A4). Tests are the load-bearing proofs; the parity claim is structural.
 
-1. **Differential byte-parity test** — NEW `lib/test/src/test_v2_transport_parity.c`
+1. **Differential byte-parity test** — NEW `lib/test/src/test_noise_transport_parity.c`
    (auto-collected, `Makefile:491-492`; add its group to the counts). Two
-   sub-assertions: (a) with `v2_enabled=false`, drive a `p2p_node` over a
+   sub-assertions: (a) with `noise_enabled=false`, drive a `p2p_node` over a
    `socketpair()` (fixture template `test_net_handshake_adversarial.c`) and assert
    the exact bytes `p2p_node_end_message` queues for `version`/`verack`/`inv`/`tx`/
    `block` are BYTE-IDENTICAL to a captured golden (the transport==NULL path is
-   literally unchanged). (b) with `v2_enabled=true` on both ends, assert the
+   literally unchanged). (b) with `noise_enabled=true` on both ends, assert the
    plaintext delivered to `p2p_node_receive_bytes` after decrypt EQUALS the (a)
    golden plaintext for the same messages — proving the seam is transparent.
 2. **Noise handshake KAT** — extend `lib/test/src/test_noise_transport.c` (its
@@ -314,7 +314,7 @@ OS-A4). Tests are the load-bearing proofs; the parity claim is structural.
    on the dev lane — two X25519 base + three scalarmults + a few HKDF/AEAD calls;
    set the exact number from the first measured run, then ratchet shrink-only).
 
-Optional belt-and-suspenders lint gate `check-v2-plaintext-seam-guarded` (grep):
+Optional belt-and-suspenders lint gate `check-noise-plaintext-seam-guarded` (grep):
 assert `net.c:708` and `connman.c:1392±2` keep an unconditional `transport==NULL`
 else-branch (catches a future edit that accidentally makes the plaintext path
 conditional). WARN→HARD once stable; the byte-parity test is the real proof.
@@ -330,13 +330,13 @@ the wire changes meaning — the same `msg_header`+payload is what gets sealed a
 what gets delivered. `check-consensus-parity` (E13) is untouched; no golden
 consensus value moves. The transport==NULL path is bit-for-bit today's wire, so
 zclassicd interop is preserved by construction (case 2/6). Copy-prove before any
-live enable: two nodes on datadir COPIES with `-v2transport` forced on must reach
+live enable: two nodes on datadir COPIES with `-noisetransport` forced on must reach
 identical H*/tip-hash vs a v1-only control (design §11 Phase-1 copy-prove) — this
 recipe lands the code dark; the enable is a separate owner-gated step.
 
 ## 9. Open questions (carry to owner / Phase 2, do NOT block P1)
 
-1. Confirm `NODE_V2TRANSPORT = 1<<25` collides with no zclassicd-observed bit.
+1. Confirm `NODE_NOISE_TRANSPORT = 1<<25` collides with no zclassicd-observed bit.
 2. Ship ephemeral-only XX in P1 (first-contact MITM residual accepted, same as
    BIP324) vs block on the addrman static-key TOFU pin — pin is Phase 3, keep P1
    passive-safe only.

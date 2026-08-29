@@ -112,13 +112,13 @@ static const char *plan_result_message(
 {
     switch (result) {
     case MESH_PAIR_PLAN_PEER_NOT_CONNECTED:
-        return "no connected peer with an established v2 session matches; "
+        return "no connected peer with an established Noise session matches; "
                "no dial is attempted";
     case MESH_PAIR_PLAN_AMBIGUOUS_PEER:
         return "the selector matched more than one session peer; narrow it "
                "with a longer fingerprint prefix";
-    case MESH_PAIR_PLAN_V2_DISABLED:
-        return "the v2 Noise transport is disabled on this node";
+    case MESH_PAIR_PLAN_NOISE_DISABLED:
+        return "the Noise transport is disabled on this node";
     case MESH_PAIR_PLAN_DELEGATION_UNAVAILABLE:
         return "no held ZID delegation names the session peer's Noise static";
     default:
@@ -131,7 +131,7 @@ static const char *plan_result_code(enum boot_mesh_pairing_plan_result result)
     switch (result) {
     case MESH_PAIR_PLAN_PEER_NOT_CONNECTED: return "PEER_NOT_CONNECTED";
     case MESH_PAIR_PLAN_AMBIGUOUS_PEER: return "AMBIGUOUS_PEER";
-    case MESH_PAIR_PLAN_V2_DISABLED: return "V2_TRANSPORT_DISABLED";
+    case MESH_PAIR_PLAN_NOISE_DISABLED: return "NOISE_TRANSPORT_DISABLED";
     case MESH_PAIR_PLAN_DELEGATION_UNAVAILABLE:
         return "DELEGATION_UNAVAILABLE";
     default: return "UNAVAILABLE";
