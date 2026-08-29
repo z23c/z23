@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 756 |
+| Registry entries (branches + leaves) | 757 |
 | Top-level roots | 12 |
 | Branches | 175 |
-| Leaves (dispatchable command paths) | 581 |
-| … `ready` (live handler in this build) | 525 |
+| Leaves (dispatchable command paths) | 582 |
+| … `ready` (live handler in this build) | 526 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
@@ -97,7 +97,7 @@ Per source file:
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
 | `config/commands/dev.def` | 59 | 14 | 45 |
-| `config/commands/code.def` | 17 | 2 | 15 |
+| `config/commands/code.def` | 18 | 2 | 16 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
 | `config/commands/zcode.def` | 245 | 58 | 187 |
@@ -966,6 +966,7 @@ represented by its children's sections.
 | `code refs` | ready | read / read / public · fast/tiny | **`name`**, `limit` | `zcl.code_refs.v1` | `z23 code refs zcl_malloc` | List call sites and references to one symbol |
 | `code impact` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_impact.v1` | `z23 code impact lib/util/include/util/safe_alloc.h` | The reverse-dependency blast radius of one changed file |
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank N symbols by name, with a one-line context per hit |
+| `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Ask whether this checkout already does X, before building it |
 
 #### `code.provenance` — Attribute output back to the code that produced it
 
