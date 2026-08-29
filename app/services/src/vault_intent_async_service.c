@@ -250,10 +250,15 @@ struct zcl_result vault_intent_async_recover(
 {
     if (!ndb || !ndb->open || !execute)
         return ZCL_ERR(-1, "open node_db and execute callback are required");
-    struct vault_intent_row rows[100];
+    struct vault_intent_row *rows = zcl_calloc(
+        100, sizeof(*rows), "vault intent async recovery rows");
+    if (!rows)
+        return ZCL_ERR(-2, "queued vault intent workspace allocation failed");
     int n = vault_intent_list(ndb, rows, 100);
-    if (n < 0)
+    if (n < 0) {
+        free(rows);
         return ZCL_ERR(-2, "queued vault intent scan failed");
+    }
     for (int i = 0; i < n; i++) {
         if (rows[i].state != VAULT_INTENT_PLANNED ||
             strcmp(rows[i].error_code, "ASYNC_QUEUED") != 0)
@@ -264,8 +269,11 @@ struct zcl_result vault_intent_async_recover(
         bool duplicate = false;
         struct zcl_result started = vault_intent_async_start(
             ndb, &rows[i], plan_hex, false, execute, &duplicate);
-        if (!started.ok)
+        if (!started.ok) {
+            free(rows);
             return started;
+        }
     }
+    free(rows);
     return ZCL_OK;
 }
