@@ -9254,6 +9254,22 @@ $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 	    -Ilib/platform/include -Ilib/base/include \
 	    -o $@ $(FILE_SIZE_POLICY_SRCS)
 
+# grok_report reads the JSON report a dispatched unit prints at the end of its
+# transcript (tools/dev/grok-unit.sh). Written in C against the in-tree JSON
+# parser rather than shelling out to jq: a developer tool that only works on a
+# machine with jq installed is a tool a stranger cannot run, and this project
+# does not take a dependency it did not write.
+GROK_REPORT_BIN = $(BIN_DIR)/grok_report
+GROK_REPORT_SRCS = tools/dev/grok_report.c lib/json/src/json.c \
+    lib/base/src/safe_alloc.c
+.PHONY: tools/dev/grok_report
+tools/dev/grok_report: $(GROK_REPORT_BIN)
+$(GROK_REPORT_BIN): $(GROK_REPORT_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -Ilib/json/include -Ilib/base/include \
+	    -o $@ $(GROK_REPORT_SRCS)
+
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
 # tables). core_seal is a tiny build-time C tool (no external deps: it links the
