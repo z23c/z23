@@ -1016,6 +1016,8 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                    strcmp(key, "wait_for_edit") == 0 ||
                    strcmp(key, "all") == 0 ||
                    strcmp(key, "allow_high_fees") == 0 ||
+                   strcmp(key, "exact") == 0 ||
+                   strcmp(key, "restore") == 0 ||
                    strcmp(key, "include_evidence_wires") == 0) {
             /* `all` is app.shop.want.list's "include expired and cancelled
              * rows" flag — a bool in its declared schema; the default
@@ -1389,6 +1391,16 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
         } else if (strcmp(key, "max_lines") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
                       json_get_int(value) <= 1000;
+        } else if (strcmp(key, "line") == 0) {
+            /* dev.agent.mutate's 1-based source line. The CLI types
+             * `--line=42` as an integer; without this rule the default
+             * branch demands a string and the leaf is uninvokable from the
+             * shell — the exact failure check_command_input_keys.sh exists
+             * to catch. The upper bound is the file-size policy's hard
+             * ceiling with headroom; the handler owns the real
+             * LINE_OUT_OF_RANGE refusal against the actual file. */
+            type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
+                      json_get_int(value) <= 1000000;
         } else if (strcmp(key, "since_secs") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
                       json_get_int(value) <= 31536000;
