@@ -2,7 +2,7 @@
  * purpose: Verify Windows candidate publication refuses without mutation. */
 #if defined(_WIN32)
 
-#include "consensus_state_snapshot_install_internal.h"
+#include "../../config/src/consensus_state_snapshot_install_internal.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

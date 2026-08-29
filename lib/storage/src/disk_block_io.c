@@ -187,7 +187,13 @@ bool disk_block_io_sync_pending(void)
     bool all_ok = true;
     int keep = 0;
     for (int i = 0; i < g_pending_count; i++) {
+#if defined(_WIN32)
+        /* Windows _commit()/FlushFileBuffers requires a write-capable handle,
+         * so open the blk file for read-write even though we only sync. */
+        int fd = open(g_pending_paths[i], O_RDWR);
+#else
         int fd = open(g_pending_paths[i], O_RDONLY);
+#endif
         bool synced = (fd >= 0 && platform_data_sync(fd) == 0);
         if (fd >= 0)
             close(fd);

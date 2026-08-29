@@ -134,7 +134,8 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # goal set below is built, and a missing file costs nothing. Its position is
 # the whole point: an app registered there joins the SAME lean parse zhello
 # gets, instead of paying the authoritative parse for a two-file build.
-GUI_APPS := zhello
+# Tracked reference apps.  User-local scaffolded apps append via config/gui_apps.mk.
+GUI_APPS := zhello ball
 -include config/gui_apps.mk
 # Five goals per GUI app: run, headless selftest, clean, .app bundle, and the
 # bare binary path. The binary is spelled `build/bin/…` literally because
@@ -263,7 +264,9 @@ VIEW_GEN_HEADERS_EARLY := app/views/include/views/wallet_templates_gen.h \
 VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
+ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 
@@ -1826,7 +1829,8 @@ ifeq ($(ZCL_HOST_OS),Darwin)
 GUI_APP_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
 	-framework QuartzCore -framework CoreVideo
 else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
-GUI_APP_HOST_LIBS := -lgdi32 -luser32 -lshell32 -lole32
+GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
+    -Wl,-Bdynamic -Wl,--no-insert-timestamp -lgdi32 -luser32 -lshell32 -lole32
 endif
 GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(GUI_APP_HOST_CPPFLAGS) \
@@ -1890,6 +1894,8 @@ endef
 # Both must precede the stamp below: the template reads them as it expands.
 zhello_ARGS = $(ZHELLO_ARGS)
 zhello_APP_TITLE := Zhello
+ball_ARGS = $(BALL_ARGS)
+ball_APP_TITLE := Ball
 $(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
 
 .PHONY: new-app
@@ -2916,7 +2922,7 @@ ZCODE_PACKAGE_BASE_ASAN_BIN := $(BIN_DIR)/zcode-package-base-test-asan
 ZCODE_PACKAGE_SHA3_ASAN_BIN := $(BIN_DIR)/zcode-package-sha3-test-asan
 ZCODE_PACKAGE_CODEC_ASAN_BIN := $(BIN_DIR)/zcode-package-codec-test-asan
 ZCODE_PACKAGE_REGISTRY_CHECK_BIN := $(BIN_DIR)/zcode-package-registry-check
-.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test zcode-package-foundation-test zcode-package-asan zclassic23-package-sign
+.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test zcode-package-foundation-test zcode-package-registry-check zcode-package-asan zclassic23-package-sign
 zcode-package-base-test: $(ZCODE_PACKAGE_BASE_TEST_BIN)
 	@$(ZCODE_PACKAGE_BASE_TEST_BIN)
 $(ZCODE_PACKAGE_BASE_TEST_BIN): lib/base/tests/test_base.c \
@@ -2944,6 +2950,8 @@ $(ZCODE_PACKAGE_CODEC_TEST_BIN): lib/codec/tests/test_codec.c \
 	    -Ilib/codec/include -Ilib/base/include -o $@ $^
 
 zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test
+
+zcode-package-registry-check: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 
 # Permanent memory/undefined-behavior gate for the self-hosted package
 # foundation and its complete signed evidence lifecycle.  The first three
@@ -3012,7 +3020,7 @@ $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
 		lib/vcs/src/package_capsule.c lib/vcs/src/package_release.c \
 		lib/json/src/json.c lib/codec/src/cursor.c lib/sha3/src/sha3.c \
 		lib/base/src/safe_alloc.c lib/base/src/log_level.c \
-		lib/platform/src/clock.c
+		lib/platform/src/clock.c lib/platform/src/directory_compat.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -D_GNU_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
 	    -O0 -Wall -Wextra -Werror -pedantic \

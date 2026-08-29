@@ -2,7 +2,7 @@
  * Native Windows acceptance: unqualified package-store mutations fail closed. */
 #if defined(_WIN32)
 
-#include "package_lifecycle_internal.h"
+#include "../../app/services/src/package_lifecycle_internal.h"
 
 #include <stdio.h>
 #include <string.h>

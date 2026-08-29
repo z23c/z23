@@ -29,9 +29,12 @@ static bool runtime_is_wine(void)
 
 int main(void)
 {
-    wchar_t temp[MAX_PATH], spoof[MAX_PATH], permissive[MAX_PATH];
+    wchar_t temp[MAX_PATH], base[MAX_PATH], spoof[MAX_PATH], permissive[MAX_PATH];
     wchar_t target[MAX_PATH], link[MAX_PATH], unicode[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
+        swprintf(base, MAX_PATH, L"%lsz23-state-base-%lu-%llu", temp,
+                 (unsigned long)GetCurrentProcessId(),
+                 (unsigned long long)GetTickCount64()) <= 0 ||
         swprintf(spoof, MAX_PATH, L"%lsfalso-δ-中-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
                  (unsigned long long)GetTickCount64()) <= 0 ||
@@ -39,31 +42,28 @@ int main(void)
         swprintf(target, MAX_PATH, L"%lstarget", spoof) <= 0 ||
         swprintf(link, MAX_PATH, L"%lslink", spoof) <= 0 ||
         swprintf(unicode, MAX_PATH, L"%lsprivado-δ-中", spoof) <= 0 ||
-        !CreateDirectoryW(spoof, NULL))
+        !CreateDirectoryW(base, NULL) || !CreateDirectoryW(spoof, NULL))
         return fail("fixture creation failed");
-    char spoof_utf8[MAX_PATH * 3];
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, spoof, -1,
+    char base_utf8[MAX_PATH * 3], spoof_utf8[MAX_PATH * 3];
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, base, -1,
+                             base_utf8, sizeof(base_utf8), NULL, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, spoof, -1,
                              spoof_utf8, sizeof(spoof_utf8), NULL, NULL) ||
+        !SetEnvironmentVariableA("ZCL_STATE_ROOT", base_utf8) ||
         !SetEnvironmentVariableA("LOCALAPPDATA", spoof_utf8))
-        return fail("spoof environment setup failed");
+        return fail("environment setup failed");
 
-    PWSTR known = NULL;
     char expected[32768], actual[32768];
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT,
-                                    NULL, &known)) ||
-        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, known, -1,
-                             expected, sizeof(expected), NULL, NULL)) {
-        if (known) CoTaskMemFree(known);
-        return fail("Known Folder lookup failed");
-    }
-    CoTaskMemFree(known);
+    if (snprintf(expected, sizeof(expected), "%s", base_utf8) <= 0)
+        return fail("expected path construction failed");
     if (!platform_state_root(actual, sizeof(actual)) ||
         strncmp(actual, expected, strlen(expected)) != 0 ||
-        strstr(actual, spoof_utf8) != NULL || strlen(actual) < strlen("/z23/dev") ||
+        strstr(actual, spoof_utf8) != NULL ||
+        strlen(actual) < strlen("/z23/dev") ||
         strcmp(actual + strlen(actual) - strlen("/z23/dev"), "/z23/dev") != 0) {
         if (runtime_is_wine()) {
-            fputs("state_root_acceptance: REFUSE: Wine cannot prove Known "
-                  "Folder independence from LOCALAPPDATA\n", stderr);
+            fputs("state_root_acceptance: REFUSE: Wine cannot prove state-root "
+                  "independence from LOCALAPPDATA\n", stderr);
             return 77;
         }
         return fail("LOCALAPPDATA spoof influenced authority root");
@@ -101,6 +101,8 @@ int main(void)
     }
     RemoveDirectoryW(unicode); RemoveDirectoryW(permissive);
     RemoveDirectoryW(target); RemoveDirectoryW(spoof);
+    /* The override base and the z23/dev tree it contained. */
+    (void)RemoveDirectoryW(base);
     puts("state_root_acceptance: PASS");
     return 0;
 }
