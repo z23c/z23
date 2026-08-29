@@ -37,8 +37,10 @@
 
 #include "install/front_door.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "crypto/sha256.h"
+#include "platform/clock.h"
 #include "tls_client.h"
 
 #include <arpa/inet.h>
@@ -148,8 +150,10 @@ static const char *env_or(const char *name, const char *fallback)
 }
 
 /* ── SHA-256 of a buffer, as lowercase hex ────────────────────────────────
- * lib/crypto owns the only SHA-256 in this tree; a second one here would be
- * a second thing to keep correct. */
+ * lib/crypto owns the only SHA-256 in this tree and lib/base owns the only
+ * hex codec; a second copy of either here would be a second thing to keep
+ * correct, and this is the program that decides whether a stranger's machine
+ * runs a downloaded installer. */
 static void sha256_hex(const unsigned char *data, size_t len,
                        char out[FD_HEX_LEN + 1])
 {
@@ -158,12 +162,7 @@ static void sha256_hex(const unsigned char *data, size_t len,
     sha256_init(&ctx);
     sha256_write(&ctx, data, len);
     sha256_finalize(&ctx, digest);
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < SHA256_OUTPUT_SIZE; i++) {
-        out[i * 2] = hex[digest[i] >> 4];
-        out[i * 2 + 1] = hex[digest[i] & 0x0fu];
-    }
-    out[FD_HEX_LEN] = '\0';
+    zcl_hex_encode(digest, SHA256_OUTPUT_SIZE, out);
 }
 
 /* ── Bounded fetch ────────────────────────────────────────────────────────
@@ -366,9 +365,8 @@ static void dns_attestation(const char *name, struct fd_attestation *att)
         /* A per-run query ID. Not a security boundary — plain DNS has none —
          * but a fixed ID would let a stale datagram from a previous run be
          * accepted as this run's answer. */
-        struct timespec now;
-        (void)clock_gettime(CLOCK_MONOTONIC, &now);
-        const uint16_t id = (uint16_t)((now.tv_nsec ^ (long)getpid()) & 0xffff);
+        const int64_t now_ns = clock_now_monotonic_ns();
+        const uint16_t id = (uint16_t)((now_ns ^ (int64_t)getpid()) & 0xffff);
         const size_t query_len = fd_dns_txt_query(id, name, query,
                                                   sizeof query);
         if (query_len == 0) {
