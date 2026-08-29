@@ -539,7 +539,7 @@ static sqlite3 *directory_open_rw(void)
  * UPnP SSDP + SOAP, then a naked IP discovery. Its own comment in
  * lib/net/src/peer_strategy.c records that it "blocks for tens of
  * seconds on a host whose gateway ignores it" — which is why it is
- * gated out of regtest boot.
+ * gated out of regtest.
  *
  * The refresh round runs on the SHARED supervisor tick runner, whose
  * liveness deadline is 30 s (SUPERVISOR_TICK_RUNNER_DEADLINE_SECS): a
@@ -549,11 +549,11 @@ static sqlite3 *directory_open_rw(void)
  * SIGABRT'd this node for before.
  *
  * So the tick READS a cache and never dials. The cache is published by
- * whoever is allowed to block — today boot_services.c, which already
- * runs the probe once synchronously — through
- * onion_directory_set_self_clearnet(). Until it is published, this
- * node's row simply carries no clearnet endpoint, which is exactly what
- * a probe failure produced anyway. */
+ * whoever is allowed to block — the background nat-probe worker
+ * (lib/net/src/peer_strategy_worker.c), probing off the boot path and
+ * re-probing at half the 7200 s lease — through
+ * onion_directory_set_self_clearnet(). Until published, this node's row
+ * carries no clearnet endpoint, exactly what a probe failure produced. */
 
 static pthread_mutex_t g_self_ep_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char     g_self_ip[64] = "";

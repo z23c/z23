@@ -2688,3 +2688,10 @@ AGENT_IMPACT_RULE("app/services/include/services/network_telemetry.h|lib/util/in
 AGENT_IMPACT_RULE("lib/util/include/util/telemetry_ontology.def|lib/util/src/telemetry_ontology.c|lib/test/src/test_telemetry_ontology.c", "telemetry_ontology telemetry_network make_lint_gates")
 /* The ZENDP group's own test source. */
 AGENT_IMPACT_RULE("lib/test/src/test_zendp.c", "zendp zendp_records make_lint_gates")
+
+/* NAT reachability probe + mapping-lease renewal worker: the blocking
+ * NAT-PMP/UPnP probe (peer_strategy.c over nat.c) and the background
+ * worker that owns it off the boot path. The directory self-row it
+ * publishes is read by the onion_directory refresh round, so that group
+ * rides along. */
+AGENT_IMPACT_RULE("lib/net/src/peer_strategy.c|lib/net/include/net/peer_strategy.h|lib/net/src/peer_strategy_worker.c|lib/net/include/net/peer_strategy_worker.h|lib/net/src/nat.c|lib/net/include/net/nat.h|lib/test/src/test_peer_strategy_worker.c|lib/test/src/test_nat_route_dump.c", "peer_strategy_worker nat_route_dump net onion_directory make_lint_gates")
