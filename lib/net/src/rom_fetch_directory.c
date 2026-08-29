@@ -18,6 +18,7 @@
 #include "rom_fetch_internal.h"
 #include "net/file_service.h"
 #include "rom_fetch_transport.h"
+#include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
@@ -141,8 +142,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
                  "skipping seed", peer_addr, (unsigned)port);
         return false;
     }
-    uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
-                    ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+    uint32_t size = zcl_read_u32_le(hdr);
     /* Bounded by the caller's cap, leaving one byte for the NUL terminator. A
      * zero-length body or one at/over cap (incl. the FS_DONE refusal) fails. */
     if (size == 0 || size >= cap) {
