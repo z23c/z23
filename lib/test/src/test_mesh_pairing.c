@@ -5,6 +5,8 @@
 
 #include "test/test_core.h"
 
+#include "config/boot_mesh_pairing.h"
+#include "base/hex.h"
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
 #include "net/v2_identity.h"
@@ -154,6 +156,108 @@ int test_mesh_pairing(void)
                       delegation.noise_static_pubkey, true,
                       MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &refused),
                   MESH_PAIRING_ALREADY_REVOKED);
+        PASS();
+    }
+
+    TEST("pairing commands: days default, clamp boundaries, and rejection") {
+        ASSERT_EQ(BOOT_MESH_PAIRING_DEFAULT_DAYS, 7);
+        ASSERT_EQ(BOOT_MESH_PAIRING_MAX_DAYS, 30);
+        ASSERT(boot_mesh_pairing_days_valid(1));
+        ASSERT(boot_mesh_pairing_days_valid(30));
+        ASSERT(!boot_mesh_pairing_days_valid(0));
+        ASSERT(!boot_mesh_pairing_days_valid(-1));
+        ASSERT(!boot_mesh_pairing_days_valid(31));
+        ASSERT_EQ(boot_mesh_pairing_expiry(10000, 7), 10000 + 7 * 86400);
+        ASSERT_EQ(boot_mesh_pairing_expiry(10000, 30), 10000 + 30 * 86400);
+        /* The 30-day ceiling lands exactly on the service's own window. */
+        ASSERT_EQ(BOOT_MESH_PAIRING_MAX_DAYS * 86400,
+                  MESH_PAIRING_MAX_LIFETIME_SECONDS);
+        PASS();
+    }
+
+    TEST("pairing commands: selector matches addr substring or fingerprint prefix") {
+        char fingerprint_hex[65];
+        uint8_t fp[32];
+        mesh_fill32(fp, 0xab);
+        zcl_hex_encode(fp, 32, fingerprint_hex);
+        ASSERT(boot_mesh_pairing_selector_matches(
+            "168.1", "192.168.1.7:8033", fingerprint_hex));
+        ASSERT(boot_mesh_pairing_selector_matches(
+            fingerprint_hex, "192.168.1.7:8033", fingerprint_hex));
+        fingerprint_hex[20] = '\0'; /* prefix match on the fingerprint hex */
+        ASSERT(boot_mesh_pairing_selector_matches(
+            fingerprint_hex, "192.168.1.7:8033",
+            "ababababababababababababababababababababababababababababababababb"));
+        ASSERT(!boot_mesh_pairing_selector_matches(
+            "ffff", "192.168.1.7:8033",
+            "abababababababababababababababababababababababababababababababab"));
+        ASSERT(boot_mesh_pairing_selector_matches(
+            NULL, "192.168.1.7:8033",
+            "abababababababababababababababababababababababababababababababab"));
+        ASSERT(boot_mesh_pairing_selector_matches(
+            "", "192.168.1.7:8033",
+            "abababababababababababababababababababababababababababababababab"));
+        PASS();
+    }
+
+    TEST("pairing commands: record state derives from now, revocation wins") {
+        struct db_mesh_pairing row = {0};
+        row.paired_at = 1000;
+        row.expires_at = 3000;
+        ASSERT_STR_EQ(boot_mesh_pairing_state(&row, 2500), "active");
+        ASSERT_STR_EQ(boot_mesh_pairing_state(&row, 3000), "expired");
+        row.revoked_at = 2600;
+        ASSERT_STR_EQ(boot_mesh_pairing_state(&row, 2500), "revoked");
+        ASSERT_STR_EQ(boot_mesh_pairing_state(&row, 3500), "revoked");
+        PASS();
+    }
+
+    TEST("pairing commands: fingerprint decode is canonical lowercase hex") {
+        uint8_t out[32];
+        ASSERT(boot_mesh_pairing_decode_fingerprint(
+            "abababababababababababababababababababababababababababababababab",
+            out));
+        ASSERT_EQ(out[0], 0xab);
+        ASSERT_EQ(out[31], 0xab);
+        ASSERT(!boot_mesh_pairing_decode_fingerprint("ab", out));
+        ASSERT(!boot_mesh_pairing_decode_fingerprint(
+            "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+            out));
+        ASSERT(!boot_mesh_pairing_decode_fingerprint(NULL, out));
+        PASS();
+    }
+
+    TEST("pairing commands: every service reason maps to a distinct named code") {
+        const enum mesh_pairing_reason reasons[] = {
+            MESH_PAIRING_OK, MESH_PAIRING_BAD_ARGUMENT,
+            MESH_PAIRING_CAPABILITY_UNAVAILABLE,
+            MESH_PAIRING_FINGERPRINT_MISMATCH, MESH_PAIRING_NETWORK_MISMATCH,
+            MESH_PAIRING_MASTER_INACTIVE, MESH_PAIRING_BEACON_UNAVAILABLE,
+            MESH_PAIRING_BEACON_PROVISIONAL, MESH_PAIRING_DELEGATION_INVALID,
+            MESH_PAIRING_WINDOW_INVALID, MESH_PAIRING_ALREADY_REVOKED,
+            MESH_PAIRING_IDENTITY_COLLISION, MESH_PAIRING_PERSIST_FAILED,
+            MESH_PAIRING_NOT_FOUND, MESH_PAIRING_EXPIRED,
+            MESH_PAIRING_SESSION_MISMATCH, MESH_PAIRING_AUTHORITY_CHANGED,
+            MESH_PAIRING_CONFIRMATION_INVALID, MESH_PAIRING_PLAN_EXPIRED,
+        };
+        for (size_t i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++) {
+            const char *code = boot_mesh_pairing_reason_code(reasons[i]);
+            ASSERT(code && code[0]);
+            for (size_t j = i + 1;
+                 j < sizeof(reasons) / sizeof(reasons[0]); j++)
+                ASSERT(strcmp(code,
+                              boot_mesh_pairing_reason_code(reasons[j])) != 0);
+        }
+        ASSERT_STR_EQ(
+            boot_mesh_pairing_reason_code(MESH_PAIRING_FINGERPRINT_MISMATCH),
+            "FINGERPRINT_MISMATCH");
+        ASSERT_STR_EQ(boot_mesh_pairing_reason_code(MESH_PAIRING_NOT_FOUND),
+                      "NOT_FOUND");
+        ASSERT_STR_EQ(
+            boot_mesh_pairing_reason_code(MESH_PAIRING_CONFIRMATION_INVALID),
+            "CONFIRMATION_INVALID");
+        ASSERT_STR_EQ(boot_mesh_pairing_reason_code(MESH_PAIRING_PLAN_EXPIRED),
+                      "PLAN_EXPIRED");
         PASS();
     }
 

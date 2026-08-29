@@ -123,6 +123,8 @@ struct rom_artifact {
     uint64_t size_bytes;
     uint32_t chunk_size;
     uint32_t num_chunks;
+    int64_t  height;                      /* artifact-known height (bundle name
+                                           * or header-seed tip); 0 = unknown  */
     uint8_t  whole_sha3[32];              /* SHA3-256 of the whole file        */
     uint8_t  chunk_root[32];              /* SHA3-256 over per-chunk digests   */
     uint8_t  chunk_sha3[ROM_SEED_MAX_CHUNKS][32];

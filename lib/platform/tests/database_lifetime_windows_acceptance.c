@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Focused native acceptance for Windows SQLite lifetime path recognition. */
 
-#include "models/database_lifetime.h"
+#include "models/database_lifetime.h" // lib-layer-ok:windows-db-lifetime-acceptance
 
 #include <sqlite3.h>
 #include <stdio.h>

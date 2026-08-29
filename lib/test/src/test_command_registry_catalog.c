@@ -3057,6 +3057,25 @@ static int test_zses_invite_leaves(void)
         PASS();
     }
 
+    TEST("ops.mesh pair plan/commit are discoverable") {
+        const struct zcl_command_spec *plan =
+            find_spec(reg, "ops.mesh.pair.plan");
+        const struct zcl_command_spec *commit =
+            find_spec(reg, "ops.mesh.pair.commit");
+        ASSERT(plan != NULL);
+        ASSERT(commit != NULL);
+        ASSERT_EQ(plan->availability, ZCL_COMMAND_READY);
+        ASSERT_EQ(commit->availability, ZCL_COMMAND_READY);
+        ASSERT(plan->handler == zcl_native_handle_ops_mesh_pair_plan);
+        ASSERT(commit->handler == zcl_native_handle_ops_mesh_pair_commit);
+        ASSERT_EQ(commit->effect, ZCL_COMMAND_EFFECT_MUTATE);
+        ASSERT_EQ(commit->confirmation, ZCL_COMMAND_CONFIRM_PLAN_COMMIT);
+        ASSERT(strstr(commit->input_keys, "fingerprint") != NULL);
+        ASSERT(strstr(commit->input_keys, "days") != NULL);
+        ASSERT(strstr(plan->input_keys, "peer") != NULL);
+        PASS();
+    }
+
     TEST("create signs a zses:v1 invite and accept verifies it") {
         const struct zcl_command_spec *create =
             find_spec(reg, "zses.invite.create");

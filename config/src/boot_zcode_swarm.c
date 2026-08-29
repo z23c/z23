@@ -5,6 +5,7 @@
 #include "config/boot_zcode_swarm_receipt.h"
 #include "config/boot_zcode_dht.h"
 #include "config/boot_internal.h"
+#include "config/boot_mesh_status.h"
 #include "config/runtime.h"
 #include "config/boot_zcode_work_authority.h"
 #include "config/boot_zcode_async_proof.h"
@@ -464,9 +465,8 @@ static void boot_zcode_swarm_lock(void)
     zcl_mutex_lock(&s_lock);
 }
 /* score_fn for the engine: earned score from the reward ledger. Pseudo-
- * keys never appear in the ledger (transport scope, not identity), so
- * this resolves to zero in practice today; it exists so a future slice
- * that swaps in authenticated peer keys needs no engine change. */
+ * keys never appear there (zero today); a future authenticated-key swap
+ * then needs no engine change. */
 static uint64_t boot_zcode_swarm_score(const uint8_t contributor[33],
                                        void *ctx)
 {
@@ -479,10 +479,8 @@ static uint64_t boot_zcode_swarm_score(const uint8_t contributor[33],
     return t.earned_score;
 }
 
-
-/* Lazily create the node-global engine. Caller holds s_lock. Returns
- * NULL (named, logged) when hosting is off, the store is not open, the
- * datadir is missing, or allocation fails — the swarm simply stays off
+/* Lazily create the node-global engine. Caller holds s_lock. Returns NULL
+ * (named, logged) when hosting is off or setup fails — the swarm stays off
  * for that frame/tick; nothing here is fatal. */
 static struct vcs_swarm_engine *boot_zcode_swarm_ensure(
     struct boot_svc_ctx *svc)
@@ -546,6 +544,10 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
         LOG_FAIL("net.zcode_swarm", "null mp/node/payload");
     if (boot_zcode_dht_frame(mp, node, payload, payload_len,
                              (struct boot_svc_ctx *)ctx))
+        return true;
+    /* Mesh status must answer with hosting off: dispatch before ensure. */
+    if (boot_mesh_status_frame(mp, node, payload, payload_len,
+                               (struct boot_svc_ctx *)ctx))
         return true;
     boot_zcode_swarm_lock();
     struct vcs_swarm_engine *engine =
@@ -643,8 +645,6 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
     return true;
 }
 
-/* Under cs_nodes add eligible nodes, announce newly complete roots, and drop
- * ineligible peers. announce_to only queues frames. Caller holds s_lock. */
 /* Throttled periodic work shared by the message-cycle tick and the
  * supervisor timer: membership sync every SYNC_PERIOD, engine scheduler
  * tick + work-node drains every TICK_PERIOD. Caller holds s_lock. */
@@ -748,11 +748,9 @@ void boot_zcode_swarm_tick(struct msg_processor *mp, struct p2p_node *node,
 }
 
 /* Supervisor on_tick: the swarm's real clock. Fires every
- * ZCODE_SWARM_TICK_PERIOD_SEC regardless of inbound peer traffic — the
- * message-cycle hook above only runs while a peer has queued messages,
- * and an idle healthy connection still needs announces, WANTs, and
- * outbound drains. Progress marker = cumulative frames sent; a quiet
- * child with no active downloads reports idle, a quiet child WITH active
+ * ZCODE_SWARM_TICK_PERIOD_SEC even without peer traffic — an idle
+ * healthy connection still needs announces, WANTs, and outbound drains.
+ * Progress marker = cumulative frames sent; a quiet child WITH active
  * downloads reports neither (a wedged download should raise NO_PROGRESS). */
 static void boot_zcode_swarm_timer_tick(struct liveness_contract *self)
 {
@@ -834,6 +832,7 @@ void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
                                   boot_zcode_swarm_frame,
                                   boot_zcode_swarm_tick, svc);
     s_svc = svc;
+    boot_mesh_status_wire(svc);
     liveness_contract_init(&s_timer_contract, "net.zcode_swarm");
     s_timer_contract.on_tick = boot_zcode_swarm_timer_tick;
     supervisor_domains_init();
@@ -860,6 +859,7 @@ void boot_zcode_swarm_shutdown(void)
         s_timer_child = SUPERVISOR_INVALID_ID;
     }
     boot_zcode_dht_shutdown();
+    boot_mesh_status_shutdown();
     boot_zcode_swarm_lock();
     s_svc = NULL;
     vcs_swarm_engine_set_global(NULL);

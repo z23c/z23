@@ -589,26 +589,18 @@ static bool onion_pass_claim(struct onion_pass_seen *seen, const char *host)
  *   1. the operator-curated file (~/.config/zclassic23/onion-seeds),
  *   2. THIS NODE'S OWN persisted onion directory — every host it has
  *      learned from a peer's /directory.json or measured itself,
- *   3. the chainparams onionSeeds[] array,
+ *   3. the chainparams onionSeeds[] array (a constant that ages the moment
+ *      it ships; entries have been found dead — see chainparams.c),
  *   4. any .onion peers the on-chain ZDIR projection named.
  *
- * The two RUNTIME sources come first on purpose. Both can change without a
- * rebuild; tier 3 is a constant compiled months ago that ages the moment it
- * ships, and its entries have in fact been found dead (see the seed block in
- * core/chainparams/src/chainparams.c). Ordering the doors that a running
- * network can repair ahead of the one only a release can repair is what stops
- * the binary from being a single point of failure.
+ * The two RUNTIME sources come first: both can change without a rebuild.
+ * Tier 2 closes the loop this pass used to leave open — learned hostnames
+ * were re-served but never dialed, so that knowledge died at every boot.
+ * On a fresh node the tier is empty and the pass behaves as before.
  *
- * Tier 2 is the loop this pass used to leave open: the node already LEARNED
- * hostnames from every directory it fetched and RE-SERVED them to others, but
- * nothing ever read them back as somewhere to dial, so all that knowledge was
- * thrown away at every boot. On a fresh node the tier is simply empty and the
- * pass behaves exactly as it did before.
- *
- * Shared by the discovery thread's below-floor branch and the public
- * connman_kick_onion_seeds() peer-of-last-resort entry so both reach an
- * identical supplier set. Requires outbound dynhost queueing; it deliberately
- * does not wait for our own descriptor publication. */
+ * Shared by the discovery thread's below-floor branch and
+ * connman_kick_onion_seeds() so both reach an identical supplier set.
+ * Requires outbound dynhost queueing; no wait for descriptor publication. */
 static void run_onion_seed_pass(struct connman *cm)
 {
     if (!cm || !cm->params || g_stop) return;

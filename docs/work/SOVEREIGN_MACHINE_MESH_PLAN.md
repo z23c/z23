@@ -89,8 +89,8 @@ bundles never ride inside control messages.
 | Capability | Current state | What remains before a product claim |
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
-| Pairing authority | Implemented locally: durable schema-v76 records plus owner-only, redacted `ops mesh pair list` and plan/commit `ops mesh pair revoke`; status-read-only capability, expiry, session binding, and sticky revocation remain fail-closed | Two-sided wire ceremony and independent-host acceptance |
-| Fleet view | Not implemented | Signed remote status request/response plus a local online/offline projection |
+| Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
+| Fleet view | Wire connected: pairing-bound signed status request/receipt over Noise plus active ZID delegation, revocation races fail closed | Local online/offline projection (`ops mesh machines`) and independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
@@ -555,6 +555,58 @@ peers, never production wallet state.
   `mesh_pairing_controller`, `command_registry_catalog`, `native_api_contract`,
   and nine selected `rpc` groups passed cold with zero skips. Remote status and
   remote-control authority remain unavailable.
+- 2026-08-29: queue item 4 connected the wire. `ZMSTAT`-prefixed
+  request/receipt frames multiplex on the frozen `zpkgswm` P2P message — no
+  new wire message, listener, or port — and are answered only on an
+  established v2 Noise session whose peer holds a live ZID delegation;
+  plaintext or mid-handshake sessions are dropped with no receipt, so
+  responder keys never cross an unauthenticated channel. The responder
+  decides through `mesh_pairing_service_authorize_status` (including its
+  revocation-race re-read) and signs every outcome — OK with the redacted
+  `zcl.machine_mesh_identity.v1` capsule (4,096-byte bound, deterministic
+  oversize marker instead of truncation) or a named refusal status — using
+  the datadir online Ed25519 key. The requester lane (`mesh_status_request`
+  / `mesh_status_poll` RPC, `ops mesh status`) admits a bounded pending
+  request only to a paired peer with a live session, never auto-dials, and
+  accepts a receipt only when its signature, request binding, current
+  session binding, and paired responder master all verify. The identity
+  capsule now reports `remote_status_protocol_implemented: true` and drops
+  the `REMOTE_STATUS_PROTOCOL_UNAVAILABLE` blocker; the test pinning the old
+  strings was updated to the new truth. The new `mesh_status_wire` group
+  proves the decision and byte-level frame roundtrip between two in-process
+  v2 transports with real Ed25519 keys and a real node.db fixture, including
+  revoke-after-accept failing closed; `mesh_status_proto`, `mesh_pairing`,
+  `zcode_swarm`, `command_registry`, `syncdiag_rpc`, `native_api_contract`,
+  and `rpc` groups all passed with zero skips, and `make lint-fast` and
+  `make lint` both passed. This is in-process proof; independent-host
+  receipts remain for the phase exit. A later proto revision removed the
+  per-side connection serial from the request and receipt (the shared
+  transcript and generation remain the session binding).
+- 2026-08-29: queue item 2 exposed the pairing ceremony to the operator.
+  `ops mesh pair plan|commit` (RPC methods `mesh_pairing_plan` /
+  `mesh_pairing_commit`) are the only path that creates pairings, driving
+  the existing `mesh_pairing_service_accept` authority — no path bypasses
+  the authenticated-session acceptance service, and all durable writes go
+  through its ActiveRecord lifecycle. plan renders a no-write preview from a
+  live re-derivation (established v2 session narrowed by an
+  address-substring or fingerprint-prefix selector, held ZID delegation,
+  status-read-only capability, default 7-day expiry, derived pairing id);
+  commit makes `--fingerprint` mandatory (the out-of-band compared value),
+  re-derives everything live, clamps the lifetime to [1, 30] days, maps
+  every `mesh_pairing_reason` refusal to a named code that writes nothing,
+  and renders the stored record through the same redacted public view as
+  `ops mesh pair list`. Inspection and revocation ride the controller's
+  redacted `ops mesh pair list` and confirmation-bound `ops mesh pair
+  revoke`; the direct-revoke RPC method was retired in favor of that
+  generation-bound flow. No command ever dials: a peer without a live
+  session is PEER_NOT_CONNECTED, more than one match is AMBIGUOUS_PEER. The
+  ceremony remains per-machine local — each host pairs the other
+  independently; there is no two-sided wire ceremony yet. The
+  `mesh_pairing` group gained the pure-layer proofs (days
+  default/bounds/rejection, selector matching, state derivation, canonical
+  fingerprint decode, distinct reason→code mapping); `mesh`,
+  `command_registry`, `native_api_contract`, and `rpc` groups all passed
+  with zero skips, and `make lint-fast` and `make lint` both passed.
 
 ## Completion rule
 

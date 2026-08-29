@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 746 |
+| Registry entries (branches + leaves) | 749 |
 | Top-level roots | 12 |
 | Branches | 174 |
-| Leaves (dispatchable command paths) | 572 |
-| … `ready` (live handler in this build) | 516 |
+| Leaves (dispatchable command paths) | 575 |
+| … `ready` (live handler in this build) | 519 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 202 |
+| Leaves with `effect=mutate` | 203 |
 | Leaves with `effect=destructive` | 4 |
-| Leaves requiring **owner** authority | 114 |
+| Leaves requiring **owner** authority | 115 |
 
 Per source file:
 
@@ -95,7 +95,7 @@ Per source file:
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 52 | 10 | 42 |
+| `config/commands/ops.def` | 55 | 10 | 45 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
@@ -818,6 +818,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `ops mesh identity` (aliases: `ops.machine.status`, `machine.status`) | ready | read / read / operator · fast/low | none | `zcl.machine_mesh_identity.v1` | `z23 ops mesh identity` | Report this machine's mesh identity readiness |
+| `ops mesh status` | ready | read / read / operator · foreground/low | **`pairing_id`** | `zcl.mesh_status_receipt_view.v1` | `z23 ops mesh status --pairing_id=<64hex>` | Request one paired machine's signed status receipt |
 | `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
 | `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
 
@@ -825,6 +826,8 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
+| `ops mesh pair plan` | ready | read / read / operator · fast/low | **`peer`** | `zcl.mesh.pairing.plan.v1` | `z23 ops mesh pair plan --peer=<addr-or-fingerprint-prefix>` | Preview pairing one connected machine |
+| `ops mesh pair commit` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`peer`**, `fingerprint`, `days` | `zcl.mesh.pairing.commit.v1` | `z23 ops mesh pair commit --peer=<selector> --fingerprint=<64hex> [--days=7]` | Pair one connected machine with status-read authority |
 | `ops mesh pair list` | ready | read / read / operator · fast/low | none | `zcl.mesh.pairing.list.v1` | `z23 ops mesh pair list` | List this machine's owner-approved pairings |
 | `ops mesh pair revoke` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`pairing_id`**, `confirm` | `zcl.mesh.pairing.revoke.v1` | `z23 ops mesh pair revoke --pairing-id=<64hex>` | Revoke one local machine pairing |
 
