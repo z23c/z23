@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -171,8 +172,10 @@ static int test_policy_restart(void)
     ASSERT_EQ(vcs_zcode_sovereignty_policy_add(before, &rule),
               VCS_ZCODE_SOVEREIGNTY_OK);
     vcs_zcode_sovereignty_policy_set_advisory(before, true);
-    char datadir[] = "test-tmp/zcode_sovereignty_XXXXXX";
-    ASSERT(mkdtemp(datadir) != NULL);
+    /* Absolute: the atomic write this save goes through refuses a relative
+     * parent by design, so a relative fixture path fails before it starts. */
+    char datadir[PATH_MAX];
+    test_make_tmpdir(datadir, sizeof(datadir), "zcode_sovereignty", "save");
     char error[160] = {0};
     ASSERT_EQ(vcs_zcode_sovereignty_policy_save(before, datadir, error,
                                                  sizeof(error)),

@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Declare cursor-independent writes for open platform descriptors. */
+ * Purpose: write at an exact absolute offset on an already-open CRT
+ * descriptor without disturbing the caller's file pointer, so two writers
+ * sharing a descriptor cannot move each other's cursor. */
 #ifndef ZCL_PLATFORM_POSITIONED_IO_H
 #define ZCL_PLATFORM_POSITIONED_IO_H
 

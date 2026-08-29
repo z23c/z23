@@ -123,9 +123,9 @@ static bool wbs_canonical_backup_path(const char *backup_dir,
         return false;
     for (size_t i = 0; i < root_len; i++)
         if (!wbs_path_char_equal(canonical_root[i], canonical_path[i]))
-            return false; // raw-return-ok:path-containment-predicate
+            return false; // raw-return-ok: not under the root
     if (!wbs_path_char_equal(canonical_path[root_len], '/'))
-        return false; // raw-return-ok:path-containment-predicate
+        return false; // raw-return-ok: root is not a whole component
     const char *leaf = canonical_path + root_len + 1;
     if (strchr(leaf, '/') || strchr(leaf, '\\') ||
         strncmp(leaf, WALLET_BACKUP_FILENAME_PREFIX,
@@ -316,60 +316,10 @@ static struct zcl_result wbs_register_supervisor(void)
     supervisor_tick(id);
     return ZCL_OK;
 }
-/* WALLET_BACKUP_PASSWORD env policy: non-empty => encrypt; absent or
- * empty => plaintext with a one-time warning (the service is the
- * key-loss safety net, so it must not refuse to run). The password is
- * kept as a FULL-LENGTH heap copy: the --decrypt-wallet-backup restore
- * path derives its key from the raw env string, so truncating here
- * (e.g. into a fixed buffer) would encrypt every backup under a key
- * the documented recovery path can never re-derive. The copy is cached
- * and never freed — a running service's shallow config copy may still
- * reference it. */
-static void wbs_config_apply_env_password(struct wallet_backup_config *cfg)
-{
-    static char *cached_pw;
-    static bool warned_plaintext;
-    const char *env_pw = getenv("WALLET_BACKUP_PASSWORD");
-    if (!env_pw || !*env_pw) {
-        if (!warned_plaintext) {
-            warned_plaintext = true;
-            LOG_WARN("wallet_backup",
-                     "WALLET_BACKUP_PASSWORD not set — wallet backups will "
-                     "be written in cleartext (set it to enable encryption)");
-        }
-        return;
-    }
-    if (!cached_pw || strcmp(cached_pw, env_pw) != 0) {
-        size_t len = strlen(env_pw) + 1;
-        char *copy = zcl_malloc(len, "wallet_backup_env_pw");
-        if (!copy) {
-            /* encrypt=true with a NULL password makes
-             * wallet_backup_start fail loudly (-24) instead of
-             * silently writing plaintext against operator intent. */
-            LOG_WARN("wallet_backup",
-                     "cannot copy WALLET_BACKUP_PASSWORD (OOM) — backup "
-                     "start will refuse rather than fall back to plaintext");
-            cfg->encrypt = true;
-            cfg->encrypt_password = NULL;
-            return;
-        }
-        memcpy(copy, env_pw, len);
-        cached_pw = copy;   /* old copy (if any) intentionally leaked */
-    }
-    cfg->encrypt = true;
-    cfg->encrypt_password = cached_pw;
-}
-void wallet_backup_config_defaults(struct wallet_backup_config *cfg)
-{
-    if (!cfg) return;
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->interval_seconds = WALLET_BACKUP_DEFAULT_INTERVAL_SEC;
-    cfg->max_versions     = WALLET_BACKUP_DEFAULT_MAX_VERSIONS;
-    cfg->encrypt          = false;
-    /* Fleet-wide encryption policy rides the env var so every
-     * config_defaults caller (boot included) inherits it. */
-    wbs_config_apply_env_password(cfg);
-}
+
+/* Config defaults + the WALLET_BACKUP_PASSWORD env encryption policy
+ * (wallet_backup_config_defaults) live in wallet_backup_config.c. */
+
 void wallet_backup_status_snapshot(struct wallet_backup_status *out)
 {
     if (!out) return;

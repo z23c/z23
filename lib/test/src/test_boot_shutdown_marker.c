@@ -7,6 +7,7 @@
 #include "event/event.h"
 #include "util/thread_registry.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,28 +128,51 @@ int test_boot_shutdown_marker(void)
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "boot_shutdown_marker", "write");
-        char cwd[512];
-        char absolute_dir[768] = {0};
-        char marker[1024];
+        char marker[512];
         char buf[64];
-        bool fixture_private = chmod(dir, 0700) == 0 &&
-                               getcwd(cwd, sizeof(cwd)) != NULL;
-        int absolute_n = fixture_private
-            ? snprintf(absolute_dir, sizeof(absolute_dir), "%s/%s", cwd, dir)
-            : -1;
-        fixture_private = absolute_n > 0 &&
-                          (size_t)absolute_n < sizeof(absolute_dir);
+        /* test_fmt_tmpdir() (test/test_core.h) already spells the fixture
+         * absolutely, which is exactly what platform_private_path_resolve()
+         * demands of a parent — so do NOT prepend getcwd() again here.
+         * platform_private_directory_ensure() additionally requires the
+         * datadir's mode to be exactly 0700, so pin it and verify the pin
+         * landed: a fixture that cannot say it failed to set itself up turns
+         * a setup bug into a phantom writer defect. */
+        struct stat dir_st;
+        bool dir_absolute = dir[0] == '/';
+        errno = 0;
+        bool dir_chmod = chmod(dir, 0700) == 0;
+        bool dir_stat = stat(dir, &dir_st) == 0;
+        int setup_errno = errno;
+        unsigned dir_mode = dir_stat ? (unsigned)(dir_st.st_mode & 07777) : 0u;
+        bool dir_private = dir_chmod && dir_stat && dir_mode == 0700;
         int marker_n = snprintf(marker, sizeof(marker), "%s/.shutdown_clean",
-                                absolute_dir);
+                                dir);
+        bool marker_fits = marker_n > 0 && (size_t)marker_n < sizeof(marker);
 
-        bool ok = fixture_private && marker_n > 0 &&
-                  (size_t)marker_n < sizeof(marker) &&
-                  boot_shutdown_marker_write_clean(absolute_dir);
-        ok = ok && bsm_read_file(marker, buf, sizeof(buf));
+        errno = 0;
+        bool wrote = dir_absolute && dir_private && marker_fits &&
+                     boot_shutdown_marker_write_clean(dir);
+        int write_errno = errno;
+        bool read_back = wrote && bsm_read_file(marker, buf, sizeof(buf));
         char *end = NULL;
-        long stamp = strtol(buf, &end, 10);
-        BSM_CHECK("write clean marker with timestamp",
-                  ok && stamp > 0 && end && *end == '\n');
+        long stamp = read_back ? strtol(buf, &end, 10) : 0;
+        bool timestamped = read_back && stamp > 0 && end && *end == '\n';
+
+        BSM_CHECK("write clean marker with timestamp", timestamped);
+        if (!timestamped)
+            printf("  datadir=%s\n"
+                   "  absolute=%d private=%d "
+                   "(chmod=%d stat=%d mode=%04o errno=%s) marker_fits=%d\n"
+                   "  write_clean=%d (errno=%s) read_back=%d "
+                   "stamp=%ld trailing=%d\n"
+                   "  marker=%s\n"
+                   "  content=[%s]\n",
+                   dir, (int)dir_absolute, (int)dir_private, (int)dir_chmod,
+                   (int)dir_stat, dir_mode, strerror(setup_errno),
+                   (int)marker_fits, (int)wrote,
+                   strerror(write_errno), (int)read_back, stamp,
+                   read_back && end ? (int)*end : -1, marker,
+                   read_back ? buf : "");
         test_rm_rf_recursive(dir);
     }
 

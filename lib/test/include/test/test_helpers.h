@@ -80,7 +80,6 @@
 #include "net/p2p_message.h"
 #include "net/netbase.h"
 #include "bloom/merkleblock.h"
-#include "script/zcashconsensus.h"
 #include "net/addrman.h"
 #include "net/net.h"
 #include "validation/txmempool.h"

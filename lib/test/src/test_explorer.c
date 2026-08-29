@@ -21,6 +21,26 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Build "<cwd>/.zcl_test_explorer_<stem>_<pid>" — an ABSOLUTE fixture
+ * datadir. Cases whose subject only reads from the datadir spell it
+ * relatively; a case whose subject WRITES into it must not, because the
+ * production writers go through platform_private_path_resolve, which
+ * realpath()s the destination's parent and refuses any pathname that does not
+ * start at the root. On getcwd failure this falls back to the relative
+ * spelling so the caller's write fails loudly rather than silently landing
+ * somewhere else. */
+static void ex_abs_dbdir(char *buf, size_t n, const char *stem)
+{
+    char cwd[256];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        (void)snprintf(buf, n, ".zcl_test_explorer_%s_%d", stem,
+                       (int)getpid());
+        return;
+    }
+    (void)snprintf(buf, n, "%s/.zcl_test_explorer_%s_%d", cwd, stem,
+                   (int)getpid());
+}
+
 int test_explorer(void)
 {
     int failures = 0;
@@ -388,12 +408,17 @@ int test_explorer(void)
 
     printf("explorer: HODL page cache is keyed by block hash... ");
     {
-        char dbdir[256];
-        char dbpath[320];
-        char cachepath[384];
+        char dbdir[384];
+        char dbpath[448];
+        char cachepath[512];
         sqlite3 *db = NULL;
-        snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_hodl_cache_%d",
-                 (int)getpid());
+        /* ABSOLUTE, unlike the read-only fixtures above: the HODL view
+         * persists its snapshot through platform_private_path_resolve, which
+         * realpath()s the destination's parent and refuses any pathname that
+         * does not start at the root ("destination parent is not a safe real
+         * directory"). A relative datadir means the cache file is never
+         * written and the cache assertion below can never pass. */
+        ex_abs_dbdir(dbdir, sizeof(dbdir), "hodl_cache");
         mkdir(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         snprintf(cachepath, sizeof(cachepath),
@@ -488,7 +513,7 @@ int test_explorer(void)
              strstr((char *)out4,
                     "verified cached transparent UTXO set") != NULL;
 
-        char cmd[384];
+        char cmd[448];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", dbdir);
         system(cmd);
 

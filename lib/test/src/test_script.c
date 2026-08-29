@@ -11,7 +11,6 @@
 #include "script/sigcache.h"
 #include "consensus/validation.h"
 #include "validation/sigops.h"
-#include "script/zcashconsensus.h"
 #include <sys/resource.h>
 #include <sys/time.h>
 
@@ -856,13 +855,6 @@ int test_script(void)
         s.data[22] = OP_EQUAL;
         s.size = 23;
         if (script_is_pay_to_script_hash(&s))
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("zcl_consensus_version... ");
-    {
-        if (zcl_consensus_version() == ZCASHCONSENSUS_API_VER)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

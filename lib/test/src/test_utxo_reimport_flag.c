@@ -64,7 +64,7 @@ int test_utxo_reimport_flag(void)
 
     /* ── 1. Absent flag → false, no side effect ─────────────────── */
     {
-        char dir[64];
+        char dir[PATH_MAX];
         if (!urf_make_tmpdir(dir, sizeof(dir))) {
             printf("urf: mkdtemp FAIL\n");
             return 1;
@@ -81,7 +81,7 @@ int test_utxo_reimport_flag(void)
 
     /* ── 2. Set with '1' → true + cleared ───────────────────────── */
     {
-        char dir[64];
+        char dir[PATH_MAX];
         if (!urf_make_tmpdir(dir, sizeof(dir))) {
             printf("urf: mkdtemp FAIL\n");
             return 1;
@@ -99,7 +99,7 @@ int test_utxo_reimport_flag(void)
 
     /* ── 3. Set with '0' → false BUT cleared ────────────────────── */
     {
-        char dir[64];
+        char dir[PATH_MAX];
         if (!urf_make_tmpdir(dir, sizeof(dir))) {
             printf("urf: mkdtemp FAIL\n");
             return 1;
@@ -118,7 +118,7 @@ int test_utxo_reimport_flag(void)
 
     /* ── 4. set() then check_and_clear round-trip ───────────────── */
     {
-        char dir[64];
+        char dir[PATH_MAX];
         if (!urf_make_tmpdir(dir, sizeof(dir))) {
             printf("urf: mkdtemp FAIL\n");
             return 1;

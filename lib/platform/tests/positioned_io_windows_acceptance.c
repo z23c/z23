@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: Windows acceptance that platform_positioned_write() writes at an
+ * absolute offset WITHOUT disturbing the descriptor file pointer, and
+ * leaves the bytes before that offset intact. */
 #include "platform/positioned_io.h"
 
 #include <fcntl.h>

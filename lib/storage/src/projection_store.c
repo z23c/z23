@@ -86,20 +86,6 @@ struct projection_file_identity {
     uint32_t version_valid_for;
 };
 
-static bool positioned_snapshot_equal(
-    const struct platform_positioned_file_snapshot *left,
-    const struct platform_positioned_file_snapshot *right)
-{
-    return left->size == right->size &&
-           left->modified_seconds == right->modified_seconds &&
-           left->modified_nanoseconds == right->modified_nanoseconds &&
-           left->changed_seconds == right->changed_seconds &&
-           left->changed_nanoseconds == right->changed_nanoseconds &&
-           left->volume == right->volume &&
-           left->file_low == right->file_low &&
-           left->file_high == right->file_high;
-}
-
 static bool projection_file_identity_read(
     const char *path, struct projection_file_identity *out)
 {
@@ -114,8 +100,11 @@ static bool projection_file_identity_read(
         return false;
     unsigned char hdr[100];
     int64_t nr = platform_positioned_file_read(&file, hdr, sizeof(hdr), 0);
+    /* Field-wise, never memcmp: the snapshot struct's alignment padding is
+     * undefined, so a whole-object compare can report an unchanged file as
+     * changed and reject a perfectly good projection. */
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  positioned_snapshot_equal(&before, &after);
+        platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable || nr != (int64_t)sizeof(hdr) ||
         memcmp(hdr, "SQLite format 3\000", 16) != 0)

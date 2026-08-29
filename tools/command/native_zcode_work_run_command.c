@@ -220,14 +220,17 @@ static bool run_codex_runner_path(char out[ZWORK_RUN_PATH_MAX])
     if (!slash)
         return false;
     *slash = '\0';
+    /* The image suffix is chosen BEFORE the call: _FORTIFY_SOURCE makes
+     * snprintf a macro, and a preprocessor directive between a macro's
+     * parentheses is undefined behaviour. */
 #if defined(_WIN32)
-    const char *exe_sfx = ".exe";
+    const char *const runner_ext = ".exe";
 #else
-    const char *exe_sfx = "";
+    const char *const runner_ext = "";
 #endif
     int n = snprintf(out, ZWORK_RUN_PATH_MAX,
                      "%s/zclassic23-zcode-adapter-runner%s", executable,
-                     exe_sfx);
+                     runner_ext);
 #if defined(_WIN32)
     struct platform_positioned_file runner;
     platform_positioned_file_init(&runner);
@@ -1837,14 +1840,17 @@ static bool run_preflight_runner_path(char out[ZWORK_RUN_PATH_MAX])
 #endif
     if (!slash) return false;
     *slash = '\0';
+    /* The image suffix is chosen BEFORE the call: _FORTIFY_SOURCE makes
+     * snprintf a macro, and a preprocessor directive between a macro's
+     * parentheses is undefined behaviour. */
 #if defined(_WIN32)
-    const char *exe_sfx = ".exe";
+    const char *const runner_ext = ".exe";
 #else
-    const char *exe_sfx = "";
+    const char *const runner_ext = "";
 #endif
     int n = snprintf(out, ZWORK_RUN_PATH_MAX,
                      "%s/zclassic23-zcode-adapter-runner%s", executable,
-                     exe_sfx);
+                     runner_ext);
 #if defined(_WIN32)
     struct platform_positioned_file runner;
     platform_positioned_file_init(&runner);

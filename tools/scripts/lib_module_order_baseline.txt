@@ -15,26 +15,31 @@
 # violations against the other. The gate pins build/obj and refuses to run if
 # the header line above disagrees with it.
 #
-# WHY THERE ARE ANY: measured 2026-07-26 over the compiled objects of the
+# WHY THERE ARE ANY: re-measured 2026-08-29 over the compiled objects of the
 # production tree (make build-only; tools/dev/module-linkgraph.sh --summary
-# --obj-root build/obj), lib/ has 195 module-to-module edges across the 37 lib
+# --obj-root build/obj), lib/ has 248 module-to-module edges across the 46 lib
 # modules that have any edge at all, with two non-trivial strongly-connected
-# components: {metrics sync validation net rpc storage script} and
+# components: {metrics sync validation net rpc storage} and
 # {util health}. A cycle cannot be ordered, so some edges must run backward
 # whatever order is chosen.
 #
-# THESE FIVE ARE THE PROVEN MINIMUM, not a heuristic's leftovers. Re-check it
+# 2026-08-29: the unused zcashconsensus C-ABI shim (lib/script/src/
+# zcashconsensus.c) was deleted. It carried lib/script's entire upward reach,
+# so lib/script left the big component — now {metrics sync validation net rpc
+# storage} — and the floor below dropped by one.
+#
+# THESE FOUR ARE THE PROVEN MINIMUM, not a heuristic's leftovers. Re-check it
 # in one command:
 #
 #   tools/dev/module-linkgraph.sh --fas --obj-root build/obj
 #
-# It solves each component exactly and reports the floor as 4 + 1 = 5, which
+# It solves each component exactly and reports the floor as 3 + 1 = 4, which
 # the order in config/lib_module_order.def hits exactly. Minimum feedback arc
 # set decomposes over strongly-connected components — an edge between two
 # components can always be made forward by ordering the components
 # topologically — so solving those two components settles the whole graph.
-# Removing these 5 and running `tsort` over the remaining 190 edges succeeds
-# and emits all 37 modules, proving the residue is acyclic. Consequence: NO
+# Removing these 4 and running `tsort` over the remaining edges succeeds and
+# emits every module, proving the residue is acyclic. Consequence: NO
 # reordering of the .def can delete a line here. Each one is paid down only by
 # breaking the cycle.
 #
@@ -46,8 +51,6 @@
 # What each line owes (symbol counts re-measured 2026-07-26 from build/obj;
 # tools/dev/module-linkgraph.sh --summary):
 #   lib/net -> lib/rpc            1 sym   legacy_chain_rpc_get_chainwork
-#   lib/script -> lib/validation  3 syms  tx_make_sig_checker, precompute_tx_data,
-#                                         tx_sig_checker_init
 #   lib/storage -> lib/net        2 syms  net_addr_to_string, net_addr_is_routable
 #   lib/sync -> lib/storage       5 syms  progress_meta_get, progress_meta_set_in_tx,
 #                                         progress_store_tx_lock/_unlock,
@@ -66,7 +69,6 @@
 #   tools/dev/module-linkgraph.sh --edges | grep -P '^lib/net\tlib/rpc\t'
 
 lib/net -> lib/rpc
-lib/script -> lib/validation
 lib/storage -> lib/net
 lib/sync -> lib/storage
 lib/util -> lib/health

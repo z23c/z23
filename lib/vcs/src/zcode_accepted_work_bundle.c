@@ -209,6 +209,11 @@ vcs_zcode_accepted_work_bundle_export(
     return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK;
 }
 
+/* Everything from here to the matching #endif serves the import staging
+ * transaction only, which the Windows arm of the import below refuses. Left
+ * unguarded they would each be an unused static under -Werror there. */
+#if !defined(_WIN32)
+
 static enum vcs_zcode_accepted_work_bundle_result accepted_bundle_parse(
     const uint8_t accepted_work_root[32], const uint8_t source_root[32],
     const uint8_t *wire, size_t wire_len,
@@ -297,6 +302,8 @@ static uint32_t accepted_bundle_work_receipt_count(
     return receipts;
 }
 
+#endif /* !_WIN32 */
+
 enum vcs_zcode_accepted_work_bundle_result
 vcs_zcode_accepted_work_bundle_import(
     const char *workspace, const uint8_t accepted_work_root[32],
@@ -308,6 +315,23 @@ vcs_zcode_accepted_work_bundle_import(
     if (work_receipt_count_out) *work_receipt_count_out = 0;
     if (!workspace || !accepted_work_root || !source_root || !wire)
         return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_NULL;
+#if defined(_WIN32)
+    /* Import is a staging transaction: it materializes every carried object
+     * into a scratch workspace, resolves the accepted-work chain there, and
+     * then recursively removes that tree. zcl_tree_remove() is an
+     * unconditional refusal on Windows (file_tree_ops.c) pending
+     * handle-bound no-reparse qualification, so the transaction could
+     * neither complete nor clean up on this platform — it would leave a
+     * staged copy of the whole chain behind on every call and report the
+     * leak as an authority mismatch. Refuse before creating anything, for
+     * the same reason vcs_source_package_reconstruct_verify() refuses in
+     * source_package_checkout.c. The staging store is what is unavailable,
+     * so the result is the same one the scratch-create failure below
+     * reports. */
+    (void)wire_len;
+    if (accepted_out) memset(accepted_out, 0, sizeof(*accepted_out));
+    return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS;
+#else
     struct accepted_bundle_view views[ACCEPTED_BUNDLE_MAX_OBJECTS];
     memset(views, 0, sizeof(views));
     size_t count = 0, task_authority_len = 0;
@@ -357,4 +381,5 @@ vcs_zcode_accepted_work_bundle_import(
         *work_receipt_count_out = accepted_bundle_work_receipt_count(
             views, count);
     return VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK;
+#endif
 }

@@ -311,6 +311,7 @@ static int test_null_node_is_inert(void)
  * the cwd the suite runs in. Bounded walk. */
 #define CONNMAN_REL "lib/net/src/connman.c"
 #define NETSRC_REL  "lib/net/src/net.c"
+#define NETLISTEN_REL "lib/net/src/net_listen.c"
 
 static const char *repo_root(void)
 {
@@ -432,13 +433,26 @@ static int test_teardown_path_is_not_silent(void)
         ASSERT(emit < node_free);
 
         /* Both directions publish an open line, so opens and closes pair.
-         * The needles carry the source's own backslash escapes — these live
-         * inside a C string literal in net.c, not as bare quotes. */
-        ASSERT(count_occurrences(src, "\\\"inbound\\\":false") >= 1);
-        ASSERT(count_occurrences(src, "\\\"inbound\\\":true") >= 1);
+         * The two directions no longer live in one file: the outbound dial
+         * stays in net.c and the inbound accept path moved to net_listen.c,
+         * so the open lines must be counted across BOTH. Counting only net.c
+         * would silently drop the inbound half and let a deleted open line
+         * read as a pass. The needles carry the source's own backslash
+         * escapes -- these live inside a C string literal, not as bare
+         * quotes. */
+        char *listen_src = slurp(NETLISTEN_REL);
+        ASSERT(listen_src != NULL);
+        ASSERT(count_occurrences(src, "\\\"inbound\\\":false") +
+               count_occurrences(listen_src, "\\\"inbound\\\":false") >= 1);
+        ASSERT(count_occurrences(src, "\\\"inbound\\\":true") +
+               count_occurrences(listen_src, "\\\"inbound\\\":true") >= 1);
         ASSERT(count_occurrences(
-                   src, "log_jsonf(LOG_JSON_INFO, \"peer_connected\",") == 2);
+                   src, "log_jsonf(LOG_JSON_INFO, \"peer_connected\",") +
+               count_occurrences(
+                   listen_src,
+                   "log_jsonf(LOG_JSON_INFO, \"peer_connected\",") == 2);
 
+        free(listen_src);
         free(src);
         PASS();
     } _test_next:;

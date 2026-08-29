@@ -153,7 +153,10 @@ static void dr_make_key(struct dr_key *k)
 static void dr_mkdir(char *dir, size_t cap, const char *tag)
 {
     mkdir("./test-tmp", 0755); /* raw-alloc-ok:test-fixture */
-    snprintf(dir, cap, "./test-tmp/drill_%d_%s", (int)getpid(), tag);
+    /* Absolute via the shared formatter: the restore and backup services write
+     * through platform_private_path_resolve(), which refuses a parent that is
+     * not absolute. Same directory, spelled so production will accept it. */
+    test_fmt_tmpdir(dir, cap, "drill", tag);
     mkdir(dir, 0700); /* raw-alloc-ok:test-fixture */
 }
 
@@ -481,8 +484,7 @@ static int act1_transparent(void)
     }
 
     /* ── RESTORE onto a fresh datadir, from the backup alone ────── */
-    snprintf(newdir, sizeof(newdir), "./test-tmp/drill_%d_act1new",
-             (int)getpid());
+    test_fmt_tmpdir(newdir, sizeof(newdir), "drill", "act1new");
     /* Deliberately NOT created: a rebuilt machine has no datadir, and the
      * restore service is supposed to make one. */
     struct wallet_restore_report rep;
@@ -811,8 +813,7 @@ static int act2_bodyless_restore_must_fail_loud(void)
     DR_CHECK("act2: DESTROY the source datadir", dr_is_destroyed(srcdir));
 
     /* Restore onto a datadir that will have NO block bodies. */
-    snprintf(snapdir, sizeof(snapdir), "./test-tmp/drill_%d_act2snap",
-             (int)getpid());
+    test_fmt_tmpdir(snapdir, sizeof(snapdir), "drill", "act2snap");
     struct wallet_restore_report rep;
     struct wallet_restore_request req = {
         .backup_path = plainpath,
@@ -1228,7 +1229,7 @@ static int act3_shielded(void)
              dr_is_destroyed(livedir));
 
     /* ── RESTORE ─────────────────────────────────────────────────── */
-    snprintf(newdir, sizeof(newdir), "./test-tmp/drill_%d_act3new", (int)getpid());
+    test_fmt_tmpdir(newdir, sizeof(newdir), "drill", "act3new");
     struct wallet_restore_report rep;
     struct wallet_restore_request req = {
         .backup_path = encpath,

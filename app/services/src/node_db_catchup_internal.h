@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sqlite3.h>
+#include "base/result.h"
 #include "platform/read_mapping.h"
 
 /* Contention-safe proven-authority read for the catchup walk. Defined in
@@ -23,9 +24,12 @@ struct node_db_catchup_block_mapping {
 
 void node_db_catchup_block_mapping_init(
     struct node_db_catchup_block_mapping *block_mapping);
-bool node_db_catchup_block_mapping_open_quiet(
+/* Quiet mapping open. On refusal the result carries the exact errno in
+ * `code` — ENOENT/ENOTDIR mean the blk file was never written, which the
+ * catchup walk treats as a lean hole rather than an incident. */
+struct zcl_result node_db_catchup_block_mapping_open_quiet(
     struct node_db_catchup_block_mapping *block_mapping,
-    const char *datadir, int file_num, int *out_errno);
+    const char *datadir, int file_num);
 void node_db_catchup_block_mapping_close(
     struct node_db_catchup_block_mapping *block_mapping);
 

@@ -14,12 +14,154 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
+/* Directory-handle-relative open/rename/unlink, flock(2) and the POSIX file
+ * mode predicates the slot machinery is built on. mingw ships no
+ * <sys/file.h> at all, so these are pulled in only on the arm that uses
+ * them; the Windows arm below refuses instead of emulating them. */
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
+
+/* Shared on every platform: this is pure text validation with no OS
+ * dependency, so a Windows build can still reject a malformed operator
+ * threshold at parse time even though every slot MUTATION below refuses.
+ * Nothing is weakened by that — the refusal lives on the calls that would
+ * actually touch the filesystem or exec a binary. */
+bool os_binary_slots_parse_threshold(const char *text, uint32_t *out)
+{
+    if (!text || !text[0] || !out)
+        return false;
+    for (const char *p = text; *p; p++)
+        if (*p < '0' || *p > '9')
+            return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0' || value == 0 ||
+        value > UINT32_MAX)
+        return false;
+    *out = (uint32_t)value;
+    return true;
+}
+
+#if defined(_WIN32)
+
+/* ── Windows: named, typed unavailability ──────────────────────────────────
+ *
+ * The guarantees this module sells are:
+ *   1. directory-handle-relative resolution — every open, create, rename and
+ *      unlink is issued through openat/mkdirat/renameat/unlinkat anchored on a
+ *      descriptor for a directory we already proved, so mutating the pathname
+ *      afterwards cannot redirect a later step;
+ *   2. no symbolic link at any path component (O_NOFOLLOW on every component);
+ *   3. every traversed component is a directory (O_DIRECTORY);
+ *   4. an inode-pinned executable descriptor handed to fexecve(2), so the
+ *      bytes that run are exactly the bytes that were checked.
+ *
+ * Win32 supplies none of them.
+ *
+ *   - There is no *at() family. CreateFileW takes a whole path, and
+ *     FILE_FLAG_OPEN_REPARSE_POINT suppresses reparse-point traversal only for
+ *     the FINAL component; every intermediate directory is still followed. A
+ *     junction planted anywhere in the prefix silently redirects the open, so
+ *     neither the per-component no-symlink guarantee nor the anchoring that
+ *     keeps the lock file, the streak file, the temporary and the rename
+ *     inside one proven directory object can be reconstructed from path-based
+ *     Win32 calls.
+ *   - There is no fexecve(2). platform_execve_fd() already refuses on Windows
+ *     (platform/process_compat.h) precisely because reconstructing a pathname
+ *     and exec'ing it is a TOCTOU hole, so a pinned handle here could never be
+ *     executed — the pin would be guarantee-shaped and load-bearing for
+ *     nothing.
+ *   - The execute bit reported by the Windows CRT is a filename heuristic, not
+ *     an access check, so "is a regular executable" would be an unfounded
+ *     claim.
+ *
+ * A partial emulation would be worse than none: a prepare_launch that returned
+ * true and then died at the exec refusal would already have incremented the
+ * durable boot-failure streak, and at threshold would latch a permanent
+ * fallback blocker for a launch that never happened.
+ *
+ * So the module refuses by name with errno == ENOTSUP and a Windows launcher
+ * fails closed and loudly instead of failing to link. Replace this arm only
+ * together with a Win32 anchored-open primitive and a descriptor-bound
+ * execution primitive, proven by Windows-native adversarial acceptance
+ * (component replacement and junction swap between steps).
+ */
+
+#define SLOT_WIN32_REFUSAL                                                 \
+    "binary A/B slot mutation is disabled on Windows pending a retained "  \
+    "directory capability transaction: no directory-handle-relative "      \
+    "O_NOFOLLOW/O_DIRECTORY open and no descriptor-bound exec"
+
+static bool slots_unavailable(char *error, size_t error_size)
+{
+    errno = ENOTSUP;
+    if (error && error_size)
+        (void)snprintf(error, error_size, "%s", SLOT_WIN32_REFUSAL);
+    return false;
+}
+
+bool os_binary_slots_ensure_directory(const char *slots_dir,
+                                      char *error, size_t error_size)
+{
+    (void)slots_dir;
+    return slots_unavailable(error, error_size);
+}
+
+bool os_binary_slots_prepare_launch(const char *slots_dir,
+                                    const char *current_path,
+                                    uint32_t fallback_threshold,
+                                    struct os_binary_slots_launch *out)
+{
+    (void)slots_dir;
+    (void)current_path;
+    (void)fallback_threshold;
+    if (!out) {
+        errno = ENOTSUP;
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->executable_fd = -1;
+    return slots_unavailable(out->error, sizeof(out->error));
+}
+
+void os_binary_slots_close_launch(struct os_binary_slots_launch *launch)
+{
+    /* prepare_launch never pins a descriptor on this platform, so there is
+     * nothing to close; never close an integer this module did not open. */
+    if (!launch)
+        return;
+    launch->executable_fd = -1;
+}
+
+bool os_binary_slots_reset_streak_file(const char *streak_file,
+                                       char *error, size_t error_size)
+{
+    (void)streak_file;
+    return slots_unavailable(error, error_size);
+}
+
+bool os_binary_slots_increment_streak_file(const char *streak_file,
+                                           char *error, size_t error_size)
+{
+    (void)streak_file;
+    return slots_unavailable(error, error_size);
+}
+
+#ifdef ZCL_TESTING
+void os_binary_slots_test_fail_before_rename_once(void)
+{
+    /* Every slot operation already refuses here, so there is no rename to fail
+     * before and arming this cannot turn a Windows test green by accident. */
+}
+#endif
+
+#else /* !_WIN32 — POSIX implementation, unchanged */
 
 #ifndef O_NOFOLLOW
 #error "os_binary_slots requires O_NOFOLLOW"
@@ -29,7 +171,6 @@
 #define SLOT_TRAVERSE_FLAGS (O_PATH | O_DIRECTORY | O_CLOEXEC)
 #else
 #define SLOT_TRAVERSE_FLAGS (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-#endif
 #endif
 
 #define SLOT_LOCK_BASENAME ".binary-slots.lock"
@@ -54,7 +195,6 @@ static void set_error(char *out, size_t out_size, const char *fmt, ...)
     va_end(ap);
 }
 
-#ifndef _WIN32
 static bool component_valid(const char *s)
 {
     return s && s[0] && strcmp(s, ".") != 0 && strcmp(s, "..") != 0 &&
@@ -76,76 +216,6 @@ static bool join_slots_path(const char *slots_dir, const char *base,
     }
     return true;
 }
-#endif
-
-bool os_binary_slots_parse_threshold(const char *text, uint32_t *out)
-{
-    if (!text || !text[0] || !out)
-        return false;
-    for (const char *p = text; *p; p++)
-        if (*p < '0' || *p > '9')
-            return false;
-    errno = 0;
-    char *end = NULL;
-    unsigned long long value = strtoull(text, &end, 10);
-    if (errno == ERANGE || !end || *end != '\0' || value == 0 ||
-        value > UINT32_MAX)
-        return false;
-    *out = (uint32_t)value;
-    return true;
-}
-
-#ifdef _WIN32
-static bool windows_refusal(char *error, size_t error_size)
-{
-    set_error(error, error_size,
-              "binary slot mutation is disabled on Windows pending a "
-              "retained directory capability transaction");
-    return false;
-}
-
-bool os_binary_slots_ensure_directory(const char *slots_dir,
-                                      char *error, size_t error_size)
-{
-    (void)slots_dir;
-    return windows_refusal(error, error_size);
-}
-
-bool os_binary_slots_prepare_launch(const char *slots_dir,
-                                    const char *current_path,
-                                    uint32_t fallback_threshold,
-                                    struct os_binary_slots_launch *out)
-{
-    (void)slots_dir;
-    (void)current_path;
-    (void)fallback_threshold;
-    if (!out)
-        return false;
-    memset(out, 0, sizeof(*out));
-    out->executable_fd = -1;
-    return windows_refusal(out->error, sizeof(out->error));
-}
-
-void os_binary_slots_close_launch(struct os_binary_slots_launch *launch)
-{
-    if (launch)
-        launch->executable_fd = -1;
-}
-
-bool os_binary_slots_reset_streak_file(const char *streak_file,
-                                       char *error, size_t error_size)
-{
-    (void)streak_file;
-    return windows_refusal(error, error_size);
-}
-
-bool os_binary_slots_increment_streak_file(const char *streak_file,
-                                           char *error, size_t error_size)
-{
-    (void)streak_file;
-    return windows_refusal(error, error_size);
-}
-#else
 
 bool os_binary_slots_ensure_directory(const char *slots_dir,
                                       char *error, size_t error_size)
@@ -570,4 +640,5 @@ bool os_binary_slots_increment_streak_file(const char *streak_file,
 {
     return streak_file_operation(streak_file, false, error, error_size);
 }
-#endif
+
+#endif /* !_WIN32 */

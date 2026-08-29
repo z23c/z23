@@ -71,6 +71,9 @@ struct json_value;
 #define MESH_OBS_ONION_MAX     64   /* "<56>.onion" + NUL, with slack */
 #define MESH_OBS_REASON_MAX    32
 #define MESH_OBS_HEXHASH       65   /* 64 hex + NUL */
+/* A build-target token — "linux", "macos", "windows", "arm64", "x86_64".
+ * Bounded because it arrives from an UNTRUSTED emitter. */
+#define MESH_OBS_PLATFORM_MAX  16
 
 /* The largest observation document this build will parse. A peer document
  * is UNTRUSTED input; refusing an oversized body BY NAME is cheaper and
@@ -129,6 +132,23 @@ const char *mesh_obs_outcome_name(enum mesh_obs_outcome o);
 bool mesh_obs_stage_from_name(const char *name, enum mesh_obs_stage *out);
 bool mesh_obs_outcome_from_name(const char *name, enum mesh_obs_outcome *out);
 
+/* This binary's own build target. Compile-time constants; never "" — a
+ * target this source does not name reports "unknown", which is a real
+ * answer and is distinguishable from an emitter that said nothing. */
+const char *mesh_obs_platform_os(void);
+const char *mesh_obs_platform_arch(void);
+
+/* DELIBERATELY NOT AN ENUM. Stage and outcome are closed sets this build
+ * defines, so an unrecognised token there is a genuine protocol error and
+ * is refused by name. The set of operating systems is NOT closed: refusing
+ * a whole document because its emitter runs something this build has never
+ * heard of would make the mesh un-extensible, and would silently drop the
+ * first node of every new platform — the exact failure this field exists to
+ * prevent. So an unknown token is CARRIED VERBATIM, and only a malformed
+ * one is refused. Valid: "" (said nothing), or 1..MESH_OBS_PLATFORM_MAX-1
+ * characters of [a-z0-9_]. */
+bool mesh_obs_platform_token_ok(const char *tok);
+
 /* ── The recompute handle ───────────────────────────────────────────────
  *
  * Fixed offsets BACK from this node's own tip, so two nodes a few blocks
@@ -148,6 +168,25 @@ struct mesh_obs_self {
     char    schema[32];                  /* MESH_OBS_SCHEMA                */
     char    onion[MESH_OBS_ONION_MAX];   /* "" when we have no onion yet   */
     char    source_id[MESH_OBS_HEXHASH]; /* build identity of the emitter  */
+
+    /* PLATFORM TRUTH. `tor_stub_build` alone cannot carry it: a Linux box
+     * built with plain `make` and a macOS box whose PLATFORM has no
+     * embedded Tor at all emit the identical `true`. One is an operator
+     * mistake a rebuild fixes; the other is a permanent property of that
+     * machine. A reader that cannot tell them apart has to guess, and a
+     * fleet view built on that guess is wrong about which boxes can ever
+     * be reached. These two tokens are what makes the difference readable.
+     *
+     * Compile-time constants of the emitting binary, exactly like
+     * source_id: they read no file, no environment variable and no working
+     * directory, so they answer "what was this executable built for", never
+     * "what is this process sitting on right now".
+     *
+     * "" means the emitter did not say — a real value, never upgraded to a
+     * guess. WEIGHTED, NEVER GATED: like every capability field below,
+     * mesh_observation_compose() may not branch on either of them. */
+    char    os[MESH_OBS_PLATFORM_MAX];
+    char    arch[MESH_OBS_PLATFORM_MAX];
 
     /* chain position — every field recomputable by a reader */
     int64_t tip_height;
@@ -367,7 +406,10 @@ struct mesh_conclusion {
 /* THE fold. See mesh_observation_compose.c for the step-by-step contract.
  * Note what this signature does NOT accept: no fsync_us, no pread_us, no
  * min_ping_us, no stage_elapsed_us, no cores, no rotational. That is R2
- * enforced by the compiler rather than by a promise. */
+ * enforced by the compiler rather than by a promise. `os` and `arch` reach
+ * this function only inside a slot's record, and it may not branch on
+ * either: a platform is something a reader WEIGHTS, never a bar a machine
+ * can be graded against. test_mesh_observation_compose pins that. */
 void mesh_observation_compose(const struct mesh_obs_slot *slots, size_t n,
                               const struct mesh_reader_chain *reader,
                               const struct mesh_compose_budget *budget,

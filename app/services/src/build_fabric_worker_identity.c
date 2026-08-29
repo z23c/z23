@@ -20,6 +20,57 @@
 
 #define BFW_IDENTITY_PATH_MAX 4096
 
+/* Host platform token for the advertised capability string, derived from
+ * the compiler's own view of the host — the same __linux__/__APPLE__ split
+ * lib/platform/src/os_proc.c already branches on, mirroring the Makefile's
+ * ZCL_HOST_OS Darwin/Linux distinction. Not a new seam: reusing the one
+ * this codebase already uses for every other Linux/Darwin behavioral fork. */
+#if defined(__linux__)
+#define BFW_HOST_PLATFORM "linux"
+#elif defined(__APPLE__)
+#define BFW_HOST_PLATFORM "macos"
+#else
+#define BFW_HOST_PLATFORM "unknown"
+#endif
+
+/* Build the advertised capability string for a host that can actually
+ * capture a toolchain capsule, or the named refusal for one that cannot.
+ * vcs_toolchain_capsule_v1_capture_gcc() probes crt1.o/crti.o/crtn.o and
+ * libc.so.6 (ELF/glibc-specific) and is the exact gate
+ * build_fabric_worker_execute() rechecks before running any dispatched
+ * c23.compile/.test/.fuzz/.package action; a worker that fails this probe
+ * can never execute what those tokens would claim, so it must not
+ * advertise them on its durable, signed identity row. */
+static struct zcl_result build_fabric_worker_capabilities(
+    bool have_toolchain, char *out, size_t out_len)
+{
+    if (!have_toolchain)
+        return ZCL_ERR(-1,
+                       "build worker declines: host platform \"%s\" cannot "
+                       "capture a %s gcc toolchain capsule "
+                       "(vcs_toolchain_capsule_v1_capture_gcc failed "
+                       "probing crt1.o/crti.o/crtn.o/libc.so.6); refusing "
+                       "to advertise c23.compile/.test/.fuzz/.package "
+                       "capability it cannot execute",
+                       BFW_HOST_PLATFORM, VCS_BUILD_TARGET_V1);
+    int n = snprintf(out, out_len, "%s,x86-64-v3,gcc,%s,%s,%s,%s",
+                     BFW_HOST_PLATFORM, VCS_BUILD_ACTION_KIND_V1,
+                     VCS_BUILD_ACTION_KIND_TEST_V1,
+                     VCS_BUILD_ACTION_KIND_FUZZ_V1,
+                     VCS_BUILD_ACTION_KIND_PACKAGE_V1);
+    if (n <= 0 || (size_t)n >= out_len)
+        return ZCL_ERR(-1, "worker capabilities string too long");
+    return ZCL_OK;
+}
+
+#ifdef ZCL_TESTING
+struct zcl_result build_fabric_worker_capabilities_for_test(
+    bool have_toolchain, char *out, size_t out_len)
+{
+    return build_fabric_worker_capabilities(have_toolchain, out, out_len);
+}
+#endif
+
 struct zcl_result build_fabric_worker_identity_load(
     const char *datadir, struct db_build_worker *worker,
     uint8_t signer_secret[32], uint8_t signer_pubkey[32])
@@ -99,11 +150,9 @@ struct zcl_result build_fabric_worker_identity_load(
     memset(worker, 0, sizeof(*worker));
     zcl_hex_encode(worker_id, sizeof(worker_id), worker->worker_id);
     zcl_hex_encode(signer_pubkey, 32, worker->signer_pubkey);
-    (void)snprintf(worker->capabilities, sizeof(worker->capabilities),
-                   "linux,x86-64-v3,gcc,%s,%s,%s,%s",
-                   VCS_BUILD_ACTION_KIND_V1, VCS_BUILD_ACTION_KIND_TEST_V1,
-                   VCS_BUILD_ACTION_KIND_FUZZ_V1,
-                   VCS_BUILD_ACTION_KIND_PACKAGE_V1);
-    return ZCL_OK;
+    struct vcs_toolchain_capsule_v1 capsule;
+    bool have_toolchain = vcs_toolchain_capsule_v1_capture_gcc(&capsule);
+    return build_fabric_worker_capabilities(
+        have_toolchain, worker->capabilities, sizeof(worker->capabilities));
 #endif
 }

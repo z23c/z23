@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Handle-bound private file publication across POSIX and Win32. */
+ *
+ * purpose: exclusive-create, lock, and durable-retire operations on a
+ * single private file, portable across POSIX and Windows. */
 #ifndef ZCL_PLATFORM_PRIVATE_FILE_H
 #define ZCL_PLATFORM_PRIVATE_FILE_H
 

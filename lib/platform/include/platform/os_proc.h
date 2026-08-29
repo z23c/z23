@@ -34,9 +34,22 @@
  * Darwin implementation:
  *   - process memory and start time: proc_pid_rusage/proc_pidinfo; virtual
  *     size: Mach task_info; total RAM: sysctl hw.memsize.
- *   - executable path and argv: dyld and crt_externs APIs. Opening the loaded
- *     image is refused because a pathname cannot prove running-image identity.
+ *   - executable path and argv: dyld and crt_externs APIs.
+ *   - os_proc_open_self_exe(): _NSGetExecutablePath() then fopen() of that
+ *     name. This is a PATHNAME reopen, so it reports
+ *     OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH and not the Linux rung. Callers
+ *     must publish the rung alongside the digest, never the digest alone.
  *   - cgroup fields and available-system-memory remain -1 (unavailable).
+ *
+ * Windows implementation:
+ *   - os_proc_open_self_exe(): GetModuleFileNameW() then CreateFileW() with
+ *     FILE_SHARE_READ|FILE_SHARE_DELETE, adopted into a FILE* through
+ *     _open_osfhandle/_fdopen so the caller's fclose still owns it. Also
+ *     rung RESOLVED_PATH: GetModuleFileNameW returns a string cached in the
+ *     PEB, and no documented API hands out a handle to the file object the
+ *     loader actually mapped, so there is no inode-equivalent pin to be had.
+ *     The full reasoning, including why GetFileInformationByHandle does not
+ *     rescue it, is at the implementation.
  *
  * FreeBSD mapping (header comments only — no FreeBSD build in this repo,
  * see docs/work/os-substrate-plan.md §2 "FreeBSD mapping"):
@@ -128,10 +141,40 @@ bool os_proc_exe_path(char *buf, size_t n);
  * the query. POSIX uses the platform's process-image authority. */
 bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n);
 
+/* How strongly the FILE* from os_proc_open_self_exe() is bound to the image
+ * this process is EXECUTING. This is the whole point of that call: an
+ * operator reads the resulting digest to decide what code a node is running,
+ * so the mechanism's strength has to travel with the digest instead of being
+ * assumed. Never widen a platform's rung without a new mechanism to justify
+ * it; an honest weaker rung is the correct answer, a flattering one is a
+ * false claim about custody. */
+enum os_proc_image_identity {
+    /* No running-image read at all: os_proc_open_self_exe() sets ENOTSUP
+     * and returns NULL. Read as "no evidence", never as "matches". */
+    OS_PROC_IMAGE_IDENTITY_UNAVAILABLE = 0,
+    /* Reopened BY PATHNAME (Darwin _NSGetExecutablePath, Windows
+     * GetModuleFileNameW). The bytes are whatever sat at the running
+     * image's name at open time; a deploy landing between the name lookup
+     * and the open is hashed instead of the running image. */
+    OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH,
+    /* Kernel-pinned: the open goes straight at the running image's inode
+     * with no name resolution anywhere in it (Linux /proc/self/exe), so the
+     * bytes are the executing image whatever later replaced the file. */
+    OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE,
+};
+
 /* Open the exact executable image for reading. Linux holds the running inode
- * via /proc/self/exe. Platforms without an identity-bound running-image
- * primitive fail with ENOTSUP. Caller owns a successful FILE*. */
+ * via /proc/self/exe; Windows and Darwin re-open the running image's
+ * pathname (see os_proc_self_exe_identity()). Platforms with neither fail
+ * with ENOTSUP. Caller owns a successful FILE* and closes it with fclose. */
 FILE *os_proc_open_self_exe(void);
+
+/* The rung os_proc_open_self_exe() reaches on THIS build. Compile-time
+ * constant per platform, exposed as a call so that every reader shares one
+ * ladder instead of re-deriving it from its own #if -- a duplicated guard is
+ * how a published identity label drifts away from the mechanism it claims to
+ * describe. */
+enum os_proc_image_identity os_proc_self_exe_identity(void);
 
 /* True iff this process's command line contains `token` as a WHOLE argument
  * (exact match, never a substring). */
@@ -160,6 +203,37 @@ void os_proc_mem_set_override(const struct os_proc_mem *forced);
  * require the two to agree. The counting descriptor itself is excluded, so
  * two censuses taken the same way are directly comparable. */
 bool os_proc_open_fd_count(size_t *out);
+
+/* ── Per-THREAD kernel work counters ─────────────────────────────────────
+ *
+ * The counters a liveness check needs in order to tell a thread that is
+ * merely SLOW from one that is WEDGED. Every field is monotonic within a
+ * thread's life; only differences between two reads of the same tid mean
+ * anything, never the absolute values.
+ *
+ * Per-thread and never per-process on purpose: a process-wide counter stays
+ * warm off whichever threads are still running, so one deadlocked thread
+ * would read as healthy and the wedge detector built on it would be dead
+ * code that nobody noticed.
+ *
+ * Linux: utime+stime, majflt and read_bytes+write_bytes from
+ * /proc/self/task/<tid>/{stat,io}. Elsewhere: unavailable, and the caller
+ * must treat "cannot see" as "no evidence", never as "healthy". */
+struct os_proc_thread_work {
+    uint64_t cpu_ticks;     /* utime + stime, clock ticks */
+    uint64_t major_faults;  /* faults that needed a disk read */
+    uint64_t io_bytes;      /* bytes actually issued to a block device */
+};
+
+/* This thread's OS-level thread id, or 0 where the platform has none. */
+long os_proc_self_tid(void);
+
+/* Read `tid`'s work counters. `tid` must name a thread of THIS process.
+ * Returns false when the platform cannot answer, leaving `*out` zeroed.
+ * Reads only kernel-generated pseudo-files: no filesystem lock, no
+ * block-device I/O, so it is safe on a thread that must stay responsive
+ * while the rest of the process is stuck on storage. */
+bool os_proc_thread_work_read(long tid, struct os_proc_thread_work *out);
 
 enum os_proc_liveness {
     OS_PROC_LIVENESS_UNKNOWN = 0,

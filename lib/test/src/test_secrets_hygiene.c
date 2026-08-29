@@ -227,48 +227,82 @@ static int test_check_no_secret_printf_script(void)
 static int test_recover_tool_path_documented(void)
 {
     int failures = 0;
-    TEST("secrets_hygiene: wallet_recover tool is allowlisted explicitly") {
-        /* tools/wallet_recover.c and tools/wallet_dump.c are the ONLY
-         * files that legitimately print raw key material, and only
-         * because their whole purpose is offline recovery. The allowlist
-         * in check_no_secret_printf.sh names them explicitly. If another
-         * file shows up on the allowlist later, someone needs to audit
-         * the justification. */
+    TEST("secrets_hygiene: every key-printing allowlist entry names a real file") {
+        /* tools/wallet_dump.c is the only file that legitimately prints
+         * raw key material, and only because offline key export is its
+         * whole purpose. The allowlist in check_no_secret_printf.sh names
+         * it explicitly.
+         *
+         * This test used to assert a fixed set of names. That was the weak
+         * shape: tools/wallet_recover.c was retired upstream, its allowlist
+         * entry was correctly removed with it, and the test then failed for
+         * naming a file that no longer exists — pointing at the wrong side.
+         * The assertion that actually protects us is structural: every
+         * allowlist entry must name a file that EXISTS. A stale entry is a
+         * standing permission to print secrets from a path nobody reviews
+         * any more, and if that path is ever recreated it arrives
+         * pre-approved. So the allowlist must not outlive its files. */
         FILE *f = fopen("tools/scripts/check_no_secret_printf.sh", "r");
         ASSERT(f != NULL);
         char line[512];
-        bool saw_wallet_recover = false;
         bool saw_wallet_dump = false;
         int allowlist_entries = 0;
+        int missing_files = 0;
         bool in_allowlist = false;
         while (fgets(line, sizeof(line), f)) {
             if (strstr(line, "ALLOWLIST_RE=(")) {
                 in_allowlist = true;
                 continue;
             }
-            if (in_allowlist) {
-                /* Allowlist ends at a line whose first non-whitespace
-                 * char is ')'. We can't key off any ')' because the
-                 * justification comments may contain parentheses. */
-                const char *p = line;
-                while (*p == ' ' || *p == '\t') p++;
-                if (*p == ')') {
-                    in_allowlist = false;
-                    continue;
+            if (!in_allowlist)
+                continue;
+            /* Allowlist ends at a line whose first non-whitespace char is
+             * ')'. We can't key off any ')' because the justification
+             * comments may contain parentheses. */
+            const char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == ')') {
+                in_allowlist = false;
+                continue;
+            }
+            /* Only lines that start with a single quote are regex entries;
+             * the rest are explanatory comments. */
+            if (*p != '\'')
+                continue;
+            allowlist_entries++;
+            if (strstr(line, "wallet_dump"))
+                saw_wallet_dump = true;
+            /* Turn the regex back into a path. These entries are literal
+             * paths with '.' escaped; anything with a real metacharacter
+             * is not a plain path and is not resolved here — it is counted
+             * as missing so that a wildcard entry, which would silently
+             * widen the allowlist, cannot pass this check either. */
+            char path[512];
+            size_t n = 0;
+            const char *q = p + 1;
+            bool literal = true;
+            while (*q && *q != '\'' && n + 1 < sizeof(path)) {
+                if (*q == '\\') {
+                    q++;
+                    if (*q != '.') { literal = false; break; }
+                } else if (strchr("*?+[](){}|^$", *q) != NULL) {
+                    literal = false;
+                    break;
                 }
-                /* Count only lines that start with a single quote —
-                 * the regex entries, not the explanatory comments. */
-                if (*p == '\'')
-                    allowlist_entries++;
-                if (strstr(line, "wallet_recover"))
-                    saw_wallet_recover = true;
-                if (strstr(line, "wallet_dump"))
-                    saw_wallet_dump = true;
+                path[n++] = *q++;
+            }
+            path[n] = '\0';
+            if (!literal || n == 0 || access(path, F_OK) != 0) {
+                printf("\n  stale or non-literal allowlist entry: %s", path);
+                missing_files++;
             }
         }
         fclose(f);
-        ASSERT(saw_wallet_recover);
+        /* A zero-entry allowlist would satisfy "no stale entries"
+         * vacuously, so pin the floor too. */
+        ASSERT(allowlist_entries >= 1);
         ASSERT(saw_wallet_dump);
+        ASSERT(missing_files == 0);
         /* Allowlist growing past 5 is a smell — someone is papering
          * over a class of leak instead of fixing call sites. */
         ASSERT(allowlist_entries <= 5);

@@ -814,6 +814,10 @@ static bool dev_write_in_progress(struct dev_activation_txn *txn)
     n = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", txn->inprogress_path,
                  (unsigned long long)os_proc_current_pid());
 #else
+    /* mkstemp() below requires the path to END in exactly six X's. A pid
+     * suffix makes it fail with EINVAL before it ever touches the disk,
+     * so the POSIX arm keeps the template and lets mkstemp pick the
+     * unique suffix itself. */
     n = snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", txn->inprogress_path);
 #endif
     if (n <= 0 || (size_t)n >= sizeof(tmp))

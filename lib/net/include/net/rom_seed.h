@@ -177,7 +177,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
                                            struct rom_artifact *out);
 
 /* Drop `filename` from the registry so it stops being served — the inverse of
- * rom_seed_register. The rotation path (config/src/bundle_exporter.c bx_rotate)
+ * rom_seed_register. The rotation path (config/src/bundle_exporter_generations.c bx_rotate)
  * calls this immediately BEFORE it unlinks a rotated-out generation, so a
  * deleted file is never left advertised in the served directory / serve_lookup.
  *

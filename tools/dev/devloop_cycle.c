@@ -23,6 +23,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+/* Length-bounded substring search over a non-NUL-terminated span. Every
+ * caller lives in the ZCL_DEV_BUILD||ZCL_TESTING regions below, so the guard
+ * matches them; unguarded it was a static function with no caller in a
+ * release build, which clang reports as an unused function. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static const char *bounded_find(const char *haystack, size_t haystack_len,
                                 const char *needle, size_t needle_len)
 {
@@ -36,6 +41,7 @@ static const char *bounded_find(const char *haystack, size_t haystack_len,
             return haystack + i;
     return NULL;
 }
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 static bool appendf(char *out, size_t cap, size_t *pos,
                     const char *fmt, ...)

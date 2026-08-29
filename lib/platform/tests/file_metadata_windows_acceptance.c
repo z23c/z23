@@ -5,6 +5,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <stdbool.h>
 #include <stdio.h>
 #include <wchar.h>
 #include <windows.h>
@@ -14,6 +15,21 @@ static int fail(const char *message)
     fprintf(stderr, "FAIL: %s (win32=%lu)\n", message,
             (unsigned long)GetLastError());
     return 1;
+}
+
+/* UTF-8 is self-synchronising: every byte of a multi-byte sequence has the
+ * high bit set, so none of them can be a backslash. Rewriting separators
+ * byte-wise therefore cannot corrupt a non-ASCII name. */
+static bool forward_slash_copy(const char *source, char *out, size_t out_size)
+{
+    size_t i = 0;
+    for (; source[i]; i++) {
+        if (i + 1 >= out_size) return false;
+        out[i] = source[i] == '\\' ? '/' : source[i];
+    }
+    if (i >= out_size) return false;
+    out[i] = '\0';
+    return true;
 }
 
 int main(void)
@@ -48,6 +64,25 @@ int main(void)
             PLATFORM_FILE_METADATA_OK ||
         metadata.size != sizeof(payload) || metadata.modified_seconds <= 0)
         return fail("regular UTF-8 file metadata");
+
+    /* The same existing file spelled with forward slashes. Callers join
+     * paths with '/' and plain Win32 rewrites those for them -- but the
+     * \\?\ prefix this implementation prepends turns every path parse OFF,
+     * so a '/' that survives into the extended form reaches the object
+     * manager as a filename character, CreateFileW fails with
+     * ERROR_INVALID_NAME, and an existing file grades REFUSED. Every other
+     * case in this program spells the separator '\\', which is exactly how
+     * that survived. */
+    char utf8_forward[4 * MAX_PATH];
+    if (!forward_slash_copy(utf8_file, utf8_forward, sizeof(utf8_forward)))
+        return fail("forward-slash path build");
+    struct platform_file_metadata forward = {0};
+    if (platform_file_metadata_read(utf8_forward, &forward) !=
+            PLATFORM_FILE_METADATA_OK ||
+        forward.size != metadata.size)
+        return fail("forward-slash UTF-8 file metadata");
+    if (platform_file_shape_read(utf8_forward) != PLATFORM_FILE_SHAPE_REGULAR)
+        return fail("forward-slash file shape");
     if (!DeleteFileW(file_path) ||
         platform_file_metadata_read(utf8_file, &metadata) !=
             PLATFORM_FILE_METADATA_MISSING)

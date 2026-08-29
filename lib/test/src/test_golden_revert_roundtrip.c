@@ -272,7 +272,10 @@ static bool gw_write(const char *dir, const char *rel, const char *content)
     for (char *p = full + strlen(dir) + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            mkdir(full, 0755);
+            /* 0700: the object store verifies its own directories are
+             * owner-only, so a fixture that pre-creates .zvcs at the
+             * ordinary 0755 makes vcs_open refuse the repo outright. */
+            mkdir(full, 0700);
             *p = '/';
         }
     }

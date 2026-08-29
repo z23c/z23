@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Read-only mappings backed by an already-open descriptor. */
+ *
+ * purpose: read-only memory mapping of a file, portable across POSIX mmap
+ * and Windows file mappings. */
 
 #include "platform/read_mapping.h"
 #include "platform/positioned_file.h"

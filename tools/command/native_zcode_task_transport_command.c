@@ -542,21 +542,22 @@ void zcl_native_handle_zcode_task_board(
 {
     if (!request || !reply)
         return;
-    struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    (void)json_push_kv_str(&input, "kind", "pointer");
-    (void)json_push_kv_str(&input, "namespace", VCS_ZCODE_TASK_DHT_NAMESPACE);
+    struct json_value forwarded_input;
+    json_init(&forwarded_input);
+    json_set_object(&forwarded_input);
+    (void)json_push_kv_str(&forwarded_input, "kind", "pointer");
+    (void)json_push_kv_str(&forwarded_input, "namespace",
+                           VCS_ZCODE_TASK_DHT_NAMESPACE);
     const char *datadir = ztl_input_str(request->input, "datadir");
     if (datadir && datadir[0])
-        (void)json_push_kv_str(&input, "datadir", datadir);
-    (void)json_push_kv_bool(&input, "board", true);
+        (void)json_push_kv_str(&forwarded_input, "datadir", datadir);
+    (void)json_push_kv_bool(&forwarded_input, "board", true);
     struct zcl_command_request forwarded = *request;
-    forwarded.input = &input;
+    forwarded.input = &forwarded_input;
     struct zcl_command_reply records;
     zcl_command_reply_init(&records, "zcl.zcode_network_records.v1");
     zcl_native_handle_zcode_network_records(&forwarded, &records);
-    json_free(&input);
+    json_free(&forwarded_input);
     if (records.exit_code != ZCL_COMMAND_EXIT_OK) {
         zcl_command_reply_fail(
             reply, records.status, records.exit_code,

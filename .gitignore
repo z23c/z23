@@ -22,10 +22,13 @@ vendor/tor/
 # `make vendor` scratch: pinned source downloads + per-lib build trees.
 vendor/.cache/
 vendor/.build/
-# Vendored OpenSSL/zlib headers installed by `make vendor` (regenerated).
+# Vendored OpenSSL/zlib/libevent headers installed by `make vendor`
+# (regenerated). event2/ exists for the embedded Tor build (`make tor-full`),
+# which on macOS has no system libevent to discover.
 vendor/include/openssl/
 vendor/include/zlib.h
 vendor/include/zconf.h
+vendor/include/event2/
 
 # Data / runtime
 .zvcs/

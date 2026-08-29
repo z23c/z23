@@ -25,6 +25,7 @@
 #include "config/boot_snapshot_install.h"
 #include "config/boot_stale_locks.h"
 #include "config/boot_wallet_phrase.h"
+#include "boot_timing_marks_internal.h"
 #include "support/cleanse.h"
 #include "net/snapshot_sync_contract.h"
 #include "services/chain_activation_service.h"
@@ -296,29 +297,6 @@ void *load_params_thread(void *arg)
 /* Block index, chainstate rebuild, and address backfill are in
  * boot_index.c. Service startup (P2P, RPC, Tor) and shutdown
  * are in boot_services.c. */
-/* Boot timing helper */
-static int64_t boot_clock_ms(void)
-{
-    struct timespec ts;
-    platform_time_monotonic_timespec(&ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-/* Emit an indented [boot] sub-phase marker + feed boot_flight_recorder;
- * return a fresh clock reading so the caller can chain: t = boot_submark("x", t). */
-static int64_t boot_submark(const char *name, int64_t since)
-{
-    int64_t ms = boot_clock_ms() - since;
-    printf("[boot]   %-28s %lldms\n", name, (long long)ms);
-    boot_flight_recorder_mark(name, ms);
-    return boot_clock_ms();
-}
-/* Top-level [boot] phase marker + boot_flight_recorder feed (boot_submark, one indent level up). */
-static void boot_topmark(const char *name, int64_t since)
-{
-    int64_t ms = boot_clock_ms() - since;
-    printf("[boot] %-30s %lldms\n", name, (long long)ms);
-    boot_flight_recorder_mark(name, ms);
-}
 /* ── boot.c decomposition ──────────────────────────────────────────
  * app_init is split into named, single-responsibility `boot_step_*`
  * static functions returning bool — true to continue, false to bail.

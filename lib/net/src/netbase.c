@@ -9,6 +9,7 @@
 #include "platform/socket_compat.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include "base/safe_alloc.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,8 +64,8 @@ bool lookup_host(const char *name, struct net_addr *results,
 
     if (max_results > SIZE_MAX / 16)
         return false;
-    uint8_t (*resolved)[16] = zcl_malloc(
-        max_results * sizeof(*resolved), "net_resolved_addresses");
+    uint8_t (*resolved)[16] =
+        zcl_malloc(max_results * sizeof(*resolved), "netbase.resolve_addresses");
     if (!resolved)
         LOG_FAIL("net", "lookup_host: address allocation failed for '%s'",
                  name);

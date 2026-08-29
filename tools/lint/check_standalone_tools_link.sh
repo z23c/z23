@@ -73,12 +73,8 @@ declare -A EXEMPT=(
     # already the direct product of make zclassic23 / test-parallel / ci.
     # The canonical node binary is build/bin/z23 (the zclassic23 symlink
     # exists for compatibility), so both spellings are exempt.
-    [zclassic23]="built by make ci and make test-parallel"
-    [z23]="built by make ci and make test-parallel (canonical node name)"
-    [zclassic23-dev]="dev-profile whole-node relink (make dev)"
     [zclassic23-dev-asan]="sanitizer whole-node relink (make dev-asan)"
     [zclassic23-dev-tsan]="sanitizer whole-node relink (make dev-tsan)"
-    [z23-dev]="dev-profile whole-node relink (make dev)"
     [z23-dev-asan]="sanitizer whole-node relink (make dev-asan)"
     [z23-dev-tsan]="sanitizer whole-node relink (make dev-tsan)"
     [test_zcl]="whole-test relink (make test-parallel)"
@@ -111,11 +107,76 @@ declare -A DARWIN_EXEMPT=(
     [fuzz_zcode_science]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
 )
 
-# The native Windows launcher has no recipe on POSIX hosts.  Keep proving it
-# on MinGW/MSYS while refusing to manufacture a meaningless Linux `.exe` rule.
-declare -A NON_WINDOWS_EXEMPT=(
-    [z23-headless-run.exe]="recipe exists only when ZCL_HOST_WINDOWS=1"
+# ── Windows-only tools (exempt on every host that is NOT Windows) ────────
+# The mirror of DARWIN_EXEMPT, and a different mechanism: not "this host is
+# missing the primitive underneath the tool", but "on this host the Makefile
+# has NO RULE for the target at all". A tool belongs here only when its
+# $(BIN_DIR)/<name> rule is written entirely inside
+# `ifeq ($(ZCL_HOST_WINDOWS),1)`, whose else arm defines only phony goals that
+# print a refusal and fail — so `make build/bin/<name>` on a POSIX host dies
+# with "No rule to make target", which is not a rotted rule and cannot be
+# fixed by an -I path. Reason is mandatory and must name that guard.
+#
+# ⛔ AN EXEMPTION WITH NO REPLACEMENT CHECK IS EXACTLY THE ROT THIS GATE
+# EXISTS TO STOP. So this table is not a pass on its own: each entry also
+# names, in COVER below, the source file that some OTHER gate must still
+# compile on THIS host, and the exemption is refused (exit 2, not a quiet
+# skip) the moment that coverage stops being real. The exemption and its
+# replacement stand or fall together.
+declare -A WINDOWS_ONLY_EXEMPT=(
+    [z23-headless-run.exe]="rule body lives only inside ifeq (\$(ZCL_HOST_WINDOWS),1); the else arm defines no \$(BIN_DIR) target, so make has no rule for it on a POSIX host — covered instead by check-windows-acceptance, which mingw-cross-links the source (see COVER)"
 )
+
+# tool name -> "<catalog row name> <source path>": the windows-acceptance row
+# that must still cross-compile the tool's source on this host, so
+# `make check-windows-acceptance` keeps proving what the native Makefile rule
+# cannot prove here. Verified below against the catalog file itself.
+declare -A WINDOWS_ONLY_COVER=(
+    [z23-headless-run.exe]="headless_run tools/dev/windows_headless_run.c"
+)
+WINDOWS_ACCEPTANCE_CATALOG="lib/platform/tests/windows_acceptance.mk"
+
+# Is <src> still cross-compiled by catalog row <row>? BOTH halves are checked,
+# because either one alone can be true while nothing gets compiled:
+#   - a ZCL_WINDOWS_ACCEPTANCE_<row>_SOURCES row whose name is missing from
+#     ZCL_WINDOWS_ACCEPTANCE_TESTS generates no make rule at all, so the row is
+#     inert and the source is read by nothing;
+#   - a name in TESTS whose row no longer lists <src> compiles something else
+#     and still reports PASS.
+#
+# ⛔ COMMENT LINES ARE STRIPPED FIRST, and that is not tidiness. The catalog
+# documents this very coupling in prose that spells out the exact path being
+# searched for. A plain substring match over the whole file therefore reported
+# "replacement check CONFIRMED" off its own documentation, with the real
+# SOURCES row pointed at a different file — observed while building this
+# check. Only assignment lines count.
+windows_acceptance_covers() {
+    local catalog="$1" row="$2" src="$3" listed sources
+    local nl=$'\n'
+    local awk_collect='
+        /^[ \t]*#/ { next }
+        {
+            line = $0
+            if ($0 ~ start) { inrow = 1; sub(/^[^:]*:=/, "", line) }
+            else if (!inrow) { next }
+            cont = (line ~ /\\[ \t]*$/)
+            gsub(/\\[ \t]*$/, "", line)
+            n = split(line, p, /[ \t]+/)
+            for (i = 1; i <= n; i++) if (p[i] != "") print p[i]
+            if (!cont) inrow = 0
+        }'
+    listed="$(LC_ALL=C awk -v start='^ZCL_WINDOWS_ACCEPTANCE_TESTS[ \t]*:=' \
+                  "$awk_collect" "$catalog")"
+    sources="$(LC_ALL=C awk \
+                  -v start="^ZCL_WINDOWS_ACCEPTANCE_${row}_SOURCES[ \t]*:=" \
+                  "$awk_collect" "$catalog")"
+    # Pipeline-free membership (never `printf | grep -q`: grep -q exits at the
+    # first match, printf takes SIGPIPE, and pipefail then reports 141 — a HIT
+    # reading as a MISS. Same rule as tools/scripts/sh_str.sh).
+    case "${nl}${listed}${nl}" in *"${nl}${row}${nl}"*) ;; *) return 1 ;; esac
+    case "${nl}${sources}${nl}" in *"${nl}${src}${nl}"*) ;; *) return 2 ;; esac
+    return 0
+}
 
 # ── Derive the tool list from the Makefile ───────────────────────────────
 # Two rule spellings carry a standalone tool:
@@ -149,14 +210,74 @@ GATE_HOST_OS="$(uname -s 2>/dev/null)"
 targets=()
 for name in $(printf '%s\n' "${!TOOLS[@]}" | sort); do
     [[ -n "${EXEMPT[$name]:-}" ]] && continue
-    if [[ "$GATE_HOST_OS" != MINGW* && "$GATE_HOST_OS" != MSYS* && \
-          -n "${NON_WINDOWS_EXEMPT[$name]:-}" ]]; then
-        echo "[check_standalone_tools_link] non-windows-exempt $name:" \
-             "${NON_WINDOWS_EXEMPT[$name]}" >&2
-        continue
-    fi
+    # A bare non-windows exemption used to sit here. It skipped the tool on
+    # sight, with no check that anything still compiled the source — the exact
+    # fail-open this gate exists to prevent. The WINDOWS_ONLY_EXEMPT block
+    # below does the same skip, but only after confirming the replacement
+    # check is real, and refuses outright when it is not.
     if [[ "$GATE_HOST_OS" == Darwin && -n "${DARWIN_EXEMPT[$name]:-}" ]]; then
         echo "[check_standalone_tools_link] darwin-exempt $name: ${DARWIN_EXEMPT[$name]}" >&2
+        continue
+    fi
+    # Windows-only tools: skipped everywhere the Makefile writes no rule for
+    # them, i.e. every host that is not MSYS/MinGW (Makefile line 28 spells
+    # ZCL_HOST_WINDOWS as `filter MINGW% MSYS%` over uname -s, and this must
+    # agree with it — on a real Windows host the rule EXISTS and the tool is
+    # built like any other, no exemption).
+    if [[ -n "${WINDOWS_ONLY_EXEMPT[$name]:-}" \
+          && "$GATE_HOST_OS" != MINGW* && "$GATE_HOST_OS" != MSYS* ]]; then
+        cover="${WINDOWS_ONLY_COVER[$name]:-}"
+        cover_row="${cover%% *}"
+        cover_src="${cover##* }"
+        # Fail-closed, both ways. No COVER entry, no catalog on disk, or a
+        # catalog that has stopped naming the source = the replacement check
+        # is gone and the exemption is now pure rot. That is exit 2 (a broken
+        # gate), never a skip, and never a silent build attempt either.
+        if [[ -z "$cover" || "$cover_row" == "$cover_src" ]]; then
+            echo "check-standalone-tools-link: FATAL — $name is in" >&2
+            echo "  WINDOWS_ONLY_EXEMPT with no usable WINDOWS_ONLY_COVER" >&2
+            echo "  entry (expected \"<catalog row> <source path>\")." >&2
+            echo "  An exemption with no named replacement check is the rot" >&2
+            echo "  this gate exists to stop. Name the source another gate" >&2
+            echo "  still compiles, or delete the exemption." >&2
+            exit 2
+        fi
+        if [[ ! -f "$WINDOWS_ACCEPTANCE_CATALOG" ]]; then
+            echo "check-standalone-tools-link: FATAL — the windows acceptance" >&2
+            echo "  catalog $WINDOWS_ACCEPTANCE_CATALOG is missing, so the" >&2
+            echo "  replacement check backing the $name exemption cannot be" >&2
+            echo "  confirmed to exist. Refusing to skip on an unproven claim." >&2
+            exit 2
+        fi
+        windows_acceptance_covers \
+            "$WINDOWS_ACCEPTANCE_CATALOG" "$cover_row" "$cover_src" || cover_rc=$?
+        cover_rc="${cover_rc:-0}"
+        if (( cover_rc != 0 )); then
+            echo "check-standalone-tools-link: FATAL — $name is exempt here" >&2
+            echo "  because $WINDOWS_ACCEPTANCE_CATALOG was supposed to keep" >&2
+            echo "  cross-compiling $cover_src for Windows as row" >&2
+            echo "  '$cover_row', and it no longer does:" >&2
+            if (( cover_rc == 1 )); then
+                echo "    '$cover_row' is not in ZCL_WINDOWS_ACCEPTANCE_TESTS," >&2
+                echo "    so no make rule is generated and the SOURCES row is" >&2
+                echo "    inert — nothing compiles it." >&2
+            else
+                echo "    ZCL_WINDOWS_ACCEPTANCE_${cover_row}_SOURCES does not" >&2
+                echo "    name $cover_src (comment mentions do not count)." >&2
+            fi
+            echo "  The exemption has outlived its replacement check: nothing" >&2
+            echo "  on this host compiles that source any more, which is the" >&2
+            echo "  silent rot this gate exists to stop. Restore the catalog" >&2
+            echo "  row, or drop the exemption and give the tool a rule make" >&2
+            echo "  can build here." >&2
+            exit 2
+        fi
+        unset cover_rc
+        echo "[check_standalone_tools_link] windows-only-exempt $name:" \
+             "${WINDOWS_ONLY_EXEMPT[$name]}" >&2
+        echo "[check_standalone_tools_link]   replacement check CONFIRMED:" \
+             "$WINDOWS_ACCEPTANCE_CATALOG row '$cover_row' cross-compiles" \
+             "$cover_src (make check-windows-acceptance)" >&2
         continue
     fi
     targets+=("build/bin/$name")
@@ -164,7 +285,9 @@ done
 
 # Floor well above 1: the failure mode this guards is the exempt set quietly
 # growing until the gate builds almost nothing while still reporting clean.
-# 18 tools are covered today; anything under 10 means exemptions have eaten it.
+# Anything under 10 means exemptions have eaten it. No count is written here:
+# the gate prints the live one on its summary line below, and a number typed
+# into prose goes stale without anything noticing.
 gate_require_scanned "${#targets[@]}" 10 check-standalone-tools-link \
     "the exempt set has swallowed the gate — it is no longer proving anything"
 
@@ -193,10 +316,22 @@ if ! make -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; 
     # Re-probe serially so the report names every broken tool, not just the
     # one that happened to lose the race to fail first.
     for t in "${targets[@]}"; do
-        if ! make --no-print-directory "$t" >/dev/null 2>&1; then
-            failed+=("$t")
-            violations=$((violations + 1))
+        probe_out="$(make --no-print-directory "$t" 2>&1)" && continue
+        # A Makefile parse failure is not this tool's fault. source-identity
+        # capture refuses while the tree is being written, and the $(error ...)
+        # it raises kills EVERY make invocation regardless of target, so the
+        # serial re-probe below would blame whichever tools the write window
+        # happened to span. That misreported 12 innocent tools once. Stop and
+        # say the gate could not run, rather than name rules that are fine.
+        if [[ "$probe_out" == *"exact source capture failed"* ]]; then
+            echo "[check_standalone_tools_link] tree changed while the gate" \
+                 "ran (at $t): source-identity capture refused, so make could" \
+                 "not parse. This is NOT a broken tool rule." >&2
+            echo "[check_standalone_tools_link] re-run on a settled tree." >&2
+            exit 2
         fi
+        failed+=("$t")
+        violations=$((violations + 1))
     done
 fi
 

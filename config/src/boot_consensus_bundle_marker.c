@@ -24,12 +24,13 @@ static bool marker_path(char *out, size_t cap, const char *datadir)
 {
     if (!out || cap == 0 || !datadir || !datadir[0])
         return false;
-    /* Separator chosen outside the macro arguments (-Wembedded-directive). */
-    const char *fmt =
+    /* The separator is chosen BEFORE the call: _FORTIFY_SOURCE makes
+     * snprintf a macro, and a preprocessor directive between a macro's
+     * parentheses is undefined behaviour. */
 #if defined(_WIN32)
-        "%s\\%s";
+    const char *fmt = "%s\\%s";
 #else
-        "%s/%s";
+    const char *fmt = "%s/%s";
 #endif
     int n = snprintf(out, cap, fmt,
                      datadir,

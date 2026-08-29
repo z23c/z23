@@ -48,6 +48,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define SH_CHECK(name, expr) do {                                       \
     printf("shop: %s... ", (name));                                     \
@@ -57,10 +58,24 @@
 
 /* ── fixture helpers ────────────────────────────────────────────────── */
 
+/* Make a fixture datadir under test-tmp.
+ *
+ * The absolute spelling matters here: the handlers write through
+ * platform_private_path_resolve, which realpath()s the destination's parent
+ * and refuses any pathname that does not start at the root ("destination
+ * parent is not a safe real directory"). test_make_tmpdir now hands back an
+ * absolute path, so this is a straight pass-through; it used to prepend the
+ * working directory itself, which after that change produced a doubled
+ * prefix and a datadir that did not exist. */
+static void sh_tmpdir(char *dir, size_t dir_size, const char *tag)
+{
+    test_make_tmpdir(dir, dir_size, "shop", tag);
+}
+
 /* Create <dir> with a migrated node.db inside it. */
 static bool sh_mk_datadir(char *dir, size_t dir_size, const char *tag)
 {
-    test_make_tmpdir(dir, dir_size, "shop", tag);
+    sh_tmpdir(dir, dir_size, tag);
     char path[512];
     snprintf(path, sizeof(path), "%s/node.db", dir);
     struct node_db ndb;
@@ -581,7 +596,7 @@ static int shop_wallet_probe_states(void)
     int failures = 0;
 
     char empty_dir[512];
-    test_make_tmpdir(empty_dir, sizeof(empty_dir), "shop", "no_db");
+    sh_tmpdir(empty_dir, sizeof(empty_dir), "no_db");
     SH_CHECK("a datadir with no node.db is UNREADABLE",
              shop_probe_wallet_posture(empty_dir) == SHOP_WALLET_UNREADABLE);
     test_rm_rf(empty_dir);

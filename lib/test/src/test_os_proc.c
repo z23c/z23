@@ -112,6 +112,41 @@ int test_os_proc(void)
         }
     }
 
+    /* ── running-image identity rung ──────────────────────────────── */
+    {
+        /* The rung is published to operators as the diagnostics
+         * `binary_identity_scope`, so it is a CLAIM about custody, not a
+         * decoration. These two checks are what stops it being widened for
+         * cosmetic platform parity: a platform may only carry the strong
+         * rung when it opens the running image without resolving a
+         * pathname, and it may only carry ANY rung when the open works. */
+        enum os_proc_image_identity rung = os_proc_self_exe_identity();
+#if defined(__linux__)
+        /* Linux earns RUNNING_IMAGE and only Linux: /proc/self/exe is the
+         * kernel's exe_file reference, no name lookup anywhere in it. */
+        OSPROC_CHECK("linux publishes the kernel-pinned running-image rung",
+                     rung == OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE);
+#elif defined(_WIN32) || defined(__APPLE__)
+        /* Both reopen BY NAME (GetModuleFileNameW / _NSGetExecutablePath),
+         * so both are honestly the weaker rung -- never RUNNING_IMAGE. */
+        OSPROC_CHECK("pathname reopen publishes the weaker resolved-path rung",
+                     rung == OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH);
+#else
+        OSPROC_CHECK("platform with no running-image read reports unavailable",
+                     rung == OS_PROC_IMAGE_IDENTITY_UNAVAILABLE);
+#endif
+        /* The ladder and the implementation must agree in BOTH directions:
+         * a non-UNAVAILABLE rung that cannot actually open the image is an
+         * overclaim, and an UNAVAILABLE rung on a platform that opens it
+         * fine is a label nobody updated. */
+        FILE *probe = os_proc_open_self_exe();
+        bool opened = probe != NULL;
+        if (probe)
+            fclose(probe);
+        OSPROC_CHECK("identity rung agrees with whether the image opens",
+                     opened == (rung != OS_PROC_IMAGE_IDENTITY_UNAVAILABLE));
+    }
+
     /* ── cgroup dir ───────────────────────────────────────────────── */
     {
         char dir[768];
@@ -176,6 +211,44 @@ int test_os_proc(void)
         (void)os_proc_mem_read(&got);
         OSPROC_CHECK("clearing the override restores a live (large, real) RSS",
                      got.rss_bytes != 1 && got.rss_bytes > 0);
+    }
+
+    /* ── per-thread work counters ────────────────────────────────────
+     * These are what lets a liveness check tell a thread that is merely SLOW
+     * from one that is WEDGED, so a blind read here silently disarms a
+     * watchdog somewhere else. On Linux it must genuinely work; a tid that
+     * names no thread must genuinely fail rather than return zeros that a
+     * caller could mistake for a real reading. */
+    {
+        struct os_proc_thread_work w;
+        long self = os_proc_self_tid();
+#if defined(__linux__)
+        OSPROC_CHECK("self_tid is a real thread id on Linux", self > 0);
+        OSPROC_CHECK("thread work counters read for this thread",
+                     os_proc_thread_work_read(self, &w));
+
+        struct os_proc_thread_work before, after;
+        OSPROC_CHECK("baseline thread work read",
+                     os_proc_thread_work_read(self, &before));
+        volatile uint64_t spin = 0;
+        for (uint64_t i = 0; i < 200000000ULL; i++)
+            spin += i;
+        (void)spin;
+        OSPROC_CHECK("a busy thread's cpu_ticks advance",
+                     os_proc_thread_work_read(self, &after) &&
+                     after.cpu_ticks > before.cpu_ticks);
+#else
+        (void)self;
+#endif
+        /* No such thread: a failed read must be reported as failure, not as
+         * a zeroed "reading". */
+        w.cpu_ticks = 12345;
+        OSPROC_CHECK("a tid naming no thread fails the read",
+                     !os_proc_thread_work_read(0, &w));
+        OSPROC_CHECK("a failed read leaves no stale value behind",
+                     w.cpu_ticks == 0);
+        OSPROC_CHECK("a NULL out is refused",
+                     !os_proc_thread_work_read(self, NULL));
     }
 
     /* Final defensive reset so later tests in the same process never see a

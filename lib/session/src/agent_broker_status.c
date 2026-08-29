@@ -310,9 +310,12 @@ size_t agent_broker_render_status_json(const char *dir, char *out,
                             ? platform_positioned_file_read(
                                   &file, buf, (size_t)before.size, 0)
                             : -1;
+    /* Field-wise, never memcmp: the snapshot struct's alignment padding is
+     * undefined, so a whole-object compare can report an unchanged file as
+     * changed and blank out a valid broker state. */
     stable = stable && read_size == (int64_t)before.size &&
              platform_positioned_file_snapshot(&file, &after) &&
-             memcmp(&before, &after, sizeof(before)) == 0;
+             platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     size_t got = stable ? (size_t)read_size : 0;
     buf[got] = '\0';

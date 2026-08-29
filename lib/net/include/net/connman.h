@@ -294,6 +294,16 @@ struct connman {
     _Atomic uint64_t message_wakes;
     _Atomic int64_t  message_last_progress_us;
     _Atomic int64_t  dial_scheduler_last_progress_us;
+
+    /* OS thread ids of the two loops above, published by each thread from its
+     * own entry point (0 until it runs). They exist so a liveness check can
+     * ask the KERNEL whether that specific thread is still doing work, instead
+     * of inferring it from how quickly the loop came round — see
+     * util/thread_work_probe.h. Per-thread, never process-wide: a
+     * process-wide counter would stay warm off other threads and quietly
+     * disable the wedge detector. */
+    _Atomic long     message_thread_tid;
+    _Atomic long     dial_thread_tid;
 };
 
 /* Persist a newly learned NODE_V2TRANSPORT capability in the existing
@@ -405,9 +415,32 @@ void connman_get_message_cycle_stats(
     struct connman *cm,
     struct connman_message_cycle_stats *out);
 
-/* Watchdog gate for the two scheduler loops owned by connman. Not-started
- * instances are fresh; a started loop must have progressed within max_age_us. */
+/* Readiness gate for the two scheduler loops owned by connman. Not-started
+ * instances are fresh; a started loop must have turned over within max_age_us.
+ *
+ * DO NOT use this to decide whether to kill the process. Turning over is an
+ * ACTIVITY observation, not a liveness one: one pass of the dial scheduler is
+ * allowed by its own code to block for DEFAULT_CONNECT_TIMEOUT on the clearnet
+ * race and then a full ONION_STREAM_CONNECT_TIMEOUT_MS budget per onion
+ * candidate — with one retry on a fresh budget — so a healthy pass routinely
+ * outlasts any watchdog window, and a healthy message cycle outlasts it
+ * whenever the disk underneath is slow. Withholding READY on that is harmless
+ * (systemd just keeps waiting); killing on it is not. For the kill decision
+ * use connman_observe_loop_liveness() with util/thread_work_probe.h. */
 bool connman_runtime_progress_fresh(struct connman *cm, int64_t max_age_us);
+
+/* Everything a liveness gate needs about connman's two loop threads, read
+ * lock-free in one shot so the marker and the thread id it belongs to cannot
+ * disagree. `started` is false before the threads exist, which is not a wedge. */
+struct connman_loop_liveness {
+    bool    started;
+    int64_t message_last_progress_us;   /* 0 = the loop has never run */
+    int64_t dial_last_progress_us;      /* 0 = the loop has never run */
+    long    message_tid;                /* 0 = not published yet */
+    long    dial_tid;                   /* 0 = not published yet */
+};
+void connman_observe_loop_liveness(struct connman *cm,
+                                   struct connman_loop_liveness *out);
 int connman_force_outbound_rotation(struct connman *cm, const char *reason);
 
 void connman_relay_transaction(struct connman *cm,

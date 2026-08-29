@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Implement cursor-independent writes on supported host platforms. */
+ * Purpose: the two implementations behind platform/positioned_io.h --
+ * pwrite on POSIX, an OVERLAPPED WriteFile on Windows. Neither touches the
+ * descriptor's own file pointer. */
 #include "platform/positioned_io.h"
 
 #include <limits.h>

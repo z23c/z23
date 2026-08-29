@@ -88,6 +88,34 @@ static bool mv_cas_path(const char *zcode_dir, const uint8_t hash[32],
     return n >= 0 && (size_t)n < MV_PATH_MAX;
 }
 
+/* Name why a CAS coordinate could not be opened as possession bytes.
+ * `relative` is a store-relative path as built by mv_cas_path(). Callers use
+ * this only for the reported verification_gap; the refusal itself is decided
+ * on the handle. */
+static const char *mv_chunk_refusal_gap(const char *zcode_dir,
+                                        const char *relative)
+{
+    char full[MV_PATH_MAX];
+    int n = snprintf(full, sizeof(full), "%s/%s", zcode_dir, relative);
+
+    if (n <= 0 || (size_t)n >= sizeof(full))
+        return "cas_path_invalid";
+    switch (platform_file_shape_read(full)) {
+    case PLATFORM_FILE_SHAPE_MISSING:
+        return "chunk_missing";
+    case PLATFORM_FILE_SHAPE_SYMLINK:
+        return "chunk_symlink";
+    case PLATFORM_FILE_SHAPE_OTHER:
+        return "chunk_not_regular";
+    /* REGULAR lands here when the object became a plain file between the
+     * refused open and this look, or when a component above it is what
+     * actually blocked the open. Either way the coordinate was unreadable
+     * to us, which is what we say. */
+    default:
+        return "chunk_unreadable";
+    }
+}
+
 static void mv_verification_gap(struct mv_manifest_read *manifest,
                                 const char *gap)
 {
@@ -307,21 +335,19 @@ static void mv_manifest_verify_possession_impl(
             platform_positioned_file_init(&file_handle);
             if (!platform_positioned_file_open_beneath(
                     &file_handle, zcode_dir, path)) {
-                char full[MV_PATH_MAX];
-                struct platform_file_metadata metadata;
-                int full_length = snprintf(full, sizeof(full), "%s/%s",
-                                           zcode_dir, path);
-                enum platform_file_metadata_result metadata_result =
-                    full_length > 0 && (size_t)full_length < sizeof(full)
-                        ? platform_file_metadata_read(full, &metadata)
-                        : PLATFORM_FILE_METADATA_REFUSED;
-                const char *gap = metadata_result == PLATFORM_FILE_METADATA_MISSING
-                    ? "chunk_missing"
-                    : metadata_result == PLATFORM_FILE_METADATA_REPARSE
-                        ? "chunk_symlink"
-                        : metadata_result == PLATFORM_FILE_METADATA_NOT_REGULAR
-                            ? "chunk_not_regular" : "chunk_unreadable";
-                mv_verification_gap(manifest, gap);
+                /* The refusal above is the fail-closed decision and it is
+                 * already taken on the handle; this second, pathname-based
+                 * look only NAMES it. open_beneath returns one bool for four
+                 * different facts, and reporting a planted symlink or a
+                 * directory as "chunk_missing" tells an operator to
+                 * re-download when what actually happened is that something
+                 * was substituted at the CAS coordinate. mv_read_file()
+                 * above answers a coarser question -- absent or invalid --
+                 * so it keeps only two of these four facts; this path needs
+                 * all four. A race here can only mislabel a refusal that
+                 * stands regardless. */
+                mv_verification_gap(manifest,
+                                    mv_chunk_refusal_gap(zcode_dir, path));
                 goto done;
             }
             if (!platform_positioned_file_snapshot(&file_handle, &before)) {

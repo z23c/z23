@@ -28,9 +28,9 @@
 #include <arpa/inet.h>
 
 /* Manually splice a pre-built node into nm->nodes[] the way nm_add_node does
- * internally (nm_add_node is static). net_manager_free() will free both the
- * array and every node still parked in it, so the caller must NOT free the
- * node separately. */
+ * internally (nm_add_node is declared only in net_internal.h).
+ * net_manager_free() will free both the array and every node still
+ * parked in it, so the caller must NOT free the node separately. */
 static void manager_insert_node(struct net_manager *nm, struct p2p_node *node)
 {
     struct p2p_node **grown =

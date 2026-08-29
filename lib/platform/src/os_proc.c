@@ -7,17 +7,25 @@
  *
  * os_proc — Linux procfs and native Darwin process implementations. */
 
+/* syscall(SYS_gettid) for os_proc_self_tid(): glibc guards it behind
+ * __USE_MISC, which an explicit -D_POSIX_C_SOURCE would otherwise switch off. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "platform/os_proc.h"
 
 #include <errno.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>
-#include <psapi.h>
+#include <errno.h>
+#include <fcntl.h>   /* _O_RDONLY/_O_BINARY for os_proc_open_self_exe() */
+#include <io.h>      /* _open_osfhandle/_close, likewise */
+#include <wchar.h>
 #else
 #include <signal.h>
 #include <sys/resource.h>
@@ -29,6 +37,11 @@
 #include <dirent.h>
 #endif
 
+#if defined(__linux__)
+#include <sys/syscall.h>   /* SYS_gettid, for os_proc_self_tid() */
+#include <unistd.h>
+#endif
+
 #if defined(__APPLE__)
 #include <crt_externs.h>
 #include <libproc.h>
@@ -36,8 +49,6 @@
 #include <mach-o/dyld.h>
 #include <sys/sysctl.h>
 #endif
-
-#define OS_PROC_CGROUP_ROOT "/sys/fs/cgroup"
 
 static bool os_proc_ascii_contains_ci(const char *text, const char *needle)
 {
@@ -199,241 +210,6 @@ bool os_proc_io_bytes(uint64_t *out)
 #endif
 }
 
-/* ── Test override seam (mirrors platform/clock.h, platform/rng.h) ──── */
-
-static _Atomic bool g_override_active;
-static struct os_proc_mem g_override_value;
-
-void os_proc_mem_set_override(const struct os_proc_mem *forced)
-{
-    if (!forced) {
-        atomic_store(&g_override_active, false);
-        return;
-    }
-    g_override_value = *forced;
-    atomic_store(&g_override_active, true);
-}
-
-/* ── Small parsing helpers ───────────────────────────────────────── */
-
-#if !defined(_WIN32)
-static void os_proc_trim_newline(char *s)
-{
-    if (!s)
-        return;
-    size_t len = strlen(s);
-    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r')) {
-        s[len - 1] = '\0';
-        len--;
-    }
-}
-
-/* Read a single "Label: NNN kB" style line's value (in kB) from a
- * /proc/self/status-shaped file, returned as bytes. -1 if not found. */
-#if !defined(__APPLE__) && !defined(_WIN32)
-static int64_t os_proc_status_field_bytes(const char *path, const char *label)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
-
-    char line[256];
-    size_t label_len = strlen(label);
-    int64_t result = -1;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, label, label_len) != 0)
-            continue;
-        long long kb = 0;
-        if (sscanf(line + label_len, " %lld", &kb) == 1 && kb >= 0)
-            result = (int64_t)kb * 1024;
-        break;
-    }
-    fclose(f);
-    return result;
-}
-#endif
-
-#endif /* !_WIN32 */
-
-/* ── cgroup v2 dir resolution + limit reads ──────────────────────── */
-
-bool os_proc_cgroup_dir(char *out, size_t out_len)
-{
-    if (!out || out_len == 0)
-        return false; // raw-return-ok:optional-cgroup-unavailable
-
-#if defined(_WIN32)
-    return false; // raw-return-ok:platform-has-no-cgroups
-#else
-    FILE *f = fopen("/proc/self/cgroup", "r");
-    if (!f)
-        return false; // raw-return-ok:optional-cgroup-unavailable
-
-    char line[512];
-    bool ok = false;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "0::", 3) != 0)
-            continue;
-        char *rel = line + 3;
-        os_proc_trim_newline(rel);
-        int n = 0;
-        if (rel[0] == '\0' || strcmp(rel, "/") == 0) {
-            n = snprintf(out, out_len, "%s", OS_PROC_CGROUP_ROOT);
-        } else if (rel[0] == '/') {
-            n = snprintf(out, out_len, "%s%s", OS_PROC_CGROUP_ROOT, rel);
-        } else {
-            n = snprintf(out, out_len, "%s/%s", OS_PROC_CGROUP_ROOT, rel);
-        }
-        if (n < 0 || (size_t)n >= out_len)
-            break;
-        ok = true;
-        break;
-    }
-
-    fclose(f);
-    return ok;
-#endif
-}
-
-#if !defined(__APPLE__) && !defined(_WIN32)
-static int64_t os_proc_cgroup_limit_bytes(const char *dir, const char *name)
-{
-    if (!dir || !name)
-        return -1; // raw-return-ok:optional-cgroup-unavailable
-
-    char path[768];
-    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
-    if (n < 0 || (size_t)n >= sizeof(path))
-        return -1; // raw-return-ok:optional-cgroup-unavailable
-
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1; // raw-return-ok:optional-cgroup-unavailable
-
-    char buf[64];
-    if (!fgets(buf, sizeof(buf), f)) {
-        fclose(f);
-        return -1; // raw-return-ok:optional-cgroup-unavailable
-    }
-    fclose(f);
-    os_proc_trim_newline(buf);
-    if (strcmp(buf, "max") == 0)
-        return -1; // raw-return-ok:unlimited-cgroup-value
-
-    long long value = -1;
-    if (sscanf(buf, "%lld", &value) != 1 || value < 0)
-        return -1; // raw-return-ok:optional-cgroup-unavailable
-    return (int64_t)value;
-}
-
-/* ── /proc/meminfo (system totals) ───────────────────────────────── */
-
-static void os_proc_meminfo(int64_t *total_bytes, int64_t *avail_bytes)
-{
-    *total_bytes = -1;
-    *avail_bytes = -1;
-
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (!f)
-        return;
-
-    char line[256];
-    int found = 0;
-    while (fgets(line, sizeof(line), f) && found < 2) {
-        long long kb = 0;
-        if (strncmp(line, "MemTotal:", 9) == 0) {
-            if (sscanf(line + 9, " %lld", &kb) == 1 && kb >= 0) {
-                *total_bytes = (int64_t)kb * 1024;
-                found++;
-            }
-        } else if (strncmp(line, "MemAvailable:", 13) == 0) {
-            if (sscanf(line + 13, " %lld", &kb) == 1 && kb >= 0) {
-                *avail_bytes = (int64_t)kb * 1024;
-                found++;
-            }
-        }
-    }
-    fclose(f);
-}
-#endif
-
-/* ── Public API ───────────────────────────────────────────────────── */
-
-bool os_proc_mem_read(struct os_proc_mem *out)
-{
-    if (!out)
-        return false; // raw-return-ok:null-arg
-
-    if (atomic_load(&g_override_active)) {
-        *out = g_override_value;
-        return true;
-    }
-
-#if defined(_WIN32)
-    PROCESS_MEMORY_COUNTERS counters;
-    memset(&counters, 0, sizeof(counters));
-    counters.cb = sizeof(counters);
-    if (!GetProcessMemoryInfo(GetCurrentProcess(), &counters,
-                              sizeof(counters)))
-        return false;
-    out->rss_bytes = (int64_t)counters.WorkingSetSize;
-    out->vsize_bytes = (int64_t)counters.PagefileUsage;
-    out->cgroup_current = -1;
-    out->cgroup_high = -1;
-    out->cgroup_max = -1;
-    MEMORYSTATUSEX memory;
-    memset(&memory, 0, sizeof(memory));
-    memory.dwLength = sizeof(memory);
-    if (GlobalMemoryStatusEx(&memory)) {
-        out->sys_total_bytes = (int64_t)memory.ullTotalPhys;
-        out->sys_avail_bytes = (int64_t)memory.ullAvailPhys;
-    } else {
-        out->sys_total_bytes = -1;
-        out->sys_avail_bytes = -1;
-    }
-    return true;
-#elif defined(__APPLE__)
-    struct rusage_info_v2 usage;
-    memset(&usage, 0, sizeof(usage));
-    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V2,
-                        (rusage_info_t *)&usage) != 0)
-        return false;
-    out->rss_bytes = (int64_t)usage.ri_resident_size;
-    mach_task_basic_info_data_t basic;
-    mach_msg_type_number_t basic_count = MACH_TASK_BASIC_INFO_COUNT;
-    out->vsize_bytes = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-        (task_info_t)&basic, &basic_count) == KERN_SUCCESS
-        ? (int64_t)basic.virtual_size : -1;
-    out->cgroup_current = -1;
-    out->cgroup_high = -1;
-    out->cgroup_max = -1;
-    uint64_t total = 0;
-    size_t total_size = sizeof(total);
-    out->sys_total_bytes = sysctlbyname("hw.memsize", &total, &total_size,
-                                       NULL, 0) == 0 ? (int64_t)total : -1;
-    out->sys_avail_bytes = -1;
-    return true;
-#else
-    out->rss_bytes = os_proc_status_field_bytes("/proc/self/status", "VmRSS:");
-    out->vsize_bytes = os_proc_status_field_bytes("/proc/self/status", "VmSize:");
-
-    char dir[768];
-    if (os_proc_cgroup_dir(dir, sizeof(dir))) {
-        out->cgroup_current = os_proc_cgroup_limit_bytes(dir, "memory.current");
-        out->cgroup_high = os_proc_cgroup_limit_bytes(dir, "memory.high");
-        out->cgroup_max = os_proc_cgroup_limit_bytes(dir, "memory.max");
-    } else {
-        out->cgroup_current = -1;
-        out->cgroup_high = -1;
-        out->cgroup_max = -1;
-    }
-
-    os_proc_meminfo(&out->sys_total_bytes, &out->sys_avail_bytes);
-
-    return out->rss_bytes >= 0;
-#endif
-}
-
 int64_t os_proc_uptime_seconds(void)
 {
 #if defined(_WIN32)
@@ -585,22 +361,143 @@ bool os_proc_pid_exe_path(uint64_t pid, char *buf, size_t n)
 #endif
 }
 
+#if defined(_WIN32)
+/* GetModuleFileNameW can hand back more than MAX_PATH characters, and a
+ * plain CreateFileW on such a string fails unless the process happens to be
+ * long-path aware. The \\?\ prefix turns the Win32 path parse off entirely
+ * and lifts the limit. Same three cases as platform_windows_wide_path()
+ * (lib/platform/src/windows_path_internal.h) minus its '/'-to-'\' rewrite:
+ * that helper takes UTF-8 and this input is already wide and already
+ * normalised by the loader, so round-tripping it through UTF-8 just to reuse
+ * the helper would add two lossy conversions to buy nothing. */
+static bool os_proc_win_extend_path(const wchar_t *in, size_t len,
+                                    wchar_t out[32768])
+{
+    if (len == 0 || len >= 32768)
+        return false;
+    if (wcsncmp(in, L"\\\\?\\", 4) == 0) {
+        wmemcpy(out, in, len + 1u);
+        return true;
+    }
+    if (in[0] == L'\\' && in[1] == L'\\') {          /* \\server\share\... */
+        if (len + 7u >= 32768) return false;
+        wmemcpy(out, L"\\\\?\\UNC\\", 8);
+        wmemcpy(out + 8, in + 2, len - 2u + 1u);
+        return true;
+    }
+    if (in[0] && in[1] == L':' && in[2] == L'\\') {  /* C:\... */
+        if (len + 5u >= 32768) return false;
+        wmemcpy(out, L"\\\\?\\", 4);
+        wmemcpy(out + 4, in, len + 1u);
+        return true;
+    }
+    wmemcpy(out, in, len + 1u);
+    return true;
+}
+#endif
+
 FILE *os_proc_open_self_exe(void)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    /* Windows reopens the running image BY PATHNAME. That is rung
+     * RESOLVED_PATH, not RUNNING_IMAGE, and the difference is real: no
+     * documented Win32 call hands out a handle to the file object the
+     * loader mapped. GetModuleFileNameW returns a STRING cached in the PEB
+     * at image load, so everything after it is ordinary name resolution.
+     *
+     * The race is not hypothetical on this platform, it is the platform's
+     * own update idiom. A running image cannot be overwritten in place --
+     * the loader holds it without FILE_SHARE_WRITE -- so a Windows deploy
+     * RENAMES the running exe aside and installs the new one at the old
+     * name. Between GetModuleFileNameW and CreateFileW that leaves a new,
+     * different file under the name we are about to open.
+     *
+     * Two things narrow the window and neither closes it, so neither earns
+     * a stronger label:
+     *   - FILE_SHARE_WRITE denial rules out the in-place-overwrite variant,
+     *     so the file at that name cannot have been edited underneath us.
+     *   - FILE_SHARE_DELETE in OUR open means that once the handle exists it
+     *     keeps naming that one file object across any later rename or
+     *     delete, so the bytes a caller reads are self-consistent.
+     * GetFileInformationByHandle's volume serial + file index would give an
+     * inode-equivalent identity for the handle, but there is nothing
+     * trustworthy to compare it against -- the only other identity available
+     * is derived from the same pathname -- so it would be a comparison of a
+     * value with itself, dressed up as a proof. Left out deliberately. */
+    wchar_t wide[32768];
+    DWORD length = GetModuleFileNameW(NULL, wide,
+                                      (DWORD)(sizeof(wide) / sizeof(wide[0])));
+    if (length == 0 || length >= sizeof(wide) / sizeof(wide[0])) {
+        errno = ENOENT;
+        return NULL;
+    }
+    wchar_t extended[32768];
+    if (!os_proc_win_extend_path(wide, (size_t)length, extended)) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    HANDLE handle = CreateFileW(extended, GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        errno = EACCES;
+        return NULL;
+    }
+    /* Ownership walks forward one step at a time and each failure arm frees
+     * exactly the tier it reached: _open_osfhandle takes the HANDLE (so
+     * _close, never CloseHandle, is the undo after it succeeds) and _fdopen
+     * takes the fd (so the caller's fclose closes both). Getting this wrong
+     * leaks a handle on every boot of a node that cannot read its own
+     * image, which is precisely the box an operator is trying to diagnose. */
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        errno = EBADF;
+        return NULL;
+    }
+    FILE *stream = _fdopen(fd, "rb");
+    if (!stream) {
+        _close(fd);
+        return NULL;
+    }
+    return stream;
+#elif defined(__APPLE__)
     /* Darwin: _NSGetExecutablePath resolves the running binary's path
      * (the kernel keeps the exec mapping alive even after unlink), then
-     * fopen reopens it for hashing. Slightly weaker than Linux's
-     * /proc/self/exe inode pin, but the standard darwin approach. */
+     * fopen reopens it for hashing. Rung RESOLVED_PATH, weaker than
+     * Linux's /proc/self/exe inode pin for the same reason the Windows arm
+     * above is -- the open is by NAME -- but the standard darwin approach. */
     char path[4096];
     if (!os_proc_exe_path(path, sizeof(path)))
         return NULL;
     return fopen(path, "rb");
 #elif defined(__linux__)
+    /* Hold the RUNNING inode, which is what this function promises.
+     * Resolving the pathname first and opening that instead would
+     * reopen whatever now sits at the name -- after a deploy that
+     * replaces the file, a different binary -- and the kernel marks a
+     * replaced dentry with a " (deleted)" suffix that does not open
+     * at all. Neither is the image this process is executing. */
     return fopen("/proc/self/exe", "rb");
 #else
     errno = ENOTSUP;
     return NULL;
+#endif
+}
+
+/* The rung the arm above actually reached. Deliberately derived from the
+ * SAME preprocessor ladder, immediately below it, so a platform cannot
+ * acquire an implementation without its label moving with it, and cannot
+ * acquire a label without an implementation. A reader that keeps its own
+ * copy of this #if is a claim that drifts away from the mechanism. */
+enum os_proc_image_identity os_proc_self_exe_identity(void)
+{
+#if defined(_WIN32) || defined(__APPLE__)
+    return OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH;
+#elif defined(__linux__)
+    return OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE;
+#else
+    return OS_PROC_IMAGE_IDENTITY_UNAVAILABLE;
 #endif
 }
 
@@ -696,3 +593,118 @@ bool os_proc_open_fd_count(size_t *out)
     return true;
 #endif
 }
+
+/* ── Per-thread kernel work counters ──────────────────────────────────────
+ * The shim for these reads lives here precisely so no caller outside
+ * lib/platform/ opens /proc itself. */
+
+long os_proc_self_tid(void)
+{
+#if defined(__linux__)
+    return (long)syscall(SYS_gettid);
+#else
+    return 0; // raw-return-ok:platform-has-no-thread-id
+#endif
+}
+
+#if defined(__linux__)
+
+/* /proc/<pid>/stat field order is stable, but field 2 (comm) is the thread
+ * name in parentheses and may itself contain spaces AND parentheses, so the
+ * only safe anchor is the LAST ')' in the line. Field 3 (state) is a letter,
+ * not a number, so it is skipped as a token rather than parsed. Numbering the
+ * remaining space-separated numeric fields from ppid (field 4) as index 0:
+ * majflt is field 12, utime field 14, stime field 15. */
+#define OS_PROC_TW_MAJFLT (12 - 4)
+#define OS_PROC_TW_UTIME  (14 - 4)
+#define OS_PROC_TW_STIME  (15 - 4)
+
+static bool os_proc_tw_parse_stat(const char *line,
+                                  struct os_proc_thread_work *out)
+{
+    const char *p = strrchr(line, ')');
+    if (!p)
+        return false; // raw-return-ok:platform-cannot-answer
+    p++;
+    while (*p == ' ')                 /* state: a letter, not a number */
+        p++;
+    while (*p != '\0' && *p != ' ')
+        p++;
+    uint64_t majflt = 0, utime = 0, stime = 0;
+    for (int idx = 0; idx <= OS_PROC_TW_STIME; idx++) {
+        while (*p == ' ')
+            p++;
+        if (*p == '\0')
+            return false; // raw-return-ok:platform-cannot-answer
+        char *end = NULL;
+        unsigned long long v = strtoull(p, &end, 10);
+        if (end == p)
+            return false; // raw-return-ok:platform-cannot-answer
+        if (idx == OS_PROC_TW_MAJFLT) majflt = (uint64_t)v;
+        if (idx == OS_PROC_TW_UTIME)  utime  = (uint64_t)v;
+        if (idx == OS_PROC_TW_STIME)  stime  = (uint64_t)v;
+        p = end;
+    }
+    out->major_faults = majflt;
+    out->cpu_ticks    = utime + stime;
+    return true;
+}
+
+/* read_bytes/write_bytes need CONFIG_TASK_IO_ACCOUNTING. When the file is
+ * missing the thread is still observable through CPU and major faults, so a
+ * failure here leaves io_bytes at zero rather than failing the whole read. */
+static void os_proc_tw_read_io(long tid, struct os_proc_thread_work *out)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/io", tid);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return;
+    char line[256];
+    uint64_t total = 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *v = NULL;
+        if (strncmp(line, "read_bytes:", 11) == 0)
+            v = line + 11;
+        else if (strncmp(line, "write_bytes:", 12) == 0)
+            v = line + 12;
+        if (v)
+            total += strtoull(v, NULL, 10);
+    }
+    fclose(f);
+    out->io_bytes = total;
+}
+
+bool os_proc_thread_work_read(long tid, struct os_proc_thread_work *out)
+{
+    if (!out)
+        return false; // raw-return-ok:platform-cannot-answer
+    memset(out, 0, sizeof(*out));
+    if (tid <= 0)
+        return false; // raw-return-ok:platform-cannot-answer
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/stat", tid);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false; // raw-return-ok:platform-cannot-answer
+    char line[1024];
+    char *got = fgets(line, sizeof(line), f);
+    fclose(f);
+    if (!got || !os_proc_tw_parse_stat(line, out))
+        return false; // raw-return-ok:platform-cannot-answer
+    os_proc_tw_read_io(tid, out);
+    return true;
+}
+
+#else /* !__linux__ */
+
+bool os_proc_thread_work_read(long tid, struct os_proc_thread_work *out)
+{
+    (void)tid;
+    if (!out)
+        return false; // raw-return-ok:platform-cannot-answer
+    memset(out, 0, sizeof(*out));
+    return false; // raw-return-ok:platform-cannot-answer
+}
+
+#endif /* __linux__ */

@@ -849,6 +849,64 @@ static int test_bf_execution_observation_codec(void)
     return failures;
 }
 
+static int test_bf_worker_identity_capability_honesty(void)
+{
+    int failures = 0;
+    TEST("build_fabric: worker identity advertises the real host platform "
+         "and declines compile capability it cannot execute") {
+        /* On a host that CAN capture a toolchain capsule (this build/test
+         * host always can — see test_bf_toolchain_capture_cache above),
+         * build_fabric_worker_identity_load() must still succeed and the
+         * advertised platform token must name the actual compiled-for
+         * host, never a blind literal. */
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "build_fabric", "identity-honest");
+        struct db_build_worker worker;
+        uint8_t signer_secret[32], signer_pubkey[32];
+        ASSERT(build_fabric_worker_identity_load(
+            dir, &worker, signer_secret, signer_pubkey).ok);
+#if defined(__linux__)
+        static const char expected_platform[] = "linux,";
+#elif defined(__APPLE__)
+        static const char expected_platform[] = "macos,";
+#else
+        static const char expected_platform[] = "unknown,";
+#endif
+        ASSERT(strncmp(worker.capabilities, expected_platform,
+                       sizeof(expected_platform) - 1) == 0);
+        ASSERT(strstr(worker.capabilities, VCS_BUILD_ACTION_KIND_V1) != NULL);
+        ASSERT(strstr(worker.capabilities,
+                      VCS_BUILD_ACTION_KIND_TEST_V1) != NULL);
+        ASSERT(strstr(worker.capabilities,
+                      VCS_BUILD_ACTION_KIND_FUZZ_V1) != NULL);
+        ASSERT(strstr(worker.capabilities,
+                      VCS_BUILD_ACTION_KIND_PACKAGE_V1) != NULL);
+
+        /* The same decision, driven directly (test seam) with the outcome
+         * a host that CANNOT capture a toolchain capsule would see (e.g.
+         * arm64 macOS, whose crt1.o/crti.o/crtn.o/libc.so.6 ELF/glibc
+         * probes can never succeed): it must refuse by name, not write a
+         * capability string that claims compile/test/fuzz/package it
+         * cannot execute. */
+        char declined[BUILD_FABRIC_CAPS_MAX + 1];
+        declined[0] = '\1'; /* poison: must stay untouched on refusal */
+        struct zcl_result refusal = build_fabric_worker_capabilities_for_test(
+            false, declined, sizeof(declined));
+        ASSERT(!refusal.ok);
+        ASSERT(strstr(refusal.message, "declines") != NULL);
+        ASSERT(declined[0] == '\1');
+
+        /* And the honored path through the same seam matches the real
+         * identity_load() output byte-for-byte. */
+        char honored[BUILD_FABRIC_CAPS_MAX + 1];
+        ASSERT(build_fabric_worker_capabilities_for_test(
+            true, honored, sizeof(honored)).ok);
+        ASSERT_STR_EQ(honored, worker.capabilities);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_confined_worker(void)
 {
     int failures = 0;
@@ -1715,6 +1773,7 @@ int test_build_fabric(void)
     failures += test_bf_toolchain_capture_cache();
     failures += test_bf_assembler_identity_is_version();
     failures += test_bf_execution_observation_codec();
+    failures += test_bf_worker_identity_capability_honesty();
     failures += test_bf_confined_worker();
     failures += test_bf_confined_test_worker();
     failures += test_bf_native();

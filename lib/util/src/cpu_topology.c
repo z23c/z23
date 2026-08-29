@@ -17,7 +17,11 @@
  * If /sys is unreadable at all (containers, non-Linux layouts) the whole
  * scan degrades to ONE synthetic domain covering
  * sysconf(_SC_NPROCESSORS_ONLN) cpus with unknown L3 size — always usable,
- * never fatal. cpu_topology_source() reports which path was taken. */
+ * never fatal. cpu_topology_source() reports which path was taken. macOS and
+ * Windows always take that fallback: it is the honest shape there (source
+ * reads "fallback", smt_width stays 0 = unknown, L3 size stays 0 = unknown),
+ * and only the raw online-cpu count differs per OS — see
+ * sysconf_cpu_count(), which is the one call this file ports. */
 #define _GNU_SOURCE /* pthread_setaffinity_np, CPU_SET */
 
 #include "util/cpu_topology.h"
@@ -26,7 +30,11 @@
 #include "json/json.h"
 #include "platform/logical_cpu.h"
 #include "util/log_macros.h"
+#include "platform/logical_cpu.h"
+#include "util/safe_alloc.h"
 
+
+#include <limits.h>
 #include <pthread.h>
 #include <limits.h>
 #if !defined(_WIN32)
@@ -162,6 +170,15 @@ static void expand_cpu_list(const char *list, int *out, int cap, int *count)
 
 /* ── Scan ──────────────────────────────────────────────────────────── */
 
+/* Online logical-cpu count, the one host primitive the fallback path needs.
+ *
+ * Delegates to platform_logical_cpu_count() rather than carrying a second
+ * copy: that primitive already answers this exact question on every host,
+ * including the Windows processor-group handling and the API-floor fallback,
+ * and two implementations of "how many CPUs" is precisely how the two drift
+ * apart. It is documented to return >= 1 always -- a zero here would be
+ * reported as a machine with no CPUs, which is never true of a host that is
+ * running this code. */
 static int sysconf_cpu_count(void)
 {
     uint32_t n = platform_logical_cpu_count();

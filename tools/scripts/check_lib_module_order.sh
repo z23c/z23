@@ -25,10 +25,11 @@
 #   Blank lines and # comments are ignored.
 #
 # Ratchet, not HARD-empty: the tree has two strongly-connected components
-# (re-measured 2026-07-26) — {metrics sync validation net rpc storage script}
-# and {util health} — so no ordering can be back-edge-free. The baseline holds
-# 5 back edges, which is the PROVEN MINIMUM (exhaustive over both components:
-# 7! and 2! orderings give 4 + 1), not a heuristic's leftovers. That has a
+# (2026-08-29, after the zcashconsensus shim purge) — {metrics sync validation
+# net rpc storage} and {util health} — so no ordering can be back-edge-free.
+# The baseline holds 4 back edges, which is the PROVEN MINIMUM (exhaustive
+# over both components: 6! and 2! orderings give 3 + 1), not a heuristic's
+# leftovers. That has a
 # consequence worth stating plainly:
 # re-ranking config/lib_module_order.def can NEVER remove a baseline line. Each
 # one is paid down only by breaking the cycle — move the symbol down, or invert

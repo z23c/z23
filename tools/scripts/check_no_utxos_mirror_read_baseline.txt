@@ -17,5 +17,5 @@ config/src/boot.c
 config/src/boot_index.c
 config/src/boot_services.c
 config/src/boot_snapshot_import.c
-config/src/consensus_state_install_runtime.c
+config/src/consensus_state_install_derived_state.c
 config/src/runtime.c

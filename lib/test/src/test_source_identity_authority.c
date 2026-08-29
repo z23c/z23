@@ -87,11 +87,10 @@ static int sia_baked_constant_is_cwd_invariant(void)
     TEST("baked source id is identical from every working directory") {
         ASSERT(getcwd(origin, sizeof(origin)) != NULL);
 
-        char work[512], abswork[PATH_MAX];
+        char work[512];
+        /* test_make_tmpdir yields an absolute path, which is what this case
+         * needs — its whole point is to leave the repository root behind. */
         test_make_tmpdir(work, sizeof(work), "sia", "chdir");
-        /* test_make_tmpdir yields a path relative to the repository root; the
-         * whole point of this case is to leave that root, so absolutise it. */
-        snprintf(abswork, sizeof(abswork), "%s/%s", origin, work);
 
         /* Read it once, then again from directories that share no prefix with
          * each other or with the repository. A value derived from the cwd —
@@ -100,7 +99,7 @@ static int sia_baked_constant_is_cwd_invariant(void)
         snprintf(first, sizeof(first), "%s", zcl_build_source_id_sha256());
         ASSERT(first[0] != '\0');
 
-        const char *elsewhere[] = { "/", abswork, "/usr" };
+        const char *elsewhere[] = { "/", work, "/usr" };
         bool same = true;
         for (size_t i = 0; i < sizeof(elsewhere) / sizeof(elsewhere[0]); i++) {
             if (chdir(elsewhere[i]) != 0)
@@ -244,8 +243,6 @@ static int sia_binary_reader_is_cwd_invariant(void)
     TEST("binary source id is the same from three working directories") {
         ASSERT(getcwd(repo_root, sizeof(repo_root)) != NULL);
         test_make_tmpdir(work, sizeof(work), "sia", "reader");
-        char abswork[PATH_MAX];
-        snprintf(abswork, sizeof(abswork), "%s/%s", repo_root, work);
 
         char lib[PATH_MAX];
         snprintf(lib, sizeof(lib), "%s/tools/scripts/source_identity_lib.sh",
@@ -257,12 +254,12 @@ static int sia_binary_reader_is_cwd_invariant(void)
          * a subdirectory of it, and a tmpdir outside any checkout. */
         char sub[PATH_MAX], outside[PATH_MAX];
         snprintf(sub, sizeof(sub), "%s/tools", repo_root);
-        snprintf(outside, sizeof(outside), "%s/outside", abswork);
+        snprintf(outside, sizeof(outside), "%s/outside", work);
         ASSERT(mkdir(outside, 0700) == 0);
         const char *cwds[3] = { repo_root, sub, outside };
 
         char bin[PATH_MAX];
-        snprintf(bin, sizeof(bin), "%s/fake-node", abswork);
+        snprintf(bin, sizeof(bin), "%s/fake-node", work);
         ASSERT(sia_write_fixture_binary(bin, "canonical"));
 
         /* C: one binary, three directories, one answer — the baked one. */
@@ -304,8 +301,6 @@ static int sia_negative_control_positional_reader(void)
     TEST("NEGATIVE CONTROL: the positional reader answers per-directory") {
         ASSERT(getcwd(repo_root, sizeof(repo_root)) != NULL);
         test_make_tmpdir(work, sizeof(work), "sia", "control");
-        char abswork[PATH_MAX];
-        snprintf(abswork, sizeof(abswork), "%s/%s", repo_root, work);
 
         char lib[PATH_MAX];
         snprintf(lib, sizeof(lib), "%s/tools/scripts/source_identity_lib.sh",
@@ -313,7 +308,7 @@ static int sia_negative_control_positional_reader(void)
 
         char sub[PATH_MAX], outside[PATH_MAX];
         snprintf(sub, sizeof(sub), "%s/tools", repo_root);
-        snprintf(outside, sizeof(outside), "%s/outside", abswork);
+        snprintf(outside, sizeof(outside), "%s/outside", work);
         ASSERT(mkdir(outside, 0700) == 0);
         const char *cwds[3] = { repo_root, sub, outside };
 
@@ -322,7 +317,7 @@ static int sia_negative_control_positional_reader(void)
          * "returns whatever this directory happens to be" for a reader that
          * takes the first match. */
         char bin[PATH_MAX];
-        snprintf(bin, sizeof(bin), "%s/fake-node", abswork);
+        snprintf(bin, sizeof(bin), "%s/fake-node", work);
         ASSERT(sia_write_fixture_binary(bin, "nested_first"));
 
         char loose[3][256];
