@@ -18,7 +18,7 @@ static const char receipt_signature_domain[] =
     "zcl.mesh.status.receipt.signature.v1";
 static const char receipt_root_domain[] = "zcl.mesh.status.receipt.v1";
 
-#define RECEIPT_UNSIGNED_FIXED_BYTES 344u
+#define RECEIPT_UNSIGNED_FIXED_BYTES 336u
 
 static bool bytes_nonzero(const uint8_t *bytes, size_t count)
 {
@@ -95,8 +95,7 @@ static enum mesh_status_proto_error request_shape(
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
         if (!bytes_nonzero(critical[i], 32))
             return MESH_STATUS_PROTO_FIELD;
-    if (request->connection_generation == 0 ||
-        request->connection_serial == 0)
+    if (request->connection_generation == 0)
         return MESH_STATUS_PROTO_FIELD;
     return lifetime_valid(request->issued_unix, request->expires_unix)
                ? MESH_STATUS_PROTO_OK
@@ -125,7 +124,6 @@ static size_t request_write(const struct mesh_status_request_v1 *request,
     memcpy(out + off, request->pairing_id, 32); off += 32;
     memcpy(out + off, request->transcript_hash, 32); off += 32;
     zcl_write_u64_le(out + off, request->connection_generation); off += 8;
-    zcl_write_u64_le(out + off, request->connection_serial); off += 8;
     zcl_write_u64_le(out + off, request->issued_unix); off += 8;
     zcl_write_u64_le(out + off, request->expires_unix); off += 8;
     return off;
@@ -167,7 +165,6 @@ enum mesh_status_proto_error mesh_status_request_v1_decode(
     memcpy(out->pairing_id, wire + off, 32); off += 32;
     memcpy(out->transcript_hash, wire + off, 32); off += 32;
     out->connection_generation = zcl_read_u64_le(wire + off); off += 8;
-    out->connection_serial = zcl_read_u64_le(wire + off); off += 8;
     out->issued_unix = zcl_read_u64_le(wire + off); off += 8;
     out->expires_unix = zcl_read_u64_le(wire + off); off += 8;
     enum mesh_status_proto_error error =
@@ -257,8 +254,7 @@ static enum mesh_status_proto_error receipt_shape(
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
         if (!bytes_nonzero(critical[i], 32))
             return MESH_STATUS_PROTO_FIELD;
-    if (receipt->connection_generation == 0 ||
-        receipt->connection_serial == 0)
+    if (receipt->connection_generation == 0)
         return MESH_STATUS_PROTO_FIELD;
     if (!lifetime_valid(receipt->observed_unix, receipt->expires_unix))
         return MESH_STATUS_PROTO_TIME;
@@ -294,7 +290,6 @@ static size_t receipt_write_unsigned(
     memcpy(out + off, receipt->responder_noise_static, 32); off += 32;
     memcpy(out + off, receipt->transcript_hash, 32); off += 32;
     zcl_write_u64_le(out + off, receipt->connection_generation); off += 8;
-    zcl_write_u64_le(out + off, receipt->connection_serial); off += 8;
     zcl_write_u64_le(out + off, receipt->revocation_generation); off += 8;
     zcl_write_u64_le(out + off, receipt->observed_unix); off += 8;
     zcl_write_u64_le(out + off, receipt->expires_unix); off += 8;
@@ -425,7 +420,6 @@ enum mesh_status_proto_error mesh_status_receipt_v1_decode(
     memcpy(out->responder_noise_static, wire + off, 32); off += 32;
     memcpy(out->transcript_hash, wire + off, 32); off += 32;
     out->connection_generation = zcl_read_u64_le(wire + off); off += 8;
-    out->connection_serial = zcl_read_u64_le(wire + off); off += 8;
     out->revocation_generation = zcl_read_u64_le(wire + off); off += 8;
     out->observed_unix = zcl_read_u64_le(wire + off); off += 8;
     out->expires_unix = zcl_read_u64_le(wire + off); off += 8;
@@ -487,8 +481,7 @@ enum mesh_status_proto_error mesh_status_receipt_v1_matches_request(
         memcmp(receipt->responder_master_pubkey,
                request->target_master_pubkey, 32) == 0 &&
         memcmp(receipt->transcript_hash, request->transcript_hash, 32) == 0 &&
-        receipt->connection_generation == request->connection_generation &&
-        receipt->connection_serial == request->connection_serial;
+        receipt->connection_generation == request->connection_generation;
     memory_cleanse(request_root, sizeof(request_root));
     if (!fields_match)
         return MESH_STATUS_PROTO_FIELD;
