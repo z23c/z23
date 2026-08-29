@@ -32,13 +32,24 @@
  *
  * ── What a hostile peer can and cannot cause ──────────────────────────
  *
- * CAN: waste bounded time and bounded bytes, and be dropped for it.
+ * CAN: waste bounded BYTES; waste time that is NOT fully bounded (see the time
+ * bound below); and, listed before the honest peers, DENY the fetch outright —
+ * one seeder may advertise up to ROM_FETCH_MAX_ARTIFACTS (8) artifacts and
+ * SOURCE_BUNDLE_FETCH_MAX_CANDIDATES is also 8, so ONE hostile seeder asked
+ * first can fill every candidate slot with distinct chunk_roots all claiming
+ * the honest source_root (the advertised root is read out of each file's own
+ * ZVSB header, which the attacker writes), and a later honest peer's offer is
+ * then dropped by the cap in sbf_candidate_add rather than tried.
+ * Refusing it is still fail-closed (the caller gets a named refusal and zero
+ * bytes), but "the search continues until it finds the right one" is only true
+ * while a slot is left. Nothing here is consulted against the deprioritize
+ * list — see the note on rom_peer_note_bad_chunk in the .c file.
  * CANNOT: make this function return bytes that do not rederive to
  * `source_root`; make it write anything to a path of the peer's choosing (this
  * function never touches the caller's output path at all — it returns a buffer
- * and lets the caller commit it); or make a wrong candidate outlast a right one
- * (a candidate that fails the root check is abandoned, its peers are scored,
- * and the search continues).
+ * and lets the caller commit it); or make a wrong candidate that IS tried
+ * outlast a right one that is also in the set (a candidate that fails the root
+ * check is abandoned and the search moves to the next).
  *
  * The specific attack this is built to refuse is SUBSTITUTION, not corruption:
  * a WELL-FORMED bundle of a tree that differs by one byte, which verifies
@@ -47,19 +58,36 @@
  * digests and proves nothing about this layer. Substitution reaches the content
  * check and is refused there, with zero bytes materialized.
  *
- * ── The time bound ───────────────────────────────────────────────────
+ * ── The time bound, and the part of it that is NOT bounded ───────────
  *
- * SOURCE_BUNDLE_FETCH_BUDGET_MS bounds the whole call. It is consulted before
+ * SOURCE_BUNDLE_FETCH_BUDGET_MS bounds the SEARCH. It is consulted before
  * every peer connection and before every candidate download, never inside a
- * socket operation, so the true ceiling is the budget PLUS one peer's in-flight
- * work. That in-flight work is itself bounded by the transport: a connect is
- * capped by RF_CONNECT_TIMEOUT_MS (10 s), a directory or manifest read by
- * RF_MANIFEST_IO_TIMEOUT_SEC (15 s), and a bundle download by
- * SOURCE_BUNDLE_FETCH_MAX_CHUNKS chunk reads each capped by RF_IO_TIMEOUT_MS
- * (120 s) of silence — all in lib/net/src/rom_fetch_transport.c. Bytes are
- * bounded independently and much more tightly: no candidate over
- * VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES is ever attempted, and at most
- * SOURCE_BUNDLE_FETCH_MAX_CANDIDATES candidates are tried. */
+ * socket operation, so the true ceiling is the budget PLUS one peer's
+ * in-flight work — and that in-flight work is where the honest answer stops
+ * being a number.
+ *
+ * BOUNDED. A connect is capped by RF_CONNECT_TIMEOUT_MS (10 s). A directory
+ * read is capped by rom_fetch_get_directory's SINGLE absolute deadline
+ * (lib/net/src/rom_fetch_directory.c), which reduces every wait after connect
+ * to the time remaining against it, so a drip-feeding seeder cannot re-arm a
+ * fresh window at each wire step. Bytes are bounded independently and much
+ * more tightly: no candidate over VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES is ever
+ * attempted, and at most SOURCE_BUNDLE_FETCH_MAX_CANDIDATES are tried.
+ *
+ * NOT BOUNDED — a known gap, stated here rather than papered over. The
+ * manifest probe (rom_fetch_get_manifest) and the chunk reads
+ * (rom_fetch_chunk) arm SO_RCVTIMEO once and then read with rf_recv_exact
+ * (lib/net/src/rom_fetch_transport.c). SO_RCVTIMEO is a per-recv SILENCE
+ * window, so a peer that sends ONE BYTE just inside each window re-arms it
+ * for every byte of the reply. RF_IO_TIMEOUT_MS (120 s) therefore caps a
+ * single recv, NOT a chunk read: an 8 MB chunk is 8 M re-armable windows.
+ * There is no absolute deadline on either call, and this call's own budget is
+ * not consulted while one is in flight, so a single dishonest peer that
+ * answers the directory request normally and then paces its chunk bytes can
+ * hold this function far past SOURCE_BUNDLE_FETCH_BUDGET_MS. Closing it needs
+ * a MINIMUM-PROGRESS deadline (silence window + bytes/floor-rate), never a
+ * flat one: this fleet has 7200 rpm boxes and Tor-only seeders, and a flat
+ * per-chunk deadline would grade an honest slow seeder as an attacker. */
 
 #ifndef ZCL_SERVICES_SOURCE_BUNDLE_FETCH_H
 #define ZCL_SERVICES_SOURCE_BUNDLE_FETCH_H

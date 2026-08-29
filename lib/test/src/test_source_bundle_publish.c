@@ -661,6 +661,102 @@ static int test_leaf_through_rpc(void)
     return failures;
 }
 
+/* ── (g) The OTHER cap: registry slots, not walked entries ───────────── */
+
+/* ADVERSARIAL. Case (d) proves publish survives a directory crowded past
+ * ROM_SEED_SCAN_ENTRY_CAP, and its padding is deliberately not artifact-shaped
+ * so nothing there "competes for a registry slot". That leaves the competition
+ * itself untested, and it is the cap that actually binds: the registry is
+ * ROM_SEED_MAX_ARTIFACTS = 8 slots, three orders of magnitude below the 4096
+ * entry cap, and rom_seed_scan_datadir() fills them in arbitrary readdir order
+ * and then `break`s. So a seeded directory nowhere near the entry cap can still
+ * lose bundles on the next sweep — and `rescan_guaranteed`, computed against
+ * the entry cap alone, told the operator the opposite.
+ *
+ * The fixture is the ordinary shape of a synced node that publishes: one
+ * header seed in the datadir root (the exactly-named artifact every sweep
+ * registers FIRST, by name) plus a full set of published source bundles. No
+ * padding, no tampering, no hostile input — every file here is one this node
+ * put there itself and was told would survive a restart. */
+static int test_registry_cap_breaks_rescan_promise(void)
+{
+    int failures = 0;
+    TEST("publish must not promise a boot-time sweep it cannot keep: the "
+         "registry holds ROM_SEED_MAX_ARTIFACTS entries, so a seeded directory "
+         "far under the entry cap still loses bundles on the next sweep") {
+        sbp_open_caps();
+        char aroot[] = "/tmp/zcl_sbpub_slots_dd_XXXXXX";
+        char *adir = mkdtemp(aroot);
+        ASSERT(adir != NULL);
+        ASSERT(sbp_serve(adir) != 0);
+
+        /* A synced node's header seed. It is not padding: it classifies as a
+         * real artifact, it is looked up BY NAME before any walk, and it
+         * therefore takes one of the eight slots on every future sweep. */
+        uint8_t seed_bytes[ROM_SEED_MIN_ARTIFACT_BYTES];
+        memset(seed_bytes, 0, sizeof(seed_bytes));
+        ASSERT(sbp_write(adir, "block_index.bin", seed_bytes,
+                         sizeof(seed_bytes)));
+
+        /* Publish a full registry's worth of distinct trees. Each call is
+         * told, in its own report, whether a future sweep will reach the
+         * bundle it just landed. */
+        uint8_t artifact_roots[ROM_SEED_MAX_ARTIFACTS][32];
+        struct source_bundle_publish_report report;
+        memset(&report, 0, sizeof(report));
+        for (unsigned i = 0; i < ROM_SEED_MAX_ARTIFACTS; i++) {
+            char wroot[] = "/tmp/zcl_sbpub_slots_ws_XXXXXX";
+            char *wdir = mkdtemp(wroot);
+            ASSERT(wdir != NULL);
+            ASSERT(sbp_make_tree(wdir, (char)('A' + (int)i)));
+            ASSERT(source_bundle_publish(wdir, adir, NULL, &report) ==
+                   SOURCE_BUNDLE_PUBLISH_OK);
+            memcpy(artifact_roots[i], report.artifact_root, 32);
+            sbp_rm_tree(wdir, 6);
+        }
+
+        /* The seeded directory is three orders of magnitude under the entry
+         * cap, so nothing the walk-length rule measures is in play here. */
+        char seed_dir[1200];
+        snprintf(seed_dir, sizeof(seed_dir), "%s/%s", adir,
+                 ROM_SEED_BUNDLES_SUBDIR);
+        ASSERT(sbp_count_entries(seed_dir) == (int)ROM_SEED_MAX_ARTIFACTS);
+        ASSERT(report.seed_directory_entries < ROM_SEED_SCAN_ENTRY_CAP);
+        ASSERT(rom_seed_count() == (int)ROM_SEED_MAX_ARTIFACTS);
+
+        /* THE RESTART. An empty registry, then the same bounded sweep a boot
+         * runs — the only thing that re-offers these bundles afterwards. */
+        rom_seed_reset();
+        rom_seed_set_enabled(true);
+        rom_seed_set_peer_bps_cap(1ull << 30);
+        rom_seed_set_global_bps_cap(1ull << 30);
+        ASSERT(rom_seed_count() == 0);
+        ASSERT(rom_seed_scan_datadir(adir) == (int)ROM_SEED_MAX_ARTIFACTS);
+
+        /* Ground truth, independent of any flag: the header seed took a slot,
+         * so the sweep provably could not re-offer every published bundle.
+         * WHICH ones survive is readdir order; that at least one does not is
+         * arithmetic. */
+        unsigned still_offered = 0;
+        for (unsigned i = 0; i < ROM_SEED_MAX_ARTIFACTS; i++)
+            if (rom_seed_find_by_root(artifact_roots[i], NULL))
+                still_offered++;
+        ASSERT(still_offered < ROM_SEED_MAX_ARTIFACTS);
+
+        /* So the promise made at publish time must not have been made.
+         * `rescan_guaranteed` is a claim about the NEXT sweep, and a sweep
+         * bounded by eight slots cannot honour it for nine artifacts —
+         * whatever the entry count says. */
+        ASSERT(!report.rescan_guaranteed);
+
+        fs_server_stop();
+        sbp_rm_tree(adir, 6);
+        sbp_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_source_bundle_publish(void)
 {
     int failures = 0;
@@ -670,5 +766,6 @@ int test_source_bundle_publish(void)
     failures += test_immune_to_scan_cap();
     failures += test_unservable_is_refused();
     failures += test_leaf_through_rpc();
+    failures += test_registry_cap_breaks_rescan_promise();
     return failures;
 }
