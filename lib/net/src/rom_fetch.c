@@ -865,9 +865,9 @@ bool rom_fetch_download_parallel(const struct rom_fetch_peer *peers,
  * binding slot. "RMF" + zero padding. */
 static const uint8_t RF_ROM_MANIFEST_MAC_TAG[32] = { 'R', 'M', 'F' };
 
-/* A stalled/absent manifest reply must fall back FAST, not sit on the 120 s
- * chunk-IO timeout — the manifest fetch precedes the whole download. */
-#define RF_MANIFEST_IO_TIMEOUT_SEC 15
+/* A stalled/absent manifest reply must fall back FAST, not sit on the full
+ * chunk-IO timeout — the manifest fetch precedes the whole download. The
+ * window is transport-scaled; see rf_probe_io_timeout_ms for why. */
 
 bool rom_fetch_verify_chunk(const uint8_t *data, uint32_t len,
                             const uint8_t expected_chunk_sha3[32])
@@ -940,7 +940,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     /* Shorten the recv window: a legacy (RMF-unaware) seeder never replies, so
      * a fast timeout is the fall-back signal rather than a 120 s stall. */
     (void)platform_socket_set_receive_timeout(
-        fd, RF_MANIFEST_IO_TIMEOUT_SEC * 1000);
+        fd, rf_probe_io_timeout_ms(peer_addr));
 
     struct fs_session s;
     fs_session_init(&s, fd);
@@ -1055,7 +1055,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
     /* Short recv window: a legacy (RLS-unaware) seeder never replies, so a fast
      * timeout is the fall-back signal rather than a 120 s stall. */
     (void)platform_socket_set_receive_timeout(
-        fd, RF_MANIFEST_IO_TIMEOUT_SEC * 1000);
+        fd, rf_probe_io_timeout_ms(peer_addr));
 
     struct fs_session s;
     fs_session_init(&s, fd);
