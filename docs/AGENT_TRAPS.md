@@ -293,3 +293,63 @@ CLEAN**, and nothing fires for months.
   top-level directory: `git grep -n '"<dirname>"' -- lib/test tools/lint tools/scripts lib/framework`
   and `git grep -n '<dirname>/' -- tools/lint tools/scripts`. A directory with
   no `.c` files can still be a scan root, a `roots[]` entry, or a runtime path.
+
+---
+
+## (5) BUILD & GATE TRAPS — a red that is not a test failure
+
+A gate can go red without a single assertion firing. These cost hours because
+the message names a symptom and the evidence is discarded before anyone reads
+it. Check this section before you start bisecting a "test failure".
+
+- **`exact source capture failed; refusing to select a compile epoch` means a
+  submodule is nonempty but uninitialized — it is not a test failure and not a
+  compiler problem.** `Makefile:381` refuses to pick a compile epoch when
+  `tools/dev/source-identity.sh capture` fails, and that capture fails hard on
+  a gitlink that has bytes but no `.git`
+  (`tools/dev/source-identity.sh:209`, "nonempty uninitialized gitlink would
+  omit bytes"). The refusal is CORRECT — hashing a tree while ignoring a
+  populated submodule would let two different source trees claim one id. In
+  practice `vendor/tor` is the gitlink that does this. Recover with
+  `git submodule update --init vendor/tor`, then re-run. Diagnose with
+  `git submodule status vendor/tor` (a leading `-` means uninitialized) and
+  `tools/dev/source-identity.sh capture`, which prints the reason on stderr and
+  a 64-hex id on success. Observed live: a full `make test-parallel` died in
+  seconds having run zero tests, and a `make ship` reported only
+  `full suite did not pass`.
+- **A worktree does not inherit submodules, so it links the Tor STUB and its
+  binary can never ship.** `git worktree add` populates tracked files but not
+  gitlinks, so `TOR_FULL` (`Makefile`, a wildcard over `vendor/tor/libtor.a`
+  plus `ext/ed25519/{donna,ref10}` and `ext/keccak-tiny`) is empty and the link
+  silently picks `libtor_stub.a`. Nothing complains until ship time, ~25 minutes
+  in. At runtime "real Tor" is `dynhost_client_fetch != NULL`
+  (`app/services/src/network_telemetry_fill.c:88`). `make worktree-prime` now
+  initializes the submodule and copies the four archives, and `tools/ship.sh`
+  refuses a stub checkout in seconds during preflight. ORDER MATTERS: copying
+  the archives into an uninitialized gitlink converts a silent stub build into
+  the total build failure above — init first, copy second, and only when
+  `[ -e vendor/tor/.git ]`.
+- **`! cmd` does not fail a script under `set -e`, so an assertion written that
+  way cannot fire.** Bash exempts a command whose status is being inverted with
+  `!` from `set -e` AND from the ERR trap. Ten assertions in `tools/ship.sh`
+  were decorative for exactly this reason — each would "pass" whatever the code
+  did. Write a helper that exits by itself
+  (`refute() { if cmd; then printf ...; exit 1; fi; }`) rather than `! cmd`.
+  Proof obligation: mutate the code the assertion guards and watch it go red. A
+  mutation that produces a SYNTAX error proves nothing — it must be a clean
+  semantic change.
+- **`grep -E ... | head -N` inside an `if` is a live bug under `set -o
+  pipefail`.** `head` closes the pipe, `grep` takes SIGPIPE, the pipeline
+  reports 141, and a pipeline that DID match is read as "no match" — inverting
+  the branch. Capture first (`out="$(grep ... | head -N || true)"`), then test
+  `[ -n "$out" ]`. Same family as the recorded `printf | grep -q` trap.
+  `tools/ship.sh` documents this at its `ldd` call and now at its suite-log
+  reporter.
+- **Evidence from a failed gate must outlive the gate.** `tools/ship.sh` used
+  to print five grep-matched lines and then `rm -f` the suite log, so a
+  25-minute failure left nothing to read — and a suite that died before
+  printing any verdict left an empty block that read like "no reason given".
+  The log now survives every failure at
+  `${GATE_CACHE_DIR}/last-failed-suite.log`, named in the die message, and is
+  removed only on success. When you add a gate, keep its log on the failure
+  path; that is the path where somebody needs it.
