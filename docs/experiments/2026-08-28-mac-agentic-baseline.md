@@ -42,6 +42,26 @@ on the current tree rather than trusted.
    - This blocks the MVP C7 full claim on macOS until the harness is ported to
      use `lsof`, `netstat`, or an equivalent macOS-native probe.
 
+## v2 transport verification
+
+The v2 Noise transport is implemented and works natively on arm64 macOS. It is
+disabled by default and armed with the `-v2transport` flag.
+
+Against an isolated regtest node started with `-v2transport`:
+
+- `transport.v2_enabled=true`
+- `transport.identity_loaded=true`
+- `transport.local_noise_fingerprint_sha3` populated
+- `authenticated_dht.disabled_reason` moved from `V2_TRANSPORT_DISABLED` to
+  `IDENTITY_MATERIAL_UNAVAILABLE`
+- Active blockers dropped from four to one: `AUTHENTICATED_DHT_INACTIVE`
+
+The remaining blocker is expected on a fresh regtest node: the authenticated DHT
+requires an on-chain-active operator identity provisioned through
+`z23 zcode network delegate --input='{"seed_file":"/path/master.hex"}'`.
+That provisioning needs a ZID identity that is ACTIVE on-chain; a regtest node at
+height 0 has none.
+
 ## Open macOS agentic / P2P gaps
 
 | Area | Current state | Next step |
@@ -53,20 +73,20 @@ on the current tree rather than trusted.
 
 ## Mesh identity detail
 
-Against the isolated regtest node, `ops mesh identity` returned:
+Against the isolated regtest node **without `-v2transport`**, `ops mesh identity`
+returned:
 
 - `platform.os=macos`, `architecture=aarch64`, `environment_observed=true`
 - `build.binary_identity_available=true`, `installed_path_matches_running_image=true`
 - `hotswap.status=refused`, `refusal_stage=macos`, reason:
   "native macOS hot-swap is disabled pending validated Mach-O imports and
   immutable executable-image staging"
-- Active blockers for pairing: `NOISE_TRANSPORT_DISABLED`,
-  `NOISE_IDENTITY_UNAVAILABLE`, `AUTHENTICATED_DHT_INACTIVE`,
-  `REMOTE_STATUS_PROTOCOL_UNAVAILABLE`.
+- Active blockers for pairing: `V2_TRANSPORT_DISABLED`,
+  `NOISE_IDENTITY_UNAVAILABLE`, `AUTHENTICATED_DHT_INACTIVE`.
 
-The capsule works; actual private-mesh pairing is gated on enabling the Noise
-transport and an authenticated DHT identity, which is the same cross-platform
-prerequisite set the command reports on Linux.
+With `-v2transport` the first two blockers drop; the remaining
+`AUTHENTICATED_DHT_INACTIVE` blocker is the cross-platform requirement for a
+provisioned on-chain DHT identity, not a macOS defect.
 
 ## Mainnet sync observation
 

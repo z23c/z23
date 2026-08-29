@@ -130,12 +130,12 @@ make lint            # defensive-coding + doc-accuracy gates
 
 ### Platform capability boundary
 
-| Host | Public node | Development loop | Resident hot swap |
-| --- | --- | --- | --- |
-| Linux | Full node | Full native workflow | Eligible read-only C23 leaves |
-| WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow |
-| macOS arm64 | Native node | Build and focused tests; polling watcher only | Unavailable; rebuild/restart |
-| Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart |
+| Host | Public node | Development loop | Resident hot swap | Machine mesh |
+| --- | --- | --- | --- | --- |
+| Linux | Full node | Full native workflow | Eligible read-only C23 leaves | v2 transport + DHT identity |
+| WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow | v2 transport + DHT identity |
+| macOS arm64 | Native node | Build and focused tests; polling watcher only | Unavailable; rebuild/restart | v2 transport works; DHT identity requires on-chain provisioning |
+| Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart | Not yet measured |
 
 Windows setup and the boundary between native MSYS2 and WSL2 are documented in
 [`WINDOWS.md`](WINDOWS.md). Never share `build/` or `vendor/lib/` between
@@ -144,11 +144,14 @@ native Windows and WSL.
 #### macOS
 
 The arm64 macOS build includes the node, wallet, P2P and RPC services,
-databases, and native cryptography. The following Linux-specific facilities
-currently report unavailable or refuse safely on macOS: Landlock/seccomp
-package confinement, signal-context self-backtraces, the inotify development
-watcher, and consensus snapshot export that requires `O_TMPFILE`. Intel macOS
-has not yet been measured.
+databases, and native cryptography. The authenticated Noise v2 transport works
+natively and is armed with `-v2transport`; private-machine mesh pairing then
+needs only a provisioned on-chain DHT identity (`zcode network delegate`), the
+same cross-platform prerequisite as Linux. The following Linux-specific
+facilities currently report unavailable or refuse safely on macOS:
+Landlock/seccomp package confinement, signal-context self-backtraces, the
+inotify development watcher, native hot-swap activation, and consensus snapshot
+export that requires `O_TMPFILE`. Intel macOS has not yet been measured.
 
 Embedded full Tor is not in that list. It was, because the build pinned Darwin
 to the offline stub regardless of whether the Tor archives existed; that pin is
