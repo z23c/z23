@@ -7,16 +7,15 @@
 // text crosses the wire. Drop/refusal logging happens at the frame edge.
 
 #include "config/boot_mesh_status.h"
+#include "boot_mesh_status_internal.h"
 
 #include "config/boot_internal.h"
-#include "config/boot_zcode_dht.h"
 #include "config/boot_zcode_dht_access.h"
 #include "config/runtime.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "controllers/diagnostics_controller.h"
-#include "crypto/random_secret.h"
 #include "json/json.h"
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
@@ -393,7 +392,7 @@ static bool mesh_render_capsule(uint8_t out[MESH_STATUS_CAPSULE_MAX],
     return true;
 }
 
-static bool mesh_send(struct msg_processor *mp, struct p2p_node *node,
+bool mesh_status_send(struct msg_processor *mp, struct p2p_node *node,
                       uint8_t kind, const uint8_t *wire, size_t wire_len)
 {
     uint8_t frame[MESH_STATUS_FRAME_MAX];
@@ -496,8 +495,8 @@ static void mesh_respond(struct msg_processor *mp, struct p2p_node *node,
         LOG_ERROR("net.mesh_status", "signed receipt failed to encode");
         return;
     }
-    (void)mesh_send(mp, node, MESH_STATUS_FRAME_KIND_RECEIPT, receipt_wire,
-                    receipt_len);
+    (void)mesh_status_send(mp, node, MESH_STATUS_FRAME_KIND_RECEIPT,
+                           receipt_wire, receipt_len);
 }
 
 /* ── Requester lane ──────────────────────────────────────────────────── */
@@ -520,6 +519,72 @@ static struct mesh_status_pending *mesh_pending_find_locked(
             return &g_pending[i];
     }
     return NULL;
+}
+
+/* ── Cross-TU helpers for the requester lane (internal header) ───────── */
+
+struct boot_svc_ctx *mesh_status_service(uint64_t *generation_out)
+{
+    mesh_lock();
+    struct boot_svc_ctx *svc = g_mesh_svc;
+    if (generation_out)
+        *generation_out = g_mesh_generation;
+    zcl_mutex_unlock(&g_mesh_lock);
+    return svc;
+}
+
+bool mesh_status_request_id_free(const uint8_t request_id[32])
+{
+    mesh_lock();
+    bool free_id = mesh_pending_find_locked(request_id) == NULL;
+    zcl_mutex_unlock(&g_mesh_lock);
+    return free_id;
+}
+
+/* Admit the pending entry before the request is sent so a fast receipt can
+ * never arrive to a missing slot. Evicts expired entries, then the oldest. */
+bool mesh_status_pending_admit(const struct mesh_status_request_v1 *request,
+                               const uint8_t expected_responder_master[32],
+                               uint64_t generation)
+{
+    uint64_t now_mono = mesh_now_mono();
+    mesh_lock();
+    mesh_pending_cleanup_locked(now_mono);
+    struct mesh_status_pending *slot = NULL;
+    size_t oldest = 0;
+    for (size_t i = 0; i < MESH_STATUS_PENDING_MAX; i++) {
+        if (!g_pending[i].used && !slot) {
+            slot = &g_pending[i];
+            continue;
+        }
+        if (g_pending[i].used &&
+            g_pending[i].expires_mono < g_pending[oldest].expires_mono)
+            oldest = i;
+    }
+    if (!slot && g_pending[oldest].used)
+        slot = &g_pending[oldest];
+    if (slot) {
+        memset(slot, 0, sizeof(*slot));
+        slot->used = true;
+        slot->request = *request;
+        memcpy(slot->expected_responder_master, expected_responder_master, 32);
+        slot->generation = generation;
+        slot->expires_mono =
+            now_mono + MESH_STATUS_REQUEST_LIFETIME_SECONDS + 5u;
+    }
+    zcl_mutex_unlock(&g_mesh_lock);
+    return slot != NULL;
+}
+
+/* Send-failed path: clear the admitted entry only when it still names this
+ * exact request and has not completed. */
+void mesh_status_pending_retract(const uint8_t request_id[32])
+{
+    mesh_lock();
+    struct mesh_status_pending *entry = mesh_pending_find_locked(request_id);
+    if (entry && !entry->done)
+        memset(entry, 0, sizeof(*entry));
+    zcl_mutex_unlock(&g_mesh_lock);
 }
 
 /* Receipt ingress: decode (verifies the signature under the embedded online
@@ -591,212 +656,6 @@ bool boot_mesh_status_frame(struct msg_processor *mp, struct p2p_node *node,
         atomic_fetch_add(&g_mesh_dropped_unknown_kind, 1);
         return true;
     }
-}
-
-const char *boot_mesh_status_begin_result_string(
-    enum boot_mesh_status_begin_result result)
-{
-    switch (result) {
-    case MESH_STATUS_BEGIN_OK: return "ok";
-    case MESH_STATUS_BEGIN_BAD_ARGUMENT: return "bad_argument";
-    case MESH_STATUS_BEGIN_UNAVAILABLE: return "unavailable";
-    case MESH_STATUS_BEGIN_V2_DISABLED: return "v2_transport_disabled";
-    case MESH_STATUS_BEGIN_NOT_PAIRED: return "not_paired";
-    case MESH_STATUS_BEGIN_REVOKED: return "revoked";
-    case MESH_STATUS_BEGIN_EXPIRED: return "expired";
-    case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED: return "peer_not_connected";
-    case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE: return "identity_unavailable";
-    case MESH_STATUS_BEGIN_BUSY: return "busy";
-    case MESH_STATUS_BEGIN_SEND_FAILED: return "send_failed";
-    }
-    return "bad_argument";
-}
-
-/* Snapshot connected peers under cs_nodes, then return the first whose
- * established v2 session names the paired Noise static. Caller releases the
- * returned reference. Never dials. */
-static struct p2p_node *mesh_find_session_peer(
-    struct net_manager *nm, const uint8_t peer_noise[32],
-    struct v2_transport_snapshot *session_out)
-{
-    struct p2p_node *candidates[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
-    size_t count = 0;
-    zcl_mutex_lock(&nm->cs_nodes);
-    for (size_t i = 0;
-         i < nm->num_nodes && count < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++) {
-        struct p2p_node *node = nm->nodes[i];
-        if (!boot_zcode_dht_peer_ready(node))
-            continue;
-        candidates[count++] = node;
-        p2p_node_add_ref(node);
-    }
-    zcl_mutex_unlock(&nm->cs_nodes);
-    struct p2p_node *found = NULL;
-    for (size_t i = 0; i < count; i++) {
-        struct v2_transport_snapshot snapshot;
-        memset(&snapshot, 0, sizeof(snapshot));
-        if (!found && candidates[i]->transport &&
-            v2_transport_snapshot(candidates[i]->transport, &snapshot) &&
-            snapshot.established &&
-            memcmp(snapshot.remote_static, peer_noise, 32) == 0) {
-            found = candidates[i];
-            *session_out = snapshot;
-        } else {
-            p2p_node_release(candidates[i]);
-        }
-    }
-    return found;
-}
-
-enum boot_mesh_status_begin_result boot_mesh_status_begin(
-    const char *pairing_id_hex, uint8_t request_id_out[32])
-{
-    uint8_t pairing_id[32];
-    if (!pairing_id_hex || strlen(pairing_id_hex) != MESH_PAIRING_ID_HEX ||
-        !zcl_hex_decode_lower(pairing_id_hex, pairing_id, 32) ||
-        !request_id_out)
-        return MESH_STATUS_BEGIN_BAD_ARGUMENT;
-
-    mesh_lock();
-    struct boot_svc_ctx *svc = g_mesh_svc;
-    uint64_t generation = g_mesh_generation;
-    zcl_mutex_unlock(&g_mesh_lock);
-    if (!svc || !svc->msg_processor || !svc->datadir)
-        return MESH_STATUS_BEGIN_UNAVAILABLE;
-    struct msg_processor *mp = svc->msg_processor;
-    if (!mp->net_mgr || !mp->params) {
-        LOG_ERROR("net.mesh_status", "begin: msg_processor incomplete");
-        return MESH_STATUS_BEGIN_UNAVAILABLE;
-    }
-    if (!mp->net_mgr->v2_enabled)
-        return MESH_STATUS_BEGIN_V2_DISABLED;
-
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
-        LOG_ERROR("net.mesh_status", "begin: node_db unavailable");
-        return MESH_STATUS_BEGIN_UNAVAILABLE;
-    }
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    if (now <= 0) {
-        LOG_ERROR("net.mesh_status", "begin: wall clock unavailable");
-        return MESH_STATUS_BEGIN_UNAVAILABLE;
-    }
-    struct db_mesh_pairing row;
-    if (!db_mesh_pairing_find(ndb, pairing_id_hex, &row))
-        return MESH_STATUS_BEGIN_NOT_PAIRED;
-    if (!mesh_pairing_allows(&row, MESH_PAIRING_CAP_STATUS_READ, now))
-        return row.revoked_at != 0 ? MESH_STATUS_BEGIN_REVOKED
-                                   : MESH_STATUS_BEGIN_EXPIRED;
-
-    /* The request names OUR anchored master identity from the filed local
-     * delegation; without it no honest request can be composed. */
-    struct vcs_zcode_dht_delegation local;
-    char error[160];
-    if (!vcs_zcode_dht_delegation_load(svc->datadir, &local, error,
-                                       sizeof(error))) {
-        LOG_ERROR("net.mesh_status",
-                  "begin: local delegation unavailable (%s)", error);
-        return MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE;
-    }
-
-    struct v2_transport_snapshot session;
-    memset(&session, 0, sizeof(session));
-    struct p2p_node *peer = mesh_find_session_peer(
-        mp->net_mgr, row.peer_noise_pubkey, &session);
-    if (!peer)
-        return MESH_STATUS_BEGIN_PEER_NOT_CONNECTED;
-
-    struct mesh_status_request_v1 request;
-    memset(&request, 0, sizeof(request));
-    request.version = MESH_STATUS_PROTO_VERSION;
-    request.flags = MESH_STATUS_PROTO_FLAGS_NONE;
-    request.capability = MESH_STATUS_CAP_STATUS_READ;
-    bool have_id = false;
-    for (int attempt = 0; attempt < 4 && !have_id; attempt++) {
-        if (!zcl_random_secret_bytes(request.request_id, 32,
-                                     "mesh_status_request")) {
-            p2p_node_release(peer);
-            LOG_ERROR("net.mesh_status", "begin: request id generation failed");
-            return MESH_STATUS_BEGIN_UNAVAILABLE;
-        }
-        mesh_lock();
-        have_id = mesh_pending_find_locked(request.request_id) == NULL;
-        zcl_mutex_unlock(&g_mesh_lock);
-    }
-    if (!have_id) {
-        p2p_node_release(peer);
-        LOG_ERROR("net.mesh_status", "begin: request id collision persisted");
-        return MESH_STATUS_BEGIN_BUSY;
-    }
-    memcpy(request.network_genesis,
-           mp->params->consensus.hashGenesisBlock.data, 32);
-    memcpy(request.target_master_pubkey, row.peer_master_pubkey, 32);
-    memcpy(request.requester_master_pubkey, local.doc.master_pubkey, 32);
-    memcpy(request.requester_noise_static, mp->net_mgr->identity_pub, 32);
-    memcpy(request.pairing_id, pairing_id, 32);
-    /* The request binds OUR side of the session; the responder verifies the
-     * shared transcript/generation and echoes the serial (see the header). */
-    memcpy(request.transcript_hash, session.transcript_hash, 32);
-    request.connection_generation = session.connection_generation;
-    request.connection_serial = session.connection_serial;
-    request.issued_unix = (uint64_t)now;
-    request.expires_unix = (uint64_t)now + MESH_STATUS_REQUEST_LIFETIME_SECONDS;
-
-    uint8_t wire[MESH_STATUS_REQUEST_V1_WIRE_BYTES];
-    enum mesh_status_proto_error encoded =
-        mesh_status_request_v1_encode(&request, wire);
-    if (encoded != MESH_STATUS_PROTO_OK) {
-        p2p_node_release(peer);
-        LOG_ERROR("net.mesh_status", "begin: request encode failed: %s",
-                  mesh_status_proto_error_string(encoded));
-        return MESH_STATUS_BEGIN_UNAVAILABLE;
-    }
-
-    /* Admit the pending entry before sending so a fast receipt can never
-     * arrive to a missing slot. Evicts expired entries, then the oldest. */
-    uint64_t now_mono = mesh_now_mono();
-    mesh_lock();
-    mesh_pending_cleanup_locked(now_mono);
-    struct mesh_status_pending *slot = NULL;
-    size_t oldest = 0;
-    for (size_t i = 0; i < MESH_STATUS_PENDING_MAX; i++) {
-        if (!g_pending[i].used && !slot) {
-            slot = &g_pending[i];
-            continue;
-        }
-        if (g_pending[i].used &&
-            g_pending[i].expires_mono < g_pending[oldest].expires_mono)
-            oldest = i;
-    }
-    if (!slot && g_pending[oldest].used)
-        slot = &g_pending[oldest];
-    if (slot) {
-        memset(slot, 0, sizeof(*slot));
-        slot->used = true;
-        slot->request = request;
-        memcpy(slot->expected_responder_master, row.peer_master_pubkey, 32);
-        slot->generation = generation;
-        slot->expires_mono =
-            now_mono + MESH_STATUS_REQUEST_LIFETIME_SECONDS + 5u;
-    }
-    zcl_mutex_unlock(&g_mesh_lock);
-    if (!slot) {
-        p2p_node_release(peer);
-        return MESH_STATUS_BEGIN_BUSY;
-    }
-    if (!mesh_send(mp, peer, MESH_STATUS_FRAME_KIND_REQUEST, wire,
-                   sizeof(wire))) {
-        mesh_lock();
-        if (slot->used && !slot->done &&
-            memcmp(slot->request.request_id, request.request_id, 32) == 0)
-            memset(slot, 0, sizeof(*slot));
-        zcl_mutex_unlock(&g_mesh_lock);
-        p2p_node_release(peer);
-        return MESH_STATUS_BEGIN_SEND_FAILED;
-    }
-    p2p_node_release(peer);
-    memcpy(request_id_out, request.request_id, 32);
-    return MESH_STATUS_BEGIN_OK;
 }
 
 enum boot_mesh_status_poll_state boot_mesh_status_poll(
