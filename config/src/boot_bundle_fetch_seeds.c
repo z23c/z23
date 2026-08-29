@@ -157,6 +157,15 @@ size_t bbf_assemble_seeds(const struct app_context *ctx,
         for (int i = 0; ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[i]; i++)
             bbf_add_peer(peers, &np, cap, ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[i]);
     }
+
+    /* Operator -addnode peers are also usable as file-service snapshot seeds:
+     * the operator already named the peer for P2P, so treating it as a seed
+     * does not expand the trust boundary. This lets z23 nodes help each other
+     * bootstrap without forcing connect-only mode. */
+    if (ctx) {
+        for (int i = 0; i < ctx->n_addnode_peers; i++)
+            (void)bbf_add_connect_seed(peers, &np, cap, ctx->addnode_peers[i]);
+    }
     return np;
 }
 

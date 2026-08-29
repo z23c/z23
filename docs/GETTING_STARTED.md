@@ -471,6 +471,18 @@ listens on TCP 18034 by default:
 make dev-service-install ZCL_SERVICE_FILESERVICE_PEER="192.168.1.50:18034"
 ```
 
+If you only know the node's P2P address, use `ZCL_SERVICE_CONNECT_PEER` or
+`ZCL_SERVICE_ADDNODE_PEER`. With `-connect`, the node talks only to that peer
+and derives a file-service seed from it. With `-addnode`, the node keeps its
+normal peer discovery AND treats the named peer as a snapshot seed, so one
+known-good z23 peer can bootstrap this Mac without isolating it:
+
+```bash
+make dev-service-install ZCL_SERVICE_CONNECT_PEER="192.168.1.50:8033"
+# or, keep normal peers and also use this one as a snapshot seed:
+make dev-service-install ZCL_SERVICE_ADDNODE_PEER="192.168.1.50:8033"
+```
+
 A minimal from-scratch example, if you'd rather not use the tracked unit
 (substitute your own paths/ports):
 
