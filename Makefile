@@ -2038,7 +2038,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         fuzz-ci-leaks \
         soak-smoke soak-7day soak-ci test-crash-bootstrap \
         test-reindex-smoke test-reindex-killmid \
-        test-two-node-peer-tip test-science-acceptance test-market-acceptance \
+        test-two-node-peer-tip test-noise-transport-interop test-science-acceptance test-market-acceptance \
         test-market-moderation-acceptance \
         chaos chaos-clean \
         replay-canary-anchor replay-canary-genesis \
@@ -6060,6 +6060,24 @@ test-reindex-killmid: zclassic23 zcl-rpc
 # harnesses; the script itself sets -euo pipefail.
 test-two-node-peer-tip: zclassic23 zcl-rpc
 	@bash tools/scripts/two_node_peer_tip.sh
+
+# Noise transport two-node/three-node interop acceptance: the evidence
+# artifact for the owner's -noisetransport default-flip decision. Real
+# isolated regtest daemons prove S1 noise->plaintext outbound stays
+# plaintext, S2 plaintext->noise inbound takes NOISE_PLAINTEXT_FALLBACK,
+# S3 noise<->noise rides the one controlled capability-learning reconnect
+# into an established Noise XX session with send/recv frames flowing, and
+# S4 a mixed plaintext+noise 3-node swarm reaches tip consensus. Every
+# assertion reads the operator surface (dumpstate transport per-peer
+# mode/state/frame counters + the dumpstate connman noisetransport
+# census), never logs. DELIBERATELY opt-in (NOT in `make ci`) — it spawns
+# real nodes. Process ownership/cleanup via tools/dev/node_lifecycle.sh;
+# P2P listeners that a redialed upgrade must reach use reachable-policy
+# ports (9033/18033/20028), RPC/FS/HTTPS disjoint 392xx/393xx/394xx quads.
+.PHONY: test-noise-transport-interop
+test-noise-transport-interop: zclassic23 zcl-rpc jsonq \
+	tools/arena-product-journey-c23
+	@bash tools/dev/noise_transport_interop.sh
 
 # ZCODE science-slice v1 acceptance proof: two disjoint isolated regtest
 # nodes (39xxx quads, loopback only, B connect-only to A). Preregister a
