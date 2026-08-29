@@ -623,6 +623,23 @@ ADAPTERS_SRCS = $(call zcl_filter_ephemeral_sources,\
 # plus any other tools headers).
 TOOLS_INCLUDES = -Itools
 
+# ZCL_ALL_INCLUDES — the one place the header roots are named as a set, so an
+# ad-hoc compile (a cross-compiler syntax sweep, a one-off -fsyntax-only check,
+# a language server) can ask the build what its include path IS instead of
+# rebuilding it by hand. Reconstructing this list with `find` looks equivalent
+# and is not: core/ headers live at core/<context>/include, sqlite3.h at
+# vendor/include, config/runtime.h at config/include, and a hand-picked subset
+# fails on exactly those. Because this variable is what the compile lines below
+# expand, a reader of `make print-includes` cannot disagree with the build.
+ZCL_ALL_INCLUDES = $(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) \
+	$(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) \
+	$(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) \
+	$(DEVLOOP_INCLUDES) -Ilib/test/include -Ivendor/include -Ivendor/x11/include
+
+.PHONY: print-includes
+print-includes:
+	@printf '%s\n' '$(ZCL_ALL_INCLUDES)'
+
 # Native development control plane.  These C adapters are the AI-facing
 # save -> classify -> prove -> publish loop; tools/dev/*.sh remain temporary
 # compatibility/self-test fixtures, not the primary interface.
