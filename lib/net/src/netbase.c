@@ -203,6 +203,12 @@ enum zcl_connect_start connect_socket_start(const struct net_service *addr,
     }
 
     (void)platform_socket_set_no_delay(sock, true);
+    if (platform_socket_set_p2p_buffers(sock) != 0) {
+        LOG_WARN("net",
+                 "connect_socket_start: failed to set P2P socket buffers, "
+                 "error=%d",
+                 platform_socket_last_error());
+    }
 
     if (platform_socket_connect(sock, (struct sockaddr *)&ss, len) ==
         ZCL_SOCKET_ERROR) {

@@ -491,6 +491,52 @@ static inline int platform_socket_set_no_delay(platform_socket_t sock,
 #endif
 }
 
+/* Default P2P stream buffer size for platforms whose TCP stack does not
+ * auto-tune socket buffers (macOS, Windows, BSD).  Linux is left to the
+ * kernel auto-tuner, so this constant is intentionally not applied there. */
+#define PLATFORM_P2P_SOCKET_BUFFER_SIZE (1 * 1024 * 1024)
+
+static inline int platform_socket_set_receive_buffer(platform_socket_t sock,
+                                                      int size)
+{
+#if defined(_WIN32)
+    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *)&size,
+                      (int)sizeof(size));
+#else
+    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+#endif
+}
+
+static inline int platform_socket_set_send_buffer(platform_socket_t sock,
+                                                   int size)
+{
+#if defined(_WIN32)
+    return setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char *)&size,
+                      (int)sizeof(size));
+#else
+    return setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+#endif
+}
+
+/* Best-effort buffer sizing for P2P sockets.  On Linux this is a no-op so
+ * the kernel's dynamic auto-tuning is preserved; everywhere else it asks for
+ * PLATFORM_P2P_SOCKET_BUFFER_SIZE for both directions.  Callers should treat
+ * a failure as a degrade (smaller default buffers), not a fatal error. */
+static inline int platform_socket_set_p2p_buffers(platform_socket_t sock)
+{
+#if defined(__linux__)
+    (void)sock;
+    return 0;
+#else
+    int rc = platform_socket_set_receive_buffer(
+        sock, PLATFORM_P2P_SOCKET_BUFFER_SIZE);
+    if (rc != 0)
+        return rc;
+    return platform_socket_set_send_buffer(sock,
+                                           PLATFORM_P2P_SOCKET_BUFFER_SIZE);
+#endif
+}
+
 static inline bool platform_socket_send_all(platform_socket_t sock,
                                              const void *data, size_t size)
 {
