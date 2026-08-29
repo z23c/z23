@@ -86,7 +86,7 @@ node) and, if you already know a peer, tell it directly:
 
 ```bash
 z23 core network peers add --address=<ip:port|v3.onion>
-z23 zcode package fetch --input='{"root":"<64hex-package-root>"}'
+z23 zcode package fetch --input='{"datadir":"<datadir>","root":"<64hex-package-root>"}'
 ```
 
 `fetch` takes a package root, not a peer — it pulls from whoever is already
@@ -94,8 +94,10 @@ connected and advertising that root, SHA3-verifying every chunk against the
 root-committed manifest before it touches disk. Run against a node that
 isn't hosting, it only persists a resumable record under
 `<datadir>/zcode/downloads/<root-hex>`; a live `-packagehost=1` node is what
-actually moves bytes. `z23 zcode package library` lists what this node has
-already reproduced, and names its own `next_command` when it has nothing.
+actually moves bytes.
+`z23 zcode package library --input='{"datadir":"<datadir>"}'` lists what this
+node has already reproduced, and names its own `next_command` when it has
+nothing.
 
 Once the package is present, reconstruct verified source from it:
 
