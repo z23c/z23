@@ -2618,3 +2618,11 @@ AGENT_IMPACT_RULE("lib/test/src/test_script.c", "script make_lint_gates")
  * either half routes to the same groups, because the handoff file is the
  * contract between them and a change to one side can break the other. */
 AGENT_IMPACT_RULE("lib/net/src/acme_b64url.c|lib/net/include/net/acme_b64url.h|lib/net/src/acme_arm_file.c|lib/net/include/net/acme_arm_file.h|lib/net/src/acme_alpn_challenge.c|lib/net/include/net/acme_challenge.h|lib/net/src/acme_renewal.c|lib/net/include/net/acme_renewal.h|lib/test/src/test_acme_b64url.c|lib/test/src/test_acme_challenge.c|lib/test/src/test_acme_renewal.c|lib/test/src/test_acme_worker.c|tools/acme/*.c|tools/acme/*.h", "acme_b64url acme_challenge acme_renewal acme_worker make_lint_gates")
+
+/* Certificate selection by the name in TLS SNI, and the ALPN responder it
+ * shares a handshake with. Additive to the front-door rule above: those two
+ * callbacks run on the SAME connection in a fixed order, and getting that
+ * order wrong discards the ACME challenge certificate — so a change to
+ * EITHER of them, or to the boot code that registers the extra names, must
+ * run the group that grades the outcome from the wire. */
+AGENT_IMPACT_RULE("lib/net/src/https_server.c|lib/net/include/net/https_server.h|lib/net/src/acme_alpn_challenge.c|lib/test/src/test_https_sni_select.c|config/src/boot_frontend_services.c", "https_sni_select acme_challenge cold_join_sovereign make_lint_gates")
