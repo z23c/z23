@@ -39,6 +39,14 @@
 # Environment:
 #   ZCL_SHIP_HOSTS    SSH destinations, space separated (operator-local)
 #   ZCL_SHIP_REMOTE   compatibility fallback for one remote host
+#   ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1
+#                     deploy even though the candidate changes persistent-schema
+#                     code. Default is to REFUSE, because the previous binary
+#                     cannot read the migrated database. Setting this also
+#                     DISARMS the automatic rollback for that host: with a
+#                     forward migration applied, restoring the old binary is
+#                     the dangerous act, so a failed activation is reported and
+#                     left in place instead of reverted.
 #   ZCL_SHIP_PROOF_SERVER
 #                     optional immutable host; never inferred from remoteness
 set -euo pipefail
@@ -181,6 +189,11 @@ ship_remote_rollout() {
 # reports the production Tor implementation through the native command tree.
 # Keep this check ahead of every deployment function: no byte crosses a host
 # boundary and no service restarts before this exact value is observed.
+#
+# The checkout-archive preflight (ship_checkout_has_real_tor_archives) is not
+# a substitute. A tree can have all four TOR_FULL archives and still produce a
+# stub candidate; only reading the built binary proves the real thing. Do not
+# delete this observation as redundant.
 ship_candidate_has_real_tor() {
     local candidate="$1" jsonq="${2:-$REPO_ROOT/build/bin/jsonq}" out tor_build
     out="$(timeout 30 "$candidate" ops telemetry network tor 2>/dev/null)" || return 1
@@ -188,6 +201,24 @@ ship_candidate_has_real_tor() {
     tor_build="$(printf '%s\n' "$out" |
         "$jsonq" get data.values.tor.tor_build 2>/dev/null)" || return 1
     [ "$tor_build" = real_tor ]
+}
+
+# True when the four archives Makefile TOR_FULL globs for exist in $1.
+# Absence means the link falls back to -ltor_stub and the candidate check
+# above will refuse after lint + test-parallel. This is the cheap filter;
+# it does not replace ship_candidate_has_real_tor.
+ship_checkout_has_real_tor_archives() {
+    local root="$1" archive
+    [ -n "$root" ] || return 1
+    for archive in \
+        vendor/tor/libtor.a \
+        vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
+        vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
+        vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a
+    do
+        [ -f "$root/$archive" ] || return 1
+    done
+    return 0
 }
 
 if [ "${1:-}" = "--selftest" ]; then
@@ -228,6 +259,20 @@ if [ "${1:-}" = "--selftest" ]; then
     set -E
     trap 'ship_selftest_report_failure "$?" "$LINENO"' ERR
 
+    # `! cmd` is EXEMPT from set -e. Bash: the shell does not exit "if the
+    # command's return value is being inverted with !". So every `! assertion`
+    # in this selftest was DECORATIVE -- it could not fail the run whatever it
+    # returned, and the header above claiming a chain of assertions under set -e
+    # was wrong about half of them. Measured 2026-08-29: shrinking
+    # ship_checkout_has_real_tor_archives to look at libtor.a alone left this
+    # selftest still printing PASS. refute() exits by itself, so a violated
+    # negative assertion now stops the run and names itself.
+    refute() {
+        if "$@"; then
+            printf 'ship: selftest FAILED — expected non-zero from: %s\n' "$*" >&2
+            exit 1
+        fi
+    }
     # Stated as a prerequisite rather than discovered as a mystery failure.
     # The real-Tor candidate gate below reads the candidate's JSON with
     # build/bin/jsonq, and the parallel `make lint` driver execs gate scripts
@@ -248,22 +293,24 @@ if [ "${1:-}" = "--selftest" ]; then
     done
     [ "$test_order" = "node1 node2 node3 node4" ]
     ship_valid_host node1 && ship_valid_host user@node-4.example
-    ! ship_valid_host '-host'
-    ! ship_valid_host '-oProxyCommand=x' && ! ship_valid_host 'node;command'
+    refute ship_valid_host '-host'
+    refute ship_valid_host '-oProxyCommand=x'
+    refute ship_valid_host 'node;command'
     ship_glibc_satisfies 2.31 2.31
     ship_glibc_satisfies 2.31 2.35
     ship_glibc_satisfies 2.31 2.36
     ship_glibc_satisfies 2.31 2.39
-    ! ship_glibc_satisfies 2.40 2.39
+    refute ship_glibc_satisfies 2.40 2.39
     selftest_sha="$(printf 'a%.0s' {1..64})"
     selftest_obs="observed=1 exists=1 pid=9 start=5 sha=$selftest_sha ident=yes rpc=ok cpu=1 blkio=1 io=1"
     ship_observation_is_candidate "$selftest_obs" "$selftest_sha"
     ship_observation_is_qualified "$selftest_obs" "$selftest_sha"
-    ! ship_observation_is_candidate "${selftest_obs/ident=yes/ident=no}" "$selftest_sha"
-    ! ship_observation_is_candidate "${selftest_obs/sha=$selftest_sha/sha=deadbeef}" "$selftest_sha"
-    ! ship_observation_is_qualified "${selftest_obs/rpc=ok/rpc=no}" "$selftest_sha"
+    refute ship_observation_is_candidate "${selftest_obs/ident=yes/ident=no}" "$selftest_sha"
+    refute ship_observation_is_candidate "${selftest_obs/sha=$selftest_sha/sha=deadbeef}" "$selftest_sha"
+    refute ship_observation_is_qualified "${selftest_obs/rpc=ok/rpc=no}" "$selftest_sha"
     PROOF_SERVER=node3
-    ! ship_is_proof_host node1 && ship_is_proof_host node3
+    refute ship_is_proof_host node1
+    ship_is_proof_host node3
     test_tmp="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-selftest.XXXXXX")"
     trap 'find "$test_tmp" -depth -delete' EXIT HUP INT TERM
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"real_tor"}}}}'\''\n' > "$test_tmp/real"
@@ -271,7 +318,24 @@ if [ "${1:-}" = "--selftest" ]; then
     printf '#!/bin/sh\nsed -n '\''s/.*"tor_build":"\\([^"]*\\)".*/\\1/p'\''\n' > "$test_tmp/jsonq"
     chmod 755 "$test_tmp/real" "$test_tmp/stub" "$test_tmp/jsonq"
     ship_candidate_has_real_tor "$test_tmp/real" "$test_tmp/jsonq"
-    ! ship_candidate_has_real_tor "$test_tmp/stub" "$test_tmp/jsonq"
+    refute ship_candidate_has_real_tor "$test_tmp/stub" "$test_tmp/jsonq"
+    mkdir -p "$test_tmp/tor-present/vendor/tor/src/ext/ed25519/donna" \
+             "$test_tmp/tor-present/vendor/tor/src/ext/ed25519/ref10" \
+             "$test_tmp/tor-present/vendor/tor/src/ext/keccak-tiny" \
+             "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/donna" \
+             "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/ref10" \
+             "$test_tmp/tor-missing-one/vendor/tor/src/ext/keccak-tiny"
+    touch "$test_tmp/tor-present/vendor/tor/libtor.a" \
+          "$test_tmp/tor-present/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a" \
+          "$test_tmp/tor-present/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a" \
+          "$test_tmp/tor-present/vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"
+    # Three of four: proves the check does not stop at libtor.a.
+    touch "$test_tmp/tor-missing-one/vendor/tor/libtor.a" \
+          "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a" \
+          "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
+    ship_checkout_has_real_tor_archives "$test_tmp/tor-present"
+    refute ship_checkout_has_real_tor_archives "$test_tmp/tor-missing-one"
+    refute ship_checkout_has_real_tor_archives "$test_tmp/tor-absent"
     selftest_stage() {
         printf 'stage-start %s\n' "$1" >> "$test_tmp/order"
         case "$1" in bad) return 1 ;; esac
@@ -294,10 +358,13 @@ if [ "${1:-}" = "--selftest" ]; then
     ZCL_SHIP_STAGE_JOBS=2 ship_remote_rollout \
         selftest_stage selftest_activate node1 bad node3 || stage_rc=$?
     [ "$stage_rc" -eq 20 ]
-    ! grep -q '^activate ' "$test_tmp/order"
-    ! ZCL_SHIP_STAGE_JOBS=0 ship_stage_all selftest_stage node1
+    refute grep -q '^activate ' "$test_tmp/order"
+    if ZCL_SHIP_STAGE_JOBS=0 ship_stage_all selftest_stage node1; then
+        printf 'ship: selftest FAILED — ship_stage_all accepted ZCL_SHIP_STAGE_JOBS=0\n' >&2
+        exit 1
+    fi
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
-    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate)\n'
+    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions)\n'
     exit 0
 fi
 
@@ -389,6 +456,14 @@ if git rev-parse --verify -q origin/main >/dev/null; then
     fi
 fi
 say "source     $(git rev-parse --short HEAD)  $(git log -1 --format=%s | cut -c1-58)"
+
+# Fail in seconds, not after lint + test-parallel. Missing any of these four
+# makes TOR_LIBS fall back to -ltor_stub, and the post-build
+# ship_candidate_has_real_tor refusal is then the first signal. That later
+# check still runs: archives on disk do not prove the candidate linked them.
+ship_checkout_has_real_tor_archives "$REPO_ROOT" ||
+    die "this checkout would link the Tor stub (one or more of the four TOR_FULL archives is missing from vendor/tor), so the candidate would be refused after the gate; run make worktree-prime — git worktree add does not populate the vendor/tor submodule"
+say "tor        four TOR_FULL archives present"
 
 # A remote host that cannot run these bytes must be found now, not after the
 # binary is already installed and the service restarted. The production build
@@ -526,6 +601,8 @@ else
     done
     say "workers    zclassic23-package-verify ${WORKER_SHAS[0]:0:16}…  zclassic23-package-verify-dev ${WORKER_SHAS[1]:0:16}…  $(du -ch "${WORKER_FILES[@]}" | tail -1 | cut -f1)"
 
+    # Not redundant with the archive preflight: only the built binary proves
+    # the link consumed real Tor rather than -ltor_stub.
     ship_candidate_has_real_tor "$CANDIDATE" ||
         die "candidate did not report exact tor_build=real_tor; nothing was transferred or restarted"
     say "tor        candidate reports exact real_tor"
@@ -801,14 +878,35 @@ REMOTE_HASH
     esac
     git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
         die "$host rollback commit $prior_commit is unavailable locally"
+    one_way_schema=0
     if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
         'app/models/src/database_migrate*.c' \
         'app/models/src/database_schema.c' \
         'app/models/src/schema_migration.c' \
         'app/models/include/models/schema_migration.h'; then
-        die "$host candidate changes persistent-schema code; automatic binary rollback is not safe"
+        # A FORWARD-ONLY deploy is a deliberate act, in the same shape as
+        # ZCL_SHIP_ALLOW_PROOF_SERVER above: refuse by default, proceed only
+        # when the operator names the risk. It is not a way to make a red
+        # ship green -- it changes what the run PROMISES, not what it checks.
+        #
+        # Measured 2026-08-29: schema_migration_apply skips every migration
+        # whose version is <= the recorded one and has NO guard for a database
+        # newer than the binary, so an older build does not refuse a migrated
+        # database -- it runs against a schema it does not know. That is why
+        # the rollback itself is the unsafe act, and why this flag also
+        # DISARMS the automatic rollback below rather than merely permitting
+        # the deploy. Allowing the deploy while leaving rollback armed would
+        # be strictly worse than refusing.
+        if [ "${ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA:-0}" != "1" ]; then
+            die "$host candidate changes persistent-schema code; automatic binary rollback is not safe (deliberate forward-only deploy: ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1, which also disarms rollback)"
+        fi
+        one_way_schema=1
+        say "rollback   $host FORWARD-ONLY: schema code changed since ${prior_commit:0:12};"
+        say "           automatic rollback is DISARMED for this host and the previous"
+        say "           binary will not be able to read the migrated database"
+    else
+        say "rollback   $host persistent-schema code unchanged from ${prior_commit:0:12}"
     fi
-    say "rollback   $host persistent-schema code unchanged from ${prior_commit:0:12}"
 
     release_root="$(ssh "${SSH_OPTS[@]}" "$host" 'printf "%s\n" "$HOME/.local/lib/z23/releases"')/$RELEASE_ID"
     node_incoming="${release_root}.incoming.$run_id"
@@ -893,6 +991,10 @@ run_id="$9"
 remote_window="${10}"; remote_silence="${11}"
 rollback_window="${12}"; rollback_silence="${13}"
 crash_samples="${14}"; unknown_samples="${15}"; rpc_budgets="${16}"
+# 1 when the local side accepted a FORWARD-ONLY schema deploy. The previous
+# binary cannot read the migrated database, so restoring it is the unsafe act
+# -- this run must fail loudly rather than "recover" into that state.
+one_way_schema="${17:-0}"
 # The two subjects this script judges, each wrapped to ship_await's
 # one-argument observer seam. Same observables, same classifier, same words as
 # the local side uses.
@@ -1020,7 +1122,13 @@ fi
 # first mutation, including the identity install and daemon-reload; otherwise
 # a failure in that small window could leave intent describing bytes that were
 # never activated.
-rollback_armed=1
+if [ "$one_way_schema" = "1" ]; then
+    echo "remote: FORWARD-ONLY deploy — automatic rollback DISARMED; the previous" >&2
+    echo "        binary cannot read the migrated database, so a failure here is" >&2
+    echo "        reported and left in place rather than silently reverted" >&2
+else
+    rollback_armed=1
+fi
 dropin_tmp="$(mktemp "${dropin}.tmp.XXXXXX")"
 {
     printf '[Service]\n'
@@ -1090,6 +1198,7 @@ REMOTE_SCRIPT
         "$SHIP_REMOTE_WINDOW" "$SHIP_REMOTE_SILENCE" \
         "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
         "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" \
+        "$one_way_schema" \
         || activate_rc=$?
 
     # The remote reached a verdict with the same classifier the local side is
