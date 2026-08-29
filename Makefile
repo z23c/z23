@@ -502,15 +502,11 @@ FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
 # POSIX-only operator tools: zcl-nodectl uses fork/signals/arpa/inet.h and
 # zclassic-cli uses poll.h. They are not in the native Windows node path, so
 # do not force the test harness or `all` to build them on Windows.
-# zclassic23-acme (the certificate worker) rides here too -- not because it is
-# POSIX-only, but because nothing has yet BUILT it on Windows. Move it out the
-# day someone proves it there; leaving it in `all` unproven would break the
-# native Windows build for everyone else.
 ifeq ($(ZCL_HOST_WINDOWS),1)
 ZCL_POSIX_ONLY_BINS =
 ZCL_NODECTL_DEP =
 else
-ZCL_POSIX_ONLY_BINS = zclassic-cli zcl-nodectl zclassic23-acme
+ZCL_POSIX_ONLY_BINS = zclassic-cli zcl-nodectl
 ZCL_NODECTL_DEP = $(ZCL_NODECTL_BIN)
 endif
 WAL_CHECKPOINT_BIN = $(BIN_DIR)/wal_checkpoint
@@ -4548,46 +4544,6 @@ mock_rpc: $(BIN_DIR)/mock_rpc
 $(BIN_DIR)/mock_rpc: tools/mock_rpc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread -o $@ $<
-
-# ── The certificate worker ────────────────────────────────────────────────
-# `zclassic23-acme` is the ONLY program in this tree that is a TLS client and
-# the only one that carries a CA trust store. That is not incidental: the node
-# must never be able to be told who to trust by whoever ships a trust store,
-# and lib/test/src/test_cold_join_sovereign.c P2 asserts exactly that by
-# scanning every Z23 object under build/*obj*/epochs for an undefined
-# reference to a TLS-client or trust-store entry point.
-#
-# So this binary is compiled STRAIGHT FROM SOURCE to an executable, with no
-# intermediate object files at all. Nothing it compiles can ever appear in a
-# scanned epoch tree, which is what keeps P2 green honestly rather than by
-# exemption. It shares only four node files, all of them free of client and
-# trust-store symbols: the base64url codec, the node/worker handoff file, the
-# renewal decision, and the JSON reader.
-ACME_WORKER_SRCS = \
-	tools/acme/acme_main.c \
-	tools/acme/acme_client.c \
-	tools/acme/acme_jws.c \
-	tools/acme/acme_protocol.c \
-	tools/acme/tls_client.c \
-	tools/acme/acme_selftest_transport.c \
-	tools/acme/acme_selftest_protocol.c \
-	lib/net/src/acme_arm_file.c \
-	lib/net/src/acme_b64url.c \
-	lib/net/src/acme_renewal.c \
-	lib/json/src/json.c \
-	lib/base/src/log_level.c \
-	lib/base/src/safe_alloc.c
-ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
-	-Ilib/platform/include -Itools/acme -Ivendor/include
-ACME_WORKER_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
-
-.PHONY: zclassic23-acme
-zclassic23-acme: $(BIN_DIR)/zclassic23-acme
-$(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
-	@mkdir -p $(dir $@)
-	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))

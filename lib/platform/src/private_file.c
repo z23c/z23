@@ -171,41 +171,49 @@ bool platform_private_file_open_locked_create(
   return platform_private_file_open_locked(path, file);
 }
 
-/* Waiting exclusive acquisition.  The nonblocking pair above gets its
+/* Waiting exclusive acquisition. The nonblocking pair above gets its
  * exclusion from the CreateFileW share mode, so a second opener is refused at
- * open time and never reaches the byte-range lock — there is nothing to wait
- * on.  A waiting lock must therefore let other writers open the same file and
- * take its exclusion solely from the whole-file LockFileEx range.  The handle
- * is FILE_FLAG_OVERLAPPED, so a lock that cannot be granted immediately
- * returns ERROR_IO_PENDING and completes asynchronously; wait on the event
- * rather than assuming LockFileEx blocked.  A waited lock file must never be
- * mixed with the nonblocking pair on the same path: the two share modes are
- * mutually incompatible and the second opener would fail. */
+ * open time and never reaches the byte-range lock. A waiting lock lets every
+ * access requested by pf_open() be shared and takes exclusion solely from the
+ * whole-file LockFileEx range.
+ *
+ * Use bounded-cadence immediate attempts instead of one pending LockFileEx.
+ * Native Windows completes the pending form after an unlock, but Wine 11.11
+ * leaves that request pending after the owner closes its handle. The immediate
+ * form has the same exclusive-lock semantics on both runtimes and keeps each
+ * attempt cancel-free. A waited lock file must never be mixed with the
+ * nonblocking pair on the same path: their share modes are incompatible. */
 static bool pf_lock_wait(struct platform_private_file *file) {
-  HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
-  if (!event)
-    return false;
-  OVERLAPPED ov = {.hEvent = event};
-  BOOL locked = LockFileEx(pf_handle(file), LOCKFILE_EXCLUSIVE_LOCK, 0,
-                           UINT32_MAX, UINT32_MAX, &ov);
-  if (!locked && GetLastError() == ERROR_IO_PENDING) {
-    DWORD transferred = 0;
-    locked = WaitForSingleObject(event, INFINITE) == WAIT_OBJECT_0 &&
-             GetOverlappedResult(pf_handle(file), &ov, &transferred, FALSE);
+  for (;;) {
+    OVERLAPPED ov = {0};
+    if (LockFileEx(pf_handle(file),
+                   LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                   UINT32_MAX, UINT32_MAX, &ov)) {
+      file->locked = true;
+      return true;
+    }
+    DWORD error = GetLastError();
+    if (error != ERROR_LOCK_VIOLATION) {
+      SetLastError(error);
+      return false;
+    }
+    Sleep(10);
   }
-  CloseHandle(event);
-  if (!locked)
-    return false;
-  file->locked = true;
-  return true;
 }
 
 bool platform_private_file_open_locked_wait(
     const char *path, struct platform_private_file *file) {
-  if (!pf_open(path, OPEN_EXISTING, FILE_SHARE_READ | FILE_SHARE_WRITE, file))
+  /* pf_open requests DELETE as well as read/write access. Windows requires
+   * every requested access class to be shared by every existing handle;
+   * omitting FILE_SHARE_DELETE makes a contender fail in CreateFileW before
+   * it can wait in LockFileEx. */
+  if (!pf_open(path, OPEN_EXISTING,
+               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, file))
     return false;
   if (!pf_lock_wait(file)) {
+    DWORD error = GetLastError();
     platform_private_file_close(file);
+    SetLastError(error);
     return false;
   }
   return true;
@@ -213,10 +221,13 @@ bool platform_private_file_open_locked_wait(
 
 bool platform_private_file_open_locked_create_wait(
     const char *path, struct platform_private_file *file) {
-  if (pf_open(path, CREATE_NEW, FILE_SHARE_READ | FILE_SHARE_WRITE, file)) {
+  if (pf_open(path, CREATE_NEW,
+              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, file)) {
     if (pf_lock_wait(file))
       return true;
+    DWORD error = GetLastError();
     platform_private_file_close(file);
+    SetLastError(error);
     return false;
   }
   return platform_private_file_open_locked_wait(path, file);

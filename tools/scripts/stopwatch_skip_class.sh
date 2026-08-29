@@ -91,7 +91,7 @@ stopwatch_no_pass_threshold() {
 # (there is nothing to excuse), it simply never reaches the threshold.
 # Mirrors scan_row()/scan_finish() in the C module row for row.
 stopwatch_no_pass_all_benign() {
-    local f="${1:-}" line v reason present artifact cls thr any=0
+    local f="${1:-}" line v reason present artifact cls thr any=0 benign=1
     if [ -z "$f" ] || [ ! -s "$f" ]; then
         printf '0\n'
         return 0
@@ -100,11 +100,15 @@ stopwatch_no_pass_all_benign() {
         [ -n "$line" ] || continue
         v="$(stopwatch_skip_row_field "$line" verdict)"
         [ -n "$v" ] || continue
-        [ "$v" = "pass" ] && break
+        if [ "$v" = "pass" ]; then
+            any=0
+            benign=1
+            continue
+        fi
         any=1
         if [ "$v" != "skip" ]; then
-            printf '0\n'
-            return 0
+            benign=0
+            continue
         fi
         reason="$(stopwatch_skip_row_field "$line" skip_reason)"
         present=0
@@ -114,12 +118,14 @@ stopwatch_no_pass_all_benign() {
         read -r cls thr \
             < <(stopwatch_skip_classify "$reason" "$present" "$artifact")
         if [ "$thr" != "0" ]; then
-            printf '0\n'
-            return 0
+            benign=0
         fi
-    done < <(tail -n 200 "$f" |
-             awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}')
-    printf '%s\n' "$any"
+    done <"$f"
+    if [ "$any" = 1 ] && [ "$benign" = 1 ]; then
+        printf '1\n'
+    else
+        printf '0\n'
+    fi
 }
 
 # stopwatch_skip_classify <reason> <reason_field_present 0|1> <has_artifact 0|1>
@@ -333,6 +339,17 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = "--selftest" ]; then
         >>"$_st_led3"
     _st_check "one fail in the streak ends the benign carve-out" \
         "$(stopwatch_no_pass_all_benign "$_st_led3")" "0"
+    # The entire streak is authoritative. A fault immediately outside a
+    # display-sized tail must not be hidden by later benign skips.
+    _st_led4="$_st_tmp/long-nopass.jsonl"
+    printf '{"ts":1,"verdict":"fail","exit_code":1,"artifact_dir":"/a/f"}\n' \
+        >"$_st_led4"
+    for ((_st_i = 2; _st_i <= 201; _st_i++)); do
+        printf '{"ts":%s,"verdict":"skip","exit_code":2,"artifact_dir":"/a/b","skip_reason":"no valid --client-rpc / ZCL_ND_CLIENT_RPCPORT given"}\n' \
+            "$_st_i" >>"$_st_led4"
+    done
+    _st_check "a failure before 200 benign skips remains non-benign" \
+        "$(stopwatch_no_pass_all_benign "$_st_led4")" "0"
     # A pass ends the streak, so there is nothing left to excuse.
     printf '{"ts":8000,"verdict":"pass","exit_code":0,"artifact_dir":"/a/p"}\n' \
         >>"$_st_led3"

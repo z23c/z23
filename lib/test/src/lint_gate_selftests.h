@@ -170,6 +170,7 @@
 #define E1_ISO_LEGACY_REL   "test-tmp/_e1_size_iso_scan_dir_tmp/legacy.c"
 #define E1_ISO_BASELINE_REL "test-tmp/_e1_size_iso_baseline_tmp.txt"
 #define E1_EMPTY_SCAN_DIR_REL "test-tmp/_e1_size_empty_scan_dir_tmp"
+#define E1_MISSING_SCAN_DIR_REL "test-tmp/_e1_size_missing_scan_dir_tmp"
 /* Gate #12 — check_long_functions.sh, extended to config/src/ (ENFORCED,
  * ratchet-baselined) and lib/ excl. lib/test/ (WARN, non-blocking). Both
  * sub-tiers run against an ISOLATED test-tmp/ scan dir + baseline (via

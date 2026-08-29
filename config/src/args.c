@@ -287,9 +287,9 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
         else if (strncmp(argv[i], "-rpcpassword=", 13) == 0) ctx->rpc_password = argv[i]+13;
         else if (strcmp(argv[i], "-listen") == 0) ctx->listen = true;
         else if (strncmp(argv[i], "-addnode=", 9) == 0) {
-            /* -addnode is wired for P2P after init, but also record it here
-             * so the instant-on weld can treat operator-named addnodes as
-             * file-service snapshot seeds without forcing connect-only mode. */
+            /* P2P wiring happens after init. Preserve bounded argv-owned
+             * values here so the instant-on weld can reuse operator-named
+             * peers without changing normal discovery. */
             if (ctx->n_addnode_peers < APP_CONNECT_PEERS_MAX)
                 ctx->addnode_peers[ctx->n_addnode_peers++] = argv[i] + 9;
         }
@@ -557,21 +557,6 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
         }
         else if (strncmp(argv[i], "-externalip=", 12) == 0) ctx->external_ip = argv[i] + 12;
         else if (strncmp(argv[i], "-httpsdomain=", 13) == 0) ctx->https_domain = argv[i] + 13;
-        else if (strncmp(argv[i], "-httpsaltdomain=", 16) == 0) {
-            /* An additional name on the SAME listener, served its own
-             * certificate by TLS SNI (see app_context.https_alt_domains).
-             * Repeatable. Past the cap the flag is refused loudly rather
-             * than silently dropped — a name nobody serves is a name whose
-             * clients get a certificate mismatch, which is invisible from
-             * the server side. */
-            if (ctx->n_https_alt_domains < APP_HTTPS_ALT_DOMAINS_MAX)
-                ctx->https_alt_domains[ctx->n_https_alt_domains++] = argv[i] + 16;
-            else
-                fprintf(stderr,
-                        "Warning: at most %d -httpsaltdomain= names are "
-                        "served; '%s' was ignored\n",
-                        APP_HTTPS_ALT_DOMAINS_MAX, argv[i] + 16);
-        }
         else if (strcmp(argv[i], "-gui") == 0 || strcmp(argv[i], "--gui") == 0) {
             /* Opt-in to the WebKit wallet GUI. Consumed earlier (the GUI
              * launch returns before node mode); recognized here so it is
