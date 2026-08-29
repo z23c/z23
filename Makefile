@@ -1924,6 +1924,23 @@ new-app-selftest:
 # file — so a primed worktree looked healthy right up until `make lint` failed
 # with "No rule to make target 'vendor/sqlite3.c'", a message that names a
 # missing file rather than a missing priming step.
+# A THIRD kind is worse, because nothing about it looks broken. The vendored
+# Tor archives (vendor/tor/libtor.a and the three ext/ archives TOR_FULL globs
+# for) are build output of a SUBMODULE, and a git worktree does not populate
+# submodules at all -- so in a fresh worktree vendor/tor is an empty gitlink,
+# TOR_FULL expands to nothing, and the link silently selects libtor_stub.a.
+# That build compiles, links, and passes the whole suite. The only symptom is
+# that the binary reports tor_build=tor_stub, which the ship step refuses --
+# AFTER its full 25-minute gate has already run. Every worktree lane was
+# therefore structurally unable to produce a shippable candidate.
+#
+# Order matters. Copying the archives into a gitlink that is still
+# UNINITIALIZED does not help and actively breaks the build: source capture
+# refuses with "nonempty uninitialized gitlink would omit bytes: vendor/tor",
+# because bytes would enter the compile that the source identity cannot
+# account for. It is right to refuse. So initialize the submodule FIRST (its
+# objects are already in the shared git dir, so this is offline and takes
+# about six seconds), and copy the archives only into an initialized one.
 worktree-prime:
 	@set -eu; \
 	src="$(SRC)"; \
@@ -1955,7 +1972,34 @@ worktree-prime:
 	    cp -a "$$src/vendor/$$amalgam" "vendor/$$amalgam"; \
 	    echo "worktree-prime: copied vendor/$$amalgam from $$src"; \
 	  fi; \
-	done
+	done; \
+	case "$$(git submodule status vendor/tor 2>/dev/null)" in \
+	  -*) echo "worktree-prime: initializing the vendor/tor submodule (a worktree does"; \
+	      echo "                not inherit one, and without it the link picks the Tor"; \
+	      echo "                STUB and the candidate cannot be shipped)"; \
+	      git submodule update --init vendor/tor >/dev/null 2>&1 \
+	        || echo "worktree-prime: WARNING - vendor/tor init failed; this worktree links the Tor STUB" >&2 ;; \
+	esac; \
+	tor_copied=0; \
+	if [ -e vendor/tor/.git ]; then \
+	  for a in vendor/tor/libtor.a \
+	           vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
+	           vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
+	           vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a; do \
+	    if [ ! -f "$$a" ] && [ -f "$$src/$$a" ]; then \
+	      mkdir -p "$${a%/*}"; \
+	      cp -a "$$src/$$a" "$$a"; \
+	      tor_copied=$$((tor_copied+1)); \
+	    fi; \
+	  done; \
+	fi; \
+	if [ "$$tor_copied" -gt 0 ]; then \
+	  echo "worktree-prime: copied $$tor_copied vendored Tor archive(s) from $$src (real-Tor link)"; \
+	elif [ ! -f vendor/tor/libtor.a ]; then \
+	  echo "worktree-prime: NOTE - no vendor/tor/libtor.a here or in $$src, so this"; \
+	  echo "                worktree links the Tor STUB and the ship step will refuse"; \
+	  echo "                its candidate (build it in $$src first)"; \
+	fi
 
 # Auto-vendor: if any required archive is absent, build it.  The per-archive
 # rule lets `make zclassic23` pull in `make vendor` transparently on a fresh
