@@ -335,7 +335,14 @@ select_test_groups() {
     while IFS= read -r file; do
         [ -n "$file" ] || continue
         matched=0
-        if match_shared_impact_rules "$file"; then
+        # A removed source cannot retain its own impact rule.  The exact
+        # source-wide compile still proves that no live translation unit
+        # references it; route the deletion through the build/lint contract
+        # instead of demanding an impossible rule in an absent component.
+        if [ ! -e "$file" ]; then
+            add_group make_lint_gates
+            matched=1
+        elif match_shared_impact_rules "$file"; then
             matched=1
         fi
         if [ "$matched" -eq 0 ] && is_code_like_change "$file"; then
