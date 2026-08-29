@@ -18,12 +18,11 @@
  * one place next to the job it manages.
  *
  * Kept as its own file rather than folded into node_db_catchup_service.c:
- * that file is already baselined at the E1 file-size ceiling
- * (tools/scripts/file_size_ceiling_baseline.txt), so appending here would
- * either regress the gate or require raising the baseline via ADR for no
- * real cohesion gain — the job *lifecycle* (thread spawn/join bookkeeping)
- * is a distinct concern from the job *body* (the block-index catchup
- * algorithm in node_db_catchup_service_run). */
+ * that file is already well past the E1 800-line target, and the job
+ * *lifecycle* (thread spawn/join bookkeeping) is a distinct concern from
+ * the job *body* (the block-index catchup algorithm in
+ * node_db_catchup_service_run) anyway — so it earns its own file on
+ * cohesion grounds, not just size. */
 
 #ifndef ZCL_SERVICES_CATCHUP_LIFECYCLE_SERVICE_H
 #define ZCL_SERVICES_CATCHUP_LIFECYCLE_SERVICE_H

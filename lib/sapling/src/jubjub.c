@@ -64,7 +64,28 @@ static const unsigned char JUBJUB_R[32] = {
  * 128-bit integer type rather than a compiler extension. */
 #define NL 4
 
+/* The standard C23 spelling is `unsigned _BitInt(128)`, and it is what every
+ * compiler that implements _BitInt at that width gets. GCC 13 — still the
+ * mingw-w64 cross compiler shipped for Windows — does not implement _BitInt
+ * at all, so it falls back to the `unsigned __int128` extension it does have.
+ * Both are unsigned 128-bit two's-complement integers with wrapping
+ * arithmetic and identical value ranges, so every carry, borrow and shift
+ * below computes the same value either way. Selection is by feature macro
+ * only: no arithmetic, constant, limb count or reduction step is conditional.
+ * A compiler that offers neither is refused rather than silently reduced to
+ * 64-bit intermediates. */
+#if defined(__BITINT_MAXWIDTH__) && __BITINT_MAXWIDTH__ >= 128
 typedef unsigned _BitInt(128) jubjub_uint128;
+#elif defined(__SIZEOF_INT128__)
+/* Same suppression, and for the same reason, as lib/sapling/src/fr.c: the
+ * extension is not ISO C, and this tree builds -pedantic -Werror. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+typedef unsigned __int128 jubjub_uint128;
+#pragma GCC diagnostic pop
+#else
+#error "jubjub requires a 128-bit unsigned integer type (C23 _BitInt(128) or __int128)"
+#endif
 
 struct bigint {
     uint64_t d[NL];

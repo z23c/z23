@@ -42,7 +42,7 @@ Gates wired to this pattern: `check_one_write_path.sh`,
 ## Gates deliberately left off this pattern
 
 `check_one_result_type.sh`, `framework_shape_check.sh`,
-`check_file_size_ceiling.sh`, `check_no_new_repair_rung.sh` — these go
+`check_no_new_repair_rung.sh` — these go
 hollow only under a core-directory rename, which coincides with a build
 break; CI still catches them red without the loud-preflight pattern. A
 conservative "scanned 0 files → exit 2" preflight would still be cheap and

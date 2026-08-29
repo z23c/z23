@@ -547,9 +547,9 @@ if [ -n "$remaining" ]; then
     for name in $remaining; do
         echo "arena-acceptance:       $name: $(aa_store_state "$AA_DD_B" "$B_RPC" "$(root_of "$name")")" >&2
     done
-    grep -m8 -i "swarm\|announce\|download" "$AA_DD_B/node.log" 2>/dev/null \
+    grep -am8 -i "swarm\|announce\|download" "$AA_DD_B/node.log" 2>/dev/null \
         | sed 's/^/arena-acceptance:       B log: /' >&2 || true
-    grep -m8 -i "swarm\|announce" "$AA_DD_A/node.log" 2>/dev/null \
+    grep -am8 -i "swarm\|announce" "$AA_DD_A/node.log" 2>/dev/null \
         | sed 's/^/arena-acceptance:       A log: /' >&2 || true
     aa_die "B swarm fetch stalled past ${FETCH_BUDGET}s: $remaining"
 fi

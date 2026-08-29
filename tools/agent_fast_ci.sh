@@ -860,16 +860,15 @@ run_shell_checks() {
     make_fast watcher-safety-gates
     tools/agent_fast_ci.sh receipt-selftest
     tools/agent_fast_ci.sh changed-set-selftest
-    for script in tools/agent_fast_ci.sh tools/githooks/pre-push \
-        tools/deploy_guard.sh tools/deploy_verify.sh \
-        tools/dev/deploy-dev-lane.sh tools/dev/agent-dev-status.sh \
-        tools/dev/agent-doctor.sh \
-        tools/scripts/remote_node_update.sh \
-        tools/scripts/lane_recover.sh \
-        tools/scripts/check_stable_publish_containment.sh \
-        tools/scripts/build_vendor.sh \
-        tools/scripts/background_quality_lane.sh \
-        tools/scripts/check_agentdeployguard_cli_exit.sh; do
+    # Parse EVERY tracked shell script, not a hand-maintained allowlist. The
+    # allowlist that used to live here named 13 scripts out of 411, and
+    # tools/scripts/anchor-snapshot-copy-prove.sh sat in the unchecked 398
+    # failing `bash -n` at EOF -- a copy-prove harness that could never have
+    # run once. The whole sweep costs ~0.5 s, so there is no reason to choose.
+    # githooks carry no .sh suffix, so they are named explicitly.
+    local script
+    for script in $(git ls-files "*.sh") tools/githooks/pre-push; do
+        [ -f "$script" ] || continue
         bash -n "$script"
     done
 }
@@ -1256,7 +1255,7 @@ first_error_line() {
         log_path="$(printf '%s\n' "$output" |
             grep -m1 -oE 'log=[^[:space:]]+' | sed 's/^log=//' || true)"
         if [ -n "$log_path" ] && [ -f "$log_path" ]; then
-            line="$(grep -m1 -E 'FAIL|Assertion|assert|EXPECT' "$log_path" || true)"
+            line="$(grep -am1 -E 'FAIL|Assertion|assert|EXPECT' "$log_path" || true)"
             if [ -n "$line" ]; then
                 log "FIRST-ERROR[$label]: $line"
                 return

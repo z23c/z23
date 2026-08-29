@@ -45,9 +45,13 @@ struct bg_hash_verify_progress {
 };
 
 struct bg_hash_verification_service {
+    /* References (not owned). `datadir` points only into the owned storage
+     * below: boot resolves the network directory in a stack buffer before
+     * this long-lived worker starts, and the worker outlives that frame. */
     struct main_state *ms;
     struct node_db *ndb;
     const char *datadir;
+    char datadir_storage[4096];
     const struct chain_params *params;
 
     /* Crash-resume cursor storage behind a port; bound from `ndb` in

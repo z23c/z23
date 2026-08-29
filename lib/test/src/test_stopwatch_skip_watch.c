@@ -21,6 +21,17 @@
  *                                          prove" must read differently from
  *                                          "the peer I need is dead".
  *
+ * AND THE SECOND RUNG, added 2026-08-29. `no_pass_streak` was computed,
+ * stored, serialised and asserted by (a)-(d) above from day one — and gated
+ * NOTHING, because the only alarm path required skip_streak > 0. The live C3
+ * ledger then ran 34 consecutive scheduled times, skipped none of them and
+ * passed none of them (17 `stalled-named` with the node under test at ZERO
+ * blocks synced), and this module reported that as "quiet". The blocks below
+ * regress the fix: N-1 non-passes quiet, N ALARM with skip_streak still 0, a
+ * pass clears it, a wholly benign streak is still exempt, ONE non-benign row
+ * ends that exemption, the two alarm texts stay distinguishable, and the skip
+ * rung keeps its own threshold and wording.
+ *
  * Plus the surrounding contract: config/harness classes fire at 1 because
  * they can never self-heal, an unknown or legacy skip is loud-ish rather than
  * assumed benign, a non-skip verdict breaks a skip streak, absence of a
@@ -305,6 +316,184 @@ int test_stopwatch_skip_watch(void)
         SSW_CHECK("a torn final line cannot clear a streak or an alarm", ok);
     }
 
+    /* ══ THE SECOND RUNG: the proof RAN and never passed ═════════════════
+     * The defect these blocks regress: `no_pass_streak` was computed here,
+     * stored, serialised to JSON and asserted by the four checks above — and
+     * gated NOTHING. The only alarm path required skip_streak > 0. Measured
+     * 2026-08-29 on the live C3 ledger: 34 consecutive non-passing runs, 17
+     * of them `stalled-named` with the node under test at ZERO blocks synced,
+     * skip_streak 0 throughout — and this module's report line for that state
+     * began with the word "quiet" and printed no_pass_streak=34 inside it.
+     * So the watch was loud about "the proof could not run" and silent about
+     * "the proof ran 34 times and never once succeeded", which is worse.
+     *
+     * The threshold is 4 — the C3 timer is OnCalendar=*-*-* 0/6:00:00, so
+     * four consecutive non-passes is ~24h of a sync gate never reaching tip.
+     * These blocks are written against rep.no_pass_threshold rather than a
+     * literal 4 so that retuning the table cannot silently rot them, but the
+     * >= 1 floor IS asserted: a 0 there would mean "mute", not "benign". */
+
+    /* One below the threshold is QUIET — one bad day is not yet a fault. */
+    {
+        text[0] = '\0';
+        for (unsigned i = 0; i < 3; i++)
+            append(text, sizeof(text),
+                   "{\"ts\":1000,\"verdict\":\"stalled-named\","
+                   "\"exit_code\":4,\"artifact_dir\":\"/a/s\"}\n");
+        bool ok = scan_text(text, &rep);
+        ok = ok && rep.no_pass_threshold >= 1;
+        ok = ok && rep.no_pass_threshold == 4;
+        ok = ok && rep.skip_streak == 0 && rep.no_pass_streak == 3;
+        ok = ok && rep.no_pass_alarm == false;
+        ok = ok && rep.alarm == false;
+        char msg[STOPWATCH_SKIP_ALARM_MAX];
+        stopwatch_skip_alarm_text(&rep, msg, sizeof(msg));
+        ok = ok && strstr(msg, "ALARM") == NULL;
+        ok = ok && strstr(msg, "no_pass_streak=3") != NULL;
+        SSW_CHECK("3 non-passing runs stay quiet (below the no-pass threshold)",
+                  ok);
+    }
+
+    /* AT the threshold it ALARMS — with skip_streak still 0, which is the
+     * exact state that used to print "quiet". */
+    {
+        text[0] = '\0';
+        for (unsigned i = 0; i < 4; i++)
+            append(text, sizeof(text),
+                   "{\"ts\":1000,\"verdict\":\"stalled-named\","
+                   "\"exit_code\":4,\"artifact_dir\":\"/a/s\"}\n");
+        bool ok = scan_text(text, &rep);
+        ok = ok && rep.skip_streak == 0 && rep.no_pass_streak == 4;
+        ok = ok && rep.no_pass_streak >= rep.no_pass_threshold;
+        ok = ok && rep.no_pass_alarm == true;
+        ok = ok && rep.no_pass_all_benign == false;
+        ok = ok && rep.alarm == false;   /* the skip rung is untouched */
+        char msg[STOPWATCH_SKIP_ALARM_MAX];
+        stopwatch_skip_alarm_text(&rep, msg, sizeof(msg));
+        ok = ok && strstr(msg, "ALARM") != NULL;
+        ok = ok && strstr(msg, "quiet") == NULL;
+        ok = ok && strstr(msg, "no_pass_streak=4") != NULL;
+        ok = ok && strstr(msg, "no_pass_threshold=4") != NULL;
+        ok = ok && strstr(msg, "last_verdict=stalled-named") != NULL;
+        /* The two alarms must be distinguishable WITHOUT reading the ledger:
+         * this one says the proof RAN, the skip one says it did not. */
+        ok = ok && strstr(msg, "RAN on every one of those") != NULL;
+        ok = ok && strstr(msg, "never once passed") != NULL;
+        ok = ok && strstr(msg, "has not run for that many") == NULL;
+        SSW_CHECK("4 non-passing runs ALARM and say the proof RAN and failed",
+                  ok);
+    }
+
+    /* The 34-deep live shape, and the last-pass age it must carry. */
+    {
+        text[0] = '\0';
+        append(text, sizeof(text),
+               "{\"ts\":1000,\"verdict\":\"pass\",\"exit_code\":0,"
+               "\"artifact_dir\":\"/a/p\"}\n");
+        for (unsigned i = 0; i < 34; i++)
+            append(text, sizeof(text),
+                   "{\"ts\":100000,\"verdict\":\"stalled-named\","
+                   "\"exit_code\":4,\"artifact_dir\":\"/a/s\"}\n");
+        bool ok = scan_text(text, &rep);
+        ok = ok && rep.no_pass_streak == 34 && rep.no_pass_alarm == true;
+        ok = ok && rep.last_pass_ts == 1000 && rep.last_ts == 100000;
+        char msg[STOPWATCH_SKIP_ALARM_MAX];
+        stopwatch_skip_alarm_text(&rep, msg, sizeof(msg));
+        ok = ok && strstr(msg, "ALARM") != NULL;
+        ok = ok && strstr(msg, "no_pass_streak=34") != NULL;
+        /* last-pass age, ledger-relative because this module has no clock */
+        ok = ok && strstr(msg, "last_pass_age=99000s-before-newest-row") != NULL;
+        SSW_CHECK("the live 34-deep no-pass streak alarms and dates the pass",
+                  ok);
+    }
+
+    /* A pass CLEARS the no-pass alarm exactly as it clears the skip one —
+     * recovery is recognised and the alarm cannot latch on stale news. */
+    {
+        text[0] = '\0';
+        for (unsigned i = 0; i < 10; i++)
+            append(text, sizeof(text),
+                   "{\"ts\":1000,\"verdict\":\"fail\",\"exit_code\":1,"
+                   "\"artifact_dir\":\"/a/f\"}\n");
+        append(text, sizeof(text),
+               "{\"ts\":9000,\"verdict\":\"pass\",\"exit_code\":0,"
+               "\"artifact_dir\":\"/a/p\"}\n");
+        bool ok = scan_text(text, &rep);
+        ok = ok && rep.no_pass_streak == 0 && rep.no_pass_alarm == false;
+        ok = ok && rep.no_pass_all_benign == false;  /* nothing to excuse */
+        char msg[STOPWATCH_SKIP_ALARM_MAX];
+        stopwatch_skip_alarm_text(&rep, msg, sizeof(msg));
+        ok = ok && strstr(msg, "ALARM") == NULL;
+        SSW_CHECK("a pass clears the no-pass alarm too", ok);
+    }
+
+    /* THE CARVE-OUT, and its limit. A streak made ENTIRELY of benign skips
+     * had nothing to prove on any of those runs, so it stays quiet however
+     * long it runs — otherwise every host that never configured PROOF B
+     * would alarm forever and the alarm would be trained away. */
+    {
+        text[0] = '\0';
+        for (int i = 0; i < 20; i++) {
+            row_skip(row, sizeof(row), 1000 + i, REASON_BENIGN, "/a/b");
+            append(text, sizeof(text), row);
+        }
+        bool ok = scan_text(text, &rep);
+        ok = ok && rep.no_pass_streak == 20;
+        ok = ok && rep.no_pass_all_benign == true;
+        ok = ok && rep.no_pass_alarm == false;
+        char msg[STOPWATCH_SKIP_ALARM_MAX];
+        stopwatch_skip_alarm_text(&rep, msg, sizeof(msg));
+        ok = ok && strstr(msg, "ALARM") == NULL;
+        ok = ok && strstr(msg, "benign") != NULL;
+        SSW_CHECK("20 benign skips do not reach the no-pass alarm either", ok);
+    }
+
+    /* ONE non-benign row anywhere in the streak ENDS the carve-out. This is
+     * the shape that would otherwise recreate the bug: three real failures
+     * capped by a single benign skip, reading as "quiet — benign". */
+    {
+        text[0] = '\0';
+        for (unsigned i = 0; i < 3; i++)
+            append(text, sizeof(text),
+                   "{\"ts\":1000,\"verdict\":\"stalled-named\","
+                   "\"exit_code\":4,\"artifact_dir\":\"/a/s\"}\n");
+        row_skip(row, sizeof(row), 4000, REASON_BENIGN, "/a/b");
+        append(text, sizeof(text), row);
+        bool ok = scan_text(text, &rep);
+        ok = ok && rep.skip_streak == 1 && rep.no_pass_streak == 4;
+        ok = ok && strcmp(rep.skip_class, "not_configured") == 0;
+        ok = ok && rep.threshold == 0 && rep.alarm == false;
+        ok = ok && rep.no_pass_all_benign == false;
+        ok = ok && rep.no_pass_alarm == true;
+        char msg[STOPWATCH_SKIP_ALARM_MAX];
+        stopwatch_skip_alarm_text(&rep, msg, sizeof(msg));
+        ok = ok && strstr(msg, "ALARM") != NULL;
+        ok = ok && strstr(msg, "benign") == NULL;
+        SSW_CHECK("one benign skip cannot mute a streak of real failures", ok);
+    }
+
+    /* The skip alarm is UNCHANGED by all of this: a class that fires at 2
+     * still fires at 2, long before the no-pass rung would, and keeps its own
+     * wording ("has not run"). Adding a rung must never move an existing one. */
+    {
+        text[0] = '\0';
+        row_skip(row, sizeof(row), 1000, REASON_PEER_DEAD, "/a/1");
+        append(text, sizeof(text), row);
+        row_skip(row, sizeof(row), 2000, REASON_PEER_DEAD, "/a/2");
+        append(text, sizeof(text), row);
+        bool ok = scan_text(text, &rep);
+        ok = ok && rep.alarm == true && rep.skip_streak == 2;
+        ok = ok && rep.no_pass_streak == 2;
+        ok = ok && rep.no_pass_alarm == false;  /* 2 < 4: the OTHER rung */
+        char msg[STOPWATCH_SKIP_ALARM_MAX];
+        stopwatch_skip_alarm_text(&rep, msg, sizeof(msg));
+        ok = ok && strstr(msg, "ALARM class=fixture_absent") != NULL;
+        ok = ok && strstr(msg, "has not run for that many") != NULL;
+        ok = ok && strstr(msg, "never once passed") == NULL;
+        SSW_CHECK("the skip alarm keeps its own threshold and its own wording",
+                  ok);
+    }
+
     /* ── file + env + typed-dump path, all under a private tmp dir ──── */
     {
         char dir[] = "/tmp/zcl-stopwatch-skip-test.XXXXXX";
@@ -374,6 +563,60 @@ int test_stopwatch_skip_watch(void)
         unlink(path);
         rmdir(dir);
         SSW_CHECK("ledger file + env resolution + typed dump report the alarm",
+                  ok);
+    }
+
+    /* ── the typed surface must go RED on a no-pass-only ledger ────────
+     * The whole point of the rung: an operator running
+     * `z23 ops state --subsystem=stopwatch_evidence` on the live host must
+     * see the alarm without opening the ledger. Rolling up only the skip
+     * `alarm` key would publish the fact one level down and still answer
+     * green at the top, which is the same silence moved. */
+    {
+        char dir[] = "/tmp/zcl-stopwatch-nopass.XXXXXX";
+        bool ok = mkdtemp(dir) != NULL;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/history.jsonl", dir);
+        char absent[PATH_MAX];
+        snprintf(absent, sizeof(absent), "%s/no-such-ledger.jsonl", dir);
+
+        text[0] = '\0';
+        for (unsigned i = 0; i < 6; i++)
+            append(text, sizeof(text),
+                   "{\"ts\":1000,\"verdict\":\"stalled-named\","
+                   "\"exit_code\":4,\"artifact_dir\":\"/a/s\","
+                   "\"skip_reason\":\"\"}\n");
+        ok = ok && write_file(path, text);
+
+        ok = ok && setenv("ZCL_C3_STOPWATCH_HISTORY", path, 1) == 0;
+        ok = ok && setenv("ZCL_NETDISRUPT_STOPWATCH_HISTORY", absent, 1) == 0;
+
+        struct json_value dump;
+        json_init(&dump);
+        ok = ok && stopwatch_evidence_dump_state_json(&dump, "c3");
+        const struct json_value *ledgers = json_get(&dump, "ledgers");
+        const struct json_value *c3 = ledgers ? json_at(ledgers, 0) : NULL;
+        ok = ok && c3 != NULL;
+        ok = ok && json_get_int(json_get(c3, "skip_streak")) == 0;
+        ok = ok && json_get_int(json_get(c3, "no_pass_streak")) == 6;
+        ok = ok && json_get_int(json_get(c3, "no_pass_threshold")) == 4;
+        ok = ok && json_get_bool(json_get(c3, "no_pass_all_benign")) == false;
+        ok = ok && json_get_bool(json_get(c3, "no_pass_alarm")) == true;
+        ok = ok && json_get_bool(json_get(c3, "alarm")) == false;
+        /* the summary line, and the rollup that must not stay green */
+        ok = ok && strstr(json_get_str(json_get(c3, "summary")),
+                          "ALARM") != NULL;
+        ok = ok && strstr(json_get_str(json_get(c3, "summary")),
+                          "never once passed") != NULL;
+        ok = ok && json_get_bool(json_get(&dump, "alarm")) == true;
+        ok = ok && json_get_int(json_get(&dump, "alarm_count")) == 1;
+        json_free(&dump);
+
+        unsetenv("ZCL_C3_STOPWATCH_HISTORY");
+        unsetenv("ZCL_NETDISRUPT_STOPWATCH_HISTORY");
+        unlink(path);
+        rmdir(dir);
+        SSW_CHECK("the typed dump reports the no-pass alarm and rolls it up",
                   ok);
     }
 

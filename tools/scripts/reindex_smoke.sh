@@ -181,8 +181,8 @@ echo "reindex-smoke: TOOTH 3 commitment parity PASS (recomputed == served == pre
 
 # Tooth 4: SERVING (already proven by the getblockcount at tip) + NO coin tear
 # in node.log. The epilogue must leave coins_applied == utxo_apply frontier.
-if grep -qE 'coins_applied=[0-9]+ > utxo_apply_frontier' "$ISO_DD/node.log"; then
-    grep -E 'coins_applied=[0-9]+ > utxo_apply_frontier' "$ISO_DD/node.log" | tail -3 >&2
+if grep -aqE 'coins_applied=[0-9]+ > utxo_apply_frontier' "$ISO_DD/node.log"; then
+    grep -aE 'coins_applied=[0-9]+ > utxo_apply_frontier' "$ISO_DD/node.log" | tail -3 >&2
     fail "TOOTH 4 NO-TEAR: node.log shows coins_applied > utxo_apply_frontier"
 fi
 echo "reindex-smoke: TOOTH 4 SERVING + NO tear PASS (no coins_applied>frontier in node.log)"

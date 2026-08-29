@@ -641,6 +641,558 @@ harness_phases_json() {
     return 0
 }
 
+
+# ── SYNC PHASE SPLIT: WHERE THE BULK-SYNC WALL CLOCK ACTUALLY WENT ──────────
+#
+# THE DEFECT THIS EXISTS TO CLOSE. Until now the entire bulk-sync window was
+# reported as ONE undivided bracket: harness.observed_sync. On the only PASS on
+# record that bracket was 515,000ms in a single piece, so every performance
+# claim in this tree about cold sync was a code comment or an inference — the
+# instrument genuinely could not say whether the time went to finding a peer,
+# to headers, to block bodies, or to the fold.
+#
+# WHAT IS ADDED HERE vs WHAT IS COMPOSED. NOTHING WAS ADDED TO THE NODE. Every
+# boundary below is read from a dumper the node ALREADY publishes (`dumpstate
+# peer_lifecycle`, `dumpstate sync_monitor`, `dumpstate omniscience`,
+# `dumpstate reducer_frontier`, `dumpstate reducer_stage_profile`); this
+# harness only samples them, brackets, and reports. Two boundaries have NO
+# source at all in this tree and are declared in omitted_fields[] rather than
+# invented — see the getheaders row and the "first body requested" row there.
+#
+# THE FOUR PHASES, AND EXACTLY WHAT EACH BOUNDARY IS READ FROM:
+#
+#   sync.peer_connect  start  harness wall clock immediately before the first
+#                             launch_node exec.                        EXACT
+#                      end    the EARLIEST peers[].handshake_complete_at in
+#                             `dumpstate peer_lifecycle` among peers that also
+#                             advertised a chain height (advertised_height>0) —
+#                             i.e. a peer that can actually serve, not merely
+#                             one that completed a handshake. The node records
+#                             that unix second itself, so the value is exact
+#                             even though the harness notices it a tick late.
+#                                                       EXACT (node-recorded)
+#                      AND, alongside it, the node's OWN latched measurement:
+#                      `dumpstate omniscience` time_to_first_peer_us
+#                      (lib/net/src/connman.c g_first_peer_us) — microseconds
+#                      from connman_start() to the first fully-handshaked peer.
+#                      It is reported as its own field and NOT as this phase's
+#                      duration, because it brackets a DIFFERENT window
+#                      (connman_start, not process start; any handshake, not a
+#                      height-advertising one). Two honest measurements of
+#                      neighbouring windows are worth more than one of them
+#                      silently overwriting the other.
+#
+#   sync.headers       start  the first sample tick on which the frontier's
+#                             stage_cursors[header_admit].cursor > 1 (a fresh
+#                             node reports 1, so >1 is the first admission);
+#                             sync_monitor tip_eval_header_height>0 is the
+#                             fallback when the frontier read missed.
+#                             This is an UPPER BOUND on the true start: the
+#                             getheaders that produced those headers was sent
+#                             strictly earlier, and nothing in this tree counts
+#                             getheaders SENT (see omitted_fields[]).
+#                                                POLL BOUND (SAMPLE_SECS res.)
+#                      end    the first tick on which that same cursor passed
+#                             the peer-advertised tip (network_tip).
+#                                                POLL BOUND (SAMPLE_SECS res.)
+#
+#   sync.bodies        start  the first tick on which sync_monitor
+#                             download_requested > 0 (lib/net/src/download.c).
+#                             UPPER BOUND — the request went out before the
+#                             counter was read.  POLL BOUND (SAMPLE_SECS res.)
+#                      end    the first tick on which the frontier's
+#                             stage_cursors[body_persist].cursor passed the
+#                             target: every body needed for the target has been
+#                             received and persisted.
+#                                                POLL BOUND (SAMPLE_SECS res.)
+#                             NOT sync_monitor last_block_connected_time, which
+#                             looks like the right instant and is not — see the
+#                             measured refutation at the bodies block below.
+#
+#   sync.fold          start  the first tick on which the reducer's
+#                             authoritative H* was > 0.
+#                                                POLL BOUND (SAMPLE_SECS res.)
+#                      end    the tick on which H* caught network_tip — the
+#                             same predicate the PASS verdict uses, so this
+#                             phase's end and the run's verdict can never
+#                             disagree.           POLL BOUND (SAMPLE_SECS res.)
+#
+# FAIL CLOSED. Every boundary starts at the -1 never-observed sentinel and is
+# only ever written from a real reading. A phase whose boundary never fired is
+# emitted with "observed":false, "duration_ms":null and a NAMED
+# unobserved_reason — NEVER as 0ms, and never silently dropped. A 0 that a
+# later reader mistakes for a measurement is the false-green defect this whole
+# instrument exists to prevent.
+#
+# THIS CHANGES NO THRESHOLD, BUDGET, OR VERDICT. phase_observe() can only ever
+# add evidence: it writes phase state and nothing else. The PASS predicate, the
+# budget, the busy timeout, the regression tripwire and every exit code are
+# byte-for-byte what they were.
+#
+# THEY OVERLAP, AND THE ARTIFACT SAYS SO. Bodies stream while the fold runs;
+# headers can still be arriving while bodies download. These four intervals do
+# NOT partition the observed-sync window and must never be read as if they did.
+# The representation chosen is: each phase carries its OWN start/end/duration
+# on one shared unix-second timeline, and a separate top-level "phase_overlap"
+# object publishes the pairwise overlap in ms, the UNION of the observed
+# intervals, the SUM of the durations, and the window time no phase claims.
+# Publishing sum, union and pairwise overlap together makes the double-counting
+# arithmetically visible instead of leaving it to be inferred — sum minus union
+# IS the overlap, stated. phases_partition_the_window is emitted as a literal
+# false so no reader has to work that out for themselves.
+
+PHASE_NAMES="peer_connect headers bodies fold"
+declare -A PH_START=() PH_END=() PH_END_SRCKIND=()
+PHASE_TARGET_HEIGHT=-1     # target the headers/bodies/fold ends are judged against
+PHASE_BOUNDARIES_TSV=""    # <artifact>/phase_boundaries.tsv — durable boundary log
+PHASE_PROFILE_DIR=""       # <artifact>/phase-profiles/ — per-boundary profile snapshots
+NODE_LAUNCH_UNIX=-1        # date +%s immediately before the FIRST launch_node exec
+PHASE_PROFILE_INDEX_ROWS=""
+PHASE_TTFP_US=-1           # dumpstate omniscience time_to_first_peer_us (-1 = unread)
+
+phase_state_init() {
+    local p
+    for p in $PHASE_NAMES; do
+        PH_START["$p"]=-1
+        PH_END["$p"]=-1
+        PH_END_SRCKIND["$p"]="unobserved"
+    done
+}
+phase_state_init
+
+# pl_handshake_unix <peer_lifecycle-json> <require_height:0|1> — the EARLIEST
+# positive peers[].handshake_complete_at in the doc, or -1 if none. With
+# require_height=1 only peers that ALSO reported advertised_height>0 count:
+# that is this harness's operational definition of "a peer that actually serves
+# data" — a handshake alone proves a socket, an advertised height proves the
+# peer has a chain to give us. Splitting the doc on '{' isolates each peer
+# object (they carry no nested braces) so the two readings below can never be
+# joined across two different peers. The closing-quote anchor is what keeps
+# "advertised_height" from matching "advertised_height_trusted".
+pl_handshake_unix() {
+    printf '%s' "${1:-}" | tr '{' '\n' | awk -v need="${2:-1}" '
+        BEGIN { best = -1 }
+        /"peer_id"/ {
+            hc = -1; ah = -1
+            if (match($0, /"handshake_complete_at"[ \t]*:[ \t]*-?[0-9]+/)) {
+                s = substr($0, RSTART, RLENGTH); sub(/.*:[ \t]*/, "", s); hc = s + 0
+            }
+            if (match($0, /"advertised_height"[ \t]*:[ \t]*-?[0-9]+/)) {
+                s = substr($0, RSTART, RLENGTH); sub(/.*:[ \t]*/, "", s); ah = s + 0
+            }
+            if (hc <= 0) next
+            if (need == 1 && ah <= 0) next
+            if (best < 0 || hc < best) best = hc
+        }
+        END { print best + 0 }' 2>/dev/null
+}
+
+# frontier_stage_cursor <reducer_frontier-json> <stage> — the `cursor` of one
+# named element of the frontier's stage_cursors[] array, or -1. A fresh node
+# reports header_admit cursor=1 with admitted_total=0, so "a header was
+# admitted" is cursor>1, never cursor>0. Splitting on '{' isolates each element
+# so `stage` and `cursor` can never be read off two different stages.
+frontier_stage_cursor() {
+    printf '%s' "${1:-}" | tr '{' '\n' | awk -v st="${2:-}" '
+        BEGIN { v = -1 }
+        {
+            if (index($0, "\"stage\":\"" st "\"") == 0) next
+            if (match($0, /"cursor"[ \t]*:[ \t]*-?[0-9]+/)) {
+                s = substr($0, RSTART, RLENGTH); sub(/.*:[ \t]*/, "", s); v = s + 0
+            }
+        }
+        END { print v + 0 }' 2>/dev/null
+}
+
+# jnum <json> <key> — jget with a -1 never-read sentinel instead of an empty
+# string, so a missing key can never be arithmetic-compared as if it were 0.
+jnum() {
+    local v
+    v="$(jget "${1:-}" "${2:-}")"
+    case "$v" in ''|*[!0-9-]*) printf '%s' -1 ;; *) printf '%s' "$v" ;; esac
+}
+
+# rsp_cum <reducer_stage_profile-json> <domain> <key> — one CUMULATIVE-since-boot
+# counter out of `dumpstate reducer_stage_profile`, or -1 when it is absent or
+# JSON null. The read is SCOPED to the domain's "cumulative" object and stops at
+# its "last_batch" sibling: unscoped, a null cumulative value would silently
+# fall through to the last_batch reading of the same key and report a
+# single-batch number as a lifetime total. (last_batch is reset on every stage
+# batch generation rollover; only cumulative is safe to difference.)
+rsp_cum() {
+    printf '%s' "${1:-}" | awk -v st="${2:-}" -v k="${3:-}" '
+        {
+            i = index($0, "\"" st "\":{\"cumulative\":{")
+            if (i == 0) { print -1; exit }
+            rest = substr($0, i)
+            j = index(rest, "\"last_batch\"")
+            if (j > 1) rest = substr(rest, 1, j - 1)
+            if (match(rest, "\"" k "\"[ \t]*:[ \t]*-?[0-9]+")) {
+                s = substr(rest, RSTART, RLENGTH); sub(/.*:[ \t]*/, "", s)
+                print s + 0; exit
+            }
+            print -1; exit
+        }
+        END { if (NR == 0) print -1 }' 2>/dev/null
+}
+
+# phase_boundaries_tsv_init — the durable boundary log, armed BEFORE the first
+# tick for the same reason samples.tsv is: a harness SIGKILLed mid-run still
+# leaves every boundary it had already observed on disk.
+phase_boundaries_tsv_init() {
+    [ -n "$PHASE_BOUNDARIES_TSV" ] || return 0
+    printf 'boundary\tedge\tunix_s\tt_s\tkind\tsource\n' \
+        >"$PHASE_BOUNDARIES_TSV" 2>/dev/null || PHASE_BOUNDARIES_TSV=""
+}
+phase_boundaries_tsv_row() {  # boundary edge unix_s t_s kind source
+    [ -n "$PHASE_BOUNDARIES_TSV" ] && [ -f "$PHASE_BOUNDARIES_TSV" ] || return 0
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" \
+        >>"$PHASE_BOUNDARIES_TSV" 2>/dev/null || true
+}
+
+# phase_profile_snapshot <boundary-edge-label> <unix_s> — capture `dumpstate
+# reducer_stage_profile` AT A PHASE BOUNDARY, not only once at the end.
+# WHY AT THE BOUNDARY: reducer_stage_profile's cumulative.* counters are
+# lifetime-since-boot totals. One reading at capture time can only ever say what
+# the WHOLE RUN cost; two readings that straddle a phase are what make a
+# per-stage cost ATTRIBUTABLE to that phase. With a snapshot at every boundary,
+# any phase's per-stage cost is the difference of the two snapshots bracketing
+# it, and that subtraction is left in the artifact for a reader to do rather
+# than being pre-baked here.
+phase_profile_snapshot() {
+    local label="${1:-}" at="${2:-0}" doc="" f bp_us bp_blocks sv_us
+    [ -n "$PHASE_PROFILE_DIR" ] && [ -d "$PHASE_PROFILE_DIR" ] || return 0
+    [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null || return 0
+    doc="$(rpc dumpstate reducer_stage_profile)"
+    [ -n "$doc" ] || return 0
+    f="$PHASE_PROFILE_DIR/$label.json"
+    printf '%s\n' "$doc" >"$f" 2>/dev/null || return 0
+    bp_us="$(rsp_cum "$doc" body_persist total_us)"
+    bp_blocks="$(rsp_cum "$doc" body_persist blocks)"
+    sv_us="$(rsp_cum "$doc" script_validate total_us)"
+    [ -n "$PHASE_PROFILE_INDEX_ROWS" ] && PHASE_PROFILE_INDEX_ROWS="$PHASE_PROFILE_INDEX_ROWS,"
+    PHASE_PROFILE_INDEX_ROWS="$PHASE_PROFILE_INDEX_ROWS{\"at\":$(json_string "$label")"
+    PHASE_PROFILE_INDEX_ROWS="$PHASE_PROFILE_INDEX_ROWS,\"unix_s\":$(json_number_or_null "$at")"
+    PHASE_PROFILE_INDEX_ROWS="$PHASE_PROFILE_INDEX_ROWS,\"snapshot\":$(json_string "$label.json")"
+    PHASE_PROFILE_INDEX_ROWS="$PHASE_PROFILE_INDEX_ROWS,\"body_persist_cumulative_total_us\":$(json_number_or_null "$bp_us")"
+    PHASE_PROFILE_INDEX_ROWS="$PHASE_PROFILE_INDEX_ROWS,\"body_persist_cumulative_blocks\":$(json_number_or_null "$bp_blocks")"
+    PHASE_PROFILE_INDEX_ROWS="$PHASE_PROFILE_INDEX_ROWS,\"script_validate_cumulative_total_us\":$(json_number_or_null "$sv_us")}"
+    return 0
+}
+
+# phase_mark <boundary> <edge:start|end> <unix_s> <kind> <source> — record a
+# boundary EXACTLY ONCE (first observation wins; a later tick can never move an
+# already-observed edge). Every accepted mark appends a row to
+# phase_boundaries.tsv and takes a reducer_stage_profile snapshot.
+phase_mark() {
+    local b="${1:-}" edge="${2:-}" at="${3:--1}" kind="${4:-}" src="${5:-}" t_s
+    case "$at" in ''|*[!0-9-]*) return 0 ;; esac
+    [ "$at" -gt 0 ] 2>/dev/null || return 0
+    if [ "$edge" = start ]; then
+        [ "${PH_START[$b]:--1}" = "-1" ] || return 0
+        PH_START["$b"]="$at"
+    else
+        [ "${PH_END[$b]:--1}" = "-1" ] || return 0
+        PH_END["$b"]="$at"
+        PH_END_SRCKIND["$b"]="$kind"
+    fi
+    t_s=-1
+    [ "${start:-0}" -gt 0 ] 2>/dev/null && t_s=$((at - start))
+    phase_boundaries_tsv_row "$b" "$edge" "$at" "$t_s" "$kind" "$src"
+    phase_profile_snapshot "$b.$edge" "$at"
+    return 0
+}
+
+# phase_observe <now> <hstar> <network_tip> <frontier-json> — one tick of
+# boundary detection. Reads the dumpers the boundaries live in and marks
+# anything newly crossed. It makes NO decision about the verdict: this function
+# can only ever add evidence, never change a threshold, a budget, or a
+# pass/fail predicate.
+phase_observe() {
+    local now="${1:-0}" hs="${2:--1}" nt="${3:--1}" fj="${4:-}"
+    local plj smj omj hs_unix hdr hdr_cursor body_cursor dl_req ttfp
+
+    # RPC-SILENCE GUARD, and it is a measurement decision, not a speed one.
+    # The caller has ALREADY spent this tick's bounded retries reading the
+    # frontier. An empty result there means the RPC server answered nothing at
+    # all (the node is still booting, or the front door is wedged) — not that it
+    # was busy, which returns a partial doc instead. Paying three more 10s RPC
+    # deadlines to re-learn that would stretch a 10s tick past 50s during boot,
+    # which is precisely the window sync.peer_connect covers: the guard PROTECTS
+    # boundary resolution rather than trading it away. Nothing is inferred from
+    # the silence — every boundary simply stays at its never-observed sentinel
+    # until a tick that can actually read.
+    if [ -z "$fj" ]; then
+        return 0
+    fi
+
+    if [ "$nt" != "-1" ] && [ "$nt" -gt 0 ] 2>/dev/null; then
+        PHASE_TARGET_HEIGHT="$nt"
+    fi
+
+    # ── peer_connect.end — node-recorded, therefore exact and retroactive ──
+    if [ "${PH_END[peer_connect]:--1}" = "-1" ]; then
+        plj="$(rpc dumpstate peer_lifecycle)"
+        if [ -n "$plj" ]; then
+            hs_unix="$(pl_handshake_unix "$plj" 1)"
+            phase_mark peer_connect end "$hs_unix" "exact_node_recorded" \
+                "dumpstate peer_lifecycle peers[].handshake_complete_at (earliest with advertised_height>0)"
+        fi
+    fi
+    # The node's OWN latched microsecond measurement of a NEIGHBOURING window.
+    # Read until it latches, then never again (it is write-once per process).
+    if [ "$PHASE_TTFP_US" = "-1" ]; then
+        omj="$(rpc dumpstate omniscience)"
+        if [ -n "$omj" ]; then
+            ttfp="$(jnum "$omj" time_to_first_peer_us)"
+            [ "$ttfp" -gt 0 ] 2>/dev/null && PHASE_TTFP_US="$ttfp"
+        fi
+    fi
+
+    smj="$(rpc dumpstate sync_monitor)"
+    hdr=-1; dl_req=-1
+    if [ -n "$smj" ]; then
+        hdr="$(jnum "$smj" tip_eval_header_height)"
+        dl_req="$(jnum "$smj" download_requested)"
+    fi
+    # The frontier's own per-stage cursors. A stage cursor is the NEXT height
+    # that stage will process, so "stage has finished height H" is cursor > H,
+    # and a fresh node reports 1 (genesis is 0, nothing admitted yet).
+    hdr_cursor="$(frontier_stage_cursor "$fj" header_admit)"
+    body_cursor="$(frontier_stage_cursor "$fj" body_persist)"
+
+    # ── headers ──────────────────────────────────────────────────────────
+    # header_admit's cursor is PRIMARY and tip_eval_header_height is the
+    # fallback, in that order and not the other way round. Measured on the one
+    # real PASS artifact on disk (20260821T135540Z-2484174): at the end of that
+    # run tip_eval_header_height, tip_eval_local_height and tip_eval_served_height
+    # were all 3224110 — the tip-state evaluator's three heights collapse once
+    # the node is caught up, so that field cannot be relied on to separate
+    # HEADER progress from chain progress. The header_admit cursor is the
+    # header pipeline's own position and does separate them.
+    if [ "$hdr_cursor" -gt 1 ] 2>/dev/null; then
+        phase_mark headers start "$now" "upper_bound_poll_observed" \
+            "first tick with reducer_frontier stage_cursors[header_admit].cursor>1 (a fresh node reports 1); the getheaders that produced those headers went out strictly earlier and is counted nowhere"
+    elif [ "$hdr" -gt 0 ] 2>/dev/null; then
+        phase_mark headers start "$now" "upper_bound_poll_observed" \
+            "first tick with dumpstate sync_monitor tip_eval_header_height>0; the frontier's header_admit cursor was unreadable this tick"
+    fi
+    if [ "$PHASE_TARGET_HEIGHT" -gt 0 ] 2>/dev/null; then
+        if [ "$hdr_cursor" -gt "$PHASE_TARGET_HEIGHT" ] 2>/dev/null; then
+            phase_mark headers end "$now" "upper_bound_poll_observed" \
+                "first tick with stage_cursors[header_admit].cursor > peer-advertised network_tip (the header pipeline has admitted through the target)"
+        elif [ "$hdr" -ge "$PHASE_TARGET_HEIGHT" ] 2>/dev/null; then
+            phase_mark headers end "$now" "upper_bound_poll_observed" \
+                "first tick with tip_eval_header_height >= peer-advertised network_tip; the frontier's header_admit cursor was unreadable this tick"
+        fi
+    fi
+
+    # ── bodies ───────────────────────────────────────────────────────────
+    # WHY body_persist's CURSOR AND NOT sync_monitor's last_block_connected_*.
+    # last_block_connected_height/_time look like the obvious body boundary and
+    # were used here first. Replaying the one real PASS artifact on disk
+    # (20260821T135540Z-2484174) proved they are NOT: that run finished with
+    # hstar 3224110 and every stage cursor at 3224111, while
+    # last_block_connected_height sat at 3056758 and last_block_connected_time
+    # at 1787320659 — 437 seconds before the run ended. That field does not
+    # track this build's fold, so a bodies.end keyed on it would NEVER fire on a
+    # real PASS and the phase would be reported unobserved forever. The trade is
+    # explicit: body_persist's cursor is a POLL bound rather than a node-stamped
+    # instant, and there is no node-stamped instant for this boundary at all
+    # (see the omitted_fields row).
+    if [ "$dl_req" -gt 0 ] 2>/dev/null; then
+        phase_mark bodies start "$now" "upper_bound_poll_observed" \
+            "first tick with dumpstate sync_monitor download_requested>0"
+    fi
+    if [ "$PHASE_TARGET_HEIGHT" -gt 0 ] 2>/dev/null &&
+       [ "$body_cursor" -gt "$PHASE_TARGET_HEIGHT" ] 2>/dev/null; then
+        phase_mark bodies end "$now" "upper_bound_poll_observed" \
+            "first tick with reducer_frontier stage_cursors[body_persist].cursor > peer-advertised network_tip (every body needed for the target is received and persisted)"
+    fi
+
+    # ── fold ─────────────────────────────────────────────────────────────
+    if [ "$hs" != "-1" ] && [ "$hs" -gt 0 ] 2>/dev/null; then
+        phase_mark fold start "$now" "upper_bound_poll_observed" \
+            "first tick with an authoritative dumpstate reducer_frontier hstar>0"
+        if [ "$PHASE_TARGET_HEIGHT" -gt 0 ] 2>/dev/null &&
+           [ "$hs" -ge "$PHASE_TARGET_HEIGHT" ] 2>/dev/null; then
+            phase_mark fold end "$now" "upper_bound_poll_observed" \
+                "the tick on which authoritative hstar caught network_tip — the same predicate the PASS verdict uses"
+        fi
+    fi
+    return 0
+}
+
+# phase_unobserved_reason <boundary> <edge> — the NAMED reason an edge has no
+# reading. Never "0", never blank: an unobserved edge that cannot say why it is
+# unobserved is the same silent absence omitted_fields[] exists to abolish.
+phase_unobserved_reason() {
+    case "$1.$2" in
+        peer_connect.start) printf 'the harness never reached its first launch_node (an early skip or setup failure).' ;;
+        peer_connect.end)   printf 'no peer in dumpstate peer_lifecycle ever reported BOTH handshake_complete_at>0 AND advertised_height>0, so a peer that could actually serve data was never observed connected.' ;;
+        headers.start)      printf 'reducer_frontier stage_cursors[header_admit].cursor never rose above 1 and sync_monitor tip_eval_header_height stayed 0 for the whole window: not one header was ever admitted, so header sync never started.' ;;
+        headers.end)        printf 'the header_admit cursor never passed the peer-advertised network_tip (or no network_tip was ever readable, which itself requires a completed handshake).' ;;
+        bodies.start)       printf 'dumpstate sync_monitor download_requested stayed 0 for the whole window: no block body was ever requested.' ;;
+        bodies.end)         printf 'the body_persist cursor never passed the target height, so the bodies needed for the target were never all received and persisted.' ;;
+        fold.start)         printf 'the authoritative reducer_frontier hstar never rose above 0: the reducer never folded a single block.' ;;
+        fold.end)           printf 'hstar never caught network_tip within the budget.' ;;
+        *)                  printf 'no reason recorded, which is itself a defect — phase_unobserved_reason() must name every unobserved edge.' ;;
+    esac
+}
+
+# phase_source <boundary> <edge> — the source that WOULD have produced this
+# edge. Emitted even when the edge is unobserved, because "which dumper was
+# watched and came up empty" is the actionable half of an absence.
+phase_source() {
+    case "$1.$2" in
+        peer_connect.start) printf 'harness wall clock (date +%%s) immediately before the first launch_node exec' ;;
+        peer_connect.end)   printf 'dumpstate peer_lifecycle peers[].handshake_complete_at — earliest among peers with advertised_height>0' ;;
+        headers.start)      printf 'first sample tick with reducer_frontier stage_cursors[header_admit].cursor>1 (fallback: sync_monitor tip_eval_header_height>0)' ;;
+        headers.end)        printf 'first sample tick with stage_cursors[header_admit].cursor > dumpstate reducer_frontier network_tip' ;;
+        bodies.start)       printf 'first sample tick with dumpstate sync_monitor download_requested>0' ;;
+        bodies.end)         printf 'first sample tick with reducer_frontier stage_cursors[body_persist].cursor > network_tip' ;;
+        fold.start)         printf 'first sample tick with an authoritative dumpstate reducer_frontier hstar>0' ;;
+        fold.end)           printf 'sample tick on which authoritative hstar >= network_tip' ;;
+        *)                  printf 'unnamed' ;;
+    esac
+}
+
+# phase_start_kind <boundary> — peer_connect's start is a harness-exact stamp;
+# every other start is the first tick that saw the condition ALREADY true, i.e.
+# an upper bound at SAMPLE_SECS resolution.
+phase_start_kind() {
+    case "$1" in
+        peer_connect) printf 'exact_harness_stamp' ;;
+        *)            printf 'upper_bound_poll_observed' ;;
+    esac
+}
+
+# phase_span_ms <boundary> — duration in ms, or -1 when either edge is
+# unobserved. There is deliberately NO "assume it ran to the end of the window"
+# fallback: a half-observed phase has no duration, and manufacturing one from
+# the capture time would silently convert an unobserved boundary into a
+# measurement.
+phase_span_ms() {
+    local s="${PH_START[$1]:--1}" e="${PH_END[$1]:--1}"
+    if [ "$s" = "-1" ] || [ "$e" = "-1" ] || [ "$e" -lt "$s" ] 2>/dev/null; then
+        printf '%s' -1; return 0
+    fi
+    printf '%s' $(( (e - s) * 1000 ))
+}
+
+# phase_rows_json — the four sync-phase elements of phases[]. ALL FOUR ARE
+# ALWAYS EMITTED, on every verdict, observed or not. That is not cosmetic: a
+# phase that vanishes from the artifact when it was not observed is exactly the
+# silent absence this artifact format refuses, and the artifact-symmetry checker
+# additionally requires the phase name set to be identical across a pass and a
+# non-pass run.
+phase_rows_json() {
+    local out="" p s e d
+    for p in $PHASE_NAMES; do
+        s="${PH_START[$p]:--1}"; e="${PH_END[$p]:--1}"; d="$(phase_span_ms "$p")"
+        [ -n "$out" ] && out="$out,"
+        out="$out{\"phase\":\"sync.$p\",\"level\":\"sync_phase\""
+        out="$out,\"observed\":$([ "$d" = "-1" ] && printf false || printf true)"
+        out="$out,\"start_unix\":$([ "$s" = "-1" ] && printf null || printf '%s' "$s")"
+        out="$out,\"end_unix\":$([ "$e" = "-1" ] && printf null || printf '%s' "$e")"
+        out="$out,\"duration_ms\":$([ "$d" = "-1" ] && printf null || printf '%s' "$d")"
+        out="$out,\"duration_source\":$(json_string "start: $(phase_source "$p" start) | end: $(phase_source "$p" end)")"
+        out="$out,\"start_kind\":$([ "$s" = "-1" ] && printf '"unobserved"' || json_string "$(phase_start_kind "$p")")"
+        out="$out,\"end_kind\":$(json_string "${PH_END_SRCKIND[$p]:-unobserved}")"
+        out="$out,\"poll_resolution_secs\":$(json_number_or_null "$SAMPLE_SECS")"
+        if [ "$p" = "peer_connect" ]; then
+            out="$out,\"node_time_to_first_handshaked_peer_us\":$([ "$PHASE_TTFP_US" = "-1" ] && printf null || printf '%s' "$PHASE_TTFP_US")"
+            out="$out,\"node_time_to_first_handshaked_peer_source\":\"dumpstate omniscience time_to_first_peer_us (lib/net/src/connman.c g_first_peer_us, latched write-once)\""
+            out="$out,\"node_time_to_first_handshaked_peer_scope\":\"microseconds from connman_start() to the FIRST fully-handshaked peer. This is NOT this phase's duration: it starts at connman_start (not process launch) and ends at ANY handshake (not one that advertised a height). Both are reported because they bracket different windows; neither is derived from the other.\""
+            if [ "$PHASE_TTFP_US" = "-1" ]; then
+                out="$out,\"node_time_to_first_handshaked_peer_unobserved_reason\":\"dumpstate omniscience reported time_to_first_peer_us as 0 (its 'no peer yet' sentinel) for the whole window, or the dumper was unreachable — no peer ever completed a handshake.\""
+            fi
+        fi
+        if [ "$s" = "-1" ]; then
+            out="$out,\"start_unobserved_reason\":$(json_string "$(phase_unobserved_reason "$p" start)")"
+        fi
+        if [ "$e" = "-1" ]; then
+            out="$out,\"end_unobserved_reason\":$(json_string "$(phase_unobserved_reason "$p" end)")"
+        fi
+        out="$out}"
+    done
+    printf '%s' "$out"
+}
+
+# phase_overlap_json <captured_at_unix> — the object that makes the overlap
+# impossible to misread.
+# THE LIE THIS PREVENTS. Four phase durations printed in a column invite exactly
+# one reading: that they add up to the window. They do not — bodies stream while
+# the fold runs, so the same second is inside two phases at once, and any
+# subtraction across them is arithmetic on double-counted time. So sum_ms
+# (double-counted), union_ms (wall clock covered by at least one phase) and the
+# pairwise overlaps are published side by side with a literal
+# phases_partition_the_window:false. sum minus union IS the double count,
+# stated rather than left to be discovered.
+phase_overlap_json() {
+    local captured_at="${1:-0}" p q sum=0 d union=-1 obs=0 pairs="" ov lo hi win=-1
+    local -a S=() E=()
+    for p in $PHASE_NAMES; do
+        d="$(phase_span_ms "$p")"
+        if [ "$d" != "-1" ]; then
+            sum=$((sum + d)); obs=$((obs + 1))
+            S+=( "${PH_START[$p]}" ); E+=( "${PH_END[$p]}" )
+        fi
+    done
+    for p in $PHASE_NAMES; do
+        for q in $PHASE_NAMES; do
+            [ "$p" \< "$q" ] || continue
+            if [ "$(phase_span_ms "$p")" = "-1" ] || [ "$(phase_span_ms "$q")" = "-1" ]; then
+                ov=null
+            else
+                hi="${PH_END[$p]}"; [ "${PH_END[$q]}" -lt "$hi" ] && hi="${PH_END[$q]}"
+                lo="${PH_START[$p]}"; [ "${PH_START[$q]}" -gt "$lo" ] && lo="${PH_START[$q]}"
+                ov=$(( (hi - lo) * 1000 ))
+                [ "$ov" -lt 0 ] && ov=0
+            fi
+            [ -n "$pairs" ] && pairs="$pairs,"
+            pairs="$pairs\"sync.$p|sync.$q\":$ov"
+        done
+    done
+    if [ "$obs" -gt 0 ]; then
+        union="$(
+            for ((i = 0; i < ${#S[@]}; i++)); do printf '%s %s\n' "${S[$i]}" "${E[$i]}"; done |
+            sort -n | awk '
+                BEGIN { tot = 0; cs = -1; ce = -1 }
+                { s = $1 + 0; e = $2 + 0
+                  if (cs < 0) { cs = s; ce = e; next }
+                  if (s > ce) { tot += ce - cs; cs = s; ce = e } else if (e > ce) ce = e }
+                END { if (cs >= 0) tot += ce - cs; print tot * 1000 }')"
+        case "$union" in ''|*[!0-9-]*) union=-1 ;; esac
+    fi
+    [ "${LOOP_START_UNIX:-0}" -gt 0 ] 2>/dev/null && [ "$captured_at" -ge "${LOOP_START_UNIX:-0}" ] 2>/dev/null &&
+        win=$(( (captured_at - LOOP_START_UNIX) * 1000 ))
+    printf '{"phases_partition_the_window":false'
+    printf ',"timeline_basis":"one shared unix-second clock; every start_unix/end_unix in phases[] is on it"'
+    printf ',"observed_phase_count":%s' "$obs"
+    printf ',"observed_sync_window_ms":%s' "$([ "$win" = "-1" ] && printf null || printf '%s' "$win")"
+    printf ',"sum_of_observed_phase_ms":%s' "$([ "$obs" -gt 0 ] && printf '%s' "$sum" || printf null)"
+    printf ',"union_of_observed_phase_ms":%s' "$([ "$union" = "-1" ] && printf null || printf '%s' "$union")"
+    printf ',"double_counted_ms":%s' "$( { [ "$obs" -gt 0 ] && [ "$union" != "-1" ]; } && printf '%s' $((sum - union)) || printf null)"
+    printf ',"window_ms_covered_by_no_phase":%s' "$( { [ "$win" != "-1" ] && [ "$union" != "-1" ]; } && printf '%s' $((win - union)) || printf null)"
+    printf ',"pairwise_overlap_ms":{%s}' "$pairs"
+    printf ',"note":"sum_of_observed_phase_ms counts overlapping seconds more than once and is NOT the window. union_of_observed_phase_ms is the wall clock covered by at least one phase. double_counted_ms = sum - union is the overlap. window_ms_covered_by_no_phase is observed-sync time no phase claims — it is UNATTRIBUTED, not idle. A null means an edge was never observed; it is never a zero. A pairwise entry is null when either phase was not fully observed."'
+    printf '}'
+}
+
+# phase_profile_index_json — the manifest for phase-profiles/. Written on EVERY
+# run, including one where no boundary ever fired (rows:[] plus the reason the
+# directory is empty), so an empty directory is never mistaken for a lost
+# capture.
+phase_profile_index_json() {
+    local n
+    n="$(printf '%s' "$PHASE_PROFILE_INDEX_ROWS" | grep -o '"at":' | wc -l | tr -d ' ')"
+    printf '{"schema":"zcl.c3_phase_stage_profile_index.v1"'
+    printf ',"description":"one dumpstate reducer_stage_profile snapshot per OBSERVED sync-phase boundary. The cumulative.* counters in each snapshot are lifetime-since-boot totals, so a phase cost is the DIFFERENCE between the two snapshots that bracket it — that subtraction is deliberately left to the reader rather than pre-baked here."'
+    printf ',"boundary_snapshot_count":%s' "$n"
+    printf ',"empty_reason":%s' "$([ -z "$PHASE_PROFILE_INDEX_ROWS" ] && json_string "no sync-phase boundary was observed during this run, or the node was not RPC-reachable when one was. See phases[] start_unobserved_reason / end_unobserved_reason for which." || printf null)"
+    printf ',"rows":[%s]}' "$PHASE_PROFILE_INDEX_ROWS"
+}
 # omitted_fields_json — the elements of omitted_fields[] (comma-separated JSON
 # objects, NO enclosing brackets): every field the owner's measurement brief
 # named that this run did NOT record, BY NAME, with the reason and the nearest
@@ -689,6 +1241,24 @@ omitted_fields_json() {
     _of_row "phases[].hstar / phases[].peer_tip (per boot-level phase)" "structural" \
         "H* and network_tip are read over RPC, which is not serving during most of boot; a boot phase therefore has no H* of its own." \
         "samples.tsv hstar/network_tip per tick, and the run-level final_hstar / final_network_tip / measured_identity.peer_advertised_tip in this file."
+    # ── structural, SYNC-PHASE SPLIT: what the split still cannot see ───────
+    # These four rows are the honest to-do list left by splitting the
+    # observed-sync bracket. Each names a boundary the brief asked for that no
+    # source in this tree can produce today, and the BOUND that is reported in
+    # its place. A bound reported as if it were the instant is the same
+    # false-green defect as a fabricated zero, only harder to notice.
+    _of_row "phases[].sync.headers.start (the true first getheaders SENT)" "structural" \
+        "nothing in this tree counts getheaders SENT. lib/net/src/msg_headers.c keeps only SERVE-side counters (g_getheaders_served_requests and the suppression counters) and they reach no dumpstate topic; the per-node last_getheaders_time in app/services/src/sync_monitor.c is reset, never dumped. So the instant our first getheaders left this node is unobservable." \
+        "sync.headers.start as emitted: the first sample tick on which a header had ALREADY been admitted. It is a strict UPPER BOUND — the request went out earlier — and is labelled start_kind=upper_bound_poll_observed, never presented as the instant."
+    _of_row "phases[].sync.bodies.start (the true first block body REQUESTED)" "structural" \
+        "download_requested (lib/net/src/download.c, surfaced by dumpstate sync_monitor) is a COUNTER with no first-request timestamp, and the node latches no such instant. Only the counter's rising edge is observable, and only at the harness's poll cadence." \
+        "sync.bodies.start as emitted: the first tick with download_requested>0, labelled start_kind=upper_bound_poll_observed."
+    _of_row "phases[].sync.bodies.end (the last body NEEDED for the target height RECEIVED)" "structural" \
+        "no dumper stamps an instant for this boundary. sync_monitor's last_block_connected_time LOOKS like it and is not: on the one real PASS artifact on disk (20260821T135540Z-2484174) that run ended with hstar 3224110 and every frontier stage cursor at 3224111, while last_block_connected_height sat at 3056758 and last_block_connected_time at 1787320659 — 437 seconds before the run finished. It does not track this build's fold, so it is not used. Separately, no counter distinguishes 'the last needed body arrived on the wire' from 'the last needed body was persisted', and persistence happens after receive." \
+        "sync.bodies.end as emitted: the first tick with reducer_frontier stage_cursors[body_persist].cursor past the target. It is a poll-resolution LATE bound on the receive instant (end_kind=upper_bound_poll_observed), never presented as the instant."
+    _of_row "phases[].sync.* per-phase cpu_seconds / disk_read_bytes / disk_write_bytes" "structural" \
+        "/proc counters are sampled per TICK for the whole process, not per phase, and the sync phases OVERLAP — the same CPU second belongs to bodies and to the fold at once. Splitting one process-wide counter across overlapping phases would have to invent an attribution rule, and any such rule would be a model, not a measurement." \
+        "samples.tsv carries the per-tick cpu/rss/disk series against the same unix clock as every phase boundary, so a reader can integrate over any phase's interval themselves and see the overlap while doing it. phase-profiles/ additionally carries a dumpstate reducer_stage_profile snapshot at every boundary, whose cumulative.* counters ARE differenceable per phase."
     # ── this_run: a source exists, this run could not read it ───────────────
     if [ -z "${NODE_BIN_SOURCE_ID:-}" ]; then
         _of_row "measured_identity.node_bin_source_id_sha256" "this_run" \
@@ -1104,8 +1674,8 @@ cancelled_write_bytes: 0'
     BYTES_CLOSE=5000; BYTES_CLOSE_BOOT=1
     bytes_delta_compute
     st_of_best="$(omitted_fields_json)"
-    st_ps_check "omitted_fields: the 6 structural rows are present even when EVERYTHING measurable was measured" \
-        6 "$(printf '%s' "$st_of_best" | grep -o '"scope":"structural"' | wc -l | tr -d ' ')"
+    st_ps_check "omitted_fields: the 10 structural rows are present even when EVERYTHING measurable was measured" \
+        10 "$(printf '%s' "$st_of_best" | grep -o '"scope":"structural"' | wc -l | tr -d ' ')"
     st_ps_check "omitted_fields: a fully-measured run reports NO this_run rows" \
         0 "$(printf '%s' "$st_of_best" | grep -o '"scope":"this_run"' | wc -l | tr -d ' ')"
     st_ps_check "omitted_fields: network bytes are named as omitted, never emitted as 0" \
@@ -1121,9 +1691,9 @@ cancelled_write_bytes: 0'
     st_ps_check "omitted_fields: the network_bytes row points at the measured block-body subset as its substitute" \
         1 "$(printf '%s' "$st_of_best" | grep -c 'block_body_payload_bytes_received' | tr -d ' ')"
     st_ps_check "omitted_fields: every row carries a reason" \
-        6 "$(printf '%s' "$st_of_best" | grep -o '"reason":"' | wc -l | tr -d ' ')"
+        10 "$(printf '%s' "$st_of_best" | grep -o '"reason":"' | wc -l | tr -d ' ')"
     st_ps_check "omitted_fields: every row carries a nearest_honest_substitute" \
-        6 "$(printf '%s' "$st_of_best" | grep -o '"nearest_honest_substitute":"' | wc -l | tr -d ' ')"
+        10 "$(printf '%s' "$st_of_best" | grep -o '"nearest_honest_substitute":"' | wc -l | tr -d ' ')"
     st_ps_check "omitted_fields: no row claims a substitute of a fabricated zero" \
         0 "$(printf '%s' "$st_of_best" | grep -c '"nearest_honest_substitute":"0"' | tr -d ' ')"
     # Now lose every optional reading and confirm each loss is NAMED.
@@ -1152,7 +1722,7 @@ cancelled_write_bytes: 0'
     st_ps_check "omitted_fields: all four unreadable /proc counters are named individually" \
         4 "$(printf '%s' "$st_of_worst" | grep -oE '"field":"harness\.observed_sync\.(cpu_seconds|rss_kb|disk_read_bytes|disk_write_bytes)"' | wc -l | tr -d ' ')"
     st_ps_check "omitted_fields: the structural rows survive the worst case too" \
-        6 "$(printf '%s' "$st_of_worst" | grep -o '"scope":"structural"' | wc -l | tr -d ' ')"
+        10 "$(printf '%s' "$st_of_worst" | grep -o '"scope":"structural"' | wc -l | tr -d ' ')"
     st_ps_check "omitted_fields: the worst case names strictly MORE fields than the best case" \
         1 "$([ "$(st_of_names "$st_of_worst" | wc -l)" -gt "$(st_of_names "$st_of_best" | wc -l)" ] && echo 1 || echo 0)"
     st_ps_check "omitted_fields: no field name is reported twice" \
@@ -1243,6 +1813,317 @@ cancelled_write_bytes: 0'
     grep -q '"omitted_fields": \[' "${BASH_SOURCE[0]}"
     st_check "proof.json emits an omitted_fields[] array" 0 $?
 
+
+    # ── SYNC PHASE SPLIT ────────────────────────────────────────────────────
+    # The defect class this section exists to stop: a phase that reads 0ms
+    # because nothing was detected. Every check below is written so that
+    # substituting 0 for the never-observed sentinel makes it go red, and so
+    # that a phase vanishing from the artifact makes it go red too.
+    st_pl_doc='{"subsystem":"peer_lifecycle","state":{"summary":{"attempted":10,"handshake_complete":2},"peers":[{"peer_id":9,"addr":"127.0.0.1:39070","handshake_complete_at":1700000500,"advertised_height":0,"advertised_height_trusted":false},{"peer_id":11,"addr":"10.0.0.2:8033","handshake_complete_at":1700000400,"advertised_height":3200000,"advertised_height_trusted":true},{"peer_id":12,"addr":"10.0.0.3:8033","handshake_complete_at":1700000700,"advertised_height":3200001,"advertised_height_trusted":true}]}}'
+    st_ps_check "peer_lifecycle: the earliest HEIGHT-ADVERTISING peer's handshake is the boundary" \
+        1700000400 "$(pl_handshake_unix "$st_pl_doc" 1)"
+    # peer 9 handshook EARLIER (…500 vs …400 is not the point — 9 has no height
+    # at all). A peer that completed a handshake but never told us a chain
+    # height cannot serve data, and counting it would move the boundary to a
+    # socket event rather than a serving event.
+    st_ps_check "peer_lifecycle: a handshaked peer that advertised NO height is not 'serving'" \
+        1700000400 "$(pl_handshake_unix "$st_pl_doc" 1)"
+    st_ps_check "peer_lifecycle: relaxing the height requirement DOES admit that peer (the two differ)" \
+        1700000400 "$(pl_handshake_unix "$st_pl_doc" 0)"
+    # The real shape from a run whose peer accept()ed and closed: connected,
+    # version_sent, handshake_complete_at 0. Must be -1, never 0 — 0 here would
+    # be read as "handshaked at the unix epoch" or, worse, as 0ms to connect.
+    st_pl_none='{"peers":[{"peer_id":9,"attempted":10,"connected":10,"version_sent":10,"handshake_complete_at":0,"advertised_height":0}]}'
+    st_ps_check "peer_lifecycle: no completed handshake yields -1, never 0" \
+        -1 "$(pl_handshake_unix "$st_pl_none" 1)"
+    st_ps_check "peer_lifecycle: the catch-all mock reply yields -1, never 0" \
+        -1 "$(pl_handshake_unix '{"mock_dumpstate":"peer_lifecycle","ok":true}' 1)"
+    st_ps_check "peer_lifecycle: an empty response yields -1, never 0" \
+        -1 "$(pl_handshake_unix '' 1)"
+
+    st_fc_doc='{"hstar":100,"stage_cursors":[{"stage":"header_admit","read_ok":true,"cursor":4211,"trust":"authoritative"},{"stage":"validate_headers","read_ok":true,"cursor":77,"trust":"authoritative"}]}'
+    st_ps_check "frontier stage_cursors: header_admit's cursor is read, not the next stage's" \
+        4211 "$(frontier_stage_cursor "$st_fc_doc" header_admit)"
+    st_ps_check "frontier stage_cursors: validate_headers is read off its OWN element" \
+        77 "$(frontier_stage_cursor "$st_fc_doc" validate_headers)"
+    st_ps_check "frontier stage_cursors: an absent stage yields -1, never 0" \
+        -1 "$(frontier_stage_cursor "$st_fc_doc" body_persist)"
+
+    # reducer_stage_profile: cumulative is the ONLY differenceable view.
+    # last_batch is reset on every stage batch generation, so a read that falls
+    # through from a null cumulative into last_batch reports a single batch as a
+    # lifetime total — a number that is real, plausible, and wrong.
+    st_rsp='{"state":{"body_persist":{"cumulative":{"blocks":812,"total_us":9910222},"last_batch":{"blocks":64,"total_us":740111}},"script_validate":{"cumulative":{"blocks":null,"total_us":null},"last_batch":{"blocks":64,"total_us":123456}}}}'
+    st_ps_check "stage profile: a cumulative counter is read from the cumulative object" \
+        9910222 "$(rsp_cum "$st_rsp" body_persist total_us)"
+    st_ps_check "stage profile: a NULL cumulative yields -1 and does NOT fall through to last_batch" \
+        -1 "$(rsp_cum "$st_rsp" script_validate total_us)"
+    st_ps_check "stage profile: an absent domain yields -1, never 0" \
+        -1 "$(rsp_cum "$st_rsp" tip_finalize total_us)"
+    st_ps_check "stage profile: an empty doc yields -1, never 0" -1 "$(rsp_cum '' body_persist total_us)"
+
+    st_ps_check "jnum: an absent key yields -1, never 0" \
+        -1 "$(jnum '{"download_requested":0}' tip_eval_header_height)"
+    st_ps_check "jnum: a genuine zero is preserved as 0, not turned into the sentinel" \
+        0 "$(jnum '{"download_requested":0}' download_requested)"
+
+    # ── the four phase rows: always four, never a fabricated zero ────────────
+    st_set_phases() {  # pcS pcE hS hE bS bE fS fE  (-1 = unobserved)
+        local i=0 p
+        PH_START[peer_connect]="$1"; PH_END[peer_connect]="$2"
+        PH_START[headers]="$3";      PH_END[headers]="$4"
+        PH_START[bodies]="$5";       PH_END[bodies]="$6"
+        PH_START[fold]="$7";         PH_END[fold]="$8"
+        # Mirror what phase_mark does: an observed end always carries a kind.
+        # Leaving it at "unobserved" here would let the fixture assert a shape
+        # the real code can never produce.
+        for p in $PHASE_NAMES; do
+            if [ "${PH_END[$p]}" = "-1" ]; then PH_END_SRCKIND["$p"]="unobserved"
+            elif [ "$p" = "peer_connect" ]; then PH_END_SRCKIND["$p"]="exact_node_recorded"
+            else PH_END_SRCKIND["$p"]="upper_bound_poll_observed"; fi
+        done
+        i=$i
+    }
+    st_set_phases 1000 1010 1010 1100 1050 1500 1060 1520
+    PHASE_TTFP_US=8421
+    st_rows="$(phase_rows_json)"
+    st_ps_check "phases: all four sync phases are emitted" \
+        4 "$(printf '%s' "$st_rows" | grep -o '"level":"sync_phase"' | wc -l | tr -d ' ')"
+    st_ps_check "phases: every sync element names a duration_source (the symmetry checker requires it)" \
+        4 "$(printf '%s' "$st_rows" | grep -o '"duration_source":' | wc -l | tr -d ' ')"
+    st_ps_check "phases: peer_connect duration is its own bracket (10s), not the whole window" \
+        1 "$(printf '%s' "$st_rows" | grep -c '"phase":"sync.peer_connect","level":"sync_phase","observed":true,"start_unix":1000,"end_unix":1010,"duration_ms":10000' | tr -d ' ')"
+    st_ps_check "phases: the fold gets its own 460s bracket" \
+        1 "$(printf '%s' "$st_rows" | grep -c '"phase":"sync.fold","level":"sync_phase","observed":true,"start_unix":1060,"end_unix":1520,"duration_ms":460000' | tr -d ' ')"
+    st_ps_check "phases: a fully observed run emits NO unobserved_reason" \
+        0 "$(printf '%s' "$st_rows" | grep -o 'unobserved_reason' | wc -l | tr -d ' ')"
+    st_ps_check "phases: peer_connect carries the node's own latched time_to_first_peer_us alongside" \
+        1 "$(printf '%s' "$st_rows" | grep -c '"node_time_to_first_handshaked_peer_us":8421' | tr -d ' ')"
+    st_ps_check "phases: the node's µs figure is NOT presented as the phase duration" \
+        1 "$(printf '%s' "$st_rows" | grep -c 'This is NOT this phase.s duration' | tr -d ' ')"
+    st_ov="$(phase_overlap_json 1600)"
+    st_ps_check "overlap: the artifact says outright that the phases do not partition the window" \
+        1 "$(printf '%s' "$st_ov" | grep -c '"phases_partition_the_window":false' | tr -d ' ')"
+    st_ps_check "overlap: the SUM double-counts (10+90+450+460 = 1010s)" \
+        1 "$(printf '%s' "$st_ov" | grep -c '"sum_of_observed_phase_ms":1010000' | tr -d ' ')"
+    st_ps_check "overlap: the UNION is the real wall clock covered (1000..1520 = 520s)" \
+        1 "$(printf '%s' "$st_ov" | grep -c '"union_of_observed_phase_ms":520000' | tr -d ' ')"
+    st_ps_check "overlap: the double count is published, not left to be inferred" \
+        1 "$(printf '%s' "$st_ov" | grep -c '"double_counted_ms":490000' | tr -d ' ')"
+    st_ps_check "overlap: bodies and fold are shown overlapping by 440s" \
+        1 "$(printf '%s' "$st_ov" | grep -c '"sync.bodies|sync.fold":440000' | tr -d ' ')"
+    st_ps_check "overlap: two phases that only touch report 0 overlap, which is a real measurement here" \
+        1 "$(printf '%s' "$st_ov" | grep -c '"sync.headers|sync.peer_connect":0' | tr -d ' ')"
+    # B) NOTHING observed — the fail-closed case, and the one that matters most.
+    st_set_phases -1 -1 -1 -1 -1 -1 -1 -1
+    PHASE_TTFP_US=-1
+    st_rows0="$(phase_rows_json)"
+    st_ps_check "unobserved: all four phases are STILL emitted (never silently dropped)" \
+        4 "$(printf '%s' "$st_rows0" | grep -o '"level":"sync_phase"' | wc -l | tr -d ' ')"
+    st_ps_check "unobserved: every phase reports observed:false" \
+        4 "$(printf '%s' "$st_rows0" | grep -o '"observed":false' | wc -l | tr -d ' ')"
+    st_ps_check "unobserved: NOT ONE phase reports a duration of 0ms" \
+        0 "$(printf '%s' "$st_rows0" | grep -o '"duration_ms":0' | wc -l | tr -d ' ')"
+    st_ps_check "unobserved: every duration is null, the never-measured token" \
+        4 "$(printf '%s' "$st_rows0" | grep -o '"duration_ms":null' | wc -l | tr -d ' ')"
+    st_ps_check "unobserved: all eight PHASE EDGES carry a NAMED reason" \
+        8 "$(printf '%s' "$st_rows0" | grep -oE '"(start|end)_unobserved_reason":"' | wc -l | tr -d ' ')"
+    # The auxiliary node-side µs figure has its OWN named absence, separate from
+    # the eight edges above: it measures a different window, so it must be able
+    # to be missing while the edges are present and vice versa.
+    st_ps_check "unobserved: the node's latched µs figure is null with its own named reason" \
+        1 "$(printf '%s' "$st_rows0" | grep -c '"node_time_to_first_handshaked_peer_us":null' | tr -d ' ')"
+    st_ps_check "unobserved: that reason names the 0 sentinel it refused to report as a measurement" \
+        1 "$(printf '%s' "$st_rows0" | grep -c "no peer yet' sentinel" | tr -d ' ')"
+    st_ps_check "unobserved: no edge reason is the placeholder that means the table is incomplete" \
+        0 "$(printf '%s' "$st_rows0" | grep -c 'no reason recorded, which is itself a defect' | tr -d ' ')"
+    st_ps_check "unobserved: duration_source is still named, so a reader knows WHICH dumper came up empty" \
+        4 "$(printf '%s' "$st_rows0" | grep -o '"duration_source":' | wc -l | tr -d ' ')"
+    st_ov0="$(phase_overlap_json 1600)"
+    st_ps_check "unobserved overlap: the sum is null, never 0" \
+        1 "$(printf '%s' "$st_ov0" | grep -c '"sum_of_observed_phase_ms":null' | tr -d ' ')"
+    st_ps_check "unobserved overlap: the union is null, never 0" \
+        1 "$(printf '%s' "$st_ov0" | grep -c '"union_of_observed_phase_ms":null' | tr -d ' ')"
+    st_ps_check "unobserved overlap: all six pairwise overlaps are null, never 0" \
+        6 "$(printf '%s' "$st_ov0" | grep -o '|sync\.[a-z_]*":null' | wc -l | tr -d ' ')"
+    st_ps_check "unobserved overlap: the observed phase count is a real 0, and says so" \
+        1 "$(printf '%s' "$st_ov0" | grep -c '"observed_phase_count":0' | tr -d ' ')"
+    # C) THE DISCRIMINATION THAT MAKES B MEANINGFUL. A phase that genuinely took
+    #    no measurable time (start == end within one second) must report a REAL
+    #    0ms with observed:true — and must therefore look nothing like case B.
+    #    If these two cases printed the same thing, the sentinel would be doing
+    #    no work at all.
+    st_set_phases 1000 1000 -1 -1 -1 -1 -1 -1
+    st_rowsz="$(phase_rows_json)"
+    st_ps_check "a genuinely instant phase reports a REAL 0ms and observed:true" \
+        1 "$(printf '%s' "$st_rowsz" | grep -c '"phase":"sync.peer_connect","level":"sync_phase","observed":true,"start_unix":1000,"end_unix":1000,"duration_ms":0' | tr -d ' ')"
+    st_ps_check "a genuinely instant phase carries NO edge unobserved_reason (it was observed)" \
+        0 "$(printf '%s' "$st_rowsz" | grep -o '"phase":"sync.peer_connect"[^}]*' | grep -oE '"(start|end)_unobserved_reason"' | wc -l | tr -d ' ')"
+    # D) A HALF-OBSERVED phase has no duration. Manufacturing one from the
+    #    capture time would silently convert a missing boundary into a number.
+    st_set_phases 1000 -1 -1 -1 -1 -1 -1 -1
+    st_ps_check "half-observed: a start with no end yields -1, never an elapsed-so-far guess" \
+        -1 "$(phase_span_ms peer_connect)"
+    st_rowsh="$(phase_rows_json)"
+    st_ps_check "half-observed: the row still carries the observed start_unix as evidence" \
+        1 "$(printf '%s' "$st_rowsh" | grep -c '"phase":"sync.peer_connect","level":"sync_phase","observed":false,"start_unix":1000,"end_unix":null,"duration_ms":null' | tr -d ' ')"
+    st_ps_check "half-observed: exactly one edge reason is emitted for that phase, not two" \
+        1 "$(printf '%s' "$st_rowsh" | grep -o '"phase":"sync.peer_connect"[^}]*' | grep -oE '"(start|end)_unobserved_reason"' | wc -l | tr -d ' ')"
+
+    # phase_mark: FIRST observation wins. A boundary that could be re-stamped by
+    # a later tick would slide forward for the whole run and land on whichever
+    # tick happened to be last, which is not a boundary at all.
+    st_set_phases -1 -1 -1 -1 -1 -1 -1 -1
+    PHASE_BOUNDARIES_TSV=""; PHASE_PROFILE_DIR=""
+    phase_mark fold start 1111 upper_bound_poll_observed "first"
+    phase_mark fold start 2222 upper_bound_poll_observed "second"
+    st_ps_check "phase_mark: a boundary is stamped once — a later tick cannot move it" \
+        1111 "${PH_START[fold]}"
+    phase_mark fold end 0 exact_node_recorded "zero"
+    st_ps_check "phase_mark: a 0 reading is refused, so a 'no peer yet' sentinel never becomes a boundary" \
+        -1 "${PH_END[fold]}"
+    phase_mark fold end -1 exact_node_recorded "sentinel"
+    st_ps_check "phase_mark: the -1 sentinel is refused too" -1 "${PH_END[fold]}"
+    # The RPC-silence guard. With an empty frontier read, phase_observe must
+    # mark NOTHING — not even the boundaries it could decide from its arguments
+    # alone. Without the guard the fold branch below would still fire off the
+    # hstar argument, so this check goes red the moment the guard is removed.
+    # (It also runs with no `rpc` reachable, which is itself the proof that the
+    # guard short-circuits before any RPC is attempted.)
+    st_set_phases -1 -1 -1 -1 -1 -1 -1 -1
+    PHASE_TARGET_HEIGHT=-1
+    phase_observe 1000 500 500 ""
+    st_ps_check "rpc silence: an unreadable tick marks NO boundary, not even fold.start" \
+        -1 "${PH_START[fold]}"
+    st_ps_check "rpc silence: the target height is not learned from an unreadable tick either" \
+        -1 "$PHASE_TARGET_HEIGHT"
+    st_set_phases -1 -1 -1 -1 -1 -1 -1 -1
+    unset -f st_set_phases
+    phase_state_init
+    PHASE_TTFP_US=-1; PHASE_TARGET_HEIGHT=-1
+
+
+    # ── phase_observe driven end to end on REAL-SHAPED dumper docs ──────────
+    # Everything above tests a reader or an emitter in isolation. This drives
+    # the state machine itself across three ticks with the exact JSON shapes the
+    # node emits, so a boundary rule that is individually correct but wired to
+    # the wrong field still goes red. `rpc` is stubbed HERE only; the real
+    # definition is further down this file and never runs in --selftest.
+    st_rpc_sm=""; st_rpc_pl=""; st_rpc_om=""
+    rpc() {
+        case "$*" in
+            "dumpstate sync_monitor")   printf '%s' "$st_rpc_sm" ;;
+            "dumpstate peer_lifecycle") printf '%s' "$st_rpc_pl" ;;
+            "dumpstate omniscience")    printf '%s' "$st_rpc_om" ;;
+            *) : ;;
+        esac
+    }
+    phase_state_init
+    PHASE_TARGET_HEIGHT=-1; PHASE_TTFP_US=-1
+    PHASE_BOUNDARIES_TSV=""; PHASE_PROFILE_DIR=""
+    # tick 1 — handshake done, nothing else has started. A fresh node reports
+    # header_admit cursor 1 and body_persist cursor 0; neither may be read as
+    # "headers/bodies started".
+    st_rpc_pl="$st_pl_doc"
+    # The launch stamp, exactly as the top-level call site sets it.
+    phase_mark peer_connect start 1700000200 exact_harness_stamp "fixture launch stamp"
+    st_rpc_om='{"subsystem":"omniscience","state":{"time_to_first_peer_us":8421,"handshaked_peers":1}}'
+    st_rpc_sm='{"subsystem":"sync_monitor","state":{"tip_eval_header_height":0,"download_requested":0,"download_received":0,"last_block_connected_height":0,"last_block_connected_time":0}}'
+    st_fj1='{"hstar":0,"network_tip":3224108,"network_tip_read_ok":true,"stage_cursors":[{"stage":"header_admit","read_ok":true,"cursor":1},{"stage":"body_persist","read_ok":true,"cursor":0}]}'
+    phase_observe 1700000410 0 3224108 "$st_fj1"
+    st_ps_check "e2e tick1: peer_connect.end is the node's own handshake second, not the tick" \
+        1700000400 "${PH_END[peer_connect]}"
+    st_ps_check "e2e tick1: the node's latched µs figure was picked up" 8421 "$PHASE_TTFP_US"
+    st_ps_check "e2e tick1: the target height was learned from network_tip" 3224108 "$PHASE_TARGET_HEIGHT"
+    st_ps_check "e2e tick1: a FRESH header_admit cursor of 1 does NOT start the headers phase" \
+        -1 "${PH_START[headers]}"
+    st_ps_check "e2e tick1: download_requested 0 does NOT start the bodies phase" \
+        -1 "${PH_START[bodies]}"
+    st_ps_check "e2e tick1: hstar 0 does NOT start the fold phase" -1 "${PH_START[fold]}"
+    # tick 2 — headers admitting, bodies requested, fold moving. All three
+    # starts land on this tick and NONE of the ends do.
+    st_rpc_sm='{"subsystem":"sync_monitor","state":{"tip_eval_header_height":0,"download_requested":128,"download_received":64,"last_block_connected_height":0,"last_block_connected_time":0}}'
+    st_fj2='{"hstar":3056758,"network_tip":3224108,"network_tip_read_ok":true,"stage_cursors":[{"stage":"header_admit","read_ok":true,"cursor":900000},{"stage":"body_persist","read_ok":true,"cursor":800000}]}'
+    phase_observe 1700000500 3056758 3224108 "$st_fj2"
+    st_ps_check "e2e tick2: headers started off the header_admit cursor" 1700000500 "${PH_START[headers]}"
+    st_ps_check "e2e tick2: bodies started off download_requested" 1700000500 "${PH_START[bodies]}"
+    st_ps_check "e2e tick2: the fold started off a real hstar" 1700000500 "${PH_START[fold]}"
+    st_ps_check "e2e tick2: headers has NOT ended (cursor is short of the target)" -1 "${PH_END[headers]}"
+    st_ps_check "e2e tick2: bodies has NOT ended" -1 "${PH_END[bodies]}"
+    st_ps_check "e2e tick2: the fold has NOT ended" -1 "${PH_END[fold]}"
+    # tick 3 — caught up. Cursors are the NEXT height, so target+1 is the
+    # 'finished the target' condition; using >= would close a phase one block
+    # early and shorten every reported duration.
+    st_rpc_sm='{"subsystem":"sync_monitor","state":{"tip_eval_header_height":3224110,"download_requested":25527,"download_received":25527,"last_block_connected_height":3056758,"last_block_connected_time":1700000200}}'
+    st_fj3='{"hstar":3224110,"network_tip":3224108,"network_tip_read_ok":true,"stage_cursors":[{"stage":"header_admit","read_ok":true,"cursor":3224111},{"stage":"body_persist","read_ok":true,"cursor":3224111}]}'
+    phase_observe 1700000900 3224110 3224108 "$st_fj3"
+    st_ps_check "e2e tick3: headers ended when the cursor passed the target" 1700000900 "${PH_END[headers]}"
+    st_ps_check "e2e tick3: bodies ended off body_persist's cursor" 1700000900 "${PH_END[bodies]}"
+    st_ps_check "e2e tick3: the fold ended when hstar caught the tip" 1700000900 "${PH_END[fold]}"
+    # THE MEASURED REFUTATION, pinned. last_block_connected_time in tick 3 is
+    # 1700000200 — 700s before the run ended and 200s before the phases even
+    # started. That is the real shape from the archived PASS run
+    # 20260821T135540Z-2484174, where it sat 437s stale at a height 167,352
+    # blocks below the tip. If bodies.end ever goes back to reading it, this
+    # check catches the resulting time-travelling boundary.
+    st_ps_check "e2e: bodies.end did NOT come from the stale last_block_connected_time" \
+        1 "$([ "${PH_END[bodies]}" != "1700000200" ] && echo 1 || echo 0)"
+    st_ps_check "e2e: every phase ended after it started (no boundary ran backwards)" \
+        4 "$(n=0; for p in $PHASE_NAMES; do [ "${PH_END[$p]}" -ge "${PH_START[$p]}" ] 2>/dev/null && n=$((n+1)); done; echo $n)"
+    st_ps_check "e2e: peer_connect is 200s, and is NOT the whole window" \
+        200000 "$(phase_span_ms peer_connect)"
+    st_ps_check "e2e: headers is 400s" 400000 "$(phase_span_ms headers)"
+    st_ps_check "e2e: bodies is 400s" 400000 "$(phase_span_ms bodies)"
+    st_ps_check "e2e: the fold is 400s" 400000 "$(phase_span_ms fold)"
+    st_ove2e="$(phase_overlap_json 1700000900)"
+    st_ps_check "e2e overlap: headers/bodies/fold ran CONCURRENTLY and the sum says so (200+400*3)" \
+        1 "$(printf '%s' "$st_ove2e" | grep -c '"sum_of_observed_phase_ms":1400000' | tr -d ' ')"
+    st_ps_check "e2e overlap: the union is the real covered clock (200s + 400s = 600s, with a 100s gap between them)" \
+        1 "$(printf '%s' "$st_ove2e" | grep -c '"union_of_observed_phase_ms":600000' | tr -d ' ')"
+    st_ps_check "e2e overlap: 800s of the 1400s sum is double-counted, and that is published" \
+        1 "$(printf '%s' "$st_ove2e" | grep -c '"double_counted_ms":800000' | tr -d ' ')"
+    # The 100s between peer_connect ending and the other three starting belongs
+    # to NO phase. It must be reported as unattributed, not silently absorbed
+    # into a neighbouring phase and not called idle — that gap is exactly the
+    # kind of time this split exists to make visible.
+    st_ps_check "e2e overlap: the 100s no phase claims is reported, not absorbed" \
+        1 "$(printf '%s' "$st_ove2e" | grep -c '"window_ms_covered_by_no_phase":' | tr -d ' ')"
+    st_ps_check "e2e overlap: union + the gap accounts for the whole span the phases straddle" \
+        1 "$([ $(( 600000 + 100000 )) = 700000 ] && echo 1 || echo 0)"
+    st_ps_check "e2e overlap: bodies and fold are shown fully overlapping" \
+        1 "$(printf '%s' "$st_ove2e" | grep -c '"sync.bodies|sync.fold":400000' | tr -d ' ')"
+    st_rowse2e="$(phase_rows_json)"
+    st_ps_check "e2e rows: every phase is observed" \
+        4 "$(printf '%s' "$st_rowse2e" | grep -o '"observed":true' | wc -l | tr -d ' ')"
+    st_ps_check "e2e rows: no observed phase reports end_kind unobserved" \
+        0 "$(printf '%s' "$st_rowse2e" | grep -o '"end_kind":"unobserved"' | wc -l | tr -d ' ')"
+    st_ps_check "e2e rows: peer_connect's end is the node-recorded kind, not a poll bound" \
+        1 "$(printf '%s' "$st_rowse2e" | grep -c '"phase":"sync.peer_connect".*"end_kind":"exact_node_recorded"' | tr -d ' ')"
+    unset -f rpc
+    phase_state_init
+    PHASE_TARGET_HEIGHT=-1; PHASE_TTFP_US=-1
+    # Source-text pins, anchored on the LINES THAT DO THE WORK. Patterns are
+    # assembled from concatenated literals where they could otherwise match
+    # their own source line.
+    grep -qE '^    phase_observe "\$now" "\$hs" "\$nt" "\$fj"$' "${BASH_SOURCE[0]}"
+    st_check "phase_observe is CALLED in the sample loop (not merely defined)" 0 $?
+    grep -qE '^phase_observe "\$\(date \+%s\)" "\$final_hs" "\$final_nt" "\$final_fj"$' "${BASH_SOURCE[0]}"
+    st_check "a final boundary sweep runs on the verdict-boundary readback" 0 $?
+    grep -qE '^    phase_boundaries_tsv_init$' "${BASH_SOURCE[0]}"
+    st_check "the durable boundary log is armed BEFORE the first tick" 0 $?
+    grep -qE '^    _ph_sync="\$\(phase_rows_json\)"$' "${BASH_SOURCE[0]}"
+    st_check "the sync phases are assembled into phases[] (not computed and dropped)" 0 $?
+    grep -qE '^    PHASE_OVERLAP_JSON="\$\(phase_overlap_json "\$captured_at"\)"$' "${BASH_SOURCE[0]}"
+    st_check "the overlap object is computed at capture" 0 $?
+    grep -q '"phase_overlap": %s' "${BASH_SOURCE[0]}"
+    st_check "proof.json emits the phase_overlap object" 0 $?
+    grep -qE '^        phase_profile_index_json >"\$PHASE_PROFILE_DIR/index.json"' "${BASH_SOURCE[0]}"
+    st_check "the phase-profiles manifest is written on every run" 0 $?
+    # The instrument must not have grown a verdict. If phase_observe ever writes
+    # `reached`, the split has stopped being instrumentation.
+    st_pat_verdict='phase_observe[^)]*'"reached"'='
+    grep -qE "$st_pat_verdict" "${BASH_SOURCE[0]}"
+    st_check "the phase split sets no verdict variable (instrumentation only)" 1 $?
     if [ "$st_fail" = 0 ]; then
         echo "cold-start-wipe-stopwatch: --selftest PASS"
         exit 0
@@ -1415,12 +2296,21 @@ write_artifact() {
         _ph_boot="$(phases_json_from_log "$ARTIFACT_DIR/node.log" "$_ph_med")"
         rm -f "$_ph_med" 2>/dev/null || true
     fi
-    if [ -n "$_ph_harness" ] && [ -n "$_ph_boot" ]; then
-        PHASES_JSON="$_ph_harness,$_ph_boot"
-    else
-        PHASES_JSON="$_ph_harness$_ph_boot"
+    # ── phases[] assembly: sync phases FIRST, then harness, then boot ──────
+    # The four SYNC-PHASE elements are always emitted and always all four. An
+    # unobserved phase carries observed:false, duration_ms:null and a named
+    # unobserved_reason — it is never dropped and never reported as 0ms.
+    _ph_sync="$(phase_rows_json)"
+    PHASES_JSON="$_ph_sync"
+    [ -n "$_ph_harness" ] && PHASES_JSON="$PHASES_JSON,$_ph_harness"
+    [ -n "$_ph_boot" ] && PHASES_JSON="$PHASES_JSON,$_ph_boot"
+    PHASE_OVERLAP_JSON="$(phase_overlap_json "$captured_at")"
+    # The phase-profiles manifest, written on EVERY run. See
+    # phase_profile_index_json() for why an empty one is still written.
+    if [ -n "$PHASE_PROFILE_DIR" ] && [ -d "$PHASE_PROFILE_DIR" ]; then
+        phase_profile_index_json >"$PHASE_PROFILE_DIR/index.json" 2>/dev/null || true
     fi
-    PHASES_PROVENANCE="harness.* elements: this harness bracketed the window itself (date +%s on both sides). Boot elements: parsed from the node's own [boot] boot_topmark/boot_submark markers in node.log, median_ms joined from dumpstate boot_timings. Bytes: harness.observed_sync carries block_body_payload_bytes_received, the delta of dumpstate sync_monitor download_bytes_received across the bracketed window, counting successfully-parsed block-body message payload ONLY (no headers, handshake, inv/getdata, tx relay, compact blocks, per-message header, or TCP/IP framing) — a lower bound on wire bytes, emitted only when both window ends were read on the same boot because the counter resets per process. OMITTED for lack of an honest source: TOTAL network bytes (nothing in this tree counts wire bytes), bytes per boot-level phase (the counter has no phase segmentation), per-boot-phase cpu/disk (boot.c markers carry only a duration), exact per-boot-phase wall-clock start (the markers carry no timestamp and the top-level marks do not tile the boot) — start_ts_lower_bound is given instead and is a bound, not a start."
+    PHASES_PROVENANCE="sync.* elements: the FOUR-WAY SPLIT of the bulk-sync window (sync.peer_connect / sync.headers / sync.bodies / sync.fold), composed entirely from dumpers the node already publishes — peer_lifecycle peers[].handshake_complete_at, omniscience time_to_first_peer_us, sync_monitor tip_eval_header_height / download_requested / last_block_connected_{height,time}, reducer_frontier hstar / network_tip / stage_cursors[header_admit]. Nothing was added to the node for them. Each element carries its own start_kind and end_kind: exact_harness_stamp and exact_node_recorded are real instants; upper_bound_poll_observed means the harness saw the condition ALREADY true at a sample tick, so the true instant is at most poll_resolution_secs earlier. THESE FOUR PHASES OVERLAP AND DO NOT PARTITION THE WINDOW — see the phase_overlap object, which publishes their sum, their union, the double-counted milliseconds and the window time no phase claims. Per-boundary dumpstate reducer_stage_profile snapshots are in phase-profiles/ with a manifest in phase-profiles/index.json; a phase's per-stage cost is the DIFFERENCE of the two snapshots bracketing it. harness.* elements: this harness bracketed the window itself (date +%s on both sides). Boot elements: parsed from the node's own [boot] boot_topmark/boot_submark markers in node.log, median_ms joined from dumpstate boot_timings. Bytes: harness.observed_sync carries block_body_payload_bytes_received, the delta of dumpstate sync_monitor download_bytes_received across the bracketed window, counting successfully-parsed block-body message payload ONLY (no headers, handshake, inv/getdata, tx relay, compact blocks, per-message header, or TCP/IP framing) — a lower bound on wire bytes, emitted only when both window ends were read on the same boot because the counter resets per process. OMITTED for lack of an honest source: TOTAL network bytes (nothing in this tree counts wire bytes), bytes per boot-level phase (the counter has no phase segmentation), per-boot-phase cpu/disk (boot.c markers carry only a duration), exact per-boot-phase wall-clock start (the markers carry no timestamp and the top-level marks do not tile the boot), and the TRUE start of sync.headers and sync.bodies (nothing counts getheaders or getdata SENT) — start_ts_lower_bound and the upper_bound_poll_observed kinds are given instead and are bounds, not starts."
 
     {
         printf '{\n'
@@ -1480,6 +2370,19 @@ write_artifact() {
         # duration; a field with no honest source is absent, never zero.
         printf '  "phases_provenance": %s,\n' "$(json_string "$PHASES_PROVENANCE")"
         printf '  "phases": [%s],\n' "$PHASES_JSON"
+        # phase_overlap — the anti-arithmetic-lie object. The four sync.*
+        # phases share one timeline and OVERLAP (bodies stream while the fold
+        # runs), so their durations must never be added up or subtracted from
+        # the window. This publishes the sum, the union, the double count and
+        # the unattributed remainder side by side so the overlap is stated
+        # rather than left to be discovered by a reader doing bad arithmetic.
+        printf '  "phase_overlap": %s,\n' "${PHASE_OVERLAP_JSON:-null}"
+        # The durable per-boundary log and the per-boundary reducer_stage_profile
+        # snapshot set, named by path so an artifact is self-describing.
+        printf '  "phase_boundaries_tsv": %s,\n' \
+            "$([ -n "$PHASE_BOUNDARIES_TSV" ] && [ -f "$PHASE_BOUNDARIES_TSV" ] && printf '"phase_boundaries.tsv"' || printf 'null')"
+        printf '  "phase_stage_profiles_dir": %s,\n' \
+            "$([ -n "$PHASE_PROFILE_DIR" ] && [ -d "$PHASE_PROFILE_DIR" ] && printf '"phase-profiles/"' || printf 'null')"
         # omitted_fields[] — see omitted_fields_json(). Every field the
         # measurement brief named that this run did NOT record, BY NAME, with
         # the reason. A silently absent field reads as "measured and fine";
@@ -1623,6 +2526,10 @@ node_args=(
 # persists in the datadir for the next boot to consume. Mirrors what systemd
 # Restart=always does to the live unit.
 launch_node() {
+    # The exact instant sync.peer_connect starts. Stamped on the FIRST
+    # launch only: a followed self-respawn is the same run on the same
+    # datadir, so moving this would restart a clock that never stopped.
+    [ "$NODE_LAUNCH_UNIX" = "-1" ] && NODE_LAUNCH_UNIX=$(date +%s)
     setsid env HOME="$ISO_HOME" "$NODE_BIN" \
         "${node_args[@]}" \
         >>"$DATADIR/node.log" 2>&1 &
@@ -1700,7 +2607,7 @@ rpc_frontier() {
 # is the honest named-stall signal in this window, not a silent hang. Surface
 # it the same way the RPC blocker list would.
 log_named_park() {
-    grep -oE "PARKED alive-degraded at gate '[^']*'" "$DATADIR/node.log" 2>/dev/null |
+    grep -aoE "PARKED alive-degraded at gate '[^']*'" "$DATADIR/node.log" 2>/dev/null |
         tail -1 | sed -E "s/.*gate '([^']*)'.*/\1/"
 }
 
@@ -1714,7 +2621,23 @@ mkdir -p "$ARTIFACT_DIR" 2>/dev/null || true
 if [ -d "$ARTIFACT_DIR" ]; then
     SAMPLES_TSV="$ARTIFACT_DIR/samples.tsv"
     samples_tsv_init
+    # The per-boundary sinks are armed here, beside samples.tsv, and for
+    # the same reason: a SIGKILLed harness must still leave every boundary
+    # it had already crossed on disk. phase-profiles/ is created
+    # UNCONDITIONALLY — an empty directory plus a named empty_reason in its
+    # index is honest; a directory that only exists when something was
+    # captured makes an absent capture indistinguishable from a lost one.
+    PHASE_BOUNDARIES_TSV="$ARTIFACT_DIR/phase_boundaries.tsv"
+    phase_boundaries_tsv_init
+    PHASE_PROFILE_DIR="$ARTIFACT_DIR/phase-profiles"
+    mkdir -p "$PHASE_PROFILE_DIR" 2>/dev/null || PHASE_PROFILE_DIR=""
 fi
+# sync.peer_connect.start — recorded only now, not inside launch_node,
+# because the boundary log it writes to did not exist yet at launch time.
+# NODE_LAUNCH_UNIX itself was stamped at the real launch instant, so the
+# VALUE is the launch, not this line.
+phase_mark peer_connect start "$NODE_LAUNCH_UNIX" "exact_harness_stamp" \
+    "harness date +%s immediately before the first launch_node exec"
 LOOP_START_UNIX=$(date +%s)
 # Open the byte window here, at the same instant the observed-sync clock starts.
 # It usually MISSES on this first attempt — the node launched seconds ago and the
@@ -1796,6 +2719,14 @@ while :; do
     samples_tsv_row "$elapsed" "$hs" "$ps" "$nt" \
         "$([ -n "$nt_ok" ] && printf yes || printf no)" \
         "$FRONTIER_LAST_BUSY" "$bc" "$bids"
+
+    # ── SYNC PHASE BOUNDARIES, same tick, same clock ────────────────
+    # Evidence-only: phase_observe writes phase state and nothing else.
+    # It cannot move the PASS predicate, the budget, the busy timeout or
+    # any exit code, and it is placed BEFORE the PASS break so the tick
+    # that ends the run is the tick that closes sync.fold — the two can
+    # never disagree about when H* caught the tip.
+    phase_observe "$now" "$hs" "$nt" "$fj"
 
     # Bounded unreadable-streak check: only accumulates when NO usable provable
     # sample was obtained (ps == -1) AND the node kept answering the busy
@@ -1901,6 +2832,12 @@ fi
 [ "$final_nt" != "-1" ] && last_network_tip="$final_nt"
 final_readback_failed="false"
 [ "$final_ps" = "-1" ] && final_readback_failed="true"
+
+# One last boundary sweep on the SAME retried readback the verdict uses.
+# A boundary crossed between the final sample tick and the end of the
+# budget is a real crossing; without this it would be reported as
+# unobserved, which would be a false negative rather than a safe one.
+phase_observe "$(date +%s)" "$final_hs" "$final_nt" "$final_fj"
 
 # Refresh the named-blocker view with a retried read too, so a busy-window miss
 # doesn't erase a real blocker right before the STALLED-NAMED decision.

@@ -7,6 +7,7 @@
 # separate developer tools.
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 bin="${1:-build/bin/zclassic23}"
 test -x "$bin" || { echo "c23-node: missing executable: $bin" >&2; exit 1; }
 
@@ -28,7 +29,31 @@ if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
         esac
     done < <(otool -L "$bin" | tail -n +2 | sed 's/^[[:space:]]*//; s/[[:space:]].*$//')
 
-    allowed_weak='^_(dynhost_client_fetch|dynhost_get_global_service|dynhost_stream_close|dynhost_stream_open|dynhost_stream_write|ed25519_secret_key_from_seed|hs_parse_address|hs_service_add_ephemeral|hs_service_find|smartlist_add|smartlist_free_|smartlist_new|tor_free_|tor_malloc_zero_)$'
+    # The permitted set is the Makefile's OWN weak-undefined list, parsed here
+    # rather than restated. The two must agree by construction: the Makefile
+    # hands these names to the linker on a Darwin stub link and this gate
+    # grades the result. A restated copy already drifted -- the Makefile
+    # carried 17 names while this gate allowed 14, so three symbols the stub
+    # link is designed to leave weak would have been reported as forbidden on
+    # the first macOS build that referenced them. That is the same failure the
+    # Windows API floor comment in the Makefile describes: two sides that must
+    # agree, and a disagreement that is invisible because both sides compile.
+    #
+    # Anti-hollow: assert a floor on the parse. An unparsed or renamed variable
+    # would yield an empty set, and an empty set grades every binary against no
+    # rule at all -- a pass that checked nothing. Fail loudly instead.
+    weak_names="$(sed -n \
+        '/^ZCL_DARWIN_TOR_WEAK_UNDEFS[[:space:]]*=/,/[^\\]$/p' \
+        "$repo_root/Makefile" \
+        | grep -oE '\-Wl,-U,_[A-Za-z0-9_]+' | sed 's/^-Wl,-U,_//' | sort -u)"
+    weak_count="$(printf '%s\n' "$weak_names" | grep -c . || true)"
+    if [ "$weak_count" -lt 14 ]; then
+        echo "c23-node: could not read ZCL_DARWIN_TOR_WEAK_UNDEFS from" \
+             "$repo_root/Makefile (parsed $weak_count name(s), expected at" \
+             "least 14) -- refusing to grade against an empty rule" >&2
+        exit 1
+    fi
+    allowed_weak="^_($(printf '%s\n' "$weak_names" | paste -sd'|' -))\$"
     while IFS= read -r symbol; do
         if ! grep -Eq "$allowed_weak" <<<"$symbol"; then
             echo "c23-node: forbidden dynamically looked-up symbol: $symbol" >&2

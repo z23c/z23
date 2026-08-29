@@ -15,6 +15,17 @@
  * module names that condition: how many consecutive skips, of what CLASS, for
  * how long, and whether that crosses the class's alarm threshold.
  *
+ * AND THE SECOND RUNG. That first alarm only ever asked "could the proof
+ * run". Measured 2026-08-29: the C3 gate ran 34 consecutive scheduled times,
+ * skipped none of them, and PASSED none of them (the last 17 recorded
+ * `stalled-named` with the node under test at zero blocks synced) — and this
+ * module's own report line for that state began with the word "quiet",
+ * printing no_pass_streak=34 inside it. `no_pass_streak` was computed,
+ * stored, serialised and asserted in tests, and gated nothing. So the watch
+ * was loud about the LESS damning failure and silent about the worse one.
+ * There is now a second, independent alarm on the no-pass streak, with its
+ * threshold in the same table as the class thresholds.
+ *
  * ══ REPORTER ONLY — the load-bearing contract ══
  * This module NEVER grades. It cannot make a run pass, cannot clear a FAIL,
  * cannot extend an evidence window, and is not wired into the architecture
@@ -67,7 +78,7 @@
 #define STOPWATCH_SKIP_REASON_MAX   192
 #define STOPWATCH_SKIP_CLASS_MAX     32
 #define STOPWATCH_SKIP_VERDICT_MAX   32
-#define STOPWATCH_SKIP_ALARM_MAX    384
+#define STOPWATCH_SKIP_ALARM_MAX    640
 
 /* Bounded tail read: the detector only ever needs the trailing streak, and a
  * ledger is one short line per 6h run, so 256 KiB is thousands of rows. */
@@ -100,6 +111,31 @@ struct stopwatch_skip_report {
     char     skip_reason[STOPWATCH_SKIP_REASON_MAX];
     unsigned threshold;      /* 0 = this class never alarms */
     bool     alarm;          /* skip_streak >= threshold, threshold > 0 */
+
+    /* ── the SECOND rung: the proof RAN and never passed ─────────────
+     * `no_pass_streak` above was computed, stored and serialised from the
+     * day this module landed, and gated NOTHING: the only alarm path
+     * required skip_streak > 0, so "the proof could not run" was loud and
+     * "the proof ran 34 times and never once succeeded" was labelled
+     * quiet. These three fields close that. */
+    unsigned no_pass_threshold; /* consecutive non-passes before the no-pass
+                                 * alarm. From STOPWATCH_NO_PASS_THRESHOLD in
+                                 * stopwatch_skip_classes.def; always >= 1 —
+                                 * 0 is refused at BUILD time, because a 0
+                                 * here would mean "mute", not "benign". */
+    bool     no_pass_all_benign;/* the ENTIRE trailing no-pass streak is skips
+                                 * whose class threshold is 0, i.e. every one
+                                 * of those runs genuinely had nothing to
+                                 * prove. The only carve-out on the alarm
+                                 * below, and it ends the moment a single
+                                 * fail/seam/stalled-named/unclassified row
+                                 * joins the streak. False when the streak is
+                                 * empty. */
+    bool     no_pass_alarm;     /* no_pass_streak >= no_pass_threshold and
+                                 * !no_pass_all_benign. INDEPENDENT of
+                                 * `alarm`: either can fire without the
+                                 * other, and the two describe different
+                                 * faults — see stopwatch_skip_alarm_text. */
 };
 
 /* Classify one recorded skip. `reason` is the ledger row's skip_reason
@@ -127,10 +163,18 @@ bool stopwatch_skip_read_ledger(const char *path,
  * no path can be resolved (no env override and no HOME). */
 bool stopwatch_skip_resolve_ledger(const char *which, char *out, size_t cap);
 
-/* One operator-readable line describing the report, e.g.
- *   "ALARM class=fixture_absent skip_streak=4 threshold=2 ..."
- * or "quiet class=fixture_absent skip_streak=1 threshold=2 ...".
- * Always NUL-terminates; returns buf. */
+/* One operator-readable line describing the report. TWO alarms live here and
+ * they are deliberately distinguishable in the TEXT, because they call for
+ * different work:
+ *   "ALARM class=fixture_absent skip_streak=4 threshold=2 ...
+ *      — this proof has not run for that many consecutive scheduled attempts"
+ *          the proof COULD NOT RUN. Go fix the named fixture/config.
+ *   "ALARM no_pass_streak=34 no_pass_threshold=4 last_verdict=stalled-named ...
+ *      — this proof RAN on every one of those scheduled attempts and never
+ *        once passed"
+ *          the proof RAN and the CLAIM IS FALSE. Go fix the product.
+ * Quiet forms keep the same shape with a leading "quiet". Always
+ * NUL-terminates; returns buf. */
 const char *stopwatch_skip_alarm_text(const struct stopwatch_skip_report *r,
                                       char *buf, size_t cap);
 

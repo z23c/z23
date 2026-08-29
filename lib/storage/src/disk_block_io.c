@@ -32,11 +32,50 @@ static struct log_throttle g_readfail_throttle  = LOG_THROTTLE_INIT;
 /* Same, for a DANGLING position (foreign writer, torn import): every sweep. */
 static struct log_throttle g_locate_fail_throttle = LOG_THROTTLE_INIT;
 
+/* Backstop for the datadir-lifetime class, NOT a substitute for owning the
+ * bytes. A long-lived reader that retains a caller's stack buffer hands this
+ * function a dead frame; the aliased address then formats into a blk path and
+ * the failed open reads as a missing body instead of as a defect. Control
+ * bytes cannot occur in a filesystem path but are near-certain in an aliased
+ * pointer (a live x86-64 stack address always carries 0x7f), so refusing them
+ * names the real cause. UTF-8 (>= 0x80) stays legal — real datadirs use it. */
+static bool datadir_is_path_shaped(const char *datadir)
+{
+    if (!datadir || !datadir[0])
+        return false;
+    for (const unsigned char *p = (const unsigned char *)datadir; *p; p++)
+        if (*p < 0x20u || *p == 0x7fu)
+            return false;
+    return true;
+}
+
+/* Named refusals for a datadir that cannot be a path; see the note above.
+ * One global identity: a lifetime bug is systemic, so the first emit plus a
+ * suppressed count is the whole signal. */
+static struct log_throttle g_datadir_shape_throttle = LOG_THROTTLE_INIT;
+
 void get_block_pos_filename(char *buf, size_t buflen,
                             const char *datadir,
                             const struct disk_block_pos *pos,
                             const char *prefix)
 {
+    if (!datadir_is_path_shaped(datadir)) {
+        /* Fail closed: an empty path opens/stats/unlinks nowhere, so every
+         * caller's existing refusal fires instead of touching a wrong file. */
+        if (buflen)
+            buf[0] = '\0';
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&g_datadir_shape_throttle, 0u,
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_ERROR("disk_block_io",
+                      "get_block_pos_filename: datadir is not a path "
+                      "(empty or control bytes) — a caller retained a dead "
+                      "stack frame; refusing file=%d prefix=%s "
+                      "(%llu suppressed repeats)",
+                      pos ? pos->nFile : -1, prefix ? prefix : "(nil)",
+                      (unsigned long long)reps);
+        return;
+    }
     if (pos->nFile == 255)
         snprintf(buf, buflen, "%s/blocks/%s_sync.dat", datadir, prefix);
     else

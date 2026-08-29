@@ -479,7 +479,7 @@ if [ "$MODE" = "import" ]; then
             $NODE_ISO_ARGS -import-complete-shielded="$ZD_DATADIR" \
             > "$IMPORT_LOG" 2>&1 || install_rc=$?
     fi
-    if [ "$install_rc" != "0" ] || ! grep -q '^IMPORT COMPLETE (committed=' "$IMPORT_LOG"; then
+    if [ "$install_rc" != "0" ] || ! grep -aq '^IMPORT COMPLETE (committed=' "$IMPORT_LOG"; then
         echo "======================================================================"
         echo "  import-copy-prove VERDICT: FAIL"
         echo "  copy:    $COPY_DIR"
@@ -536,7 +536,7 @@ else
             $NODE_ISO_ARGS -install-consensus-bundle="$BUNDLE" \
             > "$INSTALL_LOG" 2>&1 || install_rc=$?
     fi
-    if [ "$install_rc" != "0" ] || ! grep -q '^INSTALLED: -install-consensus-bundle:' "$INSTALL_LOG"; then
+    if [ "$install_rc" != "0" ] || ! grep -aq '^INSTALLED: -install-consensus-bundle:' "$INSTALL_LOG"; then
         echo "======================================================================"
         echo "  import-copy-prove VERDICT: FAIL"
         echo "  copy:    $COPY_DIR"

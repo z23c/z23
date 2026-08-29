@@ -167,7 +167,13 @@ echo "  anchor-snapshot-copy-prove plan"
 echo "  src (cp -a from):              $SRC"
 echo "  copy_dir (must not pre-exist): $COPY_DIR"
 echo "  snapshot source:               ${SNAPSHOT:-<SRC>/utxo-anchor.snapshot if present}"
-echo "  target_height:                 ${TARGET_HEIGHT:-<auto: copy's own body tip>}"
+# An apostrophe inside ${var:-word} opens a single-quoted string even within
+# double quotes, which swallowed the rest of this file: bash -n failed at EOF
+# with "unexpected EOF while looking for matching '". Build the default
+# outside the expansion instead of escaping inside it.
+target_height_display="${TARGET_HEIGHT:-}"
+[ -n "$target_height_display" ] || target_height_display="<auto: copy's own body tip>"
+echo "  target_height:                 $target_height_display"
 echo "  deadline_secs:                 $DEADLINE"
 echo "  ports:                         rpc=$RPCPORT p2p=$P2PPORT fs=$FSPORT https=$HTTPSPORT"
 echo "  tail peer:                     $([ -n "$TAIL_PEER" ] && echo "-addnode=$TAIL_PEER" || echo 'none (fully network-isolated boot)')"
@@ -320,10 +326,10 @@ reset_seen=0
 reset_fatal=0
 reset_deadline=$(( $(date +%s) + DEADLINE ))
 while [ "$(date +%s)" -lt "$reset_deadline" ]; do
-    if grep -qF "anchor coin set RE-SEEDED" "$RESET_LOG" 2>/dev/null; then
+    if grep -aqF "anchor coin set RE-SEEDED" "$RESET_LOG" 2>/dev/null; then
         reset_seen=1; break
     fi
-    if grep -qE "FATAL: -refold-from-anchor:" "$RESET_LOG" 2>/dev/null; then
+    if grep -aqE "FATAL: -refold-from-anchor:" "$RESET_LOG" 2>/dev/null; then
         reset_fatal=1; break
     fi
     if ! kill -0 "$RESET_PID" 2>/dev/null; then

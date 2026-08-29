@@ -59,8 +59,14 @@ bool boot_bg_hash_verify_start(void *ctx)
     struct boot_svc_ctx *svc = ctx;
     if (!svc || !svc->app_ctx)
         return false;
+    /* Same reason as boot_bg_validation_start above: svc->datadir is the BASE
+     * datadir, but bodies are persisted under the NET-SPECIFIC one
+     * (GetDataDir(true)). bg_hash_verify_init retains the bytes, not this
+     * frame's buffer. Byte-identical on mainnet. */
+    char net_dir[2048];
+    GetDataDir(true, net_dir, sizeof(net_dir));
     bg_hash_verify_init(&svc->bg_hash_verify, svc->state, svc->node_db,
-                        svc->datadir, svc->params);
+                        net_dir[0] ? net_dir : svc->datadir, svc->params);
     if (svc->app_ctx->no_bg_validation) {
         printf("[bg-hash] Disabled via -nobgvalidation\n");
         return true;

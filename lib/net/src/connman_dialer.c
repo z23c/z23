@@ -29,13 +29,37 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Persistent dial scheduler: deduplicated candidates, one attempt ──────
- * A serial dial once spent 5 seconds per dead address. Shared gathering now
- * feeds one scheduler-owned non-blocking attempt at a time, making endpoint
- * deduplication and recovery backoff deterministic without dial storms. */
+/* ── Persistent dial scheduler: deduplicated candidates, bounded fan ──────
+ * A serial dial spends DEFAULT_CONNECT_TIMEOUT (5 s) per dead address. With a
+ * width of one that cost is paid N times in a row: a cold node whose only
+ * candidates are the fixed clearnet seeds spent 5 s per blackholed seed before
+ * trying anything else, so a single dead seed was a latent multi-second stall
+ * on every cold boot. Shared gathering now feeds ZCL_DIAL_SCHEDULER_WIDTH
+ * scheduler-owned non-blocking attempts into ONE shared connect window, while
+ * endpoint deduplication and recovery backoff stay deterministic (see
+ * connman_gather_dial_candidates: in-batch dedupe + in-batch diversity) so a
+ * wider fan is still not a dial storm. */
 
 #define ZCL_DIAL_BATCH_MAX 8   /* candidate/test buffer bound */
-#define ZCL_DIAL_SCHEDULER_WIDTH 1 /* one scheduler-owned TCP attempt */
+/* Concurrent scheduler-owned TCP attempts per batch. Four, not one and not
+ * eight:
+ *   - one made the "batch" degenerate — the concurrent machinery below was
+ *     reachable but never fed more than a single candidate, so N dead
+ *     addresses cost N x 5 s;
+ *   - four covers the whole fixed clearnet seed tier (3 seeds) inside a
+ *     single 5 s window, which is the stall this constant exists to bound;
+ *   - four is the same number the below-floor policy in
+ *     dial_scheduler_want() already picked for a batch, so the knob agrees
+ *     with the policy instead of introducing a second, different fan;
+ *   - it stays strictly under MAX_OUTBOUND_CONNECTIONS (8), so one unvetted
+ *     batch can never spend a cold node's entire outbound budget, and it is
+ *     not simply an alias of ZCL_DIAL_BATCH_MAX.
+ * This widens CONCURRENCY only. Every cap is enforced elsewhere and still
+ * binds: want <= free outbound slots (MAX_OUTBOUND_CONNECTIONS), want <=
+ * remaining max_connections capacity, and per-/16, per-/32 and per-onion
+ * diversity are counted ACROSS the in-flight batch by batch_diversity_ok(),
+ * so a 4-wide fan cannot concentrate on one netgroup. */
+#define ZCL_DIAL_SCHEDULER_WIDTH 4
 static_assert(ONION_STREAM_CONNECT_TIMEOUT_MS <= THREAD_BOUNDED_WAIT_MAX_US / 1000);
 
 static bool connect_only_wait_needed(bool connect_only, size_t outbound,
@@ -54,7 +78,55 @@ static bool outbound_rate_allowed(bool below_floor, bool interval_elapsed,
     return dht_hint_pending || below_floor || interval_elapsed;
 }
 
+/* How many candidates ONE batch may dial concurrently.
+ *
+ * Policy (unchanged): no peers at all → fill every free slot; below the
+ * healthy floor → up to four; at/above the floor → one gentle probe.
+ *
+ * Bounds (all still binding, in order): free outbound slots, so
+ * MAX_OUTBOUND_CONNECTIONS is never exceeded; remaining total node capacity,
+ * so a small configured max_connections cannot be overshot by a wide batch;
+ * ZCL_DIAL_BATCH_MAX, the candidate/in-flight/poll buffer bound; and
+ * ZCL_DIAL_SCHEDULER_WIDTH, the concurrency knob. Netgroup concentration is
+ * NOT bounded here — batch_diversity_ok() counts the in-flight batch against
+ * MAX_OUTBOUND_PER_GROUP16 / MAX_OUTBOUND_IPV6_GROUP32 / MAX_OUTBOUND_ONION
+ * while the batch is being gathered, which is the only place that can see the
+ * other dials in the same window. */
+static size_t dial_scheduler_want(bool rate_ok, size_t outbound_healthy,
+                                  bool below_floor, size_t free_slots,
+                                  size_t free_nodes)
+{
+    if (!rate_ok)
+        return 0;
+    size_t want;
+    if (outbound_healthy == 0)
+        want = free_slots;                    /* bootstrap: fill fast */
+    else if (below_floor)
+        want = free_slots < 4 ? free_slots : 4;
+    else
+        want = 1;                             /* healthy: gentle */
+    if (want > free_slots)
+        want = free_slots;
+    if (want > free_nodes)
+        want = free_nodes;
+    if (want > ZCL_DIAL_BATCH_MAX)
+        want = ZCL_DIAL_BATCH_MAX;
+    if (want > ZCL_DIAL_SCHEDULER_WIDTH)
+        want = ZCL_DIAL_SCHEDULER_WIDTH;
+    return want;
+}
+
 #ifdef ZCL_TESTING
+size_t connman_dial_scheduler_want_for_test(bool rate_ok,
+                                            size_t outbound_healthy,
+                                            bool below_floor,
+                                            size_t free_slots,
+                                            size_t free_nodes)
+{
+    return dial_scheduler_want(rate_ok, outbound_healthy, below_floor,
+                               free_slots, free_nodes);
+}
+
 bool connman_connect_only_wait_needed_for_test(bool connect_only,
                                                size_t outbound,
                                                size_t addnode_count,
@@ -509,7 +581,9 @@ static enum peer_lifecycle_source dial_lifecycle_source(
 
 /* Fire every candidate's non-blocking connect, then poll the in-progress set
  * against ONE shared DEFAULT_CONNECT_TIMEOUT window, completing winners and
- * closing losers. Immediate (localhost) connects complete inline. The
+ * closing losers. `count` is bounded by ZCL_DIAL_SCHEDULER_WIDTH at the call
+ * site, so a batch of N blackholed clearnet addresses costs one 5 s window,
+ * not N. Immediate (localhost) connects complete inline. The
  * clearnet race runs to completion BEFORE any onion dial: an onion dial
  * blocks this thread for up to ONION_STREAM_CONNECT_TIMEOUT_MS, so in
  * candidate order one leading onion address delayed every clearnet
@@ -614,6 +688,19 @@ static void connman_dial_batch(struct connman *cm,
     }
 }
 
+#ifdef ZCL_TESTING
+/* Regression seam: drive one batch directly so a test can prove that N
+ * blackholed candidates share ONE connect window instead of N. */
+void connman_dial_batch_for_test(struct connman *cm,
+                                 struct connman_dial_candidate *batch,
+                                 size_t count)
+{
+    if (count > ZCL_DIAL_BATCH_MAX)
+        count = ZCL_DIAL_BATCH_MAX;
+    connman_dial_batch(cm, batch, count);
+}
+#endif
+
 void *thread_open_connections(void *arg)
 {
     struct connman *cm = (struct connman *)arg;
@@ -705,7 +792,9 @@ void *thread_open_connections(void *arg)
          * stuck sockets still backfills aggressively). At/above the floor we
          * dial gently, rate-limited to one candidate per 10 s. Either way the
          * whole batch's connects run concurrently against ONE shared 5 s
-         * window instead of serially, so N slow peers no longer cost N×5 s. */
+         * window instead of serially, so N slow peers no longer cost N×5 s —
+         * the fan is ZCL_DIAL_SCHEDULER_WIDTH wide, which is what makes that
+         * sentence true rather than aspirational. */
         int64_t now_oc = (int64_t)platform_time_wall_time_t();
         const size_t OUTBOUND_HEALTHY_FLOOR = ZCL_PEER_FLOOR_HEALTHY;
         bool below_floor = (outbound_healthy < OUTBOUND_HEALTHY_FLOOR);
@@ -733,19 +822,12 @@ void *thread_open_connections(void *arg)
         }
 
         size_t free_slots = MAX_OUTBOUND_CONNECTIONS - outbound; /* > 0 here */
-        size_t want = 0;
-        if (rate_ok) {
-            if (outbound_healthy == 0)
-                want = free_slots;                    /* bootstrap: fill fast */
-            else if (below_floor)
-                want = free_slots < 4 ? free_slots : 4;
-            else
-                want = 1;                             /* healthy: gentle */
-        }
-        if (want > ZCL_DIAL_BATCH_MAX)
-            want = ZCL_DIAL_BATCH_MAX;
-        if (want > ZCL_DIAL_SCHEDULER_WIDTH)
-            want = ZCL_DIAL_SCHEDULER_WIDTH;
+        /* > 0 here too: the early-out above already returned when num_nodes
+         * reached max_connections. */
+        size_t free_nodes =
+            (size_t)cm->manager.max_connections - cm->manager.num_nodes;
+        size_t want = dial_scheduler_want(rate_ok, outbound_healthy,
+                                          below_floor, free_slots, free_nodes);
 
         struct connman_dial_candidate batch[ZCL_DIAL_BATCH_MAX + 1];
         size_t nbatch = 0;

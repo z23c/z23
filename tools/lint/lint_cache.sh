@@ -46,10 +46,12 @@
 #     selftest's transient `_*fixture*.c` — which no production scan can see —
 #     does not spuriously bust the cache either.
 # Everything the gates themselves are made of is tracked and therefore already
-# inside the key: run_lint.sh, this file, every gate script, gate_lib.sh,
-# scan_exclusions.sh, every *_baseline.txt / allowlist, telemetry_scan_lib.awk,
-# and the Makefile. There is no "did I remember to list the helper?" failure
-# mode, because nothing is listed — everything is included.
+# inside the key: run_lint.sh, this file, every gate script (and the C source
+# of the one gate that is a compiled binary, tools/file_size_policy.c),
+# gate_lib.sh, scan_exclusions.sh, every *_baseline.txt / allowlist,
+# telemetry_scan_lib.awk, and the Makefile. There is no "did I remember to
+# list the helper?" failure mode, because nothing is listed — everything is
+# included.
 #
 # RESIDUAL ASSUMPTION (stated, not hidden): gitignored content sitting inside a
 # scanned source root is not in the key. scan_exclusions.sh prunes build/,

@@ -169,13 +169,13 @@ are defined once in [`agent-protocol.md`](./agent-protocol.md).
 
 | File | Authority | Purpose |
 |---|---|---|
-| [`C23_LIVING_COMMONS_V2.md`](./C23_LIVING_COMMONS_V2.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
+| [`ZC23_FAMILY_COMMONS.md`](./ZC23_FAMILY_COMMONS.md) | DESIGN | additive pre-genesis protocol foundation: family commons + evidence economics objects and commands |
 | [`C23_P2P_CORE_INVENTORY.md`](./C23_P2P_CORE_INVENTORY.md) | DESIGN | reviewed P2P core-consolidation code inventory (2026-08-12); a map, not a plan |
-| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | canonical unit reconciliation. Its header says PREPARED, NOT APPLIED, but its own §0 records that another actor applied part of it while the page was being written — so the header understates what is live. Re-read the units with `systemctl --user cat` before acting on any section; never trust this page's inventory as current |
+| [`canonical-unit-reconciliation.md`](./canonical-unit-reconciliation.md) | DESIGN | systemd drop-in reconciliation runbook: lexical apply order, detecting an `ExecStart=` collision, reading `/proc/<pid>/cmdline` for ground truth vs. `systemctl show`, and the hazard of another actor rewriting drop-ins mid-reconciliation |
 | [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](./LIVE_TRANSACTION_DEMONSTRATIONS.md) | LIVE | runbook: which cataloged transaction shapes are demonstrated live, and how |
 | [`REFLEX_REACTOR.md`](./REFLEX_REACTOR.md) | LIVE | local zero-wait reflex reactor: edit C23, receive first exact next-build result |
 | [`REFLEX_SUBSTRATE_AUDIT.md`](./REFLEX_SUBSTRATE_AUDIT.md) | EVIDENCE | measured coverage/latency audit of the merged reflex implementation (2026-08-12) |
-| [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | PLAN | owner-approved `zclassic shop` one-command sovereign storefront specification |
+| [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | PLAN | owner-approved `app shop` one-command sovereign storefront specification |
 | [`TRANSACTION_LAB.md`](./TRANSACTION_LAB.md) | LIVE | transaction laboratory notebook; keeps its two questions separate |
 | [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | PLAN | owner-visible 100-transaction micro lab demonstration plan |
 | [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md) | PLAN | ZC23 distribution rules — phase C2, owner-decided 2026-08-09 |

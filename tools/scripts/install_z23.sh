@@ -13,8 +13,14 @@
 # Checksum mismatch is a loud refusal. Nothing is copied to the destination
 # until SHA256SUMS --strict passes.
 #
+# The expected SHA256SUMS digest may instead be learned from three
+# independent systems (see "Release pin" below): pass one --attest= or
+# --attest-unreachable= record per source and this script decides.
+#
 # Usage:
 #   install_z23.sh --source=<url> --manifest-sha256=<sha256-of-SHA256SUMS>
+#   install_z23.sh --source=<url> --attest=baked=<pin> --attest=dns=<pin> \
+#                  --attest-unreachable=repo=<reason>
 #   install_z23.sh --source=<local-dir>
 #   install_z23.sh <url> --manifest-sha256=<sha256-of-SHA256SUMS>
 #   install_z23.sh <local-dir>
@@ -38,7 +44,7 @@ say() { printf 'install_z23: %s\n' "$*" >&2; }
 
 NEXT_COMMAND="z23 status"
 
-# Public fetch ceilings. The manifest has exactly three short checksum rows;
+# Public fetch ceilings. The manifest has exactly four short checksum rows;
 # 1 KiB leaves ample format headroom. Node aliases are currently below 32 MiB
 # and the confined verifier below 96 MiB; these limits allow growth without
 # permitting an untrusted mirror to stream without bound. Deadlines apply to
@@ -50,6 +56,131 @@ REMOTE_CONNECT_TIMEOUT_SECONDS=10
 REMOTE_MANIFEST_MAX_TIME_SECONDS=30
 REMOTE_PAYLOAD_MAX_TIME_SECONDS=300
 CURL_MINIMUM_VERSION="8.4.0"
+
+# ── Release pin: three independent sources, or no install ──────────────────
+# A mirror is never the authority for its own checksum manifest. The expected
+# digest of SHA256SUMS is learned from three INDEPENDENT systems — a value
+# baked into the front-door script, a DNS TXT record on the domain, and the
+# source repository — and reaches this script as attestation records:
+#
+#   --attest=<origin>=z23-pin-v1:<manifest-sha256>:<installer-sha256>
+#   --attest-unreachable=<origin>=<reason>
+#
+# The GATHERER (packaging/install/install.sh, packaging/install/install.ps1)
+# classifies each source as answered-with-a-pin or unreachable-for-<reason>.
+# This script is the JUDGE. Judging here as well as in the front door is
+# deliberate duplication, not an oversight: sh, bash and PowerShell cannot
+# share a file, and each of the three must be able to refuse on its own.
+#
+# POLICY, stated plainly so it can be argued with:
+#   * ANY two answered pins that differ -> REFUSE. We never majority-vote.
+#     A disagreement means a rollback, a half-finished publish, or a
+#     compromise; installing the "winner" would hide exactly the event this
+#     mechanism exists to surface.
+#   * FEWER THAN TWO answered pins -> REFUSE. One source is not corroboration,
+#     and quietly degrading to it hands back the whole property being bought.
+#   * EXACTLY TWO answered and agreeing -> PROCEED, and say on stderr which
+#     source was unreachable and why. Two independent systems still means
+#     taking over the web server alone does not change what a stranger
+#     installs. Demanding all three would give a veto to any corporate
+#     resolver that drops TXT or any network that blocks the repository host,
+#     and an installer that fails for honest strangers is not safer — it just
+#     pushes them onto a worse install path.
+#   * UNREACHABLE IS NOT DISAGREEMENT, and is never reported as one. A source
+#     that answers with something that is not a pin at all (a captive portal,
+#     an HTML error page) is recorded by the gatherer as unreachable with a
+#     reason. It cannot lower the quorum bar, and calling it a disagreement
+#     would teach people to click past the loudest refusal we have.
+ATTEST_ORIGINS_KNOWN=" baked dns repo "
+ATTEST_PIN_UNSET=0000000000000000000000000000000000000000000000000000000000000000
+ATTEST_SEEN=" "
+ATTEST_OK=""
+ATTEST_OK_COUNT=0
+ATTEST_DOWN=""
+ATTESTED_MANIFEST_SHA256=""
+
+attest_is_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+    return 0
+}
+
+# z23-pin-v1:<64 hex>:<64 hex> — no spaces, so a pin is one argv element and
+# one DNS TXT string, and needs no quoting anywhere in this pipeline.
+attest_valid_pin() {
+    local rest manifest installer
+    # The unset sentinel is a declaration that nothing is pinned, not a pin.
+    # A gatherer must report it as an unreachable source, never attest it.
+    case "$1" in
+        "z23-pin-v1:$ATTEST_PIN_UNSET:$ATTEST_PIN_UNSET") return 1 ;;
+    esac
+    rest="${1#z23-pin-v1:}"
+    [ "$rest" != "$1" ] || return 1
+    manifest="${rest%%:*}"
+    [ "$manifest" != "$rest" ] || return 1
+    installer="${rest#*:}"
+    case "$installer" in *:*) return 1 ;; esac
+    attest_is_sha256 "$manifest" && attest_is_sha256 "$installer"
+}
+
+attest_claim_origin() {
+    case "$ATTEST_ORIGINS_KNOWN" in
+        *" $1 "*) ;;
+        *) die "unknown attestation origin: $1" ;;
+    esac
+    case "$ATTEST_SEEN" in
+        *" $1 "*) die "attestation origin named twice: $1" ;;
+    esac
+    ATTEST_SEEN="$ATTEST_SEEN$1 "
+}
+
+attest_record() {
+    attest_claim_origin "$1"
+    attest_valid_pin "$2" \
+        || die "attestation from $1 is not a z23-pin-v1:<sha256>:<sha256> record"
+    ATTEST_OK="$ATTEST_OK$1 $2"$'\n'
+    ATTEST_OK_COUNT=$((ATTEST_OK_COUNT + 1))
+}
+
+attest_record_unreachable() {
+    attest_claim_origin "$1"
+    # The reason is text from a source we do not trust; keep it to a token so
+    # it cannot dress itself up as another line of our own output.
+    case "$2" in
+        ''|*[!a-z0-9-]*) die "unreachable reason for $1 must be lowercase-dash text" ;;
+    esac
+    ATTEST_DOWN="$ATTEST_DOWN$1 $2"$'\n'
+}
+
+# Sets ATTESTED_MANIFEST_SHA256, or dies. Deliberately not a subshell that
+# echoes a value: die() inside $(...) would exit only the subshell and leave
+# the caller carrying an empty digest.
+attest_resolve_manifest() {
+    local origin pin reason first_origin="" first_pin="" unreachable="" rest
+    while read -r origin reason; do
+        [ -n "$origin" ] || continue
+        unreachable="$unreachable${unreachable:+, }$origin=$reason"
+    done <<<"$ATTEST_DOWN"
+    while read -r origin pin; do
+        [ -n "$origin" ] || continue
+        if [ -z "$first_pin" ]; then
+            first_origin="$origin"
+            first_pin="$pin"
+            continue
+        fi
+        [ "$pin" = "$first_pin" ] && continue
+        say "attested pin $first_origin=$first_pin"
+        say "attested pin $origin=$pin"
+        die "release pin disagreement between $first_origin and $origin — refusing to install either"
+    done <<<"$ATTEST_OK"
+    if [ "$ATTEST_OK_COUNT" -lt 2 ]; then
+        die "release pin quorum: $ATTEST_OK_COUNT of 3 sources answered, two independent sources are required (unreachable: ${unreachable:-none})"
+    fi
+    [ "$ATTEST_OK_COUNT" -ge 3 ] \
+        || say "release pin agreed by $ATTEST_OK_COUNT of 3 sources (unreachable: ${unreachable:-none})"
+    rest="${first_pin#z23-pin-v1:}"
+    ATTESTED_MANIFEST_SHA256="${rest%%:*}"
+}
 
 INSTALL_STAGE=""
 INSTALL_STAGE_PARENT=""
@@ -68,40 +199,84 @@ cleanup_install_stage() {
     INSTALL_STAGE=""
 }
 
+# The release is an EXACT CLOSED SET of four names. AGENT_CARD.md is in it
+# and is not "just documentation": its whole job is to tell a coding agent
+# which commands to run, so a tampered card is instruction injection into
+# whatever assistant installs the node. A release that claims everything is
+# verified does not get to ship one unverified file. The set stays exact —
+# never a wildcard — because "any file the manifest names" is how an
+# attacker adds a fifth.
+RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify"
+REMOTE_CARD_MAX_BYTES=$((64 * 1024))
+
 payload_max_bytes() {
     case "$1" in
         z23|zclassic23) printf '%s\n' "$REMOTE_NODE_MAX_BYTES" ;;
         zclassic23-package-verify) printf '%s\n' "$REMOTE_VERIFIER_MAX_BYTES" ;;
+        AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
         *) return 1 ;;
     esac
 }
 
 validate_manifest_contract() {
-    local manifest="$1" bytes lines matching names
+    local manifest="$1" bytes lines matching names z23_digest alias_digest
     [ -f "$manifest" ] || die "SHA256SUMS missing after fetch"
     bytes="$(wc -c <"$manifest" | tr -d ' ')"
     [ "$bytes" -le "$REMOTE_MANIFEST_MAX_BYTES" ] \
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (z23|zclassic23|zclassic23-package-verify)$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|zclassic23-package-verify)$' \
         "$manifest" || true)"
-    [ "$lines" -eq 3 ] && [ "$matching" -eq 3 ] \
-        || die "SHA256SUMS must contain exactly three strict lowercase SHA-256 rows"
+    [ "$lines" -eq 4 ] && [ "$matching" -eq 4 ] \
+        || die "SHA256SUMS must contain exactly four strict lowercase SHA-256 rows"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
-    [ "$names" = $'z23\nzclassic23\nzclassic23-package-verify' ] \
-        || die "SHA256SUMS must name each required payload exactly once"
+    [ "$names" = $'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-package-verify' ] \
+        || die "SHA256SUMS must name each required release member exactly once"
+    # z23 and zclassic23 are one program under two names, and the release
+    # says so with one digest in two rows. If they ever differ this is not a
+    # release we understand: refuse rather than guess which name is the node.
+    z23_digest="$(manifest_digest_of "$(dirname "$manifest")" z23)"
+    alias_digest="$(manifest_digest_of "$(dirname "$manifest")" zclassic23)"
+    [ "$z23_digest" = "$alias_digest" ] \
+        || die "SHA256SUMS gives z23 and zclassic23 different digests — refusing to guess which one is the node"
 }
 
 validate_payload_sizes() {
     local dir="$1" name bytes maximum
-    for name in z23 zclassic23 zclassic23-package-verify; do
+    for name in $RELEASE_MEMBERS; do
         [ -f "$dir/$name" ] || die "verified payload missing $name"
         maximum="$(payload_max_bytes "$name")"
         bytes="$(wc -c <"$dir/$name" | tr -d ' ')"
         [ "$bytes" -le "$maximum" ] \
             || die "$name exceeds its $maximum-byte release ceiling"
     done
+}
+
+manifest_digest_of() {
+    awk -v want="$2" '$2 == want { print $1; exit }' "$1/SHA256SUMS"
+}
+
+# ── The duplicate third of the download ────────────────────────────────────
+# z23 and zclassic23 are one program under two names: build_release.sh emits
+# the same bytes twice (measured 2026-08-29: 27.8 MB each of a 79.9 MB set),
+# and validate_manifest_contract has already REFUSED any release where the
+# two rows disagree. A hard link in the release directory does not help the
+# stranger — a file server streams the full body per URL however the origin
+# stores it — so the second GET is skipped here instead, and the alias is
+# materialised locally from the bytes just verified.
+#
+# Nothing is verified less. The digest demanded of zclassic23 is the digest
+# that was checked against actually-transferred bytes for z23, SHA256SUMS
+# keeps both rows, and `sha256sum -c --strict` below still hashes every name
+# present on disk — including this one, through the link.
+materialize_alias() {
+    local dir="$1" name="$2" source_name="$3"
+    [ -f "$dir/$source_name" ] \
+        || die "release members are out of order: $name precedes $source_name"
+    ln -f -- "$dir/$source_name" "$dir/$name" 2>/dev/null \
+        || cp -f -- "$dir/$source_name" "$dir/$name" \
+        || die "could not materialize $name from the identical $source_name"
 }
 
 curl_bounded() {
@@ -150,7 +325,12 @@ fetch_into() {
             [ "$got_manifest_sha256" = "$expected_manifest_sha256" ] \
                 || die "remote SHA256SUMS digest mismatch — refusing to fetch payloads"
             validate_manifest_contract "$dest/SHA256SUMS"
+
             while read -r _ name; do
+                if [ "$name" = zclassic23 ]; then
+                    materialize_alias "$dest" zclassic23 z23
+                    continue
+                fi
                 curl_bounded "$src/$name" "$dest/$name" \
                     "$(payload_max_bytes "$name")" \
                     "$REMOTE_PAYLOAD_MAX_TIME_SECONDS" \
@@ -162,8 +342,23 @@ fetch_into() {
             [ -f "$src/SHA256SUMS" ] || die "SHA256SUMS missing in $src"
             cp -f -- "$src/SHA256SUMS" "$dest/SHA256SUMS"
             validate_manifest_contract "$dest/SHA256SUMS"
+            # An independently obtained digest binds a local directory too:
+            # a staging tree on disk is no more authoritative about itself
+            # than a mirror is. Only checked when one was supplied, so the
+            # ssh bootstrap path (which transfers and re-verifies bytes it
+            # produced) is unaffected.
+            if [ -n "$expected_manifest_sha256" ]; then
+                local got_local_sha256
+                got_local_sha256="$(sha256sum "$dest/SHA256SUMS" | awk '{print $1}')"
+                [ "$got_local_sha256" = "$expected_manifest_sha256" ] \
+                    || die "SHA256SUMS digest mismatch in $src — refusing to install"
+            fi
             local name
             while read -r _ name; do
+                if [ "$name" = zclassic23 ]; then
+                    materialize_alias "$dest" zclassic23 z23
+                    continue
+                fi
                 [ -f "$src/$name" ] || die "listed file missing: $src/$name"
                 cp -f -- "$src/$name" "$dest/$name"
             done <"$dest/SHA256SUMS"
@@ -179,17 +374,26 @@ verify_strict() {
 }
 
 install_payload() {
-    local stage="$1" prefix="$2"
-    local bindir="$prefix/bin"
-    mkdir -p "$bindir"
-    [ -f "$stage/z23" ] || die "verified payload missing z23"
-    [ -f "$stage/zclassic23" ] || die "verified payload missing zclassic23"
-    [ -f "$stage/zclassic23-package-verify" ] \
-        || die "verified payload missing zclassic23-package-verify"
+    local stage="$1" prefix="$2" name
+    local bindir="$prefix/bin" carddir="$prefix/share/z23"
+    mkdir -p "$bindir" "$carddir"
+    for name in $RELEASE_MEMBERS; do
+        [ -f "$stage/$name" ] || die "verified payload missing $name"
+    done
     install -m 755 "$stage/z23" "$bindir/z23"
-    install -m 755 "$stage/zclassic23" "$bindir/zclassic23"
+    # Same bytes, two names: install the alias as a RELATIVE symlink rather
+    # than a second 27.8 MB copy. A symlink and not a hard link on purpose —
+    # a later upgrade replaces the z23 inode, and a hard link would silently
+    # keep serving the old program under the old name. Nothing dispatches on
+    # argv[0]; /proc/self/exe resolves through the link to identical bytes,
+    # so the running-binary digest and self-respawn are unchanged.
+    rm -f -- "$bindir/zclassic23"
+    ln -s z23 "$bindir/zclassic23" || die "could not link zclassic23 to z23"
     install -m 755 "$stage/zclassic23-package-verify" \
         "$bindir/zclassic23-package-verify"
+    # The agent card is verified payload, so it is installed like payload:
+    # an assistant reading it is reading bytes SHA256SUMS covered.
+    install -m 644 "$stage/AGENT_CARD.md" "$carddir/AGENT_CARD.md"
 }
 
 write_unit() {
@@ -270,40 +474,60 @@ selftest_prepare() {
         "$tmp/stages"
     export TMPDIR="$tmp/stages"
 
+    # A release is four names, and z23/zclassic23 are the same bytes.
     printf 'payload-a\n' >"$tmp/good/z23"
-    printf 'payload-a\n' >"$tmp/good/zclassic23"
+    ln -f -- "$tmp/good/z23" "$tmp/good/zclassic23"
     printf 'confined-verifier\n' >"$tmp/good/zclassic23-package-verify"
-    (cd "$tmp/good" && \
-        sha256sum z23 zclassic23 zclassic23-package-verify >SHA256SUMS)
+    printf '# Z23 agent card\n\nRun `z23 status`.\n' >"$tmp/good/AGENT_CARD.md"
+    (cd "$tmp/good" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
 
     # Shell-only curl fixture: map https://mirror.invalid/<path> into the
     # selftest tree and record every requested object. This proves a bad
     # manifest pin is rejected before any executable payload is downloaded.
     mkdir -p "$tmp/mockbin" "$tmp/http/good" "$tmp/http/replaced" \
         "$tmp/http/oversized" "$tmp/http/oversized-payload" \
-        "$tmp/http/duplicate" "$tmp/http/malformed" "$tmp/http/signal"
+        "$tmp/http/duplicate" "$tmp/http/malformed" "$tmp/http/signal" \
+        "$tmp/http/split-names" "$tmp/tampered-card"
     cp -f -- "$tmp/good/"* "$tmp/http/good/"
     cp -f -- "$tmp/good/"* "$tmp/http/signal/"
+
+    # A release whose two node names are NOT the same bytes. There is no
+    # honest way to pick one, so it is refused before anything is fetched.
+    printf 'payload-a\n' >"$tmp/http/split-names/z23"
+    printf 'payload-b-different\n' >"$tmp/http/split-names/zclassic23"
+    cp -f -- "$tmp/good/zclassic23-package-verify" \
+        "$tmp/good/AGENT_CARD.md" "$tmp/http/split-names/"
+    (cd "$tmp/http/split-names" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+
+    # A release whose agent card was edited after the manifest was written.
+    # The card tells an assistant what to run, so this must refuse.
+    cp -f -- "$tmp/good/"* "$tmp/tampered-card/"
+    # Any edit at all is a mismatch; the text is a marker, deliberately not
+    # a real fetch-and-run line, so the fixture cannot trip our own
+    # supply-chain scanner while proving the card is covered.
+    printf '# Z23 agent card\n\nTAMPERED: attacker instructions.\n' \
+        >"$tmp/tampered-card/AGENT_CARD.md"
+
     printf 'replacement-node\n' >"$tmp/http/replaced/z23"
-    printf 'replacement-node\n' >"$tmp/http/replaced/zclassic23"
+    ln -f -- "$tmp/http/replaced/z23" "$tmp/http/replaced/zclassic23"
     printf 'replacement-verifier\n' \
         >"$tmp/http/replaced/zclassic23-package-verify"
-    (cd "$tmp/http/replaced" && \
-        sha256sum z23 zclassic23 zclassic23-package-verify >SHA256SUMS)
+    printf '# replacement card\n' >"$tmp/http/replaced/AGENT_CARD.md"
+    (cd "$tmp/http/replaced" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
     dd if=/dev/zero bs=1025 count=1 2>/dev/null | tr '\0' x \
         >"$tmp/http/oversized/SHA256SUMS"
     truncate -s $((REMOTE_NODE_MAX_BYTES + 1)) \
         "$tmp/http/oversized-payload/z23"
-    cp -f -- "$tmp/good/zclassic23" \
+    ln -f -- "$tmp/http/oversized-payload/z23" \
         "$tmp/http/oversized-payload/zclassic23"
     cp -f -- "$tmp/good/zclassic23-package-verify" \
-        "$tmp/http/oversized-payload/zclassic23-package-verify"
-    (cd "$tmp/http/oversized-payload" && \
-        sha256sum z23 zclassic23 zclassic23-package-verify >SHA256SUMS)
+        "$tmp/good/AGENT_CARD.md" "$tmp/http/oversized-payload/"
+    (cd "$tmp/http/oversized-payload" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
     {
         sed -n '1p' "$tmp/good/SHA256SUMS"
         sed -n '1p' "$tmp/good/SHA256SUMS"
         sed -n '2p' "$tmp/good/SHA256SUMS"
+        sed -n '3p' "$tmp/good/SHA256SUMS"
     } >"$tmp/http/duplicate/SHA256SUMS"
     sed 's/  / /' "$tmp/good/SHA256SUMS" \
         >"$tmp/http/malformed/SHA256SUMS"
@@ -337,6 +561,9 @@ case "$rel" in
     */zclassic23-package-verify)
         [ "$maximum_seconds" = 300 ] && \
             [ "$maximum_bytes" = 134217728 ] || exit 4
+        ;;
+    */AGENT_CARD.md)
+        [ "$maximum_seconds" = 300 ] && [ "$maximum_bytes" = 65536 ] || exit 4
         ;;
     *) exit 4 ;;
 esac
@@ -376,11 +603,7 @@ selftest_local_refusals() {
         || die "selftest: missing SHA256SUMS must be named"
 
     # Mismatch: dest must stay empty.
-    cp -f -- "$tmp/good/z23" "$tmp/bad/z23"
-    cp -f -- "$tmp/good/zclassic23" "$tmp/bad/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
-        "$tmp/bad/zclassic23-package-verify"
-    cp -f -- "$tmp/good/SHA256SUMS" "$tmp/bad/SHA256SUMS"
+    cp -f -- "$tmp/good/"* "$tmp/bad/"
     printf 'TAMPERED\n' >"$tmp/bad/z23"
     rc=0
     run_install "$tmp/empty-dest" "$tmp/units" "$tmp/bad" \
@@ -500,9 +723,41 @@ selftest_remote_success() {
         || die "selftest: pinned remote install next command drifted"
     cmp -s "$tmp/good/z23" "$tmp/remote-good/bin/z23" \
         || die "selftest: pinned remote z23 bytes differ"
+    # zclassic23 carries the SAME digest as z23 in this release, so it is
+    # NEVER requested: the third of the download that is a duplicate is not
+    # transferred at all. The request log is the proof.
     [ "$(cat "$tmp/curl.log")" = \
-        $'good/SHA256SUMS connect=10 time=30 bytes=1024\ngood/z23 connect=10 time=300 bytes=67108864\ngood/zclassic23 connect=10 time=300 bytes=67108864\ngood/zclassic23-package-verify connect=10 time=300 bytes=134217728' ] \
+        $'good/SHA256SUMS connect=10 time=30 bytes=1024\ngood/AGENT_CARD.md connect=10 time=300 bytes=65536\ngood/z23 connect=10 time=300 bytes=67108864\ngood/zclassic23-package-verify connect=10 time=300 bytes=134217728' ] \
         || die "selftest: bounded remote request sequence drifted"
+    [ -L "$tmp/remote-good/bin/zclassic23" ] \
+        || die "selftest: duplicate remote alias must install as a symlink"
+    cmp -s "$tmp/good/zclassic23" "$tmp/remote-good/bin/zclassic23" \
+        || die "selftest: remote zclassic23 alias does not read as the release bytes"
+
+    # The other direction of the alias rule: a release whose two node names
+    # carry DIFFERENT digests is refused outright, before any payload is
+    # requested. There is no honest way to pick one of them.
+    local split_sha rc
+    split_sha="$(sha256sum "$tmp/http/split-names/SHA256SUMS" | awk '{print $1}')"
+    : >"$tmp/curl.log"
+    rc=0
+    PATH="$tmp/mockbin:$PATH" \
+    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
+    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
+    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-split" \
+    Z23_UNIT_DIR="$tmp/units" \
+        "$SCRIPT_DIR/install_z23.sh" \
+        --source=https://mirror.invalid/split-names \
+        --manifest-sha256="$split_sha" \
+        >/dev/null 2>"$tmp/remote-split.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: split z23/zclassic23 digests must exit 1"
+    grep -q 'different digests' "$tmp/remote-split.err" \
+        || die "selftest: split node digests must be named"
+    [ "$(cat "$tmp/curl.log")" = \
+        "split-names/SHA256SUMS connect=10 time=30 bytes=1024" ] \
+        || die "selftest: split node digests fetched a payload"
+    [ ! -e "$tmp/remote-split/bin/z23" ] \
+        || die "selftest: split node digests installed z23"
 }
 
 selftest_remote_bounds() {
@@ -546,7 +801,7 @@ selftest_remote_bounds() {
         >/dev/null 2>"$tmp/remote-oversized-payload.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: oversized remote payload must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
-        $'oversized-payload/SHA256SUMS connect=10 time=30 bytes=1024\noversized-payload/z23 connect=10 time=300 bytes=67108864' ] \
+        $'oversized-payload/SHA256SUMS connect=10 time=30 bytes=1024\noversized-payload/AGENT_CARD.md connect=10 time=300 bytes=65536\noversized-payload/z23 connect=10 time=300 bytes=67108864' ] \
         || die "selftest: oversized payload request was not bounded"
     [ ! -e "$tmp/remote-oversized-payload/bin/z23" ] \
         || die "selftest: oversized remote payload installed z23"
@@ -610,7 +865,7 @@ selftest_remote_manifest_and_signal() {
 }
 
 selftest_local_success() {
-    local tmp="$SELFTEST_TMP" rc out
+    local tmp="$SELFTEST_TMP" rc out install_card
 
     # Happy path: dest gets the files; stdout is exactly one next command.
     out="$(run_install "$tmp/prefix" "$tmp/units" "$tmp/good" 2>"$tmp/ok.err")" \
@@ -619,9 +874,33 @@ selftest_local_success() {
     cmp -s "$tmp/good/z23" "$tmp/prefix/bin/z23" || die "selftest: installed z23 bytes differ"
     cmp -s "$tmp/good/zclassic23" "$tmp/prefix/bin/zclassic23" \
         || die "selftest: installed zclassic23 bytes differ"
+    # The alias must be a RELATIVE symlink to z23 and must still read back as
+    # the release bytes (the cmp above follows it). A hard link would keep
+    # serving the pre-upgrade program after the next install.
+    [ -L "$tmp/prefix/bin/zclassic23" ] \
+        || die "selftest: duplicate zclassic23 must install as a symlink"
+    [ "$(readlink "$tmp/prefix/bin/zclassic23")" = z23 ] \
+        || die "selftest: zclassic23 must link to the relative name z23"
     cmp -s "$tmp/good/zclassic23-package-verify" \
         "$tmp/prefix/bin/zclassic23-package-verify" \
         || die "selftest: installed zclassic23-package-verify bytes differ"
+
+    install_card="$tmp/prefix/share/z23/AGENT_CARD.md"
+    cmp -s "$tmp/good/AGENT_CARD.md" "$install_card" \
+        || die "selftest: the agent card must install as verified payload"
+
+    # A card edited after the manifest was written is instruction injection
+    # into whatever assistant reads it, so it refuses like any other payload.
+    rc=0
+    run_install "$tmp/card-dest" "$tmp/units" "$tmp/tampered-card" \
+        >/dev/null 2>"$tmp/card.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: a tampered agent card must exit 1"
+    grep -qi 'mismatch' "$tmp/card.err" \
+        || die "selftest: a tampered agent card must name the mismatch"
+    [ ! -e "$tmp/card-dest/bin/z23" ] \
+        || die "selftest: a tampered agent card installed z23"
+    [ ! -e "$tmp/card-dest/share/z23/AGENT_CARD.md" ] \
+        || die "selftest: a tampered agent card was installed anyway"
 
     # A valid checksum manifest that omits the worker is still an incomplete
     # release and must refuse before any payload reaches a fresh destination.
@@ -633,7 +912,7 @@ selftest_local_success() {
     run_install "$tmp/no-verifier-dest" "$tmp/units" "$tmp/no-verifier" \
         >/dev/null 2>"$tmp/no-verifier.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: missing verifier must exit 1"
-    grep -Eq 'exactly three|exactly once' "$tmp/no-verifier.err" \
+    grep -Eq 'exactly four|exactly once' "$tmp/no-verifier.err" \
         || die "selftest: missing verifier must name the strict manifest refusal"
     if [ -e "$tmp/no-verifier-dest/bin/z23" ]; then
         die "selftest: incomplete release installed z23 anyway"
@@ -662,6 +941,138 @@ selftest_local_success() {
         || die "selftest: z23.service must boot with -listen -tor -onion-persist"
 }
 
+# Every branch of the three-place agreement, in both directions. A test that
+# only ever sees agreement would prove nothing about a refusal.
+selftest_release_pin() {
+    local tmp="$SELFTEST_TMP" rc out good_sha good_pin wrong_pin bad_installer
+    local fake_installer="1111111111111111111111111111111111111111111111111111111111111111"
+    good_sha="$(sha256sum "$tmp/good/SHA256SUMS" | awk '{print $1}')"
+    good_pin="z23-pin-v1:$good_sha:$fake_installer"
+    wrong_pin="z23-pin-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:$fake_installer"
+    bad_installer="z23-pin-v1:$good_sha:not-a-digest"
+
+    # PASS: all three sources answered and agreed.
+    out="$(Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-three" \
+        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        --source="$tmp/good" \
+        --attest="baked=$good_pin" --attest="dns=$good_pin" \
+        --attest="repo=$good_pin" 2>"$tmp/pin-three.err")" \
+        || die "selftest: three agreeing pins must install"
+    [ "$out" = "$NEXT_COMMAND" ] || die "selftest: agreeing pin install drifted"
+    [ -x "$tmp/pin-three/bin/z23" ] || die "selftest: agreeing pin did not install z23"
+
+    # REFUSE: three sources agree on a pin that does not describe this
+    # release. Agreement is not a substitute for the checksum.
+    rc=0
+    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-wrong" \
+        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        --source="$tmp/good" \
+        --attest="baked=$wrong_pin" --attest="dns=$wrong_pin" \
+        --attest="repo=$wrong_pin" >/dev/null 2>"$tmp/pin-wrong.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: an agreed pin for other bytes must exit 1"
+    grep -q 'SHA256SUMS digest mismatch' "$tmp/pin-wrong.err" \
+        || die "selftest: agreed-but-wrong pin must name the digest mismatch"
+    [ ! -e "$tmp/pin-wrong/bin/z23" ] \
+        || die "selftest: agreed-but-wrong pin installed z23"
+
+    # REFUSE: one source disagrees. Never majority-vote, even 2 against 1.
+    rc=0
+    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-split" \
+        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        --source="$tmp/good" \
+        --attest="baked=$good_pin" --attest="dns=$good_pin" \
+        --attest="repo=$wrong_pin" >/dev/null 2>"$tmp/pin-split.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: a disagreeing source must exit 1"
+    grep -q 'release pin disagreement between baked and repo' "$tmp/pin-split.err" \
+        || die "selftest: disagreement must name both origins"
+    [ ! -e "$tmp/pin-split/bin/z23" ] \
+        || die "selftest: a disagreeing source installed z23"
+
+    # PASS, loudly: two agreed, one was unreachable. Unreachable is reported
+    # as unreachable and never rendered as a disagreement.
+    out="$(Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-two" \
+        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        --source="$tmp/good" \
+        --attest="baked=$good_pin" --attest="repo=$good_pin" \
+        --attest-unreachable=dns=no-dns-tool 2>"$tmp/pin-two.err")" \
+        || die "selftest: two agreeing sources must install"
+    [ "$out" = "$NEXT_COMMAND" ] || die "selftest: two-source install drifted"
+    grep -q 'agreed by 2 of 3 sources (unreachable: dns=no-dns-tool)' "$tmp/pin-two.err" \
+        || die "selftest: a degraded quorum must say so on stderr"
+    if grep -q 'disagreement' "$tmp/pin-two.err"; then
+        die "selftest: an unreachable source must not be called a disagreement"
+    fi
+
+    # REFUSE: only one source answered. No silent degradation to one.
+    rc=0
+    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-one" \
+        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        --source="$tmp/good" --attest="baked=$good_pin" \
+        --attest-unreachable=dns=no-dns-tool \
+        --attest-unreachable=repo=fetch-failed \
+        >/dev/null 2>"$tmp/pin-one.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: a single answering source must exit 1"
+    grep -q 'release pin quorum: 1 of 3 sources answered' "$tmp/pin-one.err" \
+        || die "selftest: quorum refusal must count the sources"
+    grep -q 'unreachable: dns=no-dns-tool, repo=fetch-failed' "$tmp/pin-one.err" \
+        || die "selftest: quorum refusal must name the unreachable sources"
+    [ ! -e "$tmp/pin-one/bin/z23" ] || die "selftest: one source installed z23"
+
+    # REFUSE: malformed pin, unknown origin, repeated origin, and an explicit
+    # --manifest-sha256 that contradicts the agreed pin.
+    local case_name case_args
+    local unset_pin="z23-pin-v1:$ATTEST_PIN_UNSET:$ATTEST_PIN_UNSET"
+    for case_name in malformed unset unknown-origin repeated-origin contradicted; do
+        case "$case_name" in
+            malformed) case_args=(--attest="baked=$bad_installer"
+                --attest="dns=$good_pin" --attest="repo=$good_pin") ;;
+            unset) case_args=(--attest="baked=$unset_pin"
+                --attest="dns=$good_pin" --attest="repo=$good_pin") ;;
+            unknown-origin) case_args=(--attest="mirror=$good_pin"
+                --attest="dns=$good_pin" --attest="repo=$good_pin") ;;
+            repeated-origin) case_args=(--attest="dns=$good_pin"
+                --attest="dns=$good_pin" --attest="repo=$good_pin") ;;
+            contradicted) case_args=(--attest="baked=$good_pin"
+                --attest="dns=$good_pin" --attest="repo=$good_pin"
+                --manifest-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) ;;
+        esac
+        rc=0
+        Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-$case_name" \
+            Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+            --source="$tmp/good" "${case_args[@]}" \
+            >/dev/null 2>"$tmp/pin-$case_name.err" || rc=$?
+        [ "$rc" -eq 1 ] || die "selftest: pin case $case_name must exit 1"
+        [ ! -e "$tmp/pin-$case_name/bin/z23" ] \
+            || die "selftest: pin case $case_name installed z23"
+    done
+    grep -q 'not a z23-pin-v1' "$tmp/pin-malformed.err" \
+        || die "selftest: a malformed pin must name the grammar"
+    grep -q 'not a z23-pin-v1' "$tmp/pin-unset.err" \
+        || die "selftest: the unset sentinel must never be accepted as a pin"
+    grep -q 'unknown attestation origin: mirror' "$tmp/pin-unknown-origin.err" \
+        || die "selftest: an unknown origin must be named"
+    grep -q 'attestation origin named twice: dns' "$tmp/pin-repeated-origin.err" \
+        || die "selftest: a repeated origin must be named"
+    grep -q 'disagrees with the pin' "$tmp/pin-contradicted.err" \
+        || die "selftest: a contradicted --manifest-sha256 must refuse"
+}
+
+# The front door served at the domain is proved by its own harness, which is
+# not shipped inside the served script: that script has to stay short enough
+# that a careful person reads it before piping it to a shell.
+selftest_front_door() {
+    local dir="$SCRIPT_DIR/../../packaging/install"
+    # This installer also ships alone (the front door downloads just this
+    # file), and then there is no repository beside it to test. That is
+    # UNOBSERVED, not a pass — but inside the repository, where every gate
+    # runs, the directory is present and the harness is mandatory.
+    [ -d "$dir" ] || return 0
+    [ -f "$dir/install_selftest.sh" ] \
+        || die "selftest: packaging/install exists but its front-door harness is missing"
+    bash "$dir/install_selftest.sh" \
+        || die "selftest: packaging/install front door harness failed"
+}
+
 selftest_local_manifest_refusals() {
     local tmp="$SELFTEST_TMP" rc
     # Unexpected SHA256SUMS member refuses before copy.
@@ -676,7 +1087,7 @@ selftest_local_manifest_refusals() {
     run_install "$tmp/prefix2" "$tmp/units" "$tmp/extra" \
         >/dev/null 2>"$tmp/extra.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: extra SHA256SUMS member must refuse"
-    grep -Eq 'exactly three|exactly once' "$tmp/extra.err" \
+    grep -Eq 'exactly four|exactly once' "$tmp/extra.err" \
         || die "selftest: extra member must name the strict manifest refusal"
 
     [ -z "$(find "$tmp/stages" -mindepth 1 -maxdepth 1 \
@@ -695,6 +1106,8 @@ selftest() {
     selftest_remote_manifest_and_signal
     selftest_local_success
     selftest_local_manifest_refusals
+    selftest_release_pin
+    selftest_front_door
 
     say "selftest PASS"
     trap - EXIT
@@ -704,6 +1117,7 @@ selftest() {
 
 SOURCE="${Z23_RELEASE_SOURCE:-}"
 EXPECTED_MANIFEST_SHA256="${Z23_RELEASE_MANIFEST_SHA256:-}"
+ATTEST_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) selftest; exit 0 ;;
@@ -712,6 +1126,24 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "--source needs a url or directory"
             SOURCE="$2"
             shift 2
+            ;;
+        --attest=*)
+            ATTEST_ARG="${1#--attest=}"
+            case "$ATTEST_ARG" in
+                *=*) ;;
+                *) die "--attest needs <origin>=<pin>" ;;
+            esac
+            attest_record "${ATTEST_ARG%%=*}" "${ATTEST_ARG#*=}"
+            shift
+            ;;
+        --attest-unreachable=*)
+            ATTEST_ARG="${1#--attest-unreachable=}"
+            case "$ATTEST_ARG" in
+                *=*) ;;
+                *) die "--attest-unreachable needs <origin>=<reason>" ;;
+            esac
+            attest_record_unreachable "${ATTEST_ARG%%=*}" "${ATTEST_ARG#*=}"
+            shift
             ;;
         --manifest-sha256=*) EXPECTED_MANIFEST_SHA256="${1#*=}"; shift ;;
         --manifest-sha256)
@@ -734,5 +1166,14 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$ATTEST_OK_COUNT" -gt 0 ] || [ -n "$ATTEST_DOWN" ]; then
+    attest_resolve_manifest
+    if [ -n "$EXPECTED_MANIFEST_SHA256" ] \
+        && [ "$EXPECTED_MANIFEST_SHA256" != "$ATTESTED_MANIFEST_SHA256" ]; then
+        die "--manifest-sha256 disagrees with the pin the attesting sources agreed on"
+    fi
+    EXPECTED_MANIFEST_SHA256="$ATTESTED_MANIFEST_SHA256"
+fi
 
 install_from_source "$SOURCE" "$EXPECTED_MANIFEST_SHA256"
