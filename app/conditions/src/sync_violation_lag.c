@@ -4,10 +4,6 @@
 #include "util/log_macros.h"
 #include "framework/condition.h"
 
-#include "chain/checkpoints.h"                    /* get_sha3_utxo_checkpoint */
-#include "config/consensus_state_install_runtime.h" /* boot_autodetect_consensus_bundle,
-                                                         consensus_state_checkpoint_header_ready */
-#include "controllers/agent_controller.h"         /* agent_runtime_context_datadir */
 #include "event/event.h"
 #include "net/connman.h"
 #include "platform/time_compat.h"
@@ -18,7 +14,6 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 #define SYNC_VIOLATION_GAP 100
 #define SYNC_VIOLATION_SECS 600
@@ -36,33 +31,6 @@ static _Atomic int64_t g_age_at_detect;
 static _Atomic int g_test_remedy_calls;
 #endif
 
-/* During a fresh instant-on boot the staged checkpoint bundle deliberately
- * cannot install until the validated header chain reaches the compiled
- * checkpoint height. In that window the active chain tip (H*) is intentionally
- * flat while headers crawl from the seed/P2P frontier to the checkpoint.
- * Rotating outbound peers would disconnect the very ZCL23 fast-sync peers that
- * are supplying those headers, so suppress the lag detector while a bundle is
- * staged and the checkpoint header is not yet owned. */
-static bool checkpoint_bundle_waiting_for_headers(struct main_state *ms)
-{
-    if (!ms)
-        return false;
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    if (!cp || cp->height < 0)
-        return false;
-    if (consensus_state_checkpoint_header_ready(ms))
-        return false; /* headers already own the checkpoint; normal lag rules apply */
-
-    const char *datadir = agent_runtime_context_datadir();
-    if (!datadir || !datadir[0])
-        return false;
-    char *bundle = boot_autodetect_consensus_bundle(datadir);
-    if (!bundle)
-        return false;
-    free(bundle);
-    return true;
-}
-
 static bool detect_sync_violation_lag(void)
 {
     struct connman *cm = sync_monitor_connman();
@@ -76,20 +44,6 @@ static bool detect_sync_violation_lag(void)
     int peer_max = connman_max_peer_height(cm);
     int gap = peer_max - local;
     if (peer_max <= 0 || local < 0 || gap <= SYNC_VIOLATION_GAP) {
-        atomic_store(&g_first_seen_unix, 0);
-        atomic_store(&g_last_local_seen, local);
-        return false;
-    }
-
-    /* Fresh instant-on: a staged checkpoint bundle keeps H* flat until headers
-     * reach the checkpoint. Do not treat that expected crawl as a sync
-     * violation, and do not burn the peer set that is feeding the headers. */
-    if (checkpoint_bundle_waiting_for_headers(ms)) {
-        LOG_INFO("condition",
-                 "[condition:sync_violation_lag] local=%d peer_max=%d gap=%d "
-                 "— staged checkpoint bundle is waiting for headers to reach "
-                 "the checkpoint; suppressing lag detection",
-                 local, peer_max, gap);
         atomic_store(&g_first_seen_unix, 0);
         atomic_store(&g_last_local_seen, local);
         return false;
