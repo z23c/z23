@@ -105,10 +105,24 @@ z23 zcode workspace source package checkout --input='{"datadir":"<datadir>","pac
 
 This needs three roots, not one: the package root, the source tree root
 inside it, and the accepted-work root it was published under — it
-re-verifies the whole acceptance chain, not just the bytes. There is no
-single command that turns "a root someone told me" into checked-out
-source; if you only have a source root and no package, ask whoever gave it
-to you for a `.zvsb` bundle instead.
+re-verifies the whole acceptance chain, not just the bytes.
+
+### When a source root is all you have
+
+If someone handed you one 64-hex source root and nothing else, that is
+enough. Ask the network for it directly:
+
+```bash
+z23 zcode workspace source bundle fetch --input='{"source_root":"<64hex>","output":"/tmp/source.zvsb","peers":"<ip:port>,<ip:port>"}'
+z23 zcode workspace source bundle checkout --input='{"bundle":"/tmp/source.zvsb","source_root":"<64hex>","workspace":"/tmp/zvcs-scratch","destination":"/tmp/source-scratch"}'
+```
+
+The peers are hints about who to ask, not who to trust. What arrives is
+accepted only because it rehashes to the root you asked for, so a peer
+that lies can waste your time and nothing else — a bundle that does not
+rederive to that root is refused and no file is written. On the other
+side of this, `publish` is how a machine offers its own workspace and
+prints the root to hand over.
 
 ## Exit codes
 
