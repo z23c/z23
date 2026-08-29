@@ -2607,7 +2607,7 @@ rpc_frontier() {
 # is the honest named-stall signal in this window, not a silent hang. Surface
 # it the same way the RPC blocker list would.
 log_named_park() {
-    grep -oE "PARKED alive-degraded at gate '[^']*'" "$DATADIR/node.log" 2>/dev/null |
+    grep -aoE "PARKED alive-degraded at gate '[^']*'" "$DATADIR/node.log" 2>/dev/null |
         tail -1 | sed -E "s/.*gate '([^']*)'.*/\1/"
 }
 
