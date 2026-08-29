@@ -221,6 +221,36 @@ window_outcome() {
     fi
 }
 
+# chain_tip_from_text <getblockchaininfo output> -> at_tip | behind | unknown
+#
+# Post-RPC silence has one honest innocent explanation the /proc counters
+# cannot see: the node caught up with the network and went idle. Its height
+# token freezes by design when no block arrives, and an idle synced node burns
+# no io/cpu/blkio either — byte-for-byte the same /proc shape as a wedge. The
+# signature that separates them is getblockchaininfo's headers vs blocks:
+# equal means the node knows every header the network has and is merely
+# waiting for the next block. Parsed as plain text so the selftest can pin it
+# without a live node, in the same spirit as the /proc parsers above. Anything
+# that does not parse as two integers — an RPC timeout, an error envelope, an
+# empty answer — is `unknown`, which never green-lights anything.
+chain_tip_from_text() {
+    chain_tip_headers=$(printf '%s\n' "$1" |
+        sed -n 's/.*"headers"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+        head -1)
+    chain_tip_blocks=$(printf '%s\n' "$1" |
+        sed -n 's/.*"blocks"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+        head -1)
+    if [ -n "$chain_tip_headers" ] && [ -n "$chain_tip_blocks" ]; then
+        if [ "$chain_tip_headers" -eq "$chain_tip_blocks" ]; then
+            echo at_tip
+        else
+            echo behind
+        fi
+    else
+        echo unknown
+    fi
+}
+
 service_pid_is_stable() {
     stable_pid=$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)
     [ "$stable_pid" = "$SERVICE_MAIN_PID" ] || return 1
@@ -415,6 +445,27 @@ cancelled_write_bytes: 999999'
     [ "$(window_outcome 99 301 300)" = fault ] || return 1
     # A window shorter than the silence limit has earned NEITHER verdict.
     [ "$(window_outcome 0 60 300)" = unverified_unobserved ] || return 1
+
+    # ── the idle-tip discriminator ──────────────────────────────────────────
+    # THE CASE THE SILENCE CONVICTION GOT WRONG (seen live twice on
+    # 2026-08-29): a synced node at the network tip freezes its height token
+    # by design, and its /proc counters go quiet — byte-for-byte the token
+    # shape of a wedge. headers==blocks is the signature of an idle tip.
+    selftest_tip='{"result":{"chain":"main","blocks":3232594,"headers":3232594,"best_header_height":3232594,"verificationprogress":1}}'
+    [ "$(chain_tip_from_text "$selftest_tip")" = at_tip ] || return 1
+    # A catch-up node knows more headers than it has blocks: still moving, or
+    # a stuck catch-up — either way NOT eligible for the idle-tip acquittal.
+    selftest_behind='{"result":{"chain":"main","blocks":3232500,"headers":3232594,"best_header_height":3232594,"verificationprogress":0.999}}'
+    [ "$(chain_tip_from_text "$selftest_behind")" = behind ] || return 1
+    # Anything unparseable is unknown, and unknown never green-lights: an RPC
+    # timeout, an error envelope, or a dead surface must take the conviction
+    # path unchanged.
+    [ "$(chain_tip_from_text "")" = unknown ] || return 1
+    [ "$(chain_tip_from_text "error: connection refused")" = unknown ] || return 1
+    # The adjacent key best_header_height must not be mistaken for headers,
+    # and initialblockdownload must not satisfy "blocks".
+    selftest_trapkeys='{"initialblockdownload":false,"best_header_height":77,"blocks":50,"headers":50}'
+    [ "$(chain_tip_from_text "$selftest_trapkeys")" = at_tip ] || return 1
 
     echo "deploy_verify selftest: PASS"
 }
@@ -1085,6 +1136,39 @@ while :; do
 
     # The ONLY clock allowed to call a fault.
     if [ "$silent_for" -ge "$SILENCE_LIMIT" ]; then
+        # Before convicting, give post-RPC silence its one honest innocent
+        # explanation: a node parked at the network tip. Its height token
+        # freezes by design when no block arrives, and an idle synced node
+        # moves no io/cpu/blkio — indistinguishable from a wedge to the token.
+        # Ask the node where it stands. at_tip + a live answer is an idle tip,
+        # not a wedge: unverified (exit 3, candidate stays), never a rollback.
+        # A node that no longer answers, or that is behind its headers with
+        # nothing moving, is exactly the wedge this limit exists to catch.
+        if [ "$RPC_READY" -eq 1 ]; then
+            tip_verdict=$(chain_tip_from_text "$(rpc_call getblockchaininfo 2>/dev/null || true)")
+            case "$tip_verdict" in
+                at_tip)
+                    echo "DEPLOY UNVERIFIED (idle at tip): the frozen height token" \
+                         "coincides with headers==blocks and a live getblockchaininfo" \
+                         "answer — the candidate is synced and waiting for the next" \
+                         "block, not wedged. ${silent_for}s of idle after ${elapsed}s" \
+                         "and $attempt attempts. Candidate stays installed; NOTHING" \
+                         "is rolled back. Re-run with ZCL_DEPLOY_VERIFY_WAIT=1 to" \
+                         "keep watching, or investigate why the deploy contract did" \
+                         "not pass on a healthy node."
+                    report_evidence
+                    exit 3
+                    ;;
+                behind)
+                    echo "note: silence conviction on a node still behind its" \
+                         "headers — a catch-up loop that stopped moving" >&2
+                    ;;
+                unknown)
+                    echo "note: silence conviction with getblockchaininfo" \
+                         "unanswerable — the RPC surface died" >&2
+                    ;;
+            esac
+        fi
         echo "DEPLOY FAILED: the candidate stopped making observable progress —" \
              "nothing changed for ${silent_for}s (limit ${SILENCE_LIMIT}s)" \
              "after ${elapsed}s and $attempt attempts." \
