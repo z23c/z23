@@ -11,7 +11,20 @@ repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 bin="${1:-build/bin/zclassic23}"
 test -x "$bin" || { echo "c23-node: missing executable: $bin" >&2; exit 1; }
 
-if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+# Which audit to run is a property of the BINARY, not of this machine. A
+# Windows release is now cross-linked on Linux (make ZCL_TARGET=windows-x86_64
+# release), so a host-keyed choice would hand a PE executable to the ELF
+# branch: readelf finds no shared-library entries, the "forbidden dynamic
+# dependency" loop never runs, and every DLL import ships ungraded behind a
+# PASS line. Ask objdump what the file is instead. GNU objdump on Linux reads
+# pei-x86-64; where it cannot (Mach-O on most Linux binutils) the probe is
+# simply empty and the host-keyed Darwin branch below still applies.
+bin_format=""
+if command -v objdump >/dev/null 2>&1; then
+    bin_format="$(objdump -f "$bin" 2>/dev/null | sed -n 's/^.*file format //p' | head -1)"
+fi
+
+if [[ "$(uname -s 2>/dev/null)" == Darwin && "$bin_format" != pei-* ]]; then
     command -v otool >/dev/null 2>&1 || {
         echo "c23-node: otool is required for the Mach-O dependency audit" >&2
         exit 1
@@ -74,15 +87,16 @@ if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
     exit 0
 fi
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*)
+# Selected by the artifact (see bin_format above), so a PE is graded as a PE
+# whether it was linked on Windows or cross-linked for Windows.
+case "$bin_format:$(uname -s 2>/dev/null)" in
+    pei-*:*|*:MINGW*|*:MSYS*)
         command -v objdump >/dev/null 2>&1 || {
             echo "c23-node: objdump is required for the PE dependency audit" >&2
             exit 1
         }
-        format="$(objdump -f "$bin" | sed -n 's/^.*file format //p' | head -1)"
-        [[ "$format" == pei-x86-64 ]] || {
-            echo "c23-node: expected native x86-64 PE, found ${format:-unknown}" >&2
+        [[ "$bin_format" == pei-x86-64 ]] || {
+            echo "c23-node: expected x86-64 PE, found ${bin_format:-unknown}" >&2
             exit 1
         }
         bad=0
@@ -96,7 +110,7 @@ case "$(uname -s 2>/dev/null)" in
             esac
         done < <(objdump -p "$bin" | sed -n 's/^[[:space:]]*DLL Name: //p')
         test "$bad" -eq 0 || exit 1
-        echo "c23-node: PASS (native x86-64 PE; pinned static project dependencies; Windows system DLLs only)"
+        echo "c23-node: PASS (x86-64 PE; pinned static project dependencies; Windows system DLLs only)"
         exit 0
         ;;
 esac

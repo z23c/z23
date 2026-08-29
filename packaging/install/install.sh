@@ -29,10 +29,36 @@
 # and this scaffold refuses rather than fetching something it cannot name.
 # See docs/work/BOOTSTRAP_PLAN.md.
 #
+# PUBLISHED, not BUILT. packaging/release/build_release.sh packages a
+# windows-x86_64 runtime as well as a linux-x86_64 one — a real x86-64 PE,
+# cross-linked here, with its own exact closed SHA-256 manifest — and Windows
+# is still absent from the table below, for reasons about the user's machine
+# rather than ours:
+#   1. no bootstrap exists for it. tools/install/z23_bootstrap.c is POSIX —
+#      uname(2), a UDP socket, fork/exec — so nothing here can serve
+#      bootstrap/windows-x86_64/z23-bootstrap.exe, because nothing here
+#      builds one.
+#   2. there is no Windows second stage either: a Windows bootstrap would
+#      fetch install_z23.ps1, which does not exist.
+#   3. the Windows runtime has never been EXECUTED. This host has no Windows
+#      machine and no Wine, so the evidence stops at "links, and imports only
+#      Windows system DLLs".
+# macOS is absent for a different reason: no Linux host may produce a Mach-O
+# (the SDK is not redistributable), so there is no runtime to publish at all.
+# Adding a name below is therefore a separate act from making a release, and
+# tools/lint/check_published_platforms.sh refuses any name the release cutter
+# cannot actually produce a bootstrap for. Refusing a machine we do not
+# publish for, by name, beats installing a binary that cannot run on it.
+#
 # POSIX sh, because the convenience bootstrap ends in `sh` and that is often
 # dash: no bashisms, no [[ ]], no `set -o pipefail` (not POSIX). Every
 # status-carrying test here is pipeline-free, so none can invert on SIGPIPE.
 set -euf
+# The claim, and the table that makes it good: PUBLISHED_PLATFORMS is what a
+# refusal names, and the BOOT_* digests are what a fetch is checked against.
+# check_published_platforms.sh keeps the two in step with each other, with
+# install.ps1, and with what the release cutter can actually produce.
+PUBLISHED_PLATFORMS=" linux-x86_64 "
 BOOT_ZERO=0000000000000000000000000000000000000000000000000000000000000000
 BOOT_LINUX_X86_64="$BOOT_ZERO"
 ORIGIN="${Z23_INSTALL_TEST_ORIGIN:-https://z23.sh}"
@@ -44,7 +70,7 @@ case "$(uname -m)" in x86_64|amd64) cpu=x86_64 ;; aarch64|arm64) cpu=aarch64 ;; 
 PLATFORM="$os-$cpu"
 case "$PLATFORM" in
     linux-x86_64) WANT="$BOOT_LINUX_X86_64" ;;
-    *) die "no Z23 bootstrap is published for $PLATFORM; published: linux-x86_64" ;;
+    *) die "no Z23 bootstrap is published for $PLATFORM; published:${PUBLISHED_PLATFORMS% }" ;;
 esac
 [ "$WANT" != "$BOOT_ZERO" ] || die "no Z23 bootstrap is pinned into this script yet — nothing was downloaded"
 have curl || die "curl is required to fetch the Z23 bootstrap"

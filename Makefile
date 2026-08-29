@@ -24,14 +24,72 @@ endif
 # That is exactly what happened -- 217d3eb6e raised the product to the
 # Windows 10 baseline and left the catalog at 0x0600.
 ZCL_WINDOWS_API_FLOOR := -D_WIN32_WINNT=0x0A00
+
+# ── Release targets ───────────────────────────────────────────────────────
+# Everything below is written against ZCL_HOST_OS, the OS the ARTIFACT is for.
+# On the default target that is this machine, which is why the variable is
+# named for the host and why nothing else here changes: `make z23` with no
+# ZCL_TARGET produces exactly the bytes it always did.
+#
+# ZCL_TARGET=windows-x86_64 asks for the other artifact this repository can
+# already almost produce. The Windows arms below, the platform seam, and the
+# acceptance catalog have been maintained by a mingw gate for months
+# (check-windows-platform-seam); what was missing was never the C, it was a
+# way to SELECT the Windows arms without standing on a Windows box, plus a
+# vendor archive set for that target (vendor/cross/<triple>, built by
+# VENDOR_TARGET=<triple> tools/scripts/build_vendor.sh).
+#
+# A cross target selects the node link only. Tests, dev tooling, benchmarks
+# and every other goal in this file stay host-targeted and are not built under
+# a cross target -- one of them would link host archives into a Windows binary
+# and the mismatch is exactly the silent kind. `make ZCL_TARGET=... release`
+# is the supported entry point.
+ZCL_TARGET ?= host
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
+ZCL_CROSS_TRIPLE :=
+ifneq ($(ZCL_TARGET),host)
+ifeq ($(ZCL_TARGET),windows-x86_64)
+ZCL_CROSS_TRIPLE := x86_64-w64-mingw32
+# The spelling every Windows arm below already tests for, so the cross build
+# takes the same branches a native MSYS2 build takes -- there is no second
+# Windows configuration to keep in sync with the first.
+ZCL_HOST_OS := MINGW64_NT-10.0
+else
+$(error unknown ZCL_TARGET '$(ZCL_TARGET)' — known: host, windows-x86_64)
+endif
+endif
+# Where the archives for THIS target live. vendor/lib holds exactly one target
+# (see tools/scripts/build_vendor.sh), so a cross target reads its own tree.
+ZCL_VENDOR_LIB := $(if $(ZCL_CROSS_TRIPLE),vendor/cross/$(ZCL_CROSS_TRIPLE)/lib,vendor/lib)
+# vendor/include holds the target-INDEPENDENT tracked headers (sqlite3.h,
+# secp256k1*.h, leveldb/); the generated ones (openssl/, event2/, zlib.h) are
+# per-target and come from the cross tree, which is therefore searched first.
+ZCL_VENDOR_INC_FLAGS := $(if $(ZCL_CROSS_TRIPLE),-Ivendor/cross/$(ZCL_CROSS_TRIPLE)/include,) -Ivendor/include
+# binutils follow the compiler. Host objcopy/strip do not understand a PE, and
+# on this host they fail in the least useful way: `strip` reports success on a
+# file it did not change.
+ZCL_OBJCOPY := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-objcopy,objcopy)
+ZCL_STRIP_TOOL := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-strip,strip)
+
 ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
-CC = gcc
-CXX ?= g++
+# A native Windows build uses the MSYS2 gcc, unchanged. A CROSS build cannot:
+# every mingw-w64 gcc packaged by Debian and Ubuntu is GCC 13, and GCC 13 does
+# not know -std=c23 -- the C23 toolchain gate below refuses it, correctly, by
+# compiling an empty TU rather than parsing a version. clang reaches the same
+# target with a flag instead of a separate driver, and clang 20 speaks C23, so
+# the cross toolchain is clang aimed at the mingw-w64 sysroot the distro
+# already installs (its headers, its CRT, its libgcc; only the front end
+# changes). --target rides in the platform CPPFLAGS rather than in $(CC) so
+# every consumer of $(CC) still receives ONE word: the epoch tools, the
+# compiler-cache wrapper and the identity record all treat it as a command.
+CC = $(if $(ZCL_CROSS_TRIPLE),clang,gcc)
+CXX ?= $(if $(ZCL_CROSS_TRIPLE),clang++,g++)
 ZCL_PLATFORM_CPPFLAGS = $(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
-	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC
-ZCL_LTO_FLAG = -flto=auto
+	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC \
+	$(if $(ZCL_CROSS_TRIPLE),--target=$(ZCL_CROSS_TRIPLE),)
+# -flto=auto is a GCC spelling; clang rejects the argument outright.
+ZCL_LTO_FLAG = $(if $(ZCL_CROSS_TRIPLE),-flto=thin,-flto=auto)
 # -lshlwapi is required by the vendored Tor on Windows: its own configure
 # sets TOR_LIB_SHLWAPI=-lshlwapi (vendor/tor/configure.ac:856) and a real-Tor
 # link fails without it. It is inert on the stub link -- static linking adds no
@@ -39,8 +97,17 @@ ZCL_LTO_FLAG = -flto=auto
 # work. Note the PE dependency audit does NOT pre-authorise shlwapi.dll: if a
 # real-Tor build starts importing it, the audit is meant to fail and make that
 # a deliberate decision with evidence, not one granted in advance.
-ZCL_PLATFORM_NODE_LIBS = -l:libregex.a -l:libtre.a -l:libintl.a \
-	-l:libiconv.a -lws2_32 -liphlpapi -lbcrypt -lshlwapi \
+# libregex/libtre/libintl/libiconv are MSYS2 packages, not part of the
+# mingw-w64 target sysroot a cross toolchain installs, and nothing this
+# repository wrote needs them: the node carries its own ERE matcher precisely
+# because <regex.h> does not exist on Windows (lib/util/include/util/
+# ere_match.h). They stay on the native MSYS2 link, where the real-Tor build
+# reaches them and where they have always been; a cross link asks for the
+# Windows system libraries only. If a real cross Tor ever needs one, the link
+# fails by name, which is the outcome to want.
+ZCL_PLATFORM_NODE_LIBS = \
+	$(if $(ZCL_CROSS_TRIPLE),,-l:libregex.a -l:libtre.a -l:libintl.a -l:libiconv.a) \
+	-lws2_32 -liphlpapi -lbcrypt -lshlwapi \
 	-luserenv -lcrypt32 -lshell32 -lole32 -luuid -lpsapi -lgdi32
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
@@ -211,7 +278,7 @@ endif
 # restart, the boundary recipe must also drop this session's cached capture:
 # the pre-boundary parse may already have memoized a record that cannot see
 # the inputs this boundary establishes.
-NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libsecp256k1-darwin.a,$(if $(ZCL_HOST_WINDOWS),vendor/lib/libsecp256k1-windows.a,vendor/lib/libsecp256k1.a))
+NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),$(ZCL_VENDOR_LIB)/libsecp256k1-darwin.a,$(if $(ZCL_HOST_WINDOWS),$(ZCL_VENDOR_LIB)/libsecp256k1-windows.a,$(ZCL_VENDOR_LIB)/libsecp256k1.a))
 ZCL_GC_SECTIONS_LDFLAG = -Wl,--gc-sections
 ifeq ($(ZCL_HOST_OS),Darwin)
 # Apple ld has no --gc-sections; -dead_strip is its equivalent.
@@ -234,8 +301,8 @@ NODE_VENDOR_ARCHIVES = $(notdir $(NODE_SECP_ARCHIVE)) libcrypto.a libssl.a libev
 ZCL_NODE_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23 zclassic23,$(MAKECMDGOALS))),,1),)
 VENDOR_ARCHIVES = $(NODE_VENDOR_ARCHIVES) \
 	$(if $(ZCL_NODE_ONLY_BUILD),,libleveldb.a)
-VENDOR_LIBS = $(addprefix vendor/lib/,$(VENDOR_ARCHIVES))
-NODE_VENDOR_LIBS = $(addprefix vendor/lib/,$(NODE_VENDOR_ARCHIVES))
+VENDOR_LIBS = $(addprefix $(ZCL_VENDOR_LIB)/,$(VENDOR_ARCHIVES))
+NODE_VENDOR_LIBS = $(addprefix $(ZCL_VENDOR_LIB)/,$(NODE_VENDOR_ARCHIVES))
 VENDOR_BOOTSTRAP_MK := build/identity/vendor-inputs-ready.mk
 VENDOR_MISSING_INPUTS := $(filter-out $(wildcard $(VENDOR_LIBS)),$(VENDOR_LIBS))
 VENDOR_REPAIR_GOALS := vendor-ready deploy install
@@ -931,18 +998,38 @@ ZCL_WARN_EXTRA_GATES = \
 	-Wflex-array-member-not-at-end
 endif
 
-CFLAGS = -std=c23 -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werror -pedantic \
+# C23 has two accepted spellings and one language: GCC 14+ takes -std=c23,
+# GCC 13 only the earlier -std=c2x. Every mingw-w64 package on Debian/Ubuntu
+# is GCC 13, and lib/platform/tests/windows_acceptance.mk has compiled the
+# Windows acceptance catalog as -std=c2x for exactly that reason since it was
+# written. So ask the selected compiler instead of asserting; the host answers
+# c23, leaving its command line byte-identical. The probe runs only when a
+# cross target is selected, so the default parse pays no shell call.
+ZCL_C_STD := c23
+ifneq ($(ZCL_CROSS_TRIPLE),)
+ZCL_C_STD := $(shell printf 'int main(void){return 0;}' | $(CC) -std=c23 -fsyntax-only -x c - >/dev/null 2>&1 && printf c23 || printf c2x)
+endif
+CFLAGS = -std=$(ZCL_C_STD) -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werror -pedantic \
 	$(REPRO_CFLAGS) \
 	$(HARDEN_CFLAGS) \
 	$(ZCL_WARN_EXTRA_GATES) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(ZCL_WARN_UNUSED_RESULT) \
 	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) $(DEVLOOP_INCLUDES) \
 	-Ilib/test/include \
-	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) -Ivendor/include -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) $(ZCL_VENDOR_INC_FLAGS) -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
 ZCL_EXPORT_DYNAMIC_FLAG = $(if $(filter Darwin,$(ZCL_HOST_OS)),,$(if $(ZCL_HOST_WINDOWS),,-rdynamic))
 ZCL_WINDOWS_CLANG_LINKER = $(if $(and $(ZCL_HOST_WINDOWS),$(ZCL_CC_IS_CLANG)),-fuse-ld=lld,)
-LDFLAGS = $(if $(ZCL_HOST_WINDOWS),-static-libgcc,-pthread) $(ZCL_LTO_FLAG) $(ZCL_WINDOWS_CLANG_LINKER) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
+# -static on the Windows cross link, not merely -static-libgcc. clang's MinGW
+# driver appends -lssp for -fstack-protector-strong, and -lssp resolves to the
+# IMPORT library libssp.dll.a before the static libssp.a beside it: the node
+# then depends on libssp-0.dll, a file no Windows machine has, and the PE
+# dependency audit fails it -- correctly, because a release that needs a DLL
+# from a Linux cross-toolchain directory is not a release. -static makes the
+# linker prefer every real archive over its import stub, which is what a
+# self-contained node wants anyway; the Windows API import libraries
+# (ws2_32 &c.) are import stubs with no static alternative and are unaffected.
+LDFLAGS = $(if $(ZCL_HOST_WINDOWS),$(if $(ZCL_CROSS_TRIPLE),-static,-static-libgcc),-pthread) $(ZCL_LTO_FLAG) $(ZCL_WINDOWS_CLANG_LINKER) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
 CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAGS))
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
@@ -1030,11 +1117,17 @@ DEV_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(
 # this repository already builds. A Mac without those archives simply has no
 # vendor/tor/libtor.a, so this wildcard stays empty and the stub is selected
 # for the same reason it is on any other host that never opted in.
-TOR_FULL = $(wildcard vendor/tor/libtor.a \
-	vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
-	vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
-	vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a)
-TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub)
+# ...and it asks about the archives for THIS TARGET. vendor/tor holds one
+# build, for the host, exactly like vendor/lib: a cross link that consumed it
+# would be handing an ELF archive to a PE link, and the failure mode this
+# selection was written to prevent (a binary whose tor_run_main is not the one
+# the gate believes) comes straight back in a new form.
+ZCL_TOR_TREE := $(if $(ZCL_CROSS_TRIPLE),vendor/cross/$(ZCL_CROSS_TRIPLE)/tor,vendor/tor)
+TOR_FULL = $(wildcard $(ZCL_TOR_TREE)/libtor.a \
+	$(ZCL_TOR_TREE)/src/ext/ed25519/donna/libed25519_donna.a \
+	$(ZCL_TOR_TREE)/src/ext/ed25519/ref10/libed25519_ref10.a \
+	$(ZCL_TOR_TREE)/src/ext/keccak-tiny/libkeccak-tiny.a)
+TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-L$(ZCL_VENDOR_LIB) -ltor_stub)
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
 # OpenSSL 3.0 (Apache 2.0), libevent and zlib are vendored and statically
@@ -1049,7 +1142,7 @@ CXX_STDLIB_FILE := $(shell $(CXX) -print-file-name=libstdc++.a 2>/dev/null)
 endif
 CXX_STDLIB_DIR := $(if $(filter /%,$(CXX_STDLIB_FILE)),$(dir $(CXX_STDLIB_FILE)),)
 CXX_STDLIB_LDFLAGS := $(if $(CXX_STDLIB_DIR),-L$(CXX_STDLIB_DIR),)
-LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
+LIBS = $(NODE_SECP_ARCHIVE) -L$(ZCL_VENDOR_LIB) -lleveldb \
 	$(CXX_STDLIB_LDFLAGS) $(ZCL_CXX_RUNTIME_LIB) -lsqlite3 \
 	-levent -levent_openssl -levent_pthreads \
 	-lssl -lcrypto -lz $(ZCL_DLOPEN_LIB) \
@@ -1063,11 +1156,11 @@ LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
 NODE_C23_CFLAGS = $(CFLAGS) -DZCL_C23_NODE -UHAVE_GTK -UHAVE_WEBKIT
 # Same archives-not-OS rule as TOR_LIBS above; see the comment there for why
 # the Darwin arm is gone.
-NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a)
-NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) vendor/lib/libsqlite3.a \
-	vendor/lib/libevent.a vendor/lib/libevent_openssl.a \
-	vendor/lib/libevent_pthreads.a vendor/lib/libssl.a \
-	vendor/lib/libcrypto.a vendor/lib/libz.a $(ZCL_DLOPEN_LIB) \
+NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),$(ZCL_VENDOR_LIB)/libtor_stub.a)
+NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) $(ZCL_VENDOR_LIB)/libsqlite3.a \
+	$(ZCL_VENDOR_LIB)/libevent.a $(ZCL_VENDOR_LIB)/libevent_openssl.a \
+	$(ZCL_VENDOR_LIB)/libevent_pthreads.a $(ZCL_VENDOR_LIB)/libssl.a \
+	$(ZCL_VENDOR_LIB)/libcrypto.a $(ZCL_VENDOR_LIB)/libz.a $(ZCL_DLOPEN_LIB) \
 	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(ZCL_PLATFORM_NODE_LIBS)
 
@@ -2005,8 +2098,8 @@ worktree-prime:
 # rule lets `make zclassic23` pull in `make vendor` transparently on a fresh
 # clone without re-running the whole script when the libs are already there.
 # libsecp256k1.a is tracked, so it has no recipe (git provides it).
-$(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
-	tools/scripts/build_vendor.sh $(notdir $@)
+$(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
+	VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh $(notdir $@)
 
 .PHONY: all test test-e2e test-shielded-payment test-store-e2e clean deploy deploy-dev remote-node-plan remote-node-plan-json remote-node-update remote-node-update-json lane-health lane-recover check-agent-cli check-restart-follow \
         background-fuzz background-coverage background-tests install-quality-linger quality-linger-status pre-push-ci \
@@ -4636,18 +4729,37 @@ ACME_WORKER_SRCS = \
 	lib/json/src/json.c \
 	lib/base/src/log_level.c \
 	lib/base/src/safe_alloc.c \
-	lib/platform/src/clock.c
+	lib/platform/src/clock.c \
+	lib/platform/src/temp_directory.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/platform/src/rng.c
 ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
-	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+	-Ilib/platform/include -Ilib/util/include -Itools/acme \
+	$(ZCL_VENDOR_INC_FLAGS)
 ACME_WORKER_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(ACME_WORKER_INCLUDES)
+# The renewal worker's own selftest needs a private scratch directory, and it
+# used to call mkdtemp(3) for one. That is a POSIX-only symbol the mingw CRT
+# does not export, so the four platform TUs above are what replace it:
+# platform_temp_directory_create() and the private-directory/RNG primitives it
+# stands on, all of which the seam already builds for both arms. Same code on
+# both platforms rather than a Windows-only branch.
+# Deliberately NOT $(LDFLAGS): the node's release link flags would change this
+# worker's bytes on Linux for no reason here. Only what the Windows cross link
+# cannot do without — the static preference that keeps libssp-0.dll out (see
+# LDFLAGS above) and clang's MinGW linker.
+ACME_WORKER_LDFLAGS = $(if $(ZCL_CROSS_TRIPLE),-static $(ZCL_WINDOWS_CLANG_LINKER),)
+ACME_WORKER_LIBS = $(ZCL_VENDOR_LIB)/libssl.a $(ZCL_VENDOR_LIB)/libcrypto.a \
+	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+	$(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
 
 .PHONY: zclassic23-acme
-zclassic23-acme: $(BIN_DIR)/zclassic23-acme
-$(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
+zclassic23-acme: $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
+$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+	$(CC) $(ACME_WORKER_CFLAGS) $(ACME_WORKER_LDFLAGS) -o $@ \
+		$(ACME_WORKER_SRCS) $(ACME_WORKER_LIBS)
 
 # ── The install front door ────────────────────────────────────────────────
 # `z23-bootstrap` is the program packaging/install/install.sh downloads,
@@ -4696,7 +4808,28 @@ $(eval $(call BUILD_NODE_TOOL,rebuild_recent,tools/rebuild_recent.c,-lm,-fopenmp
 # the Tor stub the only honest link input; a host's optional full-Tor build must
 # not affect verifier bytes. See tools/package_verify.c.
 .PHONY: zclassic23-package-verify
+ifneq ($(ZCL_HOST_WINDOWS),)
+# The external package verifier is the ONE program that compiles and executes
+# downloaded package code, and it is safe to do that only because it confines
+# every child: seccomp, Landlock and POSIX rlimits (tools/package_verify.c
+# reaches for <sys/resource.h> on its first page). None of those exist on
+# Windows and this tree has no Windows equivalent, so a build here can produce
+# only an UNCONFINED program wearing the name of a confined one. That is a
+# false safety claim in the exact place a false safety claim is most
+# expensive, so the build refuses instead, by name, and the Windows release
+# manifest simply does not carry this member (packaging/release/
+# build_release.sh, release_members). Nothing silently degrades.
+zclassic23-package-verify:
+	@printf '%s\n' \
+	 'zclassic23-package-verify: REFUSE: no Windows build.' \
+	 '  The verifier is only safe because it confines each child with seccomp,' \
+	 '  Landlock and rlimits. Windows has none of those here, and an unconfined' \
+	 '  binary under this name would be a false safety claim.' \
+	 '  The Windows release omits this member; z23 itself builds normally.' >&2
+	@exit 1
+else
 zclassic23-package-verify: $(BIN_DIR)/zclassic23-package-verify
+endif
 $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 		$(BUILD_IDENTITY_STAMP) $(NODE_C23_PACKAGE_VERIFY_OBJ) \
 		$(NODE_C23_PACKAGE_VERIFY_NODE_OBJS) \
@@ -4708,7 +4841,7 @@ $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 	trap 'rm -f "$$tmp" "$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)"' EXIT HUP INT TERM; \
 	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) \
 		-o "$$tmp" "@$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)" \
-		vendor/lib/libtor_stub.a $(NODE_C23_LIBS); \
+		$(ZCL_VENDOR_LIB)/libtor_stub.a $(NODE_C23_LIBS); \
 	$(BUILD_EPOCH_SESSION_TOOL) verify "$(NODE_C23_SESSION)" "$(NODE_C23_LEASE)" \
 	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
 	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
@@ -4871,9 +5004,9 @@ $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 		cp -f -- "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
 		strip -S -x "$$tmp"; \
 	else \
-		objcopy --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
-		strip $(ZCL_STRIP_ALL) "$$tmp"; \
-		objcopy --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
+		$(ZCL_OBJCOPY) --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
+		$(ZCL_STRIP_TOOL) $(ZCL_STRIP_ALL) "$$tmp"; \
+		$(ZCL_OBJCOPY) --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
 	fi; \
 	tools/scripts/check_c23_node_binary.sh "$$tmp"; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \

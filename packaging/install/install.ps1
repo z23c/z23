@@ -13,15 +13,46 @@
 # C23, inside the binary this fetches - and it runs only after a digest check,
 # where this file runs before one.
 #
-# TODAY THERE IS NO WINDOWS BOOTSTRAP. packaging/release/build_release.sh is
-# x86_64-linux only, so $BootPins below has no Windows row and this refuses
-# cleanly, having downloaded nothing and changed nothing.
+# THERE IS NO WINDOWS BOOTSTRAP, so $BootPins below has no Windows row and
+# this file refuses cleanly, having downloaded nothing and changed nothing.
+# It is worth being exact about what is and is not missing, because a runtime
+# now EXISTS and it would be easy to mistake that for a release:
+#   1. packaging/release/build_release.sh does package windows-x86_64 — a real
+#      x86-64 PE built from the whole node source, cross-linked on Linux with
+#      clang and the mingw-w64 sysroot, importing only Windows system DLLs,
+#      with its own exact closed SHA-256 manifest.
+#   2. tools/install/z23_bootstrap.c, the program this file exists to fetch,
+#      is POSIX: uname(2), a UDP socket, fork/exec. It has no Windows build,
+#      so there is no z23-bootstrap.exe to publish or to pin here.
+#   3. there is no second stage on Windows either. A Windows bootstrap would
+#      fetch install_z23.ps1, which does not exist.
+#   4. the packaged PE has never been EXECUTED — the host that cross-links it
+#      has no Windows machine and no Wine — and no Windows service lifecycle,
+#      fresh-host install, restart persistence, running-image qualification or
+#      rollback proof has been accepted.
+# A platform-index authority is still needed as well: the current
+# single-manifest pin cannot describe different per-platform releases.
+# Adding a row below is therefore not a sufficient release action, and
+# tools/lint/check_published_platforms.sh refuses a row the release cutter
+# cannot actually produce a bootstrap for.
+#
+# These checks run only after this file is already executing. An irm-to-iex
+# user trusts the z23.sh TLS origin for these first-stage bytes. A verified
+# bootstrap must authenticate this file against an anchor obtained outside
+# z23.sh before executing it.
+#
+# No prompt and no terminal is required: this runs under a coding agent as
+# often as under a person, and every refusal names the thing it protects,
+# never the shape of the caller.
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Forward)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-# platform -> SHA-256 of its published bootstrap. The all-zero digest is the
-# SENTINEL: nothing is published for that platform yet.
+# platform -> SHA-256 of the bootstrap published for it. The all-zero digest
+# is the SENTINEL: something is named but nothing is published for it yet, and
+# an empty table means no Windows platform is claimed at all. The release
+# cutter (packaging/release/build_release.sh --front-door) writes the real
+# rows into the copy it publishes; the checked-in copy stays a refusal.
 $BootZero = '0' * 64
 $BootPins = @{}
 $Origin = if ($env:Z23_INSTALL_TEST_ORIGIN) { $env:Z23_INSTALL_TEST_ORIGIN } else { 'https://z23.sh' }
