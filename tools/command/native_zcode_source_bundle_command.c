@@ -4,6 +4,8 @@
 #include "command/native_command.h"
 
 #include "base/hex.h"
+#include "controllers/rpc_client.h"
+#include "controllers/rpc_params.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/directory_transaction.h"
@@ -533,6 +535,170 @@ void zcl_native_handle_zcode_source_bundle_fetch(
     (void)json_push_kv_bool(&reply->data, "verified", true);
     (void)json_push_kv_bool(&reply->data, "signer_required", false);
     (void)json_push_kv_bool(&reply->data, "accepted", false);
+}
+
+/* ── Publish: the same bundle, offered to peers ──────────────────────
+ *
+ * The half of the loop `create` never had. `create` writes transport to a
+ * scratch path and stops; nothing about that file is where this node seeds
+ * artifacts from, in the running node's registry, or in any directory listing
+ * a peer reads. This leaf produces an OFFER instead of a file: it captures the
+ * workspace, builds the bundle, lands it under the node's own seeded
+ * directory, registers it BY NAME, and prints the one 64-hex string another
+ * machine needs to pull it with `fetch`.
+ *
+ * IT RUNS IN THE NODE, over RPC, and that is not an implementation detail: the
+ * artifact registry is the daemon's process memory, so a registration
+ * performed in this one-shot CLI process would be a publish that offered
+ * nothing (see app/controllers/src/source_bundle_publish_rpc.c). This handler
+ * therefore parses, forwards, and refuses loudly when the node does not
+ * answer — it never falls back to a local write that would look like success.
+ *
+ * The node picks the destination; the caller never names a path. `source_root`
+ * is optional and is a PIN, not a selector: supply it and a workspace that
+ * captures to a different tree is refused before anything is written. */
+
+/* The RPC body's failure shape, mirroring the other forwarding handlers: a
+ * bare string, an {"error":...} envelope, or a {code,message} pair. Returns
+ * NULL when the body carries no error. */
+static const char *zsb_rpc_error(const struct json_value *body)
+{
+    if (!body)
+        return "missing response body";
+    if (body->type == JSON_STR)
+        return json_get_str(body);
+    if (body->type != JSON_OBJ)
+        return NULL;
+    const struct json_value *error = json_get(body, "error");
+    if (error && !json_is_null(error)) {
+        if (error->type == JSON_STR)
+            return json_get_str(error);
+        if (error->type == JSON_OBJ)
+            return json_get_str(json_get(error, "message"));
+        return "the node returned an unstructured RPC error";
+    }
+    const struct json_value *code = json_get(body, "code");
+    const struct json_value *message = json_get(body, "message");
+    if (code && code->type == JSON_INT && message && message->type == JSON_STR)
+        return json_get_str(message);
+    return NULL;
+}
+
+/* Copy one key from the node's reply into the leaf's typed result, preserving
+ * its JSON type. A key the node did not send is simply absent — the leaf never
+ * invents a plausible zero for a field the node declined to report. */
+static void zsb_carry(struct json_value *out, const struct json_value *body,
+                      const char *key)
+{
+    const struct json_value *v = json_get(body, key);
+    if (!v) return;
+    if (v->type == JSON_STR)
+        (void)json_push_kv_str(out, key, json_get_str(v));
+    else if (v->type == JSON_INT)
+        (void)json_push_kv_int(out, key, json_get_int(v));
+    else if (v->type == JSON_BOOL)
+        (void)json_push_kv_bool(out, key, json_get_bool(v));
+}
+
+void zcl_native_handle_zcode_source_bundle_publish(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    const char *workspace = zsb_str(request->input, "workspace");
+    const char *pin_hex = zsb_str(request->input, "source_root");
+    char workspace_real[ZSB_PATH_MAX];
+    uint8_t pinned[32];
+    bool pin_ok = !pin_hex || !pin_hex[0] ||
+        (strlen(pin_hex) == 64 && zcl_hex_decode_lower(pin_hex, pinned, 32));
+    if (!workspace || !pin_ok ||
+        !platform_directory_canonical_real(workspace, workspace_real,
+                                           sizeof(workspace_real))) {
+        zsb_fail(reply, "BAD_SOURCE_BUNDLE_PUBLISH_INPUT", "validate",
+                 "workspace must resolve to a real directory, and source_root, when given, must be 64 lower-case hex characters");
+        return;
+    }
+
+    struct rpc_arg_builder args;
+    rpc_arg_builder_init(&args);
+    rpc_arg_builder_push_str(&args, workspace_real);
+    rpc_arg_builder_push_str(&args, pin_hex ? pin_hex : "");
+    char *params_json = rpc_arg_builder_to_json(&args);
+    if (!params_json) {
+        zsb_fail(reply, "SOURCE_BUNDLE_PUBLISH_ARGS", "normalize",
+                 "the publish parameters could not be encoded");
+        return;
+    }
+
+    zcl_native_bridge_ensure_rpc();
+    char *raw = node_rpc_call("sourcebundle_publish", params_json);
+    free(params_json);
+    if (!raw) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_TRANSIENT, "NODE_UNAVAILABLE",
+                               "dispatch", true, false,
+                               "no running node answered; a bundle can only be offered by the process that holds the file service",
+                               "zcode.workspace.source.bundle");
+        return;
+    }
+    struct json_value body;
+    json_init(&body);
+    bool parsed = json_read(&body, raw, strlen(raw));
+    free(raw);
+    const char *rpc_error = parsed ? zsb_rpc_error(&body) : "unparseable body";
+    const struct json_value *status = parsed ? json_get(&body, "status") : NULL;
+    const char *status_str =
+        status && status->type == JSON_STR ? json_get_str(status) : NULL;
+    if (rpc_error || !status_str || strcmp(status_str, "published") != 0) {
+        const struct json_value *why = parsed ? json_get(&body, "result") : NULL;
+        char detail[256];
+        (void)snprintf(detail, sizeof(detail), "%s",
+                       rpc_error ? rpc_error
+                       : (why && why->type == JSON_STR
+                              ? json_get_str(why)
+                              : "the node did not report the bundle as offered"));
+        json_free(&body);
+        zsb_fail(reply, "SOURCE_BUNDLE_PUBLISH_REFUSED", "publish", detail);
+        return;
+    }
+
+    /* Success means one thing only: the node's registry confirmed, by root,
+     * that a chunk request for this artifact would be answered. Everything
+     * below is that fact, restated for the operator. */
+    zsb_carry(&reply->data, &body, "source_root");
+    zsb_carry(&reply->data, &body, "artifact_digest");
+    zsb_carry(&reply->data, &body, "filename");
+    zsb_carry(&reply->data, &body, "path");
+    zsb_carry(&reply->data, &body, "wire_bytes");
+    zsb_carry(&reply->data, &body, "chunks");
+    zsb_carry(&reply->data, &body, "file_service_port");
+    zsb_carry(&reply->data, &body, "republished");
+    zsb_carry(&reply->data, &body, "seed_directory_entries");
+    zsb_carry(&reply->data, &body, "rescan_guaranteed");
+    zsb_carry(&reply->data, &body, "source_bytes");
+    zsb_carry(&reply->data, &body, "file_count");
+    (void)json_push_kv_bool(&reply->data, "offered", true);
+    (void)json_push_kv_bool(&reply->data, "git_required", false);
+    (void)json_push_kv_bool(&reply->data, "signer_required", false);
+    (void)json_push_kv_bool(&reply->data, "source_executed", false);
+    (void)json_push_kv_bool(&reply->data, "accepted", false);
+    const struct json_value *root_v = json_get(&body, "source_root");
+    const struct json_value *port = json_get(&body, "file_service_port");
+    const struct json_value *rescan = json_get(&body, "rescan_guaranteed");
+    char next[512];
+    (void)snprintf(next, sizeof(next),
+        "another machine needs only this source_root: z23 zcode workspace "
+        "source bundle fetch --input='{\"source_root\":\"%s\",\"output\":"
+        "\"/tmp/source.zvsb\",\"peers\":\"<this node's address>:%lld\"}'",
+        root_v && root_v->type == JSON_STR ? json_get_str(root_v) : "",
+        (long long)(port && port->type == JSON_INT ? json_get_int(port) : 0));
+    (void)json_push_kv_str(&reply->data, "next", next);
+    if (rescan && rescan->type == JSON_BOOL && !json_get_bool(rescan))
+        (void)json_push_kv_str(&reply->data, "durability_note",
+            "this bundle is offered now, but the seeded directory holds more "
+            "entries than the boot-time sweep examines, so a restart may stop "
+            "offering it — re-run publish after a restart");
+    json_free(&body);
+    reply->error.mutated = true;
 }
 
 void zcl_native_handle_zcode_source_package_checkout(

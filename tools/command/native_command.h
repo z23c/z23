@@ -545,6 +545,9 @@ void zcl_native_handle_zcode_source_bundle_checkout(
 void zcl_native_handle_zcode_source_bundle_fetch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_source_bundle_publish(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_source_package_checkout(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

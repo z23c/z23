@@ -222,8 +222,8 @@ verify, import, nor checkout executes downloaded source, and none requires
 Git.
 
 The typed leaves are `zcode workspace source capture`, the v1 diagnostic
-`zcode workspace source bundle create` / `fetch` / `verify` / `import` /
-`checkout` set, and `zcode workspace source package checkout` for
+`zcode workspace source bundle create` / `publish` / `fetch` / `verify` /
+`import` / `checkout` set, and `zcode workspace source package checkout` for
 reconstructing a v2 carrier already fetched into the ordinary node package
 store. Capture explicitly reports
 `accepted:false`: only the existing proof chain and explicit `zcode work
@@ -248,6 +248,31 @@ check, deprioritized, and stepped over — the search continues to the next
 candidate. Because the fetch never learns the caller's output path, a refusal
 cannot leave a partially materialized file behind. Retrieval still executes
 nothing; build and test remain separate explicit steps.
+
+### Offering a workspace, as opposed to writing a file
+
+`create` produces transport; `publish` produces an OFFER, and the difference
+is the whole reason the loop closes. A `.zvsb` sitting at a path the operator
+named is not reachable by anyone: it is not under the directory this node
+seeds artifacts from, the running node's artifact registry has never heard of
+it, and no directory listing advertises its tree root. `publish` captures the
+workspace, builds the bundle, lands it under the node's own seeded directory
+beneath a name derived from the content root, registers it there, and prints
+the 64-hex root the other machine needs. Publishing the same unchanged tree
+again re-offers the existing bundle rather than writing a second copy.
+
+Two properties of that path are deliberate. It runs INSIDE the node, because
+the artifact registry is the daemon's own memory and a registration performed
+in a one-shot CLI process would offer nothing while reporting success. And it
+registers the artifact BY NAME rather than waiting for the bounded directory
+sweep the seeder runs at boot, because that sweep stops after a fixed number
+of entries in arbitrary order — so a bundle published into a busy directory
+could otherwise sit past the stopping point and never be offered, silently.
+The result reports the offer only after the registry confirms it by root, and
+says explicitly when a future boot-time sweep is no longer guaranteed to reach
+the bundle. Publishing grants no acceptance authority and asks for no
+identity: a fetcher still accepts the bytes for rederiving the root it asked
+for and for no other reason.
 
 ### Git-free consumer build
 
