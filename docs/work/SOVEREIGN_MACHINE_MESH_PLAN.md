@@ -853,6 +853,14 @@ peers, never production wallet state.
   and terminal cancellation. Its one focused group ran cold with four cases,
   zero failures, and zero skips. The scheduler performs no socket, disk,
   authority, or publication operation; dispatcher integration remains open.
+- 2026-08-29T11:03:31-04:00 / 2026-08-29T15:03:31Z: exact Noise-static
+  delegation lookup moved into the bounded DHT view. It compares retained
+  contact keys before decoding and copies at most the caller's requested
+  matches, including a second match so ambiguity remains fail-closed. The mesh
+  status responder no longer allocates a maximum-chain delegation snapshot or
+  decodes unrelated entries per authenticated request. The cold
+  `zcode_dht_service` and `mesh_status_wire` groups passed with zero failures
+  and zero skips; `make lint-fast` passed 22/22 gates.
 
 ## Completion rule
 
