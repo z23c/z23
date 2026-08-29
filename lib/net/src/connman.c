@@ -1306,6 +1306,14 @@ void connman_note_addnode_prehandshake_disconnect(
            peer_state_name(node->state));
 }
 
+bool connman_node_is_addnode(struct connman *cm,
+                             const struct p2p_node *node)
+{
+    if (!cm || !node || node->inbound || node->is_feeler)
+        return false;
+    return connman_find_addnode_index(cm, &node->addr, NULL);
+}
+
 static bool connman_ready_addnode_from_other_group(struct connman *cm,
                                                    uint16_t saturated_group,
                                                    int64_t now)

@@ -110,6 +110,17 @@ static enum condition_remedy_result remedy_peer_floor_violated(void)
         struct p2p_node *n = cm->manager.nodes[i];
         if (n && !n->inbound && !n->disconnect &&
             n->state < PEER_HANDSHAKE_COMPLETE) {
+            /* Operator-configured -addnode peers are dial targets of last
+             * resort; do not tear them down mid-handshake while the floor is
+             * low. Let the normal addnode backoff/retirement logic handle a
+             * persistently-failing addnode. */
+            if (connman_node_is_addnode(cm, n)) {
+                LOG_INFO("condition",
+                         "[condition:peer_floor_violated] keeping addnode %s "
+                         "in handshake (state=%s) — not dropping it",
+                         n->addr_name, peer_state_name(n->state));
+                continue;
+            }
             (void)p2p_node_request_disconnect(
                 n, P2P_DISCONNECT_POLICY_ROTATION,
                 P2P_DISCONNECT_SOURCE_PEER_POLICY, n->endpoint_generation);

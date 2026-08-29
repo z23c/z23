@@ -109,3 +109,4 @@ Subsequent fixes:
 - `ad42404bc` — treat `-addnode=HOST:8033` peers as file-service snapshot seeds without forcing connect-only mode, so z23 nodes help each other bootstrap while keeping normal peer discovery.
 - `9eb439fe4` — support `ZCL_SERVICE_ENV_VARS` in the LaunchAgent; required for `ZCL_DEPLOY_ALLOW_CANONICAL=1` so a fetched snapshot can install into the canonical datadir.
 - `2348ed9eb` — add `ZCL_SERVICE_ADDNODE_PEERS` for multiple snapshot-seed peers and keep `tools/dev/grok_report.c` out of the node binary. The proposed lag-condition suppression was not retained because it coupled condition evaluation to controller-owned filesystem discovery without acceptance evidence.
+- *(this slice)* — protect `-addnode` peers from being torn down mid-handshake by `peer_floor_violated`, so operator-configured snapshot seeds have time to complete their handshake.
