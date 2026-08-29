@@ -134,7 +134,8 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # goal set below is built, and a missing file costs nothing. Its position is
 # the whole point: an app registered there joins the SAME lean parse zhello
 # gets, instead of paying the authoritative parse for a two-file build.
-GUI_APPS := zhello
+# Tracked reference apps.  User-local scaffolded apps append via config/gui_apps.mk.
+GUI_APPS := zhello ball
 -include config/gui_apps.mk
 # Five goals per GUI app: run, headless selftest, clean, .app bundle, and the
 # bare binary path. The binary is spelled `build/bin/…` literally because
@@ -263,7 +264,9 @@ VIEW_GEN_HEADERS_EARLY := app/views/include/views/wallet_templates_gen.h \
 VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
+ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 
@@ -1826,7 +1829,8 @@ ifeq ($(ZCL_HOST_OS),Darwin)
 GUI_APP_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
 	-framework QuartzCore -framework CoreVideo
 else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
-GUI_APP_HOST_LIBS := -lgdi32 -luser32 -lshell32 -lole32
+GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
+    -Wl,-Bdynamic -Wl,--no-insert-timestamp -lgdi32 -luser32 -lshell32 -lole32
 endif
 GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(GUI_APP_HOST_CPPFLAGS) \
@@ -1890,6 +1894,8 @@ endef
 # Both must precede the stamp below: the template reads them as it expands.
 zhello_ARGS = $(ZHELLO_ARGS)
 zhello_APP_TITLE := Zhello
+ball_ARGS = $(BALL_ARGS)
+ball_APP_TITLE := Ball
 $(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
 
 .PHONY: new-app
