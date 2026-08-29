@@ -612,6 +612,11 @@ void connman_note_addnode_prehandshake_disconnect(
     const struct p2p_node *node,
     const char *reason);
 
+/* True if `node` matches a configured -addnode entry. Inbound and feeler
+ * nodes are never addnodes by construction. Cheap: O(MAX_ADDNODES). */
+bool connman_node_is_addnode(struct connman *cm,
+                             const struct p2p_node *node);
+
 /* RETIRE: scan every addnode and retire (exclude from dial rotation) any
  * whose failure streak has crossed BOTH ZCL_ADDNODE_RETIRE_MIN_TCP_FAILURES
  * and ZCL_ADDNODE_RETIRE_MIN_WINDOW_SECS. `outbound_healthy` is the
