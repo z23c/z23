@@ -7856,6 +7856,8 @@ ZCL_LAUNCHD_DIR  = $(HOME)/Library/LaunchAgents
 ZCL_LAUNCHD_LABEL = org.z23.zclassic
 ZCL_LAUNCHD_PLIST = $(ZCL_LAUNCHD_DIR)/$(ZCL_LAUNCHD_LABEL).plist
 ZCL_DATADIR = $(or $(ZCL_NODE_DATADIR),$(HOME)/.zclassic-c23)
+ZCL_SERVICE_EXTRA_FLAGS ?=
+ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)
 
 .PHONY: service-install
 service-install:
@@ -7875,6 +7877,7 @@ __service-install:
 	@mkdir -p $(ZCL_LAUNCHD_DIR) "$(ZCL_DATADIR)"
 	@sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
 	     -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
+	     -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
 	    config/launchd/org.z23.zclassic.plist.template \
 	    > "$(ZCL_LAUNCHD_PLIST)"
 	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
@@ -10381,11 +10384,15 @@ $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	    -Ilib/sapling/include -Ilib/keys/include -Ilib/event/include \
 	    -o $@ $(EQUIHASH_FACT_SRCS)
 
-.PHONY: tools/equihash-params-fact docs-equihash-params
+.PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
 docs-equihash-params: $(EQUIHASH_FACT_TOOL)
 	@$(EQUIHASH_FACT_TOOL) docs/EQUIHASH_PARAMS.md
 	@echo "docs-equihash-params: wrote docs/EQUIHASH_PARAMS.md from the consensus tables"
+
+equihash-facts: docs-equihash-params
+
+equihash-facts-check: check-equihash-params
 
 # Gate — the height-selected Equihash fact cannot drift, in either direction.
 # Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and

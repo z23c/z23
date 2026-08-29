@@ -9,12 +9,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>@Z23_BIN@</string>
-        <string>-datadir</string>
-        <string>@DATADIR@</string>
-        <string>-operator-lane</string>
-        <string>canonical</string>
+        <string>-datadir=@DATADIR@</string>
+        <string>-operator-lane=canonical</string>
         <string>-listen</string>
         <string>-txindex</string>
+        @EXTRA_FLAGS@
     </array>
 
     <key>RunAtLoad</key>

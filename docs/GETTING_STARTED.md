@@ -450,6 +450,19 @@ straight from `build/bin/z23`. The LaunchAgent starts at login, restarts on
 crash, and logs to `~/.zclassic-c23/z23.{stdout,stderr}.log`. Stop it with
 `make service-uninstall` or `launchctl unload ~/Library/LaunchAgents/org.z23.zclassic.plist`.
 
+Pass extra node flags through the service template with
+`ZCL_SERVICE_EXTRA_FLAGS`. For a development machine that should cold-start
+quickly from the clearnet snapshot seeds rather than crawling every historical
+block body from P2P, use:
+
+```bash
+make dev-service-install ZCL_SERVICE_EXTRA_FLAGS="-allow-clearnet-snapshot-fetch"
+```
+
+This is opt-in and unauthenticated: the node still validates the fetched
+snapshot against consensus before trusting it, but the seed itself is not
+signed by the chain. Omit the flag for a from-genesis P2P-only sync.
+
 A minimal from-scratch example, if you'd rather not use the tracked unit
 (substitute your own paths/ports):
 
