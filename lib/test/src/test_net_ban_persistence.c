@@ -406,12 +406,26 @@ static int test_nbp_generation_contract(void)
 
 /* Writer thread for the lost-update regression: one whole-table write, with
  * the flush state sampled after it returns. Read by main only after
- * pthread_join(), so plain stores are enough. The thread must enter
- * ban_db_write() FIRST — its snapshot parks on cs_banned while main holds
- * it, and that park is what main's trylock on cs_ban_db_write detects; any
- * cs_banned-touching probe before the write would park the thread one lock
- * too early and the handshake below would never see the write mutex held. */
+ * pthread_join(), so plain stores are enough. */
 static struct ban_db_flush_state g_nbp_race_after;
+
+struct nbp_snapshot_rendezvous {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool reached;
+    bool proceed;
+};
+
+static void nbp_after_snapshot(void *ctx_)
+{
+    struct nbp_snapshot_rendezvous *ctx = ctx_;
+    pthread_mutex_lock(&ctx->mutex);
+    ctx->reached = true;
+    pthread_cond_broadcast(&ctx->cond);
+    while (!ctx->proceed)
+        pthread_cond_wait(&ctx->cond, &ctx->mutex);
+    pthread_mutex_unlock(&ctx->mutex);
+}
 
 static void *nbp_write_once(void *arg)
 {
@@ -440,42 +454,24 @@ static int test_nbp_ban_during_write_survives_restart(void)
         ASSERT(!nm.ban_db_dirty);
         const uint64_t gen_before = ban_db_flush_state_read(&nm).generation;
 
-        /* Park a writer at its snapshot: with cs_banned held, a
-         * ban_db_write() thread takes cs_ban_db_write and then blocks on
-         * cs_banned. trylock() stops succeeding on cs_ban_db_write exactly
-         * when the writer holds it — a deterministic observation that the
-         * writer is parked BEFORE it serialized anything. */
-        zcl_mutex_lock(&nm.cs_banned);
+        struct nbp_snapshot_rendezvous rendezvous = {
+            .mutex = PTHREAD_MUTEX_INITIALIZER,
+            .cond = PTHREAD_COND_INITIALIZER,
+            .reached = false,
+            .proceed = false,
+        };
+        nm.ban_db_after_snapshot_test_hook = nbp_after_snapshot;
+        nm.ban_db_after_snapshot_test_ctx = &rendezvous;
+
+        /* The writer stops after copying the table but before installing
+         * it.  This observes the exact flight window, independent of mutex
+         * wake order or scheduler load. */
         pthread_t writer;
         ASSERT(pthread_create(&writer, NULL, nbp_write_once, &nm) == 0);
-        bool writer_parked = false;
-        for (int i = 0; i < 100000 && !writer_parked; i++) {
-            if (!zcl_mutex_trylock(&nm.cs_ban_db_write)) {
-                writer_parked = true; /* held by the writer */
-            } else {
-                zcl_mutex_unlock(&nm.cs_ban_db_write);
-                struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 };
-                nanosleep(&ts, NULL);
-            }
-        }
-        ASSERT(writer_parked);
-
-        /* Release cs_banned and take it back: the writer must have finished
-         * its snapshot (it held cs_banned between the two observations), so
-         * everything banned from here is AFTER what that write serializes
-         * and is in the write's flight window or later. */
-        zcl_mutex_unlock(&nm.cs_banned);
-        bool snapshot_done = false;
-        for (int i = 0; i < 100000 && !snapshot_done; i++) {
-            if (zcl_mutex_trylock(&nm.cs_banned)) {
-                snapshot_done = true;
-                zcl_mutex_unlock(&nm.cs_banned);
-            } else {
-                struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 };
-                nanosleep(&ts, NULL);
-            }
-        }
-        ASSERT(snapshot_done);
+        pthread_mutex_lock(&rendezvous.mutex);
+        while (!rendezvous.reached)
+            pthread_cond_wait(&rendezvous.cond, &rendezvous.mutex);
+        pthread_mutex_unlock(&rendezvous.mutex);
 
         /* THE RACE: ban a fresh address as an AUTO ban while the write is
          * in flight. AUTO keeps the debounce from writing it behind our
@@ -484,14 +480,23 @@ static int test_nbp_ban_during_write_survives_restart(void)
         struct p2p_node node;
         nbp_flood_node(&node, racer);
         peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "race");
-        ASSERT(is_banned(&nm, &racer));
+        const bool racer_banned = is_banned(&nm, &racer);
 
+        pthread_mutex_lock(&rendezvous.mutex);
+        rendezvous.proceed = true;
+        pthread_cond_broadcast(&rendezvous.cond);
+        pthread_mutex_unlock(&rendezvous.mutex);
         pthread_join(writer, NULL);
+        nm.ban_db_after_snapshot_test_hook = NULL;
+        nm.ban_db_after_snapshot_test_ctx = NULL;
+        pthread_cond_destroy(&rendezvous.cond);
+        pthread_mutex_destroy(&rendezvous.mutex);
+        ASSERT(racer_banned);
 
         /* Exactly one mutation happened (the racer), and the write
-         * serialized the table as it was BEFORE it — main held cs_banned
-         * from before the writer existed until the snapshot had completed,
-         * so the file it installed cannot contain the racer. */
+         * serialized the table as it was BEFORE it: the rendezvous observed
+         * snapshot completion before the racer was inserted, so the file it
+         * installed cannot contain the racer. */
         ASSERT_EQ((int)ban_db_flush_state_read(&nm).generation, (int)gen_before + 1);
         struct net_manager probe;
         net_manager_init(&probe);

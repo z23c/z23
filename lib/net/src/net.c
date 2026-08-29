@@ -2039,6 +2039,10 @@ bool ban_db_write(struct net_manager *nm, const char *datadir)
         live++;
     }
     zcl_mutex_unlock(&nm->cs_banned);
+#ifdef ZCL_TESTING
+    if (nm->ban_db_after_snapshot_test_hook)
+        nm->ban_db_after_snapshot_test_hook(nm->ban_db_after_snapshot_test_ctx);
+#endif
 
     struct byte_stream s;
     stream_init(&s, entries.size + 8);

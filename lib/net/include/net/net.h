@@ -601,6 +601,12 @@ struct net_manager {
      * cs_banned — mutation sites call ban_db_write() only after releasing
      * cs_banned. */
     zcl_mutex_t cs_ban_db_write;
+#ifdef ZCL_TESTING
+    /* Deterministic rendezvous for the lost-update persistence acceptance.
+     * Production builds contain neither fields nor callback. */
+    void (*ban_db_after_snapshot_test_hook)(void *ctx);
+    void *ban_db_after_snapshot_test_ctx;
+#endif
     /* Borrowed pointer (owned by boot/connman context), NULL until the
      * owner wires it — see connman_load_addrman()/connman_save_addrman().
      * When set, ban_addr()/unban_addr()/clear_banned() persist the ban
