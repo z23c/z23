@@ -1,0 +1,42 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * tx_index_fields.def — the persisted columns of the Transaction index model,
+ * declared ONCE. See models/model_fields.h.
+ *
+ * This model is the awkward shape the mechanism has to handle honestly: its
+ * INSERT is a cached statement prepared in models/database.c while its binds
+ * live in models/tx_index.c, and its two SELECTs each omit the column the
+ * caller already knows (the txid it looked up, or the block hash it iterated).
+ * So there are three lists, not one. Each list is still internally derived —
+ * its column string, read indices and bind positions move together — which is
+ * exactly the drift this file exists to remove. A projection that reads a
+ * different column set genuinely IS a different mapping and gets to say so.
+ */
+
+/* transactions — full row, used by the cached INSERT OR REPLACE. */
+#define TX_INDEX_FIELDS \
+    ZCL_MODEL_BLOB(txid,         txid,       32), \
+    ZCL_MODEL_BLOB(block_hash,   block_hash, 32), \
+    ZCL_MODEL_INT (block_height, block_height),   \
+    ZCL_MODEL_INT (tx_index,     tx_index),       \
+    ZCL_MODEL_INT (file_num,     file_num),       \
+    ZCL_MODEL_INT (file_pos,     file_pos),       \
+    ZCL_MODEL_BOOL(is_coinbase,  is_coinbase)
+
+/* Lookup by txid: the caller already holds the txid, so it is not selected. */
+#define TX_INDEX_BY_TXID_FIELDS \
+    ZCL_MODEL_BLOB(block_hash,   block_hash, 32), \
+    ZCL_MODEL_INT (block_height, block_height),   \
+    ZCL_MODEL_INT (tx_index,     tx_index),       \
+    ZCL_MODEL_INT (file_num,     file_num),       \
+    ZCL_MODEL_INT (file_pos,     file_pos),       \
+    ZCL_MODEL_BOOL(is_coinbase,  is_coinbase)
+
+/* Iteration by block hash: the caller already holds the block hash. */
+#define TX_INDEX_BY_BLOCK_FIELDS \
+    ZCL_MODEL_BLOB(txid,         txid, 32),     \
+    ZCL_MODEL_INT (block_height, block_height), \
+    ZCL_MODEL_INT (tx_index,     tx_index),     \
+    ZCL_MODEL_INT (file_num,     file_num),     \
+    ZCL_MODEL_INT (file_pos,     file_pos),     \
+    ZCL_MODEL_BOOL(is_coinbase,  is_coinbase)

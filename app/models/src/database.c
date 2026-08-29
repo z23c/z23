@@ -23,6 +23,10 @@
 #include "models/database_owner_lease.h"
 #include "models/database_internal.h"
 #include "models/database_validators.h"
+#include "models/model_fields.h"
+/* The transactions-table column order lives with the model that binds it, so
+ * the cached INSERT below and tx_index.c's binder cannot disagree. */
+#include "models/def/tx_index_fields.def"
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -200,13 +204,11 @@ static bool prepare_statements(struct node_db *ndb)
 
     PREP(stmt_tx_insert,
          "INSERT OR REPLACE INTO transactions"
-         "(txid,block_hash,block_height,"
-         "tx_index,file_num,file_pos,is_coinbase)"
-         " VALUES(?,?,?,?,?,?,?)");
+         "(" ZCL_MODEL_COLUMNS(TX_INDEX_FIELDS) ")"
+         " VALUES(" ZCL_MODEL_PLACEHOLDERS(TX_INDEX_FIELDS) ")");
 
     PREP(stmt_tx_find,
-         "SELECT block_hash,block_height,tx_index,"
-         "file_num,file_pos,is_coinbase"
+         "SELECT " ZCL_MODEL_COLUMNS(TX_INDEX_BY_TXID_FIELDS)
          " FROM transactions WHERE txid=?");
 
     PREP(stmt_wallet_utxo_insert,
