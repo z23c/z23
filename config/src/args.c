@@ -71,6 +71,7 @@ void print_usage(const char *prog)
     printf("                      (default 0, hosting off; local store only)\n");
     printf("  -noisetransport        Enable authenticated Noise XX peer transport\n");
     printf("                      (required for the ZCODE DHT; default off)\n");
+    printf("  -v2transport        Deprecated alias for -noisetransport\n");
     printf("  -packagequota=<n>   Package store quota in bytes (default 10737418240;\n");
     printf("                      20%% pins / 40%% hot / 30%% rare / 10%% staging)\n");
     printf("  -confine            After boot reaches activation-ready, apply strict\n");
@@ -180,6 +181,7 @@ static const char *const k_extra_getarg_flags[] = {
     "-packagehost", "-nopackagehost", "-packagequota",
     "-buildworker", "-nobuildworker",
     "-noisetransport", "-nonoisetransport",
+    "-v2transport", "-nov2transport",
 };
 
 static bool main_flag_is_known_extra(const char *arg)

@@ -170,6 +170,20 @@ static int check_fill_completeness(void)
     TN_CHECK("[network] a filled snapshot leaves NO leaf unset", unset == 0);
     TN_CHECK("[network] every non-present leaf carries a static reason token",
              reasonless == 0);
+    TN_CHECK("[network] schema-v1 Noise capability alias stays identical",
+             snap.v2_offered_by_default == snap.noise_offered_by_default &&
+             snap.v2_offered_by_default_meta.presence ==
+                 snap.noise_offered_by_default_meta.presence);
+    TN_CHECK("[network] schema-v1 Noise peer alias stays identical",
+             snap.peers_advertising_v2_now ==
+                 snap.peers_advertising_noise_now &&
+             snap.peers_advertising_v2_now_meta.presence ==
+                 snap.peers_advertising_noise_now_meta.presence);
+    TN_CHECK("[network] schema-v1 Noise high-water alias stays identical",
+             snap.v2_advertising_high_water ==
+                 snap.noise_advertising_high_water &&
+             snap.v2_advertising_high_water_meta.presence ==
+                 snap.noise_advertising_high_water_meta.presence);
 
     /* The render layer's own tally must agree, and must not report a provider
      * defect. This is the machine-readable form of the two checks above. */
