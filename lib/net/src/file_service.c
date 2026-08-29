@@ -1371,10 +1371,10 @@ static void fs_serve_rom_manifest(struct fs_session *session,
  * client (rom_fetch_get_directory) re-derives the identical MAC. */
 static const uint8_t FS_ROM_LIST_MAC_TAG[32] = { 'R', 'L', 'S' };
 
-/* Buffers for the artifact catalog: at most ROM_SEED_MAX_ARTIFACTS (8) small
- * entries (~200 B each) from rom_seed_directory_json, wrapped in the
- * {"artifacts":[...]} object rom_fetch_parse_directory consumes. */
-#define FS_ROM_LIST_ARTS_MAX  2560u
+/* Artifact-catalog buffers: 8 rom_seed_directory_json entries wrapped in
+ * {"artifacts":[...]}, sized to the LARGEST shape (a source bundle carries a
+ * third 64-hex field, ~360 B); overflow DROPS entries, so undersizing hides. */
+#define FS_ROM_LIST_ARTS_MAX  4096u
 #define FS_ROM_LIST_BODY_MAX  (FS_ROM_LIST_ARTS_MAX + 64u)
 
 /* Serve one FREE ROM directory listing ("RLS" request). Rides the same

@@ -102,7 +102,9 @@ bool rom_fetch_manifest_sane(const struct rom_fetch_manifest *m)
 {
     if (!m)
         return false;
-    if (m->size_bytes < ROM_SEED_MIN_ARTIFACT_BYTES ||
+    /* Per-kind floor — a source bundle is legitimately under one SQLite page.
+     * `kind` is a peer claim: PLAUSIBILITY, never trust. */
+    if (m->size_bytes < rom_seed_kind_min_bytes(m->kind) ||
         m->size_bytes > ROM_SEED_MAX_ARTIFACT_BYTES)
         return false;
     /* The serve side chunks at exactly ROM_SEED_CHUNK_SIZE; a peer claiming
@@ -174,16 +176,14 @@ int rom_fetch_parse_directory(const char *json_body,
         m.size_bytes = (uint64_t)size;
         m.chunk_size = (uint32_t)csize;
         m.num_chunks = (uint32_t)chunks;
-        /* Optional "kind" token (untrusted, cosmetic — the digests are the
-         * trust anchor). Absent/unrecognized → ROM_ARTIFACT_UNKNOWN, the legacy
-         * back-compat shape the size-based picker still handles. */
+        /* "kind", "height" and "source_root" are OPTIONAL untrusted peer
+         * claims, outside manifest_sane's trust check on purpose: the first
+         * two steer the picker, source_root only lets a caller FIND a bundle
+         * before re-proving it. Detail is on struct rom_fetch_manifest. */
         m.kind = rom_seed_kind_from_name(json_get_str(json_get(e, "kind")));
-        /* Optional "height" (untrusted, download-cosmetic — NOT part of the
-         * manifest_sane trust check; see rom_fetch_manifest.height). Absent /
-         * negative -> 0, the legacy no-height default the size-based picker
-         * still handles. */
         int64_t height = json_get_int(json_get(e, "height"));
         m.height = height > 0 ? height : 0;
+        m.has_source_root = rf_parse_digest(e, "source_root", m.source_root);
         if (!rom_fetch_manifest_sane(&m))
             continue;
         m.used = true;

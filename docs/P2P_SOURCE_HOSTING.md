@@ -222,11 +222,32 @@ verify, import, nor checkout executes downloaded source, and none requires
 Git.
 
 The typed leaves are `zcode workspace source capture`, the v1 diagnostic
-`zcode workspace source bundle create` / `verify` / `import` / `checkout`
-set, and `zcode workspace source package checkout` for reconstructing a v2
-carrier already fetched into the ordinary node package store. Capture explicitly reports
+`zcode workspace source bundle create` / `fetch` / `verify` / `import` /
+`checkout` set, and `zcode workspace source package checkout` for
+reconstructing a v2 carrier already fetched into the ordinary node package
+store. Capture explicitly reports
 `accepted:false`: only the existing proof chain and explicit `zcode work
 accept` lifecycle can grant PROVEN publication authority.
+
+### Moving a bundle without moving an identity
+
+`fetch` is the wire half of the v1 set, and it is deliberately the only
+networked source path that asks nothing about who is speaking. A node holding
+a source bundle advertises the tree root it read out of that bundle's own
+header in the ordinary artifact directory listing; a fetcher holding only a
+64-hex root asks peers for that listing, downloads every artifact claiming the
+root, and accepts one solely because the delivered bytes rederive it through
+the same complete manifest-and-blob rehash `verify` performs locally. No
+signature, signer identity, acceptance chain, approved-verifier list or
+hardcoded host takes part, and none is consulted.
+
+The advertisement is an INDEX, never an authority: it makes bytes easier to
+find and cannot make them easier to accept. A peer that serves a well-formed
+bundle of a different tree under the requested root is refused on the content
+check, deprioritized, and stepped over — the search continues to the next
+candidate. Because the fetch never learns the caller's output path, a refusal
+cannot leave a partially materialized file behind. Retrieval still executes
+nothing; build and test remain separate explicit steps.
 
 ### Git-free consumer build
 
