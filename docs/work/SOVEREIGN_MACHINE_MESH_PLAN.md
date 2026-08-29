@@ -42,12 +42,15 @@ ops mesh machines
 ops mesh file offer|fetch|status|cancel
 ops mesh task submit|status|cancel|result
 ops mesh tunnel open|status|renew|close
+ops mesh terminal open|status|renew|close
 ops mesh service plan|commit|health|rollback
 ```
 
 Every mutating family uses plan/commit where the consequence survives the
-request. No command accepts a shell command, ambient environment, unrestricted
-path, wallet secret, canonical datadir, or arbitrary executable.
+request. Typed task and service commands never accept a shell command, ambient
+environment, unrestricted path, wallet secret, canonical datadir, or arbitrary
+executable. An interactive terminal is a separate, explicitly granted byte
+stream to one configured confined worker; it does not widen task authority.
 
 ## Architecture
 
@@ -91,7 +94,7 @@ bundles never ride inside control messages.
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
-| Interactive access | Not implemented | Capability-gated tunnels to existing SSH, RDP, or screen-sharing services |
+| Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
 | Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
 | macOS | Native C23 development/application path exists; node support must report embedded Tor unavailable | Native node/session receipts and truthful confinement/tunnel capability probes |
@@ -104,7 +107,8 @@ machine happened to work.
 ## Security boundary
 
 The mesh carries narrowly typed requests, immutable objects, and signed
-receipts. It does not expose an arbitrary remote shell in the initial product.
+receipts. Interactive terminal access is absent until its separate owner-only
+capability, confinement, revocation, and resource acceptance are complete.
 Network membership, a human-readable name, possession of a content hash, a
 transfer receipt, and a build attestation each prove only their stated fact;
 none grants execution, installation, wallet, consensus, deployment, or custody
@@ -269,22 +273,30 @@ versions fail closed.
 
 ## Interactive remote access
 
-Interactive access reuses the operating system's maintained local service
-instead of adding a second shell or desktop protocol to Z23. A paired owner may
-open an authenticated, capability-gated tunnel to one explicitly named local
-service such as SSH, Remote Desktop, or a screen-sharing server. The service
-stays bound to loopback or its existing private interface; Z23 does not publish
-an unrestricted listener.
+Interactive access uses a small encrypted terminal protocol carried by the
+same authenticated Z23 session. Z23 implements terminal framing, resize, flow
+control, expiry, revocation, quotas, and receipts in C23; it does not parse
+shell syntax. Windows connects the confined worker to ConPTY and
+`CreateProcessW`; Linux and macOS connect it to a PTY and a descriptor-safe
+spawn primitive. The worker launches only the locally configured shell or
+agent entry point. No separately installed SSH server is required.
 
-Each tunnel grant binds the target machine, subject identity, service kind,
-local endpoint, direction, connection count, byte and bandwidth limits, idle
-timeout, hard expiry, and current Noise connection generation. It grants no
-filesystem, process, wallet, deployment, or capability-delegation authority of
-its own. The target's native service performs its normal user authentication
-inside the encrypted tunnel. Closing, expiry, revocation, identity mismatch,
-transport downgrade, or Noise rekey failure tears down the tunnel and emits a
-bounded signed receipt. Relay and rendezvous peers forward opaque ciphertext
-only and never acquire endpoint credentials or access authority.
+The worker runs under a dedicated unprivileged identity or an equivalently
+proven restricted token, in a separately owned workspace. It cannot read the
+node datadir, wallet, RPC cookie, deployment credentials, identity keys, or
+canonical checkout. A platform that cannot prove those restrictions refuses
+terminal activation. Optional tunnels to existing SSH, Remote Desktop, or
+screen-sharing services remain a second access mode, not a prerequisite.
+
+Each terminal or tunnel grant binds the target machine, subject identity,
+service or terminal kind, connection count, byte and bandwidth limits, idle
+timeout, hard expiry, and current Noise connection generation. A tunnel also
+binds its local endpoint and direction. Neither grant conveys wallet,
+deployment, custody, or capability-delegation authority. Closing, expiry,
+revocation, identity mismatch, transport downgrade, or Noise rekey failure
+tears down access and emits a bounded signed receipt. Relay and rendezvous
+peers forward opaque ciphertext only and never acquire endpoint credentials or
+access authority.
 
 ## Hot-swap taxonomy
 
@@ -415,17 +427,19 @@ bounded; fetched code cannot acquire node, wallet, or deployment authority.
 
 ### Phase 4: secure interactive access
 
-- Add typed tunnel open, status, renew, and close operations for explicitly
-  enabled local SSH, Remote Desktop, and screen-sharing services.
-- Keep each native service's own authentication, authorization, and audit
-  boundary; do not implement a Z23 shell or desktop server.
+- Add typed terminal open, status, renew, and close operations over an embedded
+  C23 framing protocol, backed by ConPTY on Windows and PTYs on POSIX hosts.
+- Spawn only a configured shell or agent entry point under a dedicated
+  unprivileged identity or proven restricted token and isolated workspace.
+- Add optional tunnel operations for explicitly enabled local SSH, Remote
+  Desktop, and screen-sharing services.
 - Add direct-path, onion-path, and opaque-relay routing without granting the
   rendezvous or relay peer machine authority.
 
-Exit: a paired owner reaches an opted-in local service on Linux, macOS, and
-Windows without opening that service to the public Internet; expiry,
-revocation, path substitution, relay compromise, and disconnect close access
-without affecting node synchronization.
+Exit: a paired owner opens a confined terminal on Linux, macOS, and Windows
+without installing a separate remote-shell server or opening one to the public
+Internet; expiry, revocation, path substitution, relay compromise, and
+disconnect close access without exposing node secrets or affecting sync.
 
 ### Phase 5: service-island and cartridge activation
 

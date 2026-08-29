@@ -158,39 +158,12 @@ commit — retiring a doc is not finished until its callers are gone too.
   off the v1 path — §9 is the open-item debt board, which self-labels NOT
   the v1 path).
 - **Session entrypoint:** [`../HANDOFF.md`](../HANDOFF.md).
-- **Worker protocol:** this file plus [`agent-protocol.md`](./agent-protocol.md).
+- **Worker protocol:** [`agent-protocol.md`](./agent-protocol.md).
 
 ## Worker protocol
 
-Each assignment lives at `docs/work/wt<N>-<slug>.md` and contains:
-
-- **Branch name** — exact name to create
-- **Scope** — files this assignment owns; files it must NOT touch
-- **Dependencies** — other assignments that must complete first
-- **Tasks** — ordered, testable steps
-- **Acceptance criteria** — concrete tests that prove done
-- **Commit + push instructions** — exact git commands
-- **Completion ritual** — what to append at the end
-
-## Conflict avoidance
-
-- **Disjoint file scope**: each assignment lists exact files it owns; no
-  other assignment may touch those files until it merges.
-- **No concurrent edits to** `../FRAMEWORK.md` §9 (the debt board): only
-  orchestrator writes it. Workers append to their own assignment doc.
-- **Integrate deliberately**: follow the current operator skill and
-  assignment instructions; do not assume every dirty checkout can safely
-  rebase or push.
-
-## Failure modes
-
-- **Worker discovers assignment is wrong or impossible** → worker appends a
-  `BLOCKED` section to its assignment doc with details, pushes, reports to
-  user. Orchestrator session must respond.
-- **Worker's tests fail** → worker does NOT merge; pushes a `WIP` branch +
-  appends a `FAILED` section with the failing test output.
-- **Two workers touch overlapping files (should not happen)** →
-  second-to-merge rebases, orchestrator session resolves.
+Assignment shape, file ownership, integration, failure handling, and completion
+are defined once in [`agent-protocol.md`](./agent-protocol.md).
 
 ## Late-indexed records (reconciled 2026-08-23)
 

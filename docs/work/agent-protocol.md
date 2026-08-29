@@ -87,7 +87,6 @@ lane, never on `main`.
 
 - **Subject < 70 chars, imperative:** "add CONDITION macro", not "added".
 - **Body** explains the *why*; the *what* is in the diff.
-- **Co-author trailer** per the convention in `CLAUDE.md` (current model).
 - **No `--no-verify`** (hooks are load-bearing). **No `--amend` once the
   orchestrator has merged** — fix mistakes with a NEW commit.
 
