@@ -38,8 +38,8 @@ verify_release() {
     [ -d "$dir" ] || die "release directory missing: $dir"
     [ -f "$dir/SHA256SUMS" ] || die "SHA256SUMS missing in $dir"
     names="$(awk '{print $2}' "$dir/SHA256SUMS" | LC_ALL=C sort)"
-    [ "$names" = $'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-package-verify' ] \
-        || die "SHA256SUMS must name exactly AGENT_CARD.md, z23, zclassic23, and zclassic23-package-verify"
+    [ "$names" = $'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-acme\nzclassic23-package-verify' ] \
+        || die "SHA256SUMS must name exactly AGENT_CARD.md, z23, zclassic23, zclassic23-acme, and zclassic23-package-verify"
     (cd "$dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \
         || die "release SHA256SUMS mismatch"
     [ -x "$INSTALLER" ] || die "installer missing or not executable: $INSTALLER"
@@ -62,7 +62,8 @@ if systemctl --user cat z23.service >/dev/null 2>&1 ||
     exit 4
 fi
 for path in "$HOME/.local/bin/z23" "$HOME/.local/bin/zclassic23" \
-            "$HOME/.local/bin/zclassic23-package-verify"; do
+            "$HOME/.local/bin/zclassic23-package-verify" \
+            "$HOME/.local/bin/zclassic23-acme"; do
     [ ! -e "$path" ] || {
         echo "fresh bootstrap target already exists: $path" >&2
         exit 5
@@ -88,6 +89,7 @@ copy_release() {
     # manifest, installer, and every extracted payload before installation.
     tar -C "$release_dir" -cf - \
         SHA256SUMS AGENT_CARD.md z23 zclassic23 zclassic23-package-verify \
+        zclassic23-acme \
         -C "$SCRIPT_DIR" install_z23.sh \
         | "$SSH_BIN" "${SSH_OPTS[@]}" "$host" \
             tar -C "$incoming" -xf -
@@ -144,7 +146,8 @@ cleanup() {
         # plain -type f rollback left it behind dangling, pointing at bytes
         # this cleanup had just deleted.
         find "$prefix/bin/z23" "$prefix/bin/zclassic23" \
-             "$prefix/bin/zclassic23-package-verify" "$unit" \
+             "$prefix/bin/zclassic23-package-verify" \
+             "$prefix/bin/zclassic23-acme" "$unit" \
              -maxdepth 0 \( -type f -o -type l \) -delete 2>/dev/null || true
         find "$incoming" "$stage" -depth -delete 2>/dev/null || true
         systemctl --user daemon-reload >/dev/null 2>&1 || true
@@ -180,6 +183,7 @@ systemctl --user start --no-block z23.service
 want_node="$(sha256sum "$stage/zclassic23" | awk '{print $1}')"
 want_z23="$(sha256sum "$stage/z23" | awk '{print $1}')"
 want_verifier="$(sha256sum "$stage/zclassic23-package-verify" | awk '{print $1}')"
+want_acme="$(sha256sum "$stage/zclassic23-acme" | awk '{print $1}')"
 deadline=$(( $(date +%s) + health_seconds ))
 qualified=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -191,6 +195,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
             running_path="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
             installed_z23="$(sha256sum "$prefix/bin/z23" 2>/dev/null | awk '{print $1}' || true)"
             installed_verifier="$(sha256sum "$prefix/bin/zclassic23-package-verify" 2>/dev/null | awk '{print $1}' || true)"
+            installed_acme="$(sha256sum "$prefix/bin/zclassic23-acme" 2>/dev/null | awk '{print $1}' || true)"
             # The unit execs $prefix/bin/zclassic23, which install_z23.sh now
             # creates as a SYMLINK to z23 rather than a second 27.8 MB copy.
             # So /proc/<pid>/exe resolves to z23, and the old assertion that it
@@ -207,6 +212,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
                [ "$installed_z23" = "$want_z23" ] && \
                [ "$installed_verifier" = "$want_verifier" ] && \
                [ -x "$prefix/bin/zclassic23-package-verify" ] && \
+               [ "$installed_acme" = "$want_acme" ] && \
+               [ -x "$prefix/bin/zclassic23-acme" ] && \
                timeout 20 "/proc/$pid/exe" status >/dev/null 2>&1; then
                 pid_after="$(systemctl --user show z23.service -p MainPID --value 2>/dev/null || true)"
                 running_after="$(sha256sum "/proc/$pid/exe" 2>/dev/null | awk '{print $1}' || true)"
@@ -225,8 +232,8 @@ done
 }
 cleanup_armed=0
 trap - EXIT HUP INT TERM
-printf 'qualified manifest=%s pid=%s node_sha256=%s verifier_sha256=%s\n' \
-    "$manifest" "$pid" "$want_node" "$want_verifier"
+printf 'qualified manifest=%s pid=%s node_sha256=%s verifier_sha256=%s acme_sha256=%s\n' \
+    "$manifest" "$pid" "$want_node" "$want_verifier" "$want_acme"
 REMOTE_ACTIVATE
 }
 
@@ -275,8 +282,11 @@ EOF
     printf '# card\n' >"$tmp/release/AGENT_CARD.md"
     printf '#!/bin/sh\nexit 0\n' >"$tmp/release/zclassic23-package-verify"
     chmod 755 "$tmp/release/zclassic23-package-verify"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/release/zclassic23-acme"
+    chmod 755 "$tmp/release/zclassic23-acme"
     (cd "$tmp/release" && \
-        sha256sum AGENT_CARD.md z23 zclassic23 zclassic23-package-verify >SHA256SUMS)
+        sha256sum AGENT_CARD.md z23 zclassic23 zclassic23-package-verify \
+            zclassic23-acme >SHA256SUMS)
 }
 
 selftest_make_ssh_mock() {
@@ -363,6 +373,8 @@ selftest_assert_success() {
         cmp -s "$stage/zclassic23" "$tmp/hosts/$host/.local/bin/zclassic23"
         cmp -s "$stage/zclassic23-package-verify" \
             "$tmp/hosts/$host/.local/bin/zclassic23-package-verify"
+        cmp -s "$stage/zclassic23-acme" \
+            "$tmp/hosts/$host/.local/bin/zclassic23-acme"
     done
     alpha_line="$(grep -n 'systemctl alpha start' "$tmp/systemctl.log" | cut -d: -f1)"
     beta_line="$(grep -n 'systemctl beta start' "$tmp/systemctl.log" | cut -d: -f1)"

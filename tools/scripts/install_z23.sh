@@ -7,8 +7,8 @@
 #
 # Artifact source is taken from the first argument or Z23_RELEASE_SOURCE
 # (a node URL or a local directory). Never hardcoded: any node that serves
-# z23, zclassic23, zclassic23-package-verify, and SHA256SUMS is a valid source.
-# There is no registry.
+# z23, zclassic23, zclassic23-package-verify, zclassic23-acme, and
+# SHA256SUMS is a valid source. There is no registry.
 #
 # Checksum mismatch is a loud refusal. Nothing is copied to the destination
 # until SHA256SUMS --strict passes.
@@ -44,14 +44,16 @@ say() { printf 'install_z23: %s\n' "$*" >&2; }
 
 NEXT_COMMAND="z23 status"
 
-# Public fetch ceilings. The manifest has exactly four short checksum rows;
-# 1 KiB leaves ample format headroom. Node aliases are currently below 32 MiB
-# and the confined verifier below 96 MiB; these limits allow growth without
-# permitting an untrusted mirror to stream without bound. Deadlines apply to
-# every HTTP transaction independently.
+# Public fetch ceilings. The manifest has exactly five short checksum rows;
+# 1 KiB leaves ample format headroom. Node aliases are currently below 32 MiB,
+# the confined verifier below 96 MiB, and the certificate worker (a small
+# static-ish TLS client, currently ~5 MB) below 32 MiB; these limits allow
+# growth without permitting an untrusted mirror to stream without bound.
+# Deadlines apply to every HTTP transaction independently.
 REMOTE_MANIFEST_MAX_BYTES=1024
 REMOTE_NODE_MAX_BYTES=$((64 * 1024 * 1024))
 REMOTE_VERIFIER_MAX_BYTES=$((128 * 1024 * 1024))
+REMOTE_ACME_MAX_BYTES=$((32 * 1024 * 1024))
 REMOTE_CONNECT_TIMEOUT_SECONDS=10
 REMOTE_MANIFEST_MAX_TIME_SECONDS=30
 REMOTE_PAYLOAD_MAX_TIME_SECONDS=300
@@ -199,20 +201,24 @@ cleanup_install_stage() {
     INSTALL_STAGE=""
 }
 
-# The release is an EXACT CLOSED SET of four names. AGENT_CARD.md is in it
+# The release is an EXACT CLOSED SET of five names. AGENT_CARD.md is in it
 # and is not "just documentation": its whole job is to tell a coding agent
 # which commands to run, so a tampered card is instruction injection into
-# whatever assistant installs the node. A release that claims everything is
+# whatever assistant installs the node. zclassic23-acme is in it because a
+# node that can obtain a certificate but never installs the one binary that
+# can renew it is a node that goes dark the day the certificate expires —
+# see write_cert_renew_units below. A release that claims everything is
 # verified does not get to ship one unverified file. The set stays exact —
 # never a wildcard — because "any file the manifest names" is how an
-# attacker adds a fifth.
-RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify"
+# attacker adds a sixth.
+RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify zclassic23-acme"
 REMOTE_CARD_MAX_BYTES=$((64 * 1024))
 
 payload_max_bytes() {
     case "$1" in
         z23|zclassic23) printf '%s\n' "$REMOTE_NODE_MAX_BYTES" ;;
         zclassic23-package-verify) printf '%s\n' "$REMOTE_VERIFIER_MAX_BYTES" ;;
+        zclassic23-acme) printf '%s\n' "$REMOTE_ACME_MAX_BYTES" ;;
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
         *) return 1 ;;
     esac
@@ -226,12 +232,12 @@ validate_manifest_contract() {
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|zclassic23-package-verify)$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|zclassic23-package-verify|zclassic23-acme)$' \
         "$manifest" || true)"
-    [ "$lines" -eq 4 ] && [ "$matching" -eq 4 ] \
-        || die "SHA256SUMS must contain exactly four strict lowercase SHA-256 rows"
+    [ "$lines" -eq 5 ] && [ "$matching" -eq 5 ] \
+        || die "SHA256SUMS must contain exactly five strict lowercase SHA-256 rows"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
-    [ "$names" = $'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-package-verify' ] \
+    [ "$names" = $'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-acme\nzclassic23-package-verify' ] \
         || die "SHA256SUMS must name each required release member exactly once"
     # z23 and zclassic23 are one program under two names, and the release
     # says so with one digest in two rows. If they ever differ this is not a
@@ -391,6 +397,10 @@ install_payload() {
     ln -s z23 "$bindir/zclassic23" || die "could not link zclassic23 to z23"
     install -m 755 "$stage/zclassic23-package-verify" \
         "$bindir/zclassic23-package-verify"
+    # zclassic23-acme is the ONLY binary that can renew a certificate this
+    # node obtains (see write_cert_renew_units). Installing it beside the
+    # verifier is what closes the "certificate obtained, never renewed" bug.
+    install -m 755 "$stage/zclassic23-acme" "$bindir/zclassic23-acme"
     # The agent card is verified payload, so it is installed like payload:
     # an assistant reading it is reading bytes SHA256SUMS covered.
     install -m 644 "$stage/AGENT_CARD.md" "$carddir/AGENT_CARD.md"
@@ -633,10 +643,11 @@ selftest_prepare() {
         "$tmp/stages"
     export TMPDIR="$tmp/stages"
 
-    # A release is four names, and z23/zclassic23 are the same bytes.
+    # A release is five names, and z23/zclassic23 are the same bytes.
     printf 'payload-a\n' >"$tmp/good/z23"
     ln -f -- "$tmp/good/z23" "$tmp/good/zclassic23"
     printf 'confined-verifier\n' >"$tmp/good/zclassic23-package-verify"
+    printf 'cert-worker\n' >"$tmp/good/zclassic23-acme"
     printf '# Z23 agent card\n\nRun `z23 status`.\n' >"$tmp/good/AGENT_CARD.md"
     (cd "$tmp/good" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
 
@@ -654,7 +665,7 @@ selftest_prepare() {
     # honest way to pick one, so it is refused before anything is fetched.
     printf 'payload-a\n' >"$tmp/http/split-names/z23"
     printf 'payload-b-different\n' >"$tmp/http/split-names/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
+    cp -f -- "$tmp/good/zclassic23-package-verify" "$tmp/good/zclassic23-acme" \
         "$tmp/good/AGENT_CARD.md" "$tmp/http/split-names/"
     (cd "$tmp/http/split-names" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
 
@@ -671,6 +682,7 @@ selftest_prepare() {
     ln -f -- "$tmp/http/replaced/z23" "$tmp/http/replaced/zclassic23"
     printf 'replacement-verifier\n' \
         >"$tmp/http/replaced/zclassic23-package-verify"
+    printf 'replacement-acme\n' >"$tmp/http/replaced/zclassic23-acme"
     printf '# replacement card\n' >"$tmp/http/replaced/AGENT_CARD.md"
     (cd "$tmp/http/replaced" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
     dd if=/dev/zero bs=1025 count=1 2>/dev/null | tr '\0' x \
@@ -679,7 +691,7 @@ selftest_prepare() {
         "$tmp/http/oversized-payload/z23"
     ln -f -- "$tmp/http/oversized-payload/z23" \
         "$tmp/http/oversized-payload/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
+    cp -f -- "$tmp/good/zclassic23-package-verify" "$tmp/good/zclassic23-acme" \
         "$tmp/good/AGENT_CARD.md" "$tmp/http/oversized-payload/"
     (cd "$tmp/http/oversized-payload" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
     {
@@ -720,6 +732,10 @@ case "$rel" in
     */zclassic23-package-verify)
         [ "$maximum_seconds" = 300 ] && \
             [ "$maximum_bytes" = 134217728 ] || exit 4
+        ;;
+    */zclassic23-acme)
+        [ "$maximum_seconds" = 300 ] && \
+            [ "$maximum_bytes" = 33554432 ] || exit 4
         ;;
     */AGENT_CARD.md)
         [ "$maximum_seconds" = 300 ] && [ "$maximum_bytes" = 65536 ] || exit 4
@@ -886,7 +902,7 @@ selftest_remote_success() {
     # NEVER requested: the third of the download that is a duplicate is not
     # transferred at all. The request log is the proof.
     [ "$(cat "$tmp/curl.log")" = \
-        $'good/SHA256SUMS connect=10 time=30 bytes=1024\ngood/AGENT_CARD.md connect=10 time=300 bytes=65536\ngood/z23 connect=10 time=300 bytes=67108864\ngood/zclassic23-package-verify connect=10 time=300 bytes=134217728' ] \
+        $'good/SHA256SUMS connect=10 time=30 bytes=1024\ngood/AGENT_CARD.md connect=10 time=300 bytes=65536\ngood/z23 connect=10 time=300 bytes=67108864\ngood/zclassic23-package-verify connect=10 time=300 bytes=134217728\ngood/zclassic23-acme connect=10 time=300 bytes=33554432' ] \
         || die "selftest: bounded remote request sequence drifted"
     [ -L "$tmp/remote-good/bin/zclassic23" ] \
         || die "selftest: duplicate remote alias must install as a symlink"
@@ -1043,6 +1059,8 @@ selftest_local_success() {
     cmp -s "$tmp/good/zclassic23-package-verify" \
         "$tmp/prefix/bin/zclassic23-package-verify" \
         || die "selftest: installed zclassic23-package-verify bytes differ"
+    cmp -s "$tmp/good/zclassic23-acme" "$tmp/prefix/bin/zclassic23-acme" \
+        || die "selftest: installed zclassic23-acme bytes differ"
 
     install_card="$tmp/prefix/share/z23/AGENT_CARD.md"
     cmp -s "$tmp/good/AGENT_CARD.md" "$install_card" \
@@ -1071,10 +1089,32 @@ selftest_local_success() {
     run_install "$tmp/no-verifier-dest" "$tmp/units" "$tmp/no-verifier" \
         >/dev/null 2>"$tmp/no-verifier.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: missing verifier must exit 1"
-    grep -Eq 'exactly four|exactly once' "$tmp/no-verifier.err" \
+    grep -Eq 'exactly five|exactly once' "$tmp/no-verifier.err" \
         || die "selftest: missing verifier must name the strict manifest refusal"
     if [ -e "$tmp/no-verifier-dest/bin/z23" ]; then
         die "selftest: incomplete release installed z23 anyway"
+    fi
+
+    # The certificate worker is a release member on the same footing as the
+    # package verifier: a manifest naming every OTHER member but silently
+    # dropping zclassic23-acme is exactly the regression this task exists to
+    # close (a node that can get a certificate but never renew it), so it
+    # must refuse before any payload reaches a fresh destination too.
+    mkdir -p "$tmp/no-acme"
+    cp -f -- "$tmp/good/z23" "$tmp/good/zclassic23" \
+        "$tmp/good/zclassic23-package-verify" "$tmp/good/AGENT_CARD.md" \
+        "$tmp/no-acme/"
+    (cd "$tmp/no-acme" && \
+        sha256sum z23 zclassic23 zclassic23-package-verify AGENT_CARD.md \
+            >SHA256SUMS)
+    rc=0
+    run_install "$tmp/no-acme-dest" "$tmp/units" "$tmp/no-acme" \
+        >/dev/null 2>"$tmp/no-acme.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: missing zclassic23-acme must exit 1"
+    grep -Eq 'exactly five|exactly once' "$tmp/no-acme.err" \
+        || die "selftest: missing zclassic23-acme must name the strict manifest refusal"
+    if [ -e "$tmp/no-acme-dest/bin/z23" ]; then
+        die "selftest: a release silently missing zclassic23-acme installed z23 anyway"
     fi
 
     # Idempotent re-run.
@@ -1363,14 +1403,16 @@ selftest_local_manifest_refusals() {
     printf 'x\n' >"$tmp/extra/z23"
     printf 'x\n' >"$tmp/extra/zclassic23"
     printf 'x\n' >"$tmp/extra/zclassic23-package-verify"
+    printf 'x\n' >"$tmp/extra/zclassic23-acme"
     printf 'x\n' >"$tmp/extra/evil"
     (cd "$tmp/extra" && \
-        sha256sum z23 zclassic23 zclassic23-package-verify evil >SHA256SUMS)
+        sha256sum z23 zclassic23 zclassic23-package-verify zclassic23-acme evil \
+            >SHA256SUMS)
     rc=0
     run_install "$tmp/prefix2" "$tmp/units" "$tmp/extra" \
         >/dev/null 2>"$tmp/extra.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: extra SHA256SUMS member must refuse"
-    grep -Eq 'exactly four|exactly once' "$tmp/extra.err" \
+    grep -Eq 'exactly five|exactly once' "$tmp/extra.err" \
         || die "selftest: extra member must name the strict manifest refusal"
 
     [ -z "$(find "$tmp/stages" -mindepth 1 -maxdepth 1 \

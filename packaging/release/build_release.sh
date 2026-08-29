@@ -12,8 +12,9 @@
 #   packaging/release/build_release.sh --selftest
 #
 # Default --bin is <repo>/build/bin; default --out is
-# <repo>/build/release/z23-x86_64-linux. Requires z23 or zclassic23 and the
-# confined zclassic23-package-verify worker in --bin.
+# <repo>/build/release/z23-x86_64-linux. Requires z23 or zclassic23, the
+# confined zclassic23-package-verify worker, and the zclassic23-acme
+# certificate worker in --bin.
 # Honors the documented glibc/GLIBCXX floor (ci_symbol_floor_gate +
 # check_c23_node_binary). Exit 0 on PASS, 1 on refusal.
 set -euo pipefail
@@ -78,15 +79,19 @@ write_sha256sums() {
     # AGENT_CARD.md is a manifest member, not an optional extra: the card
     # tells a coding assistant which commands to run against the node, so
     # a tampered copy is an instruction-injection path into whatever agent
-    # installs it, not merely stale prose. This list is an exact closed
-    # set of four names -- never a glob -- because closedness is what
+    # installs it, not merely stale prose. zclassic23-acme is a manifest
+    # member because it is the ONLY binary that can renew a certificate a
+    # node obtains -- shipping a release that can get a certificate but
+    # never installs the tool that renews it is exactly the silent-failure
+    # bug this file exists to not reintroduce. This list is an exact closed
+    # set of five names -- never a glob -- because closedness is what
     # makes "sha256sum -c --strict SHA256SUMS" a complete statement about
     # every byte in the release directory, not a partial one.
     (
         cd "$dir" || exit 1
         # GNU sha256sum two-space format; sorted so the file is deterministic.
-        sha256sum z23 zclassic23 zclassic23-package-verify AGENT_CARD.md \
-            | sort -k2 >SHA256SUMS
+        sha256sum z23 zclassic23 zclassic23-package-verify zclassic23-acme \
+            AGENT_CARD.md | sort -k2 >SHA256SUMS
     ) || die "could not write SHA256SUMS in $dir"
 }
 
@@ -96,16 +101,16 @@ write_sha256sums() {
 # installs it. It IS a SHA256SUMS member (see write_sha256sums above) and
 # it is mandatory, not best-effort -- a release missing its card is a
 # release that cannot honestly claim every shipped byte is checked, so
-# packaging refuses rather than silently shipping three checksummed files
-# and a fourth unchecked one.
+# packaging refuses rather than silently shipping checksummed files and
+# an unchecked one.
 #
 # tools/scripts/install_z23.sh and tools/scripts/deploy_z23_release.sh
-# currently hard-require SHA256SUMS to name exactly z23, zclassic23, and
-# zclassic23-package-verify (three names, twice each, in independent
-# checks). Both need a small, deliberately-still-closed-set
-# update to accept AGENT_CARD.md as a fourth required name before a
-# release built by this script can be installed or fleet-deployed. That
-# change is out of scope for this file (another lane owns both).
+# hard-require SHA256SUMS to name exactly z23, zclassic23,
+# zclassic23-package-verify, zclassic23-acme, and AGENT_CARD.md (five
+# names, in independent checks in each file). Keep all three in agreement:
+# a name added or dropped here without the same change in both of those
+# files reopens the exact "release member silently missing" bug class this
+# script's own selftest below is built to catch.
 copy_agent_card() {
     local out_dir="$1"
     [ -f "$SCRIPT_DIR/AGENT_CARD.md" ] \
@@ -150,6 +155,7 @@ link_or_copy() {
 package_from_bin() {
     local bin_dir="$1" out_dir="$2"
     local src="" verifier_src="$bin_dir/zclassic23-package-verify"
+    local acme_src="$bin_dir/zclassic23-acme"
     [ -d "$bin_dir" ] || die "binary dir missing: $bin_dir"
     if [ -x "$bin_dir/z23" ]; then
         src="$bin_dir/z23"
@@ -160,6 +166,8 @@ package_from_bin() {
     fi
     [ -x "$verifier_src" ] \
         || die "no zclassic23-package-verify in $bin_dir — build first: make zclassic23-package-verify"
+    [ -x "$acme_src" ] \
+        || die "no zclassic23-acme in $bin_dir — build first: make zclassic23-acme"
     platform_supported "$(uname -s)-$(uname -m)" \
         || { platform_refusal "$(uname -s)-$(uname -m)"; exit 1; }
     command -v strip >/dev/null 2>&1 || die "strip(1) not found"
@@ -168,8 +176,8 @@ package_from_bin() {
 
     mkdir -p "$out_dir"
     rm -f "$out_dir/z23" "$out_dir/zclassic23" \
-        "$out_dir/zclassic23-package-verify" "$out_dir/AGENT_CARD.md" \
-        "$out_dir/SHA256SUMS"
+        "$out_dir/zclassic23-package-verify" "$out_dir/zclassic23-acme" \
+        "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
     strip --strip-unneeded -o "$out_dir/z23" "$src" || die "strip failed"
     chmod 755 "$out_dir/z23"
     link_or_copy "$out_dir/z23" "$out_dir/zclassic23"
@@ -177,6 +185,9 @@ package_from_bin() {
     strip --strip-unneeded -o "$out_dir/zclassic23-package-verify" "$verifier_src" \
         || die "strip failed for zclassic23-package-verify"
     chmod 755 "$out_dir/zclassic23-package-verify"
+    strip --strip-unneeded -o "$out_dir/zclassic23-acme" "$acme_src" \
+        || die "strip failed for zclassic23-acme"
+    chmod 755 "$out_dir/zclassic23-acme"
     copy_agent_card "$out_dir"
     write_sha256sums "$out_dir"
 
@@ -187,7 +198,7 @@ package_from_bin() {
     (cd "$out_dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \
         || die "SHA256SUMS does not match packaged files"
 
-    say "packed $out_dir (z23, zclassic23, zclassic23-package-verify, SHA256SUMS, AGENT_CARD.md)"
+    say "packed $out_dir (z23, zclassic23, zclassic23-package-verify, zclassic23-acme, SHA256SUMS, AGENT_CARD.md)"
 }
 
 selftest() {
@@ -215,6 +226,21 @@ selftest() {
     grep -q 'no zclassic23-package-verify' "$tmp/verifier.err" \
         || die "selftest: missing verifier must name the refusal"
 
+    # A release without the certificate renewal worker is the exact bug this
+    # task closes: a node that can obtain a certificate but ships with no
+    # way to ever renew it. This refusal occurs before strip/audit work too.
+    mkdir -p "$tmp/no-acme"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/no-acme/z23"
+    chmod 755 "$tmp/no-acme/z23"
+    printf '#!/bin/sh\nexit 0\n' >"$tmp/no-acme/zclassic23-package-verify"
+    chmod 755 "$tmp/no-acme/zclassic23-package-verify"
+    rc=0
+    (package_from_bin "$tmp/no-acme" "$tmp/out") \
+        >/dev/null 2>"$tmp/acme.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: missing zclassic23-acme must exit 1, got $rc"
+    grep -q 'no zclassic23-acme' "$tmp/acme.err" \
+        || die "selftest: missing zclassic23-acme must name the refusal"
+
     # An unsupported platform must refuse informatively, not just die. This
     # host is presumably the one supported platform (Linux-x86_64), so the
     # refusal path cannot be observed by actually running package_from_bin
@@ -237,26 +263,29 @@ selftest() {
     grep -qi 'Darwin-arm64' "$tmp/darwin.err" \
         || die "selftest: platform refusal must name the actual host"
 
-    # SHA256SUMS writer: the complete four-file manifest -- z23, zclassic23,
-    # zclassic23-package-verify, AGENT_CARD.md -- then strict verification.
-    # AGENT_CARD.md sits on the same footing as the binaries here: it is
-    # the file a coding assistant reads to learn which commands to run
-    # against the node, so it must fail exactly like a tampered binary
-    # fails, not be treated as an afterthought.
+    # SHA256SUMS writer: the complete five-file manifest -- z23, zclassic23,
+    # zclassic23-package-verify, zclassic23-acme, AGENT_CARD.md -- then
+    # strict verification. AGENT_CARD.md sits on the same footing as the
+    # binaries here: it is the file a coding assistant reads to learn which
+    # commands to run against the node, so it must fail exactly like a
+    # tampered binary fails, not be treated as an afterthought.
     mkdir -p "$tmp/sums"
     printf 'alpha\n' >"$tmp/sums/z23"
     printf 'alpha\n' >"$tmp/sums/zclassic23"
     printf 'verifier\n' >"$tmp/sums/zclassic23-package-verify"
+    printf 'acme\n' >"$tmp/sums/zclassic23-acme"
     printf 'card\n' >"$tmp/sums/AGENT_CARD.md"
     write_sha256sums "$tmp/sums"
     [ -s "$tmp/sums/SHA256SUMS" ] || die "selftest: SHA256SUMS empty"
-    [ "$(wc -l <"$tmp/sums/SHA256SUMS")" -eq 4 ] \
-        || die "selftest: SHA256SUMS must name exactly four files, not more or fewer"
+    [ "$(wc -l <"$tmp/sums/SHA256SUMS")" -eq 5 ] \
+        || die "selftest: SHA256SUMS must name exactly five files, not more or fewer"
     grep -q '  z23$' "$tmp/sums/SHA256SUMS" || die "selftest: SHA256SUMS missing z23"
     grep -q '  zclassic23$' "$tmp/sums/SHA256SUMS" \
         || die "selftest: SHA256SUMS missing zclassic23"
     grep -q '  zclassic23-package-verify$' "$tmp/sums/SHA256SUMS" \
         || die "selftest: SHA256SUMS missing zclassic23-package-verify"
+    grep -q '  zclassic23-acme$' "$tmp/sums/SHA256SUMS" \
+        || die "selftest: SHA256SUMS missing zclassic23-acme"
     grep -q '  AGENT_CARD.md$' "$tmp/sums/SHA256SUMS" \
         || die "selftest: SHA256SUMS missing AGENT_CARD.md"
     (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS >/dev/null) \
@@ -310,20 +339,21 @@ selftest() {
         say "selftest: link_or_copy fell back to a copy on this filesystem (still correct)"
     fi
     # Re-running write_sha256sums over a hardlinked pair must still record
-    # independent, individually-verifiable lines for every one of the four
+    # independent, individually-verifiable lines for every one of the five
     # names — not a shortcut just because two of them share storage.
     printf 'verifier\n' >"$tmp/link/zclassic23-package-verify"
+    printf 'acme\n' >"$tmp/link/zclassic23-acme"
     printf 'card\n' >"$tmp/link/AGENT_CARD.md"
     write_sha256sums "$tmp/link"
-    [ "$(wc -l <"$tmp/link/SHA256SUMS")" -eq 4 ] \
-        || die "selftest: hardlinked pair did not still produce a four-line SHA256SUMS"
+    [ "$(wc -l <"$tmp/link/SHA256SUMS")" -eq 5 ] \
+        || die "selftest: hardlinked pair did not still produce a five-line SHA256SUMS"
     (cd "$tmp/link" && sha256sum -c --strict SHA256SUMS >/dev/null) \
         || die "selftest: SHA256SUMS must verify a hardlinked pair too"
 
     # copy_agent_card: now a required, checksummed manifest member (see
     # write_sha256sums above), so it must FAIL CLOSED when the card is
-    # missing rather than silently packaging three checksummed files and
-    # skipping the fourth, and must copy the real bytes when present.
+    # missing rather than silently packaging the other checksummed files
+    # and skipping this one, and must copy the real bytes when present.
     mkdir -p "$tmp/card/nocard" "$tmp/card/withcard"
     rc=0
     ( SCRIPT_DIR="$tmp/card/nocard" copy_agent_card "$tmp/card/nocard" ) \
