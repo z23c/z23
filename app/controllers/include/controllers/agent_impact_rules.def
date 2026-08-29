@@ -2702,3 +2702,6 @@ AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent
  * PowerShell twin ride the same rule because their contract with the
  * bootstrap — the digest gate and the forwarded argv — is asserted there. */
 AGENT_IMPACT_RULE("lib/install/src/*|lib/install/include/install/*|tools/install/*|packaging/install/*|lib/test/src/test_z23_front_door.c", "z23_front_door make_lint_gates")
+/* lib/astro is a self-contained leaf: it references no other module, so its
+ * only proof is its own group. */
+AGENT_IMPACT_RULE("lib/astro/src/*|lib/astro/include/astro/*|lib/test/src/test_astro.c", "astro make_lint_gates")

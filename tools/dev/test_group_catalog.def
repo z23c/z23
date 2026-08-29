@@ -1025,6 +1025,12 @@ ZCL_TEST_GROUP(replay_receipt_root)
  * of the watcher family sits behind #if defined(_WIN32). */
 ZCL_TEST_GROUP(directory_watcher)
 ZCL_TEST_GROUP(watcher_record)
+/* astro lane: lib/astro's exact fixed-grid arithmetic and the birth chart
+ * built on it. The determinism cases are the point — a chart another node
+ * recomputes must match bit for bit, so the group asserts that property by
+ * construction against a `double` control rather than against golden
+ * numbers. */
+ZCL_TEST_GROUP(astro)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)
