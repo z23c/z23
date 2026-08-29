@@ -57,7 +57,7 @@ bool stack_copy_active(struct script_stack *dst,
 
 /* Thin forwarders to the domain implementation. The names + signatures
  * are preserved exactly so every caller (connect_block, bg_validation,
- * script_validate_stage, zcashconsensus, fuzz_script) links unchanged. */
+ * script_validate_stage, fuzz_script) links unchanged. */
 
 bool eval_script(struct script_stack *stack,
                  const struct script *script,
