@@ -90,7 +90,7 @@ bundles never ride inside control messages.
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Wire and durable local projection connected: pairing-bound signed status receipts pin the responder's unique active delegated online key; `ops mesh machines` lists bounded redacted pairings from schema-v77 exact receipt evidence as fresh, stale, or unknown without network I/O | Automatic bounded refresh scheduling and independent-host receipts |
+| Fleet view | Wire, durable local projection, and bounded automatic refresh connected: pairing-bound signed status receipts pin the responder's unique active delegated online key; `ops mesh machines` lists bounded redacted pairings from schema-v77 exact receipt evidence as fresh, stale, or unknown without network I/O | Independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
@@ -357,7 +357,8 @@ The phases below are delivered in this dependency order:
 4. completed: connect the wire only after Noise plus active ZID authentication
    and prove revocation races fail closed;
 5. completed: project responses into `ops mesh machines` with honest fresh,
-   stale, and unknown state;
+   stale, and unknown state, then refresh connected active pairings without
+   competing with chain synchronization;
 6. add the encrypted private-object envelope and resumable transfer before any
    remote execution surface;
 7. bind existing immutable build/test actions to paired capabilities;
@@ -616,7 +617,15 @@ peers, never production wallet state.
   evidence. Older or same-time equivocal receipts cannot replace the durable
   row; exact replay is idempotent. Fixture acceptance proves restart retention,
   stale/unknown separation, redaction, migration idempotence, and strict MinGW
-  C23 syntax. Automatic refresh and independent-host evidence remain open.
+  C23 syntax.
+- 2026-08-29: queue item 5 added a dedicated supervised refresh clock. It
+  polls at most two requests, admits at most one connected active pairing per
+  second, backs off unavailable peers, never dials, and admits no new work
+  unless the chain is at tip and disk, memory, and serialized database state
+  are clear. Verified terminal receipts enter the bounded asynchronous DB
+  writer; manual polling uses the same writer synchronously. The focused wire
+  group proves the resource gate matrix. Independent-host evidence remains
+  open; it requires an owner-approved deployment and restart on each host.
 
 ## Completion rule
 
