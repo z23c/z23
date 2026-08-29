@@ -77,10 +77,14 @@ find_make_owner()
 
 process_parent()
 {
-    local pid="$1"
+    local pid="$1" ppid=""
     case "$(uname -s 2>/dev/null)" in
         MINGW*|MSYS*)
-            sed -n '1p' "/proc/$pid/ppid" 2>/dev/null || true
+            ppid=$(sed -n '1p' "/proc/$pid/ppid" 2>/dev/null)
+            # MSYS/Cygwin /proc is sparse for orphan or init-parented
+            # processes; fall back to the native ps listing.
+            [ -n "$ppid" ] || ppid=$(ps -p "$pid" -f 2>/dev/null | awk 'NR==2 {print $3}')
+            printf '%s\n' "$ppid"
             ;;
         *) ps -p "$pid" -o ppid= 2>/dev/null || true ;;
     esac
@@ -88,11 +92,13 @@ process_parent()
 
 process_comm()
 {
-    local pid="$1"
+    local pid="$1" comm=""
     case "$(uname -s 2>/dev/null)" in
         MINGW*|MSYS*)
-            sed -n 's/^Name:[[:space:]]*//p' "/proc/$pid/status" \
-                2>/dev/null || true
+            comm=$(sed -n 's/^Name:[[:space:]]*//p' "/proc/$pid/status" \
+                2>/dev/null)
+            [ -n "$comm" ] || comm=$(ps -p "$pid" -f 2>/dev/null | awk 'NR==2 {sub(/^[^ ]+[ ]+[0-9]+[ ]+[0-9]+[ ]+[^ ]+[ ]+[^ ]+[ ]+/, ""); print}')
+            printf '%s\n' "$comm"
             ;;
         *) ps -p "$pid" -o comm= 2>/dev/null || true ;;
     esac
@@ -126,6 +132,12 @@ if [ -n "$resolved_owner" ]; then
     OWNER_PID="$resolved_owner"
 elif "$SELF_DIR/process-start-token.sh" "$OWNER_PID" >/dev/null 2>&1; then
     :
+# Some execution environments (headless MSYS2/Git Bash launched by a service
+# wrapper) orphan every shell so the Make ancestor is not visible through
+# /proc.  In that case the current recipe shell is still a live child of Make
+# and is a safe-enough owner token for this build.
+elif "$SELF_DIR/process-start-token.sh" "$$" >/dev/null 2>&1; then
+    OWNER_PID="$$"
 elif [ "$MODE" != acquire ]; then
     OWNER_PID="$$"
 else
