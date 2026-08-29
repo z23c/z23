@@ -129,7 +129,7 @@ transport, and independent-host route receipts remain acceptance work.
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
 | Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
 | macOS | Native arm64 node build and isolated startup are measured; a launchd service template exists | Native service lifecycle, independent node/session receipts, embedded-Tor build and runtime proof, and truthful confinement/tunnel probes |
-| Windows | Native UCRT64 `z23.exe` builds and a Task Scheduler installer exists; WSL2 runs the Linux node | Native full-node and service acceptance, embedded Tor, and Windows confinement/tunnel probes |
+| Windows | Native UCRT64 `z23.exe` builds, retained-handle source-package traversal is cross-linked and rejects a real reparse point under Wine, and a Task Scheduler installer exists; WSL2 runs the Linux node. The native consensus store refuses before mutation because the default SQLite VFS is not directory-capability-bound | Retained-directory SQLite VFS and migration, native full-node and service acceptance, embedded Tor, and Windows confinement/tunnel probes |
 
 ### Platform service and activation truth
 
@@ -960,6 +960,18 @@ peers, never production wallet state.
   zero skips, using GCC 16.1.1 on an AMD Ryzen 7 PRO 8840U. This is local direct
   route evidence only; onion selection and independent-host receipts remain
   open.
+- 2026-08-29T18:11:22-04:00 / 2026-08-29T22:11:22Z: Windows package
+  preparation replaced pathname traversal with one retained-root,
+  handle-relative NT walk and refused a real reparse point under Wine. Review
+  of the separately merged native consensus-store path found that migration
+  could mutate before directory validation and that the default SQLite VFS
+  reopened main/WAL/SHM paths outside the retained capability. Windows now
+  refuses that store before any mutation, with a strict cross-linked fixture
+  proving a sentinel `progress.kv` and absent database families remain inert.
+  Unicode state-root overrides and pre-existing ACL repair are also
+  cross-linked. Six affected native groups passed with zero failures and zero
+  skips. Native Windows node operation remains unclaimed until a
+  retained-directory SQLite VFS and native-host acceptance exist.
 
 ## Completion rule
 

@@ -2946,6 +2946,7 @@ $(ZCODE_PACKAGE_CODEC_TEST_BIN): lib/codec/tests/test_codec.c \
 zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test
 
 zcode-package-registry-check: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
+	@$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 
 # Permanent memory/undefined-behavior gate for the self-hosted package
 # foundation and its complete signed evidence lifecycle.  The first three

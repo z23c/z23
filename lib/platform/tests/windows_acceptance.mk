@@ -31,6 +31,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	mint_anchor_preflight_refusal \
 	nat_gateway \
 	package_lifecycle_store_refusal \
+	package_prepare \
 	os_binary_slots_refusal \
 	os_proc_pid_image \
 	os_proc_self_image \
@@ -41,6 +42,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	private_file \
 	private_file_path_swap \
 	process_lifecycle \
+	progress_store_refusal \
 	read_mapping \
 	rom_bundle_admission_refusal \
 	rpc_client_transport \
@@ -286,6 +288,20 @@ ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_FLAGS := \
 	-fno-asynchronous-unwind-tables
 ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_LIBS := \
 	-Wl,--gc-sections
+ZCL_WINDOWS_ACCEPTANCE_package_prepare_SOURCES := \
+	lib/platform/tests/package_prepare_windows_acceptance.c \
+	lib/vcs/src/package_prepare.c \
+	lib/vcs/src/package_prepare_schema.c \
+	lib/vcs/src/package_manifest.c \
+	lib/vcs/src/package_recipe.c \
+	lib/json/src/json.c \
+	lib/codec/src/cursor.c \
+	lib/sha3/src/sha3.c \
+	lib/base/src/safe_alloc.c \
+	lib/base/src/log_level.c
+ZCL_WINDOWS_ACCEPTANCE_package_prepare_FLAGS := \
+	-ffunction-sections -fdata-sections
+ZCL_WINDOWS_ACCEPTANCE_package_prepare_LIBS := -Wl,--gc-sections
 ZCL_WINDOWS_ACCEPTANCE_os_binary_slots_refusal_SOURCES := \
 	lib/test/src/os_binary_slots_refusal_acceptance.c \
 	lib/platform/src/os_binary_slots.c
@@ -338,6 +354,17 @@ ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_SOURCES := \
 	lib/platform/src/os_proc.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_LIBS := -lpsapi -lshell32
+ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_SOURCES := \
+	lib/test/src/progress_store_windows_refusal_acceptance.c \
+	lib/storage/src/progress_store.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c \
+	lib/base/src/log_level.c
+ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_FLAGS := \
+	-ffunction-sections -fdata-sections -flto -fwhole-program
+ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_LIBS := \
+	-flto -Wl,--gc-sections -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_read_mapping_SOURCES := \
 	lib/platform/tests/read_mapping_windows_acceptance.c \
 	lib/platform/src/read_mapping.c

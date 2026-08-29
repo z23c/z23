@@ -36,9 +36,19 @@ static bool state_root_repair_acl(const char *path)
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR current = NULL;
     PACL dacl = NULL;
     BOOL dacl_present = false, defaulted = false;
     bool ok = directory != INVALID_HANDLE_VALUE &&
+              GetFileInformationByHandle(directory, &info) &&
+              (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+              (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+              GetSecurityInfo(directory, SE_FILE_OBJECT,
+                              OWNER_SECURITY_INFORMATION, &owner, NULL, NULL,
+                              NULL, &current) == ERROR_SUCCESS &&
+              owner && EqualSid(owner, acl.user->User.Sid) &&
               GetSecurityDescriptorDacl(platform_private_acl_descriptor(&acl),
                                         &dacl_present, &dacl, &defaulted) &&
               dacl_present &&
@@ -46,6 +56,7 @@ static bool state_root_repair_acl(const char *path)
                               DACL_SECURITY_INFORMATION |
                                   PROTECTED_DACL_SECURITY_INFORMATION,
                               NULL, NULL, dacl, NULL) == ERROR_SUCCESS;
+    if (current) LocalFree(current);
     if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
     platform_private_acl_destroy(&acl);
     return ok;
@@ -72,12 +83,15 @@ static bool state_root_base_from_known_folder(char base[32768])
 bool platform_state_root(char *out, size_t cap)
 {
     char base[32768], z23[32768];
-    char env_base[32768];
-    DWORD env_len = GetEnvironmentVariableA("ZCL_STATE_ROOT", env_base,
-                                            sizeof(env_base));
-    if (env_len > 0 && env_len < sizeof(env_base)) {
-        int n = snprintf(base, sizeof(base), "%s", env_base);
-        if (n <= 0 || (size_t)n >= sizeof(base)) return false;
+    wchar_t env_base[32768];
+    DWORD env_len = GetEnvironmentVariableW(L"ZCL_STATE_ROOT", env_base,
+                                            32768);
+    if (env_len > 0 && env_len < 32768) {
+        int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, env_base,
+                                    -1, base, sizeof(base), NULL, NULL);
+        if (n <= 1) return false;
+    } else if (env_len >= 32768) {
+        return false;
     } else if (!state_root_base_from_known_folder(base)) {
         return false;
     }

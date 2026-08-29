@@ -24,10 +24,10 @@ static bool progress_directory_wide_to_utf8(const wchar_t *wide, char *out,
 }
 
 /* Derive a canonical path from an open directory handle and prove the path
- * still resolves to the same directory object.  This is the Windows equivalent
- * of Darwin's F_GETPATH + fstat/stat identity check: it lets SQLite open the
- * file by pathname while retaining a validated handle that cannot be swapped
- * by a namespace reparse/rename race. */
+ * resolves to the same directory object at this instant. This supports
+ * identity diagnostics and snapshot activation. It does not capability-bind
+ * later SQLite main/WAL/SHM opens; progress_store therefore remains disabled
+ * on Windows until its VFS performs retained-handle-relative operations. */
 static bool progress_directory_canonical_from_handle(HANDLE dir, char *out,
                                                      size_t out_size)
 {
