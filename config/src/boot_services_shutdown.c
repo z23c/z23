@@ -169,6 +169,13 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
 static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
 {
     printf("[shutdown] stopping runtime services\n");
+    /* Signal the NAT probe worker FIRST (non-blocking): a worker sitting in
+     * its renewal wait wakes immediately and can be finishing its exit
+     * while the stops below run. Its join is with the other runtime
+     * workers below — an in-flight probe cannot be cancelled (nat.c has no
+     * cancel seam) but is bounded by its per-socket timeouts (~25 s worst
+     * case), which the join waits out rather than detaching. */
+    peer_strategy_worker_stop(&svc->nat_probe_worker);
     /* The heartbeat sweeper owns periodic callbacks into runtime services,
      * including node-health collection. It does not poll the registry's
      * global shutdown flag because health_stop() is its explicit lifecycle
@@ -200,6 +207,7 @@ static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
      * makes shutdown wait on workers that have not yet been told to stop. */
     staged_sync_supervisor_shutdown_stages();
     printf("[shutdown] joining runtime workers\n");
+    peer_strategy_worker_join(&svc->nat_probe_worker);
     boot_join_address_backfill_service(svc);
     boot_join_hodl_history_service(svc);
     boot_join_tx_index_service(svc);

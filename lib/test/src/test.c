@@ -1095,6 +1095,7 @@ int main(int argc, char **argv)
     failures += test_net();
     failures += test_netbase_split_host_port();
     failures += test_nat_route_dump();
+    failures += test_peer_strategy_worker();
     failures += test_connman_addnode_fallback();
     failures += test_transaction();
     failures += test_mempool();

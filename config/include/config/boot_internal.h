@@ -26,6 +26,7 @@
 #include "controllers/sync_controller.h"
 #include "controllers/snapshot_controller.h"
 #include "net/snapshot_sync_contract.h"
+#include "net/peer_strategy_worker.h"
 #include "services/bg_validation_service.h"
 #include "services/bg_hash_verification_service.h"
 #include "services/block_index_loader.h"
@@ -245,6 +246,11 @@ struct boot_svc_ctx {
     pthread_t projection_backfill_thread;
     bool projection_backfill_thread_started;
     _Atomic bool projection_backfill_thread_stop;
+    /* Background NAT-PMP/UPnP probe + mapping lease renewal
+     * (lib/net/src/peer_strategy_worker.c). Spawned where the synchronous
+     * probe used to run; stop is signaled at the top of the worker drain,
+     * join happens with the other runtime workers. */
+    struct peer_strategy_worker nat_probe_worker;
     struct snapshot_tx_index_job tx_index_job;
     bool want_address_backfill;
     bool want_snapshot_tx_index;
