@@ -187,25 +187,27 @@ ZCL_COMMAND_READY_COMMAND(
     "Captures the workspace into ZVCS, builds its compressed bundle, lands it "
     "under the RUNNING node's own seeded artifact directory, registers it "
     "there by name, and prints the 64-hex source root another machine needs to "
-    "pull it with fetch. The node picks the destination path; the caller names "
+    "pull it with fetch after learning a serving peer address. The node picks "
+    "the destination path; the caller names "
     "none. Registration is by exact name, never a bounded directory sweep, so "
     "how many entries share that directory cannot silently hide the bundle, "
     "and the result reports the offer only after the node's registry confirms "
     "it by root. Publishing grants no acceptance authority and asks for no "
     "identity: a fetcher still accepts the bytes solely because they rederive "
     "the root it asked for. Optional source_root is a pin — a workspace that "
-    "captures to a different tree is refused before anything is written. It "
+    "captures to a different tree is refused before publication bytes are "
+    "written. It "
     "does not execute source.", ZCL_COMMAND_RESULT_BUDGET,
     "zcode,source,bundle,zvcs,publish,seed,p2p,content-addressed,identity-free,git-free",
     "zcl.zcode_source_bundle_publish.input.v1",
     "zcl.zcode_source_bundle_publish.v1",
-    "workspace", "workspace,source_root",
+    "workspace,source_root", "workspace",
     "z23 zcode workspace source bundle publish --input='{\"workspace\":\"/src\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
-    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
-    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_CONFIRM_IDEMPOTENCY,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_source_bundle_publish)

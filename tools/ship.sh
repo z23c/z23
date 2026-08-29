@@ -43,10 +43,12 @@
 #                     deploy even though the candidate changes persistent-schema
 #                     code. Default is to REFUSE, because the previous binary
 #                     cannot read the migrated database. Setting this also
-#                     DISARMS the automatic rollback for that host: with a
+#                     DISARMS the automatic rollback for a remote host: with a
 #                     forward migration applied, restoring the old binary is
 #                     the dangerous act, so a failed activation is reported and
-#                     left in place instead of reverted.
+#                     left in place instead of reverted. Local deployment
+#                     refuses one-way changes until make deploy has the same
+#                     rollback-disarm contract.
 #   ZCL_SHIP_PROOF_SERVER
 #                     optional immutable host; never inferred from remoteness
 set -euo pipefail
@@ -671,11 +673,25 @@ install_local_workers() {
 deploy_local() {
     step "Deploy → local"
     if [ "$DRY_RUN" -eq 1 ]; then say "would install the frozen candidate + workers transactionally"; return 0; fi
-    local pid svc_dir worker_backup i rc=0
+    local pid svc_dir worker_backup i rc=0 prior_commit
     pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
     case "$pid" in
         ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
     esac
+    prior_commit="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null |
+        sed -n 's/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p' | tail -1)"
+    case "$prior_commit" in
+        ''|*[!0-9a-f]*) die "local node has no exact rollback build commit; refusing a schema-unsafe restart" ;;
+    esac
+    git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
+        die "local rollback commit $prior_commit is unavailable"
+    if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
+        'app/models/src/database*.c' \
+        'app/models/include/models/database*.h' \
+        'app/models/src/schema_migration.c' \
+        'app/models/include/models/schema_migration.h'; then
+        die "local candidate changes persistent-schema code; local automatic rollback cannot yet be safely disarmed (ship remote targets explicitly after owner acceptance)"
+    fi
     svc_dir="$(dirname "$(ship_exe_of "$pid")")"
     # Scratch lives under the owner's state root, never /tmp: honour
     # ZCL_SCRATCH_DIR when set (same override ship_selftest.sh recognises),
@@ -880,8 +896,8 @@ REMOTE_HASH
         die "$host rollback commit $prior_commit is unavailable locally"
     one_way_schema=0
     if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
-        'app/models/src/database_migrate*.c' \
-        'app/models/src/database_schema.c' \
+        'app/models/src/database*.c' \
+        'app/models/include/models/database*.h' \
         'app/models/src/schema_migration.c' \
         'app/models/include/models/schema_migration.h'; then
         # A FORWARD-ONLY deploy is a deliberate act, in the same shape as
@@ -1222,6 +1238,9 @@ REMOTE_SCRIPT
         *)
             # The remote proved a fault and its own armed transaction already
             # restored the prior executable before exiting.
+            if [ "$one_way_schema" = "1" ]; then
+                die "$host: forward-only candidate failed remote qualification (rc=$activate_rc); rollback was disarmed and candidate remains installed"
+            fi
             die "$host: candidate failed remote qualification (rc=$activate_rc); remote rolled back"
             ;;
     esac
@@ -1264,6 +1283,9 @@ REMOTE_SCRIPT
     esac
 
     if [ "$qual_rc" -ne 0 ]; then
+        if [ "$one_way_schema" = "1" ]; then
+            die "$host is $SHIP_AWAIT_LAST_VERDICT after forward-only activation; rollback is disarmed and the candidate remains installed: $SHIP_AWAIT_LAST_LINE"
+        fi
         say "$host is $SHIP_AWAIT_LAST_VERDICT — ROLLING BACK. Evidence:"
         say "  $SHIP_AWAIT_LAST_LINE"
         rollback_rc=0

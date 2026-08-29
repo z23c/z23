@@ -22,9 +22,9 @@ void bbf_add_peer(struct rom_fetch_peer *peers, size_t *np, size_t cap,
 
 /* Append `host` at an EXPLICIT port, de-duped on (addr, port). The shared core
  * of bbf_add_peer, split out because a peer-discovered seed must NOT run the
- * host[:port] text split: the port comes from the NODE_FILESERVICE contract
- * (always FS_PORT), and running the split over a bare IPv6 literal would read
- * its last group as a port number. */
+ * host[:port] text split: the port comes from the peer's `zfileaddr` message
+ * and may differ from FS_PORT. Running the split over a bare IPv6 literal
+ * would incorrectly read its last group as a port number. */
 void bbf_add_peer_at_port(struct rom_fetch_peer *peers, size_t *np, size_t cap,
                           const char *host, uint16_t port);
 
@@ -35,7 +35,7 @@ void bbf_add_peer_at_port(struct rom_fetch_peer *peers, size_t *np, size_t cap,
  *      FS_PORT;
  *   3. then the operator's `-addnode=` hosts;
  *   4. LAST: peers this node already completed a P2P handshake with that
- *      advertised NODE_FILESERVICE, via the provider registered with
+ *      advertised `zfileaddr`, via the provider registered with
  *      boot_bundle_fetch_set_peer_source(). Lowest precedence on purpose — a
  *      source that needs no operator input must never displace one the
  *      operator named. Absent a registered provider this step is a no-op and

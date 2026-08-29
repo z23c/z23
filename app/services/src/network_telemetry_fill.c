@@ -301,14 +301,19 @@ static void nt_fill_transport(struct network_snapshot *s, struct connman *cm,
 {
     if (!cm) {
         TELEMETRY_UNAVAILABLE_LEAF(s, noise_offered_by_default, NT_R_NO_NODE);
+        TELEMETRY_UNAVAILABLE_LEAF(s, v2_offered_by_default, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, peers_encrypted_now, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, peers_plaintext_now, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, peers_handshaking_now, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, peers_advertising_noise_now, NT_R_NO_NODE);
+        TELEMETRY_UNAVAILABLE_LEAF(s, peers_advertising_v2_now, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, noise_advertising_high_water, NT_R_NO_NODE);
+        TELEMETRY_UNAVAILABLE_LEAF(s, v2_advertising_high_water, NT_R_NO_NODE);
         return;
     }
     TELEMETRY_SET_BOOL(s, noise_offered_by_default, cm->manager.noise_enabled,
+                       TELEMETRY_SRC_CONFIG);
+    TELEMETRY_SET_BOOL(s, v2_offered_by_default, cm->manager.noise_enabled,
                        TELEMETRY_SRC_CONFIG);
 
     /* The advertisement census is a lock-free publication the reactor poll
@@ -317,7 +322,12 @@ static void nt_fill_transport(struct network_snapshot *s, struct connman *cm,
     connman_get_noisetransport_stats(&census);
     TELEMETRY_SET_I64(s, peers_advertising_noise_now, census.advertising_now,
                       TELEMETRY_SRC_CACHED_PUBLICATION);
+    TELEMETRY_SET_I64(s, peers_advertising_v2_now, census.advertising_now,
+                      TELEMETRY_SRC_CACHED_PUBLICATION);
     TELEMETRY_SET_I64(s, noise_advertising_high_water,
+                      census.advertising_high_water,
+                      TELEMETRY_SRC_CACHED_PUBLICATION);
+    TELEMETRY_SET_I64(s, v2_advertising_high_water,
                       census.advertising_high_water,
                       TELEMETRY_SRC_CACHED_PUBLICATION);
 

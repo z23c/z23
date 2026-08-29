@@ -75,10 +75,7 @@
  * rather than truncating. */
 #define SBF_DIRECTORY_MAX 8192
 
-/* One artifact several peers may all be offering. Peers are grouped by
- * chunk_root so that honest replicas of the same bundle become FAILOVER for a
- * single download, while a genuinely different byte sequence claiming the same
- * source root becomes a separate candidate that must be refused on its own. */
+/* One exact immutable artifact several peers may all be offering. */
 struct sbf_candidate {
     struct rom_fetch_manifest manifest;
     struct rom_fetch_peer peers[SOURCE_BUNDLE_FETCH_MAX_PEERS];
@@ -182,7 +179,11 @@ static bool sbf_candidate_add(struct sbf_candidate *cands, size_t *ncands,
                               const struct rom_fetch_peer *peer)
 {
     for (size_t i = 0; i < *ncands; i++) {
-        if (memcmp(cands[i].manifest.chunk_root, m->chunk_root, 32) != 0)
+        if (memcmp(cands[i].manifest.chunk_root, m->chunk_root, 32) != 0 ||
+            memcmp(cands[i].manifest.whole_sha3, m->whole_sha3, 32) != 0 ||
+            cands[i].manifest.size_bytes != m->size_bytes ||
+            cands[i].manifest.chunk_size != m->chunk_size ||
+            cands[i].manifest.num_chunks != m->num_chunks)
             continue;
         if (cands[i].npeers >= SOURCE_BUNDLE_FETCH_MAX_PEERS)
             return false;
@@ -210,7 +211,8 @@ static bool sbf_candidate_add(struct sbf_candidate *cands, size_t *ncands,
  * read here is an untrusted claim used only to choose what to download. */
 static bool sbf_discover_peer(const struct rom_fetch_peer *peer,
                               const uint8_t source_root[32],
-                              struct sbf_candidate *cands, size_t *ncands)
+                              struct sbf_candidate *cands, size_t *ncands,
+                              size_t candidate_limit)
 {
     char body[SBF_DIRECTORY_MAX];
     if (!rom_fetch_get_directory(peer->addr, peer->port, body, sizeof(body)))
@@ -235,8 +237,12 @@ static bool sbf_discover_peer(const struct rom_fetch_peer *peer,
         if (arts[i].size_bytes > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES ||
             arts[i].num_chunks > SOURCE_BUNDLE_FETCH_MAX_CHUNKS)
             continue;
-        offered = true;
-        (void)sbf_candidate_add(cands, ncands, &arts[i], peer);
+        size_t before = *ncands;
+        if (sbf_candidate_add(cands, ncands, &arts[i], peer)) {
+            offered = true;
+            if (*ncands > before && *ncands >= candidate_limit)
+                break;
+        }
     }
     return offered;
 }
@@ -257,8 +263,8 @@ static uint8_t *sbf_download_candidate(const struct sbf_candidate *c,
      * ourselves keeps concurrent candidates from colliding while keeping the
      * whole path caller-controlled; the ".stage" suffix keeps a scratch
      * directory from ever classifying as a seedable ".zvsb". */
-    char stem[17];
-    HexStr(c->manifest.chunk_root, 8, false, stem, sizeof(stem));
+    char stem[65];
+    HexStr(c->manifest.chunk_root, 32, false, stem, sizeof(stem));
     char name[ROM_FETCH_NAME_MAX];
     if (snprintf(name, sizeof(name), "zvsb-stage-%s.stage", stem) <= 0)
         return NULL;
@@ -341,7 +347,11 @@ enum source_bundle_fetch_result source_bundle_fetch(
         if (!sbf_budget_left(start_us))
             break;
         asked++;
-        if (sbf_discover_peer(&peers[i], source_root, cands, &ncands))
+        size_t peers_after = npeers - i - 1u;
+        size_t limit = SOURCE_BUNDLE_FETCH_MAX_CANDIDATES;
+        if (peers_after < limit)
+            limit -= peers_after;
+        if (sbf_discover_peer(&peers[i], source_root, cands, &ncands, limit))
             offering++;
     }
     if (metrics) {

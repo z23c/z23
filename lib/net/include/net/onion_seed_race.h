@@ -25,6 +25,12 @@ typedef int (*onion_seed_fetch_fn)(const char *onion_address,
                                    int timeout_secs,
                                    void *ctx);
 
+/* Optional caller-owned content predicate. Transport success alone does not
+ * make a directory useful; production uses this to reject empty or malformed
+ * HTTP 200 bodies before they can win the race. */
+typedef bool (*onion_seed_usable_fn)(const uint8_t *body, size_t body_len,
+                                     void *ctx);
+
 /* Handle for the workers this race spawned, including the ones that lost
  * and are still finishing. The blocking Tor primitive cannot be cancelled,
  * so a loser is left to complete into a result nobody reads; the caller
@@ -33,9 +39,9 @@ typedef int (*onion_seed_fetch_fn)(const char *onion_address,
 struct onion_seed_race_join;
 
 /* Race up to ONION_SEED_RACE_MAX_INFLIGHT fetches at a time. Returns 0
- * and fills *winner / *winner_index as soon as one fetch is usable
- * (status 200 and a non-NULL body — the same rule try_onion_seed_fetch_depth
- * uses). Does not wait for the remaining in-flight fetches. Any live
+ * and fills *winner / *winner_index as soon as one fetch has status 200, a
+ * non-NULL body, and passes `usable` when that callback is non-NULL. Does not
+ * wait for the remaining in-flight fetches. Any live
  * seed's usable answer is equally acceptable; the winner is whoever
  * finished first, not a preferred index.
  *
@@ -52,6 +58,8 @@ int onion_seed_race_first_usable(const char *const *hosts,
                                  size_t n,
                                  onion_seed_fetch_fn fetch,
                                  void *fetch_ctx,
+                                 onion_seed_usable_fn usable,
+                                 void *usable_ctx,
                                  int timeout_secs,
                                  const _Atomic bool *stop,
                                  struct onion_fetch_result *winner,

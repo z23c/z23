@@ -325,6 +325,10 @@ static int selftest_jws(void)
             EVP_PKEY_free(rsa);
             AJ_CHECK("a non-P-256 account key is refused, not used with ES256",
                      acme_account_key_load(rsa_path) == NULL);
+            EVP_PKEY *wrong = acme_account_key_load_or_create(rsa_path);
+            AJ_CHECK("an existing wrong-algorithm account key is never replaced",
+                     wrong == NULL && acme_account_key_load(rsa_path) == NULL);
+            EVP_PKEY_free(wrong);
         } else {
             printf("acme_jws: RSA keygen unavailable; algorithm refusal not exercised\n");
             failures++;

@@ -637,6 +637,36 @@ static int cas_test_noisetransport_is_recognized(void)
 
         ASSERT(started);
         ASSERT(!cas_contains(out, "unrecognized flag '-noisetransport'"));
+
+        uint16_t legacy_rpc_port = cas_reserve_port();
+        uint16_t legacy_p2p_port = cas_reserve_port();
+        ASSERT(legacy_rpc_port != 0 && legacy_p2p_port != 0);
+        char legacy_home[300], legacy_datadir[340];
+        snprintf(legacy_home, sizeof(legacy_home),
+                 "/tmp/zcl_cas_legacy_noise_home_%d", (int)getpid());
+        snprintf(legacy_datadir, sizeof(legacy_datadir),
+                 "/tmp/zcl_cas_legacy_noise_dd_%d", (int)getpid());
+        cas_mkdir_p(legacy_home);
+        snprintf(datadir_flag, sizeof(datadir_flag), "-datadir=%s",
+                 legacy_datadir);
+        snprintf(rpcport_flag, sizeof(rpcport_flag), "-rpcport=%u",
+                 legacy_rpc_port);
+        snprintf(port_flag, sizeof(port_flag), "-port=%u", legacy_p2p_port);
+        char *legacy_argv[] = {
+            (char *)CAS_BIN, datadir_flag, rpcport_flag, port_flag,
+            (char *)"-regtest", (char *)"-nolegacyimport",
+            (char *)"-nobgvalidation", (char *)"-v2transport", NULL,
+        };
+        static const char *const legacy_needles[] = {
+            "z23 starting", "-v2transport is deprecated", NULL,
+        };
+        memset(out, 0, sizeof(out));
+        started = cas_run_daemon_wait_for(legacy_argv, legacy_home,
+                                          legacy_needles, 20000, out,
+                                          sizeof(out));
+        ASSERT(started);
+        ASSERT(!cas_contains(out, "unrecognized flag '-v2transport'"));
+        ASSERT(cas_contains(out, "-v2transport is deprecated"));
         PASS();
     } _test_next:;
     return failures;

@@ -941,6 +941,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
 
     /* Shorten the recv window: a legacy (RMF-unaware) seeder never replies, so
      * a fast timeout is the fall-back signal rather than a 120 s stall. */
+    const int64_t rmf_deadline_ms = platform_time_monotonic_ms() + rf_probe_io_timeout_ms(peer_addr);
     (void)platform_socket_set_receive_timeout(
         fd, rf_probe_io_timeout_ms(peer_addr));
 
@@ -968,7 +969,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
 
     /* Reply is size/blob/MAC; FS_DONE parses as an invalid size and falls back. */
     uint8_t hdr[4];
-    if (!rf_recv_exact(fd, hdr, 4)) {
+    if (!rf_recv_exact_until(fd, hdr, 4, rmf_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: no reply from %s:%u (legacy seeder?) — "
                  "falling back", peer_addr, (unsigned)port);
@@ -987,14 +988,14 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     }
 
     uint8_t blob[ROM_SEED_MANIFEST_BLOB_MAX];
-    if (!rf_recv_exact(fd, blob, size)) {
+    if (!rf_recv_exact_until(fd, blob, size, rmf_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: blob read failed from %s:%u — falling "
                  "back", peer_addr, (unsigned)port);
         return false;
     }
     uint8_t mac_wire[32];
-    if (!rf_recv_exact(fd, mac_wire, 32)) {
+    if (!rf_recv_exact_until(fd, mac_wire, 32, rmf_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: MAC read failed from %s:%u — falling "
                  "back", peer_addr, (unsigned)port);

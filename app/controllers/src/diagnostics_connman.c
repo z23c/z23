@@ -251,6 +251,8 @@ bool connman_diag_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(&census_j, "samples_total", (int64_t)census.samples_total);
     json_push_kv_bool(&census_j, "default_enabled", cm->manager.noise_enabled);
     json_push_kv(out, "noisetransport", &census_j);
+    /* Retain the v1 object key while clients migrate to the canonical name. */
+    json_push_kv(out, "v2transport", &census_j);
     json_free(&census_j);
 
     struct connman_message_cycle_stats mc;

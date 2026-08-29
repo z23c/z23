@@ -26,6 +26,7 @@
 #include "net/netbase.h"
 #include "net/onion_stream.h"
 #include "net/rom_fetch.h"
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include <errno.h>
 #include <stdio.h>
@@ -92,6 +93,32 @@ bool rf_recv_exact(platform_socket_t fd, uint8_t *buf, size_t size)
 {
     size_t received = 0;
     while (received < size) {
+        int result = platform_socket_receive(fd, buf + received,
+                                             size - received);
+        if (result < 0) {
+            if (platform_socket_error_interrupted(
+                    platform_socket_last_error()))
+                continue;
+            return false;
+        }
+        if (result == 0)
+            return false;
+        received += (size_t)result;
+    }
+    return true;
+}
+
+bool rf_recv_exact_until(platform_socket_t fd, uint8_t *buf, size_t size,
+                         int64_t deadline_ms)
+{
+    size_t received = 0;
+    while (received < size) {
+        int64_t left = deadline_ms - platform_time_monotonic_ms();
+        if (left <= 0)
+            return false;
+        int timeout = left > INT32_MAX ? INT32_MAX : (int)left;
+        if (platform_socket_set_receive_timeout(fd, timeout) != 0)
+            return false;
         int result = platform_socket_receive(fd, buf + received,
                                              size - received);
         if (result < 0) {

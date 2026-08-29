@@ -40,6 +40,26 @@
 
 /* ── 1. Pure parsing ─────────────────────────────────────────────────── */
 
+static bool tls_client_parse_port(const char *text, const char *end,
+                                  int *port_out)
+{
+    if (!text || !end || !port_out || text >= end)
+        return false;
+    int port = 0;
+    for (const char *p = text; p < end; p++) {
+        if (*p < '0' || *p > '9')
+            return false;
+        int digit = *p - '0';
+        if (port > (65535 - digit) / 10)
+            return false;
+        port = port * 10 + digit;
+    }
+    if (port == 0)
+        return false;
+    *port_out = port;
+    return true;
+}
+
 bool tls_client_url_parse(const char *url, struct tls_client_url *out)
 {
     if (!url || !out)
@@ -81,12 +101,8 @@ bool tls_client_url_parse(const char *url, struct tls_client_url *out)
             const char *port_text = rb + 2;
             if (port_text >= authority_end)
                 LOG_FAIL("tlsclient", "refusing a URL with an empty port");
-            port = 0;
-            for (const char *p = port_text; p < authority_end; p++) {
-                if (*p < '0' || *p > '9' || port > 65535)
-                    LOG_FAIL("tlsclient", "refusing a URL with a non-numeric port");
-                port = port * 10 + (*p - '0');
-            }
+            if (!tls_client_parse_port(port_text, authority_end, &port))
+                LOG_FAIL("tlsclient", "refusing an invalid URL port");
         }
     } else {
         const char *colon = memchr(host_start, ':', (size_t)(authority_end - host_start));
@@ -95,12 +111,8 @@ bool tls_client_url_parse(const char *url, struct tls_client_url *out)
             const char *port_text = colon + 1;
             if (port_text >= authority_end)
                 LOG_FAIL("tlsclient", "refusing a URL with an empty port");
-            port = 0;
-            for (const char *p = port_text; p < authority_end; p++) {
-                if (*p < '0' || *p > '9' || port > 65535)
-                    LOG_FAIL("tlsclient", "refusing a URL with a non-numeric port");
-                port = port * 10 + (*p - '0');
-            }
+            if (!tls_client_parse_port(port_text, authority_end, &port))
+                LOG_FAIL("tlsclient", "refusing an invalid URL port");
         }
     }
 

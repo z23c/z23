@@ -84,7 +84,7 @@ z23 discover schema <path> --side=input|output
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
 | Leaves with `effect=mutate` | 205 |
 | Leaves with `effect=destructive` | 4 |
-| Leaves requiring **owner** authority | 115 |
+| Leaves requiring **owner** authority | 116 |
 
 Per source file:
 
@@ -1079,7 +1079,7 @@ represented by its children's sections.
 | `zcode workspace source bundle import` | ready | mutate / app-write / operator · foreground/high | **`bundle`**, **`source_root`**, **`workspace`** | `zcl.zcode_source_bundle_import.v1` | `z23 zcode workspace source bundle import --input='{"bundle":"/tmp/source.zvsb","source_root":"<64hex>","workspace":"/tmp/zvcs-scratch"}'` | Import a verified source bundle into the existing ZVCS CAS |
 | `zcode workspace source bundle checkout` | ready | mutate / app-write / operator · foreground/high | **`bundle`**, **`source_root`**, **`workspace`**, **`destination`** | `zcl.zcode_source_bundle_checkout.v1` | `z23 zcode workspace source bundle checkout --input='{"bundle":"/tmp/source.zvsb","source_root":"<64hex>","workspace":"/tmp/zvcs-scratch","destination":"/tmp/source-scratch"}'` | Reconstruct an exact source tree without Git |
 | `zcode workspace source bundle fetch` | ready | mutate / app-write / operator · foreground/high | **`source_root`**, **`output`**, **`peers`** | `zcl.zcode_source_bundle_fetch.v1` | `z23 zcode workspace source bundle fetch --input='{"source_root":"<64hex>","output":"/tmp/source.zvsb","peers":"203.0.113.7:18034,198.51.100.9:18035"}'` | Fetch a source bundle from peers by its content root |
-| `zcode workspace source bundle publish` | ready | mutate / app-write / operator · foreground/high | **`workspace`**, **`source_root`** | `zcl.zcode_source_bundle_publish.v1` | `z23 zcode workspace source bundle publish --input='{"workspace":"/src"}'` | Offer a workspace to peers by its content root |
+| `zcode workspace source bundle publish` | ready | mutate / app-write / **owner**, idempotency · foreground/high | **`workspace`**, `source_root` | `zcl.zcode_source_bundle_publish.v1` | `z23 zcode workspace source bundle publish --input='{"workspace":"/src"}'` | Offer a workspace to peers by its content root |
 
 #### `zcode.workspace.source.package` — P2P source carrier reconstruction
 

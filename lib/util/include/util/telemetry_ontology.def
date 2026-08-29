@@ -499,7 +499,8 @@ TELEMETRY_FIELD("connman", "noisetransport.advertising_now",
     "observation only, the default stays off", "", "")
 TELEMETRY_FIELD("connman", "noisetransport.handshaked_now",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
-    "peers that actually completed a Noise handshake right now", "", "")
+    "peers that completed the ordinary P2P version handshake; denominator for "
+    "the Noise-advertising census, not proof of encryption", "", "")
 TELEMETRY_FIELD("connman", "noisetransport.advertising_high_water",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
     "the most simultaneous Noise-advertising peers seen since boot", "", "")

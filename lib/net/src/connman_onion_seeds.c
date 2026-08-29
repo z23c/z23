@@ -102,6 +102,38 @@ static int apply_onion_seed_directory(struct connman *cm, const char *onion,
                                       const uint8_t *body, size_t body_len,
                                       int depth, bool pin_endpoints);
 
+/* Race admission is stricter than HTTP success: below the peer floor this
+ * pass can use only a concrete clearnet endpoint, so an empty/irrelevant 200
+ * response must not suppress another seed. Parsing remains side-effect free;
+ * apply_onion_seed_directory performs the actual addrman write. */
+static bool onion_seed_directory_has_endpoint(const uint8_t *body,
+                                              size_t body_len, void *ctx)
+{
+    (void)ctx;
+    static const char needle[] = "\"clearnet_ip\":\"";
+    if (!body || body_len < sizeof(needle))
+        return false;
+    for (size_t i = 0; i + sizeof(needle) - 1u < body_len; i++) {
+        if (memcmp(body + i, needle, sizeof(needle) - 1u) != 0)
+            continue;
+        size_t p = i + sizeof(needle) - 1u;
+        char ip[64];
+        size_t n = 0;
+        while (p < body_len && body[p] != '"' && n + 1u < sizeof(ip))
+            ip[n++] = (char)body[p++];
+        if (p >= body_len || body[p] != '"' || n == 0)
+            continue;
+        ip[n] = '\0';
+        unsigned a, b, c, d;
+        char trailing;
+        if (sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d, &trailing) == 4 &&
+            a <= 255 && b <= 255 && c <= 255 && d <= 255 &&
+            !(a == 0 && b == 0 && c == 0 && d == 0))
+            return true;
+    }
+    return false;
+}
+
 static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
                                       int depth, bool pin_endpoints)
 {
@@ -436,6 +468,8 @@ void connman_run_onion_seed_pass(struct connman *cm)
     struct onion_seed_race_join *join = NULL;
     int rc = onion_seed_race_first_usable(hostptrs, (size_t)seen.n,
                                           onion_seed_pass_fetch, NULL,
+                                          onion_seed_directory_has_endpoint,
+                                          NULL,
                                           60, &g_stop,
                                           &winner, &winner_index, &join);
     if (rc == 0 && winner.body && winner_index < (size_t)seen.n && !g_stop) {

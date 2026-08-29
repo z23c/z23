@@ -147,6 +147,9 @@ static bool push_transport(struct json_value *out, bool *identity_loaded_out)
     json_set_object(&transport);
     json_push_kv_bool(&transport, "observed", collected);
     json_push_kv_bool(&transport, "noise_enabled", enabled);
+    /* Schema v1 compatibility: v2_enabled was the original public key for
+     * this same project Noise transport capability. */
+    json_push_kv_bool(&transport, "v2_enabled", enabled);
     json_push_kv_bool(&transport, "identity_loaded", identity_loaded);
     json_push_kv_str(&transport, "local_noise_fingerprint_sha3",
                      object_str(&raw, "local_noise_fingerprint_sha3"));
@@ -255,7 +258,7 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
     if (!binary_ready)
         push_string_item(&blockers, "BINARY_IDENTITY_UNAVAILABLE");
     if (!noise_ready)
-        push_string_item(&blockers, "NOISE_TRANSPORT_DISABLED");
+        push_string_item(&blockers, "V2_TRANSPORT_DISABLED");
     if (!noise_identity_ready)
         push_string_item(&blockers, "NOISE_IDENTITY_UNAVAILABLE");
     if (!dht_ready)

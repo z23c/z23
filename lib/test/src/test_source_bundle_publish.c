@@ -16,7 +16,7 @@
  *
  * THE TRAP THIS FILE PINS. rom_seed's directory sweep stops after
  * ROM_SEED_SCAN_ENTRY_CAP entries, so a bundle published into a crowded
- * directory can sit past the cap and never be offered, silently. Case (d)
+ * directory can sit past the cap and never be offered, silently. Case (e)
  * fills the seeded directory past that cap, resets the registry to empty, and
  * requires publish to serve the bundle anyway — which only a by-name
  * registration can do — while reporting `rescan_guaranteed` false so the
@@ -36,6 +36,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "config/command_catalog.h"
 #include "controllers/file_market_controller.h"
 #include "controllers/rpc_client.h"
 #include "json/json.h"
@@ -296,6 +297,17 @@ static const char *sbp_reply_str(const struct zcl_command_reply *reply,
     return v && v->type == JSON_STR ? json_get_str(v) : NULL;
 }
 
+static const struct zcl_command_spec *sbp_publish_spec(void)
+{
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    for (size_t i = 0; registry && i < registry->count; i++) {
+        if (strcmp(registry->commands[i].path,
+                   "zcode.workspace.source.bundle.publish") == 0)
+            return &registry->commands[i];
+    }
+    return NULL;
+}
+
 /* ── (a) The loop: publish here, fetch and check out over there ──────── */
 
 static int test_publish_then_fetch_elsewhere(void)
@@ -423,7 +435,58 @@ static int test_republish_is_idempotent(void)
     return failures;
 }
 
-/* ── (c) The pin refuses a tree the caller did not mean ──────────────── */
+/* ── (c) A malformed object at the content address is never replaced ── */
+
+static int test_malformed_existing_bundle_is_preserved(void)
+{
+    int failures = 0;
+    TEST("publishing refuses and preserves a malformed existing bundle at "
+         "the captured tree's content address") {
+        sbp_open_caps();
+        char aroot[] = "/tmp/zcl_sbpub_malformed_dd_XXXXXX";
+        char wroot[] = "/tmp/zcl_sbpub_malformed_ws_XXXXXX";
+        char *adir = mkdtemp(aroot), *wdir = mkdtemp(wroot);
+        ASSERT(adir && wdir);
+        ASSERT(sbp_make_tree(wdir, 'A'));
+        ASSERT(sbp_serve(adir) != 0);
+
+        uint8_t root[32];
+        ASSERT(vcs_tree_capture_path(wdir, root) == VCS_OK);
+        char root_hex[65], seed_dir[1200], leaf[96], path[1400];
+        sbp_hex32(root, root_hex);
+        snprintf(seed_dir, sizeof(seed_dir), "%s/%s", adir,
+                 ROM_SEED_BUNDLES_SUBDIR);
+        ASSERT(mkdir(seed_dir, 0700) == 0 || errno == EEXIST);
+        snprintf(leaf, sizeof(leaf), "%s%s", root_hex,
+                 ROM_SEED_SOURCE_BUNDLE_SUFFIX);
+        snprintf(path, sizeof(path), "%s/%s", seed_dir, leaf);
+
+        /* Empty is not a valid bundle. It is still an existing object, not
+         * permission to replace bytes at a content-addressed name. */
+        ASSERT(sbp_write(seed_dir, leaf, "", 0));
+        struct stat before;
+        ASSERT(stat(path, &before) == 0);
+        ASSERT(before.st_size == 0);
+
+        struct source_bundle_publish_report report;
+        ASSERT(source_bundle_publish(wdir, adir, NULL, &report) ==
+               SOURCE_BUNDLE_PUBLISH_ERR_STORE);
+
+        struct stat after;
+        ASSERT(stat(path, &after) == 0);
+        ASSERT(after.st_size == before.st_size);
+        ASSERT(rom_seed_count() == 0);
+
+        fs_server_stop();
+        sbp_rm_tree(wdir, 6);
+        sbp_rm_tree(adir, 6);
+        sbp_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── (d) The pin refuses a tree the caller did not mean ──────────────── */
 
 static int test_root_pin_refuses(void)
 {
@@ -469,7 +532,7 @@ static int test_root_pin_refuses(void)
     return failures;
 }
 
-/* ── (d) The bounded directory sweep cannot hide a published bundle ──── */
+/* ── (e) The bounded directory sweep cannot hide a published bundle ──── */
 
 static int test_immune_to_scan_cap(void)
 {
@@ -538,7 +601,7 @@ static int test_immune_to_scan_cap(void)
     return failures;
 }
 
-/* ── (e) Never "published" when nothing could serve it ───────────────── */
+/* ── (f) Never "published" when nothing could serve it ───────────────── */
 
 static int test_unservable_is_refused(void)
 {
@@ -589,7 +652,7 @@ static int test_unservable_is_refused(void)
     return failures;
 }
 
-/* ── (f) The leaf: through the RPC the daemon actually serves ────────── */
+/* ── (g) The leaf: through the RPC the daemon actually serves ────────── */
 
 static int test_leaf_through_rpc(void)
 {
@@ -632,6 +695,39 @@ static int test_leaf_through_rpc(void)
         ASSERT(strcmp(root_hex, captured_hex) == 0);
         zcl_command_reply_free(&reply);
 
+        /* Drive the catalog boundary too. A direct handler call cannot catch
+         * an optional key omitted from input_keys: normalization would reject
+         * it before this file's handler fixture ever ran. The pin must be an
+         * allowed JSON key while only workspace maps positionally, and a full
+         * registry dispatch with the pin must reach the RPC and succeed. */
+        const struct zcl_command_registry *registry = zcl_command_catalog();
+        const struct zcl_command_spec *spec = sbp_publish_spec();
+        ASSERT(registry && spec);
+        ASSERT(strcmp(spec->input_keys, "workspace,source_root") == 0);
+        ASSERT(strcmp(spec->positional_keys, "workspace") == 0);
+        struct json_value catalog_input;
+        json_init(&catalog_input);
+        json_set_object(&catalog_input);
+        ASSERT(json_push_kv_str(&catalog_input, "workspace", wdir));
+        ASSERT(json_push_kv_str(&catalog_input, "source_root", captured_hex));
+        char why[160];
+        ASSERT(zcl_command_registry_input_validate(
+            spec, &catalog_input, why, sizeof(why)));
+        struct zcl_command_context context = {
+            .registry = registry,
+            .granted_capabilities = ~(uint64_t)0,
+            .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+        };
+        char envelope[ZCL_COMMAND_RESULT_BUDGET + 1];
+        enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+        size_t envelope_len = zcl_command_registry_execute_json(
+            registry, spec, &context, &catalog_input, false, spec->path,
+            "normal", 0, 0, NULL, envelope, sizeof(envelope), &exit_code);
+        ASSERT(envelope_len > 0);
+        ASSERT(exit_code == ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(envelope, captured_hex) != NULL);
+        json_free(&catalog_input);
+
         /* A pin naming a tree this workspace is not is refused at the leaf
          * with the service's own reason, not a generic failure. */
         char wrong_hex[65];
@@ -666,6 +762,7 @@ int test_source_bundle_publish(void)
     int failures = 0;
     failures += test_publish_then_fetch_elsewhere();
     failures += test_republish_is_idempotent();
+    failures += test_malformed_existing_bundle_is_preserved();
     failures += test_root_pin_refuses();
     failures += test_immune_to_scan_cap();
     failures += test_unservable_is_refused();

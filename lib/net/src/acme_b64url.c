@@ -17,7 +17,10 @@ size_t acme_b64url_encoded_len(size_t len)
 {
     const size_t whole = len / 3;
     const size_t rest = len % 3;
-    return whole * 4 + (rest == 0 ? 0 : rest + 1);
+    const size_t extra = rest == 0 ? 0 : rest + 1;
+    if (whole > (SIZE_MAX - extra) / 4)
+        return SIZE_MAX;
+    return whole * 4 + extra;
 }
 
 size_t acme_b64url_encode(const void *data, size_t len, char *out, size_t out_len)
@@ -28,7 +31,7 @@ size_t acme_b64url_encode(const void *data, size_t len, char *out, size_t out_le
     if (len && !data)
         return 0;
     const size_t need = acme_b64url_encoded_len(len);
-    if (need + 1 > out_len)
+    if (need == SIZE_MAX || need >= out_len)
         return 0;
 
     const unsigned char *in = data;
@@ -75,10 +78,16 @@ bool acme_b64url_decode(const char *text, void *out, size_t out_len,
     const size_t n = strlen(text);
     if (n % 4 == 1)
         LOG_FAIL("acme", "refusing base64url of length %zu: encodes no whole byte", n);
-    const size_t need = (n / 4) * 3 + (n % 4 == 0 ? 0 : n % 4 - 1);
+    const size_t whole = n / 4;
+    const size_t extra = n % 4 == 0 ? 0 : n % 4 - 1;
+    if (whole > (SIZE_MAX - extra) / 3)
+        LOG_FAIL("acme", "refusing an overflowing base64url length");
+    const size_t need = whole * 3 + extra;
     if (need > out_len)
         LOG_FAIL("acme", "refusing base64url decode: %zu bytes into a %zu-byte buffer",
                  need, out_len);
+    if (need > 0 && !out)
+        LOG_FAIL("acme", "refusing base64url decode without an output buffer");
 
     unsigned char *dst = out;
     size_t o = 0;
@@ -91,6 +100,9 @@ bool acme_b64url_decode(const char *text, void *out, size_t out_len,
             if (v[k] < 0)
                 LOG_FAIL("acme", "refusing a byte outside the base64url alphabet");
         }
+        if ((chunk == 2 && (v[1] & 0x0f) != 0) ||
+            (chunk == 3 && (v[2] & 0x03) != 0))
+            LOG_FAIL("acme", "refusing non-canonical base64url pad bits");
         const uint32_t acc = ((uint32_t)v[0] << 18) | ((uint32_t)v[1] << 12) |
                              ((uint32_t)v[2] << 6) | (uint32_t)v[3];
         if (chunk >= 2) dst[o++] = (unsigned char)((acc >> 16) & 0xff);
@@ -101,4 +113,3 @@ bool acme_b64url_decode(const char *text, void *out, size_t out_len,
     *decoded = o;
     return true;
 }
-

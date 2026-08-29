@@ -126,7 +126,7 @@ static void v2_hooks(struct hotswap_publish_hooks *h)
 /* ── A registry the override layer can validate against ───────────────────
  * The override commit re-checks READY + read-only + resolvable, so the bound
  * registry must carry the real leaf paths under test. */
-static const struct zcl_command_spec g_noise_specs[] = {
+static const struct zcl_command_spec g_v2_specs[] = {
     { .path = "core.status", .summary = "swappable read leaf",
       .layer = ZCL_COMMAND_LAYER_CORE, .effect = ZCL_COMMAND_EFFECT_READ,
       .availability = ZCL_COMMAND_READY, .mode = ZCL_COMMAND_MODE_SYNC,
@@ -136,15 +136,15 @@ static const struct zcl_command_spec g_noise_specs[] = {
       .availability = ZCL_COMMAND_READY, .mode = ZCL_COMMAND_MODE_SYNC,
       .allowed_lanes = ZCL_COMMAND_LANE_LOCAL, .handler = v2_handler },
 };
-static const struct zcl_command_registry g_noise_reg = {
-    .commands = g_noise_specs,
-    .count = sizeof(g_noise_specs) / sizeof(g_noise_specs[0]),
+static const struct zcl_command_registry g_v2_reg = {
+    .commands = g_v2_specs,
+    .count = sizeof(g_v2_specs) / sizeof(g_v2_specs[0]),
 };
 
 static void v2_reset(void)
 {
     zcl_command_registry_reset_overrides();
-    zcl_command_registry_set_active(&g_noise_reg);
+    zcl_command_registry_set_active(&g_v2_reg);
     g_probe_ok = 1;
     g_probe_calls = 0;
     g_commit_calls = 0;
