@@ -140,6 +140,210 @@ static int test_selector_predicate(void)
     return failures;
 }
 
+
+/* ── Assertion-message contract ───────────────────────────────────
+ *
+ * The FAIL line is the whole diagnosis for most failures, so its shape is
+ * a contract rather than cosmetics: it has to name the source position and,
+ * for a value comparison, both actual values. A reader who has to reopen the
+ * file and add printf calls is paying for a message that was already free.
+ *
+ * The macros bind their operands to temporaries before comparing, which is
+ * also what makes the message trustworthy: each operand is evaluated exactly
+ * ONCE, so the value printed is the value the predicate tested. Call sites
+ * routinely pass function calls with side effects.
+ *
+ * Each deliberately failing assertion runs in its own frame (its own
+ * `failures` counter and `_test_next` label) with stdout captured, so the
+ * FAIL text is inspected here and never reaches the transcript. */
+
+static int g_assert_probe_calls;
+
+static int assert_probe(int value)
+{
+    g_assert_probe_calls++;
+    return value;
+}
+
+static const char *assert_probe_str(const char *value)
+{
+    g_assert_probe_calls++;
+    return value;
+}
+
+static int probe_failing_assert(void)
+{
+    int failures = 0;
+    ASSERT(assert_probe(0) != 0);
+_test_next:;
+    return failures;
+}
+
+static int probe_failing_assert_eq(void)
+{
+    int failures = 0;
+    ASSERT_EQ(assert_probe(7), assert_probe(9));
+_test_next:;
+    return failures;
+}
+
+static int probe_failing_assert_str_eq(void)
+{
+    int failures = 0;
+    ASSERT_STR_EQ(assert_probe_str("alpha"), assert_probe_str("beta"));
+_test_next:;
+    return failures;
+}
+
+/* A pointer against NULL, and an unsigned lvalue against the integer
+ * constant 0, are the two operand shapes that a naive per-operand `auto`
+ * binding breaks: the first becomes a pointer/int comparison error, the
+ * second loses its constant expression and trips -Wsign-compare under
+ * -Werror. Both are ordinary in this suite, so both are compiled here. */
+static int probe_failing_assert_eq_pointer(void)
+{
+    int failures = 0;
+    const char *present = "x";
+    ASSERT_EQ(present, NULL);
+_test_next:;
+    return failures;
+}
+
+static int probe_failing_assert_eq_unsigned(void)
+{
+    int failures = 0;
+    size_t counted = 3;
+    ASSERT_EQ(counted, 0);
+_test_next:;
+    return failures;
+}
+
+static int probe_failing_assert_eq_char(void)
+{
+    int failures = 0;
+    char got = 'a';
+    ASSERT_EQ(got, 'b');
+_test_next:;
+    return failures;
+}
+
+static int probe_failing_assert_eq_bool(void)
+{
+    int failures = 0;
+    bool ready = false;
+    ASSERT_EQ(ready, true);
+_test_next:;
+    return failures;
+}
+
+/* Run `probe` with stdout redirected into an unnamed temp file and return
+ * the harness failure count it reported, leaving what it printed in `out`. */
+static int run_capturing_stdout(int (*probe)(void), char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return -1;
+    out[0] = '\0';
+    FILE *sink = tmpfile();
+    if (!sink)
+        return -1;
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0) {
+        fclose(sink);
+        return -1;
+    }
+    if (dup2(fileno(sink), STDOUT_FILENO) < 0) {
+        close(saved);
+        fclose(sink);
+        return -1;
+    }
+    int reported = probe();
+    fflush(stdout);
+    if (dup2(saved, STDOUT_FILENO) < 0)
+        reported = -1;
+    close(saved);
+    rewind(sink);
+    size_t used = fread(out, 1, cap - 1, sink);
+    out[used] = '\0';
+    fclose(sink);
+    return reported;
+}
+
+static int test_assert_macros_report_where_and_what(void)
+{
+    int failures = 0;
+    char msg[512];
+
+    TEST("assert macros: operands are evaluated exactly once") {
+        g_assert_probe_calls = 0;
+        ASSERT_EQ(assert_probe(5), assert_probe(5));   /* passing path */
+        ASSERT_EQ(g_assert_probe_calls, 2);
+
+        g_assert_probe_calls = 0;
+        ASSERT_STR_EQ(assert_probe_str("same"), assert_probe_str("same"));
+        ASSERT_EQ(g_assert_probe_calls, 2);
+
+        g_assert_probe_calls = 0;                      /* failing path */
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_eq,
+                                       msg, sizeof(msg)), 1);
+        ASSERT_EQ(g_assert_probe_calls, 2);
+
+        g_assert_probe_calls = 0;
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_str_eq,
+                                       msg, sizeof(msg)), 1);
+        ASSERT_EQ(g_assert_probe_calls, 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_assert_messages_name_file_line_and_values(void)
+{
+    int failures = 0;
+    char msg[512];
+
+    TEST("assert macros: FAIL names file:line and both values") {
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert,
+                                       msg, sizeof(msg)), 1);
+        ASSERT(strstr(msg, "test_test_group_selector.c:") != NULL);
+        ASSERT(strstr(msg, "assert_probe(0) != 0") != NULL);
+
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_eq,
+                                       msg, sizeof(msg)), 1);
+        ASSERT(strstr(msg, "test_test_group_selector.c:") != NULL);
+        ASSERT(strstr(msg, "7 != 9") != NULL);
+
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_str_eq,
+                                       msg, sizeof(msg)), 1);
+        ASSERT(strstr(msg, "test_test_group_selector.c:") != NULL);
+        ASSERT(strstr(msg, "\"alpha\" != \"beta\"") != NULL);
+
+        /* Pointers cannot be enumerated in a _Generic, so they take the
+         * fallback arm; both sides must still print as addresses. */
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_eq_pointer,
+                                       msg, sizeof(msg)), 1);
+        ASSERT(strstr(msg, "test_test_group_selector.c:") != NULL);
+        ASSERT(strstr(msg, "(nil)") != NULL);
+        ASSERT(strstr(msg, "0x") != NULL);
+
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_eq_unsigned,
+                                       msg, sizeof(msg)), 1);
+        ASSERT(strstr(msg, "3 != 0") != NULL);
+
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_eq_bool,
+                                       msg, sizeof(msg)), 1);
+        ASSERT(strstr(msg, "false != true") != NULL);
+
+        /* The printer type comes from the ORIGINAL operand, so a char
+         * still renders as a char even though `1 ? c : 'b'` promotes
+         * the compared value to int. */
+        ASSERT_EQ(run_capturing_stdout(probe_failing_assert_eq_char,
+                                       msg, sizeof(msg)), 1);
+        ASSERT(strstr(msg, "'a' (97) != 98") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int test_tmpdir_recursive_cleanup(void)
 {
     int failures = 0;
@@ -640,5 +844,7 @@ int test_test_group_selector(void)
     failures += test_native_catalog_resolution();
     failures += test_process_sensitive_groups_are_catalog_exclusive();
     failures += test_runner_exact_selection();
+    failures += test_assert_macros_report_where_and_what();
+    failures += test_assert_messages_name_file_line_and_values();
     return failures;
 }

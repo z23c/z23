@@ -62,6 +62,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -898,6 +901,63 @@ static bool hotswap_module_mode_begin(void)
     return true;
 }
 
+/* Deep wallet groups overflow an 8 MiB stack and die with SIGSEGV, which reads
+ * in a transcript as a real regression rather than as a missing shell setting.
+ * Measured on this host with the stack hard limit pinned at 8 MiB, a full run
+ * loses four groups this way — test_wallet_keystore,
+ * test_simnet_wallet_import_backup, test_yardsale_wallet, test_vault_dispatch —
+ * and loses none once the limit is raised. (Re-derive that list rather than
+ * trusting it; the surviving folklore figure of "nine groups" no longer
+ * matches what the suite actually does.)
+ *
+ * Makefile:2058 exports `ulimit -s unlimited` for `make test-parallel`, but the
+ * documented way to run a subset is to invoke this binary directly, and that
+ * path had no such protection: every caller who forgot the ulimit got four
+ * plausible-looking crashes. So raise it here, where the program can do it for
+ * itself, instead of leaving it an unwritten precondition on the caller.
+ *
+ * Raising the soft limit to the hard limit is enough on Linux and needs no
+ * re-exec: the kernel checks the CURRENT RLIMIT_STACK when it expands the main
+ * thread's stack VMA on a fault, not the value in force at execve. (Measured:
+ * with soft=8 MiB / hard=unlimited a 1 MiB-per-frame recursion dies at 8
+ * frames; after this call the same recursion passes 300.) Group children are
+ * forked after this runs, so they inherit both the raised limit and the
+ * parent's address-space layout.
+ *
+ * The Makefile's ulimit stays where it is. Two independent guards is the right
+ * number for a failure whose symptom is indistinguishable from a real bug. */
+static void raise_stack_limit(void)
+{
+#if !defined(_WIN32)
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_STACK, &limit) != 0) {
+        fprintf(stderr, "test_parallel: getrlimit(RLIMIT_STACK) failed: %s\n",
+                strerror(errno));
+        return;
+    }
+    if (limit.rlim_cur == limit.rlim_max)
+        return;
+    struct rlimit raised = limit;
+    raised.rlim_cur = limit.rlim_max;
+    if (setrlimit(RLIMIT_STACK, &raised) == 0)
+        return;
+    /* macOS refuses an unlimited main-thread stack (kern.maxssiz caps it), so
+     * retry at the same large finite ceiling the release recipes use. */
+    if (limit.rlim_max == RLIM_INFINITY) {
+        raised.rlim_cur = (rlim_t)1024 * 1024 * 1024;
+        if (raised.rlim_cur > limit.rlim_cur &&
+            setrlimit(RLIMIT_STACK, &raised) == 0)
+            return;
+    }
+    fprintf(stderr,
+            "test_parallel: could not raise the stack soft limit from %llu to "
+            "%llu (%s) — deep wallet/RPC groups may SIGSEGV; run under "
+            "`ulimit -s unlimited`\n",
+            (unsigned long long)limit.rlim_cur,
+            (unsigned long long)limit.rlim_max, strerror(errno));
+#endif
+}
+
 int main(int argc, char **argv)
 {
     struct timespec process_start;
@@ -921,6 +981,10 @@ int main(int argc, char **argv)
                zcl_build_source_mutation_sha256());
         return 0;
     }
+
+    /* Before any group forks. Not inside the confined-agent arm above: that
+     * child is deliberately sandboxed and must not widen its own limits. */
+    raise_stack_limit();
 
     int jobs = get_nproc();
     /* Per-group bound on SILENCE, not on runtime — see group_watchdog_expired
