@@ -37,6 +37,17 @@ FROZEN_SOURCE_RECORD="${ZCL_FAST_BUILD_SOURCE_RECORD:-}"
 FOCUSED_RECEIPT_RAN=0
 FOCUSED_RECEIPT_REUSED=0
 FOCUSED_RECEIPT_TOOLKEY=""
+GENERATED_CHANGED_FILES_FILE=""
+
+cleanup_generated_changed_files() {
+    local owned="${GENERATED_CHANGED_FILES_FILE:-}"
+    GENERATED_CHANGED_FILES_FILE=""
+    [ -z "$owned" ] || rm -f -- "$owned"
+}
+
+# Only this process's fallback file is owned here. Hook/watcher hints are
+# caller-owned and must remain live until their caller's gate completes.
+trap cleanup_generated_changed_files EXIT
 
 log() {
     printf '[agent-fast-ci] %s\n' "$*"
@@ -1073,7 +1084,55 @@ changed_set_selftest() {
         fail "changed-set selftest: an explicit list was not detected"
     fi
 
-    log "PASS: pre-push changed-set resolver selftest"
+    # Two fallback materializations may coexist while one gate waits behind
+    # another. The second must get a different inode/name and cannot rewrite
+    # the first gate's already-published semantic input.
+    (
+        ROOT="$tmp/shared-root"
+        mkdir -p "$ROOT"
+        unset ZCL_FAST_CHANGED_FILES_FILE ZCL_FAST_CHANGED_FILES
+        GENERATED_CHANGED_FILES_FILE=""
+        pushed_range_files() { printf '%s\n' first.c; }
+        pre_push_materialize_changed_set
+        first="$ZCL_FAST_CHANGED_FILES_FILE"
+        [ "$(cat "$first")" = "first.c" ] ||
+            fail "changed-set selftest: first fallback content changed"
+
+        # Simulate a second process: it owns its own cleanup slot while the
+        # first immutable file remains live.
+        GENERATED_CHANGED_FILES_FILE=""
+        pushed_range_files() { printf '%s\n' second.c; }
+        pre_push_materialize_changed_set
+        second="$ZCL_FAST_CHANGED_FILES_FILE"
+        [ "$first" != "$second" ] ||
+            fail "changed-set selftest: fallback paths were shared"
+        [ ! -w "$first" ] && [ ! -w "$second" ] ||
+            fail "changed-set selftest: published fallback remained writable"
+        [ "$(cat "$first")" = "first.c" ] &&
+            [ "$(cat "$second")" = "second.c" ] ||
+            fail "changed-set selftest: one fallback rewrote another"
+        cleanup_generated_changed_files
+        [ ! -e "$second" ] ||
+            fail "changed-set selftest: owned fallback cleanup failed"
+        rm -f -- "$first"
+    )
+
+    # The process EXIT trap owns the ordinary completion path.
+    exit_path_record="$tmp/exit-owned-path"
+    (
+        ROOT="$tmp/exit-root"
+        mkdir -p "$ROOT"
+        unset ZCL_FAST_CHANGED_FILES_FILE ZCL_FAST_CHANGED_FILES
+        GENERATED_CHANGED_FILES_FILE=""
+        trap cleanup_generated_changed_files EXIT
+        pushed_range_files() { printf '%s\n' exit.c; }
+        pre_push_materialize_changed_set
+        printf '%s\n' "$ZCL_FAST_CHANGED_FILES_FILE" >"$exit_path_record"
+    )
+    [ ! -e "$(cat "$exit_path_record")" ] ||
+        fail "changed-set selftest: EXIT left its owned fallback behind"
+
+    log "PASS: pre-push changed-set resolver selftest (unique immutable owned fallback)"
 }
 
 run_test_proof() {
@@ -1386,8 +1445,28 @@ compile_affected_gate() {
 # source it used in the log either way. merge-base, not a two-dot diff, keeps
 # the file set correct even when origin/main has moved ahead of this branch;
 # the hook separately refuses a push whose remote main is not yet integrated.
+pre_push_materialize_changed_set() {
+    local tmp
+    mkdir -p "$ROOT/build" ||
+        fail "cannot create changed-set directory: $ROOT/build"
+    tmp="$(mktemp "$ROOT/build/pre-push-changed-files.XXXXXX")" ||
+        fail "cannot create unique pre-push changed-set file"
+    GENERATED_CHANGED_FILES_FILE="$tmp"
+    if ! pushed_range_files | sed '/^$/d' | sort -u >"$tmp"; then
+        cleanup_generated_changed_files
+        fail "cannot materialize pushed-range changed set"
+    fi
+    chmod 400 "$tmp" || {
+        cleanup_generated_changed_files
+        fail "cannot make pushed-range changed set read-only"
+    }
+    ZCL_FAST_CHANGED_FILES_FILE="$tmp"
+    ZCL_FAST_CHANGED_FILES_ONLY=1
+    export ZCL_FAST_CHANGED_FILES_FILE ZCL_FAST_CHANGED_FILES_ONLY
+}
+
 pre_push_resolve_changed_set() {
-    local tmp count
+    local count
     if explicit_changed_file_hints; then
         log "pre-push changed-set source=caller count=$(changed_file_count)"
         return
@@ -1397,14 +1476,9 @@ pre_push_resolve_changed_set() {
         log "pre-push changed-set source=worktree count=$count"
         return
     fi
-    tmp="$ROOT/build/pre-push-changed-files.txt"
-    mkdir -p "$ROOT/build" 2>/dev/null || true
-    pushed_range_files | sed '/^$/d' | sort -u >"$tmp" || true
-    count="$(wc -l <"$tmp" | tr -d ' ')"
-    ZCL_FAST_CHANGED_FILES_FILE="$tmp"
-    ZCL_FAST_CHANGED_FILES_ONLY=1
-    export ZCL_FAST_CHANGED_FILES_FILE ZCL_FAST_CHANGED_FILES_ONLY
-    log "pre-push changed-set source=pushed-range count=$count list=$tmp"
+    pre_push_materialize_changed_set
+    count="$(wc -l <"$ZCL_FAST_CHANGED_FILES_FILE" | tr -d ' ')"
+    log "pre-push changed-set source=pushed-range count=$count list=$ZCL_FAST_CHANGED_FILES_FILE"
     if [ "$count" = "0" ]; then
         log "pre-push has nothing to gate: the working tree is clean and HEAD matches its upstream"
     fi
