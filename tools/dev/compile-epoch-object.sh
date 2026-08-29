@@ -73,8 +73,13 @@ trap 'exit 2' HUP INT TERM
 
 compile_one()
 {
-    local staging object dep note_record note_tmp
-    staging="$(mktemp -d "$OUTPUT_DIR/.${OUTPUT_BASE}.compile.XXXXXX")" ||
+    local staging staging_base object dep note_record note_tmp
+    # Long source filenames can make the staging directory path breach Windows
+    # MAX_PATH. Use a short deterministic prefix derived from OUTPUT_BASE; the
+    # XXXXXX suffix still gives mktemp its uniqueness.
+    staging_base="$(printf '%s' "$OUTPUT_BASE" | sha256sum | cut -c1-16)" ||
+        fail 'could not derive staging base'
+    staging="$(mktemp -d "$OUTPUT_DIR/.${staging_base}.compile.XXXXXX")" ||
         fail 'could not create object staging directory'
     STAGING="$staging"
     object="$staging/$OUTPUT_BASE"

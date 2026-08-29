@@ -9,7 +9,54 @@
 #include <unistd.h>
 
 #if defined(_WIN32)
+#include <io.h>
+#include <wchar.h>
 #include <windows.h>
+
+static bool progress_directory_wide_to_utf8(const wchar_t *wide, char *out,
+                                            size_t out_size)
+{
+    int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                                NULL, 0, NULL, NULL);
+    return n > 0 && (size_t)n <= out_size &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                               out, (int)out_size, NULL, NULL) > 0;
+}
+
+/* Derive a canonical path from an open directory handle and prove the path
+ * still resolves to the same directory object.  This is the Windows equivalent
+ * of Darwin's F_GETPATH + fstat/stat identity check: it lets SQLite open the
+ * file by pathname while retaining a validated handle that cannot be swapped
+ * by a namespace reparse/rename race. */
+static bool progress_directory_canonical_from_handle(HANDLE dir, char *out,
+                                                     size_t out_size)
+{
+    wchar_t canonical[32768];
+    DWORD n = GetFinalPathNameByHandleW(
+        dir, canonical, sizeof(canonical) / sizeof(canonical[0]),
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (!n || n >= sizeof(canonical) / sizeof(canonical[0]))
+        return false;
+    const wchar_t *plain = wcsncmp(canonical, L"\\\\?\\", 4) == 0
+                               ? canonical + 4 : canonical;
+    HANDLE probe = CreateFileW(
+        plain, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (probe == INVALID_HANDLE_VALUE)
+        return false;
+    BY_HANDLE_FILE_INFORMATION retained, resolved;
+    bool same = GetFileInformationByHandle(dir, &retained) != 0 &&
+                GetFileInformationByHandle(probe, &resolved) != 0 &&
+                retained.dwVolumeSerialNumber == resolved.dwVolumeSerialNumber &&
+                retained.nFileIndexHigh == resolved.nFileIndexHigh &&
+                retained.nFileIndexLow == resolved.nFileIndexLow;
+    CloseHandle(probe);
+    if (!same)
+        return false;
+    return progress_directory_wide_to_utf8(canonical, out, out_size);
+}
 #endif
 
 bool progress_directory_open(const char *directory, const char *child,
@@ -18,7 +65,14 @@ bool progress_directory_open(const char *directory, const char *child,
 #if defined(_WIN32)
     if (!platform_private_directory_open_validated(directory, handle))
         return false;
-    int length = snprintf(path, path_size, "%s/%s", directory, child);
+    char canonical[32768];
+    if (!progress_directory_canonical_from_handle((HANDLE)*handle, canonical,
+                                                  sizeof(canonical))) {
+        platform_private_directory_close(*handle);
+        *handle = UINTPTR_MAX;
+        return false;
+    }
+    int length = snprintf(path, path_size, "%s\\%s", canonical, child);
     if (length > 0 && (size_t)length < path_size)
         return true;
     platform_private_directory_close(*handle);
@@ -66,9 +120,23 @@ bool progress_directory_same(uintptr_t left, uintptr_t right)
 bool progress_directory_matches_fd(uintptr_t handle, int fd)
 {
 #if defined(_WIN32)
-    (void)handle;
-    (void)fd;
-    return false;
+    if (handle == UINTPTR_MAX || fd < 0)
+        return false;
+    HANDLE retained = (HANDLE)handle;
+    HANDLE candidate = (HANDLE)_get_osfhandle(fd);
+    if (candidate == INVALID_HANDLE_VALUE)
+        return false;
+    BY_HANDLE_FILE_INFORMATION a, b;
+    FILE_ATTRIBUTE_TAG_INFO tag;
+    return GetFileInformationByHandle(retained, &a) != 0 &&
+           GetFileInformationByHandle(candidate, &b) != 0 &&
+           a.dwVolumeSerialNumber == b.dwVolumeSerialNumber &&
+           a.nFileIndexHigh == b.nFileIndexHigh &&
+           a.nFileIndexLow == b.nFileIndexLow &&
+           GetFileInformationByHandleEx(candidate, FileAttributeTagInfo,
+                                        &tag, sizeof(tag)) != 0 &&
+           (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 #else
     struct stat retained;
     struct stat candidate;
