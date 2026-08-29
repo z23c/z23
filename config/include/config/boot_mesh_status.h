@@ -29,6 +29,7 @@
 #include <stdint.h>
 
 struct boot_svc_ctx;
+struct json_value;
 struct msg_processor;
 struct node_db;
 struct p2p_node;
@@ -74,6 +75,7 @@ enum boot_mesh_status_begin_result {
     MESH_STATUS_BEGIN_EXPIRED,
     MESH_STATUS_BEGIN_PEER_NOT_CONNECTED,
     MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE,
+    MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE,
     MESH_STATUS_BEGIN_BUSY,              /* pending table full */
     MESH_STATUS_BEGIN_SEND_FAILED,
 };
@@ -131,6 +133,16 @@ bool boot_mesh_status_receipt_accept(
     const struct mesh_status_receipt_v1 *receipt,
     const struct mesh_status_request_v1 *request,
     const struct v2_transport_snapshot *session,
-    const uint8_t expected_responder_master[32]);
+    const uint8_t expected_responder_master[32],
+    const uint8_t expected_responder_online[32]);
+
+#ifdef ZCL_TESTING
+void boot_mesh_status_receipt_test_render(
+    struct json_value *result,
+    const struct mesh_status_receipt_v1 *receipt);
+bool boot_mesh_status_test_responder_admit(
+    const struct mesh_status_request_v1 *request,
+    const struct v2_transport_snapshot *session, uint64_t now_mono_ms);
+#endif
 
 #endif /* ZCL_CONFIG_BOOT_MESH_STATUS_H */

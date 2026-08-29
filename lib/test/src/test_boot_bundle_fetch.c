@@ -42,6 +42,7 @@
 #include "storage/progress_store.h"
 
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -568,6 +569,41 @@ static int case_quorum(void)
     return failures;
 }
 
+static _Atomic int probe_active, probe_peak;
+static bool delayed_directory_fetch(const char *addr, uint16_t port,
+                                    char *buf, size_t cap)
+{
+    (void)addr;
+    (void)port;
+    int active = atomic_fetch_add(&probe_active, 1) + 1;
+    int peak = atomic_load(&probe_peak);
+    while (peak < active && !atomic_compare_exchange_weak(&probe_peak, &peak,
+                                                           active)) {}
+    platform_sleep_ms(50);
+    atomic_fetch_sub(&probe_active, 1);
+    return snprintf(buf, cap, "{}") == 2;
+}
+static int case_parallel_probe(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: seed directory probes overlap") {
+        struct rom_fetch_peer peers[4] = {0};
+        char bodies[4][8] = {{0}};
+        bool responded[4] = {false};
+        for (size_t i = 0; i < 4; i++) {
+            snprintf(peers[i].addr, sizeof(peers[i].addr), "seed%zu", i);
+            peers[i].port = (uint16_t)(18034 + i);
+        }
+        atomic_store(&probe_active, 0); atomic_store(&probe_peak, 0);
+        ASSERT(boot_bundle_probe_directories_for_test(
+                   peers, 4, &bodies[0][0], sizeof(bodies[0]), responded,
+                   delayed_directory_fetch) == 4);
+        ASSERT(atomic_load(&probe_peak) >= 2);
+        ASSERT(responded[0] && responded[1] && responded[2] && responded[3]);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 /* ── (e2) Newest-by-height pick + legacy size fallback (GAP-4) ──────────── */
 
 static int case_pick_newest(void)
@@ -955,6 +991,7 @@ int test_boot_bundle_fetch(void)
     failures += case_baked_facts();
     failures += case_pick_newest();
     failures += case_quorum();
+    failures += case_parallel_probe();
     failures += case_discovery();
     failures += case_discovery_outcome_persists();
     printf("=== boot_bundle_fetch: %d failure(s) ===\n", failures);

@@ -13,18 +13,22 @@
 
 #include "config/boot_internal.h"
 #include "config/boot_zcode_dht.h"
+#include "config/boot_zcode_dht_access.h"
 #include "config/runtime.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "crypto/random_secret.h"
 #include "models/mesh_pairing.h"
 #include "net/net.h"
 #include "net/v2_transport.h"
 #include "platform/time_compat.h"
+#include "services/mesh_pairing_service.h"
 #include "util/log_macros.h"
 #include "util/sync.h"
 #include "vcs/zcode_dht_identity.h"
 #include "vcs/zcode_dht_service.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 const char *boot_mesh_status_begin_result_string(
@@ -40,6 +44,8 @@ const char *boot_mesh_status_begin_result_string(
     case MESH_STATUS_BEGIN_EXPIRED: return "expired";
     case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED: return "peer_not_connected";
     case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE: return "identity_unavailable";
+    case MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE:
+        return "peer_identity_unavailable";
     case MESH_STATUS_BEGIN_BUSY: return "busy";
     case MESH_STATUS_BEGIN_SEND_FAILED: return "send_failed";
     }
@@ -79,6 +85,74 @@ static struct p2p_node *mesh_find_session_peer(
             p2p_node_release(candidates[i]);
         }
     }
+    return found;
+}
+
+struct mesh_requester_delegation_collect {
+    struct vcs_zcode_dht_delegation *held;
+    size_t held_max;
+    struct vcs_zcode_dht_delegation best;
+    uint8_t genesis[32];
+    uint8_t master[32];
+    uint8_t noise_static[32];
+    bool found;
+    bool ambiguous;
+};
+
+/* Runs under the DHT service lock: memory copies only. The greatest sequence
+ * for the exact paired identity wins; two different online keys at that same
+ * sequence are ambiguous and fail closed. */
+static void mesh_collect_responder_delegation(
+    struct vcs_zcode_dht_service *service, void *opaque)
+{
+    struct mesh_requester_delegation_collect *collect = opaque;
+    if (!service || !collect || !collect->held)
+        return;
+    size_t count = vcs_zcode_dht_service_delegations(
+        service, collect->held, collect->held_max);
+    for (size_t i = 0; i < count; i++) {
+        struct vcs_zcode_dht_delegation *candidate = &collect->held[i];
+        if (memcmp(candidate->network_genesis, collect->genesis, 32) != 0 ||
+            memcmp(candidate->doc.master_pubkey, collect->master, 32) != 0 ||
+            memcmp(candidate->noise_static_pubkey,
+                   collect->noise_static, 32) != 0)
+            continue;
+        if (!collect->found ||
+            candidate->doc.seq > collect->best.doc.seq) {
+            collect->best = *candidate;
+            collect->found = true;
+            collect->ambiguous = false;
+        } else if (candidate->doc.seq == collect->best.doc.seq &&
+                   memcmp(candidate->online_pubkey,
+                          collect->best.online_pubkey, 32) != 0) {
+            collect->ambiguous = true;
+        }
+    }
+}
+
+static bool mesh_responder_delegation(
+    const struct db_mesh_pairing *row,
+    struct vcs_zcode_dht_delegation *out)
+{
+    struct mesh_requester_delegation_collect collect;
+    memset(&collect, 0, sizeof(collect));
+    collect.held = zcl_malloc(
+        VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS * sizeof(*collect.held),
+        "mesh_status.requester_delegations");
+    if (!collect.held) {
+        LOG_ERROR("net.mesh_status", "requester delegation alloc failed");
+        return false;
+    }
+    collect.held_max = VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS;
+    memcpy(collect.genesis, row->network_genesis, 32);
+    memcpy(collect.master, row->peer_master_pubkey, 32);
+    memcpy(collect.noise_static, row->peer_noise_pubkey, 32);
+    bool available = boot_zcode_dht_service_apply(
+        mesh_collect_responder_delegation, &collect);
+    bool found = available && collect.found && !collect.ambiguous;
+    if (found)
+        *out = collect.best;
+    free(collect.held);
     return found;
 }
 
@@ -138,6 +212,15 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
     if (!peer)
         return MESH_STATUS_BEGIN_PEER_NOT_CONNECTED;
 
+    struct vcs_zcode_dht_delegation responder_delegation;
+    if (!mesh_responder_delegation(&row, &responder_delegation) ||
+        mesh_pairing_service_authorize_status(
+            ndb, pairing_id_hex, &responder_delegation,
+            session.remote_static, now) != MESH_PAIRING_OK) {
+        p2p_node_release(peer);
+        return MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE;
+    }
+
     struct mesh_status_request_v1 request;
     memset(&request, 0, sizeof(request));
     request.version = MESH_STATUS_PROTO_VERSION;
@@ -182,8 +265,9 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
 
     /* Admit the pending entry before sending so a fast receipt can never
      * arrive to a missing slot. */
-    if (!mesh_status_pending_admit(&request, row.peer_master_pubkey,
-                                   generation)) {
+    if (!mesh_status_pending_admit(
+            &request, row.peer_master_pubkey,
+            responder_delegation.online_pubkey, generation)) {
         p2p_node_release(peer);
         return MESH_STATUS_BEGIN_BUSY;
     }
