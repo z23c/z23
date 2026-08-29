@@ -256,7 +256,7 @@ social
 The same pattern yields manifest-owned subtrees for explorer, names, messages,
 market, swaps, games, and blog without bloating root discovery.
 
-The explorer currently serving zclnet.net becomes a built-in App using the
+The explorer a node already serves becomes a built-in App using the
 same host ABI available to external developers. Local HTTP, clearnet HTTPS,
 and embedded onion traffic bind to the same resource/controller functions.
 ZNAM can bind a human name to the App's onion, clearnet endpoint, or content

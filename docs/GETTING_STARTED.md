@@ -198,7 +198,7 @@ node without them starts normally and reports one named capability blocker:
 [crypto.params] shielded send unavailable — proving parameters not installed
 ```
 
-You will see it in `z23 ops status`. Nothing else is affected: the node still
+You will see it in `z23 status`. Nothing else is affected: the node still
 follows the chain, validates shielded proofs, and relays. If you only run a
 node, you can stop reading here.
 

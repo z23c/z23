@@ -379,7 +379,7 @@ populated, it should contain domain-level consensus state predicates and
 use-case invariants that cross multiple models/services — checks that express
 business rules of the chain itself before they migrate to the pure `domain/`
 core. This keeps `application/` as the staged consensus-logic tier between
-orchestration (app/services, 98 files) and pure consensus (domain/, 21 modules).
+orchestration (`app/services`) and pure consensus (`domain/`).
 
 ---
 
