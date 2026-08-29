@@ -87,6 +87,11 @@ int main(void)
         platform_file_metadata_read(utf8_file, &metadata) !=
             PLATFORM_FILE_METADATA_MISSING)
         return fail("missing verdict");
+    for (char *p = utf8_file; *p; ++p)
+        if (*p == '\\') *p = '/';
+    if (platform_file_metadata_read(utf8_file, &metadata) !=
+            PLATFORM_FILE_METADATA_MISSING)
+        return fail("missing forward-slash verdict");
     if (platform_file_metadata_read(utf8_directory, &metadata) !=
             PLATFORM_FILE_METADATA_NOT_REGULAR)
         return fail("directory shape verdict");
