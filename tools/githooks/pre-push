@@ -132,9 +132,9 @@ unset git_local_env name
 # focused-test set includes POSIX-only tools that do not yet build there.
 # Default to the Windows acceptance gate on that lane; every other host keeps
 # the full pre-push-ci gate. ZCL_PREPUSH_CMD still overrides either default.
+default_cmd="make pre-push-ci"
 case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*) default_cmd="make windows-acceptance" ;;
-    *)            default_cmd="make pre-push-ci" ;;
 esac
 CMD="${ZCL_PREPUSH_CMD:-$default_cmd}"
 LOG_FILE="$REPO_ROOT/build/pre-push-ci.log"
@@ -153,11 +153,7 @@ echo "pre-push: verbose CI output -> $LOG_FILE (only a summary prints here)." >&
 # only thing that decides the push, regardless of how this hook's own
 # (small) output above/below gets consumed.
 rc=0
-if [ "$default_cmd" = "make pre-push-ci" ]; then
-    ZCL_FAST_CHANGED_FILES_FILE="$changed_files" ZCL_FAST_CHANGED_FILES_ONLY=1 $CMD >"$LOG_FILE" 2>&1 || rc=$?
-else
-    $CMD >"$LOG_FILE" 2>&1 || rc=$?
-fi
+ZCL_FAST_CHANGED_FILES_FILE="$changed_files" ZCL_FAST_CHANGED_FILES_ONLY=1 $CMD >"$LOG_FILE" 2>&1 || rc=$?
 
 if [ "$rc" -ne 0 ]; then
     echo "" >&2 || true

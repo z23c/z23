@@ -385,7 +385,12 @@ fi
 
 if ! awk '
     /^[[:space:]]*#/ { next }
-    /^[[:space:]]*CMD="\$\{ZCL_PREPUSH_CMD:-make pre-push-ci\}"[[:space:]]*$/ { default_cmd=1 }
+    /^[[:space:]]*default_cmd="make pre-push-ci"[[:space:]]*$/ { posix_default=1 }
+    /MINGW\*\|MSYS\*/ { windows_host=1 }
+    /^[[:space:]]*MINGW\*\|MSYS\*\)[[:space:]]+default_cmd="make windows-acceptance"[[:space:]]*;;[[:space:]]*$/ { windows_default=1 }
+    /^[[:space:]]*CMD="\$\{ZCL_PREPUSH_CMD:-\$default_cmd\}"[[:space:]]*$/ { default_cmd=1 }
+    /Z23_PREPUSH_UCRT64/ { windows_reentry_guard=1 }
+    /exec "\$windows_msys2_bash" "\$0" "\$@"/ { windows_reentry=1 }
     /refs\/heads\/main/ { main_only=1 }
     /git cat-file -e "\$\{rsha\}\^\{commit\}"/ { remote_tip_loaded=1 }
     /git fetch --no-tags --quiet "\$remote_name" "\$rref"/ { fetches_advertised_ref=1 }
@@ -401,7 +406,9 @@ if ! awk '
     /^[[:space:]]*ZCL_FAST_CHANGED_FILES_FILE="\$changed_files"[[:space:]]+ZCL_FAST_CHANGED_FILES_ONLY=1[[:space:]]+\$CMD([[:space:]]*>[^|]*)?[[:space:]]*\|\|[[:space:]]*rc=\$\?[[:space:]]*$/ { invokes_cmd=1 }
     /^[[:space:]]*if[[:space:]]+![[:space:]]+ZCL_FAST_CHANGED_FILES_FILE="\$changed_files"[[:space:]]+ZCL_FAST_CHANGED_FILES_ONLY=1[[:space:]]+\$CMD;[[:space:]]*then[[:space:]]*$/ { invokes_cmd=1 }
     /rc"?[[:space:]]*-ne[[:space:]]*0/ { checks_rc=1 }
-    END { exit !(default_cmd && main_only && remote_tip_loaded &&
+    END { exit !(posix_default && windows_host && windows_default &&
+                 default_cmd && windows_reentry_guard && windows_reentry &&
+                 main_only && remote_tip_loaded &&
                  fetches_advertised_ref && proves_remote_ancestor &&
                  names_remote_divergence && range_diff && changed_env &&
                  changed_only_env && invokes_cmd && checks_rc) }

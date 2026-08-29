@@ -217,6 +217,12 @@ signed receipt for the exact accepted or refused operation. Revocation is a
 local, durable state transition and takes effect for new requests and renewed
 sessions. Expiry is mandatory even when revocation distribution is delayed.
 
+The transcript hash and transcript-derived connection generation are shared
+session evidence. The transport's process-local connection serial is never a
+wire field, signature input, replay key, or cross-peer comparison: honest ends
+of one session intentionally assign different serials. Status-request replay is
+instead keyed by the request id within the authenticated transcript generation.
+
 ## Pairing and recovery
 
 Pairing is an explicit two-sided ceremony. The owner compares a short
