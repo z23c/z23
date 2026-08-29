@@ -93,26 +93,34 @@ if [ -n "$PARITY_HITS" ]; then
     report+="$(printf '%s\n' "$PARITY_HITS" | head -4 | sed 's/^/      /')"$'\n'
 fi
 
+# Every match test below feeds grep with a HERE-STRING, never `printf ... | grep -q`.
+# This script runs under `set -o pipefail` (above), and in a pipeline `grep -q`
+# exits at the FIRST match, so printf takes SIGPIPE and pipefail reports its 141
+# instead of grep's 0 -- turning a FOUND SECRET into a clean verdict. Measured:
+# a 400 KB diff with a matching AKIA key on line 1 reported CLEAN at status 141,
+# while the same key in a short diff reported correctly. That is the worst
+# possible direction for a security gate and it fails only on large diffs, so it
+# hides on small test inputs. Keep these pipeline-free. See tools/scripts/sh_str.sh.
 # 2) Supply-chain execution.
 SUPPLY='(curl|wget|fetch)[^|]*\|[[:space:]]*(ba)?sh|base64[[:space:]]+(-d|--decode)[^|]*\|[[:space:]]*(ba)?sh|\beval[[:space:]]|\bdlopen[[:space:]]*\(|pip[[:space:]]+install|npm[[:space:]]+install|go[[:space:]]+get'
-if printf '%s\n' "$ADDED_SCAN" | grep -qE "$SUPPLY"; then
+if grep -qE "$SUPPLY" <<<"$ADDED_SCAN"; then
     add HIGH "Possible supply-chain execution (fetch-and-run / decode-and-run / dynamic load / remote package install). Review every hit before merge."
     report+="$(show "$SUPPLY")"$'\n'
 fi
-if printf '%s\n' "$DIFF" | grep -qE '^\+\+\+ b/\.gitmodules|^\+\+\+ b/\.github/workflows/'; then
+if grep -qE '^\+\+\+ b/\.gitmodules|^\+\+\+ b/\.github/workflows/' <<<"$DIFF"; then
     add HIGH "Touches .gitmodules or .github/workflows (CI/supply-chain surface) — verify no new submodule or workflow step runs untrusted code."
 fi
 
 # 3) Secrets.
 # NOTE: pattern begins with '-', so every grep uses `-- "$SECRET"`.
 SECRET='-----BEGIN ([A-Z ]*)?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|aws_secret_access_key|xox[baprs]-[0-9A-Za-z-]+|ghp_[0-9A-Za-z]{30,}|(password|passwd|secret|api_?key)[[:space:]]*[:=][[:space:]]*["'\''][^"'\'' ]{6,}'
-if printf '%s\n' "$ADDED" | grep -qiE -- "$SECRET"; then
+if grep -qiE -- "$SECRET" <<<"$ADDED"; then
     add HIGH "Possible committed secret (private key / cloud credential / hardcoded password / token). Never merge a real secret; rotate immediately if exposed."
 fi
 
 # 4) Dangerous C (review-worthy, not auto-block).
 DANGER='\bsystem[[:space:]]*\(|\bpopen[[:space:]]*\(|\bexec[lv]p?e?[[:space:]]*\(|\bgets[[:space:]]*\(|\bstrcpy[[:space:]]*\(|\bstrcat[[:space:]]*\(|\bsprintf[[:space:]]*\('
-if printf '%s\n' "$ADDED_SCAN" | grep -qE "$DANGER"; then
+if grep -qE "$DANGER" <<<"$ADDED_SCAN"; then
     add MED "Dangerous C call introduced (system/popen/exec, or unbounded gets/strcpy/strcat/sprintf). Prefer zcl_* safe helpers / bounded variants; confirm inputs are trusted."
     report+="$(show "$DANGER")"$'\n'
 fi

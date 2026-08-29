@@ -745,16 +745,128 @@ int spec_consensus_compat(void);
 #define TEST(name) \
     for (int _t_once = (printf("%s... ", name), 1); _t_once; _t_once = 0)
 
+/* ── Assertion failure reporting ──────────────────────────────────
+ *
+ * Every FAIL line carries __FILE__:__LINE__, and a value comparison
+ * carries the ACTUAL values of both sides:
+ *
+ *   FAIL at lib/test/src/test_foo.c:412 (got != want): 7 != 9
+ *
+ * The old macros printed `FAIL (got != want)` and nothing else, so the
+ * only way to learn which case failed and what the numbers were was to
+ * find the file, find the case, and add printf calls. With ~28,000
+ * assertion sites in lib/test/src that round trip was paid constantly.
+ *
+ * Two properties matter more than the formatting:
+ *
+ * 1. EACH OPERAND IS EVALUATED EXACTLY ONCE. The old ASSERT_EQ named
+ *    (a) and (b) once in the comparison and ASSERT_STR_EQ named them
+ *    again in the message, so a failing call site whose operand was a
+ *    function call ran it twice and could report a value the predicate
+ *    never saw. Both operands are now bound to temporaries first; the
+ *    comparison and the message both read the temporaries.
+ *
+ * 2. THE COMPARISON IS UNCHANGED. The temporaries are declared with
+ *    `typeof(1 ? (a) : (b))` — the composite type of the two operands,
+ *    which is exactly the type `(a) != (b)` would have converted them
+ *    to. `auto` per operand would have changed two things: a null
+ *    pointer constant would stop being one (`ASSERT_EQ(p, 0)` becomes
+ *    a pointer/int comparison error), and a constant operand would stop
+ *    being a constant expression, so -Wsign-compare would fire under
+ *    -Werror at every `ASSERT_EQ(size_t_thing, 0)`. Both would have been
+ *    migrations across thousands of call sites. `typeof` is C23, like
+ *    `auto`; the operands inside it are unevaluated.
+ *
+ *    The dead `if (0)` comparison below keeps the compiler diagnosing
+ *    the ORIGINAL expression pair exactly as it does today (-Wsign-compare,
+ *    distinct-pointer-types, and friends). It is never executed and
+ *    generates no code, so it costs nothing at run time but a mixed-sign
+ *    ASSERT_EQ still fails the build the way it does now.
+ *
+ * ZCL_TEST_PRINT_VALUE picks the printer from the ORIGINAL operand
+ * expression and feeds it the temporary's value. The type has to come from
+ * the original: `1 ? a : b` applies the usual arithmetic conversions, so a
+ * `bool` or a `char` operand would reach the printer already promoted to
+ * `int` and would render as 0/1 instead of false/true. A _Generic never
+ * evaluates its controlling expression, so naming the operand there costs
+ * no second evaluation.
+ *
+ * Every arm of a _Generic is type-checked even though only one is
+ * evaluated, so each arm's cast must be valid for EVERY type an operand of
+ * `!=` can have — that is, every scalar. Integer arms go through
+ * (long long) / (unsigned long long), both legal from a pointer; the
+ * fallback arm goes through (const void *)(uintptr_t), legal from any
+ * integer or pointer. Pointer types cannot be enumerated in a _Generic, so
+ * they land in the fallback and print as addresses, which is what a reader
+ * wants anyway. */
+
+static inline void zcl_test_print_signed(long long v) { printf("%lld", v); }
+static inline void zcl_test_print_unsigned(unsigned long long v)
+{
+    printf("%llu", v);
+}
+static inline void zcl_test_print_bool(long long v)
+{
+    printf("%s", v ? "true" : "false");
+}
+static inline void zcl_test_print_char(long long v)
+{
+    if (v >= 32 && v < 127) printf("'%c' (%lld)", (int)v, v);
+    else                    printf("%lld", v);
+}
+/* The fallback arm, which every pointer type lands in. A scalar that is
+ * neither an enumerated integer type nor a pointer also arrives here and
+ * prints as its uintptr_t value in hex — not an address, but printing
+ * something beats printing nothing. */
+static inline void zcl_test_print_opaque(const void *v) { printf("%p", v); }
+
+/* `t` supplies the type (never evaluated), `v` supplies the value. */
+#define ZCL_TEST_PRINT_VALUE(t, v) \
+    _Generic((t), \
+        _Bool:              zcl_test_print_bool((long long)(v)), \
+        char:               zcl_test_print_char((long long)(v)), \
+        signed char:        zcl_test_print_signed((long long)(v)), \
+        unsigned char:      zcl_test_print_unsigned((unsigned long long)(v)), \
+        short:              zcl_test_print_signed((long long)(v)), \
+        unsigned short:     zcl_test_print_unsigned((unsigned long long)(v)), \
+        int:                zcl_test_print_signed((long long)(v)), \
+        unsigned int:       zcl_test_print_unsigned((unsigned long long)(v)), \
+        long:               zcl_test_print_signed((long long)(v)), \
+        unsigned long:      zcl_test_print_unsigned((unsigned long long)(v)), \
+        long long:          zcl_test_print_signed((long long)(v)), \
+        unsigned long long: zcl_test_print_unsigned((unsigned long long)(v)), \
+        default:            zcl_test_print_opaque((const void *)(uintptr_t)(v)))
+
 #define ASSERT(cond) do { \
-    if (!(cond)) { printf("FAIL (%s)\n", #cond); failures++; goto _test_next; } \
+    if (!(cond)) { \
+        printf("FAIL at %s:%d (%s)\n", __FILE__, __LINE__, #cond); \
+        failures++; goto _test_next; \
+    } \
 } while(0)
 
 #define ASSERT_EQ(a, b) do { \
-    if ((a) != (b)) { printf("FAIL (%s != %s)\n", #a, #b); failures++; goto _test_next; } \
+    if (0) { (void)((a) != (b)); } /* keeps today's compile diagnostics */ \
+    typeof(1 ? (a) : (b)) zcl_assert_lhs_ = (a); \
+    typeof(1 ? (a) : (b)) zcl_assert_rhs_ = (b); \
+    if (zcl_assert_lhs_ != zcl_assert_rhs_) { \
+        printf("FAIL at %s:%d (%s != %s): ", __FILE__, __LINE__, #a, #b); \
+        ZCL_TEST_PRINT_VALUE((a), zcl_assert_lhs_); \
+        printf(" != "); \
+        ZCL_TEST_PRINT_VALUE((b), zcl_assert_rhs_); \
+        printf("\n"); \
+        failures++; goto _test_next; \
+    } \
 } while(0)
 
 #define ASSERT_STR_EQ(a, b) do { \
-    if (strcmp((a), (b)) != 0) { printf("FAIL (\"%s\" != \"%s\")\n", (a), (b)); failures++; goto _test_next; } \
+    auto zcl_assert_lhs_ = (a); \
+    auto zcl_assert_rhs_ = (b); \
+    if (strcmp(zcl_assert_lhs_, zcl_assert_rhs_) != 0) { \
+        printf("FAIL at %s:%d (%s != %s): \"%s\" != \"%s\"\n", \
+               __FILE__, __LINE__, #a, #b, \
+               zcl_assert_lhs_, zcl_assert_rhs_); \
+        failures++; goto _test_next; \
+    } \
 } while(0)
 
 /* Assert a `struct zcl_result` lvalue is ok, PRINTING its message.
@@ -764,8 +876,11 @@ int spec_consensus_compat(void);
  * three gate cycles. Takes an lvalue (not a call) so the message is read
  * from the same evaluation the predicate tested. */
 #define ASSERT_RESULT_OK(r) do { \
-    if (!(r).ok) { printf("FAIL (%s not ok): %s\n", #r, (r).message); \
-                   failures++; goto _test_next; } \
+    if (!(r).ok) { \
+        printf("FAIL at %s:%d (%s not ok): %s\n", \
+               __FILE__, __LINE__, #r, (r).message); \
+        failures++; goto _test_next; \
+    } \
 } while(0)
 
 #define PASS() do { printf("OK\n"); } while(0)

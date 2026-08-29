@@ -1,5 +1,13 @@
 # ADR-0008: File-size baseline raises for the external-seed floor declaration
 
+> **Superseded by the 2026-08-29 file-size policy change.** E1 no longer
+> fails a build at 800 lines, so a raise like this one no longer needs an
+> ADR. The policy is now three bands — an advisory 800-line target, an
+> allowed 801..1500 buffer, and a hard 1500-line limit — implemented in
+> [`tools/file_size_policy.c`](../../tools/file_size_policy.c). Every file
+> named below is inside the allowed buffer or carried in the shrink-only
+> legacy baseline. Kept for the record of what was decided and why.
+
 - **Status:** Accepted 2026-08-01.
 - **Deciders:** Project maintainer.
 - **Related:** [`0006-always-sync-spine-file-size-raises.md`](./0006-always-sync-spine-file-size-raises.md),
@@ -10,7 +18,7 @@
 
 ## Context
 
-The E1 file-size ceiling (`tools/scripts/check_file_size_ceiling.sh`, 800-line
+The E1 file-size ceiling (then an 800-line hard
 ceiling for `app/`+`config/src/`) ratchets: the enforced-tier baseline "can
 only shrink, never grow, and growing it costs an ADR."
 
@@ -47,7 +55,7 @@ write it belongs to — both strictly worse than +13/+11 lines of size debt.
 ## Decision
 
 Raise the enforced-tier baseline for these two files to their current line
-counts (recorded in `tools/scripts/file_size_ceiling_baseline.txt`).
+counts (recorded in `tools/lint/file_size_policy_baseline.txt`).
 
 ## Consequences
 

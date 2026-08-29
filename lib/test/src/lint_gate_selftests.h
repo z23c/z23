@@ -144,26 +144,32 @@
 #define NO_UNCITED_VICTORY_CITED_FIXTURE_REL \
     "test-tmp/_uncited_victory_cited_fixture_tmp.md"
 
-#define E1_SCRIPT_REL    "tools/scripts/check_file_size_ceiling.sh"
-#define E1_FIXTURE_DST   "app/controllers/src/_e1_size_ceiling_fixture_tmp.c"
-/* E1's lib/domain WARN tier (extended to every .c under lib/, excl.
- * lib/test/ -- see tools/scripts/check_file_size_ceiling.sh's lib_files_all
- * scan + the WARN branch). No per-file baseline override env exists for E1
- * (unlike gate #12 below), so this plants directly into the real lib/ tree
- * like E1_FIXTURE_DST does for app/ -- a single violation here must PRINT
- * (WARN) and never fail the build on its own. It CAN still fail in
- * aggregate: the tier's total (new + grown) violation count is separately
- * ratcheted via ZCL_FILE_SIZE_CEILING_LIB_DRIFT_RATCHET (defaulting to
- * tools/scripts/file_size_ceiling_lib_drift_count.txt) so silent
- * accumulation still trips `make lint`. This test points that ratchet at
- * an isolated, generously-large tmp file so planting ONE fixture proves the
- * per-file WARN invariant without depending on how much real drift the live
- * tree already carries. */
-#define E1_LIB_FIXTURE_DST \
-    "lib/storage/src/_e1_lib_size_ceiling_fixture_tmp.c"
-#define E1_LIB_DRIFT_RATCHET_ENV "ZCL_FILE_SIZE_CEILING_LIB_DRIFT_RATCHET"
-#define E1_LIB_DRIFT_RATCHET_TMP_REL \
-    "test-tmp/_e1_lib_drift_ratchet_isolated_tmp.txt"
+/* Gate E1 — the file-size policy, a C23 binary (tools/file_size_policy.c),
+ * not a script. Three bands: 800 is the advisory TARGET (silent), 801..1500
+ * is an ALLOWED buffer that never fails and needs no baseline row, and over
+ * 1500 FAILS unless the file is carried in the shrink-only legacy baseline.
+ * The two self-tests below pin four cases: buffer-band allowed, over-limit
+ * fails, a baselined file that grows fails, and a zero-file scan refuses. */
+#define E1_GATE_REL      "build/bin/file_size_policy"
+/* Buffer band: planted at 900 lines into the real app/ tree, this must NOT
+ * fail. It is the whole point of the redesign — the predecessor gate failed
+ * the build here and forced emergency splits during unrelated work. */
+#define E1_BUFFER_FIXTURE_DST \
+    "app/controllers/src/_e1_size_buffer_fixture_tmp.c"
+/* Over the hard limit: planted at 1600 lines into the real lib/ tree, not in
+ * any baseline, this MUST fail. One policy now — app/ and lib/ are the same
+ * numbers, so this fixture also proves the old ENFORCED/WARN split is gone. */
+#define E1_OVER_LIMIT_FIXTURE_DST \
+    "lib/storage/src/_e1_size_over_limit_fixture_tmp.c"
+/* Baseline-growth and hollow-scan cases run against ISOLATED scan roots and
+ * an ISOLATED baseline so they never touch the real tree or the real
+ * baseline file — the SVC_CONV / LONGFN convention. */
+#define E1_BASELINE_ENV  "ZCL_FILE_SIZE_POLICY_BASELINE"
+#define E1_SCAN_ROOTS_ENV "ZCL_FILE_SIZE_POLICY_SCAN_ROOTS"
+#define E1_ISO_SCAN_DIR_REL "test-tmp/_e1_size_iso_scan_dir_tmp"
+#define E1_ISO_LEGACY_REL   "test-tmp/_e1_size_iso_scan_dir_tmp/legacy.c"
+#define E1_ISO_BASELINE_REL "test-tmp/_e1_size_iso_baseline_tmp.txt"
+#define E1_EMPTY_SCAN_DIR_REL "test-tmp/_e1_size_empty_scan_dir_tmp"
 /* Gate #12 — check_long_functions.sh, extended to config/src/ (ENFORCED,
  * ratchet-baselined) and lib/ excl. lib/test/ (WARN, non-blocking). Both
  * sub-tiers run against an ISOLATED test-tmp/ scan dir + baseline (via
@@ -422,8 +428,8 @@ int plant_long_function_file(const char *rel, const char *func_name,
                                     int target_len, const char *tag);
 int t_long_functions_enforced_ratchet(void);
 int t_long_functions_lib_warn_tier(void);
-int t_e1_file_size_ceiling(void);
-int t_e1_lib_warn_tier(void);
+int t_e1_file_size_bands(void);
+int t_e1_file_size_baseline_and_hollow_scan(void);
 int t_no_new_repair_rung(void);
 int t_no_new_borrowed_seed_caller(void);
 int t_no_new_coin_backfill_caller(void);

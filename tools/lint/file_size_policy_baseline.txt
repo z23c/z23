@@ -1,0 +1,42 @@
+# Legacy file-size baseline — lint gate E1 (tools/file_size_policy.c).
+#
+# The files that already exceeded the 1500-line hard limit when the
+# target/buffer/limit policy landed. Format: `<path> <max-loc>`.
+#
+# SHRINK-ONLY, and this is the whole contract:
+#   - a file here that GROWS past its number fails the build;
+#   - a file here that reaches 1500 lines or fewer must have its row DELETED
+#     (the gate fails and says so, so a fix cannot leave a stale exemption);
+#   - a row naming a file the gate no longer scans is stale and fails;
+#   - NOTHING is ever added. A new file over 1500 lines fails; it does not
+#     get a row here.
+#
+# `build/bin/file_size_policy --fix` lowers a number to the file's current
+# count and deletes rows that are no longer needed. It cannot raise or add.
+#
+# Files at or under 1500 lines need no entry at all — 801..1500 is an
+# allowed band with no paperwork. Generated/tabular code is skipped entirely
+# via ALLOWLIST in tools/file_size_policy.c, not listed here.
+config/src/boot.c 4001
+config/src/boot_refold_staged.c 1810
+lib/codeindex/src/codeindex_merkle.c 1776
+lib/hotswap/src/hotswap_activate.c 2325
+lib/kernel/src/command_registry.c 2403
+lib/net/src/connman.c 3432
+lib/net/src/download.c 1793
+lib/net/src/fast_sync.c 1688
+lib/net/src/file_service.c 3058
+lib/net/src/msg_headers.c 2370
+lib/net/src/msgprocessor.c 3031
+lib/net/src/msgprocessor_snapshot.c 1810
+lib/net/src/net.c 2373
+lib/net/src/onion_directory.c 1516
+lib/net/src/peer_lifecycle.c 1634
+lib/net/src/rom_fetch.c 1599
+lib/platform/src/os_sandbox_linux.c 1526
+lib/vcs/src/package_reward.c 1986
+lib/vcs/src/package_swarm_node.c 2015
+lib/vcs/src/vcs_devloop.c 2390
+lib/wallet/src/wallet.c 1560
+lib/wallet/src/wallet_sqlite.c 1603
+src/main_cli_modes.c 4275

@@ -16,6 +16,13 @@ void platform_process_lock_init(struct platform_process_lock *lock);
  * creating an absent lock file; false requires it to exist. */
 bool platform_process_lock_try_acquire(struct platform_process_lock *lock,
                                        const char *path, bool create);
+/* Waiting exclusive acquisition, for a lock whose holder must be waited for
+ * rather than reported as a failure — a durable work queue whose mutation
+ * would otherwise be silently dropped on contention. Same retained,
+ * owner-private file and same release-on-crash behaviour as the nonblocking
+ * call; a given lock path must use one or the other, never both. */
+bool platform_process_lock_acquire(struct platform_process_lock *lock,
+                                   const char *path, bool create);
 void platform_process_lock_release(struct platform_process_lock *lock);
 
 #endif

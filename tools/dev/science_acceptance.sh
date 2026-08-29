@@ -976,7 +976,7 @@ else
     echo "science-acceptance:     G2 REGRESSION: fetch stalled (state=$dl_state advertisers=$dl_ads present_bytes=$dl_bytes)" >&2
     echo "science-acceptance:     the package leg is gated CLOSED (announce bootstrap quota + deduped" >&2
     echo "science-acceptance:     per-sync re-announce + supervisor clock-driven swarm) — a stall is a bug." >&2
-    grep -m5 -i "zcode swarm\|announce" "$SA_DD_B/node.log" 2>/dev/null | sed 's/^/science-acceptance:       B log: /' >&2 || true
+    grep -am5 -i "zcode swarm\|announce" "$SA_DD_B/node.log" 2>/dev/null | sed 's/^/science-acceptance:       B log: /' >&2 || true
     sa_die "package leg stalled: G2 regressed"
 fi
 
@@ -1034,7 +1034,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 [ "$ADMITTED" = "1" ] \
     || { echo "science-acceptance:     G1 REGRESSION: B never admitted A's study blob (last reply: $out)" >&2
-         grep -m5 -i "zcode swarm\|blob" "$SA_DD_B/node.log" 2>/dev/null | sed 's/^/science-acceptance:       B log: /' >&2 || true
+         grep -am5 -i "zcode swarm\|blob" "$SA_DD_B/node.log" 2>/dev/null | sed 's/^/science-acceptance:       B log: /' >&2 || true
          sa_die "G1 carrier stalled"; }
 [ "$(sa_jget "$out" data.science_root)" = "$A_STUDY" ] \
     || sa_die "B admitted the wrong science root: $out"

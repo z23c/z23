@@ -36,6 +36,11 @@ a single `sudo setcap`, after which an AI agent / operator runs it with no sudo,
 > HTTP→HTTPS redirect falls back to the request's own `Host` header. With a single
 > cert the server presents that cert regardless of SNI, so any domain works.
 
+> Note: automatic certificate renewal, built into the node itself (no certbot,
+> no external program), is in progress on another branch of work. It is not
+> done yet. Everything below — certbot, its systemd timer, and the deploy-hook
+> — is the current, manual mechanism and still applies until that lands.
+
 ---
 
 ## B. Runbook — bring up `https://yourdomain.example`

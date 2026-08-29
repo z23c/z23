@@ -37,9 +37,9 @@ verify_release() {
     local dir="$1" names
     [ -d "$dir" ] || die "release directory missing: $dir"
     [ -f "$dir/SHA256SUMS" ] || die "SHA256SUMS missing in $dir"
-    names="$(awk '{print $2}' "$dir/SHA256SUMS" | sort)"
-    [ "$names" = $'z23\nzclassic23\nzclassic23-package-verify' ] \
-        || die "SHA256SUMS must name exactly z23, zclassic23, and zclassic23-package-verify"
+    names="$(awk '{print $2}' "$dir/SHA256SUMS" | LC_ALL=C sort)"
+    [ "$names" = $'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-package-verify' ] \
+        || die "SHA256SUMS must name exactly AGENT_CARD.md, z23, zclassic23, and zclassic23-package-verify"
     (cd "$dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \
         || die "release SHA256SUMS mismatch"
     [ -x "$INSTALLER" ] || die "installer missing or not executable: $INSTALLER"
@@ -87,7 +87,7 @@ copy_release() {
     # path-checked by prepare_host; activate_host independently re-hashes the
     # manifest, installer, and every extracted payload before installation.
     tar -C "$release_dir" -cf - \
-        SHA256SUMS z23 zclassic23 zclassic23-package-verify \
+        SHA256SUMS AGENT_CARD.md z23 zclassic23 zclassic23-package-verify \
         -C "$SCRIPT_DIR" install_z23.sh \
         | "$SSH_BIN" "${SSH_OPTS[@]}" "$host" \
             tar -C "$incoming" -xf -
@@ -140,9 +140,12 @@ cleanup() {
     trap - EXIT HUP INT TERM
     if [ "$cleanup_armed" -eq 1 ]; then
         systemctl --user disable --now z23.service >/dev/null 2>&1 || true
+        # -type l as well as -type f: zclassic23 is a symlink to z23, and a
+        # plain -type f rollback left it behind dangling, pointing at bytes
+        # this cleanup had just deleted.
         find "$prefix/bin/z23" "$prefix/bin/zclassic23" \
              "$prefix/bin/zclassic23-package-verify" "$unit" \
-             -maxdepth 0 -type f -delete 2>/dev/null || true
+             -maxdepth 0 \( -type f -o -type l \) -delete 2>/dev/null || true
         find "$incoming" "$stage" -depth -delete 2>/dev/null || true
         systemctl --user daemon-reload >/dev/null 2>&1 || true
     fi
@@ -188,8 +191,19 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
             running_path="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
             installed_z23="$(sha256sum "$prefix/bin/z23" 2>/dev/null | awk '{print $1}' || true)"
             installed_verifier="$(sha256sum "$prefix/bin/zclassic23-package-verify" 2>/dev/null | awk '{print $1}' || true)"
+            # The unit execs $prefix/bin/zclassic23, which install_z23.sh now
+            # creates as a SYMLINK to z23 rather than a second 27.8 MB copy.
+            # So /proc/<pid>/exe resolves to z23, and the old assertion that it
+            # equalled the zclassic23 path could never pass again. Assert both
+            # halves instead: the running image is the installed z23, AND the
+            # name the unit actually execs resolves to that same file. That is
+            # strictly more than the old check proved -- it now also proves the
+            # alias points where it claims to.
+
             if [ "$running" = "$want_node" ] && \
-               [ "$running_path" = "$prefix/bin/zclassic23" ] && \
+               [ "$running_path" = "$prefix/bin/z23" ] && \
+               [ "$(readlink -f "$prefix/bin/zclassic23" 2>/dev/null || true)" \
+                 = "$prefix/bin/z23" ] && \
                [ "$installed_z23" = "$want_z23" ] && \
                [ "$installed_verifier" = "$want_verifier" ] && \
                [ -x "$prefix/bin/zclassic23-package-verify" ] && \
@@ -258,10 +272,11 @@ int main(int argc, char **argv) {
 EOF
     cc -std=c23 -O0 "$tmp/node.c" -o "$tmp/release/z23"
     cp "$tmp/release/z23" "$tmp/release/zclassic23"
+    printf '# card\n' >"$tmp/release/AGENT_CARD.md"
     printf '#!/bin/sh\nexit 0\n' >"$tmp/release/zclassic23-package-verify"
     chmod 755 "$tmp/release/zclassic23-package-verify"
     (cd "$tmp/release" && \
-        sha256sum z23 zclassic23 zclassic23-package-verify >SHA256SUMS)
+        sha256sum AGENT_CARD.md z23 zclassic23 zclassic23-package-verify >SHA256SUMS)
 }
 
 selftest_make_ssh_mock() {

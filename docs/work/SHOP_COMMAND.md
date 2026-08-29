@@ -1,4 +1,4 @@
-# `zclassic shop` — one-command sovereign storefront
+# `app shop` — one-command sovereign storefront
 
 Owner-approved 2026-08-09 (after external review). Goal: run one command,
 get a live private shop: stable onion identity + storefront + wallet +

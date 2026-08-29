@@ -822,16 +822,19 @@ the native command bridge reaches.** Nine of those ten are now admitted; the
 tenth (`status_journey_native_handler.c`) owns `core.status.journey`, which is
 not declared `ZCL_COMMAND_READY_READ` and so fails condition 2.
 
-#### The addressable population, and why it is not 297
+#### The addressable population, and why it is not every leaf
 
 The unit of swap is a command leaf re-pointed in the registry's override layer,
 and a trampoline can only re-point a leaf that dispatches through the native
-command bridge. Of the **297** `ZCL_COMMAND_READY_READ` leaves in
-`config/commands/*.def`, only **61** name `zcl_native_bridge_command` as their
-handler. The other 236 carry bespoke `zcl_native_handle_*` handlers, which are
-not this seam.
+command bridge. Of every `ZCL_COMMAND_READY_READ` leaf in
+`config/commands/*.def` (re-derive the count with
+`LC_ALL=C grep -rn '^ZCL_COMMAND_READY_READ($' config/commands/*.def | wc -l`), only the
+minority that name `zcl_native_bridge_command` as their handler (re-derive with
+`LC_ALL=C grep -rn 'zcl_native_bridge_command' config/commands/*.def`, then
+drop the one comment-line hit) sit behind this seam. The rest carry bespoke
+`zcl_native_handle_*` handlers, which are not this seam.
 
-Of those 61, **31 are now swappable** (the other 10 swappable leaves —
+Of those native-bridge leaves, **31 are now swappable** (the other 10 swappable leaves —
 metaverse, and others — reach the registry by a different registered handler),
 leaving 30 addressable-but-not-yet-swapped. Those 30 split into three very
 different costs:

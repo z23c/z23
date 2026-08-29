@@ -1,5 +1,13 @@
 # ADR-0010: File-size raises for the consensus snapshot export/install IO
 
+> **Superseded by the 2026-08-29 file-size policy change.** E1 no longer
+> fails a build at 800 lines, so a raise like this one no longer needs an
+> ADR. The policy is now three bands — an advisory 800-line target, an
+> allowed 801..1500 buffer, and a hard 1500-line limit — implemented in
+> [`tools/file_size_policy.c`](../../tools/file_size_policy.c). Every file
+> named below is inside the allowed buffer or carried in the shrink-only
+> legacy baseline. Kept for the record of what was decided and why.
+
 - **Status:** Superseded 2026-08-27 by line-count reductions during integration.
 - **Deciders:** Project maintainer.
 - **Related:** [`0009-swap-money-shape-guard-file-size-raise.md`](./0009-swap-money-shape-guard-file-size-raise.md),
@@ -10,7 +18,7 @@
 
 ## Context
 
-The E1 file-size ceiling (`tools/scripts/check_file_size_ceiling.sh`, 800-line
+The E1 file-size ceiling (then an 800-line hard
 ceiling for `app/`+`config/src/`) ratchets: growth above a recorded baseline
 (or a first crossing of the ceiling) costs an explicit record.
 
@@ -40,7 +48,7 @@ debt incurred here.
 2. Raise the enforced-tier baseline for
    `config/src/consensus_state_snapshot_install_activate.c` from 1169 to its
    current line count (recorded in
-   `tools/scripts/file_size_ceiling_baseline.txt`).
+   `tools/lint/file_size_policy_baseline.txt`).
 
 ## Consequences
 
@@ -50,9 +58,9 @@ debt incurred here.
   and both carry an obvious split seam (export writer vs install/activate
   phases) that shrinking under the ceiling would let the records shrink into.
 - The WARN-tier drift-count acceptance landed alongside this ADR
-  (`src/main_cli_modes.c` +1 in the same port) rides its own valve —
-  `file_size_ceiling_lib_drift_count.txt` — with this document as the
-  reviewed provenance.
+  (`src/main_cli_modes.c` +1 in the same port) rode its own valve — a
+  drift-count ratchet file that the 2026-08-29 policy change deleted, with
+  this document as the reviewed provenance at the time.
 
 ## Integrated resolution
 

@@ -280,7 +280,7 @@ dht_wait_rpc "$DHT_DD_A" "$A_RPC" "$DHT_PGID_A" || dht_die "node A RPC warmup fa
 dht_spawn DHT_PGID_B "$DHT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" \
     "$B_HTTPS" "127.0.0.1:$A_PORT"
 dht_wait_rpc "$DHT_DD_B" "$B_RPC" "$DHT_PGID_B" || dht_die "node B RPC warmup failed"
-! rg -q "unrecognized flag '-v2transport'" "$DHT_DD_A/node.log" "$DHT_DD_B/node.log" ||
+! grep -qaF "unrecognized flag '-v2transport'" "$DHT_DD_A/node.log" "$DHT_DD_B/node.log" ||
     dht_die "v2transport was not recognized"
 
 dht_note "mining spendable regtest funds"
@@ -391,7 +391,7 @@ dht_spawn DHT_PGID_B "$DHT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" \
 dht_wait_rpc "$DHT_DD_B" "$B_RPC" "$DHT_PGID_B" || dht_die "B restart failed"
 dht_wait_auth "$DHT_DD_A" "$A_RPC" || dht_die "A never authenticated B over DHT"
 dht_wait_auth "$DHT_DD_B" "$B_RPC" || dht_die "B never authenticated A over DHT"
-rg -q 'controlled Noise reconnect requested' "$DHT_DD_B/node.log" ||
+grep -qaF 'controlled Noise reconnect requested' "$DHT_DD_B/node.log" ||
     dht_die "plaintext capability-learning reconnect was not observed"
 
 TARGET_A=0101010101010101010101010101010101010101010101010101010101010101

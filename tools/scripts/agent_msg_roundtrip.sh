@@ -214,7 +214,7 @@ echo "assertion SEND_COMMITTED ok peer_id=$PEER_ID"
 while :; do
     if [ -f "$NODE_LOG" ]; then
         hits=$(tail -c "+$((LOG_MARK + 1))" "$NODE_LOG" 2>/dev/null \
-            | grep -c "delivery ack from peer $ENDPOINT_HOST" 2>/dev/null || true)
+            | grep -ac "delivery ack from peer $ENDPOINT_HOST" 2>/dev/null || true)
         [ "${hits:-0}" -gt 0 ] && break
     fi
     [ "$(date +%s)" -ge "$DEADLINE" ] && \

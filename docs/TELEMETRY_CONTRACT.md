@@ -99,4 +99,4 @@ restart from a stall.
 | `check-command-contract` | every leaf states its source and freshness |
 | `check-command-availability-truthful` | a leaf that cannot answer is `PLANNED`, not silently empty |
 | `check-describe-budget` | every `discover describe` document fits its byte budget |
-| `check-file-size-ceiling` / `check-long-functions` | 800-line files, 500-line functions |
+| `check-file-size-ceiling` / `check-long-functions` | 1500-line hard file limit (800-line target), 500-line functions |

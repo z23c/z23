@@ -1,4 +1,4 @@
-# C23 Living Commons v2 — Family Commons and evidence economics
+# ZC23 Family Commons — evidence economics
 
 Status: additive pre-genesis protocol foundation. All v2 objects and commands
 are simulation-only and not owner-approved. They create no token, transaction,

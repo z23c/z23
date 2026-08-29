@@ -26,6 +26,15 @@ bool platform_private_file_open_locked(const char *path,
                                        struct platform_private_file *file);
 bool platform_private_file_open_locked_create(
     const char *path, struct platform_private_file *file);
+/* Waiting variants of the two calls above: block until the exclusive
+ * whole-file lock is granted instead of failing when it is already held. A
+ * path locked through these must never also be locked through the
+ * nonblocking pair — on Windows the two use incompatible share modes, so the
+ * second opener would be refused before it could wait. */
+bool platform_private_file_open_locked_wait(const char *path,
+                                            struct platform_private_file *file);
+bool platform_private_file_open_locked_create_wait(
+    const char *path, struct platform_private_file *file);
 void platform_private_file_close(struct platform_private_file *file);
 bool platform_private_file_size(struct platform_private_file *file,
                                 uint64_t *size);

@@ -60,7 +60,7 @@ _gsov_green() {
     local now_commit; now_commit="$(utxo_commitment)"
     [ -n "$now_commit" ] || return 1
     [ -n "$baseline_commit" ] && [ "$now_commit" != "$baseline_commit" ] && return 1
-    if grep -Eq 'coins_applied=[0-9]+.*> *utxo_apply_frontier' \
+    if grep -aEq 'coins_applied=[0-9]+.*> *utxo_apply_frontier' \
         "$ISO_DD/node.log" 2>/dev/null; then
         return 1   # coin tear = borrowed/torn serve, NOT sovereign
     fi

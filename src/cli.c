@@ -6,44 +6,45 @@
 
 #include "rpc/client.h"
 #include "json/json.h"
+#include "platform/socket_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/time.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 
 /* Wall-clock bounds so a dead-but-listening or firewalled RPC port cannot hang
  * the client indefinitely. Both overridable for tests. */
 #define CLI_CONNECT_MS 2000
 #define CLI_RECV_SEC   10
 
-/* Non-blocking connect bounded by CLI_CONNECT_MS. Returns 0 on success. */
-static int cli_connect_deadline(int sock, const struct sockaddr *addr,
-                                socklen_t alen, int budget_ms)
+/* Non-blocking connect bounded by CLI_CONNECT_MS. Returns 0 on success.
+ * Every socket operation goes through platform/socket_compat.h so the client
+ * builds unchanged on Windows, where poll(), fcntl() and errno do not apply
+ * to sockets. */
+static int cli_connect_deadline(platform_socket_t sock,
+                                const struct sockaddr *addr, size_t alen,
+                                int budget_ms)
 {
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0)
+    if (!platform_socket_set_nonblocking(sock, true))
         return -1;
-    int rc = connect(sock, addr, alen);
-    if (rc == 0) { (void)fcntl(sock, F_SETFL, flags); return 0; }
-    if (errno != EINPROGRESS)
+    if (platform_socket_connect(sock, addr, alen) == 0) {
+        if (!platform_socket_set_nonblocking(sock, false)) return -1;
+        return 0;
+    }
+    if (!platform_socket_error_in_progress(platform_socket_last_error()))
         return -1;
-    struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+    struct platform_socket_poll_entry entry = { .socket = sock };
     int pr;
-    do { pr = poll(&pfd, 1, budget_ms); } while (pr < 0 && errno == EINTR);
-    if (pr <= 0)
+    do {
+        pr = platform_socket_wait_writable_many(&entry, 1, budget_ms);
+    } while (pr < 0 &&
+             platform_socket_error_interrupted(platform_socket_last_error()));
+    if (pr <= 0 || !entry.writable || entry.error)
         return -1;
-    int soerr = 0; socklen_t slen = sizeof(soerr);
-    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0 || soerr != 0)
+    int soerr = 0;
+    if (platform_socket_pending_error(sock, &soerr) != 0 || soerr != 0)
         return -1;
-    (void)fcntl(sock, F_SETFL, flags);
+    if (!platform_socket_set_nonblocking(sock, false))
+        return -1;
     return 0;
 }
 
@@ -100,28 +101,35 @@ static void base64_encode(const char *in, size_t len, char *out)
  * Caller must free() the returned string. */
 static char *rpc_call(const char *body, size_t body_len)
 {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) { perror("socket"); return NULL; }
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                  true, false);
+    if (sock == PLATFORM_SOCKET_INVALID) {
+        fprintf(stderr, "Cannot create socket\n");
+        return NULL;
+    }
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)g_port);
-    inet_pton(AF_INET, g_host, &addr.sin_addr);
+    if (platform_socket_parse_address(AF_INET, g_host, &addr.sin_addr) != 1) {
+        fprintf(stderr, "Cannot parse RPC host %s\n", g_host);
+        platform_socket_close(sock);
+        return NULL;
+    }
 
     if (cli_connect_deadline(sock, (struct sockaddr *)&addr, sizeof(addr),
                              CLI_CONNECT_MS) < 0) {
         fprintf(stderr, "Cannot connect to %s:%d\n", g_host, g_port);
-        close(sock);
+        platform_socket_close(sock);
         return NULL;
     }
 
     /* Past connect, a hang means the node accepted the socket but never
      * answered (busy/wedged). Bound each recv so the client cannot block
      * forever waiting on a reply that will not come. */
-    struct timeval tv = { .tv_sec = CLI_RECV_SEC, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_receive_timeout(sock, CLI_RECV_SEC * 1000);
+    (void)platform_socket_set_send_timeout(sock, CLI_RECV_SEC * 1000);
 
     /* Build HTTP request */
     char auth_b64[512];
@@ -138,25 +146,35 @@ static char *rpc_call(const char *body, size_t body_len)
         "\r\n", g_host, auth_b64, body_len);
 
     /* Send header + body */
-    send(sock, header, (size_t)hlen, 0);
-    send(sock, body, body_len, 0);
+    if (hlen < 0 || (size_t)hlen >= sizeof(header) ||
+        !platform_socket_send_all(sock, header, (size_t)hlen) ||
+        !platform_socket_send_all(sock, body, body_len)) {
+        fprintf(stderr, "Cannot send request to %s:%d\n", g_host, g_port);
+        platform_socket_close(sock);
+        return NULL;
+    }
 
     /* Read response */
     size_t cap = 65536, len = 0;
     char *buf = malloc(cap);
-    if (!buf) { close(sock); return NULL; }
+    if (!buf) { platform_socket_close(sock); return NULL; }
 
     for (;;) {
         if (len + 4096 > cap) {
             cap *= 2;
-            buf = realloc(buf, cap);
-            if (!buf) { close(sock); return NULL; }
+            char *grown = realloc(buf, cap);
+            if (!grown) {
+                free(buf);
+                platform_socket_close(sock);
+                return NULL;
+            }
+            buf = grown;
         }
-        ssize_t n = recv(sock, buf + len, cap - len - 1, 0);
+        int n = platform_socket_receive(sock, buf + len, cap - len - 1);
         if (n <= 0) break;
         len += (size_t)n;
     }
-    close(sock);
+    platform_socket_close(sock);
     buf[len] = 0;
 
     /* Skip HTTP headers — find \r\n\r\n */

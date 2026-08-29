@@ -158,8 +158,8 @@ measure() {
     # The tests stage is only trustworthy if the runner said so in its own
     # words. A zero exit with no pass token is recorded as a failure.
     if [ -z "${ZCL_FIRST_BUILD_FAKE:-}" ] && [ -f "$work/tests.log" ]; then
-        if ! grep -q 'ALL TESTS PASSED' "$work/tests.log" ||
-             grep -q 'SOME TESTS FAILED' "$work/tests.log"; then
+        if ! grep -aq 'ALL TESTS PASSED' "$work/tests.log" ||
+             grep -aq 'SOME TESTS FAILED' "$work/tests.log"; then
             say "  tests     did not print the pass token — recording as failed"
             local i=0
             for i in "${!names[@]}"; do

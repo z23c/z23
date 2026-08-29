@@ -1,5 +1,13 @@
 # ADR-0009: File-size baseline raise for the atomic-swap money-shape guard
 
+> **Superseded by the 2026-08-29 file-size policy change.** E1 no longer
+> fails a build at 800 lines, so a raise like this one no longer needs an
+> ADR. The policy is now three bands — an advisory 800-line target, an
+> allowed 801..1500 buffer, and a hard 1500-line limit — implemented in
+> [`tools/file_size_policy.c`](../../tools/file_size_policy.c). Every file
+> named below is inside the allowed buffer or carried in the shrink-only
+> legacy baseline. Kept for the record of what was decided and why.
+
 - **Status:** Accepted 2026-08-27.
 - **Deciders:** Project maintainer.
 - **Related:** [`0006-always-sync-spine-file-size-raises.md`](./0006-always-sync-spine-file-size-raises.md),
@@ -10,7 +18,7 @@
 
 ## Context
 
-The E1 file-size ceiling (`tools/scripts/check_file_size_ceiling.sh`, 800-line
+The E1 file-size ceiling (then an 800-line hard
 ceiling for `app/`+`config/src/`) ratchets: growth above a recorded baseline
 costs an explicit raise.
 
@@ -42,7 +50,7 @@ nine cohesive RPC handlers).
 
 Raise the enforced-tier baseline for `app/controllers/src/swap_controller.c`
 to its current line count (recorded in
-`tools/scripts/file_size_ceiling_baseline.txt`).
+`tools/lint/file_size_policy_baseline.txt`).
 
 ## Consequences
 

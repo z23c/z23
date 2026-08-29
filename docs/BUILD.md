@@ -728,7 +728,7 @@ and package-verifier bytes sequentially. Every remote must already run the
 canonical `zclassic23` user service:
 
 ```bash
-ZCL_SHIP_HOSTS='user@node1 user@node2 user@node3 user@node4' make ship
+ZCL_SHIP_HOSTS='user@host-a user@host-b user@host-c' make ship
 ```
 
 All remotes are ordinary serving peers unless one exact destination is named

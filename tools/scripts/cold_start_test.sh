@@ -200,7 +200,7 @@ while :; do
     fi
 
     if [ "$MODE" = "operator-bundle" ]; then
-        hit=$(grep -m1 -F -- "$BUNDLE_SUCCESS_PATTERN" "$LOG" 2>/dev/null || true)
+        hit=$(grep -am1 -F -- "$BUNDLE_SUCCESS_PATTERN" "$LOG" 2>/dev/null || true)
         if [ -n "$hit" ]; then
             count=$(echo "$hit" | sed -n 's/.*count=\([0-9]*\).*/\1/p')
             count="${count:-0}"
@@ -213,7 +213,7 @@ while :; do
             exit 1
         fi
     else
-        hit=$(grep -m1 -F -- "$SUCCESS_PATTERN" "$LOG" 2>/dev/null || true)
+        hit=$(grep -am1 -F -- "$SUCCESS_PATTERN" "$LOG" 2>/dev/null || true)
         if [ -n "$hit" ]; then
         # Parse UTXO count from the log line. Format:
         #   "[boot] snapshot-first import OK: 1339612 UTXOs at h=3117754 ..."

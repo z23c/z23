@@ -217,7 +217,7 @@ oni_onion_address() {
     printf '%s\n' "$addr"
 }
 oni_bootstrap_tail() {
-    grep "Bootstrapped" "$1/tor.log" 2>/dev/null | tail -1
+    grep -a "Bootstrapped" "$1/tor.log" 2>/dev/null | tail -1
 }
 oni_wait_onion_address() {
     local dd="$1" rpc="$2" label="$3" deadline addr
@@ -598,7 +598,7 @@ MKT_PGID_A="$(mkt_spawn "$MKT_DD_A" "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" "127.0
 mkt_wait_rpc "$MKT_DD_A" "$A_RPC" "$MKT_PGID_A" || mkt_die "seller A RPC warmup failed"
 MKT_PGID_B="$(mkt_spawn "$MKT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
 mkt_wait_rpc "$MKT_DD_B" "$B_RPC" "$MKT_PGID_B" || mkt_die "buyer B RPC warmup failed"
-! rg -q "unrecognized flag" "$MKT_DD_A/node.log" "$MKT_DD_B/node.log" ||
+! grep -qaF "unrecognized flag" "$MKT_DD_A/node.log" "$MKT_DD_B/node.log" ||
     mkt_die "a boot flag was not recognized"
 
 # ── Phase 0: both nodes bootstrap Tor to the public network ──────────
@@ -1037,10 +1037,10 @@ DELIVERED_ROOT="$("$FIXTURE_GEN" root "$DESTINATION")"
 # (peer_port=0, asserted above) and B never dialling A's file service,
 # this is the proof the bytes crossed the Tor network.
 mkt_note "verifying the /market/chunk traffic crossed both Tor instances"
-A_CHUNK_GETS="$(grep -c "HTTP GET /market/chunk/" "$MKT_DD_A/tor.log" 2>/dev/null || true)"
+A_CHUNK_GETS="$(grep -ac "HTTP GET /market/chunk/" "$MKT_DD_A/tor.log" 2>/dev/null || true)"
 [ "${A_CHUNK_GETS:-0}" -ge "$EXPECTED_SLICES" ] ||
     mkt_die "seller tor.log shows only ${A_CHUNK_GETS:-0} /market/chunk GETs (need $EXPECTED_SLICES)"
-B_CHUNK_FETCHES="$(grep -c "initiated fetch to .*\.onion/market/chunk/" "$MKT_DD_B/tor.log" 2>/dev/null || true)"
+B_CHUNK_FETCHES="$(grep -ac "initiated fetch to .*\.onion/market/chunk/" "$MKT_DD_B/tor.log" 2>/dev/null || true)"
 [ "${B_CHUNK_FETCHES:-0}" -ge "$EXPECTED_SLICES" ] ||
     mkt_die "buyer tor.log shows only ${B_CHUNK_FETCHES:-0} onion chunk fetches (need $EXPECTED_SLICES)"
 mkt_note "onion witness: seller served $A_CHUNK_GETS chunk GETs, buyer initiated $B_CHUNK_FETCHES"
