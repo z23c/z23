@@ -1107,6 +1107,11 @@ bool fast_sync_serve_chunk_db(sqlite3 *db, uint32_t chunk_index,
 bool fast_sync_serve_chunk(const char *datadir, uint32_t chunk_index,
                             struct utxo_chunk *out)
 {
+    /* The path is retained for API compatibility. Serving is deliberately
+     * capability-based: only the already-published immutable cache may answer
+     * a request. Reopening node.db here could read a newer UTXO generation
+     * than the cached manifest and serve bytes that cannot verify against it. */
+    (void)datadir;
     pthread_mutex_lock(&g_snapshot_cache_mutex);
     bool snapshot_ok = snapshot_read_chunk_locked(chunk_index, out);
     pthread_mutex_unlock(&g_snapshot_cache_mutex);
@@ -1116,18 +1121,9 @@ bool fast_sync_serve_chunk(const char *datadir, uint32_t chunk_index,
         return true;
     }
 
-    printf("fast_sync: RAM snapshot miss for chunk %u; falling back to SQLite\n",
-           chunk_index);
-
-    char db_path[1024];
-    zcl_node_db_path(db_path, sizeof(db_path), datadir);
-
-    sqlite3 *db = NULL;
-    fast_sync_open_readonly_db(db_path, &db, "serve_chunk");
-
-    bool ok = fast_sync_serve_chunk_db(db, chunk_index, SYNC_CHUNK_SIZE, out);
-    sqlite3_close(db);
-    return ok;
+    LOG_WARN("sync", "serve_chunk: immutable snapshot cache miss for chunk %u; "
+             "refusing live-database fallback", chunk_index);
+    return false;
 }
 
 bool fast_sync_build_manifest_db(sqlite3 *db, struct sync_manifest *out)

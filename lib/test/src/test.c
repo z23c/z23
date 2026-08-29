@@ -1640,6 +1640,7 @@ int main(int argc, char **argv)
     failures += test_projection_adoption();
     failures += test_projection_consumer();
     failures += test_progress_store();
+    failures += test_coins_kv_read_snapshot();
     failures += test_event_log();
     failures += test_event_log_kill9();
     failures += test_event_log_benchmark();

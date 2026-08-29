@@ -1565,8 +1565,8 @@ static uint8_t *test_snapshot_script_entry(size_t *size_out, const char *tag,
 static int test_serve_refuses_oversize_script(void)
 {
     int failures = 0;
-    TEST("fast_sync serve refuses oversize-script chunks on both the DB "
-         "and RAM paths, and still serves full-fidelity scripts at or "
+    TEST("fast_sync serve refuses live-database fallback and oversize-script "
+         "chunks, and still serves full-fidelity cached scripts at or "
          "under the cap") {
         char dir[128];
         snprintf(dir, sizeof(dir),
@@ -1641,13 +1641,18 @@ static int test_serve_refuses_oversize_script(void)
         /* THE REFUSAL: the oversize chunk fails the serve instead of
          * coming back with entries[0].script_len clamped to 520. */
         ASSERT(!fast_sync_serve_chunk_db(db, 1, 2, chunk));
+
+        /* Production serving ignores this populated live mirror when no
+         * immutable cache has been published. The explicit helper above is
+         * the only API allowed to read it. */
+        fast_sync_reset_snapshot_cache();
+        ASSERT(!fast_sync_serve_chunk(datadir, 0, chunk));
         sqlite3_close(db);
         db = NULL;
 
-        /* ── RAM cache path: same contract against a full-fidelity
-         * snapshot buffer. Remove the database first so the SQLite
-         * fallback has nothing to serve and a refusal can only come
-         * from the RAM read itself. ── */
+        /* ── Immutable cache path: same contract against a
+         * full-fidelity snapshot buffer. Remove the database too; production
+         * serving must never consult it regardless of whether it exists. ── */
         unlink(db_path);
         uint8_t sha3[32];
         memset(sha3, 0x3c, sizeof(sha3));
@@ -1664,8 +1669,7 @@ static int test_serve_refuses_oversize_script(void)
         ASSERT(chunk->num_entries == 1);
         ASSERT(chunk->entries[0].script_len == 250);
 
-        /* The refusal: 601-byte script fails the RAM read (and the
-         * fallback finds no database at all). */
+        /* The refusal: 601-byte script fails the immutable-cache read. */
         buf = test_snapshot_script_entry(&buf_size, "oversize_ram_big",
                                          601, 0x63);
         ASSERT(buf != NULL);
