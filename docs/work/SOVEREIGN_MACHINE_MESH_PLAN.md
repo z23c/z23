@@ -121,7 +121,7 @@ onion failover, and relay transport remain acceptance work.
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
 | Fleet view | Wire, durable local projection, and bounded automatic refresh connected: pairing-bound signed status receipts pin the responder's unique active delegated online key; `ops mesh machines` lists bounded redacted pairings from schema-v77 exact receipt evidence as fresh, stale, or unknown without network I/O | Independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
-| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames | Private dispatcher and queue, private store and journal, chunk scheduling, full-root verification, atomic no-clobber publication, cancellation handling, signed receipts, and independent-host acceptance |
+| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root | Private dispatcher and queue, chunk scheduling, atomic no-clobber plaintext publication, cancellation handling, signed receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
@@ -834,6 +834,18 @@ peers, never production wallet state.
   writer; manual polling uses the same writer synchronously. The focused wire
   group proves the resource gate matrix. Independent-host evidence remains
   open; it requires an owner-approved deployment and restart on each host.
+- 2026-08-29T10:24:41-04:00 / 2026-08-29T14:24:41Z: the private-object
+  staging store added exclusive per-transfer locking and a bounded portable
+  journal under an already owner-private directory. Chunk acceptance performs
+  AEAD verification before ciphertext write and flush, then persists and
+  flushes the resume bit. Reopen checks exact file geometry and journal
+  identity and re-authenticates every set-bit chunk; corruption refuses the
+  staging state instead of silently repairing it. The focused
+  `mesh_private_object_stage` group passed cold with one group run, zero
+  failures, and zero skips, proving out-of-order resume, exact duplicate
+  idempotence, short-final-chunk handling, full ciphertext-root verification,
+  and corruption refusal. This does not publish plaintext, complete a grant,
+  connect a network dispatcher, or establish independent-host acceptance.
 
 ## Completion rule
 
