@@ -26,19 +26,21 @@
  * A module missing from this file is not a lint warning, it is a module
  * missing from the build.
  *
- * How the order was derived — re-measured 2026-07-26 on today's tree, and
+ * How the order was derived — re-measured 2026-08-29 on today's tree, and
  * re-derivable at any time with two commands:
  *   make build-only -j"$(nproc)"          # the ONLY tree the gate measures
  *   tools/dev/module-linkgraph.sh --fas --obj-root build/obj
- * The graph is 195 lib->lib edges over the 37 lib modules that have any edge
- * at all (lib/znam has none), with 30 strongly-connected components of which
- * two are non-trivial: {metrics sync validation net rpc storage script} and
- * {util health}. The sequence below leaves 5 back edges, and that is OPTIMAL,
+ * The graph is 248 lib->lib edges over the 46 lib modules that have any edge
+ * at all (lib/presentation has none), with 40 strongly-connected components
+ * of which two are non-trivial: {metrics sync validation net rpc storage} and
+ * {util health}. The sequence below leaves 4 back edges, and that is OPTIMAL,
  * not merely good: --fas solves each component exactly (minimum feedback arc
- * set decomposes over components) and reports the floor as 4 + 1 = 5, so no
- * reordering of this file can do better. Deleting those 5 and running `tsort`
- * over the remaining 190 confirms the residue is acyclic and covers all 37
- * modules. The 5 are grandfathered in
+ * set decomposes over components) and reports the floor as 3 + 1 = 4, so no
+ * reordering of this file can do better. Deleting those 4 and running `tsort`
+ * over the residue confirms it is acyclic. lib/script sat in the big
+ * component until 2026-08-29, when the unused zcashconsensus C-ABI shim — the
+ * TU that carried script's entire upward reach — was deleted. The 4 are
+ * grandfathered in
  * tools/scripts/lib_module_order_baseline.txt and the gate ratchets: the
  * baseline may only shrink, and shrinking it now requires BREAKING A CYCLE,
  * not reordering.
@@ -82,7 +84,7 @@ LIB_MODULE("noise")
 LIB_MODULE("bloom")
 
 /* The foundation hub. Almost everything above it depends on util; util's one
- * remaining upward reach is util -> health (4 symbols), one of the 5
+ * remaining upward reach is util -> health (4 symbols), one of the 4
  * grandfathered back edges. */
 LIB_MODULE("util")
 LIB_MODULE("sapling")
@@ -90,9 +92,11 @@ LIB_MODULE("crypto_registry")
 LIB_MODULE("event")
 LIB_MODULE("keys")
 
-/* Consensus state, the chain index, transport and observability. These seven
- * — metrics sync validation net rpc storage script — are one strongly
- * connected component, so 4 of the 5 back edges necessarily live in here. */
+/* Consensus state, the chain index, transport and observability. Six of these
+ * — metrics sync validation net rpc storage — are one strongly connected
+ * component, so 3 of the 4 back edges necessarily live in here. lib/script
+ * sat in that component too until the 2026-08-29 zcashconsensus purge removed
+ * its only upward reach. */
 LIB_MODULE("coins")
 LIB_MODULE("chain")
 LIB_MODULE("sync")
