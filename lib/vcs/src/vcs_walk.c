@@ -11,15 +11,24 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <winternl.h>
+#include <sys/stat.h>
+#else
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 /* Return the final path component of relpath. */
 static const char *base_of(const char *relpath)
@@ -132,7 +141,6 @@ bool vcs_path_ignored(const char *relpath)
     return false;
 }
 
-#if !defined(_WIN32)
 struct walk_ctx {
     const char  *repo_root;
     vcs_walk_cb  cb;
@@ -140,6 +148,219 @@ struct walk_ctx {
     bool         aborted;
 };
 
+#if defined(_WIN32)
+typedef NTSTATUS (NTAPI *walk_nt_create_file_fn)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
+    PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+typedef NTSTATUS (NTAPI *walk_nt_query_directory_file_fn)(
+    HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
+    FILE_INFORMATION_CLASS, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+
+static bool walk_nt_functions(walk_nt_create_file_fn *create_file,
+                              walk_nt_query_directory_file_fn *query_directory)
+{
+    HMODULE module = GetModuleHandleW(L"ntdll.dll");
+    FARPROC create_symbol = module ? GetProcAddress(module, "NtCreateFile") : NULL;
+    FARPROC query_symbol = module
+        ? GetProcAddress(module, "NtQueryDirectoryFile") : NULL;
+    if (!create_symbol || !query_symbol) return false;
+    static_assert(sizeof(*create_file) == sizeof(create_symbol));
+    static_assert(sizeof(*query_directory) == sizeof(query_symbol));
+    memcpy(create_file, &create_symbol, sizeof(*create_file));
+    memcpy(query_directory, &query_symbol, sizeof(*query_directory));
+    return true;
+}
+
+static bool walk_utf8_root(const char *path, wchar_t out[32768])
+{
+    if (!path || !path[0]) return false;
+    wchar_t plain[32768];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                    plain, 32768);
+    if (count <= 0) return false;
+    for (int i = 0; i < count - 1; ++i)
+        if (plain[i] == L'/') plain[i] = L'\\';
+    if (wcsncmp(plain, L"\\\\?\\", 4) == 0) {
+        wmemcpy(out, plain, (size_t)count);
+        return true;
+    }
+    if (plain[0] == L'\\' && plain[1] == L'\\') {
+        if ((size_t)count + 6u >= 32768u) return false;
+        wmemcpy(out, L"\\\\?\\UNC\\", 8);
+        wmemcpy(out + 8, plain + 2, (size_t)count - 2u);
+        return true;
+    }
+    if (plain[0] && plain[1] == L':' && plain[2] == L'\\') {
+        if ((size_t)count + 4u >= 32768u) return false;
+        wmemcpy(out, L"\\\\?\\", 4);
+        wmemcpy(out + 4, plain, (size_t)count);
+        return true;
+    }
+    wmemcpy(out, plain, (size_t)count);
+    return true;
+}
+
+static HANDLE walk_open_child(HANDLE parent, const char *name,
+                              walk_nt_create_file_fn create_file,
+                              bool *vanished)
+{
+    if (vanished) *vanished = false;
+    wchar_t wide[260];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1,
+                                    wide, 260);
+    if (count <= 1 || strchr(name, '/') || strchr(name, '\\') ||
+        !strcmp(name, ".") || !strcmp(name, ".."))
+        return INVALID_HANDLE_VALUE;
+    UNICODE_STRING leaf = {
+        .Length = (USHORT)((count - 1) * (int)sizeof(wchar_t)),
+        .MaximumLength = (USHORT)((count - 1) * (int)sizeof(wchar_t)),
+        .Buffer = wide,
+    };
+    OBJECT_ATTRIBUTES attributes;
+    InitializeObjectAttributes(&attributes, &leaf, OBJ_CASE_INSENSITIVE,
+                               parent, NULL);
+    IO_STATUS_BLOCK status = {0};
+    HANDLE child = INVALID_HANDLE_VALUE;
+    NTSTATUS result = create_file(
+        &child, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+        FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    if (result >= 0) return child;
+    if (vanished)
+        *vanished = (ULONG)result == 0xC0000034u ||
+                    (ULONG)result == 0xC000003Au ||
+                    (ULONG)result == 0xC0000056u;
+    return INVALID_HANDLE_VALUE;
+}
+
+static bool walk_append_name(char ***names, size_t *count, const wchar_t *wide,
+                             int wide_count)
+{
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide,
+                                    wide_count, NULL, 0, NULL, NULL);
+    if (bytes <= 0 || *count >= SIZE_MAX / sizeof(**names)) return false;
+    char *name = zcl_malloc((size_t)bytes + 1u, "vcs_walk_win_name");
+    char **grown = name ? zcl_realloc(
+        *names, (*count + 1u) * sizeof(**names), "vcs_walk_win_names") : NULL;
+    if (!grown) {
+        free(name);
+        return false;
+    }
+    *names = grown;
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, wide_count,
+                            name, bytes, NULL, NULL) != bytes) {
+        free(name);
+        return false;
+    }
+    name[bytes] = 0;
+    (*names)[(*count)++] = name;
+    return true;
+}
+
+static int walk_name_compare(const void *left, const void *right)
+{
+    return strcmp(*(char *const *)left, *(char *const *)right);
+}
+
+static bool walk_windows_time(LARGE_INTEGER value, int64_t *nanoseconds)
+{
+    constexpr int64_t epoch = INT64_C(116444736000000000);
+    if (!nanoseconds || value.QuadPart < epoch ||
+        value.QuadPart - epoch > INT64_MAX / 100)
+        return false;
+    *nanoseconds = (value.QuadPart - epoch) * 100;
+    return true;
+}
+
+static bool walk_dir_windows(struct walk_ctx *w, HANDLE directory,
+                             const char *rel,
+                             walk_nt_create_file_fn create_file,
+                             walk_nt_query_directory_file_fn query_directory)
+{
+    char **names = NULL;
+    size_t count = 0;
+    bool restart = true, ok = true;
+    unsigned char buffer[16384];
+    for (;;) {
+        IO_STATUS_BLOCK status = {0};
+        NTSTATUS result = query_directory(
+            directory, NULL, NULL, NULL, &status, buffer, sizeof(buffer),
+            FileIdBothDirectoryInformation, FALSE, NULL, restart ? TRUE : FALSE);
+        restart = false;
+        if ((ULONG)result == 0x80000006u) break;
+        if (result < 0 || status.Information == 0) { ok = false; break; }
+        FILE_ID_BOTH_DIR_INFO *entry = (FILE_ID_BOTH_DIR_INFO *)buffer;
+        for (;;) {
+            int chars = (int)(entry->FileNameLength / sizeof(wchar_t));
+            bool dot = (chars == 1 && entry->FileName[0] == L'.') ||
+                (chars == 2 && entry->FileName[0] == L'.' &&
+                 entry->FileName[1] == L'.');
+            if (!dot && !walk_append_name(&names, &count, entry->FileName, chars)) {
+                ok = false;
+                break;
+            }
+            if (!entry->NextEntryOffset) break;
+            entry = (FILE_ID_BOTH_DIR_INFO *)
+                ((unsigned char *)entry + entry->NextEntryOffset);
+        }
+        if (!ok) break;
+    }
+    qsort(names, count, sizeof(*names), walk_name_compare);
+    for (size_t i = 0; i < count && ok && !w->aborted; ++i) {
+        char childrel[4096];
+        int n = rel[0] ? snprintf(childrel, sizeof(childrel), "%s/%s", rel,
+                                  names[i])
+                       : snprintf(childrel, sizeof(childrel), "%s", names[i]);
+        if (n <= 0 || (size_t)n >= sizeof(childrel) ||
+            vcs_path_ignored(childrel))
+            continue;
+        bool vanished = false;
+        HANDLE child = walk_open_child(directory, names[i], create_file,
+                                       &vanished);
+        BY_HANDLE_FILE_INFORMATION info = {0};
+        FILE_BASIC_INFO basic = {0};
+        if (child == INVALID_HANDLE_VALUE) {
+            if (!vanished) ok = false;
+            continue;
+        }
+        if (!GetFileInformationByHandle(child, &info) ||
+            !GetFileInformationByHandleEx(child, FileBasicInfo, &basic,
+                                           sizeof(basic))) {
+            CloseHandle(child);
+            ok = false;
+            break;
+        }
+        if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            CloseHandle(child);
+            continue;
+        }
+        if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            ok = walk_dir_windows(w, child, childrel, create_file,
+                                  query_directory);
+        } else if (GetFileType(child) == FILE_TYPE_DISK) {
+            uint64_t size = ((uint64_t)info.nFileSizeHigh << 32) |
+                            info.nFileSizeLow;
+            uint32_t mode = (uint32_t)(_S_IFREG | _S_IREAD);
+            if (!(info.dwFileAttributes & FILE_ATTRIBUTE_READONLY))
+                mode |= (uint32_t)_S_IWRITE;
+            int64_t modified = 0, changed = 0;
+            if (!walk_windows_time(basic.LastWriteTime, &modified) ||
+                !walk_windows_time(basic.ChangeTime, &changed)) {
+                ok = false;
+            } else if (!w->cb(childrel, mode, size,
+                              modified, changed, w->user)) {
+                w->aborted = true;
+            }
+        }
+        CloseHandle(child);
+    }
+    for (size_t i = 0; i < count; ++i) free(names[i]);
+    free(names);
+    return ok;
+}
+
+#else
 /* Recurse into <repo_root>/<rel> (rel="" for the root). */
 static bool walk_dir(struct walk_ctx *w, const char *rel)
 {
@@ -239,11 +460,29 @@ bool vcs_walk_tracked(const char *repo_root, vcs_walk_cb cb, void *user)
     if (!repo_root || !cb)
         LOG_FAIL("vcs", "null arg to walk_tracked");
 #if defined(_WIN32)
-    (void)user;
-    /* Safe traversal requires enumeration relative to a retained directory
-     * handle. The current Windows directory-list seam validates only the
-     * final path and cannot exclude an intermediate reparse substitution. */
-    return false;
+    wchar_t root_path[32768];
+    walk_nt_create_file_fn create_file = NULL;
+    walk_nt_query_directory_file_fn query_directory = NULL;
+    if (!walk_utf8_root(repo_root, root_path) ||
+        !walk_nt_functions(&create_file, &query_directory))
+        return false;
+    HANDLE root = CreateFileW(
+        root_path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        NULL);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    if (root == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(root, &info) ||
+        !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        if (root != INVALID_HANDLE_VALUE) CloseHandle(root);
+        return false;
+    }
+    struct walk_ctx w = {repo_root, cb, user, false};
+    bool ok = walk_dir_windows(&w, root, "", create_file, query_directory);
+    CloseHandle(root);
+    return ok && !w.aborted;
 #else
     struct walk_ctx w = { repo_root, cb, user, false };
     if (!walk_dir(&w, ""))

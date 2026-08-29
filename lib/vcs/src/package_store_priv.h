@@ -82,6 +82,10 @@ bool store_mkdir_p(const char *path);
 /* Recursive delete of a file or directory tree (pure C). */
 bool store_rm_rf(const char *path);
 
+/* UTF-8 no-follow file presence/removal used by store policy paths. */
+bool store_path_exists(const char *path);
+bool store_unlink(const char *path);
+
 /* Durable write: <path><STORE_TEMP_SUFFIX>.<pid>.<seq>, fsync, rename. */
 bool store_atomic_write(const char *path, const uint8_t *data,
                         size_t data_len);
