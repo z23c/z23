@@ -19,6 +19,7 @@
 
 #include "config/boot_internal.h"
 #include "config/boot_background_workers.h"
+#include "config/boot_mesh_pairing.h"
 #include "config/boot_msg_callbacks.h"
 #include "config/boot_zcode_swarm.h"
 #include "controllers/api_controller.h"
@@ -445,6 +446,7 @@ static void boot_zcode_store_stop(void *ctx)
     /* The swarm engine borrows the global store: it must be freed
      * BEFORE the store closes (slice 12). */
     boot_zcode_swarm_shutdown();
+    boot_mesh_pairing_shutdown();
     if (vcs_package_store_global())
         vcs_package_store_close_global();
 }
@@ -458,6 +460,7 @@ bool boot_register_frontend_services(struct boot_svc_ctx *svc)
      * itself is created lazily on first use when -packagehost=1 and the
      * store is open; wiring the hooks is always safe. */
     boot_zcode_swarm_wire(svc);
+    boot_mesh_pairing_wire(svc);
 
     const struct zcl_service_spec specs[] = {
         {

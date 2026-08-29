@@ -49,6 +49,8 @@ dev.generation.rollback    exempt: dev generation store, contained
 dev.generation.compact     exempt: dev generation store, contained
 dev.generation.activate    receipt:tools/command/native_dev_activation_command.c
 ops.recovery.rebuild       exempt: refold reset, gated by copy-prove doctrine
+ops.mesh.pair_commit       exempt: node.db pairing AR write via mesh_pairing_service, no artifact install
+ops.mesh.pair_revoke       exempt: sticky revocation AR write via mesh_pairing_service, no artifact install
 
 # ZCL app-feature writes (config/commands/app_features.def). None of them
 # installs a privileged datadir artifact, so every row stays `exempt` — the

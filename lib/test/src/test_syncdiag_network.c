@@ -47,11 +47,11 @@ int syncdiag_cases_network(void)
         ok = ok && local_authority && local_authority->type == JSON_BOOL &&
              json_get_bool(local_authority);
         ok = ok && remote_protocol && remote_protocol->type == JSON_BOOL &&
-             !json_get_bool(remote_protocol);
+             json_get_bool(remote_protocol);
         ok = ok && mesh_ready && mesh_ready->type == JSON_BOOL &&
              !json_get_bool(mesh_ready);
         ok = ok && blockers && blockers->type == JSON_ARR;
-        ok = ok && json_array_has_str(
+        ok = ok && !json_array_has_str(
                            blockers, "REMOTE_STATUS_PROTOCOL_UNAVAILABLE");
 
         char encoded[4096];
