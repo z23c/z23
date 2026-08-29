@@ -470,6 +470,16 @@ ZCL_AGENT_DEV_BIN ?= $(HOME)/.local/bin/zclassic23-dev
 ZCL_AGENT_DEV_DATADIR ?= $(HOME)/.zclassic-c23-dev
 ZCL_AGENT_DEV_RPCPORT ?= 18252
 ZCL_NODECTL_BIN = $(BIN_DIR)/zcl-nodectl
+# POSIX-only operator tools: zcl-nodectl uses fork/signals/arpa/inet.h and
+# zclassic-cli uses poll.h. They are not in the native Windows node path, so
+# do not force the test harness or `all` to build them on Windows.
+ifeq ($(ZCL_HOST_WINDOWS),1)
+ZCL_POSIX_ONLY_BINS =
+ZCL_NODECTL_DEP =
+else
+ZCL_POSIX_ONLY_BINS = zclassic-cli zcl-nodectl
+ZCL_NODECTL_DEP = $(ZCL_NODECTL_BIN)
+endif
 WAL_CHECKPOINT_BIN = $(BIN_DIR)/wal_checkpoint
 SOAK_RUNNER_BIN = $(BIN_DIR)/soak_runner
 CRASH_RECOVERY_TEST_BIN = $(BIN_DIR)/crash_recovery_test
@@ -1956,8 +1966,8 @@ ifneq ($(ZCL_HOST_WINDOWS),)
 # unconstrained agent adapter merely to make the native node build green.
 ZCL_ADAPTER_RUNNER_TARGET =
 endif
-all: test_zcl zclassic23 zclassic-cli zcl-rpc zcl-nodectl zclassic23-package-verify \
-	$(ZCL_ADAPTER_RUNNER_TARGET)
+all: test_zcl zclassic23 zcl-rpc zclassic23-package-verify \
+	$(ZCL_POSIX_ONLY_BINS) $(ZCL_ADAPTER_RUNNER_TARGET)
 
 # ── Hot-swap ROLLBACK fixture images ──────────────────────────────────────
 # lib/test/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
@@ -2338,7 +2348,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2360,7 +2370,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -3541,7 +3551,7 @@ dev-package-verifier: $(DEV_PACKAGE_VERIFY_BIN)
 	mv -f -- "$$tmp" '$(DEV_PACKAGE_VERIFY_ENSURE_STAMP)'; \
 	trap - EXIT HUP INT TERM
 
-ifeq ($(ZCL_STANDALONE_CLEAN),1)
+ifeq ($(or $(ZCL_STANDALONE_CLEAN),$(ZCL_HOST_WINDOWS)),1)
 dev-package-verifier-ensure:
 	@:
 else
