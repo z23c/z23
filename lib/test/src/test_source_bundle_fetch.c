@@ -967,6 +967,132 @@ static int test_planted_resume_state_refused(void)
     return failures;
 }
 
+
+/* ── (i) ONE seeder can consume the whole candidate budget ───────────── */
+
+/* ADVERSARIAL, and this one is about a BOUND rather than about bytes. Every
+ * case above proves the content check cannot be talked past. This one asks the
+ * next question: what does a hostile seeder get to spend of the SEARCH?
+ *
+ * The arithmetic. A directory listing carries at most ROM_FETCH_MAX_ARTIFACTS
+ * entries, the candidate set holds at most SOURCE_BUNDLE_FETCH_MAX_CANDIDATES,
+ * and today those two numbers are equal. The advertised source_root is read
+ * out of each file's OWN ZVSB header at registration (rom_seed_register), so a
+ * seeder that writes the honest 32 bytes into the header of eight different
+ * bundles advertises eight artifacts, with eight DIFFERENT chunk_roots, all
+ * claiming the honest tree. sbf_candidate_add groups by chunk_root, so those
+ * do not merge — they are eight separate candidates, and one peer has filled
+ * the set before any other peer is asked.
+ *
+ * What this test pins, and why each half matters:
+ *
+ *   FAIL-CLOSED holds absolutely. Eight impostors buy the attacker nothing:
+ *   every one is downloaded, every one is refused by the caller's own root,
+ *   the refusal is the CONTENT check's ("tree-root-mismatch", not a transport
+ *   error), and the staging directory is empty afterwards. That half must
+ *   never change.
+ *
+ *   THE BUDGET IS EXHAUSTIBLE BY ONE PEER. candidates_tried reaching the cap
+ *   from a single seeder is the finding, not a feature: sbf_candidate_add
+ *   returns false once the set is full, and source_bundle_fetch discards that
+ *   false, so a HONEST peer asked afterwards has its offer dropped by the cap
+ *   rather than tried. That cannot be shown end-to-end here — one process
+ *   hosts one file service and one rom_seed registry — so this pins the
+ *   precondition, exactly. If per-peer fairness is ever added, this assertion
+ *   is meant to go red and be re-stated against the new rule. */
+static int test_one_seeder_fills_the_candidate_set(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: a single seeder advertising the honest source "
+         "root on SOURCE_BUNDLE_FETCH_MAX_CANDIDATES distinct artifacts is "
+         "refused on every one of them with nothing materialized — and "
+         "consumes the entire candidate budget by itself") {
+        sbft_open_caps();
+        char hroot[] = "/tmp/zcl_sbfetch_flood_honest_XXXXXX";
+        char sroot[] = "/tmp/zcl_sbfetch_flood_srv_XXXXXX";
+        char croot[] = "/tmp/zcl_sbfetch_flood_cli_XXXXXX";
+        char *hdir = mkdtemp(hroot), *sdir = mkdtemp(sroot),
+             *cdir = mkdtemp(croot);
+        ASSERT(hdir && sdir && cdir);
+
+        /* The tree the caller actually wants. It is never served by anyone in
+         * this fixture: the point is what happens to the SEARCH, not whether
+         * an honest copy would have verified. */
+        ASSERT(sbft_make_tree(hdir, 'A'));
+        uint8_t honest_root[32];
+        uint8_t *honest = NULL;
+        size_t honest_len = 0;
+        ASSERT(sbft_bundle(hdir, honest_root, &honest, &honest_len));
+
+        /* One impostor per candidate slot. Each is a WELL-FORMED bundle of a
+         * different tree — proven well-formed under its own root first — then
+         * relabelled so its header advertises the honest root. Distinct
+         * contents mean distinct chunk_roots, which is what keeps them from
+         * merging into a single candidate. */
+        /* One listing carries at most ROM_FETCH_MAX_ARTIFACTS entries and the
+         * registry holds ROM_SEED_MAX_ARTIFACTS, and both equal the candidate
+         * cap today — which is exactly why one seeder is enough. */
+        for (unsigned i = 0; i < SOURCE_BUNDLE_FETCH_MAX_CANDIDATES; i++) {
+            char iroot[] = "/tmp/zcl_sbfetch_flood_tree_XXXXXX";
+            char *idir = mkdtemp(iroot);
+            ASSERT(idir != NULL);
+            ASSERT(sbft_make_tree(idir, (char)('a' + (int)i)));
+
+            uint8_t evil_root[32];
+            uint8_t *evil = NULL;
+            size_t evil_len = 0;
+            ASSERT(sbft_bundle(idir, evil_root, &evil, &evil_len));
+            ASSERT(memcmp(evil_root, honest_root, 32) != 0);
+            struct vcs_source_bundle_metrics vm;
+            ASSERT(vcs_source_bundle_verify(evil, evil_len, evil_root, &vm) ==
+                   VCS_SOURCE_BUNDLE_OK);
+            memcpy(evil + ROM_SEED_SOURCE_BUNDLE_ROOT_OFFSET, honest_root, 32);
+
+            char name[64];
+            snprintf(name, sizeof(name), "impostor-%u.zvsb", i);
+            ASSERT(sbft_write(sdir, name, evil, evil_len));
+            ASSERT(rom_seed_register(sdir, name, NULL, NULL) == ROM_REG_OK);
+            free(evil);
+            test_cleanup_tmpdir(idir);
+        }
+        ASSERT(rom_seed_count() == (int)SOURCE_BUNDLE_FETCH_MAX_CANDIDATES);
+
+        uint16_t port = sbft_serve(sdir);
+        ASSERT(port != 0);
+        struct rom_fetch_peer peer;
+        sbft_peer(&peer, port);
+
+        uint8_t *got = NULL;
+        size_t got_len = 0;
+        struct source_bundle_fetch_metrics m;
+        ASSERT(source_bundle_fetch(&peer, 1, honest_root, cdir, &got, &got_len,
+                                   &m) == SOURCE_BUNDLE_FETCH_ERR_ROOT);
+
+        /* Fail-closed, on every one of them. */
+        ASSERT(got == NULL && got_len == 0);
+        ASSERT(m.candidates_refused == m.candidates_tried);
+        ASSERT(m.last_refusal == VCS_SOURCE_BUNDLE_ERR_ROOT);
+        ASSERT(sbft_dir_empty(cdir));
+        ASSERT(rom_peer_is_deprioritized("127.0.0.1", port));
+
+        /* THE FINDING: one seeder, one directory listing, and the whole
+         * candidate budget is spent. A later honest peer would have nowhere
+         * left to be added (sbf_candidate_add's cap, whose false return
+         * source_bundle_fetch discards). */
+        ASSERT(m.peers_asked == 1 && m.peers_offering == 1);
+        ASSERT(m.candidates_tried == SOURCE_BUNDLE_FETCH_MAX_CANDIDATES);
+
+        free(honest);
+        fs_server_stop();
+        test_cleanup_tmpdir(cdir);
+        test_cleanup_tmpdir(sdir);
+        test_cleanup_tmpdir(hdir);
+        sbft_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_source_bundle_fetch(void)
 {
     int failures = 0;
@@ -979,5 +1105,6 @@ int test_source_bundle_fetch(void)
     failures += test_no_peer_named_refusal();
     failures += test_leaf_end_to_end();
     failures += test_planted_resume_state_refused();
+    failures += test_one_seeder_fills_the_candidate_set();
     return failures;
 }
