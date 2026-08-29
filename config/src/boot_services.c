@@ -109,6 +109,7 @@
 #include "controllers/name_controller.h"
 #include "controllers/anchor_controller.h"
 #include "controllers/identity_controller.h"
+#include "controllers/mesh_pairing_controller.h"
 #include "controllers/zdir_controller.h"
 #include "controllers/op_return_index_controller.h"
 #include "services/op_return_backfill_service.h"
@@ -1231,6 +1232,7 @@ bool app_init_services(struct app_context *ctx,
     /* Diagnostics RPCs — dumpstate, getnodelog, dbquery */
     diagnostics_controller_set_state(svc->state, ctx->datadir);
     register_diagnostics_rpc_commands(svc->rpc_table);
+    register_mesh_pairing_rpc_commands(svc->rpc_table, boot_node_db(svc));
     boot_zcode_dht_register_rpc(svc->rpc_table);
     boot_zcode_async_proof_register_rpc(svc->rpc_table);
     /* File transfer service — SHA3-verified chunk serving */

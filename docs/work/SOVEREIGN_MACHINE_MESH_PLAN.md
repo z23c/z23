@@ -89,7 +89,7 @@ bundles never ride inside control messages.
 | Capability | Current state | What remains before a product claim |
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
-| Pairing authority | Implemented internally: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation | Two-sided wire ceremony and owner-facing plan/commit/list/revoke commands |
+| Pairing authority | Implemented locally: durable schema-v76 records plus owner-only, redacted `ops mesh pair list` and plan/commit `ops mesh pair revoke`; status-read-only capability, expiry, session binding, and sticky revocation remain fail-closed | Two-sided wire ceremony and independent-host acceptance |
 | Fleet view | Not implemented | Signed remote status request/response plus a local online/offline projection |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
@@ -342,10 +342,10 @@ portable; native artifacts are platform- and toolchain-bound.
 
 The phases below are delivered in this dependency order:
 
-1. correct the local identity capsule so it reports the pairing authority that
+1. completed: the local identity capsule reports the pairing authority that
    exists without claiming a remote protocol;
-2. expose pairing list/revoke locally, without creating a way to bypass the
-   authenticated-session acceptance service;
+2. completed: pairing list/revoke is owner-visible locally without creating a
+   way to bypass the authenticated-session acceptance service;
 3. define and fuzz the bounded status request/response wire, transcript binding,
    nonce, expiry, and signed receipt;
 4. connect the wire only after Noise plus active ZID authentication and prove
@@ -541,6 +541,14 @@ peers, never production wallet state.
   completed 10,000 iterations across the full maximum bound without a finding.
   The wire remains disconnected from Noise, DHT, and peer handlers; it grants
   no remote status authority and does not advance queue item 4.
+- 2026-08-28T23:26:48-04:00 / 2026-08-29T03:26:48Z: local owners gained a
+  bounded redacted pairing list and an explicit 60-second, generation-bound
+  revoke plan/commit. Tampered or expired unused confirmations made no write;
+  successful revoke replay remained idempotent after database reopen; and the
+  RPC registry exposed no accept, create, or capability-widening method. The
+  `mesh_pairing_controller`, `command_registry_catalog`, `native_api_contract`,
+  and nine selected `rpc` groups passed cold with zero skips. Remote status and
+  remote-control authority remain unavailable.
 
 ## Completion rule
 
