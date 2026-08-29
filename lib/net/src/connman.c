@@ -1261,13 +1261,11 @@ static bool connman_pick_addrman_target(struct connman *cm,
             return true;
         }
     }
-
     return false;
 }
 
 static bool connman_find_addnode_index(struct connman *cm,
-                                       const struct net_address *addr,
-                                       size_t *out)
+                                       const struct net_address *addr, size_t *out)
 {
     if (out)
         *out = SIZE_MAX;
@@ -1285,15 +1283,13 @@ static bool connman_find_addnode_index(struct connman *cm,
     return false;
 }
 
-void connman_note_addnode_prehandshake_disconnect(
-    struct connman *cm,
-    const struct p2p_node *node,
-    const char *reason)
+void connman_note_addnode_prehandshake_disconnect(struct connman *cm,
+                                                  const struct p2p_node *node,
+                                                  const char *reason)
 {
     size_t addnode_index = SIZE_MAX;
 
-    if (!cm || !node || node->inbound ||
-        node->state >= PEER_HANDSHAKE_COMPLETE)
+    if (!cm || !node || node->inbound || node->state >= PEER_HANDSHAKE_COMPLETE)
         return;
     if (!connman_find_addnode_index(cm, &node->addr, &addnode_index))
         return;
@@ -1301,17 +1297,13 @@ void connman_note_addnode_prehandshake_disconnect(
     connman_record_addnode_failure(cm, addnode_index,
                                    CONNMAN_ADDNODE_FAILURE_PROTOCOL);
     printf("Addnode %s: protocol failure before handshake (%s, state=%s)\n",
-           node->addr_name,
-           reason ? reason : "disconnect",
-           peer_state_name(node->state));
+           node->addr_name, reason ? reason : "disconnect", peer_state_name(node->state));
 }
 
-bool connman_node_is_addnode(struct connman *cm,
-                             const struct p2p_node *node)
+bool connman_node_is_addnode(struct connman *cm, const struct p2p_node *node)
 {
-    if (!cm || !node || node->inbound || node->is_feeler)
-        return false;
-    return connman_find_addnode_index(cm, &node->addr, NULL);
+    return cm && node && !node->inbound && !node->is_feeler &&
+           connman_find_addnode_index(cm, &node->addr, NULL);
 }
 
 static bool connman_ready_addnode_from_other_group(struct connman *cm,
