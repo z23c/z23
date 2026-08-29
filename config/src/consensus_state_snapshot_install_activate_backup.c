@@ -189,19 +189,67 @@ bool activate_backup_prior_generation(sqlite3 *progress_db,
     sqlite3_int64 version_after = -1;
     sqlite3_int64 changes_before = sqlite3_total_changes64(progress_db);
     sqlite3_stmt *stmt = NULL;
-    bool ok = activate_data_version(progress_db, &version_before) &&
-              sqlite3_prepare_v2(progress_db, "VACUUM main INTO ?1", -1,
-                                 &stmt, NULL) == SQLITE_OK &&
-              sqlite3_bind_text(stmt, 1, destination_name_path, -1,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+    bool ok = activate_data_version(progress_db, &version_before);
+    if (!ok)
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "data_version probe before VACUUM failed");
+    int rc = SQLITE_OK;
+    if (ok) {
+        rc = sqlite3_prepare_v2(progress_db, "VACUUM main INTO ?1", -1,
+                                &stmt, NULL);
+        if (rc != SQLITE_OK) {
+            ok = false;
+            LOG_WARN(ACTIVATE_SUBSYS,
+                     "prepare VACUUM main INTO failed (rc=%d)", rc);
+        }
+    }
+    if (ok) {
+        rc = sqlite3_bind_text(stmt, 1, destination_name_path, -1,
+                               SQLITE_STATIC);
+        if (rc != SQLITE_OK) {
+            ok = false;
+            LOG_WARN(ACTIVATE_SUBSYS,
+                     "bind VACUUM destination failed (rc=%d)", rc);
+        }
+    }
+    if (ok) {
+        rc = sqlite3_step(stmt); // raw-sql-ok:progress-kv-kernel-store
+        if (rc != SQLITE_DONE) {
+            ok = false;
+            LOG_WARN(ACTIVATE_SUBSYS,
+                     "VACUUM main INTO step failed (rc=%d)", rc);
+        }
+    }
     if (stmt)
         sqlite3_finalize(stmt);
-    ok = ok && activate_data_version(progress_db, &version_after) &&
-         version_before == version_after &&
-         changes_before == sqlite3_total_changes64(progress_db) &&
-         activate_progress_file_unmoved(progress_db) &&
-         activate_backup_sidecars_absent(datadir_fd, name);
+    if (ok && !activate_data_version(progress_db, &version_after)) {
+        ok = false;
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "data_version probe after VACUUM failed");
+    }
+    if (ok && version_before != version_after) {
+        ok = false;
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "data_version changed across VACUUM: before=%lld after=%lld",
+                 (long long)version_before, (long long)version_after);
+    }
+    if (ok && changes_before != sqlite3_total_changes64(progress_db)) {
+        ok = false;
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "total_changes changed across VACUUM: before=%lld after=%lld",
+                 (long long)changes_before,
+                 (long long)sqlite3_total_changes64(progress_db));
+    }
+    if (ok && !activate_progress_file_unmoved(progress_db)) {
+        ok = false;
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "progress store file moved during backup");
+    }
+    if (ok && !activate_backup_sidecars_absent(datadir_fd, name)) {
+        ok = false;
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "backup sidecars are not absent");
+    }
     if (!ok) {
         LOG_WARN(ACTIVATE_SUBSYS,
                  "prior-generation VACUUM/data-version fence failed while "
