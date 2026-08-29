@@ -16,11 +16,17 @@ fail()
     exit 2
 }
 
+# The default linker is the one that keeps the tail short: a linker that wins
+# the median but blows the p95 is the one that occasionally eats a whole
+# minute on a big link, which is exactly the wait a dev loop cannot absorb.
+# Selection is therefore p95 first, with p50 then name as tie-breaks. Rows
+# with p95=null cannot win here — a candidate that never linked has no
+# identical probe and is filtered by the select above.
 select_fastest()
 {
     jq -s '[.[]|select(.status=="passed" and .probe_identical==true)] |
       if length==0 then error("no verified linker")
-      else sort_by([.p50_us,.name]) | .[0] end' "$@"
+      else sort_by([.p95_us,.p50_us,.name]) | .[0] end' "$@"
 }
 
 self_test()
@@ -28,13 +34,25 @@ self_test()
     local scratch a b bad selected
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/zcl-linker-selftest.XXXXXX")"
     trap "rm -rf -- '$scratch'" EXIT INT TERM
-    a="$scratch/a.json"; b="$scratch/b.json"; bad="$scratch/bad.json"
-    printf '%s\n' '{"name":"bfd","status":"passed","probe_identical":true,"p50_us":900}' >"$a"
-    printf '%s\n' '{"name":"gold","status":"passed","probe_identical":true,"p50_us":500}' >"$b"
-    printf '%s\n' '{"name":"mold","status":"passed","probe_identical":false,"p50_us":100}' >"$bad"
-    selected="$(select_fastest "$a" "$b" "$bad")"
-    [ "$(jq -r '.name' <<<"$selected")" = gold ] ||
-        fail 'fastest verified linker selection regressed'
+    a="$scratch/a.json"; b="$scratch/b.json"; c="$scratch/c.json"
+    t1="$scratch/t1.json"; t2="$scratch/t2.json"; bad="$scratch/bad.json"
+    # The decision metric is the tail: gold owns the best median but blows the
+    # p95, and bfd — the slower median — owns the tail. The old p50 key picked
+    # gold here; the p95 key must pick bfd.
+    printf '%s\n' '{"name":"bfd","status":"passed","probe_identical":true,"p50_us":900,"p95_us":950}' >"$a"
+    printf '%s\n' '{"name":"gold","status":"passed","probe_identical":true,"p50_us":500,"p95_us":2000}' >"$b"
+    printf '%s\n' '{"name":"lld","status":"passed","probe_identical":true,"p50_us":700,"p95_us":1500}' >"$c"
+    printf '%s\n' '{"name":"mold","status":"passed","probe_identical":false,"p50_us":100,"p95_us":110}' >"$bad"
+    selected="$(select_fastest "$a" "$b" "$c" "$bad")"
+    [ "$(jq -r '.name' <<<"$selected")" = bfd ] ||
+        fail 'p95-driven linker selection regressed'
+    # Equal tails fall back to the median; equal medians fall back to the
+    # name — the composite key, pinned in that order.
+    printf '%s\n' '{"name":"slow_tie","status":"passed","probe_identical":true,"p50_us":60,"p95_us":100}' >"$t1"
+    printf '%s\n' '{"name":"fast_tie","status":"passed","probe_identical":true,"p50_us":40,"p95_us":100}' >"$t2"
+    selected="$(select_fastest "$t1" "$t2")"
+    [ "$(jq -r '.name' <<<"$selected")" = fast_tie ] ||
+        fail 'p50 tie-break inside equal p95 regressed'
     if select_fastest "$bad" >/dev/null 2>&1; then
         fail 'non-identical candidate was selectable'
     fi
@@ -151,7 +169,7 @@ run_shootout()
         probe_sha256:$probe,selected:($selected+{verified:true}),
         results:$results}' >"$OUTPUT"
     jq -r --arg output "$OUTPUT" '
-      "dev-linker-shootout: selected=\(.selected.name) p50_us=\(.selected.p50_us) receipt=\($output)"' \
+      "dev-linker-shootout: selected=\(.selected.name) p95_us=\(.selected.p95_us) p50_us=\(.selected.p50_us) receipt=\($output)"' \
       "$OUTPUT"
 }
 
