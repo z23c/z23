@@ -244,9 +244,12 @@ ZCL_WORKTREE_PRIME_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-o
 # archives before entering a nested authoritative Make. On a from-empty clone,
 # do not let this outer parse first bootstrap host-ABI archives that the
 # portable builder would immediately replace.
+# doctor-env is here for a different reason than the portable sysroot
+# front doors: it must run on a machine whose compiler cannot compile
+# C23, so it cannot trip the parse-time -std=c23 toolchain gate below.
 ZCL_PORTABLE_FRONTDOOR_GOALS := portable c23-portable-toolchain \
 	c23-portable-release c23-portable-install c23-commons-installed-acceptance \
-	native-agent-ui-alpha
+	native-agent-ui-alpha doctor-env
 ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 	$(filter-out $(ZCL_PORTABLE_FRONTDOOR_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -742,7 +745,8 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary) — filtering there would only move the duplicate-`main` link error.
 DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
 	tools/dev/hotswap_verify_so.c \
-	tools/dev/windows_headless_run.c
+	tools/dev/windows_headless_run.c \
+	tools/dev/z23_doctor.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
@@ -11631,7 +11635,7 @@ postmortem-to-scenario: tools/postmortem_to_scenario
 # build_vendor.sh, and there was no way to ask the host how long anything
 # actually takes. `make help` prints the live target count; do not restate it
 # here.
-.PHONY: help setup doctor timings pr-check help-selftest doctor-selftest timings-selftest first-build-timing first-build-timing-selftest
+.PHONY: help setup doctor doctor-env timings pr-check help-selftest doctor-selftest timings-selftest first-build-timing first-build-timing-selftest
 
 help:
 	@tools/scripts/make_help.sh
@@ -11657,6 +11661,16 @@ setup:
 # that table has fallen behind build_vendor.sh.
 doctor:
 	@tools/scripts/doctor.sh
+
+# C23 build-environment doctor. Compiles with a plain `cc -std=c2x` so a
+# gcc-13 box (which cannot build the node) can still ask what is missing.
+# Listed in ZCL_PORTABLE_FRONTDOOR_GOALS so the parse-time toolchain gate
+# does not fire. ARGS=--input=json for a flat JSON object; ARGS=--root=DIR
+# to inspect another tree.
+doctor-env:
+	@mkdir -p build/bin
+	cc -std=c2x -Wall -Wextra -o build/bin/z23_doctor tools/dev/z23_doctor.c
+	@build/bin/z23_doctor $(ARGS)
 
 # Where the wall time went, read from artifacts measured on this host.
 # Never prints a duration it did not measure here.
