@@ -48,7 +48,10 @@ killing the two-name drift) is **landed**
    strictly validates the canonical `(txid,vout)` traversal. A concurrent
    writer fixture proves the scan cannot mix generations. Network chunk serving
    now refuses a live `node.db` fallback after an immutable snapshot cache miss.
-   Remaining: encode and publish the immutable chunk artifact from this reader,
+   A sequential adapter now emits deterministic 500-entry wire chunks from that
+   reader while deriving the full-set SHA3 and each chunk hash; boundary tests
+   cover 499/500/501 rows and refuse oversize scripts without truncation.
+   Remaining: persist and publish the immutable chunk artifact from this adapter,
    bind it to the exact `coins_applied_height - 1` active hash, and route receipt
    through the verified staging installer before enabling publication.
 7. **Delete the dead heal ladder** (grep-proven zero callers): chain_restore_integrity,
