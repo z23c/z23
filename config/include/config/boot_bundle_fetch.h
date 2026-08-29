@@ -117,6 +117,15 @@ size_t boot_bundle_fetch_armed_peer_seed_count(void);
 typedef bool (*bbf_directory_fetch_fn)(const char *peer_addr, uint16_t port,
                                        char *buf, size_t cap);
 
+/* Same shape as rom_fetch_get_manifest — the per-chunk ("RMF") manifest
+ * pre-flight, seam-typed so the bounded fan-out that runs it can be driven
+ * without a network. */
+typedef bool (*bbf_manifest_fetch_fn)(const char *peer_addr, uint16_t port,
+                                      const uint8_t chunk_root[32],
+                                      uint8_t (*out_chunk_sha3)[32],
+                                      uint32_t out_cap,
+                                      uint32_t *out_num_chunks);
+
 /* Gate: true iff the instant-on bundle fetch should run for `datadir` under
  * `ctx`. False when: datadir is empty; the caller opted out (-nofilesync via
  * ctx->no_file_sync, or ZCL_NO_BUNDLE_FETCH set in the environment); the
@@ -211,6 +220,11 @@ int  boot_bundle_quorum_pick_for_test(const int64_t *heights, const int *counts,
 size_t boot_bundle_probe_directories_for_test(
     const struct rom_fetch_peer *peers, size_t np, char *bodies,
     size_t stride, bool *responded, bbf_directory_fetch_fn fetch);
+bool boot_bundle_probe_manifest_for_test(
+    const struct rom_fetch_peer *peers, size_t np,
+    const uint8_t chunk_root[32], uint32_t want_chunks,
+    uint8_t (*out_chunk_sha3)[32], uint32_t out_cap,
+    uint32_t *out_num_chunks, bbf_manifest_fetch_fn fetch);
 #endif
 
 #endif /* ZCL_CONFIG_BOOT_BUNDLE_FETCH_H */

@@ -131,15 +131,20 @@ bool boot_bundle_fetch_download(const char *datadir,
         zcl_malloc((size_t)ROM_SEED_MAX_CHUNKS * 32, "bbf_chunk_sha3");
     if (!chunk_sha3)
         LOG_FAIL(BBF_SUBSYS, "OOM allocating chunk-manifest buffer");
+    /* The pre-flight runs against EVERY seed at once rather than walking them.
+     * A seed that accepts the connection and then goes silent costs the whole
+     * connect budget plus the whole probe budget, and walking multiplied that
+     * by the seed count before boot could move on — the very stall the RLS
+     * discovery sweep is already fanned out to avoid, and worse on a Tor
+     * circuit where both budgets are legitimately 4x larger. Same seed wins
+     * (lowest index with a matching chunk count), same verification, same
+     * budgets; only the waiting overlaps. */
     uint32_t manifest_chunks = 0;
-    bool have_manifest = false;
-    for (size_t i = 0; i < npeers && !have_manifest; i++) {
-        if (rom_fetch_get_manifest(peers[i].addr, peers[i].port, m->chunk_root,
-                                   chunk_sha3, ROM_SEED_MAX_CHUNKS,
-                                   &manifest_chunks) &&
-            manifest_chunks == m->num_chunks)
-            have_manifest = true;
-    }
+    bool have_manifest = bbf_probe_manifest(peers, npeers, m->chunk_root,
+                                            m->num_chunks, chunk_sha3,
+                                            ROM_SEED_MAX_CHUNKS,
+                                            &manifest_chunks,
+                                            rom_fetch_get_manifest);
     uint32_t workers = (uint32_t)(2 * npeers);
     if (workers > ROM_FETCH_MAX_WORKERS)
         workers = ROM_FETCH_MAX_WORKERS;
@@ -729,7 +734,13 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
      * bbf_discovery.live for the bound and why a non-serving seed must not
      * reach the per-chunk download rotation. When discovery did not run (a
      * local directory.json hint was used) n_live is 0 and the full assembled
-     * set is kept, exactly as before. */
+     * set is kept, exactly as before — which is the RESUME case, and the one
+     * that used to carry every dead seed into the download. It is no longer
+     * the only guard: the download driver itself remembers, for the life of
+     * one job, a peer it could not dial at all, so a seed that is gone this
+     * boot costs one connect budget rather than one per worker per chunk
+     * (rf_ver_acquire_chunk, lib/net/src/rom_fetch.c). Neither guard shortens
+     * a budget; both only stop re-paying one already spent. */
     const struct rom_fetch_peer *dl_peers = peers;
     size_t dl_np = np;
     if (disc.n_live > 0) {

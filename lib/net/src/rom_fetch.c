@@ -194,177 +194,6 @@ int rom_fetch_parse_directory(const char *json_body,
     return n;
 }
 
-/* ── Verified chunk fetch ───────────────────────────────────────────── */
-
-/* Must byte-match FS_ROM_REFUSAL_MAC_TAG in file_service.c: the typed ROM
- * chunk refusal frame rides fs_send_chunk_refusal's MAC scheme with this
- * constant in the tag slot. "RREF" + zero padding. */
-static const uint8_t RF_ROM_REFUSAL_MAC_TAG[32] = { 'R', 'R', 'E', 'F' };
-
-/* Pure decode of the 4-byte chunk-reply size field: true iff it is the ROM
- * refusal sentinel (server declined this chunk). A real chunk size never
- * reaches the sentinel (it is bounded by ROM_SEED_CHUNK_SIZE), so this cleanly
- * separates a refusal from a data reply — and a corrupt/garbage size is NOT
- * mistaken for a refusal (only the exact sentinel is). */
-bool rom_fetch_wire_is_refusal(const uint8_t hdr4[4])
-{
-    if (!hdr4)
-        return false;
-    uint32_t size = (uint32_t)hdr4[0] | ((uint32_t)hdr4[1] << 8) |
-                    ((uint32_t)hdr4[2] << 16) | ((uint32_t)hdr4[3] << 24);
-    return size == FS_ROM_REFUSAL_SENTINEL;
-}
-
-/* Human label for a refusal reason code (bounded; unknown codes fold to a
- * stable string). Used for clean "peer busy" logging and in tests. */
-const char *rom_fetch_refusal_reason_name(uint8_t reason)
-{
-    switch (reason) {
-    case FS_ROM_REFUSE_UNKNOWN:     return "unknown-artifact";
-    case FS_ROM_REFUSE_CONN_BUDGET: return "conn-budget";
-    case FS_ROM_REFUSE_INFLIGHT:    return "inflight-cap";
-    case FS_ROM_REFUSE_RATE:        return "rate-window";
-    case FS_ROM_REFUSE_IO:          return "server-io";
-    default:                        return "declined";
-    }
-}
-
-bool rom_fetch_chunk(const char *peer_addr, uint16_t port,
-                     const uint8_t chunk_root[32], uint32_t idx,
-                     uint8_t *buf, uint32_t buf_cap, uint32_t *out_sz)
-{
-    if (!peer_addr || !chunk_root || !buf || !out_sz)
-        LOG_FAIL(RF_SUBSYS, "chunk: null arg");
-    if (buf_cap < ROM_SEED_CHUNK_SIZE)
-        LOG_FAIL(RF_SUBSYS, "chunk: buf_cap %u < ROM chunk size %u",
-                 buf_cap, (unsigned)ROM_SEED_CHUNK_SIZE);
-
-    platform_socket_t fd = rf_connect(peer_addr, port);
-    if (fd == PLATFORM_SOCKET_INVALID)
-        return false;
-
-    struct fs_session s;
-    fs_session_init(&s, fd);
-    /* The ROM serve path keys its sessions on an all-zero utxo_root (see
-     * fs_handle_client_fd, file_service.c) — match it exactly. */
-    uint8_t zero_root[32];
-    memset(zero_root, 0, sizeof(zero_root));
-    if (!fs_handshake(&s, zero_root, true)) {
-        rf_session_close(&s, fd);
-        LOG_FAIL(RF_SUBSYS, "chunk: handshake failed with %s:%u",
-                 peer_addr, (unsigned)port);
-    }
-
-    /* Request: ["ROM"(3)][chunk_root(32)][chunk_index(4 LE)]. */
-    uint8_t req[FS_ROM_REQUEST_SIZE];
-    memcpy(req, "ROM", 3);
-    memcpy(req + 3, chunk_root, 32);
-    req[35] = (uint8_t)(idx);
-    req[36] = (uint8_t)(idx >> 8);
-    req[37] = (uint8_t)(idx >> 16);
-    req[38] = (uint8_t)(idx >> 24);
-    if (!fs_send_frame(&s, FS_REQUEST, req, sizeof(req))) {
-        rf_session_close(&s, fd);
-        LOG_FAIL(RF_SUBSYS, "chunk: request send failed to %s:%u",
-                 peer_addr, (unsigned)port);
-    }
-
-    /* Reply is raw size/data/MAC or a typed refusal sentinel. */
-    uint8_t hdr[4];
-    if (!rf_recv_exact(fd, hdr, 4)) {
-        rf_session_close(&s, fd);
-        LOG_FAIL(RF_SUBSYS, "chunk: size header read failed (peer %s:%u "
-                 "refused or went away)", peer_addr, (unsigned)port);
-    }
-    if (rom_fetch_wire_is_refusal(hdr)) {
-        /* Fixed-size authenticated refusal; never a peer-sized read. */
-        uint8_t reason = 0;
-        uint8_t rmac_wire[32];
-        if (!rf_recv_exact(fd, &reason, 1) || !rf_recv_exact(fd, rmac_wire, 32)) {
-            rf_session_close(&s, fd);
-            LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u refused (truncated "
-                     "refusal frame) — backing off", idx, peer_addr,
-                     (unsigned)port);
-            return false;
-        }
-        platform_socket_close(fd);
-        uint8_t rmac_expect[32];
-        struct sha3_256_ctx rmc;
-        sha3_256_init(&rmc);
-        sha3_256_write(&rmc, s.key, 32);
-        sha3_256_write(&rmc, (const unsigned char *)&s.recv_counter, 8);
-        sha3_256_write(&rmc, RF_ROM_REFUSAL_MAC_TAG, 32);
-        sha3_256_write(&rmc, &reason, 1);
-        sha3_256_finalize(&rmc, rmac_expect);
-        memory_cleanse(&rmc, sizeof(rmc));
-        fs_session_cleanup(&s);
-        uint8_t rdiff = 0;
-        for (int i = 0; i < 32; i++) rdiff |= rmac_wire[i] ^ rmac_expect[i];
-        if (rdiff != 0) {
-            LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u sent an unauthenticated "
-                     "refusal (MAC mismatch) — backing off", idx, peer_addr,
-                     (unsigned)port);
-            return false;
-        }
-        LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u busy (%s) — backing off + "
-                 "retry", idx, peer_addr, (unsigned)port,
-                 rom_fetch_refusal_reason_name(reason));
-        return false;
-    }
-    uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
-                    ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-    if (size == 0 || size > ROM_SEED_CHUNK_SIZE) {
-        rf_session_close(&s, fd);
-        LOG_FAIL(RF_SUBSYS, "chunk: implausible chunk size %u from %s:%u "
-                 "(refusal or corrupt stream)", size, peer_addr,
-                 (unsigned)port);
-    }
-    if (!rf_recv_exact(fd, buf, size)) {
-        rf_session_close(&s, fd);
-        LOG_FAIL(RF_SUBSYS, "chunk: data read failed (%u bytes) from %s:%u",
-                 size, peer_addr, (unsigned)port);
-    }
-    uint8_t mac_wire[32];
-    if (!rf_recv_exact(fd, mac_wire, 32)) {
-        rf_session_close(&s, fd);
-        LOG_FAIL(RF_SUBSYS, "chunk: MAC read failed from %s:%u",
-                 peer_addr, (unsigned)port);
-    }
-    platform_socket_close(fd);
-
-    /* The chunk's content digest is learned from the received bytes: the
-     * serve side binds the true per-chunk SHA3 into the MAC, so a tampered
-     * payload fails the MAC; content-vs-manifest verification is the
-     * whole-file pass (rom_fetch_verify_file). */
-    uint8_t data_sha3[32];
-    sha3_256(buf, size, data_sha3);
-
-    uint8_t mac_expect[32];
-    struct sha3_256_ctx mctx;
-    sha3_256_init(&mctx);
-    sha3_256_write(&mctx, s.key, 32);
-    sha3_256_write(&mctx, (const unsigned char *)&s.recv_counter, 8);
-    sha3_256_write(&mctx, data_sha3, 32);
-    sha3_256_write(&mctx, buf, size);
-    sha3_256_finalize(&mctx, mac_expect);
-    memory_cleanse(&mctx, sizeof(mctx));
-    fs_session_cleanup(&s);
-
-    uint8_t diff = 0;
-    for (int i = 0; i < 32; i++)
-        diff |= mac_wire[i] ^ mac_expect[i];
-    if (diff != 0) {
-        /* Scoring, not a content verdict: chunk-level whole-file content
-         * proof is a separate later step. This only stops us from wasting
-         * more retries on a peer whose transport MAC keeps failing. */
-        (void)rom_peer_note_bad_chunk(peer_addr, port, idx, "mac");
-        LOG_FAIL(RF_SUBSYS, "chunk: transport MAC mismatch on chunk %u "
-                 "from %s:%u", idx, peer_addr, (unsigned)port);
-    }
-
-    *out_sz = size;
-    return true;
-}
 
 /* ── Whole-file verification + download driver ──────────────────────── */
 
@@ -1050,6 +879,11 @@ struct rf_ver_job {
     struct rom_journal *jrnl;         /* shared; mark() is self-locked     */
     _Atomic uint32_t next_chunk;
     _Atomic uint64_t bytes_done;
+    /* Bit p set => peers[p] could not be DIALLED at all earlier in this job.
+     * Shared by every worker so the swarm pays that discovery once instead of
+     * once per worker per chunk — see rf_ver_acquire_chunk. Peers past index
+     * 63 are untracked and simply keep the old behaviour. */
+    _Atomic uint64_t unreachable;
     _Atomic bool abort;
     _Atomic bool failed;
     rom_fetch_progress_cb cb;
@@ -1064,8 +898,17 @@ struct rf_ver_job {
 #define ROM_FETCH_VER_ROUNDS (ROM_FETCH_CHUNK_RETRIES + 1u)
 
 /* Acquire + content-verify chunk `i` into `buf`, trying the job's peers in
- * round-robin (starting at i % npeers) so a corrupt/unreachable seeder fails
- * OVER to the next one. Two distinct failure classes are handled differently,
+ * round-robin so a corrupt/unreachable seeder fails OVER to the next one.
+ *
+ * The ring STARTS at the peer this worker already holds a session with, and
+ * falls back to `i % npeers` when it holds none — which is every worker's
+ * first chunk, so the initial spread of workers across seeders is exactly
+ * what it always was. Preferring the held session afterwards is what turns a
+ * download into O(workers) dials instead of O(chunks); it changes only which
+ * of the peers is asked FIRST, never which peers are tried (all of them, in
+ * one round) nor on what terms.
+ *
+ * Two distinct failure classes are handled differently,
  * which is what keeps single-peer behaviour identical to the old driver:
  *
  *   - A TRANSIENT miss (unreachable / refused / wrong-size) is retryable — a
@@ -1080,30 +923,97 @@ struct rf_ver_job {
  *     the chunk fails immediately — so a single-peer digest mismatch fails on
  *     the first attempt exactly as before, never looping.
  *
+ * UNREACHABLE-PEER MEMORY, and why it is not a speed judgement.
+ *
+ * A peer that cannot be DIALLED — rf_connect comes back with no socket at all
+ * — has already cost this job one whole connect budget. That budget is
+ * transport-scaled on purpose: 10 s to a socket, 120 s to build a Tor circuit,
+ * because a circuit is genuinely slower to establish and reading that as
+ * "bad peer" would drop honest onion seeders. What it must NOT also mean is
+ * that every worker, and every chunk, gets to spend that budget over again
+ * rediscovering the same absence: eight workers walking past seven dead seeds
+ * is fifty-six 120 s circuit attempts before the first byte arrives.
+ *
+ * So a failed DIAL is recorded once in j->unreachable, shared by the whole
+ * job, and the ring skips those peers. Three properties keep this honest:
+ *
+ *   - Only a dial that returned NOTHING marks a peer. A peer that connects
+ *     slowly, hands over bytes slowly, or refuses with a typed busy reply is
+ *     never marked — slowness is not a verdict here, and no budget is
+ *     shortened, sampled early, or scaled down to produce this signal.
+ *   - The memory is JOB-scoped, not persisted and not a ban. A later download
+ *     starts with a clean set and pays the full budget again.
+ *   - It can never write a peer off. If skipping would leave a round with no
+ *     peer left to try, the whole mask is cleared BEFORE that round runs and
+ *     everyone is dialled again at full budget — so no round is ever spent
+ *     asking nobody and the retry tolerance is exactly what it was. A
+ *     shrinking swarm converges on retrying its last seed, not on giving up.
+ *
  * Returns true (with *out_got set) only on digest-verified bytes from some
  * peer; false when the chunk cannot be satisfied, or the job aborted. Peer
  * indices past 63 are not poison-tracked (a bounded bitmask); they degrade to
  * retryable, still bounded by the round cap. */
-static bool rf_ver_acquire_chunk(struct rf_ver_job *j, uint32_t i,
+static bool rf_ver_acquire_chunk(struct rf_ver_job *j, struct rf_peer_conn *c,
+                                  uint32_t i,
                                   uint32_t want, uint8_t *buf, uint32_t *out_got)
 {
     *out_got = 0;
     uint64_t poisoned = 0; /* bit p set => peers[p] served bad content here */
+    /* Start the ring on the peer this worker is already talking to. */
+    size_t start = i;
+    if (c->open) {
+        for (size_t k = 0; k < j->npeers; k++) {
+            if (j->peers[k].port == c->port &&
+                strcmp(j->peers[k].addr, c->addr) == 0) {
+                start = k;
+                break;
+            }
+        }
+    }
     for (uint32_t round = 0; round < ROM_FETCH_VER_ROUNDS; round++) {
         if (atomic_load(&j->abort))
             return false;
         bool any_retryable_miss = false;
+        /* Safety valve, evaluated BEFORE the ring so no round is ever spent
+         * asking nobody and the retry tolerance is exactly what it was: if
+         * every peer still eligible for this chunk has been marked
+         * unreachable, forget the marks and dial them all again at full
+         * budget. The mask is a cost memory, never a verdict. */
+        {
+            uint64_t unreach = atomic_load(&j->unreachable);
+            bool eligible = false;
+            for (size_t k = 0; k < j->npeers && !eligible; k++) {
+                if (k < 64 && ((poisoned | unreach) & (1ull << k)))
+                    continue;
+                eligible = true;
+            }
+            if (!eligible)
+                atomic_store(&j->unreachable, 0);
+        }
         for (size_t a = 0; a < j->npeers; a++) {
             if (atomic_load(&j->abort))
                 return false;
-            size_t pi = (i + a) % j->npeers;
+            size_t pi = (start + a) % j->npeers;
             if (pi < 64 && (poisoned & (1ull << pi)))
                 continue; /* served bad content already — never re-fetch it */
+            if (pi < 64 && (atomic_load(&j->unreachable) & (1ull << pi))) {
+                /* Already paid this peer's full connect budget in this job and
+                 * got no socket. Skip, but count it as retryable so the round
+                 * cap still governs and the mask can be cleared below. */
+                any_retryable_miss = true;
+                continue;
+            }
             const struct rom_fetch_peer *p = &j->peers[pi];
             uint32_t got = 0;
-            if (!rom_fetch_chunk(p->addr, p->port, j->m.chunk_root, i,
-                                 buf, ROM_SEED_CHUNK_SIZE, &got) ||
-                got != want) {
+            enum rf_xchg x = RF_XCHG_BROKEN;
+            if (rf_conn_ensure(c, p->addr, p->port))
+                x = rf_chunk_exchange(c, j->m.chunk_root, i, buf, &got);
+            else if (pi < 64)
+                atomic_fetch_or(&j->unreachable, 1ull << pi);
+            /* Only a clean, fully-accounted exchange may keep the session. */
+            if (x == RF_XCHG_BROKEN)
+                rf_conn_drop(c);
+            if (x != RF_XCHG_OK || got != want) {
                 any_retryable_miss = true; /* transient — may clear next round */
                 continue;
             }
@@ -1152,6 +1062,19 @@ static void *rf_ver_worker(void *arg)
         atomic_store(&j->abort, true);
         return NULL;
     }
+    /* This worker's seeder session, carried across chunks. Heap-held: struct
+     * fs_session carries a 64 KB receive buffer, which has no business on a
+     * worker stack. */
+    struct rf_peer_conn *conn = zcl_malloc(sizeof(*conn), "rom_fetch_ver_conn");
+    if (!conn) {
+        LOG_WARN(RF_SUBSYS, "ver: worker session alloc failed");
+        free(buf);
+        atomic_store(&j->failed, true);
+        atomic_store(&j->abort, true);
+        return NULL;
+    }
+    memset(conn, 0, sizeof(*conn));
+    conn->fd = PLATFORM_SOCKET_INVALID;
 
     for (;;) {
         if (atomic_load(&j->abort))
@@ -1174,7 +1097,7 @@ static void *rf_ver_worker(void *arg)
         /* Fetch + per-chunk content-verify with round-robin multi-seeder
          * failover (single-peer jobs pass npeers==1). */
         uint32_t got = 0;
-        if (!rf_ver_acquire_chunk(j, i, want, buf, &got)) {
+        if (!rf_ver_acquire_chunk(j, conn, i, want, buf, &got)) {
             if (!atomic_load(&j->abort))
                 LOG_WARN(RF_SUBSYS, "ver: chunk %u/%u failed content-verify on "
                          "all %zu peer(s)", i, j->num_chunks, j->npeers);
@@ -1217,6 +1140,10 @@ static void *rf_ver_worker(void *arg)
             }
         }
     }
+    /* Hand the seeder's serve thread back the moment this worker is done with
+     * it — never let a finished/aborted worker leave a session held open. */
+    rf_conn_drop(conn);
+    free(conn);
     free(buf);
     return NULL;
 }
