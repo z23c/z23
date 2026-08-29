@@ -38,7 +38,7 @@ static bool has_key(const struct json_value *v, const char *key)
 static void print_value(const struct json_value *v)
 {
     size_t need = json_write(v, NULL, 0);
-    char *buf = malloc(need + 1);
+    char *buf = malloc(need + 1); // raw-alloc-ok:build-tool
     if (!buf) {
         fprintf(stderr, "grok_report: out of memory for a %zu byte report\n",
                 need + 1);
@@ -150,7 +150,7 @@ int main(int argc, char **argv)
         return 2;
     }
     size_t cap = 1 << 16, len = 0;
-    char *text = malloc(cap);
+    char *text = malloc(cap); // raw-alloc-ok:build-tool
     if (!text) {
         fclose(f);
         fprintf(stderr, "grok_report: out of memory\n");
@@ -159,7 +159,7 @@ int main(int argc, char **argv)
     for (;;) {
         if (len == cap) {
             size_t want = cap * 2;
-            char *bigger = realloc(text, want);
+            char *bigger = realloc(text, want); // raw-alloc-ok:build-tool
             if (!bigger) {
                 free(text);
                 fclose(f);
