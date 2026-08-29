@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static bool boot_snapshot_equal(
     const struct platform_positioned_file_snapshot *a,
@@ -89,6 +90,45 @@ static bool boot_legacy_blocks_dir(char *out, size_t out_n,
 
     int n = snprintf(out, out_n, "%s/blocks", datadir);
     return n >= 0 && (size_t)n < out_n;
+}
+
+bool boot_legacy_default_blocks_dir(char *out, size_t out_n)
+{
+    if (!out || out_n == 0)
+        return false;
+
+    const char *home = getenv("HOME");
+    const char *appdata = getenv("APPDATA");
+    const char *bases[3] = {NULL};
+    int nbases = 0;
+
+    if (appdata && appdata[0]) {
+        bases[nbases++] = appdata;
+    }
+    if (home && home[0]) {
+        bases[nbases++] = home; /* placeholder: macOS path built below */
+        bases[nbases++] = home; /* placeholder: Unix dot-dir built below */
+    }
+
+    for (int i = 0; i < nbases; i++) {
+        const char *base = bases[i];
+        const char *suffix = "/.zclassic";
+        if (i == 0 && appdata)
+            suffix = "/Zclassic";
+        else if (i == 1 && home)
+            suffix = "/Library/Application Support/Zclassic";
+
+        int n = snprintf(out, out_n, "%s%s/blocks", base, suffix);
+        if (n < 0 || (size_t)n >= out_n)
+            continue;
+
+        struct stat st;
+        if (stat(out, &st) == 0 && S_ISDIR(st.st_mode))
+            return true;
+    }
+
+    out[0] = '\0';
+    return false;
 }
 
 static bool boot_legacy_file_path(char *out, size_t out_n,

@@ -911,6 +911,7 @@ AGENT_IMPACT_RULE("app/services/src/consensus_state_publication_cas.c|app/servic
  * and the snapshot importers). */
 AGENT_IMPACT_RULE("lib/util/src/file_tree_ops.c|lib/util/include/util/file_tree_ops.h|lib/test/src/test_file_tree_ops.c", "file_tree_ops make_lint_gates")
 AGENT_IMPACT_RULE("config/src/file_ops.c|config/include/config/file_ops.h|lib/test/src/test_file_ops.c", "file_ops file_tree_ops boot_legacy_blocks boot_blocktree_cleanup make_lint_gates")
+AGENT_IMPACT_RULE("config/src/boot_legacy_blocks.c|config/include/config/boot_legacy_blocks.h", "boot_legacy_blocks importblockindex_roundtrip make_lint_gates")
 /* P0-sandbox-builders (multi-user-server program, Rung 2): composable
  * process-confinement builders in lib/platform — no_new_privs, Landlock,
  * seccomp-bpf deny-list, rlimits, userns helpers, and the enter() profile

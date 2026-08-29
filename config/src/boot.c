@@ -2202,12 +2202,15 @@ bool app_init(struct app_context *ctx)
                 /* Copy block files from zclassicd if we don't have them */
                 if (g_state.map_block_index.size > 1000) {
                     char zcd_blk_dir[1024];
-                    if (home)
-                        snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
-                                 "%s/.zclassic/blocks", home);
-                    else
-                        snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
-                                 ".zclassic/blocks");
+                    if (!boot_legacy_default_blocks_dir(zcd_blk_dir,
+                                                        sizeof(zcd_blk_dir))) {
+                        if (home)
+                            snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
+                                     "%s/.zclassic/blocks", home);
+                        else
+                            snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
+                                     ".zclassic/blocks");
+                    }
                     struct boot_legacy_block_file_import_result import_files =
                         boot_legacy_import_block_files(zcd_blk_dir,
                                                        ctx->datadir, 256);
@@ -2236,10 +2239,14 @@ bool app_init(struct app_context *ctx)
             g_state.map_block_index.size > 1000) {
             const char *home = getenv("HOME");
             char zcd_blk[1024];
-            if (home)
-                snprintf(zcd_blk, sizeof(zcd_blk), "%s/.zclassic/blocks", home);
-            else
-                snprintf(zcd_blk, sizeof(zcd_blk), ".zclassic/blocks");
+            if (!boot_legacy_default_blocks_dir(zcd_blk,
+                                                sizeof(zcd_blk))) {
+                if (home)
+                    snprintf(zcd_blk, sizeof(zcd_blk),
+                             "%s/.zclassic/blocks", home);
+                else
+                    snprintf(zcd_blk, sizeof(zcd_blk), ".zclassic/blocks");
+            }
             struct boot_legacy_block_file_link_result link_files =
                 boot_legacy_link_missing_block_files(zcd_blk,
                                                      ctx->datadir, 256);
