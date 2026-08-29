@@ -152,6 +152,7 @@ int test_validation(void);
 int test_wallet(void);
 int test_primitives(void);
 int test_bloom(void);
+int test_fingerprint(void);
 int test_compact_blocks(void);
 int test_dandelion(void);
 int test_addrman_rebalance(void);

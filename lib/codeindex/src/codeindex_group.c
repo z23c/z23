@@ -153,6 +153,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/crypto_registry") == 0) return "singleton catalog of pluggable cryptographic verifier implementations";
     if (strcmp(group, "lib/encoding") == 0) return "string encoding helpers: money strings, hex/bin string encodings";
     if (strcmp(group, "lib/event") == 0) return "the in-process publish/subscribe event bus that decouples subsystems";
+    if (strcmp(group, "lib/fingerprint") == 0) return "behavioral fingerprints: fail-closed purity judgement, signature-derived call harnesses, shape-seeded input corpora";
     if (strcmp(group, "lib/framework") == 0) return "app-shape platform glue: app_platform bootstrap + the typed-blocker condition contract";
     if (strcmp(group, "lib/health") == 0) return "single in-process heartbeat/watchdog ring (replaces the old per-subsystem watchdogs)";
     if (strcmp(group, "lib/hotswap") == 0) return "Tier-1 dev-only dlopen hot-swap loader for hotswap-eligible controller/handler TUs";
