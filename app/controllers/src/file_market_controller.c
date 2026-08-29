@@ -797,4 +797,9 @@ void register_market_rpc_commands(struct rpc_table *t)
      * gate) lives in market_content_rpc.c and registers here for the same
      * reason. */
     register_market_content_rpc_commands(t);
+    /* Offering one local source tree by its ZVCS root lives in
+     * source_bundle_publish_rpc.c — a serve-side surface over the same free
+     * artifact tier romseed_register uses — and registers here for the same
+     * reason. */
+    register_source_bundle_rpc_commands(t);
 }
