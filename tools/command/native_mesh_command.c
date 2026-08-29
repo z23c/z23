@@ -17,6 +17,11 @@
 #define NATIVE_MESH_TAG "native.mesh"
 #define MESH_STATUS_CLIENT_BUDGET_MS 15000
 #define MESH_STATUS_CLIENT_POLL_MS 50
+/* The fleet view collects receipts server-side for up to 12 s; the client
+ * budget must outlive that plus serialization headroom. The server-side
+ * watchdog extends mesh_machines to RPC_MESH_COLLECT_TIMEOUT_MS (20 s). */
+#define MESH_MACHINES_CLIENT_CONNECT_MS 2000
+#define MESH_MACHINES_CLIENT_TOTAL_MS 18000
 
 static bool mesh_status_body_ok(const struct json_value *body)
 {
@@ -530,5 +535,64 @@ void zcl_native_handle_ops_mesh_pair_revoke(
         (void)json_push_kv_str(&reply->data, "stage", "commit");
         (void)json_push_kv_bool(&reply->data, "committed", true);
     }
+    json_free(&body);
+}
+
+/* ── Fleet view (ops.mesh.machines) ───────────────────────────────────── */
+
+void zcl_native_handle_ops_mesh_machines(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply) {
+        LOG_ERROR(NATIVE_MESH_TAG, "INVALID_REQUEST: null request or reply");
+        return;
+    }
+    zcl_native_bridge_ensure_rpc();
+    /* The server collects receipts for up to 12 s inside the call; the
+     * default 10 s client deadline would abandon a healthy reply. */
+    char *raw = node_rpc_call_deadline("mesh_machines", "[]",
+                                       MESH_MACHINES_CLIENT_CONNECT_MS,
+                                       MESH_MACHINES_CLIENT_TOTAL_MS);
+    if (!raw) {
+        mesh_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                  ZCL_COMMAND_EXIT_TRANSIENT, "NODE_UNAVAILABLE", "dispatch",
+                  "the node did not answer the fleet request",
+                  "mesh_machines");
+        return;
+    }
+    struct json_value body = {0};
+    bool parsed = json_read(&body, raw, strlen(raw));
+    free(raw);
+    const struct json_value *ok = parsed && body.type == JSON_OBJ
+                                      ? json_get(&body, "ok") : NULL;
+    if (!parsed || body.type != JSON_OBJ) {
+        json_free(&body);
+        mesh_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                  ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY", "serialize",
+                  "the fleet RPC returned an unreadable body",
+                  "mesh_machines");
+        return;
+    }
+    if (!ok || ok->type != JSON_BOOL || !json_get_bool(ok)) {
+        /* The method's own refusals carry ok:false with a string code. A
+         * JSON-RPC error object ({"code":-32601,...}) — e.g. the running
+         * node predates mesh_machines — has no ok field at all; both are
+         * failures, never a projected success. */
+        const char *code = json_get_str(json_get(&body, "code"));
+        const char *message = json_get_str(json_get(&body, "message"));
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED,
+                               code && code[0] ? code : "MESH_MACHINES_REFUSED",
+                               "execute", false, false,
+                               message && message[0]
+                                   ? message
+                                   : "the node refused the fleet request",
+                               "mesh_machines");
+        json_copy(&reply->data, &body);
+        json_free(&body);
+        return;
+    }
+    zcl_native_bridge_project(request, &body, reply);
     json_free(&body);
 }

@@ -90,7 +90,7 @@ bundles never ride inside control messages.
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Wire connected: pairing-bound signed status request/receipt over Noise plus active ZID delegation, revocation races fail closed | Local online/offline projection (`ops mesh machines`) and independent-host receipts |
+| Fleet view | Implemented: `ops mesh machines` projects every durable pairing — active, expired, and revoked — with an honest live reachability verdict (online with a redacted capsule summary / refused:<status> / unreachable / timeout / unknown / expired / revoked) from signed-receipt probes over the status lane; bounded at 8 probed machines and a collective 12-second budget, never dials, offline machines stay listed | Independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
@@ -607,6 +607,38 @@ peers, never production wallet state.
   fingerprint decode, distinct reason→code mapping); `mesh`,
   `command_registry`, `native_api_contract`, and `rpc` groups all passed
   with zero skips, and `make lint-fast` and `make lint` both passed.
+
+- 2026-08-29: queue item 5 landed the fleet view. `ops mesh machines` (RPC
+  method `mesh_machines`) projects every durable pairing record — active,
+  expired, and revoked — exactly once, and probes up to
+  MESH_MACHINES_FLEET_MAX (8) active records over the existing status lane
+  with a collective 12-second budget and 50 ms poll rounds inside the RPC
+  worker thread. Each row carries the redacted pairing view plus a verdict
+  from one pure mapping (`mesh_machine_derive_state`): online (signed OK
+  receipt with observed time, responder Noise fingerprint, and a redacted
+  capsule summary lifting platform/build/confinement/hotswap, including
+  `same_source_as_this_node`), refused:<status> (a signed refusal receipt
+  with its wire token), unreachable (no live v2 session or the v2 transport
+  disabled), timeout (request expiry or budget exhaustion), unknown (named
+  cause, counted only in `total`), expired, or revoked. The RPC watchdog
+  extends only this method's slot to a bounded 20 s
+  (RPC_MESH_COLLECT_TIMEOUT_MS) so the collective wait is never killed
+  mid-reply; the native client deadline is 18 s. No dial, no write, and no
+  persistent reachability history — every verdict is derived at call time.
+  Proofs: the `mesh_status_wire` group gained the full derive matrix (both
+  unreachable causes, both timeout causes, refused-token propagation,
+  record/begin/poll precedence), probe-cap planning with the truncation
+  flag, and the tally rollup including the empty fleet; the `rpc_timeout`
+  group pins the method-scoped extension; the catalog pins
+  `ops.mesh.machines` READY/read with its handler. Gates: t-fast ONLY=mesh
+  7/7, ONLY=command_registry 2/2, ONLY=native_api_contract 1/1, ONLY=rpc
+  9/9 groups with zero skips; the impact-rule check passed and
+  `make lint-fast` passed. `make lint` reported three pre-existing upstream
+  failures in files this slice never touched (doc-count drift
+  test_groups=998-vs-994 in docs/CODEBASE_MAP.md, a publish-shaped printf
+  string in tools/dev/grok-unit.sh, operator paths in
+  docs/experiments/2026-08-28-mac-agentic-baseline.md). What remains before
+  the product claim: independent-host receipts.
 
 ## Completion rule
 
