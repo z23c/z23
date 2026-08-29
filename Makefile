@@ -32,8 +32,15 @@ CXX ?= g++
 ZCL_PLATFORM_CPPFLAGS = $(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
 	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC
 ZCL_LTO_FLAG = -flto=auto
+# -lshlwapi is required by the vendored Tor on Windows: its own configure
+# sets TOR_LIB_SHLWAPI=-lshlwapi (vendor/tor/configure.ac:856) and a real-Tor
+# link fails without it. It is inert on the stub link -- static linking adds no
+# import for a library nothing references -- so it can sit here ahead of that
+# work. Note the PE dependency audit does NOT pre-authorise shlwapi.dll: if a
+# real-Tor build starts importing it, the audit is meant to fail and make that
+# a deliberate decision with evidence, not one granted in advance.
 ZCL_PLATFORM_NODE_LIBS = -l:libregex.a -l:libtre.a -l:libintl.a \
-	-l:libiconv.a -lws2_32 -liphlpapi -lbcrypt \
+	-l:libiconv.a -lws2_32 -liphlpapi -lbcrypt -lshlwapi \
 	-luserenv -lcrypt32 -lshell32 -lole32 -luuid -lpsapi -lgdi32
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
