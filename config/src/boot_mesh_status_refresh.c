@@ -11,6 +11,7 @@
 #include "models/mesh_machine_observation.h"
 #include "models/mesh_pairing.h"
 #include "services/disk_monitor.h"
+#include "services/subordinate_work_admission.h"
 #include "supervisors/domains.h"
 #include "sync/sync_state.h"
 #include "util/log_macros.h"
@@ -162,18 +163,6 @@ static bool refresh_inflight(const char *pairing_id)
     return false;
 }
 
-static bool refresh_gate(bool running, int sync_state, int disk_level,
-                         int memory_level, bool long_db_operation,
-                         bool db_service_started,
-                         const struct node_db_status *status)
-{
-    return running && sync_state == SYNC_AT_TIP &&
-           disk_level == DISK_MONITOR_OK && memory_level < MEM_HIGH &&
-           !long_db_operation && db_service_started && status &&
-           status->open && !status->tx_open && !status->turbo_mode &&
-           status->sync_pending_blocks == 0;
-}
-
 static bool refresh_resources_allow(struct boot_svc_ctx *svc)
 {
     if (!svc)
@@ -182,12 +171,12 @@ static bool refresh_resources_allow(struct boot_svc_ctx *svc)
     struct db_service *dbsvc = boot_db_service(svc);
     if (!ndb || !dbsvc)
         return false;
-    struct node_db_status status;
-    node_db_get_status(ndb, &status);
-    return refresh_gate(boot_running(svc), sync_get_state(),
-                        disk_monitor_level(), mem_pressure_current(),
-                        node_db_long_op_active(NULL, NULL),
-                        db_service_is_started(dbsvc), &status);
+    struct subordinate_work_facts facts;
+    struct zcl_result observation = subordinate_work_admission_observe(
+        boot_running(svc), db_service_is_started(dbsvc), ndb, &facts);
+    return observation.ok &&
+           subordinate_work_admission_decide(&facts) ==
+               SUBORDINATE_WORK_ADMIT;
 }
 
 #ifdef ZCL_TESTING
@@ -196,8 +185,21 @@ bool boot_mesh_status_refresh_test_gate(
     bool long_db_operation, bool db_service_started,
     const struct node_db_status *db_status)
 {
-    return refresh_gate(running, sync_state, disk_level, memory_level,
-                        long_db_operation, db_service_started, db_status);
+    struct subordinate_work_facts facts = {
+        .running = running,
+        .sync_at_tip = sync_state == SYNC_AT_TIP,
+        .disk_clear = disk_level == DISK_MONITOR_OK,
+        .memory_clear = memory_level < MEM_HIGH,
+        .db_long_operation_clear = !long_db_operation,
+        .persistence_ready = db_service_started,
+        .db_open = db_status && db_status->open,
+        .db_transaction_clear = db_status && !db_status->tx_open,
+        .db_turbo_clear = db_status && !db_status->turbo_mode,
+        .db_pending_blocks_clear =
+            db_status && db_status->sync_pending_blocks == 0,
+    };
+    return subordinate_work_admission_decide(&facts) ==
+           SUBORDINATE_WORK_ADMIT;
 }
 #endif
 

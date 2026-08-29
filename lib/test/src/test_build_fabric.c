@@ -10,6 +10,7 @@
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_async.h"
 #include "services/build_fabric_runtime.h"
+#include "services/subordinate_work_admission.h"
 #include "services/build_fabric_worker.h"
 #include "services/build_fabric_worker_evidence.h"
 #include "config/db_service.h"
@@ -1759,6 +1760,52 @@ static int test_bf_content_contracts(void)
     return failures;
 }
 
+static int test_bf_subordinate_work_admission(void)
+{
+    int failures = 0;
+    TEST("build worker defers before lease claim on every blockchain pressure fact") {
+        struct subordinate_work_facts facts = {
+            .running = true,
+            .sync_at_tip = true,
+            .disk_clear = true,
+            .memory_clear = true,
+            .db_long_operation_clear = true,
+            .persistence_ready = true,
+            .db_open = true,
+            .db_transaction_clear = true,
+            .db_turbo_clear = true,
+            .db_pending_blocks_clear = true,
+        };
+        ASSERT(subordinate_work_admission_decide(&facts) ==
+               SUBORDINATE_WORK_ADMIT);
+#define BF_REFUSES(member_, reason_) do {                                  \
+        facts.member_ = false;                                             \
+        ASSERT(subordinate_work_admission_decide(&facts) == (reason_));     \
+        ASSERT(strcmp(subordinate_work_refusal_token(reason_), "admit") != \
+               0);                                                         \
+        facts.member_ = true;                                              \
+    } while (0)
+        BF_REFUSES(running, SUBORDINATE_WORK_STOPPING);
+        BF_REFUSES(sync_at_tip, SUBORDINATE_WORK_SYNC_NOT_AT_TIP);
+        BF_REFUSES(disk_clear, SUBORDINATE_WORK_DISK_PRESSURE);
+        BF_REFUSES(memory_clear, SUBORDINATE_WORK_MEMORY_PRESSURE);
+        BF_REFUSES(db_long_operation_clear,
+                   SUBORDINATE_WORK_DB_LONG_OPERATION);
+        BF_REFUSES(persistence_ready,
+                   SUBORDINATE_WORK_PERSISTENCE_UNAVAILABLE);
+        BF_REFUSES(db_open, SUBORDINATE_WORK_DB_CLOSED);
+        BF_REFUSES(db_transaction_clear, SUBORDINATE_WORK_DB_TRANSACTION);
+        BF_REFUSES(db_turbo_clear, SUBORDINATE_WORK_DB_TURBO);
+        BF_REFUSES(db_pending_blocks_clear,
+                   SUBORDINATE_WORK_DB_PENDING_BLOCKS);
+#undef BF_REFUSES
+        ASSERT(subordinate_work_admission_decide(NULL) ==
+               SUBORDINATE_WORK_NOT_OBSERVED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_build_fabric(void)
 {
     int failures = 0;
@@ -1779,6 +1826,7 @@ int test_build_fabric(void)
     failures += test_bf_native();
     failures += test_bf_runtime_dump();
     failures += test_bf_content_contracts();
+    failures += test_bf_subordinate_work_admission();
     printf("=== build_fabric: %d failures ===\n", failures);
     return failures;
 }

@@ -84,6 +84,35 @@ status capsules, and receipts. The data plane carries bounded immutable
 objects. Large file bytes, build inputs, artifacts, logs, and application
 bundles never ride inside control messages.
 
+### Control and data-plane route strategy
+
+Routes are transport choices, not authorities. Direct TCP, onion, and a future
+opaque relay must terminate in the same Noise static identity and active ZID
+delegation before a private control or data request is admitted. An endpoint
+record supplies only a candidate address. A successful connection supplies no
+capability by itself.
+
+The route procedure is:
+
+1. collect bounded candidates from operator configuration and available
+   signed discovery records;
+2. connect without attaching a private request;
+3. complete Noise and validate the peer's active delegation against the paired
+   identity and network genesis;
+4. select a route by locally configured policy and measured reachability, not
+   by a privilege difference between transports;
+5. send a small capability-bound control request; and
+6. transfer any referenced immutable bytes through the bounded data lane,
+   then bind the terminal receipt to both the control request and object root.
+
+A route failure may try another candidate, but an identity mismatch,
+delegation failure, plaintext downgrade, revocation, or capability refusal is
+terminal for that request. Relays and rendezvous peers forward opaque records
+only. They do not receive target credentials, plaintext, or machine authority.
+The currently implemented status requester is narrower: it uses an already
+connected authenticated peer and never dials. Automatic route selection,
+onion failover, and relay transport remain acceptance work.
+
 ## Current truthful state
 
 | Capability | Current state | What remains before a product claim |
@@ -97,8 +126,25 @@ bundles never ride inside control messages.
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
 | Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
-| macOS | Native C23 development/application path exists; node support must report embedded Tor unavailable | Native node/session receipts and truthful confinement/tunnel capability probes |
-| Windows | Native UCRT64 `z23.exe` builds; WSL2 runs the Linux node | Native runtime/service acceptance and Windows confinement/tunnel capability probes |
+| macOS | Native arm64 node build and isolated startup are measured; a launchd service template exists | Native service lifecycle, independent node/session receipts, embedded-Tor build and runtime proof, and truthful confinement/tunnel probes |
+| Windows | Native UCRT64 `z23.exe` builds and a Task Scheduler installer exists; WSL2 runs the Linux node | Native full-node and service acceptance, embedded Tor, and Windows confinement/tunnel probes |
+
+### Platform service and activation truth
+
+| Boundary | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Native node build/start | Measured | Measured on arm64; Intel remains unverified | Build path exists; full runtime acceptance remains open |
+| User service definition | systemd unit with restart and watchdog policy | launchd template with `RunAtLoad` and failure keepalive; lifecycle unproved | Task Scheduler installer with restricted file ACL and exact binary hash; lifecycle unproved |
+| Production binary rollback | Native A/B launcher and deployment checks exist | No equivalent accepted path | No equivalent accepted path |
+| Embedded onion service | Available only when the full Tor archives are built and linked; the stub is not Tor | Full-Tor build path exists but has not been measured on a Mac | Native path currently uses the Tor stub |
+| Live module activation | Development build only, isolated development datadir, allowlisted read-only leaves | Refuses native activation | Refuses native activation |
+| Live module rollback | Prior in-process development image can be restored after the same admission checks | Unavailable | Unavailable |
+| Confined build execution | Linux worker path exists with bounded action policy and host isolation | Required Linux toolchain/isolation identity is unavailable, so execution refuses | Worker execution refuses |
+
+Service installation does not prove native node operation, Tor availability,
+rollback, or confinement. A platform claim requires a native-host receipt for
+each row. Linux production A/B rollback and Linux development module rollback
+are distinct mechanisms and must not share one generic "hot swap" claim.
 
 No row may be promoted from partial to implemented because another operating
 system passed, because a simulator passed, or because one maintainer-owned
@@ -117,6 +163,30 @@ authority.
 The blockchain, wallet, canonical datadir, and production deployment remain
 outside the default machine-access capability set. Consensus and peer health
 retain resource priority over discovery, transfer, build, and control traffic.
+
+### Shared subordinate-work admission
+
+The host operating system remains the process scheduler. Z23 needs one shared,
+pure admission decision for work subordinate to the blockchain, not a second
+general-purpose scheduler. Mesh refresh currently implements the strongest
+version of this decision: the node must be running and at chain tip; disk and
+memory pressure must be clear; no long database operation, open transaction,
+turbo mode, or pending block application may exist.
+
+Transfer, build, test, private-object maintenance, discovery refresh, service
+activation, and terminal workers must consult the same named decision before
+claiming durable work and again before starting an expensive or irreversible
+stage. A resource refusal defers work without consuming an attempt, lease, or
+failure budget. Work already running obeys its fixed limits and cancellation
+contract, while new subordinate work remains closed until blockchain pressure
+clears. Background workers also apply the native platform QoS primitive where
+available. Shutdown stops admission before worker drain begins.
+
+This is not yet a system-wide guarantee. Automatic mesh status refresh and the
+build-fabric worker now share the same pre-claim decision; the worker also uses
+background-thread QoS and reports its current refusal reason. Transfer,
+private-object maintenance, discovery, activation, and terminal workers must
+adopt the same contract as those surfaces are implemented.
 
 ## Verified substrate
 
@@ -155,9 +225,12 @@ reimplemented:
   [`lib/vcs/include/vcs/zcode_dht_record.h`](../../lib/vcs/include/vcs/zcode_dht_record.h),
   [`lib/vcs/include/vcs/package_verify_policy.h`](../../lib/vcs/include/vcs/package_verify_policy.h),
   and [`app/services/include/services/package_lifecycle.h`](../../app/services/include/services/package_lifecycle.h).
-- Linux has an embedded Tor onion path. macOS currently builds the native node
-  without embedded Tor, and must report onion service unavailable rather than
-  claim fallback coverage. The measured platform boundary is recorded in
+- Linux has an embedded Tor onion path when the full Tor archives are built and
+  linked; a binary linked to the offline stub must not claim Tor. The native
+  macOS full-Tor build path exists but has not completed native-host acceptance.
+  The Windows native dependency lane currently uses the stub. Each runtime must
+  report its linked capability rather than infer it from the operating system.
+  The measured platform boundary is recorded in
   [`docs/GETTING_STARTED.md`](../GETTING_STARTED.md). Windows support is not a
   completed or measured production baseline yet.
 
@@ -216,6 +289,38 @@ subject under local policy, consumes or records its replay key, and returns a
 signed receipt for the exact accepted or refused operation. Revocation is a
 local, durable state transition and takes effect for new requests and renewed
 sessions. Expiry is mandatory even when revocation distribution is delayed.
+
+### Capability-grant lifecycle
+
+Each grant follows one target-local lifecycle:
+
+```text
+absent -> planned -> locally committed -> active -> expired or revoked
+                                   |          |
+                                   |          +-> renewed by a new explicit grant
+                                   +-> refused without authority change
+```
+
+Planning is read-only and names the exact target, subject, operation, limits,
+expiry, and deny mask. Commit re-derives those facts from the live authenticated
+session and requires an owner confirmation bound to the plan generation. The
+target stores the grant through its durable lifecycle before it can authorize a
+request. Request admission then verifies the active session, target and subject
+identities, operation kind, immutable input root, limits, time window, replay
+key, and current revocation state. Every outcome produces a bounded accepted or
+refused receipt without widening the grant.
+
+Renewal creates a new bounded grant; it does not mutate expiry in place or
+revive a revoked record. Revocation is sticky and prevents new requests and
+session renewal. Cancellation stops one admitted operation but does not revoke
+its grant. Disconnect preserves durable cancellation, result, and revocation
+state. Garbage collection may remove expired payloads only after the durable
+receipt and replay windows no longer require them.
+
+Today, pairing commit implements only the initial status-read authority and is
+performed independently on each machine. Two-sided wire grant negotiation,
+renewal, capability-specific plan/commit, and capability transport beyond
+status-read remain unimplemented.
 
 The transcript hash and transcript-derived connection generation are shared
 session evidence. The transport's process-local connection serial is never a
@@ -359,15 +464,57 @@ The phases below are delivered in this dependency order:
 5. completed: project responses into `ops mesh machines` with honest fresh,
    stale, and unknown state, then refresh connected active pairings without
    competing with chain synchronization;
-6. add the encrypted private-object envelope and resumable transfer before any
+6. extract the mesh resource gate into shared subordinate-work admission, use
+   it before build-fabric lease claims, apply platform background QoS, and prove
+   deferral never consumes an attempt or competes with chain synchronization;
+7. record independent-host native service and signed status receipts, then add
+   identity-pinned direct and, where available, onion route selection without
+   changing authority when the path changes;
+8. complete the two-sided capability plan/commit, renewal, cancellation, and
+   sticky-revocation lifecycle for the next typed operation;
+9. add the encrypted private-object envelope and resumable transfer before any
    remote execution surface;
-7. bind existing immutable build/test actions to paired capabilities;
-8. add local-service tunnels; and
-9. add service-island and app-cartridge activation last.
+10. bind existing immutable build/test actions to paired capabilities;
+11. add local-service tunnels and the separately granted terminal worker; and
+12. add service-island and app-cartridge activation last.
 
 Each item lands with a local adversarial test and then an independent-host
 receipt. Work does not skip forward because a later UI can be demonstrated
 against fixtures.
+
+The immediate acceptance for item 6 queues an action while each admission fact
+is independently unsafe: chain not at tip, low disk, high memory pressure, long
+database operation, database service unavailable, database closed, transaction
+open, turbo mode, pending block application, and shutdown. No case may acquire
+a lease, increment an attempt, or start a worker. Clearing all facts admits
+exactly one claim. Existing mesh-status gate tests must continue to pass from
+the same decision table. The predicate belongs in a shared C23 service rather
+than the boot layer: `boot_mesh_status_refresh.c` and
+`build_fabric_runtime.c` must consume the same result and reason vocabulary.
+
+Checkpoint measured 2026-08-29T07:50:42-04:00 /
+2026-08-29T11:50:42Z: `mesh_capability_grant`,
+`mesh_private_object_proto`, `build_fabric`, `mesh_status_wire`, `thread_qos`,
+and `db_migration_idempotent` each passed with `groups_failed=0` and
+`self_skips=0`; `make lint-fast` passed all 22 selected gates. This proves the
+local grant lifecycle, canonical signed-offer refusal surface, shared pure
+admission decision, and schema migration. Encrypted transfer and independent
+host receipts remain unproved.
+
+Item 7 records one native-host service receipt per claimed platform containing
+the OS and architecture, source identity, running-image digest, service-manager
+identity, readiness result, graceful-stop result, and automatic-restart result.
+Rollback is tested and recorded only on a platform that implements it. Route
+acceptance then authenticates the same paired identity over each available
+path, removes the selected path, and proves that fallback changes neither the
+capability nor receipt signer. An unavailable path is an explicit refusal, not
+a skipped success.
+
+Item 8 proves that planning writes nothing; a tampered, expired, or stale plan
+writes nothing; commit stores exactly the displayed grant; request replay has
+no second effect; renewal creates a distinct bounded grant; cancellation does
+not widen or revoke authority; and sticky revocation survives restart and
+rejects a racing reconnect.
 
 ### Phase 0: measure and close transport prerequisites
 
@@ -378,9 +525,10 @@ static key, authenticated DHT node identity, confinement, and native hot-swap
 capability. Linux distinguishes WSL from native execution; Windows distinguishes
 Wine from native execution. The capsule redacts local paths and private
 material, names missing prerequisites, reports the durable local pairing
-authority, and separately refuses to claim a remote status protocol. This is
-local observation only; restart stability, four-host distinctness, and native
-macOS and Windows execution still require independent host receipts.
+authority, and reports the implemented remote-status protocol separately from
+its live session count and stored receipts. The capsule itself is local
+observation only; restart stability, four-host distinctness, and native macOS
+and Windows execution still require independent host receipts.
 
 Checkpoint measured 2026-08-28T17:24:08-04:00 / 2026-08-28T21:24:08Z:
 the strict C23 release build and the `v2_transport_parity`, `os_proc`,

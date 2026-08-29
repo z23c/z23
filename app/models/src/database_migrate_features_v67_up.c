@@ -376,6 +376,48 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         current_ver = 77;
         applied++;
     }
+    if (current_ver < 78) {
+        /* v78: exact, insert-only private-object receive grants. Pairing is
+         * the subject authority; one-use consumption and sticky revocation
+         * remain durable across retries and process restarts. */
+        if (!node_db_exec(ndb,
+                "CREATE TABLE IF NOT EXISTS mesh_capability_grants("
+                "grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=64),"
+                "pairing_id TEXT NOT NULL REFERENCES mesh_pairings(pairing_id) "
+                "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
+                "operation INTEGER NOT NULL CHECK(operation=1),"
+                "plaintext_root BLOB NOT NULL CHECK(length(plaintext_root)=32),"
+                "ciphertext_root BLOB NOT NULL CHECK(length(ciphertext_root)=32),"
+                "object_size_bytes INTEGER NOT NULL CHECK(object_size_bytes BETWEEN 1 AND 1073741824),"
+                "ciphertext_size_bytes INTEGER NOT NULL CHECK(ciphertext_size_bytes>=object_size_bytes AND ciphertext_size_bytes<=2147483648),"
+                "storage_limit_bytes INTEGER NOT NULL CHECK(storage_limit_bytes>=ciphertext_size_bytes AND storage_limit_bytes<=2147483648),"
+                "transfer_limit_bytes INTEGER NOT NULL CHECK(transfer_limit_bytes>=ciphertext_size_bytes AND transfer_limit_bytes<=2147483648),"
+                "chunk_limit INTEGER NOT NULL CHECK(chunk_limit BETWEEN 1 AND 4096),"
+                "max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes BETWEEN 1 AND 4194304),"
+                "wall_limit_seconds INTEGER NOT NULL CHECK(wall_limit_seconds BETWEEN 1 AND 86400),"
+                "nonce BLOB NOT NULL CHECK(length(nonce)=32),"
+                "deny_mask INTEGER NOT NULL CHECK(deny_mask=63),"
+                "issued_at INTEGER NOT NULL CHECK(issued_at>0),"
+                "not_before INTEGER NOT NULL CHECK(not_before>=issued_at),"
+                "expires_at INTEGER NOT NULL CHECK(expires_at>not_before AND expires_at-issued_at<=2592000),"
+                "consumed_at INTEGER NOT NULL DEFAULT 0 CHECK(consumed_at=0 OR (consumed_at>=not_before AND consumed_at<expires_at)),"
+                "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at=0 OR revoked_at>=issued_at),"
+                "revocation_generation INTEGER NOT NULL DEFAULT 0 CHECK((revoked_at=0 AND revocation_generation=0) OR (revoked_at>0 AND revocation_generation>0)),"
+                "CHECK(chunk_limit*max_chunk_bytes>=ciphertext_size_bytes))"))
+            LOG_ERR("db", "migrate v78: mesh capability grants failed");
+        if (!node_db_exec(ndb,
+                "CREATE INDEX IF NOT EXISTS "
+                "idx_mesh_capability_grants_pairing_state ON "
+                "mesh_capability_grants(pairing_id,revoked_at,consumed_at,expires_at)"))
+            LOG_ERR("db", "migrate v78: mesh capability grant index failed");
+        if (!node_db_exec(ndb,
+                "INSERT OR IGNORE INTO schema_migrations(version) "
+                "VALUES('078')"))
+            LOG_ERR("db", "migrate v78: migration stamp failed");
+        DB_MIGRATE_PERSIST_VERSION(ndb, 78);
+        current_ver = 78;
+        applied++;
+    }
     *version = current_ver;
     return applied;
 }
