@@ -258,7 +258,7 @@ static int lifecycle_roundtrip(void)
             ASSERT_EQ(encode_view(&original, wire, sizeof(wire), &wire_len),
                       MESH_CAPABILITY_PROTO_OK);
             ASSERT_EQ(wire_len, kind_size(kind));
-            ASSERT(memcmp(wire, "ZMCP", 4) == 0);
+            ASSERT(memcmp(wire, "ZCAP", 4) == 0);
             ASSERT_EQ(zcl_read_u16_le(wire + 4),
                       MESH_CAPABILITY_PROTO_VERSION);
             ASSERT_EQ(wire[6], raw);

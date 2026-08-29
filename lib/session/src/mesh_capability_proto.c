@@ -11,7 +11,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-static const uint8_t frame_magic[4] = {'Z', 'M', 'C', 'P'};
+static const uint8_t frame_magic[4] = {'Z', 'C', 'A', 'P'};
 static const char *const signing_domains[] = {
     NULL,
     "zcl.mesh.capability.proposal.signature.v1",
