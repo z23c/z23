@@ -263,7 +263,9 @@ VIEW_GEN_HEADERS_EARLY := app/views/include/views/wallet_templates_gen.h \
 VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
+ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 
@@ -1826,7 +1828,8 @@ ifeq ($(ZCL_HOST_OS),Darwin)
 GUI_APP_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
 	-framework QuartzCore -framework CoreVideo
 else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
-GUI_APP_HOST_LIBS := -lgdi32 -luser32 -lshell32 -lole32
+GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
+    -Wl,-Bdynamic -lgdi32 -luser32 -lshell32 -lole32
 endif
 GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(GUI_APP_HOST_CPPFLAGS) \

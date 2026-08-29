@@ -1,0 +1,82 @@
+# Z23 lean GUI-app build front-end.
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+#
+# This is the fast parse path for the native GUI-app loop.  It compiles the
+# packages/*/<app> C23 applications without paying the full-node Makefile
+# parse (source-identity capture, vendor epochs, lib/ module inventory, etc.).
+#
+#   make -f Makefile.gui ball
+#   make -f Makefile.gui ball-selftest
+#   make -f Makefile.gui ball-app
+#
+# The rules intentionally mirror the GUI_APP_RULES block in the top-level
+# Makefile so the same compiler/host flags are used; if you change the host
+# seam there, update this file too.
+
+ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
+ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
+
+CC = gcc
+CXX ?= g++
+
+ZCL_WINDOWS_API_FLOOR := -D_WIN32_WINNT=0x0A00
+GUI_APP_HOST_CPPFLAGS := -D_POSIX_C_SOURCE=200809L
+GUI_APP_HOST_LIBS := -ldl -lm
+
+ifeq ($(ZCL_HOST_OS),Darwin)
+GUI_APP_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
+	-framework QuartzCore -framework CoreVideo
+else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
+GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
+    -Wl,-Bdynamic -lgdi32 -luser32 -lshell32 -lole32
+endif
+
+GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(GUI_APP_HOST_CPPFLAGS) \
+	$(if $(ZCL_HOST_WINDOWS),$(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
+		-D__USE_MINGW_ANSI_STDIO=1,-DSECP256K1_STATIC) \
+	-Ivendor/rgfw
+
+BUILD_DIR := build
+BIN_DIR := $(BUILD_DIR)/bin
+APP_BUNDLE_OUT ?= $(BUILD_DIR)/app-bundle
+
+GUI_APPS := zhello
+-include config/gui_apps.mk
+
+define GUI_APP_RULES
+$(BUILD_DIR)/$(1)/$(1).o: packages/$(1)/src/$(1).c \
+		packages/$(1)/include/$(1)/$(1).h
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include -c $$< -o $$@
+
+$(BUILD_DIR)/$(1)/main.o: packages/$(1)/app/main.c \
+		packages/$(1)/include/$(1)/$(1).h vendor/rgfw/RGFW.h
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include -c $$< -o $$@
+
+$(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o
+	@mkdir -p $$(dir $$@)
+	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include $$^ \
+		$(GUI_APP_HOST_LIBS) -o $$@
+
+.PHONY: $(1) $(1)-selftest $(1)-clean $(1)-app
+$(1): $(BIN_DIR)/$(1)
+	$(BIN_DIR)/$(1) $$($(1)_ARGS)
+$(1)-selftest: $(BIN_DIR)/$(1)
+	$(BIN_DIR)/$(1) --frames=120 --quiet
+$(1)-clean:
+	rm -f $(BIN_DIR)/$(1) $(BUILD_DIR)/$(1)/*.o
+$(1)-app: $(BIN_DIR)/$(1)
+	@mkdir -p $(APP_BUNDLE_OUT)
+	@tools/scripts/make_app_bundle.sh $(BIN_DIR)/$(1) \
+		$(if $($(1)_APP_TITLE),$($(1)_APP_TITLE),$(1)) $(APP_BUNDLE_OUT)
+endef
+
+zhello_ARGS = $(ZHELLO_ARGS)
+zhello_APP_TITLE := Zhello
+$(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
+
+.PHONY: clean
+ clean:
+	rm -rf $(BUILD_DIR)
