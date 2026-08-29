@@ -2607,3 +2607,11 @@ AGENT_IMPACT_RULE("config/lib_module_order.def", "make_lint_gates codeindex")
 /* The script group's own test source: editing it is proven by running it,
  * with the lint-gate selftests for the shared harness it touches. */
 AGENT_IMPACT_RULE("lib/test/src/test_script.c", "script make_lint_gates")
+
+/* ACME / TLS-ALPN-01. The node keeps only the responder, the base64url
+ * codec, the node/worker handoff file and the renewal decision; the TLS
+ * client and the order flow live in tools/acme and are proven by
+ * test_acme_worker, which RUNS that binary rather than linking it. Editing
+ * either half routes to the same groups, because the handoff file is the
+ * contract between them and a change to one side can break the other. */
+AGENT_IMPACT_RULE("lib/net/src/acme_b64url.c|lib/net/include/net/acme_b64url.h|lib/net/src/acme_arm_file.c|lib/net/include/net/acme_arm_file.h|lib/net/src/acme_alpn_challenge.c|lib/net/include/net/acme_challenge.h|lib/net/src/acme_renewal.c|lib/net/include/net/acme_renewal.h|lib/test/src/test_acme_b64url.c|lib/test/src/test_acme_challenge.c|lib/test/src/test_acme_renewal.c|lib/test/src/test_acme_worker.c|tools/acme/*.c|tools/acme/*.h", "acme_b64url acme_challenge acme_renewal acme_worker make_lint_gates")

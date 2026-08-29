@@ -12,6 +12,7 @@
 #if !defined(_WIN32)
 #define _XOPEN_SOURCE 700
 #endif
+#include "net/acme_challenge.h"
 #include "net/https_frontdoor.h"
 #include "net/https_server.h"
 #include "https_server_internal.h"
@@ -584,6 +585,19 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
 
     /* Set minimum TLS 1.2 */
     SSL_CTX_set_min_proto_version(g_ssl_ctx, TLS1_2_VERSION);
+
+    /* TLS-ALPN-01 responder (RFC 8737). One call: the module owns the armed
+     * state and the challenge certificate, and presents it only while an ACME
+     * validation is in flight for the name in SNI. Port 80 is deliberately not
+     * forwarded here, so this is the only challenge type the node can answer
+     * -- see net/acme_challenge.h. */
+    if (!acme_alpn_install(g_ssl_ctx)) {
+        SSL_CTX_free(g_ssl_ctx);
+        g_ssl_ctx = NULL;
+        pthread_mutex_unlock(&g_https_state_mutex);
+        LOG_ERROR("https", "cannot install the TLS-ALPN-01 certificate responder");
+        return false;
+    }
 
     if (SSL_CTX_use_certificate_chain_file(g_ssl_ctx, cert_path) <= 0) {
         ERR_print_errors_fp(stderr);
