@@ -740,7 +740,9 @@ static bool rpc_romseed_list(const struct json_value *params, bool help,
         HexStr(arts[i].chunk_root, 32, false, hex, sizeof(hex));
         json_push_kv_str(&entry, "kind",
             arts[i].kind == ROM_ARTIFACT_CONSENSUS_BUNDLE ? "consensus_bundle" :
-            arts[i].kind == ROM_ARTIFACT_HEADER_SEED ? "header_seed" : "unknown");
+            arts[i].kind == ROM_ARTIFACT_HEADER_SEED ? "header_seed" :
+            arts[i].kind == ROM_ARTIFACT_SOURCE_BUNDLE ? "source_bundle" :
+            "unknown");
         json_push_kv_str(&entry, "filename", arts[i].filename);
         json_push_kv_str(&entry, "digest", hex);
         json_push_kv_int(&entry, "size_bytes", (int64_t)arts[i].size_bytes);

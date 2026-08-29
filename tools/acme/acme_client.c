@@ -16,6 +16,7 @@
 #include "acme_client.h"
 
 #include "net/acme_arm_file.h"
+#include "net/acme_selfsigned.h"
 #include "acme_jws.h"
 #include "acme_protocol.h"
 #include "tls_client.h"
@@ -531,8 +532,10 @@ bool acme_client_obtain(const struct acme_client_config *cfg)
         LOG_FAIL("acme", "cannot run an order without a configuration");
     if (!cfg->domain || !cfg->domain[0])
         LOG_FAIL("acme", "cannot run an order without a domain");
-    if (strlen(cfg->domain) > ACME_MAX_DOMAIN)
-        LOG_FAIL("acme", "refusing a domain of %zu bytes", strlen(cfg->domain));
+    if (strlen(cfg->domain) > ACME_MAX_DOMAIN ||
+        !acme_domain_is_ldh(cfg->domain) || strchr(cfg->domain, '*'))
+        LOG_FAIL("acme", "refusing a non-canonical TLS-ALPN-01 domain: %s",
+                 cfg->domain);
     if (!cfg->account_key_path || !cfg->cert_path || !cfg->cert_key_path ||
         !cfg->handoff_path || !cfg->handoff_path[0])
         LOG_FAIL("acme",

@@ -50,10 +50,15 @@ killing the two-name drift) is **landed**
    now refuses a live `node.db` fallback after an immutable snapshot cache miss.
    A sequential adapter now emits deterministic 500-entry wire chunks from that
    reader while deriving the full-set SHA3 and each chunk hash; boundary tests
-   cover 499/500/501 rows and refuse oversize scripts without truncation.
-   Remaining: persist and publish the immutable chunk artifact from this adapter,
-   bind it to the exact `coins_applied_height - 1` active hash, and route receipt
-   through the verified staging installer before enabling publication.
+   cover 499/500/501 rows and refuse oversize scripts without truncation. An
+   atomic artifact writer now streams that adapter into the existing bounded
+   snapshot chunk encoding, returns the pinned frontier/generation plus exact
+   root, count, size, chunk hashes, and Merkle root, and publishes only after a
+   complete file flush and descriptor-bound replacement. Export failure leaves
+   an existing artifact unchanged and publishes no partial file. Remaining:
+   bind the artifact to the exact `coins_applied_height - 1` active hash, publish
+   its manifest and disk-backed serving capability from boot, and route receipt
+   through the verified staging installer before enabling activation.
 7. **Delete the dead heal ladder** (grep-proven zero callers): chain_restore_integrity,
    chain_restore rebuild ladder, stage_repair_reducer_frontier_{tipfin,refill,purge} +
    tear branch, reducer_frontier_reconcile_light, utxo_recovery_torn_anchor (M2),
@@ -81,6 +86,16 @@ binary boots the COPY degraded-but-live at 3141533 (no FATAL) and the reducer ad
 forward. (3) `coins_kv_serve_utxo_root` over `coins` == prior commitment over `utxos`
 byte-for-byte, and == zclassicd `gettxoutsetinfo` at the same finalized height. Deploy is a
 separate owner-gated action only after the copy reaches tip with byte-identical parity.
+
+Checkpoint measured 2026-08-29T13:58:35-04:00 /
+2026-08-29T17:58:35Z: `fast_sync_coins_artifact` and
+`fast_sync_coins_export` each passed cold with one group run, zero failures,
+and zero skips. The artifact acceptance decoded the published 500+1 chunks,
+independently recomputed the canonical UTXO commitment and per-chunk hashes,
+and matched the returned count and Merkle root. A 521-byte script refused the
+export while preserving prior destination bytes and leaving no stage file.
+This proves atomic canonical artifact construction only; boot publication,
+network serving, chain-hash binding, and client activation remain unproved.
 
 ## Open questions to close during implementation
 

@@ -111,8 +111,8 @@ re-verifies the whole acceptance chain, not just the bytes.
 
 ### When a source root is all you have
 
-If someone handed you one 64-hex source root and nothing else, that is
-enough. Ask the network for it directly:
+If someone handed you a 64-hex source root and one or more serving peer
+addresses, ask those peers for it directly:
 
 ```bash
 z23 zcode workspace source bundle fetch --input='{"source_root":"<64hex>","output":"/tmp/source.zvsb","peers":"<ip:port>,<ip:port>"}'

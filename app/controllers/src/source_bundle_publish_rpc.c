@@ -54,7 +54,7 @@ static bool rpc_sourcebundle_publish(const struct json_value *params, bool help,
             "\nArguments:\n"
             "1. workspace   (string, required) Source tree to capture.\n"
             "2. source_root (string, optional) 64-hex root the caller expects;\n"
-            "               the call is refused before any write if the\n"
+            "               the call is refused before publication writes if the\n"
             "               captured tree is a different one.\n"
             "\nThe bundle lands under <datadir>/bundles/<root>.zvsb and is\n"
             "registered by name, so how many entries share that directory\n"

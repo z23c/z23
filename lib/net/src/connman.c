@@ -2098,7 +2098,14 @@ bool connman_init(struct connman *cm, const struct chain_params *params,
 
     /* Noise transport: default OFF. When -noisetransport is passed, advertise
      * NODE_NOISE_TRANSPORT and load/generate the persistent static identity. */
-    cm->manager.noise_enabled = GetBoolArg("-noisetransport", false);
+    const bool noise_arg_set = GetArg("-noisetransport", NULL) != NULL;
+    const bool legacy_noise_arg_set = GetArg("-v2transport", NULL) != NULL;
+    cm->manager.noise_enabled = noise_arg_set
+        ? GetBoolArg("-noisetransport", false)
+        : GetBoolArg("-v2transport", false);
+    if (legacy_noise_arg_set)
+        LOG_WARN("connman", "-v2transport is deprecated; use -noisetransport%s",
+                 noise_arg_set ? " (new spelling takes precedence)" : "");
     if (cm->manager.noise_enabled) {
         char datadir[1024], identity_error[160];
         /* The DHT delegation command and the running service both receive

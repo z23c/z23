@@ -153,7 +153,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
      * three full windows. */
     uint8_t hdr[4];
     (void)platform_socket_set_receive_timeout(fd, rf_ms_left(rls_deadline_ms));
-    if (!rf_recv_exact(fd, hdr, 4)) {
+    if (!rf_recv_exact_until(fd, hdr, 4, rls_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: no reply from %s:%u (legacy seeder?) — "
                  "skipping seed", peer_addr, (unsigned)port);
@@ -169,7 +169,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
         return false;
     }
     (void)platform_socket_set_receive_timeout(fd, rf_ms_left(rls_deadline_ms));
-    if (!rf_recv_exact(fd, (uint8_t *)buf, size)) {
+    if (!rf_recv_exact_until(fd, (uint8_t *)buf, size, rls_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: body read failed from %s:%u — skipping "
                  "seed", peer_addr, (unsigned)port);
@@ -177,7 +177,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
     }
     uint8_t mac_wire[32];
     (void)platform_socket_set_receive_timeout(fd, rf_ms_left(rls_deadline_ms));
-    if (!rf_recv_exact(fd, mac_wire, 32)) {
+    if (!rf_recv_exact_until(fd, mac_wire, 32, rls_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "directory: MAC read failed from %s:%u — skipping "
                  "seed", peer_addr, (unsigned)port);

@@ -4,88 +4,17 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "vcs/package_prepare.h"
-
-#ifdef _WIN32
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-const char *vcs_package_prepare_error_string(enum vcs_package_prepare_error e)
-{
-    static const char *const names[] = {
-        "ok", "null-argument", "path", "file-type", "file-changed", "io",
-        "allocation", "package-metadata", "content-manifest", "build-recipe",
-        "dependency-lock", "api-capsule", "release-body"
-    };
-    return (unsigned)e < sizeof(names) / sizeof(names[0]) ? names[e]
-                                                          : "unknown-error";
-}
-
-void vcs_package_prepared_init(struct vcs_package_prepared *prepared)
-{
-    if (!prepared) return;
-    memset(prepared, 0, sizeof(*prepared));
-    vcs_package_manifest_init(&prepared->manifest);
-    vcs_package_recipe_init(&prepared->recipe);
-    vcs_package_lock_init(&prepared->lock);
-    vcs_package_capsule_init(&prepared->capsule);
-}
-
-void vcs_package_prepared_free(struct vcs_package_prepared *prepared)
-{
-    if (!prepared) return;
-    vcs_package_manifest_free(&prepared->manifest);
-    vcs_package_recipe_free(&prepared->recipe);
-    free(prepared->manifest_wire); free(prepared->recipe_wire);
-    free(prepared->lock_wire); free(prepared->capsule_wire);
-    free(prepared->release_body);
-    memset(prepared, 0, sizeof(*prepared));
-}
-
-static enum vcs_package_prepare_error prepare_windows_refusal(
-    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
-{
-    if (out) vcs_package_prepared_init(out);
-    if (detail && detail_cap)
-        (void)snprintf(detail, detail_cap,
-                       "Windows package traversal requires retained-root "
-                       "no-reparse qualification");
-    return VCS_PACKAGE_PREPARE_ERR_PATH;
-}
-
-enum vcs_package_prepare_error vcs_package_prepare(
-    const struct vcs_package_prepare_options *options,
-    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
-{
-    if (!options || !options->dir || !out) return VCS_PACKAGE_PREPARE_ERR_NULL;
-    return prepare_windows_refusal(out, detail, detail_cap);
-}
-
-enum vcs_package_prepare_error vcs_package_scan_layout(
-    const char *dir, struct vcs_package_prepared *out,
-    bool *has_package_config, char *detail, size_t detail_cap)
-{
-    if (!dir || !out || !has_package_config) return VCS_PACKAGE_PREPARE_ERR_NULL;
-    *has_package_config = false;
-    return prepare_windows_refusal(out, detail, detail_cap);
-}
-
-#else
-
 #include "json/json.h"
 #include "util/safe_alloc.h"
 
 #include "package_prepare_internal.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #define PREPARE_META_MAX VCS_PACKAGE_DEPS_META_MAX_BYTES
@@ -157,14 +86,6 @@ void vcs_package_prepared_free(struct vcs_package_prepared *prepared)
     memset(prepared, 0, sizeof(*prepared));
 }
 
-static bool prepare_stat_same(const struct stat *a, const struct stat *b)
-{
-    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-           a->st_size == b->st_size &&
-           a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
-           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
-}
-
 static bool prepare_read_exact(int fd, uint8_t *buf, size_t len)
 {
     size_t off = 0;
@@ -196,105 +117,6 @@ static bool prepare_recipe_file(struct prepare_walk *walk, const char *path)
     return true;
 }
 
-static bool prepare_regular(struct prepare_walk *walk, int parent_fd,
-                            const char *name, const char *path,
-                            const struct stat *listed)
-{
-    int fd = openat(parent_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
-        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-        prepare_detail(walk, "%s: open: %s", path, strerror(errno));
-        return false;
-    }
-    struct stat before;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_dev != listed->st_dev || before.st_ino != listed->st_ino ||
-        before.st_size < 0 ||
-        (uint64_t)before.st_size > VCS_PACKAGE_MAX_FILE_BYTES) {
-        close(fd);
-        walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
-        prepare_detail(walk, "%s: changed before read", path);
-        return false;
-    }
-    uint64_t size = (uint64_t)before.st_size;
-    uint32_t chunks = size == 0 ? 0u :
-        (uint32_t)(1u + (size - 1u) / VCS_PACKAGE_CHUNK_BYTES);
-    uint8_t *hashes = NULL;
-    uint8_t *buf = NULL;
-    if (chunks) {
-        hashes = zcl_malloc((size_t)chunks * 32u,
-                            "vcs.package.prepare.hashes");
-        buf = zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
-                         "vcs.package.prepare.chunk");
-        if (!hashes || !buf) {
-            free(hashes); free(buf); close(fd);
-            walk->error = VCS_PACKAGE_PREPARE_ERR_ALLOC;
-            prepare_detail(walk, "%s: chunk allocation", path);
-            return false;
-        }
-    }
-    uint64_t left = size;
-    for (uint32_t i = 0; i < chunks; i++) {
-        size_t want = left > VCS_PACKAGE_CHUNK_BYTES
-            ? VCS_PACKAGE_CHUNK_BYTES : (size_t)left;
-        if (!prepare_read_exact(fd, buf, want) ||
-            !vcs_package_chunk_hash(buf, want, hashes + (size_t)i * 32u)) {
-            free(hashes); free(buf); close(fd);
-            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-            prepare_detail(walk, "%s: read chunk %u", path, i);
-            return false;
-        }
-        left -= want;
-    }
-    struct stat after;
-    if (fstat(fd, &after) != 0 || !prepare_stat_same(&before, &after)) {
-        free(hashes); free(buf); close(fd);
-        walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
-        prepare_detail(walk, "%s: changed while read", path);
-        return false;
-    }
-    if (strcmp(path, VCS_PACKAGE_DEPS_META_PATH) == 0) {
-        if (size > PREPARE_META_MAX || lseek(fd, 0, SEEK_SET) < 0) {
-            free(hashes); free(buf); close(fd);
-            walk->error = VCS_PACKAGE_PREPARE_ERR_META;
-            prepare_detail(walk, "%s: metadata exceeds bound", path);
-            return false;
-        }
-        walk->meta = zcl_malloc((size_t)size + 1u,
-                                "vcs.package.prepare.meta");
-        if (!walk->meta || !prepare_read_exact(fd, walk->meta, (size_t)size)) {
-            free(walk->meta); walk->meta = NULL;
-            free(hashes); free(buf); close(fd);
-            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-            prepare_detail(walk, "%s: metadata read", path);
-            return false;
-        }
-        struct stat metadata_after;
-        if (fstat(fd, &metadata_after) != 0 ||
-            !prepare_stat_same(&before, &metadata_after)) {
-            free(walk->meta); walk->meta = NULL;
-            free(hashes); free(buf); close(fd);
-            walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
-            prepare_detail(walk, "%s: changed during metadata read", path);
-            return false;
-        }
-        walk->meta[size] = 0;
-        walk->meta_len = (size_t)size;
-    }
-    close(fd);
-    uint32_t mode = (before.st_mode & 0111u)
-        ? VCS_PACKAGE_MODE_EXECUTABLE : VCS_PACKAGE_MODE_FILE;
-    bool ok = vcs_package_manifest_add(&walk->out->manifest, path, mode,
-                                       size, hashes, chunks) &&
-              prepare_recipe_file(walk, path);
-    free(hashes); free(buf);
-    if (!ok) {
-        walk->error = VCS_PACKAGE_PREPARE_ERR_MANIFEST;
-        prepare_detail(walk, "%s: manifest or recipe admission", path);
-    }
-    return ok;
-}
-
 /* Root-level local control and generated-output directories do not enter
  * package identity. Nested same-named directories stay visible. A symlink
  * or special file with these names is refused by the walk caller. */
@@ -303,79 +125,6 @@ static bool prepare_local_control_dir(const char *prefix, const char *name)
     return prefix[0] == '\0' &&
            (strcmp(name, ".zvcs") == 0 || strcmp(name, ".codeindex") == 0 ||
             strcmp(name, "build") == 0);
-}
-
-static bool prepare_walk_dir(struct prepare_walk *walk, int dir_fd,
-                             const char *prefix)
-{
-    int scan_fd = dup(dir_fd);
-    if (scan_fd < 0) {
-        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-        prepare_detail(walk, "%s: dup directory", prefix);
-        return false;
-    }
-    DIR *dir = fdopendir(scan_fd);
-    if (!dir) {
-        close(scan_fd);
-        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-        prepare_detail(walk, "%s: fdopendir", prefix);
-        return false;
-    }
-    bool ok = true;
-    struct dirent *entry;
-    while (ok) {
-        errno = 0;
-        entry = readdir(dir);
-        if (!entry) {
-            if (errno != 0) {
-                walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-                prepare_detail(walk, "%s: readdir: %s", prefix,
-                               strerror(errno));
-                ok = false;
-            }
-            break;
-        }
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0)
-            continue;
-        char path[VCS_PACKAGE_PATH_MAX + 1u];
-        int n = prefix[0]
-            ? snprintf(path, sizeof(path), "%s/%s", prefix, entry->d_name)
-            : snprintf(path, sizeof(path), "%s", entry->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(path) ||
-            !vcs_package_path_valid(path)) {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
-            prepare_detail(walk, "%s: non-canonical package path", path);
-            ok = false;
-            break;
-        }
-        struct stat listed;
-        if (fstatat(dir_fd, entry->d_name, &listed,
-                    AT_SYMLINK_NOFOLLOW) != 0) {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-            prepare_detail(walk, "%s: stat: %s", path, strerror(errno));
-            ok = false;
-        } else if (S_ISDIR(listed.st_mode) &&
-                   prepare_local_control_dir(prefix, entry->d_name)) {
-            continue;
-        } else if (S_ISDIR(listed.st_mode)) {
-            int child = openat(dir_fd, entry->d_name,
-                               O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                               O_NOFOLLOW);
-            if (child < 0 || !prepare_walk_dir(walk, child, path))
-                ok = false;
-            if (child >= 0)
-                close(child);
-        } else if (S_ISREG(listed.st_mode)) {
-            ok = prepare_regular(walk, dir_fd, entry->d_name, path, &listed);
-        } else {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_FILE_TYPE;
-            prepare_detail(walk, "%s: symlink or special file refused", path);
-            ok = false;
-        }
-    }
-    closedir(dir);
-    return ok;
 }
 
 static const char *prepare_meta_string(const struct json_value *meta,
@@ -663,6 +412,554 @@ static enum vcs_package_prepare_error prepare_finish(
     memcpy(out->release_body, release_wire, out->release_body_len);
     free(release_wire);
     return VCS_PACKAGE_PREPARE_OK;
+}
+
+#ifdef _WIN32
+
+#include "platform/directory_compat.h"
+
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <wchar.h>
+#include <windows.h>
+
+static wchar_t *prepare_utf8_to_wide(const char *path)
+{
+    if (!path) return NULL;
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                NULL, 0);
+    if (n <= 0) return NULL;
+    wchar_t *wide = zcl_malloc((size_t)n * sizeof(*wide),
+                               "vcs.package.prepare.wide");
+    if (!wide || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                      wide, n)) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static bool prepare_stat_same(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+           a->st_size == b->st_size && a->st_mtime == b->st_mtime;
+}
+
+static bool prepare_regular(struct prepare_walk *walk, const char *fs_path,
+                            const char *pkg_path,
+                            const struct stat *listed)
+{
+    wchar_t *wide = prepare_utf8_to_wide(fs_path);
+    if (!wide) {
+        walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
+        prepare_detail(walk, "%s: utf8 conversion", pkg_path);
+        return false;
+    }
+    HANDLE h = CreateFileW(
+        wide, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide);
+    if (h == INVALID_HANDLE_VALUE) {
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: open: %s", pkg_path, strerror(errno));
+        return false;
+    }
+    FILE_ATTRIBUTE_TAG_INFO info;
+    if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &info,
+                                      sizeof(info)) ||
+        (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        CloseHandle(h);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_FILE_TYPE;
+        prepare_detail(walk, "%s: not a regular file", pkg_path);
+        return false;
+    }
+    int fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(h);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: _open_osfhandle", pkg_path);
+        return false;
+    }
+    struct stat before;
+    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
+        before.st_size != listed->st_size ||
+        before.st_mtime != listed->st_mtime || before.st_size < 0 ||
+        (uint64_t)before.st_size > VCS_PACKAGE_MAX_FILE_BYTES) {
+        close(fd);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+        prepare_detail(walk, "%s: changed before read", pkg_path);
+        return false;
+    }
+    uint64_t size = (uint64_t)before.st_size;
+    uint32_t chunks = size == 0 ? 0u :
+        (uint32_t)(1u + (size - 1u) / VCS_PACKAGE_CHUNK_BYTES);
+    uint8_t *hashes = NULL;
+    uint8_t *buf = NULL;
+    if (chunks) {
+        hashes = zcl_malloc((size_t)chunks * 32u,
+                            "vcs.package.prepare.hashes");
+        buf = zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
+                         "vcs.package.prepare.chunk");
+        if (!hashes || !buf) {
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_ALLOC;
+            prepare_detail(walk, "%s: chunk allocation", pkg_path);
+            return false;
+        }
+    }
+    uint64_t left = size;
+    for (uint32_t i = 0; i < chunks; i++) {
+        size_t want = left > VCS_PACKAGE_CHUNK_BYTES
+            ? VCS_PACKAGE_CHUNK_BYTES : (size_t)left;
+        if (!prepare_read_exact(fd, buf, want) ||
+            !vcs_package_chunk_hash(buf, want, hashes + (size_t)i * 32u)) {
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: read chunk %u", pkg_path, i);
+            return false;
+        }
+        left -= want;
+    }
+    struct stat after;
+    if (fstat(fd, &after) != 0 || !prepare_stat_same(&before, &after)) {
+        free(hashes); free(buf); close(fd);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+        prepare_detail(walk, "%s: changed while read", pkg_path);
+        return false;
+    }
+    if (strcmp(pkg_path, VCS_PACKAGE_DEPS_META_PATH) == 0) {
+        if (size > PREPARE_META_MAX || lseek(fd, 0, SEEK_SET) < 0) {
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_META;
+            prepare_detail(walk, "%s: metadata exceeds bound", pkg_path);
+            return false;
+        }
+        walk->meta = zcl_malloc((size_t)size + 1u,
+                                "vcs.package.prepare.meta");
+        if (!walk->meta || !prepare_read_exact(fd, walk->meta, (size_t)size)) {
+            free(walk->meta); walk->meta = NULL;
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: metadata read", pkg_path);
+            return false;
+        }
+        struct stat metadata_after;
+        if (fstat(fd, &metadata_after) != 0 ||
+            !prepare_stat_same(&before, &metadata_after)) {
+            free(walk->meta); walk->meta = NULL;
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+            prepare_detail(walk, "%s: changed during metadata read", pkg_path);
+            return false;
+        }
+        walk->meta[size] = 0;
+        walk->meta_len = (size_t)size;
+    }
+    close(fd);
+    uint32_t mode = (before.st_mode & 0111u)
+        ? VCS_PACKAGE_MODE_EXECUTABLE : VCS_PACKAGE_MODE_FILE;
+    bool ok = vcs_package_manifest_add(&walk->out->manifest, pkg_path, mode,
+                                       size, hashes, chunks) &&
+              prepare_recipe_file(walk, pkg_path);
+    free(hashes); free(buf);
+    if (!ok) {
+        walk->error = VCS_PACKAGE_PREPARE_ERR_MANIFEST;
+        prepare_detail(walk, "%s: manifest or recipe admission", pkg_path);
+    }
+    return ok;
+}
+
+static bool prepare_walk_dir(struct prepare_walk *walk, const char *dir_path,
+                             const char *prefix)
+{
+    struct platform_directory_list files = {0};
+    struct platform_directory_list dirs = {0};
+    bool listed_ok = true;
+    if (!platform_directory_list_regular_sorted(dir_path, &files)) {
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: list files: %s", prefix, strerror(errno));
+        listed_ok = false;
+    }
+    if (listed_ok && !platform_directory_list_real_sorted(dir_path, &dirs)) {
+        platform_directory_list_free(&files);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: list directories: %s", prefix,
+                       strerror(errno));
+        listed_ok = false;
+    }
+    if (!listed_ok) {
+        platform_directory_list_free(&files);
+        platform_directory_list_free(&dirs);
+        return false;
+    }
+
+    bool ok = true;
+    for (size_t i = 0; i < files.count && ok; i++) {
+        const char *name = files.entries[i].name;
+        char child_path[32768];
+        char path[VCS_PACKAGE_PATH_MAX + 1u];
+        int n = snprintf(child_path, sizeof(child_path), "%s/%s", dir_path,
+                         name);
+        if (n <= 0 || (size_t)n >= sizeof(child_path)) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
+            prepare_detail(walk, "%s/%s: path too long", dir_path, name);
+            ok = false;
+            break;
+        }
+        n = prefix[0]
+            ? snprintf(path, sizeof(path), "%s/%s", prefix, name)
+            : snprintf(path, sizeof(path), "%s", name);
+        if (n <= 0 || (size_t)n >= sizeof(path) ||
+            !vcs_package_path_valid(path)) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
+            prepare_detail(walk, "%s: non-canonical package path", path);
+            ok = false;
+            break;
+        }
+        struct stat listed;
+        if (stat(child_path, &listed) != 0 || !S_ISREG(listed.st_mode)) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: stat: %s", path, strerror(errno));
+            ok = false;
+            break;
+        }
+        ok = prepare_regular(walk, child_path, path, &listed);
+    }
+
+    for (size_t i = 0; i < dirs.count && ok; i++) {
+        const char *name = dirs.entries[i].name;
+        if (prepare_local_control_dir(prefix, name))
+            continue;
+        char child_path[32768];
+        char path[VCS_PACKAGE_PATH_MAX + 1u];
+        int n = snprintf(child_path, sizeof(child_path), "%s/%s", dir_path,
+                         name);
+        if (n <= 0 || (size_t)n >= sizeof(child_path)) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
+            prepare_detail(walk, "%s/%s: path too long", dir_path, name);
+            ok = false;
+            break;
+        }
+        n = prefix[0]
+            ? snprintf(path, sizeof(path), "%s/%s", prefix, name)
+            : snprintf(path, sizeof(path), "%s", name);
+        if (n <= 0 || (size_t)n >= sizeof(path) ||
+            !vcs_package_path_valid(path)) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
+            prepare_detail(walk, "%s: non-canonical package path", path);
+            ok = false;
+            break;
+        }
+        struct stat listed;
+        if (stat(child_path, &listed) != 0 || !S_ISDIR(listed.st_mode)) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: stat: %s", path, strerror(errno));
+            ok = false;
+            break;
+        }
+        if (!prepare_walk_dir(walk, child_path, path))
+            ok = false;
+    }
+
+    platform_directory_list_free(&files);
+    platform_directory_list_free(&dirs);
+    return ok;
+}
+
+static enum vcs_package_prepare_error prepare_open_root(
+    const char *dir, char *detail, size_t detail_cap)
+{
+    enum platform_directory_probe_result probe =
+        platform_directory_probe_real(dir);
+    if (probe == PLATFORM_DIRECTORY_PROBE_OK)
+        return VCS_PACKAGE_PREPARE_OK;
+    if (detail && detail_cap) {
+        if (probe == PLATFORM_DIRECTORY_PROBE_MISSING)
+            (void)snprintf(detail, detail_cap, "%s: %s", dir, strerror(errno));
+        else
+            (void)snprintf(detail, detail_cap, "%s: not a real directory", dir);
+    }
+    return VCS_PACKAGE_PREPARE_ERR_PATH;
+}
+
+enum vcs_package_prepare_error vcs_package_prepare(
+    const struct vcs_package_prepare_options *options,
+    struct vcs_package_prepared *out, char *detail, size_t detail_cap)
+{
+    if (!options || !options->dir || !out)
+        return VCS_PACKAGE_PREPARE_ERR_NULL;
+    vcs_package_prepared_init(out);
+    if (detail && detail_cap)
+        detail[0] = '\0';
+    enum vcs_package_prepare_error open_err =
+        prepare_open_root(options->dir, detail, detail_cap);
+    if (open_err != VCS_PACKAGE_PREPARE_OK)
+        return open_err;
+    struct prepare_walk walk = {
+        .out = out,
+        .error = VCS_PACKAGE_PREPARE_OK,
+        .detail = detail,
+        .detail_cap = detail_cap,
+    };
+    bool walked = prepare_walk_dir(&walk, options->dir, "");
+    enum vcs_package_prepare_error err = walked
+        ? prepare_finish(options, &walk) : walk.error;
+    free(walk.meta);
+    if (err != VCS_PACKAGE_PREPARE_OK) {
+        vcs_package_prepared_free(out);
+        vcs_package_prepared_init(out);
+    }
+    return err;
+}
+
+enum vcs_package_prepare_error vcs_package_scan_layout(
+    const char *dir, struct vcs_package_prepared *out,
+    bool *has_package_config, char *detail, size_t detail_cap)
+{
+    if (!dir || !out || !has_package_config)
+        return VCS_PACKAGE_PREPARE_ERR_NULL;
+    vcs_package_prepared_init(out);
+    *has_package_config = false;
+    if (detail && detail_cap)
+        detail[0] = '\0';
+    enum vcs_package_prepare_error open_err =
+        prepare_open_root(dir, detail, detail_cap);
+    if (open_err != VCS_PACKAGE_PREPARE_OK)
+        return open_err;
+    struct prepare_walk walk = {
+        .out = out,
+        .error = VCS_PACKAGE_PREPARE_OK,
+        .detail = detail,
+        .detail_cap = detail_cap,
+    };
+    bool walked = prepare_walk_dir(&walk, dir, "");
+    enum vcs_package_prepare_error err = walked
+        ? VCS_PACKAGE_PREPARE_OK : walk.error;
+    *has_package_config = walk.meta != NULL;
+    free(walk.meta);
+    if (err == VCS_PACKAGE_PREPARE_OK) {
+        enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
+        if (out->recipe.public_headers.count > 0 &&
+            !vcs_package_recipe_add_include_dir(&out->recipe, "include",
+                                                &rerr)) {
+            if (detail && detail_cap)
+                (void)snprintf(detail, detail_cap, "recipe include: %s",
+                               vcs_package_recipe_error_string(rerr));
+            err = VCS_PACKAGE_PREPARE_ERR_RECIPE;
+        }
+        if (err == VCS_PACKAGE_PREPARE_OK) {
+            vcs_package_recipe_set_test_limits(&out->recipe, 0,
+                                               PREPARE_TEST_SECONDS,
+                                               PREPARE_TEST_MEMORY);
+            rerr = vcs_package_recipe_validate(&out->recipe);
+            if (rerr != VCS_PACKAGE_RECIPE_OK) {
+                if (detail && detail_cap)
+                    (void)snprintf(detail, detail_cap, "recipe: %s",
+                                   vcs_package_recipe_error_string(rerr));
+                err = VCS_PACKAGE_PREPARE_ERR_RECIPE;
+            }
+        }
+    }
+    if (err != VCS_PACKAGE_PREPARE_OK) {
+        vcs_package_prepared_free(out);
+        vcs_package_prepared_init(out);
+        *has_package_config = false;
+    }
+    return err;
+}
+
+#else
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static bool prepare_stat_same(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+           a->st_size == b->st_size &&
+           a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
+
+static bool prepare_regular(struct prepare_walk *walk, int parent_fd,
+                            const char *name, const char *path,
+                            const struct stat *listed)
+{
+    int fd = openat(parent_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: open: %s", path, strerror(errno));
+        return false;
+    }
+    struct stat before;
+    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
+        before.st_dev != listed->st_dev || before.st_ino != listed->st_ino ||
+        before.st_size < 0 ||
+        (uint64_t)before.st_size > VCS_PACKAGE_MAX_FILE_BYTES) {
+        close(fd);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+        prepare_detail(walk, "%s: changed before read", path);
+        return false;
+    }
+    uint64_t size = (uint64_t)before.st_size;
+    uint32_t chunks = size == 0 ? 0u :
+        (uint32_t)(1u + (size - 1u) / VCS_PACKAGE_CHUNK_BYTES);
+    uint8_t *hashes = NULL;
+    uint8_t *buf = NULL;
+    if (chunks) {
+        hashes = zcl_malloc((size_t)chunks * 32u,
+                            "vcs.package.prepare.hashes");
+        buf = zcl_malloc(VCS_PACKAGE_CHUNK_BYTES,
+                         "vcs.package.prepare.chunk");
+        if (!hashes || !buf) {
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_ALLOC;
+            prepare_detail(walk, "%s: chunk allocation", path);
+            return false;
+        }
+    }
+    uint64_t left = size;
+    for (uint32_t i = 0; i < chunks; i++) {
+        size_t want = left > VCS_PACKAGE_CHUNK_BYTES
+            ? VCS_PACKAGE_CHUNK_BYTES : (size_t)left;
+        if (!prepare_read_exact(fd, buf, want) ||
+            !vcs_package_chunk_hash(buf, want, hashes + (size_t)i * 32u)) {
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: read chunk %u", path, i);
+            return false;
+        }
+        left -= want;
+    }
+    struct stat after;
+    if (fstat(fd, &after) != 0 || !prepare_stat_same(&before, &after)) {
+        free(hashes); free(buf); close(fd);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+        prepare_detail(walk, "%s: changed while read", path);
+        return false;
+    }
+    if (strcmp(path, VCS_PACKAGE_DEPS_META_PATH) == 0) {
+        if (size > PREPARE_META_MAX || lseek(fd, 0, SEEK_SET) < 0) {
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_META;
+            prepare_detail(walk, "%s: metadata exceeds bound", path);
+            return false;
+        }
+        walk->meta = zcl_malloc((size_t)size + 1u,
+                                "vcs.package.prepare.meta");
+        if (!walk->meta || !prepare_read_exact(fd, walk->meta, (size_t)size)) {
+            free(walk->meta); walk->meta = NULL;
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: metadata read", path);
+            return false;
+        }
+        struct stat metadata_after;
+        if (fstat(fd, &metadata_after) != 0 ||
+            !prepare_stat_same(&before, &metadata_after)) {
+            free(walk->meta); walk->meta = NULL;
+            free(hashes); free(buf); close(fd);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+            prepare_detail(walk, "%s: changed during metadata read", path);
+            return false;
+        }
+        walk->meta[size] = 0;
+        walk->meta_len = (size_t)size;
+    }
+    close(fd);
+    uint32_t mode = (before.st_mode & 0111u)
+        ? VCS_PACKAGE_MODE_EXECUTABLE : VCS_PACKAGE_MODE_FILE;
+    bool ok = vcs_package_manifest_add(&walk->out->manifest, path, mode,
+                                       size, hashes, chunks) &&
+              prepare_recipe_file(walk, path);
+    free(hashes); free(buf);
+    if (!ok) {
+        walk->error = VCS_PACKAGE_PREPARE_ERR_MANIFEST;
+        prepare_detail(walk, "%s: manifest or recipe admission", path);
+    }
+    return ok;
+}
+
+static bool prepare_walk_dir(struct prepare_walk *walk, int dir_fd,
+                             const char *prefix)
+{
+    int scan_fd = dup(dir_fd);
+    if (scan_fd < 0) {
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: dup directory", prefix);
+        return false;
+    }
+    DIR *dir = fdopendir(scan_fd);
+    if (!dir) {
+        close(scan_fd);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: fdopendir", prefix);
+        return false;
+    }
+    bool ok = true;
+    struct dirent *entry;
+    while (ok) {
+        errno = 0;
+        entry = readdir(dir);
+        if (!entry) {
+            if (errno != 0) {
+                walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+                prepare_detail(walk, "%s: readdir: %s", prefix,
+                               strerror(errno));
+                ok = false;
+            }
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        char path[VCS_PACKAGE_PATH_MAX + 1u];
+        int n = prefix[0]
+            ? snprintf(path, sizeof(path), "%s/%s", prefix, entry->d_name)
+            : snprintf(path, sizeof(path), "%s", entry->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(path) ||
+            !vcs_package_path_valid(path)) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
+            prepare_detail(walk, "%s: non-canonical package path", path);
+            ok = false;
+            break;
+        }
+        struct stat listed;
+        if (fstatat(dir_fd, entry->d_name, &listed,
+                    AT_SYMLINK_NOFOLLOW) != 0) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: stat: %s", path, strerror(errno));
+            ok = false;
+        } else if (S_ISDIR(listed.st_mode) &&
+                   prepare_local_control_dir(prefix, entry->d_name)) {
+            continue;
+        } else if (S_ISDIR(listed.st_mode)) {
+            int child = openat(dir_fd, entry->d_name,
+                               O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                               O_NOFOLLOW);
+            if (child < 0 || !prepare_walk_dir(walk, child, path))
+                ok = false;
+            if (child >= 0)
+                close(child);
+        } else if (S_ISREG(listed.st_mode)) {
+            ok = prepare_regular(walk, dir_fd, entry->d_name, path, &listed);
+        } else {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_FILE_TYPE;
+            prepare_detail(walk, "%s: symlink or special file refused", path);
+            ok = false;
+        }
+    }
+    closedir(dir);
+    return ok;
 }
 
 enum vcs_package_prepare_error vcs_package_prepare(

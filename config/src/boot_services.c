@@ -134,7 +134,7 @@
 #include <limits.h>
 #include "config/boot_onion_discovery.h"
 #include "config/boot_zcode_async_proof.h"
-#include "net/peer_strategy.h"
+#include "net/peer_strategy_worker.h"
 #include "net/tor_integration.h"
 #include "net/version.h"
 #include "util/thread_registry.h"
@@ -1349,29 +1349,22 @@ bool app_init_services(struct app_context *ctx,
     t_svc = boot_mark_step(t_svc, "svc.frontend_tor_start",
                            "svc.peer_discover_self");
 
-    /* Discover peer reachability */
-    {
-        static struct node_profile g_node_profile;
-        peer_strategy_discover_self(&g_node_profile,
-                                    (uint16_t)ctx->p2p_port);
-
-        const char *cn = g_node_profile.has_public_ip ? "yes" : "no";
-        const char *method = "";
-        if (g_node_profile.nat_pmp_available)
-            method = " (NAT-PMP)";
-        else if (g_node_profile.upnp_available)
-            method = " (UPnP)";
-        const char *tor = g_node_profile.tor_available ? "yes" : "no";
-        printf("Reachability: clearnet=%s%s tor=%s\n", cn, method, tor);
-
-        char addrs[4][68];
-        int n = peer_strategy_get_addresses(&g_node_profile, addrs, 4);
-        if (n > 0) {
-            printf("Addresses:");
-            for (int i = 0; i < n; i++)
-                printf(" %s", addrs[i]);
-            printf("\n");
-        }
+    /* Discover peer reachability — ASYNC. The NAT-PMP/UPnP probe blocks
+     * for tens of seconds on a host whose gateway ignores it, and running
+     * it here wedged boot ahead of the reducer stage-pipeline init (the
+     * node answered RPC because the frontend had already started, masking
+     * the stall). The tracked worker (lib/net/src/peer_strategy_worker.c)
+     * owns the probe now, publishes the profile and the onion-directory
+     * self row when it completes (structured `nat_probe_complete` log),
+     * and re-arms the 7200 s mapping lease at half-life so it no longer
+     * silently expires. Boot reports the honest intermediate state. */
+    peer_strategy_worker_init(&svc->nat_probe_worker,
+                              (uint16_t)ctx->p2p_port);
+    if (peer_strategy_worker_start(&svc->nat_probe_worker)) {
+        printf("Reachability: probing in background (NAT-PMP/UPnP + Tor)\n");
+    } else {
+        fprintf(stderr,
+                "WARNING: failed to start tracked NAT probe thread\n");
     }
 
     t_svc = boot_mark_step(t_svc, "svc.peer_discover_self",

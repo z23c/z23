@@ -192,17 +192,6 @@ bool progress_store_open(const char *datadir)
     if (!datadir || !datadir[0]) LOG_FAIL("progress_store",
         "open: empty datadir");
 
-#ifdef _WIN32
-    /* consensus.db is authority-bearing and SQLite opens its WAL/SHM siblings
-     * by pathname. Until the native VFS can bind those opens to the validated
-     * directory handle, refuse before migration, quarantine, schema creation,
-     * or any other filesystem mutation. */
-    fprintf(stderr,  // obs-ok:progress-store-open-failure
-            "[progress_store] native Windows consensus store disabled: "
-            "retained-directory SQLite VFS is not qualified (%s)\n", datadir);
-    return false;
-#endif
-
     /* Rename-in-place flip: migrate a legacy progress.kv kernel into
      * consensus.db before opening it. Idempotent (a no-op once consensus.db
      * exists, and a clean no-op on a fresh node where there is no progress.kv —

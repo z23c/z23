@@ -349,17 +349,25 @@ package_from_bin() {
     # nothing, which is the shape of false green this repository keeps paying
     # for. check_c23_node_binary.sh below reads the artifact's own format and
     # applies that platform's dependency audit (Windows: system DLLs only), so
-    # every platform is graded by something.
+    # every platform is graded by something, and BOTH shipped binaries are
+    # graded -- the certificate worker is packaged on every platform too.
     case "$platform" in
         linux-x86_64)
             ZCL_SYMBOL_FLOOR_BIN="$out_dir/z23" bash "$FLOOR_GATE" \
                 || die "stripped z23 exceeds documented glibc/GLIBCXX symbol floor"
             ZCL_C23_MAX_GLIBC=GLIBC_2.38 bash "$NODE_AUDIT" "$out_dir/z23" \
                 || die "stripped z23 failed the C23 node ABI audit"
+            ZCL_SYMBOL_FLOOR_BIN="$out_dir/zclassic23-acme" bash "$FLOOR_GATE" \
+                || die "certificate worker exceeds documented glibc/GLIBCXX symbol floor"
+            ZCL_C23_MAX_GLIBC=GLIBC_2.38 bash "$NODE_AUDIT" \
+                "$out_dir/zclassic23-acme" \
+                || die "certificate worker failed the C23 binary ABI audit"
             ;;
         *)
             bash "$NODE_AUDIT" "$out_dir/z23$exe" \
                 || die "stripped z23$exe failed the C23 node ABI audit"
+            bash "$NODE_AUDIT" "$out_dir/zclassic23-acme$exe" \
+                || die "certificate worker$exe failed the C23 binary ABI audit"
             ;;
     esac
     (cd "$out_dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \

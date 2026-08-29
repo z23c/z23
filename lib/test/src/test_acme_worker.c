@@ -76,10 +76,10 @@ int test_acme_worker(void)
     int failures = 0;
 
     if (!binary_present()) {
-        printf("acme_worker: SKIP (%s not built — run `make` or "
-               "`make zclassic23-acme`; nothing was asserted in this run)\n",
+        printf("acme_worker: FAIL (%s is a required test prerequisite; "
+               "nothing can be asserted without it)\n",
                WORKER_BIN);
-        return 0;
+        return 1;
     }
 
     static char out[256 * 1024];
@@ -190,7 +190,7 @@ int test_acme_worker(void)
     /* ── the opt-in live leg ───────────────────────────────────────── */
     const char *live = getenv("ZCL_ACME_LIVE_STAGING");
     if (!live || strcmp(live, "1") != 0) {
-        printf("acme_worker: SKIP (the live leg contacts the real Let's Encrypt "
+        printf("acme_worker: optional live staging leg NOT RUN (contacts Let's Encrypt "
                "STAGING directory; set ZCL_ACME_LIVE_STAGING=1 to run it, and "
                "additionally ZCL_ACME_LIVE_DOMAIN=<name> resolving to this host "
                "with 443 reachable plus ZCL_ACME_LIVE_AGREE_TOS=1 for a full "
@@ -226,7 +226,7 @@ int test_acme_worker(void)
                      strstr(out, "no CA trust store") == NULL);
             AW_CHECK("an unresolvable name fails at the CA, not at our transport",
                      rc != 0);
-            printf("acme_worker: SKIP (the full order leg needs "
+            printf("acme_worker: optional full-order leg NOT RUN (needs "
                    "ZCL_ACME_LIVE_DOMAIN=<name> and ZCL_ACME_LIVE_AGREE_TOS=1; "
                    "only the reachability leg ran)\n");
         } else {

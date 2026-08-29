@@ -377,10 +377,47 @@ int test_rom_fetch_onion(void)
         };
         bool ok = true;
         for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            /* Classification is the proof this spelling is claimed before
+             * rf_connect's resolver branch. The strict onion parser below may
+             * refuse it, but it may never fall through to DNS. */
+            ok = ok && net_name_is_onion(bad[i]);
             platform_socket_t fd = rom_fetch_dial_for_test(bad[i], 39412);
             if (fd != PLATFORM_SOCKET_INVALID) {
                 platform_socket_close(fd);
                 ok = false;
+            }
+        }
+
+        /* DNS names are case-insensitive and may carry one terminal root dot,
+         * so suffix detection must claim these spellings too. The canonical
+         * onion decoder is intentionally stricter: both are refused inside
+         * the onion route, before either a resolver or a circuit is opened. */
+        char canonical[ONION_V3_ADDRESS_LEN + 1];
+        char uppercase[ONION_V3_ADDRESS_LEN + 1];
+        char trailing_dot[ONION_V3_ADDRESS_LEN + 2];
+        ok = ok && make_onion_host(canonical);
+        if (ok) {
+            memcpy(uppercase, canonical, sizeof(uppercase));
+            for (size_t i = 0; uppercase[i]; i++) {
+                if (uppercase[i] >= 'a' && uppercase[i] <= 'z')
+                    uppercase[i] = (char)(uppercase[i] - ('a' - 'A'));
+            }
+            int n = snprintf(trailing_dot, sizeof(trailing_dot), "%s.",
+                             canonical);
+            ok = n == ONION_V3_ADDRESS_LEN + 1 &&
+                 net_name_is_onion(uppercase) &&
+                 net_name_is_onion(trailing_dot);
+        }
+        if (ok) {
+            const char *const noncanonical[] = { uppercase, trailing_dot };
+            for (size_t i = 0;
+                 i < sizeof(noncanonical) / sizeof(noncanonical[0]); i++) {
+                platform_socket_t fd =
+                    rom_fetch_dial_for_test(noncanonical[i], 39412);
+                if (fd != PLATFORM_SOCKET_INVALID) {
+                    platform_socket_close(fd);
+                    ok = false;
+                }
             }
         }
 

@@ -155,6 +155,23 @@ static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
 #endif
 }
 
+static bool zsb_write_child_exclusive(
+    struct platform_directory_transaction *directory, const char *leaf,
+    const uint8_t *bytes, size_t len)
+{
+    struct platform_directory_child file;
+    platform_directory_child_init(&file);
+    bool created = platform_directory_child_create(directory, leaf, &file);
+    bool ok = created &&
+        platform_directory_child_write_exact(&file, bytes, len, 0) &&
+        platform_directory_child_flush(&file) &&
+        platform_directory_transaction_flush(directory);
+    platform_directory_child_close(&file);
+    if (created && !ok)
+        (void)platform_directory_child_unlink(directory, leaf, true);
+    return ok;
+}
+
 static bool zsb_empty_dir(const char *path)
 {
 #if defined(_WIN32)
@@ -478,21 +495,43 @@ static bool zsb_parent_dir(const char *path, char *out, size_t out_size)
     return true;
 }
 
+static const char *zsb_leaf(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+#if defined(_WIN32)
+    const char *back = strrchr(path, '\\');
+    if (back && (!slash || back > slash)) slash = back;
+#endif
+    return slash && slash[1] ? slash + 1 : NULL;
+}
+
 void zcl_native_handle_zcode_source_bundle_fetch(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply) return;
     const char *output = zsb_str(request->input, "output");
     struct rom_fetch_peer peers[SOURCE_BUNDLE_FETCH_MAX_PEERS];
-    char staging[ZSB_PATH_MAX];
+    char staging[ZSB_PATH_MAX], staging_real[ZSB_PATH_MAX];
     uint8_t root[32];
     size_t npeers = zsb_parse_peers(request->input, peers,
                                     SOURCE_BUNDLE_FETCH_MAX_PEERS);
     if (!output || !zsb_root(request->input, root) || npeers == 0 ||
         !zcl_native_zcode_workspace_is_explicit_scratch(output) ||
-        !zsb_parent_dir(output, staging, sizeof(staging))) {
+        !zsb_parent_dir(output, staging, sizeof(staging)) ||
+        !platform_directory_canonical_real(staging, staging_real,
+                                           sizeof(staging_real))) {
         zsb_fail(reply, "BAD_SOURCE_BUNDLE_FETCH_INPUT", "validate",
                  "source_root, a non-empty comma-separated peers list of host:port entries, and an explicit scratch output path inside an existing directory are required");
+        return;
+    }
+
+    const char *output_leaf = zsb_leaf(output);
+    struct platform_directory_transaction output_directory;
+    platform_directory_transaction_init(&output_directory);
+    if (!output_leaf || !platform_directory_transaction_open(
+            &output_directory, staging_real)) {
+        zsb_fail(reply, "SOURCE_BUNDLE_OUTPUT_REFUSED", "validate",
+                 "the scratch parent must be a private real directory");
         return;
     }
 
@@ -500,7 +539,7 @@ void zcl_native_handle_zcode_source_bundle_fetch(
     size_t wire_len = 0;
     struct source_bundle_fetch_metrics metrics;
     enum source_bundle_fetch_result result = source_bundle_fetch(
-        peers, npeers, root, staging, &wire, &wire_len, &metrics);
+        peers, npeers, root, staging_real, &wire, &wire_len, &metrics);
     if (result != SOURCE_BUNDLE_FETCH_OK) {
         /* No output file was ever opened — the fetch service is not told the
          * output path at all, so "materialized: 0" here is structural.
@@ -512,15 +551,19 @@ void zcl_native_handle_zcode_source_bundle_fetch(
                  result == SOURCE_BUNDLE_FETCH_ERR_ROOT
                      ? vcs_source_bundle_result_string(metrics.last_refusal)
                      : source_bundle_fetch_result_string(result));
+        platform_directory_transaction_close(&output_directory);
         return;
     }
-    if (!zsb_write_exclusive(output, wire, wire_len)) {
+    if (!zsb_write_child_exclusive(&output_directory, output_leaf, wire,
+                                   wire_len)) {
         free(wire);
+        platform_directory_transaction_close(&output_directory);
         zsb_fail(reply, "SOURCE_BUNDLE_OUTPUT_REFUSED", "fetch",
                  "output must be a new no-follow file in an existing scratch directory");
         return;
     }
     free(wire);
+    platform_directory_transaction_close(&output_directory);
     zsb_render(&reply->data, root, &metrics.bundle);
     (void)json_push_kv_str(&reply->data, "output", output);
     (void)json_push_kv_int(&reply->data, "wire_bytes", (int64_t)wire_len);
@@ -688,7 +731,7 @@ void zcl_native_handle_zcode_source_bundle_publish(
     (void)snprintf(next, sizeof(next),
         "another machine needs only this source_root: z23 zcode workspace "
         "source bundle fetch --input='{\"source_root\":\"%s\",\"output\":"
-        "\"/tmp/source.zvsb\",\"peers\":\"<this node's address>:%lld\"}'",
+        "\"/tmp/source.zvsb\",\"peers\":\"NODE_ADDRESS:%lld\"}'",
         root_v && root_v->type == JSON_STR ? json_get_str(root_v) : "",
         (long long)(port && port->type == JSON_INT ? json_get_int(port) : 0));
     (void)json_push_kv_str(&reply->data, "next", next);

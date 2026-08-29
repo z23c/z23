@@ -201,7 +201,8 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # goal set below is built, and a missing file costs nothing. Its position is
 # the whole point: an app registered there joins the SAME lean parse zhello
 # gets, instead of paying the authoritative parse for a two-file build.
-GUI_APPS := zhello
+# Tracked reference apps.  User-local scaffolded apps append via config/gui_apps.mk.
+GUI_APPS := zhello ball
 -include config/gui_apps.mk
 # Five goals per GUI app: run, headless selftest, clean, .app bundle, and the
 # bare binary path. The binary is spelled `build/bin/…` literally because
@@ -333,7 +334,9 @@ VIEW_GEN_HEADERS_EARLY := app/views/include/views/wallet_templates_gen.h \
 VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
+ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 
@@ -1957,7 +1960,8 @@ ifeq ($(ZCL_HOST_OS),Darwin)
 GUI_APP_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
 	-framework QuartzCore -framework CoreVideo
 else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
-GUI_APP_HOST_LIBS := -lgdi32 -luser32 -lshell32 -lole32
+GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
+    -Wl,-Bdynamic -Wl,--no-insert-timestamp -lgdi32 -luser32 -lshell32 -lole32
 endif
 GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(GUI_APP_HOST_CPPFLAGS) \
@@ -2021,6 +2025,8 @@ endef
 # Both must precede the stamp below: the template reads them as it expands.
 zhello_ARGS = $(ZHELLO_ARGS)
 zhello_APP_TITLE := Zhello
+ball_ARGS = $(BALL_ARGS)
+ball_APP_TITLE := Ball
 $(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
 
 .PHONY: new-app
@@ -2567,7 +2573,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2589,7 +2595,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -3075,7 +3081,7 @@ ZCODE_PACKAGE_BASE_ASAN_BIN := $(BIN_DIR)/zcode-package-base-test-asan
 ZCODE_PACKAGE_SHA3_ASAN_BIN := $(BIN_DIR)/zcode-package-sha3-test-asan
 ZCODE_PACKAGE_CODEC_ASAN_BIN := $(BIN_DIR)/zcode-package-codec-test-asan
 ZCODE_PACKAGE_REGISTRY_CHECK_BIN := $(BIN_DIR)/zcode-package-registry-check
-.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test zcode-package-foundation-test zcode-package-asan zclassic23-package-sign
+.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test zcode-package-foundation-test zcode-package-registry-check zcode-package-asan zclassic23-package-sign
 zcode-package-base-test: $(ZCODE_PACKAGE_BASE_TEST_BIN)
 	@$(ZCODE_PACKAGE_BASE_TEST_BIN)
 $(ZCODE_PACKAGE_BASE_TEST_BIN): lib/base/tests/test_base.c \
@@ -3103,6 +3109,8 @@ $(ZCODE_PACKAGE_CODEC_TEST_BIN): lib/codec/tests/test_codec.c \
 	    -Ilib/codec/include -Ilib/base/include -o $@ $^
 
 zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test
+
+zcode-package-registry-check: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 
 # Permanent memory/undefined-behavior gate for the self-hosted package
 # foundation and its complete signed evidence lifecycle.  The first three
@@ -3171,7 +3179,7 @@ $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
 		lib/vcs/src/package_capsule.c lib/vcs/src/package_release.c \
 		lib/json/src/json.c lib/codec/src/cursor.c lib/sha3/src/sha3.c \
 		lib/base/src/safe_alloc.c lib/base/src/log_level.c \
-		lib/platform/src/clock.c
+		lib/platform/src/clock.c lib/platform/src/directory_compat.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -D_GNU_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
 	    -O0 -Wall -Wextra -Werror -pedantic \
@@ -4792,6 +4800,7 @@ ACME_WORKER_SRCS = \
 	lib/net/src/acme_arm_file.c \
 	lib/net/src/acme_b64url.c \
 	lib/net/src/acme_renewal.c \
+	lib/net/src/acme_selfsigned.c \
 	lib/json/src/json.c \
 	lib/base/src/log_level.c \
 	lib/base/src/safe_alloc.c \
@@ -4803,7 +4812,7 @@ ACME_WORKER_SRCS = \
 ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
 	-Ilib/platform/include -Ilib/util/include -Itools/acme \
 	$(ZCL_VENDOR_INC_FLAGS)
-ACME_WORKER_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
+ACME_WORKER_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(ACME_WORKER_INCLUDES)
 # The renewal worker's own selftest needs a private scratch directory, and it
 # used to call mkdtemp(3) for one. That is a POSIX-only symbol the mingw CRT
@@ -8194,6 +8203,8 @@ install -m 755 $(BIN_DIR)/zclassic23-package-verify \
 	"$(DESTDIR)$(PREFIX)/bin/zclassic23-package-verify"; \
 install -m 755 $(BIN_DIR)/zclassic23-package-sign \
 	"$(DESTDIR)$(PREFIX)/bin/zclassic23-package-sign"; \
+install -m 755 $(BIN_DIR)/zclassic23-acme \
+	"$(DESTDIR)$(PREFIX)/bin/zclassic23-acme"; \
 if [ -z "$(DESTDIR)" ]; then \
 	install -d "$(HOME)/.config/systemd/user"; \
 	sed -e 's|%h/zclassic23/build/bin/zcl-nodectl|$(PREFIX)/bin/zcl-nodectl|' \
@@ -8203,11 +8214,11 @@ if [ -z "$(DESTDIR)" ]; then \
 	(systemctl --user daemon-reload 2>/dev/null || true); \
 	echo "installed systemd --user unit; start: systemctl --user start zclassic23"; \
 fi; \
-echo "make install: node, RPC, package verifier + offline signer -> $(DESTDIR)$(PREFIX)/bin"
+echo "make install: node, RPC, package verifier, signer + certificate worker -> $(DESTDIR)$(PREFIX)/bin"
 endef
 
 .PHONY: install
-install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign
+install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign zclassic23-acme
 	@$(INSTALL_C23_PRODUCTS)
 
 # ── macOS launchd service (the launchd equivalent of systemd linger) ──

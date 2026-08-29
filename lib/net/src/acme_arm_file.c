@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #if !defined(_WIN32)
 #include <fcntl.h>
@@ -163,10 +164,11 @@ bool acme_arm_file_clear(const char *path)
     if (!path || !path[0])
         return true;
     if (remove(path) != 0) {
+        if (errno == ENOENT)
+            return true;
         FILE *f = fopen(path, "rb");
-        if (!f)
-            return true; /* already gone */
-        fclose(f);
+        if (f)
+            fclose(f);
         LOG_FAIL("acme", "cannot remove the challenge handoff at %s", path);
     }
     return true;

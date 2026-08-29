@@ -97,23 +97,29 @@ const char *source_bundle_publish_result_string(
 /* Read `path` whole, bounded by the transport's own wire ceiling. Returns NULL
  * (and *len_out = 0) for an absent, unreadable, empty or over-large file —
  * every one of which means "there is no identical bundle already here". */
-static uint8_t *sbp_read_whole(const char *path, size_t *len_out)
+enum sbp_read_result { SBP_READ_ABSENT, SBP_READ_OK, SBP_READ_ERROR };
+
+static enum sbp_read_result sbp_read_whole(const char *path,
+                                            uint8_t **bytes_out,
+                                            size_t *len_out)
 {
+    *bytes_out = NULL;
     *len_out = 0;
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path) ||
-        !platform_positioned_file_snapshot(&file, &before) ||
+    if (!platform_positioned_file_open(&file, path))
+        return SBP_READ_ABSENT;
+    if (!platform_positioned_file_snapshot(&file, &before) ||
         before.size == 0 || before.size > VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES) {
         platform_positioned_file_close(&file);
-        return NULL;
+        return SBP_READ_ERROR;
     }
     size_t len = (size_t)before.size;
     uint8_t *bytes = zcl_malloc(len, "source_bundle_publish.readback");
     if (!bytes) {
         platform_positioned_file_close(&file);
-        return NULL;
+        return SBP_READ_ERROR;
     }
     size_t off = 0;
     while (off < len) {
@@ -127,10 +133,11 @@ static uint8_t *sbp_read_whole(const char *path, size_t *len_out)
     platform_positioned_file_close(&file);
     if (!ok) {
         free(bytes);
-        return NULL;
+        return SBP_READ_ERROR;
     }
+    *bytes_out = bytes;
     *len_out = len;
-    return bytes;
+    return SBP_READ_OK;
 }
 
 /* Stage the wire beside its destination and replace it in one step, so the
@@ -154,7 +161,7 @@ static bool sbp_write_atomic(const char *staging, const char *final_path,
     platform_private_file_close(&staged);
     if (!ok)
         LOG_FAIL(SBP_SUBSYS, "could not publish '%s'", final_path);
-    return true;
+    return ok;
 }
 
 /* Count entries in one directory the same bounded way rom_seed's own sweep
@@ -270,7 +277,15 @@ enum source_bundle_publish_result source_bundle_publish(
      * bundle (a republish, which is a no-op) or something that must not be
      * silently overwritten. */
     size_t present_len = 0;
-    uint8_t *present = sbp_read_whole(final_path, &present_len);
+    uint8_t *present = NULL;
+    enum sbp_read_result read_result =
+        sbp_read_whole(final_path, &present, &present_len);
+    if (read_result == SBP_READ_ERROR) {
+        free(wire);
+        LOG_WARN(SBP_SUBSYS, "publish refused: existing '%s' could not be "
+                 "verified and was not overwritten", final_path);
+        return SOURCE_BUNDLE_PUBLISH_ERR_STORE;
+    }
     bool republished = present && present_len == wire_len &&
         memcmp(present, wire, wire_len) == 0;
     bool foreign = present && !republished;

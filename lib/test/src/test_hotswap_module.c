@@ -691,7 +691,7 @@ static int test_loader_refuses_non_dev_datadir(void)
 /* ── Live swap + epoch-quiesce drain (registry override layer) ─────────── */
 
 static _Atomic int g_v1_calls = 0;
-static _Atomic int g_noise_calls = 0;
+static _Atomic int g_v2_calls = 0;
 
 static void h_v1(const struct zcl_command_request *request,
                  struct zcl_command_reply *reply)
@@ -704,7 +704,7 @@ static void h_v2(const struct zcl_command_request *request,
                  struct zcl_command_reply *reply)
 {
     (void)request;
-    atomic_fetch_add_explicit(&g_noise_calls, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_v2_calls, 1, memory_order_relaxed);
     (void)json_push_kv_str(&reply->data, "v", "v2");
 }
 
@@ -746,7 +746,7 @@ static int test_live_swap_and_quiesce(void)
         zcl_command_registry_reset_overrides();
         zcl_command_registry_set_active(&g_mod_reg);
         atomic_store(&g_v1_calls, 0);
-        atomic_store(&g_noise_calls, 0);
+        atomic_store(&g_v2_calls, 0);
         char out[4096];
 
         /* Baseline builtin handler. */
@@ -768,7 +768,7 @@ static int test_live_swap_and_quiesce(void)
                                                  sizeof(why), NULL));
         ASSERT_EQ((int)mod_exec(out, sizeof(out)), (int)ZCL_COMMAND_EXIT_OK);
         ASSERT(strstr(out, "\"v\":\"v2\"") != NULL);
-        ASSERT(atomic_load(&g_noise_calls) >= 1);
+        ASSERT(atomic_load(&g_v2_calls) >= 1);
 
         /* With readers idle the retired gen-1 snapshot has quiesced — a loader
          * would now be clear to dlclose the superseded .so. */

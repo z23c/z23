@@ -8,8 +8,6 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#ifndef _WIN32
-
 #include "package_prepare_internal.h"
 
 #include <stdio.h>
@@ -69,12 +67,3 @@ bool prepare_meta_closed(const struct json_value *meta,
     }
     return true;
 }
-
-#else /* _WIN32 */
-
-/* package_prepare.c's Windows branch never reaches metadata validation (it
- * refuses before opening the directory), and ISO C forbids an empty
- * translation unit under -Wpedantic -Werror. */
-typedef int package_prepare_schema_win32_no_op_placeholder;
-
-#endif /* _WIN32 */

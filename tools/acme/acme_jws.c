@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #if !defined(_WIN32)
 #include <sys/stat.h>
@@ -127,10 +128,21 @@ bool acme_account_key_save(const EVP_PKEY *key, const char *pem_path)
         LOG_FAIL("acme", "cannot flush the account key to %s", tmp);
     }
     fclose(f);
+#if !defined(_WIN32)
+    /* Account identity is create-once. link(2) publishes without replacing a
+     * path another process created after our initial absence check. */
+    if (link(tmp, pem_path) != 0) {
+        remove(tmp);
+        LOG_FAIL("acme", "cannot publish the account key without replacing %s",
+                 pem_path);
+    }
+    (void)unlink(tmp);
+#else
     if (rename(tmp, pem_path) != 0) {
         remove(tmp);
         LOG_FAIL("acme", "cannot move the account key into place at %s", pem_path);
     }
+#endif
     return true;
 }
 
@@ -139,6 +151,16 @@ EVP_PKEY *acme_account_key_load_or_create(const char *pem_path)
     EVP_PKEY *key = acme_account_key_load(pem_path);
     if (key)
         return key;
+    errno = 0;
+    FILE *existing = fopen(pem_path, "rb");
+    if (existing) {
+        fclose(existing);
+        LOG_NULL("acme", "refusing to replace the unreadable account key at %s",
+                 pem_path);
+    }
+    if (errno != ENOENT)
+        LOG_NULL("acme", "cannot prove the account key path %s is absent",
+                 pem_path);
     key = acme_account_key_generate();
     if (!key)
         return NULL;

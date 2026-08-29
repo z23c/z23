@@ -144,8 +144,7 @@ experiments.
 ## What this is not
 
 - Not a consensus fork. Do not SHA3 block hashes or Equihash.
-- Not a Noise change. The Bitcoin-compatible v2 transport stays
-  HKDF-SHA256.
+- Not a Noise change. The project Noise transport stays HKDF-SHA256.
 - Not a grant of wallet, deployment, or datadir authority. Fetching overlay
   bytes is storage; building and testing are separate; installing or
   deploying is operator-gated.

@@ -202,6 +202,11 @@ TL_LEAF(transport, noise_offered_by_default, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
     "— and it is a capability, never evidence that any byte was encrypted",
     "", "")
 
+TL_LEAF(transport, v2_offered_by_default, TLC_BOOL, TFU_BOOL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "deprecated schema-v1 alias of noise_offered_by_default",
+    "", "")
+
 TL_LEAF(transport, peers_encrypted_now, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
     "live connections whose Noise handshake COMPLETED — the only leaf here "
@@ -230,10 +235,20 @@ TL_LEAF(transport, peers_advertising_noise_now, TLC_I64, TFU_GAUGE, TLV_NORMAL,
     "how many did",
     "", "")
 
+TL_LEAF(transport, peers_advertising_v2_now, TLC_I64, TFU_GAUGE, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "deprecated schema-v1 alias of peers_advertising_noise_now",
+    "", "")
+
 TL_LEAF(transport, noise_advertising_high_water, TLC_I64, TFU_GAUGE, TLV_FULL,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
-    "the most simultaneous v2-advertising peers seen since boot; the evidence "
+    "the most simultaneous Noise-advertising peers seen since boot; the evidence "
     "a rollout decision would need, and still not proof of any negotiation",
+    "", "")
+
+TL_LEAF(transport, v2_advertising_high_water, TLC_I64, TFU_GAUGE, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "deprecated schema-v1 alias of noise_advertising_high_water",
     "", "")
 
 TL_GROUP_END(transport)

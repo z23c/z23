@@ -157,6 +157,93 @@ struct sbft_stall_peer {
     _Atomic int accepts;
 };
 
+/* A deliberately incomplete file-service peer: it completes the real
+ * handshake and serves exactly one caller-supplied RLS body, then closes every
+ * RMF/chunk request. This is the useful adversary for candidate selection: its
+ * directory claims are authenticated by the transport but remain untrusted,
+ * while an independent honest fs_server supplies the actual artifact. */
+struct sbft_directory_peer {
+    int listen_fd;
+    uint16_t port;
+    pthread_t tid;
+    _Atomic bool stop;
+    _Atomic int listings;
+    char body[8192];
+};
+
+static void *sbft_directory_thread(void *arg)
+{
+    static const uint8_t list_tag[32] = { 'R', 'L', 'S' };
+    struct sbft_directory_peer *peer = arg;
+    while (!atomic_load(&peer->stop)) {
+        struct pollfd pfd = { .fd = peer->listen_fd, .events = POLLIN };
+        if (poll(&pfd, 1, 100) <= 0)
+            continue;
+        int fd = accept(peer->listen_fd, NULL, NULL);
+        if (fd < 0)
+            continue;
+        struct fs_session session;
+        fs_session_init(&session, fd);
+        uint8_t root[32] = {0};
+        uint8_t type = 0;
+        const uint8_t *payload = NULL;
+        uint32_t payload_len = 0;
+        if (fs_handshake(&session, root, false) &&
+            fs_recv_frame(&session, &type, &payload, &payload_len) &&
+            type == FS_REQUEST && payload_len == FS_ROM_LIST_REQUEST_SIZE &&
+            memcmp(payload, "RLS", FS_ROM_LIST_REQUEST_SIZE) == 0) {
+            size_t body_len = strlen(peer->body);
+            if (body_len <= UINT32_MAX &&
+                fs_send_chunk_fast(&session, (const uint8_t *)peer->body,
+                                   (uint32_t)body_len, list_tag))
+                atomic_fetch_add(&peer->listings, 1);
+        }
+        fs_session_cleanup(&session);
+        close(fd);
+    }
+    return NULL;
+}
+
+static bool sbft_directory_start(struct sbft_directory_peer *peer,
+                                 const char *body)
+{
+    if (!peer || !body || strlen(body) >= sizeof(peer->body))
+        return false;
+    memset(peer, 0, sizeof(*peer));
+    snprintf(peer->body, sizeof(peer->body), "%s", body);
+    peer->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (peer->listen_fd < 0)
+        return false;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    socklen_t addr_len = sizeof(addr);
+    if (bind(peer->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(peer->listen_fd, 8) != 0 ||
+        getsockname(peer->listen_fd, (struct sockaddr *)&addr, &addr_len) != 0) {
+        close(peer->listen_fd);
+        return false;
+    }
+    peer->port = ntohs(addr.sin_port);
+    atomic_init(&peer->stop, false);
+    atomic_init(&peer->listings, 0);
+    if (peer->port == 0 ||
+        pthread_create(&peer->tid, NULL, sbft_directory_thread, peer) != 0) {
+        close(peer->listen_fd);
+        return false;
+    }
+    return true;
+}
+
+static void sbft_directory_stop(struct sbft_directory_peer *peer)
+{
+    atomic_store(&peer->stop, true);
+    pthread_join(peer->tid, NULL);
+    close(peer->listen_fd);
+}
+
 static void *sbft_stall_thread(void *arg)
 {
     struct sbft_stall_peer *h = arg;
@@ -707,7 +794,7 @@ static int test_no_peer_named_refusal(void)
     return failures;
 }
 
-/* ── (g) The leaf itself: no output file on a refusal ────────────────── */
+/* ── Adversarial directory construction ─────────────────────────────── */
 
 static void sbft_run_leaf(const char *root_hex, const char *out_path,
                           const char *peers, struct zcl_command_reply *reply)
@@ -733,6 +820,165 @@ static void sbft_hex32(const uint8_t v[32], char out[65])
     }
     out[64] = '\0';
 }
+
+static bool sbft_append_offer(char *body, size_t cap, size_t *off,
+                              bool comma, const uint8_t chunk_root[32],
+                              const uint8_t whole_sha3[32],
+                              const uint8_t source_root[32], uint64_t size,
+                              uint32_t chunks)
+{
+    char chunk_hex[65], whole_hex[65], source_hex[65];
+    sbft_hex32(chunk_root, chunk_hex);
+    sbft_hex32(whole_sha3, whole_hex);
+    sbft_hex32(source_root, source_hex);
+    int n = snprintf(body + *off, cap - *off,
+        "%s{\"kind\":\"source_bundle\",\"digest\":\"%s\","
+        "\"whole_sha3\":\"%s\",\"size\":%llu,\"chunk_size\":%u,"
+        "\"chunks\":%u,\"height\":0,\"source_root\":\"%s\"}",
+        comma ? "," : "", chunk_hex, whole_hex,
+        (unsigned long long)size, ROM_SEED_CHUNK_SIZE, chunks, source_hex);
+    if (n <= 0 || (size_t)n >= cap - *off)
+        return false;
+    *off += (size_t)n;
+    return true;
+}
+
+static bool sbft_finish_directory(char *body, size_t cap, size_t *off)
+{
+    int n = snprintf(body + *off, cap - *off, "]}");
+    if (n <= 0 || (size_t)n >= cap - *off)
+        return false;
+    *off += (size_t)n;
+    return true;
+}
+
+static int test_same_chunk_root_divergent_manifest(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: same chunk root with divergent whole-file "
+         "metadata remains a separate candidate") {
+        sbft_open_caps();
+        char troot[] = "/tmp/zcl_sbfetch_tuple_tree_XXXXXX";
+        char sroot[] = "/tmp/zcl_sbfetch_tuple_srv_XXXXXX";
+        char croot[] = "/tmp/zcl_sbfetch_tuple_cli_XXXXXX";
+        char *tdir = mkdtemp(troot), *sdir = mkdtemp(sroot),
+             *cdir = mkdtemp(croot);
+        ASSERT(tdir && sdir && cdir);
+        ASSERT(sbft_make_tree(tdir, 'A'));
+
+        uint8_t root[32], *wire = NULL;
+        size_t wire_len = 0;
+        ASSERT(sbft_bundle(tdir, root, &wire, &wire_len));
+        ASSERT(sbft_write(sdir, "tree.zvsb", wire, wire_len));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "tree.zvsb", NULL, &art) == ROM_REG_OK);
+
+        uint8_t false_whole[32];
+        memcpy(false_whole, art.whole_sha3, sizeof(false_whole));
+        false_whole[0] ^= 0x80u;
+        char body[8192] = "{\"artifacts\":[";
+        size_t body_len = strlen(body);
+        ASSERT(sbft_append_offer(body, sizeof(body), &body_len, false,
+                                 art.chunk_root, false_whole, root,
+                                 art.size_bytes, art.num_chunks));
+        ASSERT(sbft_finish_directory(body, sizeof(body), &body_len));
+
+        struct sbft_directory_peer liar;
+        ASSERT(sbft_directory_start(&liar, body));
+        uint16_t honest_port = sbft_serve(sdir);
+        ASSERT(honest_port != 0);
+        struct rom_fetch_peer peers[2];
+        sbft_peer(&peers[0], liar.port);
+        sbft_peer(&peers[1], honest_port);
+        uint8_t *got = NULL;
+        size_t got_len = 0;
+        struct source_bundle_fetch_metrics metrics;
+        ASSERT(source_bundle_fetch(peers, 2, root, cdir, &got, &got_len,
+                                   &metrics) == SOURCE_BUNDLE_FETCH_OK);
+        ASSERT(got && got_len == wire_len && memcmp(got, wire, wire_len) == 0);
+        ASSERT(metrics.peers_offering == 2 && metrics.candidates_tried == 1);
+        ASSERT(atomic_load(&liar.listings) == 1);
+        ASSERT(sbft_dir_empty(cdir));
+
+        free(got);
+        sbft_directory_stop(&liar);
+        free(wire);
+        fs_server_stop();
+        test_cleanup_tmpdir(cdir);
+        test_cleanup_tmpdir(sdir);
+        test_cleanup_tmpdir(tdir);
+        sbft_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_one_peer_cannot_fill_candidate_set(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: one peer cannot consume every candidate slot "
+         "ahead of an honest peer") {
+        sbft_open_caps();
+        char troot[] = "/tmp/zcl_sbfetch_slots_tree_XXXXXX";
+        char sroot[] = "/tmp/zcl_sbfetch_slots_srv_XXXXXX";
+        char croot[] = "/tmp/zcl_sbfetch_slots_cli_XXXXXX";
+        char *tdir = mkdtemp(troot), *sdir = mkdtemp(sroot),
+             *cdir = mkdtemp(croot);
+        ASSERT(tdir && sdir && cdir);
+        ASSERT(sbft_make_tree(tdir, 'A'));
+
+        uint8_t root[32], *wire = NULL;
+        size_t wire_len = 0;
+        ASSERT(sbft_bundle(tdir, root, &wire, &wire_len));
+        ASSERT(sbft_write(sdir, "tree.zvsb", wire, wire_len));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "tree.zvsb", NULL, &art) == ROM_REG_OK);
+
+        char body[8192] = "{\"artifacts\":[";
+        size_t body_len = strlen(body);
+        for (uint32_t i = 0; i < SOURCE_BUNDLE_FETCH_MAX_CANDIDATES; i++) {
+            uint8_t fake_chunk[32], fake_whole[32];
+            memcpy(fake_chunk, art.chunk_root, sizeof(fake_chunk));
+            memcpy(fake_whole, art.whole_sha3, sizeof(fake_whole));
+            fake_chunk[0] ^= (uint8_t)(i + 1u);
+            fake_whole[1] ^= (uint8_t)(0x40u + i);
+            ASSERT(sbft_append_offer(body, sizeof(body), &body_len, i != 0,
+                                     fake_chunk, fake_whole, root,
+                                     art.size_bytes, art.num_chunks));
+        }
+        ASSERT(sbft_finish_directory(body, sizeof(body), &body_len));
+
+        struct sbft_directory_peer flooder;
+        ASSERT(sbft_directory_start(&flooder, body));
+        uint16_t honest_port = sbft_serve(sdir);
+        ASSERT(honest_port != 0);
+        struct rom_fetch_peer peers[2];
+        sbft_peer(&peers[0], flooder.port);
+        sbft_peer(&peers[1], honest_port);
+        uint8_t *got = NULL;
+        size_t got_len = 0;
+        struct source_bundle_fetch_metrics metrics;
+        ASSERT(source_bundle_fetch(peers, 2, root, cdir, &got, &got_len,
+                                   &metrics) == SOURCE_BUNDLE_FETCH_OK);
+        ASSERT(got && got_len == wire_len && memcmp(got, wire, wire_len) == 0);
+        ASSERT(metrics.peers_asked == 2 && metrics.peers_offering == 2);
+        ASSERT(atomic_load(&flooder.listings) == 1);
+        ASSERT(sbft_dir_empty(cdir));
+
+        free(got);
+        sbft_directory_stop(&flooder);
+        free(wire);
+        fs_server_stop();
+        test_cleanup_tmpdir(cdir);
+        test_cleanup_tmpdir(sdir);
+        test_cleanup_tmpdir(tdir);
+        sbft_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── (i) The leaf itself: no output file on a refusal ────────────────── */
 
 static int test_leaf_end_to_end(void)
 {
@@ -1103,6 +1349,8 @@ int test_source_bundle_fetch(void)
     failures += test_damaged_payload_refused();
     failures += test_stalled_peer_failover();
     failures += test_no_peer_named_refusal();
+    failures += test_same_chunk_root_divergent_manifest();
+    failures += test_one_peer_cannot_fill_candidate_set();
     failures += test_leaf_end_to_end();
     failures += test_planted_resume_state_refused();
     failures += test_one_seeder_fills_the_candidate_set();

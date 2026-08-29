@@ -123,6 +123,9 @@ int t_canonical_deploy_proof_binding_contract(void)
         ASSERT(strstr(unit_buf,
                       "ExecStart=%h/zclassic23/build/bin/zcl-nodectl launch "
                       "%h/zclassic23/build/bin/z23") != NULL);
+        ASSERT(strstr(unit_buf, "Environment=\"ZCL_TOR_FLAG=\"") != NULL);
+        ASSERT(strstr(unit_buf, "    $ZCL_TOR_FLAG \\\n") != NULL);
+        ASSERT(strstr(unit_buf, "    -tor \\\n") == NULL);
         ASSERT(strstr(unit_buf, "zclassic23-launch.sh") == NULL);
         free(unit_buf);
 

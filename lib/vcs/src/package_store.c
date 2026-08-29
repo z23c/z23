@@ -14,6 +14,7 @@
 #include "base/safe_alloc.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
+#include "platform/positioned_file.h"
 #include "util/util.h"
 #include "vcs/package_recipe.h"
 
@@ -23,7 +24,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <io.h>
+#include <windows.h>
+#else
 #include <sys/file.h>
 #endif
 #include <unistd.h>
@@ -33,8 +40,14 @@
 static bool store_process_lock(struct vcs_package_store *store)
 {
 #ifdef _WIN32
-    (void)store;
-    return false;
+    if (!store || store->process_lock_fd < 0)
+        return false;
+    intptr_t raw = _get_osfhandle(store->process_lock_fd);
+    if (raw == -1)
+        return false;
+    OVERLAPPED overlap = {0};
+    return LockFileEx((HANDLE)raw, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0,
+                      &overlap) != 0;
 #else
     if (!store || store->process_lock_fd < 0)
         return false;
@@ -49,7 +62,12 @@ static bool store_process_lock(struct vcs_package_store *store)
 static void store_process_unlock(struct vcs_package_store *store)
 {
 #ifdef _WIN32
-    (void)store;
+    if (store && store->process_lock_fd >= 0) {
+        intptr_t raw = _get_osfhandle(store->process_lock_fd);
+        OVERLAPPED overlap = {0};
+        if (raw != -1)
+            (void)UnlockFileEx((HANDLE)raw, 0, 1, 0, &overlap);
+    }
 #else
     if (store && store->process_lock_fd >= 0)
         (void)flock(store->process_lock_fd, LOCK_UN);
@@ -194,7 +212,7 @@ static void store_drop_package(struct vcs_package_store *store, size_t index)
     if (pkg->committed) {
         snprintf(path, sizeof(path), "%s/manifests/%s", store->root,
                  pkg->root_hex);
-        if (unlink(path) != 0 && errno != ENOENT)
+        if (!store_unlink(path))
             LOG_ERROR(STORE_LOG, "evict unlink %s: %s", path,
                       strerror(errno));
     } else {
@@ -204,14 +222,14 @@ static void store_drop_package(struct vcs_package_store *store, size_t index)
             LOG_ERROR(STORE_LOG, "evict staging cleanup %s", path);
     }
     snprintf(path, sizeof(path), "%s/pins/%s", store->root, pkg->root_hex);
-    if (unlink(path) != 0 && errno != ENOENT)
+    if (!store_unlink(path))
         LOG_ERROR(STORE_LOG, "evict pin unlink %s: %s", path,
                   strerror(errno));
     for (size_t c = 0; c < pkg->chunk_count; c++) {
         if (store_chunk_shared(store, pkg->chunks[c].hash, index))
             continue;
         store_cas_path(store, pkg->chunks[c].hash, path, sizeof(path));
-        if (unlink(path) != 0 && errno != ENOENT)
+        if (!store_unlink(path))
             LOG_ERROR(STORE_LOG, "evict chunk unlink %s: %s", path,
                       strerror(errno));
         store_cas_remove(store, pkg->chunks[c].hash);
@@ -294,15 +312,6 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
 {
     if (!datadir)
         LOG_NULL(STORE_LOG, "null datadir");
-#ifdef _WIN32
-    (void)quota_bytes;
-    /* Refuse before allocating, creating the root, opening recovery state, or
-     * taking a pathname lock. Native admission requires a retained private
-     * root capability and a process-wide handle lock that survives recovery. */
-    LOG_NULL(STORE_LOG,
-             "Windows package store disabled pending retained-root and "
-             "process-lock qualification");
-#else
     struct vcs_package_store *store =
         zcl_malloc(sizeof(*store), "vcs_package_store");
     if (!store)
@@ -325,8 +334,40 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
         free(store);
         LOG_NULL(STORE_LOG, "process lock path too long");
     }
+#ifdef _WIN32
+    int wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                         lock_path, -1, NULL, 0);
+    wchar_t wide_lock[STORE_PATH_MAX];
+    HANDLE lock_handle = INVALID_HANDLE_VALUE;
+    if (wide_count > 0 && wide_count <= (int)STORE_PATH_MAX &&
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, lock_path, -1,
+                            wide_lock, wide_count) == wide_count) {
+        lock_handle = CreateFileW(
+            wide_lock, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            NULL);
+    }
+    if (lock_handle != INVALID_HANDLE_VALUE) {
+        FILE_ATTRIBUTE_TAG_INFO tag;
+        if (!GetFileInformationByHandleEx(lock_handle, FileAttributeTagInfo,
+                                          &tag, sizeof(tag)) ||
+            (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                                   FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+            CloseHandle(lock_handle);
+            lock_handle = INVALID_HANDLE_VALUE;
+        }
+    }
+    if (lock_handle != INVALID_HANDLE_VALUE) {
+        store->process_lock_fd = _open_osfhandle(
+            (intptr_t)lock_handle, _O_RDWR | _O_BINARY);
+        if (store->process_lock_fd < 0)
+            CloseHandle(lock_handle);
+    }
+#else
     store->process_lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC,
                                   0600);
+#endif
     if (store->process_lock_fd < 0 || !store_process_lock(store)) {
         if (store->process_lock_fd >= 0)
             close(store->process_lock_fd);
@@ -361,7 +402,6 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
              store->pkg_count, store->cas_count,
              (unsigned long long)store->gc_orphans_total);
     return store;
-#endif
 }
 
 void vcs_package_store_close(struct vcs_package_store *store)
@@ -511,7 +551,7 @@ enum vcs_package_store_result vcs_package_store_put_manifest(
      * pool it assembles in. A package that can never fit is refused now. */
     char pin[STORE_PATH_MAX];
     snprintf(pin, sizeof(pin), "%s/pins/%s", store->root, root_hex);
-    bool pre_pinned = access(pin, F_OK) == 0;
+    bool pre_pinned = store_path_exists(pin);
     enum vcs_package_store_pool eventual =
         pre_pinned ? VCS_PACKAGE_STORE_POOL_PINS : VCS_PACKAGE_STORE_POOL_RARE;
     if (total_bytes > store_pool_budget(store, eventual) ||
@@ -813,8 +853,10 @@ enum vcs_package_store_result vcs_package_store_get_chunk(
     }
     char cas_path[STORE_PATH_MAX];
     store_cas_path(store, hash, cas_path, sizeof(cas_path));
-    struct stat st;
-    if (stat(cas_path, &st) != 0) {
+    struct platform_positioned_file cas_file;
+    uint64_t file_size = 0;
+    platform_positioned_file_init(&cas_file);
+    if (!platform_positioned_file_open(&cas_file, cas_path)) {
         int saved_errno = errno;
         if (saved_errno == ENOENT) {
             store_cas_remove(store, hash);
@@ -825,13 +867,19 @@ enum vcs_package_store_result vcs_package_store_get_chunk(
         }
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
-                   "CAS object %s stat: %s", cas_path,
+                   "CAS object %s open: %s", cas_path,
                    strerror(saved_errno));
     }
-    if (st.st_size <= 0 ||
-        (uint64_t)st.st_size > VCS_PACKAGE_CHUNK_BYTES) {
+    if (!platform_positioned_file_size(&cas_file, &file_size)) {
+        platform_positioned_file_close(&cas_file);
+        pthread_mutex_unlock(&store->lock);
+        LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
+                   "CAS object %s size", cas_path);
+    }
+    if (file_size == 0 || file_size > VCS_PACKAGE_CHUNK_BYTES) {
+        platform_positioned_file_close(&cas_file);
         int remove_errno = 0;
-        if (unlink(cas_path) != 0 && errno != ENOENT)
+        if (!store_unlink(cas_path))
             remove_errno = errno;
         if (!remove_errno) {
             store_cas_remove(store, hash);
@@ -843,30 +891,29 @@ enum vcs_package_store_result vcs_package_store_get_chunk(
                        "quarantine corrupt CAS object %s: %s", cas_path,
                        strerror(remove_errno));
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_CHUNK_HASH, STORE_LOG,
-                   "quarantined corrupt CAS object %s with invalid size %lld",
-                   cas_path, (long long)st.st_size);
+                   "quarantined corrupt CAS object %s with invalid size %llu",
+                   cas_path, (unsigned long long)file_size);
     }
-    size_t len = (size_t)st.st_size;
+    size_t len = (size_t)file_size;
     uint8_t *buf = zcl_malloc(len, "vcs_store_get_chunk");
     if (!buf) {
+        platform_positioned_file_close(&cas_file);
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_ALLOC, STORE_LOG,
                    "alloc %zu chunk bytes", len);
     }
-    FILE *f = fopen(cas_path, "rb");
-    if (!f || fread(buf, 1, len, f) != len) {
-        if (f)
-            fclose(f);
+    int64_t got = platform_positioned_file_read(&cas_file, buf, len, 0);
+    platform_positioned_file_close(&cas_file);
+    if (got < 0 || (uint64_t)got != file_size) {
         free(buf);
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
                    "read CAS object %s", cas_path);
     }
-    fclose(f);
     if (!vcs_package_verify_chunk(file, chunk_index, buf, len)) {
         free(buf);
         int remove_errno = 0;
-        if (unlink(cas_path) != 0 && errno != ENOENT)
+        if (!store_unlink(cas_path))
             remove_errno = errno;
         if (!remove_errno) {
             store_cas_remove(store, hash);
@@ -1054,7 +1101,7 @@ enum vcs_package_store_result vcs_package_store_pin(
         pkg->pinned = true;
         store_package_touch(store, pkg);
     } else {
-        if (unlink(pin) != 0 && errno != ENOENT) {
+        if (!store_unlink(pin)) {
             pthread_mutex_unlock(&store->lock);
             LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
                        "unlink pin %s: %s", pin, strerror(errno));

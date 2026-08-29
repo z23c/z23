@@ -81,6 +81,8 @@ struct onion_seed_race_wave {
     size_t winner_index;
     onion_seed_fetch_fn fetch;
     void *fetch_ctx;
+    onion_seed_usable_fn usable;
+    void *usable_ctx;
     int timeout_secs;
     struct onion_seed_race_join *join;
 };
@@ -120,8 +122,11 @@ static void *onion_seed_race_worker(void *arg)
 
     int rc = wave->fetch(w->host, "/directory.json", &result,
                          wave->timeout_secs, wave->fetch_ctx);
-    bool usable = (rc == 0 && result.status == 200 && result.body != NULL);
-    if (usable) {
+    bool answer_usable =
+        rc == 0 && result.status == 200 && result.body != NULL &&
+        (!wave->usable || wave->usable(result.body, result.body_len,
+                                       wave->usable_ctx));
+    if (answer_usable) {
         int expected = 0;
         if (atomic_compare_exchange_strong_explicit(&wave->winner_claimed,
                                                     &expected, 1,
@@ -210,6 +215,8 @@ int onion_seed_race_first_usable(const char *const *hosts,
                                  size_t n,
                                  onion_seed_fetch_fn fetch,
                                  void *fetch_ctx,
+                                 onion_seed_usable_fn usable,
+                                 void *usable_ctx,
                                  int timeout_secs,
                                  const _Atomic bool *stop,
                                  struct onion_fetch_result *winner,
@@ -256,6 +263,8 @@ int onion_seed_race_first_usable(const char *const *hosts,
     atomic_init(&wave->winner_ready, 0);
     wave->fetch = fetch;
     wave->fetch_ctx = fetch_ctx;
+    wave->usable = usable;
+    wave->usable_ctx = usable_ctx;
     wave->timeout_secs = timeout_secs;
     wave->join = join;
 

@@ -39,13 +39,16 @@ bool peer_strategy_discover_self(struct node_profile *profile,
 
     /* Regtest (fMineBlocksOnDemand) is a local, connect-only test chain that
      * never needs NAT-PMP/UPnP port mapping or public-reachability discovery.
-     * Skip it: this runs SYNCHRONOUSLY during boot (config/src/boot_services.c)
-     * ahead of the reducer stage-pipeline init, and the UPnP SSDP/SOAP probe
-     * blocks for tens of seconds on a host whose gateway ignores it — wedging
-     * boot so the consensus engine never starts (the node answers RPC because
-     * the frontend already started, masking the stall). Gated on
-     * fMineBlocksOnDemand: true ONLY for regtest, false on main/testnet
-     * (lib/chain/src/chainparams.c), so live-network discovery is unchanged. */
+     * Gated on fMineBlocksOnDemand: true ONLY for regtest, false on
+     * main/testnet (lib/chain/src/chainparams.c), so live-network discovery
+     * is unchanged. This gate is now belt-and-braces: the probe runs on the
+     * background nat-probe worker (lib/net/src/peer_strategy_worker.c),
+     * which checks the same flag and exits before ever calling here. The
+     * blocking stays off the boot path: the UPnP SSDP/SOAP probe blocks for
+     * tens of seconds on a host whose gateway ignores it, and run
+     * synchronously during boot it wedged the reducer stage-pipeline init
+     * (the node answered RPC because the frontend already started, masking
+     * the stall). */
     const struct chain_params *cp = chain_params_get();
     if (cp && cp->fMineBlocksOnDemand)
         return false;
@@ -98,8 +101,11 @@ bool peer_strategy_discover_self(struct node_profile *profile,
      * as the gateway ignored us — the same failure class the systemd
      * watchdog has SIGABRT'd this node for. Now the round reads a cache
      * and never dials, and the cache is written here rather than by a
-     * caller who has to remember to. A no-public-IP result publishes the
-     * absence, so the row simply carries no clearnet endpoint.
+     * caller who has to remember to. The only caller is the background
+     * nat-probe worker (peer_strategy_worker.c), which re-runs this probe
+     * at half the 7200 s lease to renew the mapping. A no-public-IP
+     * result publishes the absence, so the row simply carries no clearnet
+     * endpoint.
      *
      * B5 gate (docs/work/MARKET_ONION_DELIVERY.md item 6): the probed IP
      * is published only under the explicit public-endpoint opt-in
