@@ -16,6 +16,7 @@
 #include "config/boot_zcode_dht.h"
 #include "config/boot_mesh_pairing.h"
 #include "config/boot_mesh_status.h"
+#include "config/boot_mesh_machines.h"
 #include "services/binary_ab_fallback.h"
 #include "services/chain_activation_service.h"
 #include "services/block_index_integrity.h"
@@ -1234,6 +1235,7 @@ bool app_init_services(struct app_context *ctx,
     boot_mesh_status_register_rpc(svc->rpc_table, boot_node_db(svc),
                                   boot_db_service(svc));
     boot_mesh_pairing_register_rpc(svc->rpc_table);
+    boot_mesh_machines_register_rpc(svc->rpc_table);
     boot_zcode_async_proof_register_rpc(svc->rpc_table);
     /* File transfer service — SHA3-verified chunk serving */
     if (boot_profile_has_file_service(ctx)) {

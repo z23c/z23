@@ -66,6 +66,7 @@ ALLOW_PATHS=(
   "tools/ship.sh|the operator-run deploy path; a person invokes it and it verifies the running daemon's source id"
   "tools/githooks/pre-push|prints advice text naming the override command; performs no push of its own"
   "tools/githooks/pre-commit|prints advice text naming the override command; performs no commit of its own"
+  "tools/dev/grok-unit.sh|prints agent instructions forbidding git commit/push; performs no push of its own"
   "tools/lint/check_stable_publish_containment.sh|lint fixture: the forbidden string is the input it tests"
   "tools/scripts/check_stable_publish_containment.sh|lint fixture: the forbidden string is the input it tests"
   "tools/lint/check_no_unattended_publish.sh|this gate; a gate exempt from itself is a place to hide, so it is listed rather than skipped"

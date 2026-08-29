@@ -7,6 +7,7 @@
 
 #include "config/boot_mesh_pairing.h"
 #include "config/boot_mesh_status.h"
+#include "config/boot_mesh_machines.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
@@ -262,6 +263,79 @@ int test_mesh_pairing(void)
         ASSERT_EQ(view.observation.observed_unix, 2400);
         ASSERT(memcmp(view.observation.receipt_root, equivocation.receipt_root,
                       32) != 0);
+        PASS();
+    }
+
+    TEST("mesh machines: live probe row and durable store agree on identity") {
+        /* One verified receipt feeds BOTH halves of the unified fleet view:
+         * the durable observation store (through the lane's single handoff)
+         * and the live sidecar row the refresh derives. Pin that both derive
+         * the same pairing identity and responder Noise fingerprint from the
+         * same receipt, and that the rendered document agrees. */
+        struct db_mesh_pairing pairing;
+        ASSERT_EQ(db_mesh_pairing_list(&ndb, &pairing, 1), 1);
+        struct db_mesh_machine_observation stored;
+        ASSERT(mesh_observation_fixture(&pairing, 2500, "{}", &stored));
+        /* Decode the exact wire, as the status lane delivers it to the
+         * persistence handoff. */
+        struct mesh_status_receipt_v1 receipt;
+        ASSERT_EQ(mesh_status_receipt_v1_decode(&receipt, stored.receipt_wire,
+                                                stored.receipt_len),
+                  MESH_STATUS_PROTO_OK);
+        /* The synchronous store handoff; production writers (poll path,
+         * fleet refresh, background refresh scheduler) run this same store
+         * write through boot_mesh_status_receipt_persist on the serialized
+         * db_service lane. */
+        ASSERT(boot_mesh_status_persist_observation(&ndb, &receipt));
+
+        struct mesh_machine_row live;
+        memset(&live, 0, sizeof(live));
+        snprintf(live.pairing_id, sizeof(live.pairing_id), "%s",
+                 pairing.pairing_id);
+        live.probed = true;
+        live.state = MESH_MACHINE_ONLINE;
+        ASSERT(mesh_machines_fill_live_identity(&live, &receipt));
+        ASSERT_STR_EQ(live.pairing_id, pairing.pairing_id);
+        ASSERT_EQ(live.observed_unix, 2500);
+        uint8_t expect_fingerprint[32];
+        ASSERT(v2_identity_public_fingerprint(receipt.responder_noise_static,
+                                              expect_fingerprint));
+        ASSERT(memcmp(expect_fingerprint, live.responder_noise_fingerprint,
+                      32) == 0);
+
+        /* The durable projection carries the same identity: receipt's
+         * responder Noise key is the pairing's peer key, and the row ids
+         * match the live row byte for byte. */
+        struct db_mesh_machine_view view;
+        ASSERT_EQ(db_mesh_machine_observation_list(&ndb, &view, 1, 2501), 1);
+        ASSERT(view.has_observation);
+        ASSERT_STR_EQ(view.pairing.pairing_id, live.pairing_id);
+        ASSERT_STR_EQ(view.observation.pairing_id, live.pairing_id);
+        ASSERT(memcmp(view.pairing.peer_noise_pubkey,
+                      receipt.responder_noise_static, 32) == 0);
+        ASSERT_EQ(view.observation.observed_unix, 2500);
+        ASSERT_EQ(view.observation.expires_unix, 2530);
+
+        /* The rendered document (durable evidence only, no live sidecar)
+         * agrees: same pairing id, same fingerprint from the lane's one
+         * shared helper, and no live keys appear. */
+        struct json_value doc;
+        json_init(&doc);
+        boot_mesh_status_machines_test_render(&ndb, 2501, &doc);
+        ASSERT_EQ(json_get_int(json_get(&doc, "returned_fresh")), 1);
+        const struct json_value *item = json_at(json_get(&doc, "machines"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(item, "pairing_id")),
+                      live.pairing_id);
+        ASSERT_STR_EQ(json_get_str(json_get(item, "observation_state")),
+                      "fresh");
+        char expect_hex[65];
+        boot_mesh_status_key_fingerprint("zcl.mesh.noise.fingerprint.v1",
+                                         receipt.responder_noise_static,
+                                         expect_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(item, "peer_noise_fingerprint")),
+                      expect_hex);
+        ASSERT(json_get(item, "live_reachability") == NULL);
+        json_free(&doc);
         PASS();
     }
 

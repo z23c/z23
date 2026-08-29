@@ -15,7 +15,9 @@
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "controllers/diagnostics_controller.h"
+#include "crypto/sha3.h"
 #include "json/json.h"
+#include "models/mesh_machine_observation.h"
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
 #include "net/net.h"
@@ -791,4 +793,56 @@ void boot_mesh_status_shutdown(void)
     memset(g_pending, 0, sizeof(g_pending));
     memset(g_seen_requests, 0, sizeof(g_seen_requests));
     zcl_mutex_unlock(&g_mesh_lock);
+}
+
+/* The single durable-evidence handoff: every verified terminal receipt —
+ * whether it completed a single `ops mesh status` poll or a fleet probe
+ * inside `ops mesh machines` — enters the observation store through here.
+ * The store itself refuses older or equivocal evidence and treats an
+ * exact-root replay as idempotent, so concurrent callers cannot regress a
+ * row. */
+bool boot_mesh_status_persist_observation(
+    struct node_db *ndb, const struct mesh_status_receipt_v1 *receipt)
+{
+    if (!ndb || !receipt ||
+        receipt->observed_unix > INT64_MAX ||
+        receipt->expires_unix > INT64_MAX) {
+        LOG_ERROR("net.mesh_status", "persist observation: invalid input");
+        return false;
+    }
+    struct db_mesh_machine_observation row;
+    memset(&row, 0, sizeof(row));
+    zcl_hex_encode(receipt->pairing_id, 32, row.pairing_id);
+    if (mesh_status_receipt_v1_encode(
+            receipt, row.receipt_wire, sizeof(row.receipt_wire),
+            &row.receipt_len) != MESH_STATUS_PROTO_OK ||
+        mesh_status_receipt_v1_root(receipt, row.receipt_root) !=
+            MESH_STATUS_PROTO_OK) {
+        LOG_ERROR("net.mesh_status", "persist observation: encode/root failed");
+        return false;
+    }
+    row.status = receipt->status;
+    row.observed_unix = (int64_t)receipt->observed_unix;
+    row.expires_unix = (int64_t)receipt->expires_unix;
+    row.received_unix = (int64_t)platform_time_wall_time_t();
+    if (row.received_unix <= 0) {
+        LOG_ERROR("net.mesh_status", "persist observation: wall clock unavailable");
+        return false;
+    }
+    return db_mesh_machine_observation_save(ndb, &row);
+}
+
+/* Domain-separated SHA3-256 fingerprint of a public key, hex-encoded. The
+ * one implementation every mesh operator surface uses, so a rendered
+ * fingerprint can never drift between the receipt view and the fleet view. */
+void boot_mesh_status_key_fingerprint(const char *domain,
+                                      const uint8_t key[32], char out[65])
+{
+    struct sha3_256_ctx hash;
+    uint8_t digest[32];
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const uint8_t *)domain, strlen(domain));
+    sha3_256_write(&hash, key, 32);
+    sha3_256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
 }
