@@ -1,0 +1,1006 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * THE REMOTE CLASS TABLE — for every command leaf this binary registers, the
+ * one decision "may a peer on our own mesh ask this node to run it?"
+ *
+ * Consumer must define:
+ *   REMOTE_COMMAND_CLASS(leaf, class, reason)
+ *
+ * `leaf`    the canonical invocation name, exactly as registered:
+ *           a dotted path from config/commands/<branch>.def (the typed
+ *           registry expanded by config/src/command_catalog.c), or a flat
+ *           method name from
+ *           app/controllers/include/controllers/agent_contracts.def (the
+ *           first-call agent API table).
+ * `class`   exactly one of:
+ *             REMOTE_CLASS_NEVER            refuse regardless of capability
+ *             REMOTE_CLASS_OWNER_CAPABILITY require a live owner-minted
+ *                                           capability that NAMES this leaf
+ *             REMOTE_CLASS_READ_ONLY        bounded, side-effect-free read,
+ *                                           reachable by any live owner-minted
+ *                                           capability for this node
+ * `reason`  one line saying why the leaf is remotable. REQUIRED for
+ *           REMOTE_CLASS_READ_ONLY and REMOTE_CLASS_OWNER_CAPABILITY; empty
+ *           for REMOTE_CLASS_NEVER, whose justification is the section comment
+ *           above its group. Refusing needs no defence; permitting does.
+ *
+ * ── WHAT THIS FILE IS AND IS NOT ────────────────────────────────────────────
+ * It is a CLASSIFICATION, not a switch. No transport reads it today, no
+ * dispatcher consults it, and nothing here enables remote execution of
+ * anything. The design it belongs to is docs/work/REMOTE_COMMAND_CHANNEL.md,
+ * whose first increment is deliberately this table plus its gate. Landing the
+ * decision before the mechanism is the point: when the transport is written it
+ * inherits a table somebody already argued over, instead of an allowlist grown
+ * one hurried leaf at a time next to the code that needed it.
+ *
+ * ── DEFAULT DENY ────────────────────────────────────────────────────────────
+ * REMOTE_CLASS_NEVER is the default and the majority. A leaf with no row here
+ * is not "unclassified, treat as read-only"; it is a lint failure
+ * (tools/lint/check_remote_command_classes.sh), because an unclassified leaf is
+ * a decision nobody made. The gate is symmetric: a row naming a leaf the
+ * registry no longer has also fails, so a renamed leaf cannot leave a stale
+ * permission behind under its old name.
+ *
+ * ── THE CLASS ONLY EVER SUBTRACTS ───────────────────────────────────────────
+ * A class is a filter in front of the existing leaf, never a substitute for it.
+ * Every local check a leaf already performs — ZCL_COMMAND_AUTH_OWNER,
+ * hotswap_activation_authorized(), the wallet grant default-deny, the datadir
+ * refusals — still runs afterwards, unchanged, on the target node. Nothing in
+ * this file can grant an authority the leaf would refuse locally. That is why
+ * REMOTE_CLASS_OWNER_CAPABILITY on a leaf that is already owner-gated locally
+ * is not a widening: it adds a second, independent, revocable, expiring gate in
+ * front of the first.
+ *
+ * ── HOW A CLASS WAS CHOSEN ──────────────────────────────────────────────────
+ * READ_ONLY answers one question only: "what is this machine doing right now?"
+ * Node, chain, sync, network, storage and runtime posture; registry discovery;
+ * deterministic local projections. A leaf is NOT read_only merely because its
+ * macro is a *_READ shape. Custody reads (balances, addresses, notes),
+ * authority reads (which grants exist, which peers are paired, this node's
+ * identity), general introspection primitives (arbitrary SQL, arbitrary state
+ * dumps, arbitrary file reads), work-starting reads (benchmarks, self-tests,
+ * waits) and economic reads are all NEVER.
+ *
+ * OWNER_CAPABILITY is deliberately tiny — seven leaves. Each is a thing the
+ * owner concretely needs to do to a machine they own and cannot do any other
+ * way, and each carries its own argument below.
+ *
+ * NEVER is everything else, including every leaf that spends, signs, exports
+ * key material, mutates a datadir, changes who this node trusts, evaluates or
+ * mutates a consensus predicate, publishes on the operator's behalf, or
+ * executes fetched code.
+ *
+ * ── ORDER AND GROUPING ──────────────────────────────────────────────────────
+ * Promoted leaves come first, individually argued. The NEVER rows follow,
+ * grouped by branch in registry order, with one section comment per branch
+ * carrying that branch's argument. Rows are data; the reasoning lives beside
+ * them on purpose. A list of names nobody can defend is a list the next lane
+ * deletes.
+ */
+
+/* ── read_only ────────────────────────────────────────────────────── */
+REMOTE_COMMAND_CLASS("discover.help", REMOTE_CLASS_READ_ONLY,
+    "one registry branch or leaf from the in-binary catalog; deterministic, node-free, no datadir touch")
+REMOTE_COMMAND_CLASS("discover.search", REMOTE_CLASS_READ_ONLY,
+    "deterministic intent ranking over the static catalog; no node contact")
+REMOTE_COMMAND_CLASS("discover.describe", REMOTE_CLASS_READ_ONLY,
+    "one leaf contract from the static catalog; deterministic")
+REMOTE_COMMAND_CLASS("discover.schema", REMOTE_CLASS_READ_ONLY,
+    "one leaf input schema from the static catalog; deterministic")
+REMOTE_COMMAND_CLASS("core.status", REMOTE_CLASS_READ_ONLY,
+    "chain-only readiness projection; PUBLIC auth, CHAIN_READ only, emits no address or key")
+REMOTE_COMMAND_CLASS("core.status.brief", REMOTE_CLASS_READ_ONLY,
+    "lean chain-only status projection; PUBLIC auth, CHAIN_READ only")
+REMOTE_COMMAND_CLASS("core.chain.tip", REMOTE_CLASS_READ_ONLY,
+    "current tip height and hash; public chain data already served over P2P")
+REMOTE_COMMAND_CLASS("core.chain.mempool.status", REMOTE_CLASS_READ_ONLY,
+    "mempool size and fee posture; a counter, not the transactions")
+REMOTE_COMMAND_CLASS("core.sync.status", REMOTE_CLASS_READ_ONLY,
+    "sync phase and stage projection; the primary fleet health question")
+REMOTE_COMMAND_CLASS("core.sync.validation", REMOTE_CLASS_READ_ONLY,
+    "validation progress projection; read of an existing counter")
+REMOTE_COMMAND_CLASS("core.sync.blockers", REMOTE_CLASS_READ_ONLY,
+    "the node's own stated blocker; the point of asking a machine remotely")
+REMOTE_COMMAND_CLASS("core.sync.diagnose", REMOTE_CLASS_READ_ONLY,
+    "bounded sync diagnosis over state the node already publishes")
+REMOTE_COMMAND_CLASS("core.consensus.report", REMOTE_CLASS_READ_ONLY,
+    "consensus posture projection; reads a predicate result, evaluates none")
+REMOTE_COMMAND_CLASS("core.consensus.integrity", REMOTE_CLASS_READ_ONLY,
+    "integrity posture projection; reads a predicate result, evaluates none")
+REMOTE_COMMAND_CLASS("core.network.status", REMOTE_CLASS_READ_ONLY,
+    "peer-count and reachability projection")
+REMOTE_COMMAND_CLASS("core.network.chain_view", REMOTE_CLASS_READ_ONLY,
+    "what this node believes the network's chain looks like")
+REMOTE_COMMAND_CLASS("core.network.peers.list", REMOTE_CLASS_READ_ONLY,
+    "peer table projection; public P2P addresses this node already gossips")
+REMOTE_COMMAND_CLASS("core.network.peers.latency", REMOTE_CLASS_READ_ONLY,
+    "per-peer latency projection")
+REMOTE_COMMAND_CLASS("core.network.peers.incidents", REMOTE_CLASS_READ_ONLY,
+    "peer incident counters; the reachability half of a fleet check")
+REMOTE_COMMAND_CLASS("core.network.census", REMOTE_CLASS_READ_ONLY,
+    "aggregate network census projection")
+REMOTE_COMMAND_CLASS("core.network.node", REMOTE_CLASS_READ_ONLY,
+    "this node's own advertised P2P posture")
+REMOTE_COMMAND_CLASS("core.network.versions", REMOTE_CLASS_READ_ONLY,
+    "observed peer build strings; the fleet-version question")
+REMOTE_COMMAND_CLASS("core.network.graph", REMOTE_CLASS_READ_ONLY,
+    "peer graph projection")
+REMOTE_COMMAND_CLASS("core.network.onion.status", REMOTE_CLASS_READ_ONLY,
+    "onion service up/down; reachability, not identity material")
+REMOTE_COMMAND_CLASS("core.network.onion.health", REMOTE_CLASS_READ_ONLY,
+    "onion circuit health counters")
+REMOTE_COMMAND_CLASS("core.storage.stats", REMOTE_CLASS_READ_ONLY,
+    "database size and row counters; no row contents")
+REMOTE_COMMAND_CLASS("core.mining.status", REMOTE_CLASS_READ_ONLY,
+    "mining posture projection; starts no work")
+REMOTE_COMMAND_CLASS("core.node.bootstatus", REMOTE_CLASS_READ_ONLY,
+    "boot phase and stage; returns immediately, unlike core.node.bootwait")
+REMOTE_COMMAND_CLASS("ops.health", REMOTE_CLASS_READ_ONLY,
+    "bounded node health document; PUBLIC auth, CHAIN_READ only")
+REMOTE_COMMAND_CLASS("ops.diagnose", REMOTE_CLASS_READ_ONLY,
+    "bounded diagnosis with a named blocker and one next action")
+REMOTE_COMMAND_CLASS("ops.lanes", REMOTE_CLASS_READ_ONLY,
+    "which lane this node runs; the first question when driving a fleet")
+REMOTE_COMMAND_CLASS("ops.metrics", REMOTE_CLASS_READ_ONLY,
+    "counter projection")
+REMOTE_COMMAND_CLASS("ops.timeline", REMOTE_CLASS_READ_ONLY,
+    "bounded event timeline projection")
+REMOTE_COMMAND_CLASS("ops.statecatalog", REMOTE_CLASS_READ_ONLY,
+    "the names of dumpable subsystems; a catalog, not the state")
+REMOTE_COMMAND_CLASS("ops.debug.explain", REMOTE_CLASS_READ_ONLY,
+    "explains a typed error code; deterministic, node-free")
+REMOTE_COMMAND_CLASS("ops.debug.meaning", REMOTE_CLASS_READ_ONLY,
+    "explains a typed field; deterministic, node-free")
+REMOTE_COMMAND_CLASS("ops.debug.dash.slo", REMOTE_CLASS_READ_ONLY,
+    "SLO dashboard projection")
+REMOTE_COMMAND_CLASS("ops.debug.dash.kpi", REMOTE_CLASS_READ_ONLY,
+    "KPI dashboard projection")
+REMOTE_COMMAND_CLASS("ops.debug.dash.snapshot", REMOTE_CLASS_READ_ONLY,
+    "dashboard snapshot projection")
+REMOTE_COMMAND_CLASS("ops.debug.dash.summary", REMOTE_CLASS_READ_ONLY,
+    "dashboard summary projection")
+REMOTE_COMMAND_CLASS("ops.debug.dash.milestone", REMOTE_CLASS_READ_ONLY,
+    "milestone dashboard projection")
+REMOTE_COMMAND_CLASS("ops.debug.dash.mirror", REMOTE_CLASS_READ_ONLY,
+    "mirror-lag dashboard projection")
+REMOTE_COMMAND_CLASS("ops.debug.dash.selfheal", REMOTE_CLASS_READ_ONLY,
+    "self-heal dashboard projection")
+REMOTE_COMMAND_CLASS("ops.debug.rom_seed.status", REMOTE_CLASS_READ_ONLY,
+    "whether this node seeds ROM artifacts; a posture flag")
+REMOTE_COMMAND_CLASS("ops.debug.rom_seed.artifacts", REMOTE_CLASS_READ_ONLY,
+    "the artifact list this node already advertises over the RLS wire tag")
+REMOTE_COMMAND_CLASS("ops.debug.rom_fetch.status", REMOTE_CLASS_READ_ONLY,
+    "ROM fetch progress counters")
+REMOTE_COMMAND_CLASS("ops.mesh.status", REMOTE_CLASS_READ_ONLY,
+    "mesh reachability projection; the fleet's own liveness question")
+REMOTE_COMMAND_CLASS("ops.mesh.join_status", REMOTE_CLASS_READ_ONLY,
+    "mesh join progress projection")
+REMOTE_COMMAND_CLASS("ops.recovery.status", REMOTE_CLASS_READ_ONLY,
+    "recovery posture projection; starts no recovery")
+REMOTE_COMMAND_CLASS("ops.postmortem.list", REMOTE_CLASS_READ_ONLY,
+    "the list of recorded postmortems; identifiers, not bodies")
+REMOTE_COMMAND_CLASS("ops.telemetry.summary", REMOTE_CLASS_READ_ONLY,
+    "telemetry roll-up projection")
+REMOTE_COMMAND_CLASS("ops.telemetry.health", REMOTE_CLASS_READ_ONLY,
+    "telemetry health projection")
+REMOTE_COMMAND_CLASS("ops.telemetry.alerts.active", REMOTE_CLASS_READ_ONLY,
+    "currently firing alerts")
+REMOTE_COMMAND_CLASS("ops.telemetry.network.summary", REMOTE_CLASS_READ_ONLY,
+    "network telemetry roll-up")
+REMOTE_COMMAND_CLASS("ops.telemetry.network.peers", REMOTE_CLASS_READ_ONLY,
+    "peer telemetry projection")
+REMOTE_COMMAND_CLASS("ops.telemetry.network.tor", REMOTE_CLASS_READ_ONLY,
+    "Tor transport telemetry counters")
+REMOTE_COMMAND_CLASS("ops.telemetry.network.transport", REMOTE_CLASS_READ_ONLY,
+    "transport telemetry counters")
+REMOTE_COMMAND_CLASS("ops.telemetry.runtime.services", REMOTE_CLASS_READ_ONLY,
+    "which services are running")
+REMOTE_COMMAND_CLASS("ops.telemetry.runtime.threads", REMOTE_CLASS_READ_ONLY,
+    "thread counters")
+REMOTE_COMMAND_CLASS("ops.telemetry.runtime.resources", REMOTE_CLASS_READ_ONLY,
+    "CPU and memory counters; the is-this-box-wedged question")
+REMOTE_COMMAND_CLASS("ops.telemetry.storage.summary", REMOTE_CLASS_READ_ONLY,
+    "storage telemetry roll-up")
+REMOTE_COMMAND_CLASS("ops.telemetry.storage.database", REMOTE_CLASS_READ_ONLY,
+    "database size counters")
+REMOTE_COMMAND_CLASS("ops.telemetry.storage.disk", REMOTE_CLASS_READ_ONLY,
+    "free-space counters; the single most useful fleet-wide read")
+REMOTE_COMMAND_CLASS("ops.telemetry.sync.summary", REMOTE_CLASS_READ_ONLY,
+    "sync telemetry roll-up")
+REMOTE_COMMAND_CLASS("ops.telemetry.sync.stages", REMOTE_CLASS_READ_ONLY,
+    "per-stage sync counters")
+REMOTE_COMMAND_CLASS("ops.telemetry.sync.stage", REMOTE_CLASS_READ_ONLY,
+    "one stage's sync counters")
+REMOTE_COMMAND_CLASS("agent", REMOTE_CLASS_READ_ONLY,
+    "the first-call compatibility status document; bounded, side-effect-free")
+REMOTE_COMMAND_CLASS("agentops", REMOTE_CLASS_READ_ONLY,
+    "compact command-center projection over routes and next work")
+REMOTE_COMMAND_CLASS("agentdiagnose", REMOTE_CLASS_READ_ONLY,
+    "bounded first-call diagnosis with pointers, not payloads")
+REMOTE_COMMAND_CLASS("agentdevstatus", REMOTE_CLASS_READ_ONLY,
+    "read-only dev-lane status; reports staged state, changes none")
+REMOTE_COMMAND_CLASS("agentliveness", REMOTE_CLASS_READ_ONLY,
+    "liveness projection")
+REMOTE_COMMAND_CLASS("agentlanes", REMOTE_CLASS_READ_ONLY,
+    "lane inventory projection")
+REMOTE_COMMAND_CLASS("agentinterface", REMOTE_CLASS_READ_ONLY,
+    "static description of transports and payload rules")
+REMOTE_COMMAND_CLASS("agentcontracts", REMOTE_CLASS_READ_ONLY,
+    "the contract registry itself; static data")
+REMOTE_COMMAND_CLASS("agentmap", REMOTE_CLASS_READ_ONLY,
+    "static command map")
+REMOTE_COMMAND_CLASS("agentdeployguard", REMOTE_CLASS_READ_ONLY,
+    "a pure allow/refuse DECISION about a restart or deploy; it changes nothing and refusing to let a fleet driver ask it remotely would defeat its purpose")
+REMOTE_COMMAND_CLASS("anchorstatus", REMOTE_CLASS_READ_ONLY,
+    "anchor posture projection")
+REMOTE_COMMAND_CLASS("api", REMOTE_CLASS_READ_ONLY,
+    "static route inventory")
+REMOTE_COMMAND_CLASS("appprotocols", REMOTE_CLASS_READ_ONLY,
+    "static protocol inventory")
+REMOTE_COMMAND_CLASS("healthcheck", REMOTE_CLASS_READ_ONLY,
+    "bounded health probe")
+REMOTE_COMMAND_CLASS("getmirrorstatus", REMOTE_CLASS_READ_ONLY,
+    "mirror lag projection")
+REMOTE_COMMAND_CLASS("milestone", REMOTE_CLASS_READ_ONLY,
+    "milestone projection")
+REMOTE_COMMAND_CLASS("timeline", REMOTE_CLASS_READ_ONLY,
+    "bounded event timeline projection")
+REMOTE_COMMAND_CLASS("peerincidents", REMOTE_CLASS_READ_ONLY,
+    "peer incident counters")
+REMOTE_COMMAND_CLASS("statecatalog", REMOTE_CLASS_READ_ONLY,
+    "the names of dumpable subsystems; a catalog, not the state")
+REMOTE_COMMAND_CLASS("servicecatalog", REMOTE_CLASS_READ_ONLY,
+    "static service inventory")
+REMOTE_COMMAND_CLASS("serviceoperations", REMOTE_CLASS_READ_ONLY,
+    "static operation inventory")
+REMOTE_COMMAND_CLASS("operatorsnapshot", REMOTE_CLASS_READ_ONLY,
+    "observationally pure target snapshot; the contract states it mutates nothing")
+
+/* ── owner_capability ─────────────────────────────────────────────── */
+REMOTE_COMMAND_CLASS("dev.hotswap.probe", REMOTE_CLASS_OWNER_CAPABILITY,
+    "verify-only half of the fleet dev loop: dlopen, ABI-validate, self-test, never commit. Blast radius is one dev-lane process that keeps serving its previous generation on any failure.")
+REMOTE_COMMAND_CLASS("dev.hotswap.apply", REMOTE_CLASS_OWNER_CAPABILITY,
+    "the fleet dev loop's activation step, and the reason this channel exists. The capability must name this leaf explicitly and expire. Remote class only SUBTRACTS authority: hotswap_activation_authorized() still requires -hotswap-activate, ZCL_HOTSWAP_ACTIVATE=1 and the dev datadir, and still refuses the canonical datadir, after the remote check has passed.")
+REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.fetch", REMOTE_CLASS_OWNER_CAPABILITY,
+    "lets a remote node converge to a named source root by pulling and verifying it ITSELF. source_bundle_fetch() accepts nothing that vcs_source_bundle_verify() does not match against the caller-supplied root, so the capability grants go-find-these-bytes, never trust-these-bytes.")
+REMOTE_COMMAND_CLASS("ops.logs", REMOTE_CLASS_OWNER_CAPABILITY,
+    "a bounded log read is the second thing a fleet driver needs and the first thing that leaks: log bodies carry operator paths, peer addresses and datadir names. Bounded and useful, so not never_remote; leaky, so never read_only.")
+REMOTE_COMMAND_CLASS("ops.debug.bundle", REMOTE_CLASS_OWNER_CAPABILITY,
+    "a bounded diagnostic capture over several subsystems at once. Same reasoning as ops.logs: genuinely needed across a fleet, too broad to hand out without the capability naming it.")
+REMOTE_COMMAND_CLASS("getnodelog", REMOTE_CLASS_OWNER_CAPABILITY,
+    "the agent-contract log read. Same leak surface as ops.logs and classified identically.")
+REMOTE_COMMAND_CLASS("eventlog", REMOTE_CLASS_OWNER_CAPABILITY,
+    "the agent-contract event-log read. Bodies can quote operator paths and peer identity; bounded, but named-capability only.")
+
+/* ── never_remote ─────────────────────────────────────────────────── */
+
+/* ROOT — 1 never_remote leaf.
+ *
+ * `z23 status` is the money front door. Its projection is custody-authoritative
+ * — spendable, pending and reserved amounts — and it declares
+ * ZCL_COMMAND_CAP_WALLET_REQUEST for exactly that reason. The chain-only read a
+ * fleet driver actually wants is core.status.brief, promoted to read_only
+ * above. */
+REMOTE_COMMAND_CLASS("status", REMOTE_CLASS_NEVER, "")
+
+/* CORE — 68 never_remote leaves.
+ *
+ * What is left in `core` after the status, sync and network projections
+ * promoted above is one of five things.
+ *
+ *   Consensus. core.consensus.block.invalidate / .reconsider mutate this
+ *   node's view of the chain; core.consensus.producer-session.retire and
+ *   core.epoch.anchor mutate producer and epoch state; utxo.commitment,
+ *   utxo.audit and mmb hand back consensus commitments that a caller will
+ *   treat AS the chain. AGENTS.md makes consensus inviolable and puts it above
+ *   every convenience this channel exists to provide.
+ *
+ *   Raw chain and database content rather than a posture projection —
+ *   core.chain.block.get, core.chain.transaction.get, core.chain.mempool.list,
+ *   core.storage.query, core.storage.query.offline, core.storage.integrity.
+ *   The P2P protocol already serves blocks to anyone who asks, with its own
+ *   bounds; core.storage.query is arbitrary query authority over the node
+ *   database, which is the general-purpose primitive a typed channel exists to
+ *   refuse.
+ *
+ *   Unbounded or work-starting calls. core.node.bootwait and core.chain.wait.*
+ *   block until something happens, which turns one remote call into a held
+ *   resource; core.mining.benchmark burns CPU on request.
+ *
+ *   Sovereign identity and directory state — core.identity.anchor / .rotate /
+ *   .revoke / .resolve / .list, core.zdir.*, core.anchor.compose / .inspect,
+ *   core.epoch.status / .verify. These name and re-key who this node IS. An
+ *   identity a remote caller can rotate is not sovereign.
+ *
+ *   Wallet custody — every core.wallet.* leaf, INCLUDING its reads. Balances,
+ *   addresses, shielded notes, UTXO lists and backup posture are precisely what
+ *   a stolen capability would enumerate before attempting a spend, and
+ *   core.wallet.address.export-key is key export outright. */
+REMOTE_COMMAND_CLASS("core.wallet.security.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.security.encrypt", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.security.unlock", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.security.lock", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.chain.block.get", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.chain.transaction.get", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.chain.mempool.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.chain.wait.height", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.chain.wait.blocker", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.chain.wait.halt", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.sync.frontier.offline", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.anchor.compose", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.anchor.inspect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.epoch.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.epoch.anchor", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.epoch.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.consensus.utxo.commitment", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.consensus.utxo.audit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.consensus.mmb", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.consensus.producer-session.retire", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.consensus.block.invalidate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.consensus.block.reconsider", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.network.peers.add", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.balance", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.address.new", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.address.public-key", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.address.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.address.import", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.address.export-key", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.address.label", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.address.by-label", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.utxo.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.transaction.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.transaction.get", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.transaction.send", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.transaction.multisig.compose", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.transaction.raw.create", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.transaction.raw.sign", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.transaction.raw.broadcast", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.shielded.address", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.shielded.balance", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.shielded.notes", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.shielded.send", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.backup.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.backup.now", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.backup.decrypt", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.restore", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.recovery.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.recovery.restore", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.rescan-witnesses", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.audit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.rescan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.wallet.replay", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.storage.integrity", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.storage.query", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.storage.query.offline", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.mining.benchmark", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.node.bootwait", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.identity.resolve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.identity.anchor", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.identity.rotate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.identity.revoke", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.identity.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.zdir.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.zdir.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.zdir.register", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.zdir.deregister", REMOTE_CLASS_NEVER, "")
+
+/* APP — 93 never_remote leaves.
+ *
+ * The app layer is accounts, authentication, names, tokens, messaging,
+ * markets, storefronts, shops and atomic swaps. Every leaf here either moves
+ * value, changes who may act as this node, or publishes on this node's behalf.
+ *
+ * The reads are not exempt and that is the interesting half.
+ * app.market.purchase.status and app.messaging.inbox return the operator's own
+ * private commerce and correspondence; app.account.list and app.account.show
+ * enumerate the principals a later capability could target; app.auth.challenge
+ * and app.auth.verify are the authentication surface itself, and a channel
+ * that let a caller drive another node's authentication would be lending it
+ * this node's voice. app.presentation.* renders for a human sitting at the
+ * machine and has no remote meaning at all. */
+REMOTE_COMMAND_CLASS("app.auth.challenge", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.auth.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.account.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.account.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.account.whoami", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.account.add", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.account.role", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.account.suspend", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.account.unsuspend", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.payments.zpay.compose", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.payments.zpay.inspect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.qr.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.corpus", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.code-change", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.development", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.reproduction", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.publication-confirm", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.release-confirm", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.presentation.publication-status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.blog.anchor", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.resolve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.register", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.update", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.transfer", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.renew", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.set-record", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.names.set-text", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.tokens.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.tokens.create", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.tokens.send", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.tokens.mint", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.tokens.burn", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.messaging.inbox", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.messaging.send", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.messaging.send-named", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.messaging.read", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.content.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.content.register", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.purchase.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.purchase.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.purchase.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.purchase.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.purchase.retrieve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.offer", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.moderation.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.moderation.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.moderation.profile.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.moderation.profile.set", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.moderation.relay.set", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.moderation.review.set", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.market.buy", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.store.list-product", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.store.products", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.swap.chains", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.swap.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.swap.initiate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.swap.participate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.inspect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.protocols", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.transaction-types.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.transaction-types.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.transaction-types.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.transaction-types.command", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.transaction-types.wire", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.transaction-types.micro-lab", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.service.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.service.inspect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.service.access", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.service.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.store.catalog", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.store.order", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.store.pay", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.store.purchases", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.store.collect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.init", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.reputation", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.post", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.cancel", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.review", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.fulfill.post", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.fulfill.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.fulfill.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.fulfill.withdraw", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("app.shop.want.fulfill.review", REMOTE_CLASS_NEVER, "")
+
+/* VAULT — 20 never_remote leaves.
+ *
+ * The custody surface. Every leaf here is spend authority, a spend plan, or the
+ * grant machinery that authorizes spends. vault.session.create / .list /
+ * .revoke drive struct db_agent_session
+ * (app/models/include/models/agent_session.h) — the very model
+ * docs/work/REMOTE_COMMAND_CHANNEL.md proposes to borrow the SHAPE of. Borrow
+ * the shape; never expose the spend instance. A remote caller who could mint a
+ * vault session could mint itself money authority, which is the one failure
+ * this whole table exists to make unreachable. */
+REMOTE_COMMAND_CLASS("vault.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.encumbered", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.routes", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.send", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.send-shielded", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.send-token", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.issue", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.fanout-plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.submit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.cancel", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.intent.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.session.create", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.session.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.session.revoke", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.swap.redeem", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
+
+/* DEV — 40 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
+ * owner_capability above; they are the only two).
+ *
+ * The dev branch drives a checkout. It compiles (ZCL_COMMAND_CAP_COMPILER),
+ * executes processes (CAP_PROCESS_EXEC), runs tests (CAP_TEST_RUN), writes
+ * source (CAP_CHECKOUT_WRITE), activates generations (CAP_DEV_ACTIVATE) and
+ * reverts version control. A remote caller holding any one of those holds
+ * arbitrary code execution on the box by construction — which is exactly the
+ * unbounded authority the shell was rejected for.
+ *
+ * Its READS are refused too, and not out of excess caution: dev.test.run,
+ * dev.test.sim and dev.verify-change are *_READ macros that execute the dev
+ * toolchain against a working tree, and dev.ff, dev.drive and dev.loop.* read
+ * and steer a live build loop. The remote path to another node's source is
+ * source-by-hash (zcode.workspace.source.bundle.fetch), which the target
+ * verifies itself.
+ *
+ * The two hot-swap leaves are the deliberate, individually-named exception,
+ * argued at their rows above. */
+REMOTE_COMMAND_CLASS("dev.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.begin", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.drive", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.ff", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.publication.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.publication.advance", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.publication.collect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.publication.mirror.record", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.verify-change", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.core.boundary", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.core.proof", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.app.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.app.describe", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.app.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.app.scaffold", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.app.simulate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.app.inspect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.app.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.change.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.change.apply", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.vcs.revert", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.vcs.seal.grant", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.loop.ensure", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.loop.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.loop.wait", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.loop.events", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.loop.stop", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.test.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.test.run", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.test.story", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.test.sim", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.test.replay", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.test.background.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.generation.current", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.generation.history", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.generation.activate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.generation.rollback", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.generation.compact", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.diagnose.latest", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.diagnose.show", REMOTE_CLASS_NEVER, "")
+
+/* OPS — 36 never_remote leaves.
+ *
+ * What survives the promotions above, by kind.
+ *
+ *   General introspection levers. ops.state dumps whatever a named subsystem
+ *   chooses to emit, and ops.debug.producer / .profile / .backtrace / .rom are
+ *   the same shape. The CATALOG of dumpable subsystems (ops.statecatalog) is a
+ *   list of names and is read_only; the dump itself is not, because its content
+ *   is decided by code this table cannot see.
+ *
+ *   Work starters. ops.selftest and ops.recovery.rebuild spend the target's
+ *   resources on request.
+ *
+ *   ops.mesh.machines belongs in that group and reads like it does not, which
+ *   is why it is called out rather than left in the list. Its name and its
+ *   *_READ macro say "list paired machines", and its registered description
+ *   says the rest: the call runs a bounded live refresh, probing up to 8 active
+ *   records over the established Noise status lane on a collective 12-second
+ *   budget and PERSISTING each verified receipt before rendering. It never
+ *   dials, so it is not a reachability lever — but it is still one remote
+ *   request that spends the target's time, touches eight other machines and
+ *   writes durable state, which is not a side-effect-free read whatever the
+ *   macro shape claims. It is also the pairing roster, and this table's own
+ *   rule puts "which peers are paired" in NEVER. The read a fleet driver
+ *   actually wants from one box is ops.mesh.status, promoted above, which
+ *   projects reachability and dials nothing.
+ *
+ *   The trust surface this channel rides on. ops.mesh.identity reveals this
+ *   node's identity; ops.mesh.pair.plan / .commit / .list / .revoke and
+ *   ops.mesh.join change or enumerate who it trusts. Letting a remote caller
+ *   edit the pairing that authorizes remote callers is a bootstrap loop with no
+ *   floor.
+ *
+ *   The authority inventory. ops.telemetry.agents.sessions / .grants /
+ *   .activity enumerate the capability grants themselves — the map an attacker
+ *   would want before choosing a target.
+ *
+ *   Custody and economics telemetry. ops.telemetry.wallet.* is custody;
+ *   ops.telemetry.metaverse.* and ops.telemetry.zcode.* are P4 economics, not
+ *   "what is this machine doing".
+ *
+ *   Mutation and long-lived state. ops.config.reload and
+ *   ops.debug.rom_seed.enable / .disable / .publish and
+ *   ops.debug.rom_fetch.bundle change node configuration or publish on the
+ *   node's behalf; ops.telemetry.watch opens a subscription rather than
+ *   answering once. ops.config.show is refused with them: node configuration
+ *   quotes datadir paths and operator layout.
+ *
+ *   Not yet real. ops.jobs.list, ops.postmortem.replay,
+ *   ops.telemetry.alerts.history and ops.telemetry.storage.cache are PLANNED
+ *   leaves that fail closed today. Classifying a PLANNED leaf by what its name
+ *   suggests it will do is how a permission gets granted to code nobody has
+ *   read; they stay NEVER until they exist and someone reclassifies them. */
+REMOTE_COMMAND_CLASS("ops.jobs.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.state", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.selftest", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.profile", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.producer", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.rom", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.backtrace", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.rom_seed.enable", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.rom_seed.disable", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.rom_seed.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.debug.rom_fetch.bundle", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.machines", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.identity", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.pair.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.pair.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.pair.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.pair.revoke", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.join", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.postmortem.replay", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.config.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.config.reload", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.recovery.rebuild", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.agents.sessions", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.agents.grants", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.agents.activity", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.metaverse.properties", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.metaverse.market", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.metaverse.services", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.alerts.history", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.storage.cache", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.wallet.summary", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.wallet.security", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.watch", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.zcode.summary", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.zcode.swarm", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.telemetry.zcode.installs", REMOTE_CLASS_NEVER, "")
+
+/* CODE — 15 never_remote leaves.
+ *
+ * The whole `code` branch is a source-content read surface: it returns file
+ * bytes, symbol bodies, room and capsule excerpts, and provenance facts from
+ * the checkout. There is already a correct way to read another node's source
+ * remotely — fetch the content-addressed bundle by its root hash and verify it
+ * locally (zcode.workspace.source.bundle.fetch, owner_capability above, whose
+ * acceptance is vcs_source_bundle_verify() against a root the CALLER supplied).
+ *
+ * Exposing a path-taking file reader over a wire adds a traversal surface and
+ * buys nothing that source-by-hash does not already give, verifiably. The
+ * deterministic index projections (code.map, code.refs, code.impact) are
+ * refused alongside the readers rather than split hair-by-hair: they are the
+ * same branch, they read the same tree, and a per-leaf split here would be a
+ * distinction the next person to add a `code` leaf would not notice. */
+REMOTE_COMMAND_CLASS("code.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.group", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.map", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.tests", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.room", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.file", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.sym", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.capsule", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.change-plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.refs", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.impact", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.find", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.provenance.merkle", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.provenance.facts", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.provenance.emitter", REMOTE_CLASS_NEVER, "")
+
+/* ZCODE — 204 never_remote leaves (zcode.workspace.source.bundle.fetch is
+ * owner_capability above).
+ *
+ * The C23 Commons branch builds, seals, installs, publishes, reproduces and
+ * pays for packages. Its commands execute fetched source under the bounded
+ * build lifecycle and publish signed artifacts. AGENTS.md is explicit that
+ * fetching and storing are separate from building and testing, and that both
+ * are separate from installing, linking, executing and deploying — each step
+ * being a LOCAL acceptance a remote caller cannot perform on the operator's
+ * behalf. A remote `zcode ... build` would collapse that ladder into one wire
+ * call.
+ *
+ * Its reads are not promoted either, and the reason is the read_only test
+ * rather than any specific danger: rewards, leaderboards, patronage, badges,
+ * impact shares, corpus and moderation state answer "what is happening in the
+ * commons", not "what is this machine doing". Several read-shaped leaves here
+ * also carry mutating verbs (.commit, .capture, .rebuild, .begin, .cancel),
+ * which is a second reason not to promote the branch on macro shape alone.
+ *
+ * Only the fetch is promoted, because converging a machine you own to a named
+ * source root is the one Commons operation the fleet dev loop needs and the
+ * only one whose acceptance is a hash the caller already knows. */
+REMOTE_COMMAND_CLASS("zcode.workspace.source.capture", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.create", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.import", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.checkout", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.source.package.checkout", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.passport.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.manifest.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.workspace.manifest.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.passport.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.passport.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.passport.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.project.inspect", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.project.init.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.context", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.preflight", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.project.init.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.project.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.start", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.toolchain", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.run", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.accept", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.offer", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.pull", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.task.offer", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.task.pull", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.task.board", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.work.review", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.economics.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.backlog", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.claim.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.claim.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.claim.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.corpus.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.corpus.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.corpus.shard.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.corpus.shard.page", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.corpus.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.impact.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.impact.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.impact.share", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.moderation.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.moderation.service.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.moderation.policy.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.moderation.policy.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.reproduction.challenge.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.reproduction.challenge.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.attribution.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.attribution.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.epoch.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.epoch.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.shadow.protocol.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.schedule.propose.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.schedule.propose.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.schedule.claim.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.schedule.claim.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.schedule.claim.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.schedule.claim.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.epoch", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.creation.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.lineage", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.commons.rebuild", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.offer.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.offer.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.fund.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.fund.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.continuity.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.continuity.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.continuity.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.settle.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.settle.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.refund.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.patronage.refund.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.prepare", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.seal", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.score.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.score.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.score.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.create", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.use", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.improve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.evidence", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.accept", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.lane", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.promotion-guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.tasks", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.publish.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.dev.publish.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.publish.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.publish.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.search", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.library", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.recipe", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.attest.import", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.attest.offer", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.attest.pull", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.attest.admit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.contributor.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.contributor.packages", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.resolve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.reward.score", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.reward.eligible", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.reward.queue", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.reward.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.reward.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.reward.receipt", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.leaderboard.daily", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.leaderboard.weekly", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.leaderboard.monthly", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.leaderboard.all", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.badge.eligible", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.badge.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.badge.issue", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.contributor.badges", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.seed.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.seed.ratio", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.storage.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.fetch", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.source.reproduce", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.peers", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.offered", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.pin", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.unpin", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.fastobj.export", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.fastobj.admit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.release.sign", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.release.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.release.anchor", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.release.prove", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.domain.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.domain.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.proof.walk", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.delegate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.peers", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.find.begin", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.find.poll", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.find.cancel", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.find", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.records.begin", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.records.poll", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.records.cancel", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.records", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.providers", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.storage_ack", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.policy.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.policy.mutate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.network.replication", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.desc.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.desc.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.desc.resolve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.endpoint.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.endpoint.accept", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.endpoint.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.endpoint.resolve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.endpoint.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.checkout", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.add.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.add.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.rollback", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.reproduce", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.node.join", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.node.verify", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.node.update.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.node.update.check", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.node.update.apply", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.package.policy.limits", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.study.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.study.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.study.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.study.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.findings.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.findings.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.work.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.work.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.work.execute", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.work.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.work.receipt", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.review.submit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.vote.submit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.discover", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.rank.snapshot", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.rebuild", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.science.fetch", REMOTE_CLASS_NEVER, "")
+
+/* METAVERSE — 23 never_remote leaves.
+ *
+ * Simulation-only economics — AGENTS.md priority P4, explicitly "no live ZC23
+ * token economics today". Nothing here answers an operational question about a
+ * machine, and several leaves move simulated value. A surface that is not yet
+ * real is the worst thing to grant remote authority over, because there is no
+ * operational experience to say what a wrong call costs. */
+REMOTE_COMMAND_CLASS("metaverse.agent.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.agent.money", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.agent.liquidity", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.agent.audit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.property.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.property.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.commit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.discover", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.scout.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.scout.run", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.space.scout.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.plan", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.submit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.cancel", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.receipt", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.worker.list", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.worker.approve", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("metaverse.build.worker.revoke", REMOTE_CLASS_NEVER, "")
+
+/* YARDSALE — 5 never_remote leaves.
+ *
+ * Peer-to-peer selling. Arming a seller and buying move value; the guide and
+ * status reads describe a market rather than a machine and fail the read_only
+ * test. */
+REMOTE_COMMAND_CLASS("yardsale.guide", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("yardsale.seller.arm", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("yardsale.seller.disarm", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("yardsale.seller.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("yardsale.buy", REMOTE_CLASS_NEVER, "")
+
+/* ZSES — 2 never_remote leaves.
+ *
+ * Session invites mint and accept the credential that lets another party act.
+ * Minting an authority THROUGH the channel that authority would then be used on
+ * is a bootstrap loop: the owner must create the first credential out of band,
+ * at the machine, or the whole chain of trust closes on itself. */
+REMOTE_COMMAND_CLASS("zses.invite.create", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zses.invite.accept", REMOTE_CLASS_NEVER, "")
+
+/* AGENT-CONTRACT METHODS — 8 never_remote.
+ *
+ * The remaining flat methods from
+ * app/controllers/include/controllers/agent_contracts.def.
+ *
+ * dbquery is arbitrary SQL against the node database and dumpstate is arbitrary
+ * subsystem introspection. Both are general-purpose primitives whose blast
+ * radius is decided by the caller's string rather than by this table — which is
+ * precisely the property that disqualified a shell, and it is not improved by
+ * arriving over a typed frame.
+ *
+ * agentbuild, agenttest, agentcopyprove, agentimpact, proofbundle and refold
+ * compile, execute or re-derive state on the target. */
+REMOTE_COMMAND_CLASS("agentbuild", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("agentcopyprove", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("agentimpact", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("agenttest", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dbquery", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dumpstate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("proofbundle", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("refold", REMOTE_CLASS_NEVER, "")

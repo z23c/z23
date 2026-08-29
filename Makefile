@@ -9435,6 +9435,22 @@ check-hotswap-denied-leaves:
 	@tools/lint/check_hotswap_denied_leaves.sh --selftest
 	@tools/lint/check_hotswap_denied_leaves.sh
 
+# Every command leaf carries exactly one remote class in
+# config/remote_command_classes.def — the decision "may a peer on our own mesh
+# ask this node to run it?" (design: docs/work/REMOTE_COMMAND_CHANNEL.md). The
+# table's default is never_remote, so a MISSING row is safe today and therefore
+# invisible; this gate makes registering a command leaf a two-file operation so
+# the decision cannot be skipped. Symmetric: a row naming a leaf the registry no
+# longer has is a permission with no owner and fails too. Covers both dispatch
+# surfaces — the typed config/commands catalog and the flat AGENT_CONTRACT
+# table. No baseline: the tree is clean, and a baseline here would only be
+# somewhere to hide the next omission. --selftest runs first and proves the gate
+# fires on each defect class.
+check-remote-command-classes:
+	@echo "══ LINT: remote command classes ══"
+	@./tools/lint/check_remote_command_classes.sh --selftest
+	@./tools/lint/check_remote_command_classes.sh
+
 # Scans the UNION of config/hotswap_eligible.def and
 # config/hotswap_swappable.def: every TU either manifest can recompile into a
 # .so must be free of mutable file-scope statics.
@@ -11199,6 +11215,7 @@ LINT_GATES := \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
     check-hotswap-denied-leaves \
+    check-remote-command-classes \
     check-hotswap-static-state \
     check-hotswap-service-islands \
     check-hotswap-swappable-shape \

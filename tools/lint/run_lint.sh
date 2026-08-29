@@ -103,6 +103,7 @@ gate_command() {
         check-hotswap-dev-only)            echo './tools/lint/check_hotswap_dev_only.sh' ;;
         check-hotswap-eligible-scope)      echo 'tools/lint/check_hotswap_eligible_scope.sh' ;;
         check-hotswap-denied-leaves)       echo 'tools/lint/check_hotswap_denied_leaves.sh --selftest && tools/lint/check_hotswap_denied_leaves.sh' ;;
+        check-remote-command-classes)      echo './tools/lint/check_remote_command_classes.sh --selftest && ./tools/lint/check_remote_command_classes.sh' ;;
         check-hotswap-static-state)        echo 'tools/lint/check_hotswap_static_state.sh' ;;
         check-hotswap-service-islands)     echo 'tools/lint/check_hotswap_service_islands.sh' ;;
         check-hotswap-swappable-shape)     echo 'tools/lint/check_hotswap_swappable_shape.sh' ;;
