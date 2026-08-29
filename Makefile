@@ -643,7 +643,8 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary, or the test harness. They must leave the wildcard BEFORE the
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
-DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
+DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
+	tools/dev/hotswap_verify_so.c \
 	tools/dev/windows_headless_run.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
