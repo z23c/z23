@@ -538,11 +538,29 @@ void zcl_native_handle_dev_agent_mutate(
     bool written = dvm_write_file(abs, rewritten, mutated_len);
     free(rewritten);
     if (!written) {
+        /* dvm_write_file opens "wb", which TRUNCATES the moment fopen
+         * succeeds — so a write that fails afterwards (ENOSPC, quota, I/O)
+         * leaves the caller's source file truncated on disk. Telling them to
+         * run --restore=true later is not good enough: this command edits a
+         * checkout it does not own, and the only acceptable behaviour is to
+         * put the bytes back HERE, while they are still in hand. The pending
+         * marker stays armed either way, so a failure to restore is still
+         * recoverable — and the message says which of the two happened
+         * instead of leaving the reader to guess. */
+        bool put_back = dvm_write_file(abs, original, len);
         free(original);
         dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                    "MUTATE_WRITE_FAILED", "mutate",
-                   "could not write the mutated file", rel,
-                   "z23 dev agent mutate --restore=true");
+                   put_back
+                       ? "could not write the mutated file; the original "
+                         "bytes were written back and the file is unchanged"
+                       : "could not write the mutated file AND could not "
+                         "write the original bytes back — the file on disk "
+                         "is truncated; the original is in "
+                         DVM_PENDING_DIR,
+                   rel,
+                   put_back ? "free disk space and rerun"
+                            : "z23 dev agent mutate --restore=true");
         return;
     }
 

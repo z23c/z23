@@ -378,7 +378,24 @@ BUILD_SOURCE_RECORD_VALID := yes
 else
 BUILD_SOURCE_RECORD_VALID := $(shell printf '%s\n' '$(BUILD_SOURCE_ID) $(BUILD_CLEAN) $(BUILD_MUTATION)' | awk 'BEGIN { ok=0 } $$1 ~ /^[0-9a-f]{64}$$/ && $$2 == "1" && $$3 ~ /^[0-9a-f]{64}$$/ && NF == 3 { ok=1 } END { if (ok) print "yes" }')
 ifneq ($(BUILD_SOURCE_RECORD_VALID),yes)
-$(error exact source capture failed; refusing to select a compile epoch)
+# WHY THIS ERROR USED TO NAME NOTHING. The $(shell) above discards
+# source-identity.sh's stderr (`2>/dev/null`), so the ONLY thing anyone saw was
+# "exact source capture failed" — a symptom with no cause and no next action —
+# and it stops EVERY goal before a single test runs. In a fresh `git worktree`
+# the cause is nearly always an uninitialized-but-nonempty vendor/tor gitlink:
+# `git worktree add` does not populate submodules, and copying the Tor archives
+# into the still-empty gitlink instead of initializing it FIRST is exactly what
+# produces "nonempty uninitialized gitlink would omit bytes". Re-running the
+# capture on the ERROR path costs nothing that matters — the build is already
+# over — and it turns a dead end into an instruction.
+SOURCE_CAPTURE_REASON := $(strip $(shell \
+  ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' \
+  tools/dev/source-identity.sh capture-record 2>&1 >/dev/null | head -2 | tr '\n' ' '))
+$(error exact source capture failed; refusing to select a compile epoch. \
+  Reason: $(if $(SOURCE_CAPTURE_REASON),$(SOURCE_CAPTURE_REASON),(none reported)). \
+  In a fresh git worktree this is the vendor/tor submodule holding files but no \
+  .git — run `make worktree-prime`, which initializes the submodule BEFORE \
+  copying archives into it)
 endif
 endif
 BUILD_DIR = build
@@ -2744,6 +2761,33 @@ ifneq ($(ONLY_ACTIVE_GOALS),)
         Closest candidates: $(ONLY_NEAR))
     endif
     $(info $(ONLY_GOAL): ONLY='$(ONLY)' selects $(words $(ONLY_MATCHED)) group(s): $(ONLY_MATCHED))
+  endif
+endif
+
+# ── ONLY= on a goal that cannot honour it is a REFUSAL ───────────────────
+# `make test_parallel ONLY=<group>` reads like "run that one group". It is
+# not. test_parallel is a BUILD target: it links the runner and executes
+# nothing, ONLY= is never looked at, and the caller sees a successful build
+# and believes a group passed. Every goal below either builds a test binary
+# without running it or runs the WHOLE suite; none of them consults ONLY=.
+# Silence there costs a full link and buys a false green, so name the goals
+# that DO honour it — and the runner flag, for a binary already built.
+#
+# Denylist, not allowlist, on purpose: `make t ONLY=x` re-enters make as
+# `$(MAKE) t-locked ONLY='x'`, so ONLY= legitimately reaches inner goals
+# through MAKECMDGOALS and MAKEFLAGS. Refusing everything not on a short
+# allowlist would break the working targets.
+ONLY_IGNORING_GOALS := test test-locked test-full \
+                       test_parallel test-parallel test-parallel-locked \
+                       test_parallel_fast test_parallel_wpo \
+                       test-asan test-tsan
+ONLY_IGNORED_ACTIVE := $(filter $(ONLY_IGNORING_GOALS),$(MAKECMDGOALS))
+ifneq ($(ONLY_IGNORED_ACTIVE),)
+  ifneq ($(strip $(ONLY)),)
+    $(error make $(firstword $(ONLY_IGNORED_ACTIVE)): ONLY='$(ONLY)' is IGNORED by this goal, \
+      which builds and/or runs the WHOLE suite — nothing would have been selected. \
+      Run that one group with:  make t-fast ONLY=$(ONLY)   (strict build: make t ONLY=$(ONLY)). \
+      Already built? run the runner itself:  build/bin/test_parallel --only=$(ONLY))
   endif
 endif
 
@@ -10404,6 +10448,20 @@ check-pipefail-status-pipe:
 	@./tools/lint/check_pipefail_status_pipe.sh --selftest
 	@./tools/lint/check_pipefail_status_pipe.sh
 
+# Sibling of the gate above, for two more shapes where the shell throws a
+# decision away. (A) A bare `! cmd` statement under `set -e`: bash does not
+# exit for a command whose value is being inverted, and the ERR trap is exempt
+# too, so the assertion is decorative — five live ones were found, every one a
+# negative control on a security-relevant predicate. Fix with a refute()
+# helper that exits for itself (tools/ship.sh --selftest is the reference).
+# (B) `make ... | head/tail` with no pipefail: the pipeline reports tail's 0
+# and a failed build reads as a successful one. Both prongs are HARD with no
+# baseline and no per-line escape hatch.
+check-discarded-status:
+	@echo "══ LINT: no assertion or build status the shell discards ══"
+	@./tools/lint/check_discarded_status.sh --selftest
+	@./tools/lint/check_discarded_status.sh
+
 # Anti-flake ratchet: no NEW test assertion graded on a measured wall-clock
 # interval. A verdict a busy box can flip is measuring the box, not the code —
 # and this project keeps slow machines on purpose, because a slow box is the
@@ -10967,6 +11025,7 @@ LINT_GATES := \
     check-source-identity-authority \
     check-status-reason-single \
     check-pipefail-status-pipe \
+    check-discarded-status \
     check-no-wallclock-assertion \
     check-framework-shape \
     check-framework-filename-suffix \

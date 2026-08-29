@@ -183,7 +183,14 @@ void zcl_native_handle_dev_agent_ready(
 
     bool can_link = vendor_missing == 0 && sqlite_amalgam;
     bool can_link_real_tor = submodule && tor_missing == 0;
-    bool shippable = can_link && can_link_real_tor && tor_real;
+    /* node_binary is part of the verdict, not just a reported row. Without it
+     * this command could answer shippable=true while build/bin/z23 does not
+     * exist — the answering process can be a binary that was deleted after it
+     * started, or a z23 from another checkout on PATH, and tor_real is read
+     * from whatever is answering. A "can this checkout produce a shippable
+     * candidate" verdict that ignores whether the candidate is on disk is
+     * exactly the kind of green this whole surface exists to stop. */
+    bool shippable = can_link && can_link_real_tor && tor_real && node_binary;
 
     const char *blocker = "NONE";
     char next_action[256];
@@ -200,6 +207,11 @@ void zcl_native_handle_dev_agent_ready(
         (void)snprintf(next_action, sizeof(next_action),
                        "make -j\"$(getconf _NPROCESSORS_ONLN)\" z23 "
                        "(the archives are here now; this binary predates them)");
+    } else if (!node_binary) {
+        blocker = "NODE_BINARY_NOT_BUILT";
+        (void)snprintf(next_action, sizeof(next_action),
+                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" z23 "
+                       "(the archives are here; the candidate is not on disk)");
     } else if (!test_runner) {
         blocker = "TEST_RUNNER_NOT_BUILT";
         (void)snprintf(next_action, sizeof(next_action),
@@ -257,8 +269,10 @@ void zcl_native_handle_dev_agent_ready(
     (void)json_push_kv_str(
         &reply->data, "means",
         shippable
-            ? "this checkout links real Tor and can produce a shippable "
-              "candidate"
+            ? "the archives a real-Tor link needs are here, build/bin/z23 "
+              "exists, and the ANSWERING binary linked real Tor — run this "
+              "through the z23 you just built, or tor_build describes a "
+              "different binary than the one on disk"
             : "this checkout cannot produce a shippable candidate yet; "
               "next_action names the exact fix");
 }

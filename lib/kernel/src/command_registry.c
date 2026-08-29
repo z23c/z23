@@ -1016,16 +1016,12 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                    strcmp(key, "wait_for_edit") == 0 ||
                    strcmp(key, "all") == 0 ||
                    strcmp(key, "allow_high_fees") == 0 ||
-                   strcmp(key, "exact") == 0 ||
-                   strcmp(key, "restore") == 0 ||
+                   strcmp(key, "exact") == 0 || strcmp(key, "restore") == 0 ||
                    strcmp(key, "include_evidence_wires") == 0) {
-            /* `all` is app.shop.want.list's "include expired and cancelled
-             * rows" flag — a bool in its declared schema; the default
-             * string branch made it uninvokable from the shell.
-             * `include_evidence_wires` is zcode.network.records' signed-wire
-             * opt-in, parsed as a bool by the DHT record RPC it forwards
-             * to; the string branch made the leaf's own documented flag
-             * unpassable while raw RPC accepted it fine. */
+            /* Each is a bool in its own declared schema, and the default
+             * STRING branch made it unpassable from a shell while raw RPC
+             * accepted it fine — `all`, `include_evidence_wires`, and the
+             * dev.agent leaves' `exact`/`restore` all arrived that way. */
             type_ok = value->type == JSON_BOOL;
         } else if (strcmp(key, "effects") == 0) {
             /* vault.intent.plan owns the strict nested effect contract. The
@@ -1388,19 +1384,11 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
         } else if (strcmp(key, "max_items") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
                       json_get_int(value) <= 100;
-        } else if (strcmp(key, "max_lines") == 0) {
+        /* `line` is dev.agent.mutate's 1-based source line: INT, or the
+         * default STRING branch makes the leaf uninvokable from a shell. */
+        } else if (strcmp(key, "max_lines") == 0 || strcmp(key, "line") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
-                      json_get_int(value) <= 1000;
-        } else if (strcmp(key, "line") == 0) {
-            /* dev.agent.mutate's 1-based source line. The CLI types
-             * `--line=42` as an integer; without this rule the default
-             * branch demands a string and the leaf is uninvokable from the
-             * shell — the exact failure check_command_input_keys.sh exists
-             * to catch. The upper bound is the file-size policy's hard
-             * ceiling with headroom; the handler owns the real
-             * LINE_OUT_OF_RANGE refusal against the actual file. */
-            type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
-                      json_get_int(value) <= 1000000;
+                      json_get_int(value) <= (strcmp(key, "line") ? 1000 : 1000000);
         } else if (strcmp(key, "since_secs") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
                       json_get_int(value) <= 31536000;
