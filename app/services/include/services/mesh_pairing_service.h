@@ -7,9 +7,17 @@
 #include "models/mesh_pairing.h"
 #include "vcs/zcode_dht_delegation.h"
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define MESH_PAIRING_MAX_LIFETIME_SECONDS INT64_C(2592000)
+#define MESH_PAIRING_REVOKE_PLAN_SECONDS INT64_C(60)
+#define MESH_PAIRING_REVOKE_TOKEN_BYTES 56u
+#define MESH_PAIRING_REVOKE_TOKEN_HEX \
+    (MESH_PAIRING_REVOKE_TOKEN_BYTES * 2u)
+#define MESH_PAIRING_PUBLIC_FINGERPRINT_HEX 64u
+#define MESH_PAIRING_LIST_MAX 64u
 
 enum mesh_pairing_reason {
     MESH_PAIRING_OK = 0,
@@ -29,6 +37,34 @@ enum mesh_pairing_reason {
     MESH_PAIRING_EXPIRED,
     MESH_PAIRING_SESSION_MISMATCH,
     MESH_PAIRING_AUTHORITY_CHANGED,
+    MESH_PAIRING_CONFIRMATION_INVALID,
+    MESH_PAIRING_PLAN_EXPIRED,
+};
+
+struct mesh_pairing_public_view {
+    char pairing_id[MESH_PAIRING_ID_HEX + 1];
+    char peer_master_fingerprint[MESH_PAIRING_PUBLIC_FINGERPRINT_HEX + 1];
+    char peer_noise_fingerprint[MESH_PAIRING_PUBLIC_FINGERPRINT_HEX + 1];
+    uint64_t capability_mask;
+    uint64_t delegation_sequence;
+    int64_t paired_at;
+    int64_t expires_at;
+    int64_t revoked_at;
+    uint64_t revocation_generation;
+    char state[8];
+};
+
+struct mesh_pairing_revoke_plan {
+    char pairing_id[MESH_PAIRING_ID_HEX + 1];
+    uint64_t revocation_generation;
+    int64_t issued_at;
+    int64_t expires_at;
+    char confirmation_token[MESH_PAIRING_REVOKE_TOKEN_HEX + 1];
+};
+
+struct mesh_pairing_revoke_result {
+    struct db_mesh_pairing pairing;
+    bool replayed;
 };
 
 const char *mesh_pairing_reason_token(enum mesh_pairing_reason reason);
@@ -47,6 +83,24 @@ enum mesh_pairing_reason mesh_pairing_service_accept(
 
 enum mesh_pairing_reason mesh_pairing_service_revoke(
     struct node_db *ndb, const char *pairing_id, int64_t now);
+
+/* Redacted owner view. Raw ZID and Noise public keys never leave the service;
+ * the view carries only domain-separated fingerprints and local policy. */
+bool mesh_pairing_service_list(
+    struct node_db *ndb, int64_t now, struct mesh_pairing_public_view *out,
+    size_t max, size_t *count, struct db_mesh_pairing_counts *counts);
+
+/* Revocation is a short-lived compare-and-set transaction. The confirmation
+ * token binds the exact pairing, current revocation generation, issue time,
+ * and exclusive expiry. It is confirmation evidence, not a capability: RPC
+ * owner authentication remains the authority. */
+enum mesh_pairing_reason mesh_pairing_service_revoke_plan(
+    struct node_db *ndb, const char *pairing_id, int64_t now,
+    struct mesh_pairing_revoke_plan *out);
+enum mesh_pairing_reason mesh_pairing_service_revoke_commit(
+    struct node_db *ndb, const char *pairing_id,
+    const char *confirmation_token, int64_t now,
+    struct mesh_pairing_revoke_result *out);
 
 /* Authorize the private status operation against current local revocation and
  * chain state plus the exact established Noise peer. The delegation is live

@@ -567,6 +567,43 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_identity)
+ZCL_COMMAND_BRANCH("ops.mesh.pair", "ops.mesh", "Pairing",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.pair.list", "ops.mesh.pair", "",
+    "List this machine's owner-approved pairings",
+    "Lists bounded, redacted local pairing authority. Public master and Noise "
+    "keys are represented only by fingerprints; no private key, endpoint, "
+    "path, capability secret, or remote status is exposed.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,pairing,list,authority,revocation",
+    "zcl.command.empty_input.v1", "zcl.mesh.pairing.list.v1", "", "",
+    "z23 ops mesh pair list",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_pair_list)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.pair.revoke", "ops.mesh.pair", "",
+    "Revoke one local machine pairing",
+    "Plans, then commits, sticky local revocation of exactly one pairing. The "
+    "short-lived confirmation binds the pairing ID and current revocation "
+    "generation. Revocation cannot create, renew, or widen authority.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,pairing,revoke,authority,security",
+    "zcl.mesh.pairing.revoke.input.v1", "zcl.mesh.pairing.revoke.v1",
+    "pairing_id,confirm", "pairing_id",
+    "z23 ops mesh pair revoke --pairing-id=<64hex>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_ops_mesh_pair_revoke)
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.join", "ops.mesh", "",
     "Join a peer from a verified session invite",
