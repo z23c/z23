@@ -4,9 +4,18 @@
  * and in refusals, and answer whether a Z23 runtime is published for it.
  *
  * The failure this prevents: installing a binary that cannot run on the
- * machine that asked for it. packaging/release/build_release.sh produces
- * x86_64-linux and nothing else, so every other machine gets a refusal that
- * names both what it is and what we do publish, and downloads nothing.
+ * machine that asked for it. A machine we publish no runtime for gets a
+ * refusal that names both what it is and what we do publish, and downloads
+ * nothing.
+ *
+ * PUBLISHED is not the same question as PACKAGED.
+ * packaging/release/build_release.sh can package a windows-x86_64 runtime as
+ * well as a linux-x86_64 one, and only linux-x86_64 is named below: the
+ * Windows PE has never been executed, and there is no Windows second-stage
+ * installer for the bootstrap to hand off to. Widening this list is checked
+ * against what the cutter reports it produces by
+ * tools/lint/check_published_platforms.sh, which is a floor and not a
+ * licence — a platform can be packaged and still not be fit to publish.
  */
 
 #include "install/front_door.h"

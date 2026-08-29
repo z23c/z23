@@ -133,9 +133,11 @@ bool fd_attest_arg(const struct fd_attestation *a, char *out, size_t out_len);
 void fd_platform_triple(const char *sysname, const char *machine,
                         char out[FD_TRIPLE_MAX]);
 
-/* packaging/release/build_release.sh produces x86_64-linux only today, so
- * that is the whole published set. Refusing a machine we do not publish for,
- * by name, beats installing a binary that cannot run on it. */
+/* linux-x86_64 is the whole published set today. That is narrower than what
+ * packaging/release/build_release.sh can package — a Windows runtime is built
+ * and not published; see front_door_platform.c for why — because refusing a
+ * machine we do not publish for, by name, beats installing a binary nobody
+ * has ever run on it. */
 bool fd_platform_published(const char *triple);
 const char *fd_platform_published_list(void);
 
