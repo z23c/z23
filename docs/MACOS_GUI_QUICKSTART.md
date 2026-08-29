@@ -245,11 +245,13 @@ because ASan with an unlimited stack intermittently aborts at startup
 (google/sanitizers#856). Run tests through `make t-fast ONLY=<group>` and
 `make test-parallel`, which set it for you; see [`BUILD.md`](BUILD.md).
 
-**Your new file trips the file-size ceiling.** The enforced ceiling is on
-`app/**/*.c` (800 lines); a GUI package's sources live under `packages/`, so
-they are outside it, but the discipline is the same one rule everywhere: a
-file that wants to grow past that is two files. See
-[`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) for the ratchet and its baseline.
+**Your new file trips the file-size limit.** The hard limit is 1500 lines for
+every production `.c` (800 lines is the advisory target, and 801..1500 is an
+allowed buffer that never fails); a GUI package's sources live under
+`packages/`, so they are outside the scan, but the discipline is the same one
+rule everywhere: a file that wants to grow past 1500 lines is two files. See
+[`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) for the bands and the legacy
+baseline.
 
 **`The application can't be opened` on another Mac, or after a download.**
 arm64 macOS refuses unsigned binaries, and a file that arrived over the

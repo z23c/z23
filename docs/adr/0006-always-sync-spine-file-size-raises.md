@@ -1,5 +1,13 @@
 # ADR-0006: File-size baseline raises for the always-sync spine core
 
+> **Superseded by the 2026-08-29 file-size policy change.** E1 no longer
+> fails a build at 800 lines, so a raise like this one no longer needs an
+> ADR. The policy is now three bands — an advisory 800-line target, an
+> allowed 801..1500 buffer, and a hard 1500-line limit — implemented in
+> [`tools/file_size_policy.c`](../../tools/file_size_policy.c). Every file
+> named below is inside the allowed buffer or carried in the shrink-only
+> legacy baseline. Kept for the record of what was decided and why.
+
 - **Status:** Accepted 2026-07-16.
 - **Deciders:** Project maintainer.
 - **Related:** [`self-verified-tip-plan.md`](../work/self-verified-tip-plan.md),
@@ -11,7 +19,7 @@
 
 ## Context
 
-The E1 file-size ceiling (`tools/scripts/check_file_size_ceiling.sh`, 800-line
+The E1 file-size ceiling (then an 800-line hard
 ceiling for `app/`+`config/src/`) is a beauty ratchet whose baseline "can only
 shrink, never grow, and growing it costs an ADR." The always-sync spine's
 Wave-1 core (Pillars 0 + 2) legitimately grew three enforced-tier files past
@@ -44,7 +52,7 @@ current #1 mission (fold a datadir all the way to the network tip).
 ## Decision
 
 Raise the enforced-tier baseline for these three files to their current line
-counts (recorded in `tools/scripts/file_size_ceiling_baseline.txt`). Track the
+counts (recorded in `tools/lint/file_size_policy_baseline.txt`). Track the
 cohesion-preserving split of each as follow-up cleanup debt, to be done
 deliberately with full build + `test-parallel` verification — not as a rushed
 mid-mission refactor.

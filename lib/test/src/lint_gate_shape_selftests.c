@@ -255,107 +255,202 @@ int t_long_functions_lib_warn_tier(void)
     return failures;
 }
 
-/* E1 — file-size ceiling is an ENFORCED RATCHET (hard FAIL, not advisory):
- * a NEW (non-baselined) app/.c file over the 800-line ceiling trips the
- * gate (nonzero exit) and prints the violation report; removing it returns
- * to a clean, zero-exit run. This complements (does not replace) the hard
- * correctness gate check_long_functions.sh (<=500 lines/function). */
-int t_e1_file_size_ceiling(void)
+/* E1 is the one gate that is a compiled binary, so — unlike a script — it
+ * does not simply ride into a shard's sandbox with the source tree (see
+ * lint_sandbox_build, which copies it in explicitly). If it is absent, say
+ * so in those words instead of reporting an unexplained exit 127. */
+static int e1_gate_binary_present(void)
+{
+    char path[PATH_MAX];
+    if (repo_path(path, sizeof(path), E1_GATE_REL) != 0) return 0;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr,
+                "[lint-gate] E1: gate binary missing at %s — build it with "
+                "`make tools/file_size_policy`\n", path);
+        return 0;
+    }
+    fclose(fp);
+    return 1;
+}
+
+/* E1 bands — the whole policy in one check, run against the REAL tree.
+ *
+ *   1. baseline: the tree as committed is clean (exit 0).
+ *   2. a 900-line file planted in app/ is in the 801..1500 BUFFER band and
+ *      must NOT fail. This is the regression the redesign exists to prevent:
+ *      the predecessor gate hard-failed at 801 lines, so adding three lines
+ *      to an 877-line file broke the build and forced a split in the middle
+ *      of unrelated work.
+ *   3. a 1600-line file planted in lib/ is over the 1500 HARD LIMIT and is
+ *      not in the baseline, so it MUST fail — and say which file and why.
+ *      Planting this one in lib/ (not app/) also pins that the old
+ *      ENFORCED-app/ vs WARN-lib/ split is gone: one policy, one number.
+ *   4. remove both -> clean again. */
+int t_e1_file_size_bands(void)
 {
     int failures = 0;
-    unlink_rel(E1_FIXTURE_DST);
-    int baseline_rc = run_gate_script(E1_SCRIPT_REL, NULL);
-    int planted = plant_oversized_file(E1_FIXTURE_DST, 900);
-    int trip_rc = planted == 0 ? run_gate_script(E1_SCRIPT_REL, NULL) : -1;
-    /* Capture the FAIL run's stdout so we can prove the report still PRINTS
-     * the violation detail alongside the nonzero exit. */
-    char *fail_out = NULL;
-    char fail_path[PATH_MAX];
-    int fail_read = (planted == 0 &&
-                     lint_gate_out_path(fail_path, sizeof(fail_path)) == 0)
-                        ? read_entire_file(fail_path, &fail_out)
+    int gate_present = e1_gate_binary_present();
+    unlink_rel(E1_BUFFER_FIXTURE_DST);
+    unlink_rel(E1_OVER_LIMIT_FIXTURE_DST);
+
+    int baseline_rc = run_gate_script(E1_GATE_REL, NULL);
+
+    int planted_buffer = plant_oversized_file(E1_BUFFER_FIXTURE_DST, 900);
+    int buffer_rc = planted_buffer == 0 ? run_gate_script(E1_GATE_REL, NULL)
+                                        : -1;
+    char *buffer_out = NULL;
+    char buffer_path[PATH_MAX];
+    int buffer_read = (planted_buffer == 0 &&
+                       lint_gate_out_path(buffer_path, sizeof(buffer_path)) == 0)
+                          ? read_entire_file(buffer_path, &buffer_out)
+                          : -1;
+
+    int planted_over = plant_oversized_file(E1_OVER_LIMIT_FIXTURE_DST, 1600);
+    int over_rc = planted_over == 0 ? run_gate_script(E1_GATE_REL, NULL) : -1;
+    char *over_out = NULL;
+    char over_path[PATH_MAX];
+    int over_read = (planted_over == 0 &&
+                     lint_gate_out_path(over_path, sizeof(over_path)) == 0)
+                        ? read_entire_file(over_path, &over_out)
                         : -1;
-    unlink_rel(E1_FIXTURE_DST);
-    int recover_rc = run_gate_script(E1_SCRIPT_REL, NULL);
-    TEST("[lint-gate] E1 file-size ceiling: clean, FAILS (exit != 0) on oversized, recovers") {
+
+    unlink_rel(E1_BUFFER_FIXTURE_DST);
+    unlink_rel(E1_OVER_LIMIT_FIXTURE_DST);
+    int recover_rc = run_gate_script(E1_GATE_REL, NULL);
+
+    TEST("[lint-gate] E1 file-size bands: buffer 801-1500 passes, over 1500 fails, recovers") {
+        ASSERT(gate_present == 1);
         ASSERT(baseline_rc == 0);
-        ASSERT(planted == 0);
-        /* FAIL, not WARN: oversized file now exits nonzero (enforced). */
-        ASSERT(trip_rc != 0);
-        /* ...and the violation report must be printed alongside the fail. */
-        ASSERT(fail_read == 0);
-        ASSERT(fail_out != NULL && strstr(fail_out, "FAIL") != NULL);
-        ASSERT(fail_out != NULL &&
-               strstr(fail_out, "NEW oversized file") != NULL);
+
+        /* Buffer band: allowed, and the pass line still reports the counts. */
+        ASSERT(planted_buffer == 0);
+        if (buffer_rc != 0)
+            fprintf(stderr, "[lint-gate] E1: a 900-line file must be ALLOWED "
+                            "(buffer band), got exit %d\n", buffer_rc);
+        ASSERT(buffer_rc == 0);
+        ASSERT(buffer_read == 0);
+        ASSERT(buffer_out != NULL && strstr(buffer_out, "PASS") != NULL);
+        ASSERT(buffer_out != NULL && strstr(buffer_out, "buffer") != NULL);
+
+        /* Over the hard limit: fails, names the file, names the action. */
+        ASSERT(planted_over == 0);
+        if (over_rc == 0)
+            fprintf(stderr, "[lint-gate] E1: a 1600-line unbaselined file must "
+                            "FAIL, got exit 0\n");
+        ASSERT(over_rc == 1);
+        ASSERT(over_read == 0);
+        ASSERT(over_out != NULL && strstr(over_out, "FAIL") != NULL);
+        ASSERT(over_out != NULL &&
+               strstr(over_out, "OVER THE HARD LIMIT") != NULL);
+        ASSERT(over_out != NULL &&
+               strstr(over_out, E1_OVER_LIMIT_FIXTURE_DST) != NULL);
+
         ASSERT(recover_rc == 0);
         PASS();
     } _test_next:;
-    free(fail_out);
+    free(buffer_out);
+    free(over_out);
     return failures;
 }
 
-/* E1 lib/domain WARN tier: a SINGLE oversized, unbaselined lib/ file must
- * WARN (print) but never fail the build on its own (exit 0), mirroring the
- * WARN-vs-ENFORCED split proven for gate #12 below. The tier's aggregate
- * drift-count ratchet (see E1_LIB_FIXTURE_DST's comment above) is pointed at
- * an isolated tmp file for the duration of this test so the assertion holds
- * regardless of how much real, already-reviewed drift the live tree
- * carries. */
-int t_e1_lib_warn_tier(void)
+/* E1 legacy baseline + hollow scan. Both cases run against an ISOLATED scan
+ * root and an ISOLATED baseline (same convention as LONGFN above) so they
+ * never touch the real tree or the real baseline file:
+ *
+ *   - a baselined file sitting AT its recorded count is clean;
+ *   - growing it by five lines FAILS. The baseline is shrink-only, so this
+ *     is the mechanism that keeps the 23 legacy over-limit files closing
+ *     instead of drifting;
+ *   - pointing the scan at an empty directory exits 2. A gate that scanned
+ *     nothing must never report clean — that is worse than no gate. */
+int t_e1_file_size_baseline_and_hollow_scan(void)
 {
+    int gate_present = e1_gate_binary_present();
     int failures = 0;
-    unlink_rel(E1_LIB_FIXTURE_DST);
 
-    char ratchet_path[PATH_MAX];
-    int ratchet_rc = repo_path(ratchet_path, sizeof(ratchet_path),
-                                E1_LIB_DRIFT_RATCHET_TMP_REL);
-    if (ratchet_rc == 0) {
-        FILE *rf = fopen(ratchet_path, "wb");
-        if (rf) {
-            fputs("999999\n", rf);
-            fclose(rf);
-        } else {
-            ratchet_rc = -1;
-        }
+    char scan_dir[PATH_MAX];
+    char empty_dir[PATH_MAX];
+    char baseline_abs[PATH_MAX];
+    int setup = repo_path(scan_dir, sizeof(scan_dir), E1_ISO_SCAN_DIR_REL);
+    if (setup == 0)
+        setup = repo_path(empty_dir, sizeof(empty_dir), E1_EMPTY_SCAN_DIR_REL);
+    if (setup == 0)
+        setup = repo_path(baseline_abs, sizeof(baseline_abs),
+                          E1_ISO_BASELINE_REL);
+    if (setup == 0) {
+        (void)mkdir(scan_dir, 0700);
+        (void)mkdir(empty_dir, 0700);
     }
 
-    int baseline_rc = ratchet_rc == 0
-        ? run_gate_script_with_env(E1_SCRIPT_REL, E1_LIB_DRIFT_RATCHET_ENV,
-                                    ratchet_path)
+    /* At its recorded count: clean. */
+    int planted = setup == 0 ? plant_oversized_file(E1_ISO_LEGACY_REL, 1700)
+                             : -1;
+    int wrote_baseline = -1;
+    if (planted == 0) {
+        FILE *bf = fopen(baseline_abs, "wb");
+        if (bf) {
+            fprintf(bf, "%s 1700\n", E1_ISO_LEGACY_REL);
+            fclose(bf);
+            wrote_baseline = 0;
+        }
+    }
+    int held_rc = wrote_baseline == 0
+        ? run_gate_script_with_env2(E1_GATE_REL,
+                                    E1_BASELINE_ENV, baseline_abs,
+                                    E1_SCAN_ROOTS_ENV, E1_ISO_SCAN_DIR_REL)
         : -1;
-    int planted = plant_oversized_file(E1_LIB_FIXTURE_DST, 900);
-    int warn_rc = (planted == 0 && ratchet_rc == 0)
-        ? run_gate_script_with_env(E1_SCRIPT_REL, E1_LIB_DRIFT_RATCHET_ENV,
-                                    ratchet_path)
+
+    /* Grown past it: FAIL. */
+    int regrown = wrote_baseline == 0
+        ? plant_oversized_file(E1_ISO_LEGACY_REL, 1705) : -1;
+    int grown_rc = regrown == 0
+        ? run_gate_script_with_env2(E1_GATE_REL,
+                                    E1_BASELINE_ENV, baseline_abs,
+                                    E1_SCAN_ROOTS_ENV, E1_ISO_SCAN_DIR_REL)
         : -1;
-    char *warn_out = NULL;
-    char warn_path[PATH_MAX];
-    int warn_read = (planted == 0 &&
-                     lint_gate_out_path(warn_path, sizeof(warn_path)) == 0)
-                        ? read_entire_file(warn_path, &warn_out)
-                        : -1;
-    unlink_rel(E1_LIB_FIXTURE_DST);
-    int recover_rc = ratchet_rc == 0
-        ? run_gate_script_with_env(E1_SCRIPT_REL, E1_LIB_DRIFT_RATCHET_ENV,
-                                    ratchet_path)
+    char *grown_out = NULL;
+    char grown_path[PATH_MAX];
+    int grown_read = (regrown == 0 &&
+                      lint_gate_out_path(grown_path, sizeof(grown_path)) == 0)
+                         ? read_entire_file(grown_path, &grown_out)
+                         : -1;
+
+    /* Scanned nothing: exit 2, never a quiet pass. */
+    int hollow_rc = setup == 0
+        ? run_gate_script_with_env2(E1_GATE_REL,
+                                    E1_BASELINE_ENV, baseline_abs,
+                                    E1_SCAN_ROOTS_ENV, E1_EMPTY_SCAN_DIR_REL)
         : -1;
-    unlink_rel(E1_LIB_DRIFT_RATCHET_TMP_REL);
-    TEST("[lint-gate] E1 lib/domain WARN tier: clean, WARN-prints (exit 0) on oversized lib file, recovers") {
-        ASSERT(ratchet_rc == 0);
-        ASSERT(baseline_rc == 0);
+
+    unlink_rel(E1_ISO_LEGACY_REL);
+    unlink_rel(E1_ISO_BASELINE_REL);
+    (void)rmdir(scan_dir);
+    (void)rmdir(empty_dir);
+
+    TEST("[lint-gate] E1 legacy baseline is shrink-only and a zero-file scan exits 2") {
+        ASSERT(gate_present == 1);
+        ASSERT(setup == 0);
         ASSERT(planted == 0);
-        /* WARN, not FAIL: a single new WARN-tier violation never fails the
-         * build on its own (the isolated ratchet above keeps this test
-         * independent of the real tree's already-reviewed aggregate drift). */
-        ASSERT(warn_rc == 0);
-        ASSERT(warn_read == 0);
-        ASSERT(warn_out != NULL && strstr(warn_out, "WARN") != NULL);
-        ASSERT(warn_out != NULL &&
-               strstr(warn_out, "NEW oversized file") != NULL);
-        ASSERT(recover_rc == 0);
+        ASSERT(wrote_baseline == 0);
+        ASSERT(held_rc == 0);
+
+        ASSERT(regrown == 0);
+        if (grown_rc == 0)
+            fprintf(stderr, "[lint-gate] E1: a baselined file that GREW must "
+                            "FAIL, got exit 0\n");
+        ASSERT(grown_rc == 1);
+        ASSERT(grown_read == 0);
+        ASSERT(grown_out != NULL &&
+               strstr(grown_out, "LEGACY FILE GREW") != NULL);
+
+        if (hollow_rc != 2)
+            fprintf(stderr, "[lint-gate] E1: an empty scan set must exit 2 "
+                            "(fail-loud), got %d\n", hollow_rc);
+        ASSERT(hollow_rc == 2);
         PASS();
     } _test_next:;
-    free(warn_out);
+    free(grown_out);
     return failures;
 }
 

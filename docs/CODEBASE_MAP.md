@@ -316,7 +316,7 @@ Use `docs/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
    `make lint` rejects the command.
 
    Worked example of a plan/commit mutating leaf plus its read leaf, with
-   the probe half split into a second TU under the file-size ceiling:
+   the probe half split into a second TU to keep each near the file-size target:
    `app shop init` / `app shop status` — leaf rows in
    `config/commands/store.def` (branch row in `app_features.def`),
    handlers in `app/controllers/src/shop_native_handler.c`, datadir-local

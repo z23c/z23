@@ -6,8 +6,8 @@
 # whose body (signature line through its closing brace) spans more than
 # LIMIT lines.
 #
-# Two tiers, same mechanics, different consequence — mirrors E1's
-# file-size-ceiling split (tools/scripts/check_file_size_ceiling.sh):
+# Two tiers, same mechanics, different consequence (E1's file-size gate
+# dropped its own tier split in 2026-08; this one keeps it):
 #
 #   ENFORCED (fails the build) — app/controllers/src/*.c,
 #   app/services/src/*.c, and config/src/*.c (the composition root — same

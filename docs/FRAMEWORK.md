@@ -328,7 +328,7 @@ with the work they guard:
 | **health-is-the-gap** | one `tip_not_advancing` Condition is the sole liveness authority; others don't emit `EV_OPERATOR_NEEDED` for liveness (Directive, Law 10) | ratchet |
 | **operator-needed-has-a-sink** | every `EV_OPERATOR_NEEDED` emit pairs with a registered subscriber (Law 7) | hard |
 | **shape-is-content-checked** | a shape file includes its shape header (closes the "mislabeled Service" hole) | ratchet → hard |
-| **file-size-ceiling** | no `app/**/*.c` or `config/src/*.c` over 800 lines; mega-modules can't hide under <500-LOC functions (Law 1) | enforced ratchet (fails the build; grandfathered files listed in `tools/scripts/file_size_ceiling_baseline.txt`, shrink-only) |
+| **file-size-ceiling** | one policy for every production `.c`: 800 lines is an advisory target, 801..1500 is an allowed buffer that never fails, over 1500 fails — 1500 is where a file stops fitting in one agent read (Law 1) | hard at 1500 (files already over it are listed in `tools/lint/file_size_policy_baseline.txt`, shrink-only) |
 | **one-result-type** | services return `zcl_result`, not bare `bool`/`int` (Law 2) | ratchet |
 
 Both strategic gates (`framework-shape`, `controller-SQL`) have graduated
@@ -423,13 +423,13 @@ The eight-shape refactor (§3) is far along but not finished; this is the
 open-item list — the "what's next," not the "how we got here" (that's git
 history). Any ratchet-gate count belongs to its baseline file, never to
 prose here: baselines drift release-to-release, so re-count from the file
-(`tools/scripts/file_size_ceiling_baseline.txt`,
-`tools/scripts/file_size_ceiling_lib_baseline.txt`, etc. — §5) before citing
+(`tools/lint/file_size_policy_baseline.txt`,
+`tools/lint/hex_codec_baseline.txt`, etc. — §5) before citing
 a number.
 
 | Item | Status |
 |------|--------|
-| `config/` boot monolith (`boot.c`, `boot_services.c`, `boot_refold_staged.c`) | GATED under the file-size-ceiling ratchet; grandfathered in the ENFORCED baseline, must not grow. Continue only behavior-preserving extractions; larger moves need an explicit seam design. |
+| `config/` boot monolith (`boot.c`, `boot_services.c`, `boot_refold_staged.c`) | GATED: `boot.c` and `boot_refold_staged.c` are over the 1500-line hard limit and carried in the shrink-only legacy baseline, so they may only get smaller. Continue only behavior-preserving extractions; larger moves need an explicit seam design. |
 | `domain/` fronted by thin `lib/` wrappers | base58 + bech32 collapsed into `domain/` (landed: callers moved to `domain_encoding_*`, the `lib/` wrappers deleted). `upgrades.c` is intentionally kept as two files — `core/params/src/upgrades.c` (the ex-`lib/consensus/upgrades.c`) owns the `NetworkUpgradeInfo`/`SPROUT_BRANCH_ID`/`EquihashUpgradeInfo` tables, `core/consensus/src/upgrades.c` (the ex-`domain/consensus/upgrades.c`) holds the pure activation-height arithmetic that reads them (correct layering, not duplication). The direction is easy to invert from the names alone — ADR-0002's "moved from" table is the authority. `lib/keys/*` + `core/params/src/params.c` remain a future scoping item. Both `core/` files are under the byte seal — see `core/UNSEAL.md`. | <!-- doc-path-ok: "ex-" names are the pre-ADR-0002 locations, deliberately gone -->
 | Supervisor shape partial | `app/supervisors/` now declares `net`, `chain`, `staged_sync`, `legacy_mirror`, `self_heal` and the three domains (`domains.c`). Every other long-running service registers its own `liveness_contract` in its own file, so nothing is off the tree — what remains in `config/src/boot_services.c` is the ORDER those registrars run in (`boot_register_core_liveness_and_reducer`), which is load-bearing and pinned by ordering asserts in `lib/test/src/test_make_lint_gates.c`. Moving that sequence needs a seam design, not code motion. Coverage is measured by six gates (`check-supervisor-registration`, `check-supervisor-domain`, `check-thread-supervision`, `check-typed-blocker`, `check-blocker-escape-registered`, `check-blocker-remedy`); the residual debt is the shrink-only `tools/scripts/supervisor_baseline.txt` (10) and `tools/lint/thread_supervision_baseline.txt` (11), both documented per entry. |
 | Controller/Service legacy compat | the file-level E1/E2/typed-blocker baselines carry no NEW violations, but import/sync controllers still carry legacy orchestration and services keep bare-`bool` compatibility APIs alongside `zcl_result`. Subtraction work, not new structure. |

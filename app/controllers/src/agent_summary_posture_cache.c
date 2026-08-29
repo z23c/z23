@@ -4,7 +4,7 @@
  * exclusively by rpc_agent_summary() (event_agent_summary.c) -- split out
  * to its own file so that one keeps growing its own field list without
  * pushing the other file over its line-count ceiling (see
- * tools/scripts/check_file_size_ceiling.sh).
+ * tools/file_size_policy.c).
  *
  * agent_security_posture_collect()'s bootstrap step
  * (chain_evidence_controller_snapshot, see chain_evidence_snapshot.c) issues

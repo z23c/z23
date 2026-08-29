@@ -218,17 +218,15 @@ Gates fall into three modes:
 - **HARD / FAIL** — fails on any violation.
 - **RATCHET** — fails on a *new* violation while tolerating a recorded
   baseline; the baseline file may only shrink (growing it requires an ADR).
-- **WARN** — measures only, per-file, never fails on any ONE violation. Two
-  gates carry a WARN sub-tier for `lib/` (excl. `lib/test/`) + `domain/`
-  (+ `src/` for E1), alongside their own ENFORCED tier for the app-shape
-  surfaces: **E1** (`check-file-size-ceiling`) and **#12**
-  (`check-long-functions`). #18 and #20 graduated WARN → RATCHET as **E10**;
-  #19 ratcheted WARN → FAIL. E1's WARN tier additionally
-  ratchets the *aggregate* (new + grown) violation COUNT via
-  `tools/scripts/file_size_ceiling_lib_drift_count.txt` — no single file ever
-  fails the build, but silently accumulating drift past the reviewed count
-  does (a shrinking file never counts against this; it only tightens the
-  per-file baseline, see the script's `--fix`).
+- **WARN** — measures only, per-file, never fails on any ONE violation. Gate
+  **#12** (`check-long-functions`) carries a WARN sub-tier for `lib/` (excl.
+  `lib/test/`) + `domain/`, alongside its ENFORCED tier for the app-shape
+  surfaces. #18 and #20 graduated WARN → RATCHET as **E10**; #19 ratcheted
+  WARN → FAIL. **E1** (`check-file-size-ceiling`) used to carry a WARN tier
+  with an aggregate drift-count ratchet; both are gone. E1 is now one policy
+  for all production C with three bands — an advisory 800-line target, an
+  allowed 801..1500 buffer that never fails, and a hard 1500-line limit —
+  so there is nothing left to warn about between the target and the limit.
 
 Each gate's intent is one row below. Implementation scripts live under
 `tools/scripts/` or `tools/lint/`. The E-series gates are tested in
@@ -344,8 +342,8 @@ assert green).
   `tools/scripts/check_model_ar_lifecycle.sh`.
 
 - **Gate #12: `check-long-functions`** — flags any top-level function whose
-  body spans >500 lines. Two tiers, same split as Gate E1
-  (`check-file-size-ceiling`): ENFORCED (HARD, fails the build) covers
+  body spans >500 lines. Two tiers (a split Gate E1 no longer uses — E1 is
+  one policy for all production C now): ENFORCED (HARD, fails the build) covers
   `app/controllers/src/*.c`, `app/services/src/*.c`, and `config/src/*.c`,
   ratchet-baselined at
   `tools/scripts/check_long_functions_baseline.txt` for grandfathered
@@ -826,7 +824,7 @@ current green tree.
 
 | Gate | Mode | Intent / baseline / override |
 |------|------|------------------------------|
-| **E1: `check-file-size-ceiling`** | RATCHET | No `app/**/*.c` exceeds **800 lines** (caps mega-modules hiding behind many <500-LOC functions). Baseline `file_size_ceiling_baseline.txt` (`<path> <max-loc>`; may only shrink) IS the visible escape hatch — no inline override. |
+| **E1: `check-file-size-ceiling`** | RATCHET | The file-size policy for every production `.c` (`app/`, `config/src/`, `lib/` excl. `lib/test/`, `domain/`, `src/`), in three bands: **800 lines is the advisory TARGET** (95% of the tree already meets it), **801..1500 is an ALLOWED buffer** — never fails, no baseline row, no churn — and **over 1500 FAILS**. 1500 is where a file stops fitting in one agent read, so past it every later reader works blind. Files already over 1500 are carried in `tools/lint/file_size_policy_baseline.txt` (`<path> <max-loc>`), which may only shrink: a row that grows fails, a row whose file drops to 1500 or fewer must be deleted, and nothing is ever added. No inline override; generated/tabular code is skipped via the tool's `ALLOWLIST`. Implemented as a C23 binary, `tools/file_size_policy.c`. |
 | **`check-hex-codec-single`** | RATCHET | Base-16 encode/decode lives only in `lib/base/include/base/hex.h` (`zcl_hex_encode`, `zcl_hex_decode`, `zcl_hex_decode_lower`, `zcl_hex_decode_n`, `zcl_hex_nibble`). Per-file shape detectors: a hex-digit table **plus** a high-nibble index (encoder), or nibble-ladder arithmetic / `sscanf("%2x")` (decoder). Baseline `tools/lint/hex_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because a known-answer fixture must not parse its vectors with the implementation under test. No inline override — the fix is to call the codec. `--selftest` plants a fresh encoder and decoder and requires the scan to reject them. |
 | **`check-byte-order-codec-single`** | RATCHET | Packing/unpacking a fixed-width 16/32/64-bit integer at a byte address lives only in `lib/base/include/base/serialize_le.h` (`zcl_write_u{16,32,64}_le` / `zcl_read_u{16,32,64}_le`, the `i32`/`i64` forms, and the `u32`/`u64` big-endian pair); `crypto/common.h`'s `ReadLE`/`WriteLE` forward to it. Per-file shape detectors: an indexed shift loop (`>> (8 * i)` in either operand order), an unrolled ladder (a shift by 24 or 56 **plus** a byte-array subscript on the same line — a bare `>> 24` is ordinary bit work and does not match), or a hand-rolled byte-swap mask. Baseline `tools/lint/byte_order_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because `test_byte_order_codec.c` deliberately keeps a verbatim copy of every replaced helper and asserts the canonical functions agree with it byte for byte; `core/` is excluded because it is byte-sealed. No inline override — the fix is to call the codec. `--selftest` plants each detected shape and requires rejection, plus innocent bit work and a canonical caller and requires acceptance. |
 | **`check-zcode-package-registry`** | HARD | Re-derives the content manifest, unsigned release/signing root, recipe, target-inclusive exact dependency lock, and API capsule roots for the nine real C23 Commons Alpha packages directly from their authoritative `lib/<module>` trees. The public alpha-fixture publisher, sequences, empty reward address, `zclassic-main`, exact roots, and closed dependency DAG are projected in `config/zcode_package_registry.def`. Drift, an unresolved dependency, or a selected package source/API change without regenerating the projection fails. Production source ownership remains the unique `LIB_MODULE` row checked independently by `check-lib-module-order`, so the monolith compiles each package module source exactly once. No baseline or override. |

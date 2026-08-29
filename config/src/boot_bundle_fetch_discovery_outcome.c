@@ -2,8 +2,8 @@
  *
  * Discovery-outcome observability for config/src/boot_bundle_fetch.c's
  * bbf_discover_from_peers() — split into its own file to keep
- * boot_bundle_fetch.c under the E1 800-line file-size ceiling
- * (tools/scripts/check_file_size_ceiling.sh). See config/boot_bundle_fetch.h
+ * boot_bundle_fetch.c near the E1 800-line file-size target
+ * (tools/file_size_policy.c). See config/boot_bundle_fetch.h
  * for the public dump-function contract and CLAUDE.md "Adding state
  * introspection" for the convention this follows.
  *

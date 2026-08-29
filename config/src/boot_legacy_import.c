@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * PURPOSE: Pure boot-heuristic predicate for the automatic zclassicd-LevelDB
  * header pull (config/src/boot.c app_init, the need_zcd decision). Split out
- * of boot.c to keep boot.c under the E1 file-size ceiling — this file is the
- * "seam" the check-file-size-ceiling gate asks for. */
+ * of boot.c to keep boot.c smaller — this file is the "seam" the E1
+ * file-size policy (tools/file_size_policy.c) asks for. */
 
 #include "config/boot.h"
 

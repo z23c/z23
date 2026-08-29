@@ -17,7 +17,7 @@
 # not an ordinal trust comparison, so hits whose compared token is
 # SYNC_TRUST_STATE_COUNT are excluded. Test sources (lib/test/) are excluded.
 #
-# House style mirrors tools/scripts/check_file_size_ceiling.sh: exit 0 clean,
+# House style mirrors the other repo-scanning gates: exit 0 clean,
 # exit 1 on a violation, exit 2 (via gate_require_scanned) on a hollow/empty
 # scan.
 set -euo pipefail

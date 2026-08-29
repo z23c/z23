@@ -477,6 +477,9 @@ ZCL_AGENT_DEV_BIN ?= $(HOME)/.local/bin/zclassic23-dev
 ZCL_AGENT_DEV_DATADIR ?= $(HOME)/.zclassic-c23-dev
 ZCL_AGENT_DEV_RPCPORT ?= 18252
 ZCL_NODECTL_BIN = $(BIN_DIR)/zcl-nodectl
+# Gate E1 file-size policy checker (rule near check-file-size-ceiling below).
+# Declared here because the test binaries take it as an order-only prereq.
+FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
 WAL_CHECKPOINT_BIN = $(BIN_DIR)/wal_checkpoint
 SOAK_RUNNER_BIN = $(BIN_DIR)/soak_runner
 CRASH_RECOVERY_TEST_BIN = $(BIN_DIR)/crash_recovery_test
@@ -2328,7 +2331,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN) $(FILE_SIZE_POLICY_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2350,7 +2353,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN) $(FILE_SIZE_POLICY_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -9081,6 +9084,21 @@ check-observability-pairing: tools/check_observability_pairing
 	@echo "══ LINT: observable stderr diagnostics ══"
 	@$(BIN_DIR)/check_observability_pairing
 
+# Gate E1's binary — the file-size policy checker (see check-file-size-ceiling
+# below). Three sources, no external deps: the tool, lib/platform's UTF-8
+# directory listing (dirent on POSIX, FindFirstFileW on Win32) and the checked
+# allocators that listing uses.
+FILE_SIZE_POLICY_SRCS = tools/file_size_policy.c \
+    lib/platform/src/directory_compat.c lib/base/src/safe_alloc.c
+.PHONY: tools/file_size_policy
+tools/file_size_policy: $(FILE_SIZE_POLICY_BIN)
+$(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Ilib/platform/include -Ilib/base/include \
+	    -o $@ $(FILE_SIZE_POLICY_SRCS)
+
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
 # tables). core_seal is a tiny build-time C tool (no external deps: it links the
@@ -9931,12 +9949,15 @@ check-mint-skip-crypto-offline-only:
 	@echo "══ LINT: fast-mint crypto pass-through is offline-only ══"
 	@./tools/lint/check_mint_skip_crypto_offline_only.sh .
 
-# Gate E1 — file-size ceiling for app/ .c files (RATCHET). Mega-modules
-# cannot hide behind <500-LOC functions; baseline at
-# tools/scripts/file_size_ceiling_baseline.txt may only shrink.
-check-file-size-ceiling:
-	@echo "══ LINT: app/ file-size ceiling (E1) ══"
-	@./tools/scripts/check_file_size_ceiling.sh
+# Gate E1 — the file-size policy for production C (tools/file_size_policy.c).
+# Three bands: 800 is the advisory TARGET, 801..1500 is an ALLOWED buffer that
+# needs no paperwork, over 1500 FAILS. 1500 is the point past which an agent
+# can no longer read the whole file in one tool call. Files already over 1500
+# are carried in tools/lint/file_size_policy_baseline.txt, which may only
+# shrink — nothing is ever added to it.
+check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
+	@echo "══ LINT: file-size policy (E1: target 800 / buffer 1500) ══"
+	@$(FILE_SIZE_POLICY_BIN)
 
 # Rejects dev-history phrasing ("STEP-0 STATUS", "stub bodies"/"stub body",
 # "lane <N><letter>", "future slice") from production contract surfaces
@@ -10787,7 +10808,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
@@ -10812,11 +10833,11 @@ endif
 # read build output, git config, /proc, or untracked worktree state. Each
 # carries its reason in tools/lint/lint_cache.sh, and each always runs.
 .PHONY: lint-cached lint-cold-audit
-lint-cached: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
+lint-cached: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
 	@tools/lint/run_lint.sh --cache --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed (cached where inputs were unchanged) ══"
 
-lint-cold-audit: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
+lint-cold-audit: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
 	@tools/lint/run_lint.sh --cold-audit --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed, every cache hit verified against a fresh run ══"
 
