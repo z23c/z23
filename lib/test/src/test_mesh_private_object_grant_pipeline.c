@@ -169,6 +169,7 @@ static int grant_encrypt_offer_pipeline(void)
         static uint8_t first[MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES];
         uint8_t last[23], ephemeral_secret[32], online_seed[32];
         uint8_t context_before[32], context_after[32], grant_id[32];
+        const uint8_t zero[32] = {0};
         struct db_mesh_capability_grant grant;
         struct mesh_private_object_offer_v1 offer, tampered;
         struct mesh_private_object_offer_expectation_v1 expected, wrong;
@@ -181,6 +182,8 @@ static int grant_encrypt_offer_pipeline(void)
         ASSERT(grant_pipeline_plaintext_root(
             first, sizeof(first), last, sizeof(last), grant.plaintext_root));
         memcpy(offer.plaintext_root, grant.plaintext_root, 32);
+        ASSERT(memcmp(offer.grant_id, zero, 32) == 0);
+        ASSERT(memcmp(offer.ciphertext_root, zero, 32) == 0);
 
         ASSERT_EQ(mesh_private_object_offer_key_context_v1(
                       &offer, context_before),
