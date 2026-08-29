@@ -13,12 +13,23 @@
 #   4. hand off, passing every attestation through so the installer judges
 #      the same evidence again for itself.
 #
-# TODAY THERE IS NO WINDOWS RUNTIME. packaging/release/build_release.sh is
-# x86_64-linux only, so $PublishedPlatforms below is empty for Windows and
-# this script refuses cleanly, having downloaded nothing and changed nothing.
-# Enabling Windows requires a native package, a second-stage PowerShell
-# installer, a Windows service lifecycle, and a platform-index authority. The
-# current single-manifest pin cannot describe different platform releases.
+# A WINDOWS RUNTIME NOW EXISTS; IT IS NOT PUBLISHED.
+# packaging/release/build_release.sh packages windows-x86_64 — a real x86-64
+# PE built from the whole node source, cross-linked on Linux with clang and
+# the mingw-w64 sysroot, importing only Windows system DLLs, with its own
+# exact closed SHA-256 manifest. $PublishedPlatforms below is still empty, and
+# this script still refuses cleanly, having downloaded nothing and changed
+# nothing, because "built" is not "published". Three things stand between:
+#   1. that binary has never been EXECUTED. It was produced on a Linux host
+#      with no Windows machine and no Wine available, so the evidence stops
+#      at "links, and imports only system DLLs".
+#   2. there is no second stage. The handoff below fetches install_z23.ps1,
+#      which does not exist; publishing the platform without it would trade
+#      this honest refusal for a confusing download failure.
+#   3. no Windows service lifecycle, fresh-host install, restart persistence,
+#      running-image qualification, or rollback proof has been accepted.
+# A platform-index authority is still needed as well: the current
+# single-manifest pin cannot describe different per-platform releases.
 # Changing the table below is therefore not a sufficient release action.
 #
 # These checks run only after this file is already executing. An irm-to-iex
@@ -38,8 +49,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# What we publish. Windows is absent on purpose; do not add a platform until
-# the native package, installer, service lifecycle, and platform index pass.
+# What we PUBLISH — not what we build. Windows is absent on purpose even
+# though build_release.sh now produces a windows-x86_64 release: see the three
+# outstanding items in the header. Do not add a platform until the runtime has
+# been executed on that platform, the second-stage installer exists, and the
+# service lifecycle and platform index pass.
 $PublishedPlatforms = @()
 $LinuxPublished = 'linux-x86_64'
 

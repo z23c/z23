@@ -31,9 +31,24 @@
 # sentinel and this scaffold refuses. See docs/work/BOOTSTRAP_PLAN.md.
 # --print-pin resolves the consistency channels and installs nothing.
 set -euf
-# build_release.sh produces x86_64-linux only today, so that is the whole
-# published set. Refusing a machine we do not publish for, by name, beats
-# installing a binary that cannot run on it.
+# PUBLISHED, not BUILT. build_release.sh now also packages windows-x86_64 (a
+# real x86-64 PE, cross-linked here, with its own SHA-256 manifest), and that
+# runtime is still not on this list, for three reasons that are all about the
+# user's machine rather than ours:
+#   1. nothing has ever executed it. This host has no Windows machine and no
+#      Wine; the evidence stops at "links, and imports only Windows system
+#      DLLs". A platform on this list promises a runtime that RUNS.
+#   2. there is no Windows second stage. install.ps1 would fetch
+#      install_z23.ps1, which does not exist, so proceeding past the gate
+#      would trade an honest refusal for a confusing download failure.
+#   3. no Windows service lifecycle or fresh-host install has been accepted.
+# Adding a name here is therefore a separate act from making the release, and
+# the Windows front door (install.ps1) is where that name would go — this
+# POSIX front door derives its platform from uname and can never produce
+# "windows-x86_64" at all. macOS is not here either, and cannot be built at
+# all on a Linux host: see docs/work/BOOTSTRAP_PLAN.md.
+# Refusing a machine we do not publish for, by name, beats installing a binary
+# that cannot run on it.
 PUBLISHED_PLATFORMS=" linux-x86_64 "
 ORIGIN="${Z23_INSTALL_TEST_ORIGIN:-https://z23.sh}"
 PIN_DNS_NAME="${Z23_INSTALL_TEST_PIN_DNS:-_z23-pin.z23.sh}"

@@ -459,7 +459,12 @@ selftest() {
     find "$tmp" -depth -delete
 }
 
-RELEASE_DIR="$REPO_ROOT/build/release/z23-x86_64-linux"
+# One vocabulary for platform names. build_release.sh now packages more than
+# one target and names each directory by the SAME platform string the install
+# front doors use (packaging/install/install.sh's PUBLISHED_PLATFORMS), so
+# there is no second spelling of x86-64 Linux to keep in sync with the first.
+# This deployer stays Linux-only: it installs a systemd user unit.
+RELEASE_DIR="$REPO_ROOT/build/release/z23-linux-x86_64"
 HOSTS="${Z23_RELEASE_HOSTS:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
