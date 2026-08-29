@@ -36,6 +36,26 @@
 set -euo pipefail
 trap '' PIPE
 
+# Git for Windows launches hooks with its own minimal MSYS runtime, which does
+# not carry the UCRT64 compiler, make, or flock used by the native Z23 lane.
+# Re-enter once through the qualified MSYS2 shell so an ordinary `git push`
+# proves the same environment as `make windows-acceptance`.
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*)
+        if [ "${Z23_PREPUSH_UCRT64:-0}" != "1" ]; then
+            windows_msys2_root=${Z23_WINDOWS_MSYS2_ROOT:-/c/msys64}
+            windows_msys2_bash=$windows_msys2_root/usr/bin/bash.exe
+            if [ ! -x "$windows_msys2_bash" ]; then
+                echo "pre-push: MSYS2 UCRT64 shell missing: $windows_msys2_bash" >&2 || true
+                exit 1
+            fi
+            export Z23_PREPUSH_UCRT64=1 MSYSTEM=UCRT64
+            export PATH="$windows_msys2_root/ucrt64/bin:$windows_msys2_root/usr/bin:$PATH"
+            exec "$windows_msys2_bash" "$0" "$@"
+        fi
+        ;;
+esac
+
 if [ "${ZCL_SKIP_PREPUSH:-0}" = "1" ]; then
     echo "pre-push: ZCL_SKIP_PREPUSH=1 — skipping the local CI gate." >&2 || true
     exit 0
@@ -108,7 +128,15 @@ for name in $git_local_env; do
 done
 unset git_local_env name
 
-CMD="${ZCL_PREPUSH_CMD:-make pre-push-ci}"
+# Windows (MINGW/MSYS) is a supported native lane, but the full pre-push-ci
+# focused-test set includes POSIX-only tools that do not yet build there.
+# Default to the Windows acceptance gate on that lane; every other host keeps
+# the full pre-push-ci gate. ZCL_PREPUSH_CMD still overrides either default.
+default_cmd="make pre-push-ci"
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*) default_cmd="make windows-acceptance" ;;
+esac
+CMD="${ZCL_PREPUSH_CMD:-$default_cmd}"
 LOG_FILE="$REPO_ROOT/build/pre-push-ci.log"
 mkdir -p "$REPO_ROOT/build" 2>/dev/null || true
 

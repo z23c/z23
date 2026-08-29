@@ -39,7 +39,6 @@ static bool all_zero_block(const uint8_t *buf, size_t len)
     }
     return true;
 }
-
 static unsigned long parse_octal_field(const uint8_t *buf, size_t len)
 {
     unsigned long v = 0;
@@ -216,4 +215,3 @@ int gz_read_tar_member(const char *archive_path, const char *member,
     gzclose(gz);
     return rc;
 }
-

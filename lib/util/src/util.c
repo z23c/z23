@@ -357,29 +357,30 @@ static void AppendNetworkDataDir(char *path, size_t path_size)
  * CreateDirectoryW with an explicit owner+SYSTEM-only descriptor then a
  * re-check of the live handle's actual ACL, owner and reparse state.
  *
- * The result is discarded, exactly as the mkdir() it replaces discarded
- * EEXIST. What both arms guarantee is that a directory THIS process creates
- * is owner-private; neither repairs, nor refuses to use, a directory an
- * operator already created with wider access — SetDataDir/GetDataDir have no
- * error channel, and turning a pre-existing datadir into a boot failure is a
- * product decision, not a fix for the inherited-ACL defect. */
-static void EnsurePrivateDataDir(const char *path)
+ * Existing paths are accepted only when that same private-directory contract
+ * holds. Callers receive failure before the path is cached or used. */
+static bool EnsurePrivateDataDir(const char *path)
 {
-    (void)platform_private_directory_ensure(path);
+    return platform_private_directory_ensure(path);
 }
 
-void SetDataDir(const char *datadir)
+bool SetDataDir(const char *datadir)
 {
     ClearDataDirCache();
     if (!datadir || !datadir[0])
-        return;
+        return true;
 
-    snprintf(cachedDataDir, sizeof(cachedDataDir), "%s", datadir);
-    snprintf(cachedDataDirNet, sizeof(cachedDataDirNet), "%s", datadir);
-    AppendNetworkDataDir(cachedDataDirNet, sizeof(cachedDataDirNet));
+    char base[sizeof(cachedDataDir)];
+    char network[sizeof(cachedDataDirNet)];
+    snprintf(base, sizeof(base), "%s", datadir);
+    snprintf(network, sizeof(network), "%s", datadir);
+    AppendNetworkDataDir(network, sizeof(network));
 
-    EnsurePrivateDataDir(cachedDataDir);
-    EnsurePrivateDataDir(cachedDataDirNet);
+    if (!EnsurePrivateDataDir(base) || !EnsurePrivateDataDir(network))
+        return false;
+    snprintf(cachedDataDir, sizeof(cachedDataDir), "%s", base);
+    snprintf(cachedDataDirNet, sizeof(cachedDataDirNet), "%s", network);
+    return true;
 }
 
 void GetDataDir(bool fNetSpecific, char *out, size_t out_size)
@@ -401,7 +402,10 @@ void GetDataDir(bool fNetSpecific, char *out, size_t out_size)
         AppendNetworkDataDir(out, out_size);
     }
 
-    EnsurePrivateDataDir(out);
+    if (!EnsurePrivateDataDir(out)) {
+        out[0] = '\0';
+        return;
+    }
 
     snprintf(cached, 4096, "%s", out);
 }

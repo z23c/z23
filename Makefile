@@ -480,6 +480,21 @@ ZCL_NODECTL_BIN = $(BIN_DIR)/zcl-nodectl
 # Gate E1 file-size policy checker (rule near check-file-size-ceiling below).
 # Declared here because the test binaries take it as an order-only prereq.
 FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
+
+# POSIX-only operator tools: zcl-nodectl uses fork/signals/arpa/inet.h and
+# zclassic-cli uses poll.h. They are not in the native Windows node path, so
+# do not force the test harness or `all` to build them on Windows.
+# zclassic23-acme (the certificate worker) rides here too -- not because it is
+# POSIX-only, but because nothing has yet BUILT it on Windows. Move it out the
+# day someone proves it there; leaving it in `all` unproven would break the
+# native Windows build for everyone else.
+ifeq ($(ZCL_HOST_WINDOWS),1)
+ZCL_POSIX_ONLY_BINS =
+ZCL_NODECTL_DEP =
+else
+ZCL_POSIX_ONLY_BINS = zclassic-cli zcl-nodectl zclassic23-acme
+ZCL_NODECTL_DEP = $(ZCL_NODECTL_BIN)
+endif
 WAL_CHECKPOINT_BIN = $(BIN_DIR)/wal_checkpoint
 SOAK_RUNNER_BIN = $(BIN_DIR)/soak_runner
 CRASH_RECOVERY_TEST_BIN = $(BIN_DIR)/crash_recovery_test
@@ -1679,7 +1694,10 @@ presentation-portability: presentation-demo
 # Defined BEFORE the catalog include: the catalog assigns its per-program
 # variables with :=, so anything it references must already hold a value.
 ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
-ZCL_WINDOWS_ACCEPTANCE_AR ?= x86_64-w64-mingw32-ar
+ZCL_WINDOWS_CROSS_AR := $(shell \
+	command -v x86_64-w64-mingw32-ar 2>/dev/null)
+ZCL_WINDOWS_ACCEPTANCE_AR ?= $(if \
+	$(ZCL_WINDOWS_CROSS_AR),x86_64-w64-mingw32-ar,ar)
 ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 
 # An acceptance program that reaches real sqlite3 needs a mingw archive, and
@@ -1728,7 +1746,10 @@ windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
 windows-acceptance: windows-acceptance-compile
 
 ifeq ($(ZCL_HOST_WINDOWS),1)
+windows-acceptance: windows-headless-run-selftest
+
 	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		"$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
@@ -1741,6 +1762,7 @@ else
 		exit 2; \
 	}; \
 	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		WINEDEBUG=-all wine "$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
@@ -1748,6 +1770,16 @@ else
 	done; \
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 endif
+
+.PHONY: windows-service-install windows-service-status windows-service-remove
+windows-service-install: z23
+	@packaging/windows/install-service.sh install
+
+windows-service-status:
+	@packaging/windows/install-service.sh status
+
+windows-service-remove:
+	@packaging/windows/install-service.sh remove
 
 # ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
 # `make <app>` opens a real window on this host and prints the timestamp it
@@ -1949,9 +1981,8 @@ ifneq ($(ZCL_HOST_WINDOWS),)
 # unconstrained agent adapter merely to make the native node build green.
 ZCL_ADAPTER_RUNNER_TARGET =
 endif
-all: test_zcl zclassic23 zclassic-cli zcl-rpc zcl-nodectl zclassic23-package-verify \
-	zclassic23-acme \
-	$(ZCL_ADAPTER_RUNNER_TARGET)
+all: test_zcl zclassic23 zcl-rpc zclassic23-package-verify \
+	$(ZCL_POSIX_ONLY_BINS) $(ZCL_ADAPTER_RUNNER_TARGET)
 
 # ── Hot-swap ROLLBACK fixture images ──────────────────────────────────────
 # lib/test/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
@@ -2332,7 +2363,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN) $(FILE_SIZE_POLICY_BIN)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2354,7 +2385,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_BIN) $(FILE_SIZE_POLICY_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -3535,7 +3566,7 @@ dev-package-verifier: $(DEV_PACKAGE_VERIFY_BIN)
 	mv -f -- "$$tmp" '$(DEV_PACKAGE_VERIFY_ENSURE_STAMP)'; \
 	trap - EXIT HUP INT TERM
 
-ifeq ($(ZCL_STANDALONE_CLEAN),1)
+ifeq ($(or $(ZCL_STANDALONE_CLEAN),$(ZCL_HOST_WINDOWS)),1)
 dev-package-verifier-ensure:
 	@:
 else
@@ -7852,6 +7883,65 @@ endef
 .PHONY: install
 install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign
 	@$(INSTALL_C23_PRODUCTS)
+
+# ── macOS launchd service (the launchd equivalent of systemd linger) ──
+# Installs a LaunchAgent plist that keeps the z23 node running in the
+# background with auto-restart on crash, starts at login, and logs to
+# the datadir. Uses launchd — the native macOS service manager — so no
+# Xcode, Homebrew services, or third-party tools are needed.
+#
+#   make service-install        # production path: uses $(PREFIX)/bin/z23
+#   make dev-service-install    # development path: uses build/bin/z23
+#
+# The production path requires 'make install' first so the plist points
+# at a stable installed binary, not a build directory that may relink.
+
+ZCL_LAUNCHD_DIR  = $(HOME)/Library/LaunchAgents
+ZCL_LAUNCHD_LABEL = org.z23.zclassic
+ZCL_LAUNCHD_PLIST = $(ZCL_LAUNCHD_DIR)/$(ZCL_LAUNCHD_LABEL).plist
+ZCL_DATADIR = $(or $(ZCL_NODE_DATADIR),$(HOME)/.zclassic-c23)
+
+.PHONY: service-install
+service-install:
+	@test -x "$(PREFIX)/bin/z23" || { \
+	    echo "service-install: $(PREFIX)/bin/z23 not found." >&2; \
+	    echo "  Run 'make install' first, or use 'make dev-service-install'" >&2; \
+	    echo "  to run from the build directory ($(BIN_DIR)/z23)." >&2; \
+	    exit 1; }
+	@$(MAKE) __service-install ZCL_SERVICE_Z23_BIN="$(PREFIX)/bin/z23"
+
+.PHONY: dev-service-install
+dev-service-install: | $(BIN_DIR)/z23
+	@$(MAKE) __service-install ZCL_SERVICE_Z23_BIN="$(abspath $(BIN_DIR)/z23)"
+
+.PHONY: __service-install
+__service-install:
+	@mkdir -p $(ZCL_LAUNCHD_DIR) "$(ZCL_DATADIR)"
+	@sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
+	     -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
+	    config/launchd/org.z23.zclassic.plist.template \
+	    > "$(ZCL_LAUNCHD_PLIST)"
+	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
+	@launchctl load "$(ZCL_LAUNCHD_PLIST)"
+	@echo "service-install: LaunchAgent loaded ($(ZCL_LAUNCHD_LABEL))"
+	@echo "  binary:  $(ZCL_SERVICE_Z23_BIN)"
+	@echo "  datadir: $(ZCL_DATADIR)"
+	@echo "  logs:    $(ZCL_DATADIR)/z23.{stdout,stderr}.log"
+	@echo "  stop:    launchctl unload $(ZCL_LAUNCHD_PLIST)"
+	@echo "  start:   launchctl load $(ZCL_LAUNCHD_PLIST)"
+
+.PHONY: service-uninstall
+service-uninstall:
+	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
+	@rm -f "$(ZCL_LAUNCHD_PLIST)"
+	@echo "service-uninstall: LaunchAgent unloaded and removed"
+
+.PHONY: service-status
+service-status:
+	@launchctl list | LC_ALL=C grep z23 || echo "  (not loaded)"
+	@test -f "$(ZCL_LAUNCHD_PLIST)" && echo "  plist: $(ZCL_LAUNCHD_PLIST)" \
+	    || echo "  (not installed)"
+
 
 # Same installation surface, but every copied product was freshly built and
 # audited by the pinned old-glibc front door above. Keeping the copy recipe

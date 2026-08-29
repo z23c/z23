@@ -41,7 +41,6 @@ static void make_request(struct mesh_status_request_v1 *request)
     fill_bytes(request->pairing_id, 0xb1);
     fill_bytes(request->transcript_hash, 0xd1);
     request->connection_generation = UINT64_C(0x1020304050607080);
-    request->connection_serial = UINT64_C(0x8877665544332211);
     request->issued_unix = UINT64_C(1800000000);
     request->expires_unix = request->issued_unix +
                             MESH_STATUS_MAX_LIFETIME_SECONDS;
@@ -74,7 +73,6 @@ static bool make_receipt(struct mesh_status_receipt_v1 *receipt,
     fill_bytes(receipt->responder_noise_static, 0x42);
     memcpy(receipt->transcript_hash, request->transcript_hash, 32);
     receipt->connection_generation = request->connection_generation;
-    receipt->connection_serial = request->connection_serial;
     receipt->revocation_generation = 7;
     receipt->observed_unix = request->issued_unix + 1;
     receipt->expires_unix = request->expires_unix;
@@ -179,10 +177,6 @@ static int request_strictness(void)
         }
         memcpy(&trial, &request, sizeof(trial));
         trial.connection_generation = 0;
-        ASSERT_EQ(mesh_status_request_v1_validate(&trial),
-                  MESH_STATUS_PROTO_FIELD);
-        memcpy(&trial, &request, sizeof(trial));
-        trial.connection_serial = 0;
         ASSERT_EQ(mesh_status_request_v1_validate(&trial),
                   MESH_STATUS_PROTO_FIELD);
         memcpy(&trial, &request, sizeof(trial));
@@ -347,7 +341,7 @@ static int receipt_tamper_and_bounds(void)
         ASSERT_EQ(mesh_status_receipt_v1_decode(&decoded, tampered, wire_len),
                   MESH_STATUS_PROTO_SIZE);
         memcpy(tampered, wire, wire_len);
-        tampered[344] ^= 1;
+        tampered[MESH_STATUS_RECEIPT_V1_FIXED_BYTES - 64u] ^= 1;
         ASSERT_EQ(mesh_status_receipt_v1_decode(&decoded, tampered, wire_len),
                   MESH_STATUS_PROTO_CAPSULE_ROOT);
         memcpy(tampered, wire, wire_len);
@@ -425,6 +419,12 @@ static int receipt_request_binding(void)
 
         memcpy(&trial, &receipt, sizeof(trial));
         trial.request_root[0] ^= 1;
+        ASSERT_EQ(mesh_status_receipt_v1_sign(&trial, seed),
+                  MESH_STATUS_PROTO_OK);
+        ASSERT_EQ(mesh_status_receipt_v1_matches_request(&trial, &request),
+                  MESH_STATUS_PROTO_FIELD);
+        memcpy(&trial, &receipt, sizeof(trial));
+        trial.request_id[0] ^= 1;
         ASSERT_EQ(mesh_status_receipt_v1_sign(&trial, seed),
                   MESH_STATUS_PROTO_OK);
         ASSERT_EQ(mesh_status_receipt_v1_matches_request(&trial, &request),

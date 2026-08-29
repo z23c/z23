@@ -469,14 +469,16 @@ bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,
 bool boot_sd_watchdog_test_runtime_pillars(bool sweep_alive,
                                            bool tick_alive,
                                            bool connman_alive);
-/* One runtime pillar: its loop marker is fresh, OR the kernel says that
- * thread is still doing work. Both false is the wedge this watchdog kills. */
-bool boot_sd_watchdog_test_pillar_alive(bool marker_fresh, bool thread_working);
+/* One runtime pillar: its loop marker is fresh, the kernel reports work, or
+ * an explicit operation-specific bounded wait remains inside its deadline. */
+bool boot_sd_watchdog_test_pillar_alive(bool marker_fresh, bool thread_working,
+                                        bool bounded_wait_active);
 /* The two connman loops, each judged by the rule above and then ANDed. */
 bool boot_sd_watchdog_test_connman_alive(bool msg_marker_fresh,
                                          bool msg_working,
                                          bool dial_marker_fresh,
-                                         bool dial_working);
+                                         bool dial_working,
+                                         bool dial_bounded_wait_active);
 #endif
 
 /* ── boot_supervisor_backstop.c ──────────────────────────────────

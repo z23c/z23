@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+         "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.z23.zclassic</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@Z23_BIN@</string>
+        <string>-datadir</string>
+        <string>@DATADIR@</string>
+        <string>-operator-lane</string>
+        <string>canonical</string>
+        <string>-listen</string>
+        <string>-txindex</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>@DATADIR@/z23.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@DATADIR@/z23.stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>@DATADIR@</string>
+
+    <key>Nice</key>
+    <integer>0</integer>
+
+    <key>LowPriorityIO</key>
+    <false/>
+</dict>
+</plist>

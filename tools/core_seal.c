@@ -204,6 +204,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <io.h>
+#include <windows.h>
+#endif
 #include <unistd.h>
 
 #define HSZ SHA3_256_OUTPUT_SIZE
@@ -354,6 +358,71 @@ static int open_sealed_file(const char *path)
     if (path_reject_reason(path) != NULL)
         return -1;
 
+#if defined(_WIN32)
+    wchar_t wide[MERKLE_PATH_MAX];
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                       wide, MERKLE_PATH_MAX);
+    if (wide_len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* CreateFileW follows reparse points in intermediate components even when
+     * FILE_FLAG_OPEN_REPARSE_POINT is set.  Refuse every component first, then
+     * open the final component itself as a reparse point so neither a symlink
+     * nor a junction is accepted as a sealed file. */
+    for (wchar_t *cursor = wide;; cursor++) {
+        if (*cursor != L'/' && *cursor != L'\\' && *cursor != L'\0')
+            continue;
+        wchar_t saved = *cursor;
+        *cursor = L'\0';
+        DWORD attrs = GetFileAttributesW(wide);
+        *cursor = saved;
+        if (attrs == INVALID_FILE_ATTRIBUTES ||
+            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            errno = ELOOP;
+            return -1;
+        }
+        if (saved == L'\0')
+            break;
+    }
+
+    HANDLE handle = CreateFileW(
+        wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        errno = EACCES;
+        return -1;
+    }
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        CloseHandle(handle);
+        errno = EINVAL;
+        return -1;
+    }
+    wchar_t expected[MERKLE_PATH_MAX], resolved[MERKLE_PATH_MAX + 4];
+    DWORD expected_len = GetFullPathNameW(wide, MERKLE_PATH_MAX, expected,
+                                          NULL);
+    DWORD resolved_len = GetFinalPathNameByHandleW(
+        handle, resolved, MERKLE_PATH_MAX + 4,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    const wchar_t *resolved_path = resolved;
+    if (resolved_len >= 4 && wcsncmp(resolved, L"\\\\?\\", 4) == 0)
+        resolved_path += 4;
+    if (expected_len == 0 || expected_len >= MERKLE_PATH_MAX ||
+        resolved_len == 0 || resolved_len >= MERKLE_PATH_MAX + 4 ||
+        _wcsicmp(expected, resolved_path) != 0) {
+        CloseHandle(handle);
+        errno = ELOOP;
+        return -1;
+    }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0)
+        CloseHandle(handle);
+    return fd;
+#else
     char copy[MERKLE_PATH_MAX];
     memcpy(copy, path, strlen(path) + 1);
     int dirfd = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -380,12 +449,16 @@ static int open_sealed_file(const char *path)
         dirfd = next;
         part = slash + 1;
     }
+#endif
 }
 
 static bool stable_file_stat(const struct stat *before,
                              const struct stat *after)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    bool times_equal = before->st_mtime == after->st_mtime &&
+                       before->st_ctime == after->st_ctime;
+#elif defined(__APPLE__)
     bool times_equal =
         before->st_mtimespec.tv_sec == after->st_mtimespec.tv_sec &&
         before->st_mtimespec.tv_nsec == after->st_mtimespec.tv_nsec &&
@@ -1039,7 +1112,14 @@ static int read_manifest(const char *manifest_path, struct manifest_view *mv)
     mv->file = calloc(MAX_MAN_FILES, sizeof(*mv->file)); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
     if (!mv->sec || !mv->file)
         die("out of memory reading manifest");
+    /* Native Windows Git checkouts may materialize this text manifest with
+     * CRLF. Text mode removes only the platform line ending; a bare or
+     * embedded CR still reaches the strict physical-line rejection below. */
+#if defined(_WIN32)
+    FILE *m = fopen(manifest_path, "r");
+#else
     FILE *m = fopen(manifest_path, "rb");
+#endif
     if (!m)
         return -1;
     char line[4096];

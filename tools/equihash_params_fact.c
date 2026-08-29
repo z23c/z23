@@ -85,7 +85,10 @@ int main(int argc, char **argv)
 {
     FILE *out = stdout;
     if (argc > 1) {
-        out = fopen(argv[1], "w");
+        /* Open in binary mode so the generated Markdown uses LF line endings
+         * on every host, matching the repository's core.autocrlf=false policy
+         * and keeping check-equihash-params deterministic on Windows. */
+        out = fopen(argv[1], "wb");
         if (!out) {
             fprintf(stderr, "equihash_params_fact: cannot write %s\n", argv[1]);
             return 1;

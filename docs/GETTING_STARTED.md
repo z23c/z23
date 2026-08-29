@@ -436,6 +436,20 @@ after `git clone` into `~/zclassic23`; if you cloned elsewhere, edit the
 it; the unit sources this file optionally, so a fresh clone without it still
 starts cleanly.
 
+**On macOS**, install the binary once, then use the provided LaunchAgent:
+
+```bash
+make install                              # default PREFIX=/usr/local; use ~/.local for rootless
+make service-install                      # loads ~/Library/LaunchAgents/org.z23.zclassic.plist
+launchctl list | grep org.z23.zclassic    # confirm it is loaded
+```
+
+`make service-install` fails closed if `$(PREFIX)/bin/z23` is missing, so
+run `make install` first or use `make dev-service-install` to run the node
+straight from `build/bin/z23`. The LaunchAgent starts at login, restarts on
+crash, and logs to `~/.zclassic-c23/z23.{stdout,stderr}.log`. Stop it with
+`make service-uninstall` or `launchctl unload ~/Library/LaunchAgents/org.z23.zclassic.plist`.
+
 A minimal from-scratch example, if you'd rather not use the tracked unit
 (substitute your own paths/ports):
 

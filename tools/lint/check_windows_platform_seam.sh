@@ -101,8 +101,8 @@ BASELINE="tools/lint/windows_platform_seam_baseline.txt"
 SRC_FLOOR=8
 
 # The Windows preprocessor flags come from the Makefile, never from a
-# copy kept here. The build compiles the Windows target at
-# ZCL_PLATFORM_CPPFLAGS -- notably -D_WIN32_WINNT=0x0600 -- and mingw
+# copy kept here. The build compiles the Windows target at the API floor
+# referenced by ZCL_PLATFORM_CPPFLAGS, and mingw
 # gates real API surface on that macro: GetActiveProcessorCount and
 # ALL_PROCESSOR_GROUPS, for instance, are declared only at 0x0601 and
 # up. Compiling here at mingw's permissive default therefore asks a
@@ -111,10 +111,31 @@ SRC_FLOOR=8
 # target. That is a false green, and this gate existed to prevent
 # exactly that, so the floor is read from the Makefile and drifts
 # with it by construction.
-mapfile -t PLATFORM_DEFINES < <(
+mapfile -t API_FLOOR_DEFINES < <(
+    awk '/^ZCL_WINDOWS_API_FLOOR[ \t]*:?=/ { print; exit }' Makefile |
+        tr ' \t' '\n\n' | LC_ALL=C grep '^-D_WIN32_WINNT=' )
+if [ "${#API_FLOOR_DEFINES[@]}" -ne 1 ]; then
+    echo "  $GATE: FAIL — expected exactly one _WIN32_WINNT floor in the" >&2
+    echo "      Makefile; refusing to compile against mingw's default." >&2
+    exit 1
+fi
+
+platform_assignment="$({
     awk '/^ZCL_PLATFORM_CPPFLAGS[ \t]*=/ { inblock = 1 }
          inblock { line = line " " $0; if ($0 !~ /\\$/) { print line; exit } }
-        ' Makefile | tr ' \t\\' '\n\n\n' | LC_ALL=C grep '^-D' )
+        ' Makefile
+} )"
+case "$platform_assignment" in
+    *'$(ZCL_WINDOWS_API_FLOOR)'*) ;;
+    *)
+        echo "  $GATE: FAIL — ZCL_PLATFORM_CPPFLAGS does not reference" >&2
+        echo "      ZCL_WINDOWS_API_FLOOR; the product and gate can drift." >&2
+        exit 1
+        ;;
+esac
+mapfile -t PLATFORM_DEFINES < <(
+    printf '%s\n' "$platform_assignment" |
+        tr ' \t\\' '\n\n\n' | LC_ALL=C grep '^-D' )
 if [ "${#PLATFORM_DEFINES[@]}" -eq 0 ]; then
     echo "  $GATE: FAIL — could not read ZCL_PLATFORM_CPPFLAGS from the" >&2
     echo "      Makefile. Refusing to cross-compile at a guessed API" >&2
@@ -122,7 +143,8 @@ if [ "${#PLATFORM_DEFINES[@]}" -eq 0 ]; then
     exit 1
 fi
 
-WARN_FLAGS=(-std=c2x -fsyntax-only "${PLATFORM_DEFINES[@]}")
+WARN_FLAGS=(-std=c2x -fsyntax-only "${API_FLOOR_DEFINES[@]}"
+            "${PLATFORM_DEFINES[@]}")
 
 echo "══ LINT: Windows platform-seam cross-compile (mingw -fsyntax-only) ══"
 

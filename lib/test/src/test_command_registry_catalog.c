@@ -3021,11 +3021,17 @@ static int test_zses_invite_leaves(void)
             find_spec(reg, "ops.mesh.join_status");
         const struct zcl_command_spec *identity =
             find_spec(reg, "ops.mesh.identity");
+        const struct zcl_command_spec *pair_list =
+            find_spec(reg, "ops.mesh.pair.list");
+        const struct zcl_command_spec *pair_revoke =
+            find_spec(reg, "ops.mesh.pair.revoke");
         ASSERT(create != NULL);
         ASSERT(accept != NULL);
         ASSERT(join != NULL);
         ASSERT(st != NULL);
         ASSERT(identity != NULL);
+        ASSERT(pair_list != NULL);
+        ASSERT(pair_revoke != NULL);
         ASSERT_EQ(create->availability, ZCL_COMMAND_READY);
         ASSERT_EQ(accept->availability, ZCL_COMMAND_READY);
         ASSERT_EQ(join->availability, ZCL_COMMAND_READY);
@@ -3034,6 +3040,13 @@ static int test_zses_invite_leaves(void)
         ASSERT(join->handler == zcl_native_handle_ops_mesh_join);
         ASSERT(st->handler == zcl_native_handle_ops_mesh_join_status);
         ASSERT(identity->handler == zcl_native_handle_ops_mesh_identity);
+        ASSERT(pair_list->handler == zcl_native_handle_ops_mesh_pair_list);
+        ASSERT(pair_revoke->handler == zcl_native_handle_ops_mesh_pair_revoke);
+        ASSERT_EQ(pair_list->effect, ZCL_COMMAND_EFFECT_READ);
+        ASSERT_EQ(pair_revoke->effect, ZCL_COMMAND_EFFECT_MUTATE);
+        ASSERT_EQ(pair_revoke->authority, ZCL_COMMAND_AUTH_OWNER);
+        ASSERT_EQ(pair_revoke->confirmation,
+                  ZCL_COMMAND_CONFIRM_PLAN_COMMIT);
         ASSERT(strcmp(identity->aliases,
                       "ops.machine.status,machine.status") == 0);
         ASSERT(strstr(create->input_keys, "endpoint") != NULL);

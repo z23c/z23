@@ -52,3 +52,37 @@ bool thread_work_probe_advanced(const struct thread_work_sample *prev,
            now->major_faults > prev->major_faults ||
            now->io_bytes     > prev->io_bytes;
 }
+
+bool thread_bounded_wait_begin_at(struct thread_bounded_wait *wait,
+                                  int64_t now_us, int64_t timeout_us)
+{
+    if (!wait)
+        return false;
+    atomic_store_explicit(&wait->deadline_us, 0, memory_order_release);
+    if (now_us < 0 || timeout_us <= 0 ||
+        timeout_us > THREAD_BOUNDED_WAIT_MAX_US ||
+        now_us > INT64_MAX - timeout_us)
+        return false;
+    atomic_store_explicit(&wait->deadline_us, now_us + timeout_us,
+                          memory_order_release);
+    return true;
+}
+
+void thread_bounded_wait_end(struct thread_bounded_wait *wait)
+{
+    if (wait)
+        atomic_store_explicit(&wait->deadline_us, 0, memory_order_release);
+}
+
+int64_t thread_bounded_wait_deadline(const struct thread_bounded_wait *wait)
+{
+    return wait ? atomic_load_explicit(&wait->deadline_us,
+                                       memory_order_acquire) : 0;
+}
+
+bool thread_bounded_wait_active_at(const struct thread_bounded_wait *wait,
+                                   int64_t now_us)
+{
+    int64_t deadline_us = thread_bounded_wait_deadline(wait);
+    return now_us >= 0 && deadline_us > now_us;
+}

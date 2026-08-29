@@ -69,11 +69,6 @@ bool explorer_start_once(_Atomic int *flag,
                          void *(*entry)(void *),
                          const char *name);
 
-/* ── Cache helpers (defined in explorer_controller_pages.c) ── */
-
-void cache_save(const char *name, const char *data, size_t len);
-size_t cache_load(const char *name, char *buf, size_t max);
-
 /* ── Filesystem-backed explorer assets (defined in
  * explorer_controller.c). Used by pages.c for cache files + CSS. */
 

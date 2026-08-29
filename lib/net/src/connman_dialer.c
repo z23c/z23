@@ -60,6 +60,7 @@
  * diversity are counted ACROSS the in-flight batch by batch_diversity_ok(),
  * so a 4-wide fan cannot concentrate on one netgroup. */
 #define ZCL_DIAL_SCHEDULER_WIDTH 4
+static_assert(ONION_STREAM_CONNECT_TIMEOUT_MS <= THREAD_BOUNDED_WAIT_MAX_US / 1000);
 
 static bool connect_only_wait_needed(bool connect_only, size_t outbound,
                                      size_t addnode_count,
@@ -675,10 +676,14 @@ static void connman_dial_batch(struct connman *cm,
         peer_lifecycle_note_attempt(&c->addr, dial_lifecycle_source(c));
         int64_t began_ms = platform_time_monotonic_ms();
         zcl_socket_t s = ZCL_INVALID_SOCKET;
+        (void)thread_bounded_wait_begin_at(
+            &cm->dial_bounded_wait, platform_time_monotonic_us(),
+            onion_budget_ms * 1000);
         if (onion_stream_connect(&c->addr.svc, &s, (int)onion_budget_ms))
             connman_complete_dial(cm, c, s);   /* takes ownership of s */
         else
             connman_record_dial_failure(cm, c);
+        thread_bounded_wait_end(&cm->dial_bounded_wait);
         onion_budget_ms -= platform_time_monotonic_ms() - began_ms;
     }
 }
