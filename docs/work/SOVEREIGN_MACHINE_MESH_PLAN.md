@@ -121,7 +121,7 @@ onion failover, and relay transport remain acceptance work.
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
 | Fleet view | Wire, durable local projection, and bounded automatic refresh connected: pairing-bound signed status receipts pin the responder's unique active delegated online key; `ops mesh machines` lists bounded redacted pairings from schema-v77 exact receipt evidence as fresh, stale, or unknown without network I/O | Independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
-| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume | Private dispatcher and queue, private store and journal, chunk scheduling, full-root verification, atomic no-clobber publication, cancellation, signed receipts, and independent-host acceptance |
+| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames | Private dispatcher and queue, private store and journal, chunk scheduling, full-root verification, atomic no-clobber publication, cancellation handling, signed receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
@@ -482,6 +482,27 @@ Each item lands with a local adversarial test and then an independent-host
 receipt. Work does not skip forward because a later UI can be demonstrated
 against fixtures.
 
+### Parallel platform lanes
+
+Linux, macOS, and Windows work proceeds concurrently without creating a fleet
+controller or separate platform protocols. `origin/main` is the integration
+blackboard; each lane consumes the same portable C23 protocol and publishes
+native evidence for only the guarantees that host can prove.
+
+| Lane | Owns now | Acceptance before promotion |
+| --- | --- | --- |
+| Portable protocol | Pairing/capability wire, private-object frames and store, receipts, terminal framing, route identity | Strict C23 build, adversarial codec/fuzz gates, restart-safe fixtures, no socket/disk work on message threads |
+| Linux native | systemd lifecycle, full Tor, directory/descriptor confinement, PTY worker, A/B core restart | Signed native receipt for service restart, onion identity, confinement, terminal revocation, rollback, and chain-priority load |
+| macOS native | launchd lifecycle, full-Tor measurement, directory transaction semantics, PTY worker, service-island generation switch | arm64 native receipts first; Intel remains unclaimed until independently measured; unsupported confinement refuses by name |
+| Windows native | UCRT64 runtime, Task Scheduler lifecycle, ACL-safe private store, ConPTY worker, native Tor decision | Native—not Wine/WSL—receipts for start/restart, file publication, terminal teardown, and every advertised transport |
+| Cross-host acceptance | Pair each platform combination and remove initiating agents, GitHub, and one route | Exact signed receipts prove identity stability, transfer resume, revocation, alternate-route authority parity, and continued chain sync |
+
+Platform agents may improve their native lane before the shared protocol reaches
+it, but they record measurements and portable seams rather than inventing an
+alternate wire, identity, capability, scheduler, or update authority. Work is
+ready to compose only after its commit is on `main`, its exact source identity
+is named, and another host can independently reproduce the claimed behavior.
+
 The immediate acceptance for item 6 queues an action while each admission fact
 is independently unsafe: chain not at tip, low disk, high memory pressure, long
 database operation, database service unavailable, database closed, transaction
@@ -528,6 +549,17 @@ streams. Checkpoint measured 2026-08-29T09:22:48-04:00 /
 `self_skips=0`; the root-specific gate is recorded with the implementing
 change. No network dispatcher, private store, resume journal, or
 independent-host receipt exists yet; private file transfer remains incomplete.
+
+Checkpoint measured 2026-08-29T09:55:08-04:00 /
+2026-08-29T13:55:08Z: the allocation-free `ZMPO` v1 data-plane envelope
+defines exact OFFER, REQUEST, CHUNK, and CANCEL frames. Transfer id, transient
+offer request id, nonzero per-request replay id, chunk index, and sealed length
+are explicit little-endian fields. The 65,624-byte maximum is build-time
+asserted below the existing two-mebibyte carrier limit; unknown versions,
+flags, kinds, zero identifiers, invalid sealed lengths, truncation, and trailing
+bytes fail closed. This is a portable codec only. It performs no network,
+database, file, admission, decryption, execution, or deployment work; the
+bounded dispatcher and private staging store remain next.
 
 Item 7 records one native-host service receipt per claimed platform containing
 the OS and architecture, source identity, running-image digest, service-manager
