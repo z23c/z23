@@ -68,6 +68,12 @@ extern "C" {
  * unparseable body. Clearnet retrieval is unaffected: it completes well
  * under the generic ceiling. */
 #define RPC_MARKET_DELIVERY_TIMEOUT_MS 300000
+/* The mesh fleet view probes up to 8 paired machines with a bounded 12 s
+ * collective wait inside one RPC (MESH_MACHINES_COLLECT_BUDGET_MS). The
+ * generic 10 s ceiling would shutdown() the socket mid-wait and surface a
+ * truncated, unparseable body to the caller, so this method gets a bounded
+ * 20 s budget — extend, never shorten, same as the proof budget. */
+#define RPC_MESH_COLLECT_TIMEOUT_MS 20000
 
 struct rpc_timeout_slot {
     bool     in_use;

@@ -119,7 +119,7 @@ onion failover, and relay transport remain acceptance work.
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Wire, durable local projection, and bounded automatic refresh connected: pairing-bound signed status receipts pin the responder's unique active delegated online key; `ops mesh machines` lists bounded redacted pairings from schema-v77 exact receipt evidence as fresh, stale, or unknown without network I/O | Independent-host receipts |
+| Fleet view | Implemented: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget); rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, fixed replay/cadence bounds protect both ends, and a supervised, sync-subordinate scheduler refreshes paired-machine status automatically (bounded in-flight, cooldown/backoff, admitted only at chain tip with clear disk, memory, and DB); every verified receipt persists through the one serialized db_service writer; never dials, offline machines stay listed | Independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, and restart resume | Private dispatcher and queue, atomic no-clobber plaintext publication, cancellation wiring, signed receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
@@ -825,7 +825,63 @@ peers, never production wallet state.
   evidence. Older or same-time equivocal receipts cannot replace the durable
   row; exact replay is idempotent. Fixture acceptance proves restart retention,
   stale/unknown separation, redaction, migration idempotence, and strict MinGW
-  C23 syntax.
+<<<<<<< HEAD
+  C23 syntax. Automatic refresh and independent-host evidence remain open.
+- 2026-08-29: queue item 5 landed the fleet view. `ops mesh machines` (RPC
+  method `mesh_machines`) projects every durable pairing record — active,
+  expired, and revoked — exactly once, and probes up to
+  MESH_MACHINES_FLEET_MAX (8) active records over the existing status lane
+  with a collective 12-second budget and 50 ms poll rounds inside the RPC
+  worker thread. Each row carries the redacted pairing view plus a verdict
+  from one pure mapping (`mesh_machine_derive_state`): online (signed OK
+  receipt with observed time, responder Noise fingerprint, and a redacted
+  capsule summary lifting platform/build/confinement/hotswap, including
+  `same_source_as_this_node`), refused:<status> (a signed refusal receipt
+  with its wire token), unreachable (no live v2 session or the v2 transport
+  disabled), timeout (request expiry or budget exhaustion), unknown (named
+  cause, counted only in `total`), expired, or revoked. The RPC watchdog
+  extends only this method's slot to a bounded 20 s
+  (RPC_MESH_COLLECT_TIMEOUT_MS) so the collective wait is never killed
+  mid-reply; the native client deadline is 18 s. No dial, no write, and no
+  persistent reachability history — every verdict is derived at call time.
+  Proofs: the `mesh_status_wire` group gained the full derive matrix (both
+  unreachable causes, both timeout causes, refused-token propagation,
+  record/begin/poll precedence), probe-cap planning with the truncation
+  flag, and the tally rollup including the empty fleet; the `rpc_timeout`
+  group pins the method-scoped extension; the catalog pins
+  `ops.mesh.machines` READY/read with its handler. Gates: t-fast ONLY=mesh
+  7/7, ONLY=command_registry 2/2, ONLY=native_api_contract 1/1, ONLY=rpc
+  9/9 groups with zero skips; the impact-rule check passed and
+  `make lint-fast` passed. `make lint` reported three pre-existing upstream
+  failures in files this slice never touched (doc-count drift
+  test_groups=998-vs-994 in docs/CODEBASE_MAP.md, a publish-shaped printf
+  string in tools/dev/grok-unit.sh, operator paths in
+  docs/experiments/2026-08-28-mac-agentic-baseline.md). What remains before
+  the product claim: independent-host receipts.
+- 2026-08-29: merge reconciliation unified the two `ops mesh machines`
+  implementations into one surface. Upstream's schema-v77 observation store
+  and its read/render path are authoritative for durable evidence
+  (fresh/stale/never-seen, fingerprints only); the live-probe fan-out became
+  the bounded refresh that populates that store. Persistence moved into the
+  status lane as `boot_mesh_status_persist_observation`
+  (config/src/boot_mesh_status.c), called by both the single-machine poll
+  RPC and the fleet refresh, so both writers share one handoff and one
+  truth. The unified document keeps every upstream field and adds the live
+  rollup (`live_probed`/`live_online`/… plus per-row `live_reachability`)
+  only when a probe ran; the test hook renders the durable document alone.
+  The row no longer embeds a capsule summary — `ops mesh status` already
+  renders the full verified capsule for one machine, so the fleet row
+  carries identity fingerprints and verdicts only. Duplicates removed: the
+  second command-catalog leaf, the second native handler and declaration,
+  and the upstream render/method copy in boot_mesh_status_rpc.c. The
+  `mesh_pairing` group gained the agreement pin: one verified receipt feeds
+  the live row, the store, and the rendered document, and all three agree
+  on pairing identity and responder Noise fingerprint. Gates: `make z23`
+  passed; t-fast ONLY=mesh 7/7, ONLY=command_registry 2/2,
+  ONLY=native_api_contract 1/1, ONLY=rpc 9/9 groups with zero skips; the
+  impact-rule check, `make lint-fast`, and full `make lint` (163 gates) all
+  passed. What remains before the product claim: automatic bounded refresh
+  scheduling and independent-host receipts.
 - 2026-08-29: queue item 5 added a dedicated supervised refresh clock. It
   polls at most two requests, admits at most one connected active pairing per
   second, backs off unavailable peers, never dials, and admits no new work
@@ -874,6 +930,19 @@ peers, never production wallet state.
   groups ran cold with zero failures and zero skips. This proves ciphertext
   staging only; network dispatch, plaintext-root publication, grant completion,
   signed receipt, and independent-host acceptance remain open.
+- 2026-08-29: merge reconciliation converged the fleet view with the new
+  refresh architecture. Upstream's supervised, sync-subordinate refresh clock
+  and its db_service writer lane are authoritative; the on-demand live-probe
+  fan-out in `ops mesh machines` now persists its verified terminal receipts
+  through `boot_mesh_status_receipt_persist` — the same serialized writer
+  the poll RPC and the background refresh use — so all three writers share
+  one lane and one store. The direct `boot_mesh_status_persist_observation`
+  variant remains only as the synchronous test handoff. Upstream's duplicate
+  render/method copy in boot_mesh_status_rpc.c was dropped again (the unified
+  render with the live rollup stays in boot_mesh_machines_rpc.c); the poll
+  path took upstream's db_service persist call. Gates: `make z23` passed;
+  t-fast ONLY=mesh passed with zero skips; `make lint-fast` passed. What
+  remains before the product claim: independent-host receipts.
 
 ## Completion rule
 

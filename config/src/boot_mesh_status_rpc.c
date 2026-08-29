@@ -4,14 +4,13 @@
  * bounded pending request and returns its request id; poll reports the
  * honest state machine and, once terminal, the verified receipt view. */
 
+#include "config/boot_mesh_machines.h"
 #include "config/boot_mesh_status.h"
 #include "config/db_service.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
-#include "crypto/sha3.h"
 #include "json/json.h"
-#include "models/mesh_machine_observation.h"
 #include "net/v2_identity.h"
 #include "platform/time_compat.h"
 #include "rpc/server.h"
@@ -23,8 +22,6 @@
 
 static struct node_db *g_mesh_status_ndb;
 static struct db_service *g_mesh_status_dbsvc;
-
-#define MESH_MACHINES_VIEW_MAX 16u
 
 static const struct json_value *rpc_input(const struct json_value *params)
 {
@@ -129,19 +126,8 @@ static bool rpc_mesh_status_request(const struct json_value *params, bool help,
 /* Terminal receipt view: status token, responder identity fingerprints,
  * times, and the decoded capsule JSON. The receipt reached this point only
  * after signature, request-binding, session-binding, and responder-identity
- * verification. */
-static void receipt_fingerprint(const char *domain, const uint8_t key[32],
-                                char out[65])
-{
-    struct sha3_256_ctx hash;
-    uint8_t digest[32];
-    sha3_256_init(&hash);
-    sha3_256_write(&hash, (const uint8_t *)domain, strlen(domain));
-    sha3_256_write(&hash, key, 32);
-    sha3_256_finalize(&hash, digest);
-    zcl_hex_encode(digest, sizeof(digest), out);
-}
-
+ * verification. Fingerprints come from the lane's one shared implementation
+ * so they match the fleet view exactly. */
 static void receipt_view_json(struct json_value *result,
                               const struct mesh_status_receipt_v1 *receipt)
 {
@@ -157,11 +143,11 @@ static void receipt_view_json(struct json_value *result,
     json_push_kv_str(result, "request_id", hex);
     zcl_hex_encode(receipt->pairing_id, 32, hex);
     json_push_kv_str(result, "pairing_id", hex);
-    receipt_fingerprint("zcl.mesh.master.fingerprint.v1",
-                        receipt->responder_master_pubkey, hex);
+    boot_mesh_status_key_fingerprint("zcl.mesh.master.fingerprint.v1",
+                                     receipt->responder_master_pubkey, hex);
     json_push_kv_str(result, "responder_master_fingerprint", hex);
-    receipt_fingerprint("zcl.mesh.online.fingerprint.v1",
-                        receipt->responder_online_pubkey, hex);
+    boot_mesh_status_key_fingerprint("zcl.mesh.online.fingerprint.v1",
+                                     receipt->responder_online_pubkey, hex);
     json_push_kv_str(result, "responder_online_fingerprint", hex);
     uint8_t fingerprint[32];
     if (v2_identity_public_fingerprint(receipt->responder_noise_static,
@@ -193,125 +179,6 @@ static void receipt_view_json(struct json_value *result,
     }
 }
 
-static const char *mesh_pairing_state(const struct db_mesh_pairing *pairing,
-                                      int64_t now)
-{
-    if (pairing->revoked_at != 0)
-        return "revoked";
-    return now < pairing->expires_at ? "active" : "expired";
-}
-
-static void mesh_machine_json(struct json_value *array,
-                              const struct db_mesh_machine_view *view,
-                              int64_t now, bool *fresh_out)
-{
-    struct json_value item;
-    json_init(&item);
-    json_set_object(&item);
-    const char *pairing_state = mesh_pairing_state(&view->pairing, now);
-    bool fresh = view->has_observation &&
-                 strcmp(pairing_state, "active") == 0 &&
-                 now < view->observation.expires_unix;
-    char hex[65];
-    json_push_kv_str(&item, "pairing_id", view->pairing.pairing_id);
-    json_push_kv_str(&item, "pairing_state", pairing_state);
-    receipt_fingerprint("zcl.mesh.master.fingerprint.v1",
-                        view->pairing.peer_master_pubkey, hex);
-    json_push_kv_str(&item, "peer_master_fingerprint", hex);
-    receipt_fingerprint("zcl.mesh.noise.fingerprint.v1",
-                        view->pairing.peer_noise_pubkey, hex);
-    json_push_kv_str(&item, "peer_noise_fingerprint", hex);
-    json_push_kv_str(&item, "observation_state",
-                     !view->has_observation ? "unknown"
-                                            : fresh ? "fresh" : "stale");
-    if (view->has_observation) {
-        json_push_kv_str(
-            &item, "receipt_status",
-            mesh_status_receipt_status_string(view->observation.status));
-        json_push_kv_int(&item, "observed_unix",
-                         view->observation.observed_unix);
-        json_push_kv_int(&item, "expires_unix",
-                         view->observation.expires_unix);
-        json_push_kv_int(&item, "received_unix",
-                         view->observation.received_unix);
-        zcl_hex_encode(view->observation.receipt_root, 32, hex);
-        json_push_kv_str(&item, "receipt_root", hex);
-    }
-    (void)json_push_back(array, &item);
-    json_free(&item);
-    *fresh_out = fresh;
-}
-
-static void mesh_machines_render(struct node_db *ndb, int64_t now,
-                                 struct json_value *result)
-{
-    size_t capacity = MESH_MACHINES_VIEW_MAX;
-    struct db_mesh_machine_view *views = zcl_calloc(
-        capacity, sizeof(*views), "mesh_machines.views");
-    if (!views || !ndb || now <= 0) {
-        free(views);
-        rpc_error(result, "OBSERVATION_UNAVAILABLE",
-                  "the durable machine projection is unavailable");
-        return;
-    }
-    struct db_mesh_pairing_counts pairing_counts;
-    int count = db_mesh_machine_observation_list(ndb, views, capacity, now);
-    if (count < 0 ||
-        !db_mesh_pairing_count_states(ndb, now, &pairing_counts)) {
-        free(views);
-        rpc_error(result, "OBSERVATION_UNAVAILABLE",
-                  "the durable pairing count is unavailable");
-        return;
-    }
-    size_t shown = (size_t)count;
-    bool truncated = pairing_counts.total > (int64_t)shown;
-    struct json_value machines;
-    json_init(&machines);
-    json_set_array(&machines);
-    int64_t fresh = 0, stale = 0, unknown = 0;
-    for (size_t i = 0; i < shown; i++) {
-        bool is_fresh = false;
-        mesh_machine_json(&machines, &views[i], now, &is_fresh);
-        if (!views[i].has_observation)
-            unknown++;
-        else if (is_fresh)
-            fresh++;
-        else
-            stale++;
-    }
-    free(views);
-    json_set_object(result);
-    json_push_kv_bool(result, "ok", true);
-    json_push_kv_str(result, "schema", "zcl.mesh.machines.v1");
-    json_push_kv_int(result, "observed_at", now);
-    json_push_kv_int(result, "total", pairing_counts.total);
-    json_push_kv_int(result, "active", pairing_counts.active);
-    json_push_kv_int(result, "returned", (int64_t)shown);
-    json_push_kv_int(result, "returned_fresh", fresh);
-    json_push_kv_int(result, "returned_stale", stale);
-    json_push_kv_int(result, "returned_unknown", unknown);
-    json_push_kv_bool(result, "truncated", truncated);
-    json_push_kv(result, "machines", &machines);
-    json_free(&machines);
-}
-
-static bool rpc_mesh_machines(const struct json_value *params, bool help,
-                              struct json_value *result)
-{
-    if (help) {
-        json_set_str(result, "mesh_machines\n");
-        return true;
-    }
-    if (rpc_input(params)) {
-        rpc_error(result, "INVALID_ARGUMENT",
-                  "mesh_machines accepts no input");
-        return true;
-    }
-    mesh_machines_render(g_mesh_status_ndb,
-                         (int64_t)platform_time_wall_time_t(), result);
-    return true;
-}
-
 #ifdef ZCL_TESTING
 void boot_mesh_status_receipt_test_render(
     struct json_value *result, const struct mesh_status_receipt_v1 *receipt)
@@ -319,10 +186,13 @@ void boot_mesh_status_receipt_test_render(
     receipt_view_json(result, receipt);
 }
 
+/* The fleet render moved to boot_mesh_machines_rpc.c with the unified
+ * surface; this hook forwards with no live-probe sidecar, so tests observe
+ * exactly the durable-evidence document. */
 void boot_mesh_status_machines_test_render(
     struct node_db *ndb, int64_t now, struct json_value *result)
 {
-    mesh_machines_render(ndb, now, result);
+    boot_mesh_machines_render(ndb, now, NULL, result);
 }
 #endif
 
@@ -385,7 +255,6 @@ void boot_mesh_status_register_rpc(struct rpc_table *table,
     const struct rpc_command commands[] = {
         {"mesh", "mesh_status_request", rpc_mesh_status_request, true},
         {"mesh", "mesh_status_poll", rpc_mesh_status_poll, true},
-        {"mesh", "mesh_machines", rpc_mesh_machines, true},
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         rpc_table_must_append(table, &commands[i]);

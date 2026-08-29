@@ -151,6 +151,23 @@ bool boot_mesh_status_receipt_accept(
     const uint8_t expected_responder_master[32],
     const uint8_t expected_responder_online[32]);
 
+/* Durable-evidence handoff, synchronous: persist one verified terminal
+ * receipt (OK or a named refusal) as the pairing's latest machine
+ * observation, directly on the caller's node_db. The store refuses older or
+ * same-time equivocal evidence and treats an exact-root replay as
+ * idempotent. Production writers (status poll, fleet refresh, background
+ * refresh scheduler) instead go through boot_mesh_status_receipt_persist,
+ * which runs this same store write on the serialized db_service lane; this
+ * direct variant serves tests that own the only writer. */
+bool boot_mesh_status_persist_observation(
+    struct node_db *ndb, const struct mesh_status_receipt_v1 *receipt);
+
+/* Domain-separated SHA3-256 fingerprint of a public key, lowercase hex
+ * (65-byte out). Shared by every mesh operator surface so rendered
+ * fingerprints never drift between views. */
+void boot_mesh_status_key_fingerprint(const char *domain,
+                                      const uint8_t key[32], char out[65]);
+
 #ifdef ZCL_TESTING
 void boot_mesh_status_receipt_test_render(
     struct json_value *result,

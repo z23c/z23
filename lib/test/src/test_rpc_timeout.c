@@ -172,6 +172,27 @@ static int test_proof_methods_receive_bounded_extension(void)
         close(retrieve_pair[0]);
         close(retrieve_pair[1]);
         PASS();
+    }
+    TEST("rpc_timeout: mesh_machines fleet collection receives its bounded extension") {
+        fresh_mgr();
+        int mesh_pair[2] = { -1, -1 };
+        int generic_pair[2] = { -1, -1 };
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, mesh_pair) == 0);
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, generic_pair) == 0);
+        int mesh = rpc_timeout_register(&mgr, mesh_pair[0], 0);
+        int generic = rpc_timeout_register(&mgr, generic_pair[0], 0);
+        ASSERT(mesh >= 0 && generic >= 0);
+        rpc_timeout_set_method(&mgr, mesh, "mesh_machines");
+        rpc_timeout_set_method(&mgr, generic, "mesh_status_poll");
+        ASSERT(mgr.slots[mesh].timeout_ms == RPC_MESH_COLLECT_TIMEOUT_MS);
+        ASSERT(mgr.slots[generic].timeout_ms == 10000);
+        rpc_timeout_unregister(&mgr, mesh);
+        rpc_timeout_unregister(&mgr, generic);
+        close(mesh_pair[0]);
+        close(mesh_pair[1]);
+        close(generic_pair[0]);
+        close(generic_pair[1]);
+        PASS();
     } _test_next:;
     return failures;
 }

@@ -11,6 +11,7 @@
 #include "test/test_core.h"
 
 #include "config/boot_mesh_status.h"
+#include "config/boot_mesh_machines.h"
 #include "../../../config/src/boot_mesh_status_internal.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
@@ -716,6 +717,214 @@ int test_mesh_status_wire(void)
                                           &f.peer_delegation, 1, f.genesis,
                                           MESH_WIRE_NOW, &rg),
                   MESH_STATUS_RECEIPT_REVOKED);
+        PASS();
+    }
+
+    /* ── Fleet view projection: pure state derivation, probe planning, and
+     * tally — the exact production mapping, no sockets or fixture. ── */
+
+    TEST("mesh machines: derive state from record, begin, poll, receipt") {
+        const char *detail = NULL;
+        /* Expired and revoked durable records are never probed; the begin
+         * and poll arguments must be ignored entirely. */
+        ASSERT_EQ(mesh_machine_derive_state("expired", MESH_STATUS_BEGIN_OK,
+                                            MESH_STATUS_POLL_OK,
+                                            MESH_STATUS_RECEIPT_OK, &detail),
+                  MESH_MACHINE_EXPIRED);
+        ASSERT_STR_EQ(detail, "");
+        ASSERT_EQ(mesh_machine_derive_state("revoked", MESH_STATUS_BEGIN_OK,
+                                            MESH_STATUS_POLL_REFUSED,
+                                            MESH_STATUS_RECEIPT_REVOKED,
+                                            &detail),
+                  MESH_MACHINE_REVOKED);
+        ASSERT_STR_EQ(detail, "");
+        ASSERT_EQ(mesh_machine_derive_state("wedged", MESH_STATUS_BEGIN_OK,
+                                            MESH_STATUS_POLL_OK,
+                                            MESH_STATUS_RECEIPT_OK, &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "unrecognized_record_state");
+        ASSERT_EQ(mesh_machine_derive_state(NULL, MESH_STATUS_BEGIN_OK,
+                                            MESH_STATUS_POLL_OK,
+                                            MESH_STATUS_RECEIPT_OK, &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "unrecognized_record_state");
+        /* Begin verdicts on active records. */
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_PEER_NOT_CONNECTED,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNREACHABLE);
+        ASSERT_STR_EQ(detail, "no_live_v2_session");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_V2_DISABLED,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNREACHABLE);
+        ASSERT_STR_EQ(detail, "v2_transport_disabled");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_REVOKED,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_REVOKED);
+        ASSERT_STR_EQ(detail, "record_revoked_before_probe");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_EXPIRED,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_EXPIRED);
+        ASSERT_STR_EQ(detail, "record_expired_before_probe");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_NOT_PAIRED,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "record_vanished_before_probe");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_BUSY,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "pending_table_full");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_SEND_FAILED,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "send_failed");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "local_identity_unavailable");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_UNAVAILABLE,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "status_lane_unavailable");
+        /* Poll outcomes after a successful begin. */
+        ASSERT_EQ(mesh_machine_derive_state("active", MESH_STATUS_BEGIN_OK,
+                                            MESH_STATUS_POLL_OK,
+                                            MESH_STATUS_RECEIPT_OK, &detail),
+                  MESH_MACHINE_ONLINE);
+        ASSERT_STR_EQ(detail, "");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_OK, MESH_STATUS_POLL_REFUSED,
+                      MESH_STATUS_RECEIPT_SESSION_MISMATCH, &detail),
+                  MESH_MACHINE_REFUSED);
+        /* The detail is the hyphenated wire token, ready for
+         * "refused:<token>" composition. */
+        ASSERT_STR_EQ(detail, "session-mismatch");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_OK,
+                      MESH_STATUS_POLL_EXPIRED, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_TIMEOUT);
+        ASSERT_STR_EQ(detail, "request_expired_unanswered");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_OK,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_TIMEOUT);
+        ASSERT_STR_EQ(detail, "collect_budget_exhausted");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_OK,
+                      MESH_STATUS_POLL_UNKNOWN, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "request_lost");
+        /* Upstream receipt-binding: a connected peer without a unique active
+         * delegation is an authority gap, UNKNOWN — never UNREACHABLE, since
+         * the session itself is live. */
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "peer_identity_unavailable");
+        PASS();
+    }
+
+    TEST("mesh machines: fleet burst always fits the status pending table") {
+        /* Upstream admission refuses a still-full pending table instead of
+         * evicting the oldest live request; a fleet cap above the table
+         * bound would self-congest a machines call into BUSY rows. The
+         * compile-time twin of this pin lives in boot_mesh_machines.c. */
+        ASSERT(MESH_MACHINES_FLEET_MAX <= MESH_STATUS_PENDING_MAX);
+        PASS();
+    }
+
+    TEST("mesh machines: probe planning caps actives and flags truncation") {
+        const char *ten_active[10] = {
+            "active", "active", "active", "active", "active",
+            "active", "active", "active", "active", "active",
+        };
+        bool probes[10];
+        bool truncated = false;
+        ASSERT_EQ(mesh_machines_plan_probes(ten_active, 10,
+                                            MESH_MACHINES_FLEET_MAX, probes,
+                                            &truncated),
+                  MESH_MACHINES_FLEET_MAX);
+        ASSERT(truncated);
+        for (size_t i = 0; i < 10; i++)
+            ASSERT_EQ(probes[i], i < MESH_MACHINES_FLEET_MAX);
+
+        /* Only active records are ever probed; expired and revoked are
+         * durable truths that need no wire round trip. */
+        const char *mixed[5] = {
+            "active", "expired", "revoked", "active", "wedged",
+        };
+        bool mixed_probes[5];
+        truncated = false;
+        ASSERT_EQ(mesh_machines_plan_probes(mixed, 5, MESH_MACHINES_FLEET_MAX,
+                                            mixed_probes, &truncated),
+                  2);
+        ASSERT(!truncated);
+        ASSERT(mixed_probes[0] && !mixed_probes[1] && !mixed_probes[2] &&
+               mixed_probes[3] && !mixed_probes[4]);
+
+        const char *two_active[2] = { "active", "active" };
+        bool two_probes[2];
+        truncated = false;
+        ASSERT_EQ(mesh_machines_plan_probes(two_active, 2,
+                                            MESH_MACHINES_FLEET_MAX,
+                                            two_probes, &truncated),
+                  2);
+        ASSERT(!truncated);
+        ASSERT(two_probes[0] && two_probes[1]);
+        PASS();
+    }
+
+    TEST("mesh machines: tally rolls up every verdict, unknown only totals") {
+        struct mesh_machine_row rows[7];
+        memset(rows, 0, sizeof(rows));
+        rows[0].state = MESH_MACHINE_ONLINE;
+        rows[1].state = MESH_MACHINE_REFUSED;
+        rows[2].state = MESH_MACHINE_UNREACHABLE;
+        rows[3].state = MESH_MACHINE_TIMEOUT;
+        rows[4].state = MESH_MACHINE_UNKNOWN;
+        rows[5].state = MESH_MACHINE_EXPIRED;
+        rows[6].state = MESH_MACHINE_REVOKED;
+        struct mesh_machines_counts counts;
+        mesh_machines_tally(rows, 7, &counts);
+        ASSERT_EQ(counts.total, 7);
+        ASSERT_EQ(counts.online, 1);
+        ASSERT_EQ(counts.refused, 1);
+        ASSERT_EQ(counts.unreachable, 1);
+        ASSERT_EQ(counts.timeout, 1);
+        ASSERT_EQ(counts.expired, 1);
+        ASSERT_EQ(counts.revoked, 1);
+
+        /* Empty fleet: every count is zero, nothing invented. */
+        mesh_machines_tally(rows, 0, &counts);
+        ASSERT_EQ(counts.total, 0);
+        ASSERT_EQ(counts.online, 0);
+        ASSERT_EQ(counts.refused, 0);
+        ASSERT_EQ(counts.unreachable, 0);
+        ASSERT_EQ(counts.timeout, 0);
+        ASSERT_EQ(counts.expired, 0);
+        ASSERT_EQ(counts.revoked, 0);
         PASS();
     }
 
