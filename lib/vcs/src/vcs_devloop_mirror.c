@@ -8,7 +8,9 @@
 #include "vcs_priv.h"
 
 #include "base/serialize_le.h"
+#include "platform/directory_transaction.h"
 #include "storage/event_log.h"
+#include "util/crc32c.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -133,6 +135,13 @@ static bool mirror_path(const char *repo_root, const char *leaf,
         ? snprintf(out, PATH_MAX, "%s/.zvcs/%s", repo_root, leaf) : -1;
     return n > 0 && n < PATH_MAX;
 }
+#else
+static bool mirror_zvcs_path(const char *repo_root, char out[PATH_MAX])
+{
+    int n = repo_root ? snprintf(out, PATH_MAX, "%s/.zvcs", repo_root) : -1;
+    return n > 0 && n < PATH_MAX;
+}
+#endif
 
 struct mirror_scan {
     const char *repo_root;
@@ -172,6 +181,7 @@ static bool mirror_scan_cb(uint64_t offset, enum event_log_type type,
     return true;
 }
 
+#ifndef _WIN32
 static bool mirror_scan_log(const char *repo_root, const uint8_t job_root[32],
                             struct mirror_scan *scan)
 {
@@ -190,6 +200,72 @@ static bool mirror_scan_log(const char *repo_root, const uint8_t job_root[32],
     if (log) event_log_close(log);
     return ok && !scan->invalid;
 }
+#else
+static bool mirror_child_read_exact(struct platform_directory_child *file,
+                                    void *data, size_t size, uint64_t offset)
+{
+    return platform_directory_child_read(file, data, size, offset) ==
+           (int64_t)size;
+}
+
+static bool mirror_scan_child(
+    const char *repo_root, const uint8_t job_root[32],
+    struct platform_directory_child *file, bool recover_tail,
+    struct mirror_scan *scan, uint64_t *end_out)
+{
+    struct platform_directory_child_info info;
+    if (!platform_directory_child_info(file, &info) ||
+        info.size > VCS_DEVLOOP_MIRROR_LOG_MAX_BYTES)
+        return false;
+    *scan = (struct mirror_scan){.repo_root = repo_root, .job_root = job_root};
+    uint64_t offset = 0;
+    while (offset < info.size) {
+        uint8_t record[VCS_DEVLOOP_MIRROR_LOG_RECORD_BYTES];
+        bool frame_ok = info.size - offset >= sizeof(record) &&
+            mirror_child_read_exact(file, record, sizeof(record), offset) &&
+            zcl_read_u32_le(record) == 32u &&
+            zcl_read_u32_le(record + 4) == EV_VCS_DEV_MIRROR_RECEIPT &&
+            zcl_read_u32_le(record + 8) == 0u &&
+            zcl_read_u32_le(record + 12) == zcl_crc32c(record + 16, 32) &&
+            zcl_read_u64_le(record + 48) == EVENT_LOG_SENTINEL_MAGIC &&
+            zcl_read_u64_le(record + 56) == offset;
+        if (!frame_ok) {
+            if (!recover_tail ||
+                !platform_directory_child_truncate(file, offset) ||
+                !platform_directory_child_flush(file))
+                return false;
+            info.size = offset;
+            break;
+        }
+        if (!mirror_scan_cb(offset, EV_VCS_DEV_MIRROR_RECEIPT,
+                            record + 16, 32, scan))
+            return false;
+        offset += sizeof(record);
+    }
+    if (end_out) *end_out = offset;
+    return !scan->invalid;
+}
+
+static bool mirror_append_child(struct platform_directory_child *file,
+                                uint64_t offset,
+                                const uint8_t receipt_root[32])
+{
+    if (offset > VCS_DEVLOOP_MIRROR_LOG_MAX_BYTES -
+                     VCS_DEVLOOP_MIRROR_LOG_RECORD_BYTES)
+        return false;
+    uint8_t record[VCS_DEVLOOP_MIRROR_LOG_RECORD_BYTES] = {0};
+    zcl_write_u32_le(record, 32u);
+    zcl_write_u32_le(record + 4, EV_VCS_DEV_MIRROR_RECEIPT);
+    zcl_write_u32_le(record + 12, zcl_crc32c(receipt_root, 32));
+    memcpy(record + 16, receipt_root, 32);
+    zcl_write_u64_le(record + 48, EVENT_LOG_SENTINEL_MAGIC);
+    zcl_write_u64_le(record + 56, offset);
+    return platform_directory_child_write_exact(file, record, 48, offset) &&
+        platform_directory_child_flush(file) &&
+        platform_directory_child_write_exact(file, record + 48, 16,
+                                              offset + 48) &&
+        platform_directory_child_flush(file);
+}
 #endif
 
 enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
@@ -201,9 +277,44 @@ enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
         !receipt_root_out)
         return VCS_DEVLOOP_MIRROR_INVALID;
 #ifdef _WIN32
-    /* The event-log snapshot and its lock must be bound to retained handles;
-     * a pathname-only emulation could mix generations during publication. */
-    return VCS_DEVLOOP_MIRROR_INVALID;
+    char zvcs_path[PATH_MAX];
+    struct platform_directory_transaction directory;
+    struct platform_directory_lock lock;
+    struct platform_directory_child log;
+    platform_directory_transaction_init(&directory);
+    platform_directory_lock_init(&lock);
+    platform_directory_child_init(&log);
+    if (!mirror_zvcs_path(repo_root, zvcs_path) ||
+        !platform_directory_transaction_open(&directory, zvcs_path))
+        return VCS_DEVLOOP_MIRROR_INVALID;
+    enum platform_directory_result locked = platform_directory_lock_acquire(
+        &directory, "publication.mirrors.lock", false,
+        PLATFORM_DIRECTORY_LOCK_SHARED, &lock);
+    if (locked == PLATFORM_DIRECTORY_MISSING) {
+        platform_directory_transaction_close(&directory);
+        return VCS_DEVLOOP_MIRROR_ABSENT;
+    }
+    if (locked != PLATFORM_DIRECTORY_OK) {
+        platform_directory_transaction_close(&directory);
+        return VCS_DEVLOOP_MIRROR_INVALID;
+    }
+    enum platform_directory_result opened = platform_directory_child_open_result(
+        &directory, "publication.mirrors.log", false, false, &log, NULL);
+    struct mirror_scan scan = {0};
+    bool valid = opened == PLATFORM_DIRECTORY_OK &&
+        mirror_scan_child(repo_root, job_root, &log, false, &scan, NULL);
+    platform_directory_child_close(&log);
+    platform_directory_lock_release(&lock);
+    platform_directory_transaction_close(&directory);
+    if (opened == PLATFORM_DIRECTORY_MISSING)
+        return VCS_DEVLOOP_MIRROR_ABSENT;
+    if (!valid)
+        return VCS_DEVLOOP_MIRROR_INVALID;
+    if (!scan.found)
+        return VCS_DEVLOOP_MIRROR_ABSENT;
+    *out = scan.receipt;
+    memcpy(receipt_root_out, scan.receipt_root, 32);
+    return VCS_DEVLOOP_MIRROR_FOUND;
 #else
     char path[PATH_MAX], lock_path[PATH_MAX];
     struct stat st;
@@ -232,7 +343,6 @@ enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
 #endif
 }
 
-#ifndef _WIN32
 static bool mirror_build_from_provider(
     const char *repo_root, const uint8_t job_root[32],
     const uint8_t *git_oid, size_t git_oid_len,
@@ -280,7 +390,6 @@ static bool mirror_build_from_provider(
         memcpy(out->git_oid, git_oid, git_oid_len);
     return true;
 }
-#endif
 
 bool vcs_devloop_mirror_record(
     const char *repo_root, const uint8_t job_root[32],
@@ -290,13 +399,6 @@ bool vcs_devloop_mirror_record(
     if (reused_out) *reused_out = false;
     if (!repo_root || !repo_root[0] || !job_root || !receipt_root_out)
         return false;
-#ifdef _WIN32
-    (void)git_oid;
-    (void)git_oid_len;
-    /* Refuse before object publication or log mutation until a retained-root
-     * cross-process lock and atomic event-log transaction are qualified. */
-    return false;
-#else
     struct vcs_devloop_mirror_receipt receipt;
     uint8_t wire[VCS_DEVLOOP_MIRROR_WIRE_BYTES];
     if (!mirror_build_from_provider(
@@ -305,6 +407,45 @@ bool vcs_devloop_mirror_record(
         !vcs_object_put(repo_root, wire, sizeof(wire),
                         VCS_TAG_DEV_MIRROR_RECEIPT, receipt_root_out))
         return false;
+#ifdef _WIN32
+    char zvcs_path[PATH_MAX];
+    struct platform_directory_transaction directory;
+    struct platform_directory_lock lock;
+    struct platform_directory_child log;
+    platform_directory_transaction_init(&directory);
+    platform_directory_lock_init(&lock);
+    platform_directory_child_init(&log);
+    if (!mirror_zvcs_path(repo_root, zvcs_path) ||
+        !platform_directory_transaction_open(&directory, zvcs_path))
+        return false;
+    bool ok = platform_directory_lock_acquire(
+        &directory, "publication.mirrors.lock", true,
+        PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &lock) == PLATFORM_DIRECTORY_OK;
+    bool created = false;
+    if (ok)
+        ok = platform_directory_child_open_result(
+            &directory, "publication.mirrors.log", true, true, &log,
+            &created) == PLATFORM_DIRECTORY_OK;
+    if (ok && created)
+        ok = platform_directory_transaction_flush(&directory);
+    struct mirror_scan scan = {0};
+    uint64_t end = 0;
+    if (ok)
+        ok = mirror_scan_child(repo_root, job_root, &log, true, &scan, &end);
+    if (ok && scan.found) {
+        ok = memcmp(scan.receipt_root, receipt_root_out, 32) == 0;
+        if (ok && reused_out) *reused_out = true;
+    } else if (ok) {
+        ok = mirror_append_child(&log, end, receipt_root_out);
+    }
+    platform_directory_child_close(&log);
+    platform_directory_lock_release(&lock);
+    platform_directory_transaction_close(&directory);
+    if (!ok)
+        LOG_WARN("vcs.devloop.mirror",
+                 "mirror receipt append or exact retry validation failed");
+    return ok;
+#else
     char lock_path[PATH_MAX], log_path[PATH_MAX];
     if (!mirror_path(repo_root, "publication.mirrors.lock", lock_path) ||
         !mirror_path(repo_root, "publication.mirrors.log", log_path))
