@@ -1739,6 +1739,16 @@ else
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 endif
 
+.PHONY: windows-service-install windows-service-status windows-service-remove
+windows-service-install: z23
+	@packaging/windows/install-service.sh install
+
+windows-service-status:
+	@packaging/windows/install-service.sh status
+
+windows-service-remove:
+	@packaging/windows/install-service.sh remove
+
 # ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
 # `make <app>` opens a real window on this host and prints the timestamp it
 # presented its first frame; `make <app>-selftest` replays the same painter

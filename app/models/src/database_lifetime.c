@@ -111,6 +111,11 @@ static bool lifetime_node_db_path(const char *path)
 {
     if (!path) return false;
     const char *base = strrchr(path, '/');
+#if defined(_WIN32)
+    const char *backslash = strrchr(path, '\\');
+    if (!base || (backslash && backslash > base))
+        base = backslash;
+#endif
     base = base ? base + 1 : path;
     return strcmp(base, "node.db") == 0 ||
            strcmp(base, "node.db-wal") == 0 ||
