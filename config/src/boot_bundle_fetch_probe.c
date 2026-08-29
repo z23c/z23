@@ -53,7 +53,6 @@ size_t bbf_probe_directories(const struct rom_fetch_peer *peers, size_t np,
         // thread-supervision-ok: bounded joined bootstrap probe pool
         started[i] = thread_registry_spawn("zcl_bbf_probe", bbf_probe_one,
                                             &jobs[i], &threads[i]) == 0;
-        if (started[i]) { pthread_join(threads[i], NULL); started[i] = false; } /* MUTATION: serial */
     }
     /* A spawn failure cannot disable a named seed. Probe it synchronously
      * while successfully spawned peers continue in the background. */
@@ -127,7 +126,6 @@ bool bbf_probe_manifest(const struct rom_fetch_peer *peers, size_t np,
         // thread-supervision-ok: bounded joined bootstrap probe pool
         started[i] = thread_registry_spawn("zcl_bbf_rmf", bbf_manifest_one,
                                            &jobs[i], &threads[i]) == 0;
-        if (started[i]) { pthread_join(threads[i], NULL); started[i] = false; } /* MUTATION: serial */
     }
     /* A spawn failure cannot disable a named seed — probe it synchronously
      * while the successfully spawned ones continue in the background. */

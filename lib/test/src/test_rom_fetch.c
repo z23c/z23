@@ -1488,6 +1488,137 @@ static int test_dial_cost_of_a_download(void)
     return failures;
 }
 
+/* ── (i3) BOOT LATENCY: what a DEAD seed costs a download ──────────────
+ *
+ * The other half of onion boot latency is the seed that is not there. A dial
+ * that never completes costs the full transport-scaled connect budget — 10 s
+ * to a socket, 120 s to build a Tor circuit — and that budget is correct: a
+ * circuit really is slower to establish, and shortening it to notice a dead
+ * peer sooner would also abandon honest onion seeders mid-handshake. What is
+ * NOT correct is paying it over and over. Every worker walking past the same
+ * dead seeds, on every chunk, multiplies one absence into minutes.
+ *
+ * This measures that directly: one live seeder, three seeds that are simply
+ * not listening, and a full verified download. The instrument is the count of
+ * FAILED dials, which is deterministic and completely insensitive to how
+ * loaded the machine is — it is a number of events, not a duration. The
+ * shipped default byte caps are used deliberately: a stock seeder answers
+ * back-to-back requests with a typed refusal, and every refusal sends the
+ * worker on around the ring, into the dead seeds, again.
+ *
+ * Nothing here asserts on time, and nothing here may be satisfied by making a
+ * budget smaller. The only thing asserted is that the same absence is not
+ * rediscovered once per chunk. */
+static int test_dead_seed_is_dialled_once_per_job(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: a seed that cannot be dialled costs a download ONE connect "
+         "budget per worker, not one per chunk — and the file still verifies") {
+        fs_server_stop();
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        /* A seeder under real pressure. The per-peer cap is set to two chunks
+         * a second — a busy seeder, not a broken one — so the eight workers
+         * get typed BUSY refusals through most of this download, exactly as
+         * they would against a popular seed. That matters because a refusal is
+         * what sends a worker on around the ring; without it the dead seeds
+         * are met only once, on a worker's first chunk, and the repeated cost
+         * this test is about never appears. Capping the SEEDER is a property
+         * of the fixture; no client budget is touched. */
+        rom_seed_set_peer_bps_cap(2ull * (uint64_t)ROM_SEED_CHUNK_SIZE);
+        rom_seed_set_global_bps_cap(4ull * (uint64_t)ROM_SEED_CHUNK_SIZE);
+
+        char sroot[] = "/tmp/zcl_romfetch_deadsrv_XXXXXX";
+        char *sdir = mkdtemp(sroot);
+        ASSERT(sdir != NULL);
+        char croot[] = "/tmp/zcl_romfetch_deadcli_XXXXXX";
+        char *cdir = mkdtemp(croot);
+        ASSERT(cdir != NULL);
+
+        /* 9 chunks against 8 workers, so at least one worker fetches twice and
+         * the per-chunk cost is separable from the per-worker one. */
+        uint64_t size = 8ull * (uint64_t)ROM_SEED_CHUNK_SIZE + 4096;
+        ASSERT(write_sparse_bundle(sdir, "consensus-state-bundle-dead.sqlite",
+                                   size));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-dead.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        ASSERT(art.num_chunks == 9);
+        struct rom_fetch_manifest m;
+        manifest_from_artifact(&art, &m);
+
+        uint16_t port = 0;
+        fs_server_start(sdir, 0);
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+            platform_sleep_ms(50);
+        if (fs_server_is_running())
+            port = fs_server_get_port();
+        ASSERT(port != 0);
+
+        uint8_t (*chunk_sha3)[32] = malloc((size_t)ROM_SEED_MAX_CHUNKS * 32);
+        ASSERT(chunk_sha3 != NULL);
+        uint32_t manifest_chunks = 0;
+        ASSERT(rom_fetch_get_manifest("127.0.0.1", port, m.chunk_root,
+                                      chunk_sha3, ROM_SEED_MAX_CHUNKS,
+                                      &manifest_chunks));
+        ASSERT(manifest_chunks == art.num_chunks);
+
+        /* The live seeder first, then three addresses nothing is listening on.
+         * Ports 1-3 on loopback refuse immediately, so the WALL CLOCK of this
+         * test says nothing about the production budget — which is the point:
+         * the budget is unchanged and unmeasured here, only the number of
+         * times it would have been spent. */
+        const size_t npeers = 4;
+        struct rom_fetch_peer peers[4];
+        memset(peers, 0, sizeof(peers));
+        snprintf(peers[0].addr, sizeof(peers[0].addr), "%s", "127.0.0.1");
+        peers[0].port = port;
+        for (size_t i = 1; i < npeers; i++) {
+            snprintf(peers[i].addr, sizeof(peers[i].addr), "%s", "127.0.0.1");
+            peers[i].port = (uint16_t)i;
+        }
+
+        rom_fetch_dial_count_reset_for_test();
+        ASSERT(rom_fetch_download_verified_parallel(peers, npeers, &m,
+                                                    chunk_sha3,
+                                                    manifest_chunks, cdir,
+                                                    NULL, NULL));
+        uint64_t dead_dials = rom_fetch_dial_fail_count_for_test();
+
+        char final_path[1200];
+        snprintf(final_path, sizeof(final_path), "%s/%s", cdir, m.filename);
+        ASSERT(rom_fetch_verify_file(final_path, &m));
+
+        printf("DEAD-SEED-DIALS chunks=%u dead_seeds=%zu workers=%u "
+               "failed_dials=%llu\n", art.num_chunks, npeers - 1,
+               (unsigned)ROM_FETCH_MAX_WORKERS,
+               (unsigned long long)dead_dials);
+
+        /* THE assertion. Each worker may discover each dead seed once — that
+         * is the herd of workers starting at the same instant, before any of
+         * them has recorded the absence, and it is bounded by the seed set,
+         * not by the artifact. What must not happen is the count scaling with
+         * the number of chunks (or with the refusals a rate-limited seeder
+         * legitimately sends), which is what re-walking the ring per chunk
+         * produced. */
+        ASSERT(dead_dials <= (uint64_t)(npeers - 1) *
+                             (uint64_t)ROM_FETCH_MAX_WORKERS);
+
+        free(chunk_sha3);
+        fs_server_stop();
+        char p[1200];
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-dead.sqlite", sdir);
+        unlink(p);
+        unlink(final_path);
+        rmdir(sdir);
+        rmdir(cdir);
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── (i) Native command layer: typed blocker + typed refusal ───────────
  *
  * rom_fetch.c/test_rom_fetch.c above prove the ENGINE fails closed; these
@@ -1742,6 +1873,7 @@ int test_rom_fetch(void)
     failures += test_refusal_frame_decode();
     failures += test_default_caps_parallel_multichunk();
     failures += test_dial_cost_of_a_download();
+    failures += test_dead_seed_is_dialled_once_per_job();
     failures += test_bundle_handler_no_seeder_blocker();
     failures += test_bundle_handler_corrupted_refused();
     return failures;

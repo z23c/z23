@@ -363,6 +363,14 @@ void rom_fetch_dial_budgets_for_test(struct rom_fetch_dial_budgets *out);
  * not be read as a statement about how fast a peer is allowed to be. */
 void     rom_fetch_dial_count_reset_for_test(void);
 uint64_t rom_fetch_dial_count_for_test(void);
+
+/* Count of FAILED dials (rf_connect returning no socket) since the same reset.
+ * A failed dial is a stall the boot paid in full: a refused port, or the whole
+ * transport-scaled connect budget elapsing on a peer that is gone. It is the
+ * instrument for "how many times did one download pay to discover the same
+ * peer is unreachable", and, like its sibling, it counts EVENTS and says
+ * nothing about how long any peer is allowed to take. */
+uint64_t rom_fetch_dial_fail_count_for_test(void);
 #endif
 
 #endif /* ZCL_NET_ROM_FETCH_H */

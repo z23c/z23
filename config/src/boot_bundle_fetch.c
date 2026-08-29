@@ -734,7 +734,13 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
      * bbf_discovery.live for the bound and why a non-serving seed must not
      * reach the per-chunk download rotation. When discovery did not run (a
      * local directory.json hint was used) n_live is 0 and the full assembled
-     * set is kept, exactly as before. */
+     * set is kept, exactly as before — which is the RESUME case, and the one
+     * that used to carry every dead seed into the download. It is no longer
+     * the only guard: the download driver itself remembers, for the life of
+     * one job, a peer it could not dial at all, so a seed that is gone this
+     * boot costs one connect budget rather than one per worker per chunk
+     * (rf_ver_acquire_chunk, lib/net/src/rom_fetch.c). Neither guard shortens
+     * a budget; both only stop re-paying one already spent. */
     const struct rom_fetch_peer *dl_peers = peers;
     size_t dl_np = np;
     if (disc.n_live > 0) {
