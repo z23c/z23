@@ -501,6 +501,22 @@ if [ "$SKIP_CLASS_OK" = "1" ]; then
         # merged stderr into stdout cannot read it as a verdict.
         echo "stopwatch-judge: ALARM class=$sw_class skip_streak=$sw_skip_streak threshold=$sw_threshold last_pass_age=$sw_last_pass_age reason=\"${sw_reason:-}\" — $sw_skip_streak scheduled runs in a row could not run this proof at all; nothing has been proven since the last pass" >&2
     fi
+    # The SECOND rung, mirroring the collector: the proof RAN every time and
+    # never passed. The block above only fires when the proof could not run,
+    # so without this the judge prints no_pass_streak and escalates nothing --
+    # which is how 34 consecutive non-passes stayed quiet for 7.4 days.
+    # Same shared threshold and same benign carve-out as the collector, so the
+    # two cannot drift; no env knob, because an override is how this gets
+    # silenced. No "VERDICT=" token, for the same reason as above.
+    if [ "$sw_no_pass_streak" -gt 0 ]; then
+        sw_no_pass_threshold="$(stopwatch_no_pass_threshold)"
+        sw_no_pass_benign="$(stopwatch_no_pass_all_benign "$HISTORY_FILE")"
+        if [ "$sw_no_pass_benign" = "1" ]; then
+            echo "stopwatch-judge: note no_pass_streak=$sw_no_pass_streak — benign (every run in the streak had nothing configured to prove); no alarm" >&2
+        elif [ "$sw_no_pass_streak" -ge "$sw_no_pass_threshold" ]; then
+            echo "stopwatch-judge: ALARM no_pass_streak=$sw_no_pass_streak no_pass_threshold=$sw_no_pass_threshold last_verdict=$sw_last_verdict last_pass_age=$sw_last_pass_age — this proof RAN on every one of those consecutive scheduled attempts and never once passed, so the claim it exists to prove is unproven; fix the failing verdict, do not wait for the score to move" >&2
+        fi
+    fi
 fi
 
 if [ -z "$ts" ]; then
