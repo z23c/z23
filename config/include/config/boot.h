@@ -233,6 +233,12 @@ struct app_context {
 #define APP_CONNECT_PEERS_MAX 8
     const char *connect_peers[APP_CONNECT_PEERS_MAX];
     int n_connect_peers;
+    /* The raw `-addnode=HOST[:PORT]` values, in command-line order (argv-owned
+     * pointers; never freed). Added to the instant-on weld seed set alongside
+     * -connect peers so an operator-named peer can serve as both a P2P addnode
+     * and a fast-start file-service seed without forcing connect-only mode. */
+    const char *addnode_peers[APP_CONNECT_PEERS_MAX];
+    int n_addnode_peers;
     bool no_file_sync;         /* -nofilesync : skip file service download, use P2P only */
     bool allow_clearnet_snapshot_fetch; /* -allow-clearnet-snapshot-fetch :
                                  * OPT-IN to auto-download a chainstate
