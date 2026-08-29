@@ -70,9 +70,9 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "ops.telemetry.network.transport", "ops.telemetry.network", "",
     "Wire transport posture",
-    "The typed network snapshot's transport group at full detail, collected in-process at call time: how many live connections actually completed the Noise v2 handshake versus how many carry plaintext, counted per connection. The 'offered by default' and 'advertising' leaves are capability and willingness; only the encrypted count is evidence that any byte was encrypted, and it is 0 while the default stays off.",
+    "The typed network snapshot's transport group at full detail, collected in-process at call time: how many live connections actually completed the Noise handshake versus how many carry plaintext, counted per connection. The 'offered by default' and 'advertising' leaves are capability and willingness; only the encrypted count is evidence that any byte was encrypted, and it is 0 while the default stays off.",
     ZCL_COMMAND_LIST_BUDGET,
-    "telemetry,network,transport,v2,noise,encryption",
+    "telemetry,network,transport,noise,encryption",
     "zcl.command.empty_input.v1", "zcl.telemetry.network.v1", "", "",
     "z23 ops telemetry network transport",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,

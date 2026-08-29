@@ -152,7 +152,7 @@ dht_build_helper() {
         -I"$REPO_ROOT/lib/vcs/include" -I"$REPO_ROOT/lib/zid/include" \
         -I"$REPO_ROOT/core/math/include" -o "$DHT_WORK/dht-peer" \
         "$REPO_ROOT/tools/zcode_dht_acceptance_peer.c" \
-        "$REPO_ROOT/lib/net/src/v2_transport.c" \
+        "$REPO_ROOT/lib/net/src/noise_transport.c" \
         "$REPO_ROOT/lib/noise/src/noise_handshake.c" \
         "$REPO_ROOT/lib/noise/src/session_transport.c" \
         "$REPO_ROOT/lib/vcs/src/zcode_dht.c" \
@@ -280,8 +280,8 @@ dht_wait_rpc "$DHT_DD_A" "$A_RPC" "$DHT_PGID_A" || dht_die "node A RPC warmup fa
 dht_spawn DHT_PGID_B "$DHT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" \
     "$B_HTTPS" "127.0.0.1:$A_PORT"
 dht_wait_rpc "$DHT_DD_B" "$B_RPC" "$DHT_PGID_B" || dht_die "node B RPC warmup failed"
-! grep -qaF "unrecognized flag '-v2transport'" "$DHT_DD_A/node.log" "$DHT_DD_B/node.log" ||
-    dht_die "v2transport was not recognized"
+! grep -qaF "unrecognized flag '-noisetransport'" "$DHT_DD_A/node.log" "$DHT_DD_B/node.log" ||
+    dht_die "noisetransport was not recognized"
 
 dht_note "mining spendable regtest funds"
 ADDR="$(a_rpc getnewaddress | dht_result)"

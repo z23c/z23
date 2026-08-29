@@ -393,8 +393,8 @@ void msg_version_build(struct version_message *ver,
     ver->services = NODE_NETWORK | NODE_ZCL23;
     if (bip37_enabled())
         ver->services |= NODE_BLOOM;
-    if (mp->net_mgr && mp->net_mgr->v2_enabled)
-        ver->services |= NODE_V2TRANSPORT;
+    if (mp->net_mgr && mp->net_mgr->noise_enabled)
+        ver->services |= NODE_NOISE_TRANSPORT;
     ver->timestamp = (int64_t)platform_time_wall_time_t();
     ver->addr_recv = node->addr;
     if (g_has_external_ip) {
@@ -545,7 +545,7 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
     /* An inbound peer must send its version before its verack.  Sending the
      * verack first lets an outbound peer mark the handshake complete before
      * it has processed our advertised service bits; its following version is
-     * then treated as a duplicate and the one-shot v2 capability upgrade can
+     * then treated as a duplicate and the one-shot Noise capability upgrade can
      * never run.  Both messages use the same ordered send queue. */
     if (node->inbound)
         push_version(mp, node);
@@ -563,12 +563,12 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
     if (is_zcl23)
         node->services |= NODE_ZCL23;
 
-    /* An outbound peer first reached over legacy framing may reveal v2 only
+    /* An outbound peer first reached over legacy framing may reveal the Noise capability only
      * in its version message.  Remember that authenticated capability in the
      * existing dial sources and reconnect exactly once; the next connect sees
      * the bit before any bytes are sent and net.c starts Noise XX. */
     if (mp->net_mgr && mp->net_mgr->owner)
-        (void)connman_request_v2_upgrade(mp->net_mgr->owner, node);
+        (void)connman_request_noise_upgrade(mp->net_mgr->owner, node);
 
     /* For outbound connections, we already sent version; now we received
      * their version and sent verack. Mark connected once we also get their

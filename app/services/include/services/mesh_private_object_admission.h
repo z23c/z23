@@ -6,7 +6,7 @@
 
 #include "base/result.h"
 #include "models/mesh_capability_grant.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "session/mesh_private_object_proto.h"
 #include "vcs/zcode_dht_delegation.h"
 
@@ -46,7 +46,7 @@ const char *mesh_private_object_admission_reason_string(
  * reason; infrastructure failure returns a non-ok zcl_result. */
 struct zcl_result mesh_private_object_admit_offer(
     struct node_db *ndb, const struct mesh_private_object_offer_v1 *offer,
-    const struct v2_transport_snapshot *session,
+    const struct noise_transport_snapshot *session,
     const struct vcs_zcode_dht_delegation *source_delegation,
     const uint8_t local_master_pubkey[32],
     const uint8_t local_noise_static[32], uint64_t now_unix,

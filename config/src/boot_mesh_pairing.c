@@ -18,7 +18,7 @@
 #include "base/safe_alloc.h"
 #include "net/net.h"
 #include "net/v2_identity.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/sync.h"
@@ -144,7 +144,7 @@ const char *boot_mesh_pairing_plan_result_string(
     case MESH_PAIR_PLAN_OK: return "ok";
     case MESH_PAIR_PLAN_BAD_ARGUMENT: return "bad_argument";
     case MESH_PAIR_PLAN_UNAVAILABLE: return "unavailable";
-    case MESH_PAIR_PLAN_V2_DISABLED: return "v2_transport_disabled";
+    case MESH_PAIR_PLAN_NOISE_DISABLED: return "noise_transport_disabled";
     case MESH_PAIR_PLAN_PEER_NOT_CONNECTED: return "peer_not_connected";
     case MESH_PAIR_PLAN_AMBIGUOUS_PEER: return "ambiguous_peer";
     case MESH_PAIR_PLAN_DELEGATION_UNAVAILABLE: return "delegation_unavailable";
@@ -159,7 +159,7 @@ const char *boot_mesh_pairing_commit_result_string(
     case MESH_PAIR_COMMIT_OK: return "ok";
     case MESH_PAIR_COMMIT_BAD_ARGUMENT: return "bad_argument";
     case MESH_PAIR_COMMIT_UNAVAILABLE: return "unavailable";
-    case MESH_PAIR_COMMIT_V2_DISABLED: return "v2_transport_disabled";
+    case MESH_PAIR_COMMIT_NOISE_DISABLED: return "noise_transport_disabled";
     case MESH_PAIR_COMMIT_PEER_NOT_CONNECTED: return "peer_not_connected";
     case MESH_PAIR_COMMIT_AMBIGUOUS_PEER: return "ambiguous_peer";
     case MESH_PAIR_COMMIT_DELEGATION_UNAVAILABLE: return "delegation_unavailable";
@@ -171,12 +171,12 @@ const char *boot_mesh_pairing_commit_result_string(
 /* ── Live peer pick + held-delegation lookup ─────────────────────────── */
 
 /* Snapshot connected peers under cs_nodes, keep those with an established
- * v2 session, then apply the selector (address substring or fingerprint
+ * Noise session, then apply the selector (address substring or fingerprint
  * prefix). Returns the match count; on exactly one match *node_out holds an
  * owned reference the caller releases. Never dials. */
 static int mesh_pair_pick_peer(struct net_manager *nm, const char *selector,
                                struct p2p_node **node_out,
-                               struct v2_transport_snapshot *session_out)
+                               struct noise_transport_snapshot *session_out)
 {
     struct p2p_node *candidates[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
     size_t count = 0;
@@ -192,10 +192,10 @@ static int mesh_pair_pick_peer(struct net_manager *nm, const char *selector,
     zcl_mutex_unlock(&nm->cs_nodes);
     int matches = 0;
     for (size_t i = 0; i < count; i++) {
-        struct v2_transport_snapshot snapshot;
+        struct noise_transport_snapshot snapshot;
         memset(&snapshot, 0, sizeof(snapshot));
         bool established = candidates[i]->transport &&
-            v2_transport_snapshot(candidates[i]->transport, &snapshot) &&
+            noise_transport_snapshot(candidates[i]->transport, &snapshot) &&
             snapshot.established;
         bool matched = false;
         if (established) {
@@ -271,11 +271,11 @@ static bool mesh_pair_held_delegation(const uint8_t remote_static[32],
     return found;
 }
 
-/* Shared live derivation for plan and commit: wired composition, v2 enabled,
+/* Shared live derivation for plan and commit: wired composition, Noise enabled,
  * exactly one matching session peer (owned ref out), its held delegation. */
 static enum boot_mesh_pairing_plan_result mesh_pair_derive(
     const char *selector, struct p2p_node **node_out,
-    struct v2_transport_snapshot *session_out,
+    struct noise_transport_snapshot *session_out,
     struct vcs_zcode_dht_delegation *delegation_out)
 {
     pair_lock();
@@ -288,8 +288,8 @@ static enum boot_mesh_pairing_plan_result mesh_pair_derive(
         LOG_ERROR("net.mesh_pairing", "derive: msg_processor incomplete");
         return MESH_PAIR_PLAN_UNAVAILABLE;
     }
-    if (!mp->net_mgr->v2_enabled)
-        return MESH_PAIR_PLAN_V2_DISABLED;
+    if (!mp->net_mgr->noise_enabled)
+        return MESH_PAIR_PLAN_NOISE_DISABLED;
     struct p2p_node *node = NULL;
     int matches = mesh_pair_pick_peer(mp->net_mgr, selector, &node,
                                       session_out);
@@ -315,7 +315,7 @@ enum boot_mesh_pairing_plan_result boot_mesh_pairing_plan(
         return MESH_PAIR_PLAN_BAD_ARGUMENT;
     memset(out, 0, sizeof(*out));
     struct p2p_node *node = NULL;
-    struct v2_transport_snapshot session;
+    struct noise_transport_snapshot session;
     struct vcs_zcode_dht_delegation delegation;
     enum boot_mesh_pairing_plan_result derived =
         mesh_pair_derive(selector, &node, &session, &delegation);
@@ -371,7 +371,7 @@ enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
     if (!boot_mesh_pairing_days_valid(days))
         return MESH_PAIR_COMMIT_BAD_ARGUMENT;
     struct p2p_node *node = NULL;
-    struct v2_transport_snapshot session;
+    struct noise_transport_snapshot session;
     struct vcs_zcode_dht_delegation delegation;
     enum boot_mesh_pairing_plan_result derived =
         mesh_pair_derive(selector, &node, &session, &delegation);

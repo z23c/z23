@@ -47,7 +47,7 @@
 #include "net/net.h"
 #include "net/peer_lifecycle.h"
 #include "net/tor_integration.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "util/log_macros.h"
 #include "util/sync.h"
 #include "util/timedata.h"
@@ -174,7 +174,7 @@ static void nt_walk_nodes(struct connman *cm, struct nt_node_walk *w)
          * with no transport attached is carrying plaintext bytes. */
         if (!n->transport)
             w->plaintext++;
-        else if (n->transport->state == V2_ESTABLISHED)
+        else if (n->transport->state == NOISE_ESTABLISHED)
             w->encrypted++;
         else
             w->handshaking++;
@@ -300,24 +300,25 @@ static void nt_fill_transport(struct network_snapshot *s, struct connman *cm,
                               const struct nt_node_walk *w)
 {
     if (!cm) {
-        TELEMETRY_UNAVAILABLE_LEAF(s, v2_offered_by_default, NT_R_NO_NODE);
+        TELEMETRY_UNAVAILABLE_LEAF(s, noise_offered_by_default, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, peers_encrypted_now, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, peers_plaintext_now, NT_R_NO_NODE);
         TELEMETRY_UNAVAILABLE_LEAF(s, peers_handshaking_now, NT_R_NO_NODE);
-        TELEMETRY_UNAVAILABLE_LEAF(s, peers_advertising_v2_now, NT_R_NO_NODE);
-        TELEMETRY_UNAVAILABLE_LEAF(s, v2_advertising_high_water, NT_R_NO_NODE);
+        TELEMETRY_UNAVAILABLE_LEAF(s, peers_advertising_noise_now, NT_R_NO_NODE);
+        TELEMETRY_UNAVAILABLE_LEAF(s, noise_advertising_high_water, NT_R_NO_NODE);
         return;
     }
-    TELEMETRY_SET_BOOL(s, v2_offered_by_default, cm->manager.v2_enabled,
+    TELEMETRY_SET_BOOL(s, noise_offered_by_default, cm->manager.noise_enabled,
                        TELEMETRY_SRC_CONFIG);
 
     /* The advertisement census is a lock-free publication the reactor poll
      * loop updates, so it answers even when the node array is busy. */
-    struct connman_v2transport_stats v2;
-    connman_get_v2transport_stats(&v2);
-    TELEMETRY_SET_I64(s, peers_advertising_v2_now, v2.advertising_now,
+    struct connman_noisetransport_stats census;
+    connman_get_noisetransport_stats(&census);
+    TELEMETRY_SET_I64(s, peers_advertising_noise_now, census.advertising_now,
                       TELEMETRY_SRC_CACHED_PUBLICATION);
-    TELEMETRY_SET_I64(s, v2_advertising_high_water, v2.advertising_high_water,
+    TELEMETRY_SET_I64(s, noise_advertising_high_water,
+                      census.advertising_high_water,
                       TELEMETRY_SRC_CACHED_PUBLICATION);
 
     if (!w->taken) {

@@ -84,11 +84,11 @@ static bool rpc_mesh_status_request(const struct json_value *params, bool help,
             message = "the pairing has expired";
             break;
         case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED:
-            message = "the paired peer has no established v2 session; no "
+            message = "the paired peer has no established Noise session; no "
                       "dial is attempted";
             break;
-        case MESH_STATUS_BEGIN_V2_DISABLED:
-            message = "the v2 Noise transport is disabled on this node";
+        case MESH_STATUS_BEGIN_NOISE_DISABLED:
+            message = "the Noise transport is disabled on this node";
             break;
         case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE:
             message = "this node's filed ZID delegation is unavailable";

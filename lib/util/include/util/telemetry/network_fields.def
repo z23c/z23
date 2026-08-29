@@ -195,42 +195,42 @@ TL_GROUP_END(tor)
 TL_GROUP(transport, "what the wire actually negotiated, not what the code can "
                     "do")
 
-TL_LEAF(transport, v2_offered_by_default, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
+TL_LEAF(transport, noise_offered_by_default, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
-    "whether this node offers the Noise v2 encrypted transport when it dials. "
+    "whether this node offers the Noise encrypted transport when it dials. "
     "False is the shipped posture pending rollout, so false is not a finding "
     "— and it is a capability, never evidence that any byte was encrypted",
     "", "")
 
 TL_LEAF(transport, peers_encrypted_now, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
-    "live connections whose Noise v2 handshake COMPLETED — the only leaf here "
+    "live connections whose Noise handshake COMPLETED — the only leaf here "
     "that says traffic is encrypted. Expected to be 0 while the default is "
     "off; compare against peers_plaintext_now for the split",
     "", "")
 
 TL_LEAF(transport, peers_plaintext_now, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
-    "live connections carrying no v2 transport at all, so their bytes are on "
-    "the wire in the clear. Not judged: every zclassicd peer is necessarily "
+    "live connections carrying no Noise transport at all, so their bytes are "
+    "on the wire in the clear. Not judged: every zclassicd peer is necessarily "
     "here, so a nonzero value is the network's shape, not a defect",
     "", "")
 
 TL_LEAF(transport, peers_handshaking_now, TLC_I64, TFU_GAUGE, TLV_NORMAL,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
-    "live connections with a v2 transport attached that has not reached "
+    "live connections with a Noise transport attached that has not reached "
     "ESTABLISHED; a value stuck here while peers_encrypted_now stays 0 is a "
-    "v2 handshake wall",
+    "Noise handshake wall",
     "", "")
 
-TL_LEAF(transport, peers_advertising_v2_now, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+TL_LEAF(transport, peers_advertising_noise_now, TLC_I64, TFU_GAUGE, TLV_NORMAL,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
-    "handshaked peers currently advertising the v2 service bit — how many "
+    "handshaked peers currently advertising the Noise service bit — how many "
     "COULD negotiate it. Always read alongside peers_encrypted_now, which is "
     "how many did",
     "", "")
 
-TL_LEAF(transport, v2_advertising_high_water, TLC_I64, TFU_GAUGE, TLV_FULL,
+TL_LEAF(transport, noise_advertising_high_water, TLC_I64, TFU_GAUGE, TLV_FULL,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
     "the most simultaneous v2-advertising peers seen since boot; the evidence "
     "a rollout decision would need, and still not proof of any negotiation",

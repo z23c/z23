@@ -21,7 +21,7 @@ struct admission_fixture {
     struct db_mesh_capability_grant grant;
     struct vcs_zcode_dht_delegation delegation;
     struct mesh_private_object_offer_v1 offer;
-    struct v2_transport_snapshot session;
+    struct noise_transport_snapshot session;
     uint8_t local_master[32];
     uint8_t local_noise[32];
     uint8_t online_seed[32];
@@ -231,7 +231,7 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
         ASSERT_EQ(mesh_private_object_offer_v1_sign(
                       &reoffer, f->online_seed),
                   MESH_PRIVATE_OBJECT_PROTO_OK);
-        struct v2_transport_snapshot new_session = f->session;
+        struct noise_transport_snapshot new_session = f->session;
         memcpy(new_session.transcript_hash, reoffer.transcript_hash, 32);
         new_session.connection_generation = reoffer.connection_generation;
         result = mesh_private_object_admit_offer(
@@ -263,7 +263,7 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
         ASSERT(result.ok);
         ASSERT_EQ(resumed.reason, MESH_PRIVATE_OBJECT_ADMISSION_NONCE_MISMATCH);
 
-        struct v2_transport_snapshot wrong_session = f->session;
+        struct noise_transport_snapshot wrong_session = f->session;
         wrong_session.transcript_hash[0] ^= 1;
         result = mesh_private_object_admit_offer(
             &f->ndb, &f->offer, &wrong_session, &f->delegation,

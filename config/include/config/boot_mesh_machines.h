@@ -21,7 +21,7 @@
  *     also use, so every writer funnels into the same store handoff; there
  *     is no parallel verdict-only truth.
  *
- * No dial is ever attempted; a peer without a live established v2 session is
+ * No dial is ever attempted; a peer without a live established Noise session is
  * UNREACHABLE, not reconnected. Offline machines stay listed. Public keys
  * never leave the surface — fingerprints only. The pure mapping from
  * (record state, begin verdict, poll outcome, receipt status) to a verdict
@@ -68,7 +68,7 @@ struct rpc_table;
 enum mesh_machine_state {
     MESH_MACHINE_ONLINE = 0,  /* signed OK receipt inside the budget */
     MESH_MACHINE_REFUSED,     /* signed receipt carrying a named refusal */
-    MESH_MACHINE_UNREACHABLE, /* no live v2 session / v2 transport disabled */
+    MESH_MACHINE_UNREACHABLE, /* no live Noise session / Noise transport disabled */
     MESH_MACHINE_TIMEOUT,     /* no receipt before budget or request expiry */
     MESH_MACHINE_UNKNOWN,     /* probe could not be honestly classified */
     MESH_MACHINE_EXPIRED,     /* durable record past its expiry, never probed */

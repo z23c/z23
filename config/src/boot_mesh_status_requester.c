@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Mesh status requester lane: begin one bounded pairing-bound
- * status request against a paired peer's live v2 Noise session. Shared
+ * status request against a paired peer's live Noise session. Shared
  * state, receipt ingress, poll, and the responder lane live in
  * boot_mesh_status.c (see the internal header for the seam). */
 
@@ -20,7 +20,7 @@
 #include "crypto/random_secret.h"
 #include "models/mesh_pairing.h"
 #include "net/net.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "platform/time_compat.h"
 #include "services/mesh_pairing_service.h"
 #include "util/log_macros.h"
@@ -38,7 +38,7 @@ const char *boot_mesh_status_begin_result_string(
     case MESH_STATUS_BEGIN_OK: return "ok";
     case MESH_STATUS_BEGIN_BAD_ARGUMENT: return "bad_argument";
     case MESH_STATUS_BEGIN_UNAVAILABLE: return "unavailable";
-    case MESH_STATUS_BEGIN_V2_DISABLED: return "v2_transport_disabled";
+    case MESH_STATUS_BEGIN_NOISE_DISABLED: return "noise_transport_disabled";
     case MESH_STATUS_BEGIN_NOT_PAIRED: return "not_paired";
     case MESH_STATUS_BEGIN_REVOKED: return "revoked";
     case MESH_STATUS_BEGIN_EXPIRED: return "expired";
@@ -53,11 +53,11 @@ const char *boot_mesh_status_begin_result_string(
 }
 
 /* Snapshot connected peers under cs_nodes, then return the first whose
- * established v2 session names the paired Noise static. Caller releases the
+ * established Noise session names the paired Noise static. Caller releases the
  * returned reference. Never dials. */
 static struct p2p_node *mesh_find_session_peer(
     struct net_manager *nm, const uint8_t peer_noise[32],
-    struct v2_transport_snapshot *session_out)
+    struct noise_transport_snapshot *session_out)
 {
     struct p2p_node *candidates[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
     size_t count = 0;
@@ -73,10 +73,10 @@ static struct p2p_node *mesh_find_session_peer(
     zcl_mutex_unlock(&nm->cs_nodes);
     struct p2p_node *found = NULL;
     for (size_t i = 0; i < count; i++) {
-        struct v2_transport_snapshot snapshot;
+        struct noise_transport_snapshot snapshot;
         memset(&snapshot, 0, sizeof(snapshot));
         if (!found && candidates[i]->transport &&
-            v2_transport_snapshot(candidates[i]->transport, &snapshot) &&
+            noise_transport_snapshot(candidates[i]->transport, &snapshot) &&
             snapshot.established &&
             memcmp(snapshot.remote_static, peer_noise, 32) == 0) {
             found = candidates[i];
@@ -174,8 +174,8 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
         LOG_ERROR("net.mesh_status", "begin: msg_processor incomplete");
         return MESH_STATUS_BEGIN_UNAVAILABLE;
     }
-    if (!mp->net_mgr->v2_enabled)
-        return MESH_STATUS_BEGIN_V2_DISABLED;
+    if (!mp->net_mgr->noise_enabled)
+        return MESH_STATUS_BEGIN_NOISE_DISABLED;
 
     struct node_db *ndb = app_runtime_node_db();
     if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
@@ -205,7 +205,7 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
         return MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE;
     }
 
-    struct v2_transport_snapshot session;
+    struct noise_transport_snapshot session;
     memset(&session, 0, sizeof(session));
     struct p2p_node *peer = mesh_find_session_peer(
         mp->net_mgr, row.peer_noise_pubkey, &session);

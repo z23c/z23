@@ -571,7 +571,7 @@ ZCL_COMMAND_READY_READ(
     "ops.mesh.status", "ops.mesh", "",
     "Request one paired machine's signed status receipt",
     "Sends a bounded mesh status request to the paired peer over the "
-    "established Noise v2 session (multiplexed on zpkgswm), waits up to 15 "
+    "established Noise session (multiplexed on zpkgswm), waits up to 15 "
     "seconds for the signed receipt, and projects the receipt status token, "
     "responder identity fingerprints, observation times, and the redacted "
     "status capsule. A refusal receipt is a successful answer carrying the "
@@ -597,7 +597,7 @@ ZCL_COMMAND_READY_READ(
     "receipt, marked fresh, stale, or never-seen from the current time (a "
     "stale receipt is evidence of the past, never current reachability). The "
     "call also runs a bounded live refresh: up to 8 active records are "
-    "probed over the established Noise v2 status lane with a collective "
+    "probed over the established Noise status lane with a collective "
     "12-second budget, each verified terminal receipt is persisted before "
     "rendering, and each probed row additionally reports its live verdict "
     "(online / refused:<status> / unreachable / timeout / unknown). Offline "
@@ -617,7 +617,7 @@ ZCL_COMMAND_BRANCH("ops.mesh.pair", "ops.mesh", "Pairing",
 ZCL_COMMAND_READY_READ(
     "ops.mesh.pair.plan", "ops.mesh.pair", "",
     "Preview pairing one connected machine",
-    "Finds the connected peer with an established v2 Noise session "
+    "Finds the connected peer with an established Noise session "
     "(optionally narrowed by an address substring or a Noise fingerprint hex "
     "prefix), pulls its held ZID delegation, and renders what commit would "
     "record: peer address, Noise fingerprint hex to compare out of band, "

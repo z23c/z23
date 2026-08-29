@@ -13,7 +13,7 @@
 #include "platform/private_file.h"
 #include "connman_internal.h"
 #include "net/connman.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "net/v2_identity.h"
 #include "net/addrman.h"
 #include "event/event.h"
@@ -166,45 +166,45 @@ void connman_get_reactor_stats(struct connman_reactor_stats *out)
         atomic_load(&g_reactor_configured_listen_sockets);
 }
 
-/* v2-transport advertisement census — see struct connman_v2transport_stats
+/* Noise-transport advertisement census — see struct connman_noisetransport_stats
  * in net/connman.h. Written only by thread_socket_handler (single writer,
  * once per poll iteration); read by the dump-state surface and tests.
  * Nothing in the node branches on these. */
-static _Atomic size_t   g_v2_advertising_now        = 0;
-static _Atomic size_t   g_v2_handshaked_now         = 0;
-static _Atomic size_t   g_v2_advertising_high_water = 0;
-static _Atomic uint64_t g_v2_advertising_obs_total  = 0;
-static _Atomic uint64_t g_v2_samples_total          = 0;
+static _Atomic size_t   g_noise_advertising_now        = 0;
+static _Atomic size_t   g_noise_handshaked_now         = 0;
+static _Atomic size_t   g_noise_advertising_high_water = 0;
+static _Atomic uint64_t g_noise_advertising_obs_total  = 0;
+static _Atomic uint64_t g_noise_samples_total          = 0;
 
 /* Record one census sample. Plain atomics and no allocation, so it is safe
  * with or without cs_nodes held; the reactor calls it after unlocking
  * because there is no reason to widen the lock hold. */
-static void connman_note_v2transport_sample(size_t advertising,
+static void connman_note_noisetransport_sample(size_t advertising,
                                             size_t handshaked)
 {
-    atomic_store_explicit(&g_v2_advertising_now, advertising,
+    atomic_store_explicit(&g_noise_advertising_now, advertising,
                           memory_order_relaxed);
-    atomic_store_explicit(&g_v2_handshaked_now, handshaked,
+    atomic_store_explicit(&g_noise_handshaked_now, handshaked,
                           memory_order_relaxed);
-    if (advertising > atomic_load_explicit(&g_v2_advertising_high_water,
+    if (advertising > atomic_load_explicit(&g_noise_advertising_high_water,
                                            memory_order_relaxed))
-        atomic_store_explicit(&g_v2_advertising_high_water, advertising,
+        atomic_store_explicit(&g_noise_advertising_high_water, advertising,
                               memory_order_relaxed);
     if (advertising > 0)
-        atomic_fetch_add_explicit(&g_v2_advertising_obs_total,
+        atomic_fetch_add_explicit(&g_noise_advertising_obs_total,
                                   (uint64_t)advertising, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_v2_samples_total, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_noise_samples_total, 1, memory_order_relaxed);
 }
 
-void connman_get_v2transport_stats(struct connman_v2transport_stats *out)
+void connman_get_noisetransport_stats(struct connman_noisetransport_stats *out)
 {
     if (!out) return;
-    out->advertising_now = atomic_load(&g_v2_advertising_now);
-    out->handshaked_now  = atomic_load(&g_v2_handshaked_now);
-    out->advertising_high_water = atomic_load(&g_v2_advertising_high_water);
+    out->advertising_now = atomic_load(&g_noise_advertising_now);
+    out->handshaked_now  = atomic_load(&g_noise_handshaked_now);
+    out->advertising_high_water = atomic_load(&g_noise_advertising_high_water);
     out->advertising_observations_total =
-        atomic_load(&g_v2_advertising_obs_total);
-    out->samples_total = atomic_load(&g_v2_samples_total);
+        atomic_load(&g_noise_advertising_obs_total);
+    out->samples_total = atomic_load(&g_noise_samples_total);
 }
 
 #ifdef ZCL_TESTING
@@ -212,10 +212,10 @@ void connman_get_v2transport_stats(struct connman_v2transport_stats *out)
  * poll loop, which a unit test cannot spin up; the accumulation rule is
  * what needs proving, so expose exactly the recorder, not a shortcut
  * around it. */
-void connman_note_v2transport_sample_for_test(size_t advertising,
+void connman_note_noisetransport_sample_for_test(size_t advertising,
                                               size_t handshaked)
 {
-    connman_note_v2transport_sample(advertising, handshaked);
+    connman_note_noisetransport_sample(advertising, handshaked);
 }
 #endif
 
@@ -1306,21 +1306,21 @@ static void *thread_socket_handler(void *arg)
             }
             npfds++;
         }
-        /* v2-transport advertisement census (observation only — see
-         * connman_get_v2transport_stats). Same lock hold, own walk: the
+        /* Noise-transport advertisement census (observation only — see
+         * connman_get_noisetransport_stats). Same lock hold, own walk: the
          * poll-array loop above skips fd<0 and stops at REACTOR_MAX_FDS,
          * and a census that silently under-counts is worse than none. */
-        size_t v2_advertising = 0, v2_handshaked = 0;
+        size_t noise_advertising = 0, noise_handshaked = 0;
         for (size_t i = 0; i < cm->manager.num_nodes; i++) {
             const struct p2p_node *n = cm->manager.nodes[i];
             if (!n || n->disconnect || n->state < PEER_HANDSHAKE_COMPLETE)
                 continue;
-            v2_handshaked++;
-            if (n->services & NODE_V2TRANSPORT)
-                v2_advertising++;
+            noise_handshaked++;
+            if (n->services & NODE_NOISE_TRANSPORT)
+                noise_advertising++;
         }
         zcl_mutex_unlock(&cm->manager.cs_nodes);
-        connman_note_v2transport_sample(v2_advertising, v2_handshaked);
+        connman_note_noisetransport_sample(noise_advertising, noise_handshaked);
 
         /* High-water mark for operator/agent introspection (net/connman
          * dump-state). Single writer (this thread), plain atomic store. */
@@ -1403,26 +1403,26 @@ static void *thread_socket_handler(void *arg)
                 }
                 int n = platform_socket_receive(target_fd, buf, recv_cap);
                 if (n > 0) {
-                    /* v2 transport seam: decrypt below the message layer. The
+                    /* Noise transport seam: decrypt below the message layer. The
                      * plaintext path (transport == NULL) is the UNCHANGED else
                      * — `plain`/`plain_n` remain the raw recv bytes. */
                     const char *plain = buf;
                     unsigned int plain_n = (unsigned int)n;
                     uint8_t *dec = NULL, *wire = NULL;
                     size_t dec_len = 0, wire_len = 0;
-                    bool v2_dropped = false;
+                    bool noise_dropped = false;
                     if (node->transport) {
-                        if (!v2_transport_feed(node->transport,
+                        if (!noise_transport_feed(node->transport,
                                                (const uint8_t *)buf, (size_t)n,
                                                &wire, &wire_len,
                                                &dec, &dec_len)) {
                             connman_note_addnode_prehandshake_disconnect(
-                                cm, node, "v2-transport");
+                                cm, node, "noise-transport");
                             (void)p2p_node_request_disconnect(
                                 node, P2P_DISCONNECT_TRANSPORT_ERROR,
                                 P2P_DISCONNECT_SOURCE_SOCKET,
                                 node->endpoint_generation);
-                            v2_dropped = true;
+                            noise_dropped = true;
                         } else {
                             /* Handshake replies / flushed sealed pending go out
                              * unmodified; cs_recv held, this takes cs_send. */
@@ -1434,14 +1434,14 @@ static void *thread_socket_handler(void *arg)
                              * continue plaintext. `dec` carries the buffered
                              * raw bytes to replay through the parser. */
                             if (node->transport->state ==
-                                V2_PLAINTEXT_FALLBACK) {
-                                v2_transport_free(node->transport);
+                                NOISE_PLAINTEXT_FALLBACK) {
+                                noise_transport_free(node->transport);
                                 node->transport = NULL;
                             }
                         }
                         free(wire);
                     }
-                    if (!v2_dropped && plain_n &&
+                    if (!noise_dropped && plain_n &&
                         !p2p_node_receive_bytes(node, plain, plain_n,
                                                 cm->manager.message_start)) {
                         connman_note_addnode_prehandshake_disconnect(
@@ -2096,10 +2096,10 @@ bool connman_init(struct connman *cm, const struct chain_params *params,
     if (bip37_enabled())
         cm->manager.local_services |= NODE_BLOOM;
 
-    /* v2 Noise transport: default OFF. When -v2transport is passed, advertise
-     * NODE_V2TRANSPORT and load/generate the persistent static identity. */
-    cm->manager.v2_enabled = GetBoolArg("-v2transport", false);
-    if (cm->manager.v2_enabled) {
+    /* Noise transport: default OFF. When -noisetransport is passed, advertise
+     * NODE_NOISE_TRANSPORT and load/generate the persistent static identity. */
+    cm->manager.noise_enabled = GetBoolArg("-noisetransport", false);
+    if (cm->manager.noise_enabled) {
         char datadir[1024], identity_error[160];
         /* The DHT delegation command and the running service both receive
          * the operator's base datadir.  Keep the persistent Noise identity
@@ -2113,10 +2113,10 @@ bool connman_init(struct connman *cm, const struct chain_params *params,
                 datadir, cm->manager.identity_priv,
                 cm->manager.identity_pub, identity_error,
                 sizeof(identity_error)))
-            cm->manager.local_services |= NODE_V2TRANSPORT;
+            cm->manager.local_services |= NODE_NOISE_TRANSPORT;
         else {
-            cm->manager.v2_enabled = false;
-            LOG_WARN("net", "v2 identity unavailable: %s; transport disabled",
+            cm->manager.noise_enabled = false;
+            LOG_WARN("net", "Noise identity unavailable: %s; transport disabled",
                      identity_error);
         }
     }

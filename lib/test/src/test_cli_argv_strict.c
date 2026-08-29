@@ -600,16 +600,16 @@ static int cas_test_daemon_mode_tolerant_and_warns(void)
     return failures;
 }
 
-static int cas_test_v2transport_is_recognized(void)
+static int cas_test_noisetransport_is_recognized(void)
 {
     int failures = 0;
-    TEST("daemon argv: -v2transport is a recognized GetBoolArg flag and "
+    TEST("daemon argv: -noisetransport is a recognized GetBoolArg flag and "
          "never emits the unknown-flag warning") {
         uint16_t rpc_port = cas_reserve_port();
         uint16_t p2p_port = cas_reserve_port();
         if (rpc_port == 0 || p2p_port == 0) {
             printf("cli_argv_strict: could not reserve test ports — SKIP "
-                   "v2transport case\n");
+                   "noisetransport case\n");
             return 0;
         }
         char home[300], datadir[340];
@@ -626,7 +626,7 @@ static int cas_test_v2transport_is_recognized(void)
         char *argv[] = {
             (char *)CAS_BIN, datadir_flag, rpcport_flag, port_flag,
             (char *)"-regtest", (char *)"-nolegacyimport",
-            (char *)"-nobgvalidation", (char *)"-v2transport", NULL,
+            (char *)"-nobgvalidation", (char *)"-noisetransport", NULL,
         };
         static const char *const ready_needles[] = {
             "z23 starting", NULL,
@@ -636,7 +636,7 @@ static int cas_test_v2transport_is_recognized(void)
             argv, home, ready_needles, 20000, out, sizeof(out));
 
         ASSERT(started);
-        ASSERT(!cas_contains(out, "unrecognized flag '-v2transport'"));
+        ASSERT(!cas_contains(out, "unrecognized flag '-noisetransport'"));
         PASS();
     } _test_next:;
     return failures;
@@ -670,7 +670,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_extended_transaction_catalog_fits();
     failures += cas_test_extended_transaction_guide_fits();
     failures += cas_test_daemon_mode_tolerant_and_warns();
-    failures += cas_test_v2transport_is_recognized();
+    failures += cas_test_noisetransport_is_recognized();
 
     return failures;
 }

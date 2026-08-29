@@ -493,26 +493,26 @@ TELEMETRY_FIELD("connman", "reactor.configured_listen_sockets",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
     "how many listening sockets are configured; 0 means no inbound connection "
     "can ever be accepted", "", "")
-TELEMETRY_FIELD("connman", "v2transport.advertising_now",
+TELEMETRY_FIELD("connman", "noisetransport.advertising_now",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
-    "connected peers advertising the Noise v2 encrypted transport right now; "
+    "connected peers advertising the Noise encrypted transport right now; "
     "observation only, the default stays off", "", "")
-TELEMETRY_FIELD("connman", "v2transport.handshaked_now",
+TELEMETRY_FIELD("connman", "noisetransport.handshaked_now",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
-    "peers that actually completed a Noise v2 handshake right now", "", "")
-TELEMETRY_FIELD("connman", "v2transport.advertising_high_water",
+    "peers that actually completed a Noise handshake right now", "", "")
+TELEMETRY_FIELD("connman", "noisetransport.advertising_high_water",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
-    "the most simultaneous v2-advertising peers seen since boot", "", "")
-TELEMETRY_FIELD("connman", "v2transport.advertising_observations_total",
+    "the most simultaneous Noise-advertising peers seen since boot", "", "")
+TELEMETRY_FIELD("connman", "noisetransport.advertising_observations_total",
     TFU_COUNT_TOTAL, TFR_INFO, NULL, 0, TFS_INFO,
-    "lifetime count of peer observations that advertised v2", "", "")
-TELEMETRY_FIELD("connman", "v2transport.samples_total",
+    "lifetime count of peer observations that advertised the Noise transport", "", "")
+TELEMETRY_FIELD("connman", "noisetransport.samples_total",
     TFU_COUNT_TOTAL, TFR_INFO, NULL, 0, TFS_INFO,
     "lifetime peer observations taken; the denominator for "
     "advertising_observations_total", "", "")
-TELEMETRY_FIELD("connman", "v2transport.default_enabled",
+TELEMETRY_FIELD("connman", "noisetransport.default_enabled",
     TFU_BOOL, TFR_INFO, NULL, 0, TFS_INFO,
-    "whether this node offers v2 by default; false is the shipped posture, so "
+    "whether this node offers the Noise transport by default; false is the shipped posture, so "
     "false here is not a finding", "", "")
 TELEMETRY_FIELD("connman", "message_cycle.cycles",
     TFU_COUNT_TOTAL, TFR_EXPECT_NONZERO, NULL, 0, TFS_CRITICAL,

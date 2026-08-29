@@ -53,8 +53,8 @@ signaling channel that is guaranteed to exist.
   connects directly. This IS the rendezvous layer, already deployed.
 - ZNAM `ZNAM_TYPE_ONION` records — a human name can point at an onion;
   `ZNAM_TYPE_CONTENT` fits package roots. Names are pointers, never trust.
-- Noise XX/NK handshake + v2 encrypted transport
-  (`lib/noise/src/noise_handshake.c`, `lib/net/src/v2_transport.c`),
+- Noise XX/NK handshake + encrypted transport
+  (`lib/noise/src/noise_handshake.c`, `lib/net/src/noise_transport.c`),
   armed as initiator, default OFF pending rollout.
 - P2P ping wire type (game framework Type 0) — per-peer RTT measurement in
   microseconds (`core network peers latency`), exactly the signal transport
@@ -94,7 +94,7 @@ binding options, in order of preference:
 
 1. Noise XX with static keys — the handshake authenticates both endpoints;
    the static key IS the peer identity on clearnet, onion, and punched
-   connections alike. This is the strongest argument for finishing the v2
+   connections alike. This is the strongest argument for finishing the Noise
    transport rollout (currently default OFF).
 2. Until Noise is default: a challenge/response over the established
    channel binding a secp256k1 peer key to the session before any
@@ -112,7 +112,7 @@ anchored, was rotated away, or was revoked is refused with its own named
 error; with no chain lookup registered the module fails CLOSED.
 
 That does NOT make a record proof of who answers: binding the SESSION to
-the key needs the Noise v2 transport, which is default OFF because every
+the key needs the Noise transport, which is default OFF because every
 peer on the live network speaks v1 today. So a record remains a HINT
 about where to look. It ADDS a place to try alongside the unsigned
 wallet scrape and the signed descriptor directory, and it can never
@@ -163,7 +163,7 @@ one.
    verified but not yet an addrman candidate.
 2. Per-transport RTT/throughput stats wired into peer selection (the ping
    infrastructure already measures; persist and use it).
-3. Noise v2 default-ON rollout plan (identity across transports depends on
+3. Noise default-ON rollout plan (identity across transports depends on
    it).
 4. Punch-coordination message codec (pure, tested) over the onion channel.
 5. Simultaneous-open attempt + measurement, off by default behind a flag.

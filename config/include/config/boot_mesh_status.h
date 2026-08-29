@@ -3,14 +3,14 @@
  *
  * The mesh status protocol multiplexes on the frozen "zpkgswm" P2P message
  * with a "ZMSTAT" prefix, exactly like ZCDHTM/ZSR1/ZCWS: no new wire message,
- * no listener, no port. It inherits the v2 Noise session, the onion path, and
+ * no listener, no port. It inherits the Noise session, the onion path, and
  * connman session management. Every request is answered with a signed
  * mesh_status_receipt_v1 (OK or a named refusal) only when the session is an
- * established v2 Noise session bound to a live ZID delegation; anything less
+ * established Noise session bound to a live ZID delegation; anything less
  * is dropped quietly without a receipt, so no responder key material ever
  * crosses an unauthenticated channel.
  *
- * Session binding note: v2_transport_snapshot's transcript_hash and
+ * Session binding note: noise_transport_snapshot's transcript_hash and
  * connection_generation are transcript-derived and identical on both sides;
  * the wire binds only that shared session evidence (the process-local
  * per-side connection_serial left the protocol in 2114f5257). The responder
@@ -36,7 +36,7 @@ struct node_db;
 struct node_db_status;
 struct p2p_node;
 struct rpc_table;
-struct v2_transport_snapshot;
+struct noise_transport_snapshot;
 struct vcs_zcode_dht_delegation;
 
 #define MESH_STATUS_FRAME_PREFIX "ZMSTAT"
@@ -84,7 +84,7 @@ enum boot_mesh_status_begin_result {
     MESH_STATUS_BEGIN_OK = 0,
     MESH_STATUS_BEGIN_BAD_ARGUMENT,
     MESH_STATUS_BEGIN_UNAVAILABLE,       /* composition not wired */
-    MESH_STATUS_BEGIN_V2_DISABLED,       /* -v2transport=0: no Noise sessions */
+    MESH_STATUS_BEGIN_NOISE_DISABLED,       /* -noisetransport=0: no Noise sessions */
     MESH_STATUS_BEGIN_NOT_PAIRED,
     MESH_STATUS_BEGIN_REVOKED,
     MESH_STATUS_BEGIN_EXPIRED,
@@ -100,7 +100,7 @@ const char *boot_mesh_status_begin_result_string(
 
 /* Begin one bounded status request to the paired peer. On OK,
  * request_id_out carries the random 32-byte request id. No dial is ever
- * performed: a paired peer without a live established v2 session is
+ * performed: a paired peer without a live established Noise session is
  * PEER_NOT_CONNECTED. */
 enum boot_mesh_status_begin_result boot_mesh_status_begin(
     const char *pairing_id_hex, uint8_t request_id_out[32]);
@@ -118,12 +118,12 @@ enum boot_mesh_status_poll_state boot_mesh_status_poll(
 
 /* Pure responder decision: no sockets, no locks, no I/O beyond the pairing
  * reads on ndb. `delegations` is the held-delegation snapshot; `session` must
- * be an established v2 snapshot. revocation_generation_out is set on OK.
+ * be an established Noise snapshot. revocation_generation_out is set on OK.
  * Exported (not static) so the wire group test drives the exact production
  * decision without sockets. */
 enum mesh_status_receipt_status boot_mesh_status_decide(
     struct node_db *ndb, const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session,
+    const struct noise_transport_snapshot *session,
     const struct vcs_zcode_dht_delegation *delegations,
     size_t delegation_count, const uint8_t network_genesis[32],
     uint64_t now_unix, uint64_t *revocation_generation_out);
@@ -132,7 +132,7 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
  * required iff status is OK. */
 bool boot_mesh_status_compose_receipt(
     const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session,
+    const struct noise_transport_snapshot *session,
     enum mesh_status_receipt_status status, const uint8_t network_genesis[32],
     const uint8_t responder_master_pubkey[32],
     const uint8_t responder_online_pubkey[32],
@@ -147,7 +147,7 @@ bool boot_mesh_status_compose_receipt(
 bool boot_mesh_status_receipt_accept(
     const struct mesh_status_receipt_v1 *receipt,
     const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session,
+    const struct noise_transport_snapshot *session,
     const uint8_t expected_responder_master[32],
     const uint8_t expected_responder_online[32]);
 
@@ -176,7 +176,7 @@ void boot_mesh_status_machines_test_render(
     struct node_db *ndb, int64_t now, struct json_value *result);
 bool boot_mesh_status_test_responder_admit(
     const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session, uint64_t now_mono_ms);
+    const struct noise_transport_snapshot *session, uint64_t now_mono_ms);
 bool boot_mesh_status_refresh_test_gate(
     bool running, int sync_state, int disk_level, int memory_level,
     bool long_db_operation, bool db_service_started,

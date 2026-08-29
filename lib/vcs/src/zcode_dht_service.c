@@ -416,7 +416,7 @@ vcs_zcode_dht_service_create(const struct vcs_zcode_dht_service_params *p) {
   uint8_t online_pub[32], secret_copy[32];
   if (!p->transport_enabled) {
     snprintf(s->disabled_reason, sizeof(s->disabled_reason),
-             "V2_TRANSPORT_DISABLED");
+             "NOISE_TRANSPORT_DISABLED");
     return s;
   }
   s->record_store = vcs_zcode_dht_record_store_create(p->network_genesis);

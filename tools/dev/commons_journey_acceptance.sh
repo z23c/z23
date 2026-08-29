@@ -466,7 +466,7 @@ cj_build_peer_helper() {
         -I"$REPO_ROOT/lib/vcs/include" -I"$REPO_ROOT/lib/zid/include" \
         -I"$REPO_ROOT/core/math/include" -o "$DHT_WORK/journey-peer" \
         "$REPO_ROOT/tools/zcode_dht_acceptance_peer.c" \
-        "$REPO_ROOT/lib/net/src/v2_transport.c" \
+        "$REPO_ROOT/lib/net/src/noise_transport.c" \
         "$REPO_ROOT/lib/noise/src/noise_handshake.c" \
         "$REPO_ROOT/lib/noise/src/session_transport.c" \
         "$REPO_ROOT/lib/vcs/src/zcode_dht.c" \

@@ -30,7 +30,7 @@
  * key-bound) and descriptors fill what is left.
  *
  * A RECORD IS A HINT. Even a chain-anchored record does not prove who
- * answers at the address; that needs the Noise v2 transport, default
+ * answers at the address; that needs the Noise transport, default
  * OFF today. Nothing here narrows peer selection, and nothing here may
  * grow into something that does. */
 

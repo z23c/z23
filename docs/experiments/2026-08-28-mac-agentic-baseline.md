@@ -60,13 +60,13 @@ Against the isolated regtest node, `ops mesh identity` returned:
 - `hotswap.status=refused`, `refusal_stage=macos`, reason:
   "native macOS hot-swap is disabled pending validated Mach-O imports and
   immutable executable-image staging"
-- Active blockers for pairing: `V2_TRANSPORT_DISABLED`,
+- Active blockers for pairing: `NOISE_TRANSPORT_DISABLED`,
   `NOISE_IDENTITY_UNAVAILABLE`, `AUTHENTICATED_DHT_INACTIVE`,
   `REMOTE_STATUS_PROTOCOL_UNAVAILABLE`.
 
-The capsule works; actual private-mesh pairing is gated on enabling v2 transport
-and an authenticated DHT identity, which is the same cross-platform prerequisite
-set the command reports on Linux.
+The capsule works; actual private-mesh pairing is gated on enabling the Noise
+transport and an authenticated DHT identity, which is the same cross-platform
+prerequisite set the command reports on Linux.
 
 ## Mainnet sync observation
 
