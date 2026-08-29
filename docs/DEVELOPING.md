@@ -337,6 +337,78 @@ for each compile when a rebuild is slower than it should be. See
 [`BUILD.md`](./BUILD.md#the-compile-cache-is-in-the-repository) for how a hit
 is kept honest and how to clear or audit the cache.
 
+### Measuring whether a group would NOTICE — mutation testing
+
+Green tells you the tests pass. It does not tell you the tests would go red if
+the code were wrong, and those are different facts. An audit of one 12,474-line
+module found ~80 defects in code that compiled under
+`-Wall -Wextra -Werror -pedantic` and whose suite was green — including a
+declared validator whose body was `return true;`, a signature check that hashed
+bytes nobody had written, and an index that silently held exactly 32 keys.
+Nothing was wrong with those tests' assertions. Nothing in the suite ever
+inserted a 33rd key.
+
+`mutation-campaign` measures the second fact. It enumerates every realistic
+one-token defect in a source file, compiles each one, runs ONLY the group that
+covers it, and reports the fraction the group killed.
+
+```bash
+make mutation-campaign
+build/bin/mutation-campaign --file=lib/metaverse/src/node_character.c \
+                            --group=test_node_character
+build/bin/mutation-campaign --file=<any .c> --list   # enumerate only; no build
+```
+
+`z23 code tests <file.c>` names the group that covers a file, which is the
+`--group=` argument. `--limit=N` takes a sample instead of the whole file, and
+`--target=` points the plan at a build other than `test_parallel`.
+
+**The survivors are the product, not the score.** Each survivor is a specific
+line the group's assertions cannot see, printed as `file:line:col` with the
+exact change. A score with no survivor list is a number nobody can act on.
+
+Five buckets, and only two of them are the suite's business:
+
+| bucket | meaning | in the score |
+|---|---|---|
+| `KILLED` | the group went red | yes (numerator) |
+| `SURVIVED` | different machine code, group still green | yes (denominator) |
+| `STILLBORN` | the mutant did not compile | **no** — `-Werror` caught it, not a test |
+| `EQUIVALENT` | byte-identical object file | **no** — provably unkillable |
+| `ERROR` | no usable `SUITE VERDICT`, or `groups_ran=0` | **no** — never silently a survivor |
+
+`score = KILLED / (KILLED + SURVIVED)`.
+
+Equivalent mutants are undecidable in general and this does not pretend
+otherwise. Byte-identical object code is the cheap SOUND half: what it flags is
+certainly equivalent (an ignored array bound in a parameter, an enum constant
+that really is `0`). A semantically equivalent mutant whose machine code
+differs still lands in `SURVIVED`, where it depresses the score. That is
+another reason to read the list rather than the number.
+
+**It never edits your checkout.** The mutant is compiled from a scratch copy
+carrying a `#line` directive back to the real path, so `__FILE__` and `__LINE__`
+are unchanged and the target file is never opened for writing on any path.
+There is no restore step to get wrong: interrupt it at any moment and the file
+is byte-identical. The report prints the source's SHA3-256 before and after so
+that is checkable rather than promised. `dev.agent.mutate`, which edits in
+place, is the single-mutation interactive tool; this is the campaign.
+
+Cost, measured on this tree: about **5–8s per mutant** (one TU compile, one
+link of the harness, one group run of ~70ms). `make` is deliberately not in the
+loop — it runs once per campaign as `make -n -W <src> <target>` to learn the
+exact compile and link argv — because `make`'s no-op dependency scan alone is
+13s and a one-file incremental rebuild is 26s.
+
+**This is a reporting tool. It is not on the default test path, not in
+`make lint`, and not in the push gate.** A mutation-score threshold imposed
+before the tree has measured scores would block everyone. Run it on the file
+you are changing.
+
+What mutation testing does NOT catch is in
+[`tools/dev/mutation_harness.h`](../tools/dev/mutation_harness.h); read it
+before treating any score as a quality claim.
+
 ### Proving a permissionless cold join
 
 One claim gets asserted often enough in prose that it earned a single command:
