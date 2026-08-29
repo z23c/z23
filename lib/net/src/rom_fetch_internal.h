@@ -83,7 +83,9 @@ struct rf_peer_conn {
     char     addr[128];
     uint16_t port;
     uint32_t served;   /* chunks delivered on THIS session */
-    bool     open;
+    /* Not named `open`: mingw defines open() as a macro, so a member of that
+     * name expands to `_open` and the Windows build fails to compile. */
+    bool     is_open;
 };
 
 /* Close and forget the session `c` holds, if any. Idempotent. */

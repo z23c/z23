@@ -524,7 +524,7 @@ REMOTE_COMMAND_CLASS("vault.session.revoke", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.redeem", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
 
-/* DEV — 40 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
+/* DEV — 43 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
  * owner_capability above; they are the only two).
  *
  * The dev branch drives a checkout. It compiles (ZCL_COMMAND_CAP_COMPILER),
@@ -535,11 +535,11 @@ REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
  * unbounded authority the shell was rejected for.
  *
  * Its READS are refused too, and not out of excess caution: dev.test.run,
- * dev.test.sim and dev.verify-change are *_READ macros that execute the dev
- * toolchain against a working tree, and dev.ff, dev.drive and dev.loop.* read
- * and steer a live build loop. The remote path to another node's source is
- * source-by-hash (zcode.workspace.source.bundle.fetch), which the target
- * verifies itself.
+ * dev.test.sim, dev.verify-change and dev.agent.test are *_READ macros that
+ * execute the dev toolchain against a working tree, and dev.ff, dev.drive
+ * and dev.loop.* read and steer a live build loop. The remote path to another
+ * node's source is source-by-hash (zcode.workspace.source.bundle.fetch),
+ * which the target verifies itself.
  *
  * The two hot-swap leaves are the deliberate, individually-named exception,
  * argued at their rows above. */
@@ -583,6 +583,9 @@ REMOTE_COMMAND_CLASS("dev.generation.rollback", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.generation.compact", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.diagnose.latest", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.diagnose.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.ready", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.test", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.mutate", REMOTE_CLASS_NEVER, "")
 
 /* OPS — 36 never_remote leaves.
  *

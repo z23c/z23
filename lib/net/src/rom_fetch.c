@@ -961,7 +961,7 @@ static bool rf_ver_acquire_chunk(struct rf_ver_job *j, struct rf_peer_conn *c,
     uint64_t poisoned = 0; /* bit p set => peers[p] served bad content here */
     /* Start the ring on the peer this worker is already talking to. */
     size_t start = i;
-    if (c->open) {
+    if (c->is_open) {
         for (size_t k = 0; k < j->npeers; k++) {
             if (j->peers[k].port == c->port &&
                 strcmp(j->peers[k].addr, c->addr) == 0) {

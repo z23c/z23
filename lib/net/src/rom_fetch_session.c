@@ -121,10 +121,10 @@ const char *rom_fetch_refusal_reason_name(uint8_t reason)
 
 void rf_conn_drop(struct rf_peer_conn *c)
 {
-    if (!c || !c->open)
+    if (!c || !c->is_open)
         return;
     rf_session_close(&c->s, c->fd);
-    c->open = false;
+    c->is_open = false;
     c->fd = PLATFORM_SOCKET_INVALID;
     c->served = 0;
 }
@@ -134,10 +134,10 @@ void rf_conn_drop(struct rf_peer_conn *c)
 bool rf_conn_ensure(struct rf_peer_conn *c, const char *addr,
                            uint16_t port)
 {
-    if (c->open && (c->port != port || strcmp(c->addr, addr) != 0 ||
+    if (c->is_open && (c->port != port || strcmp(c->addr, addr) != 0 ||
                     c->served >= RF_SESSION_MAX_CHUNKS))
         rf_conn_drop(c);
-    if (c->open)
+    if (c->is_open)
         return true;
 
     platform_socket_t fd = rf_connect(addr, port);
@@ -158,7 +158,7 @@ bool rf_conn_ensure(struct rf_peer_conn *c, const char *addr,
     c->port = port;
     snprintf(c->addr, sizeof(c->addr), "%s", addr);
     c->served = 0;
-    c->open = true;
+    c->is_open = true;
     return true;
 }
 
