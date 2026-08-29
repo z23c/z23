@@ -38,6 +38,12 @@
 #define ACME_MAX_DOMAIN     253
 #define ACME_MAX_KEY_AUTHZ  512
 
+/* The name the node looks for, relative to <datadir>/ssl. Both halves have
+ * to agree on one path or every validation fails for a reason that looks
+ * like a network problem, so the name is written down once, here, and the
+ * node prints the absolute path at start for the worker's --handoff. */
+#define ACME_HANDOFF_FILENAME "acme-challenge"
+
 /* Pure. Key authorization (RFC 8555 §8.1): "<token>.<base64url(thumbprint)>".
  * Refuses a token carrying anything outside the base64url alphabet — the
  * token comes from the CA and ends up inside a certificate the node signs

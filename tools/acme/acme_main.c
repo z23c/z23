@@ -31,6 +31,11 @@
  *             nothing but the file; contacts nobody.
  *   selftest  Run the offline assertions that travel with this program.
  *
+ * The node picks up what this program writes with no restart: its front
+ * door watches the certificate path and swaps the running TLS context when
+ * the file changes. Renewal is therefore this one command on a timer, and
+ * nothing else.
+ *
  * Exit codes: 0 success, 1 the operation failed, 2 the arguments were not
  * usable. `check` also uses 3 to mean "renewal is due", so a shell can act
  * on the verdict without parsing text.
@@ -222,7 +227,20 @@ int main(int argc, char **argv)
 
     if (!acme_client_obtain(&cfg))
         return ACME_EXIT_FAILED;
-    printf("issued cert=%s key=%s domain=%s\n", cfg.cert_path, cfg.cert_key_path,
-           cfg.domain);
+
+    /* The renewal is end-to-end from here with nothing else to run. The
+     * node's front door watches this exact certificate path and swaps the
+     * running TLS context when its file identity changes, on the next
+     * connection, with no restart and without breaking a handshake already
+     * in flight (net/https_server.h). Saying so out loud matters: the
+     * ninety-day manual restart this program exists to remove is exactly the
+     * step an operator would otherwise go looking for. */
+    int64_t not_before = 0;
+    int64_t not_after = 0;
+    (void)acme_certificate_validity(cfg.cert_path, &not_before, &not_after);
+    printf("issued cert=%s key=%s domain=%s not_after=%lld\n", cfg.cert_path,
+           cfg.cert_key_path, cfg.domain, (long long)not_after);
+    printf("the running node serves this on its next connection; no restart, "
+           "and nothing else to run\n");
     return ACME_EXIT_OK;
 }

@@ -22,6 +22,7 @@
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/x509.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -468,6 +469,62 @@ static bool write_key_pem(const EVP_PKEY *key, const char *path)
     return true;
 }
 
+/* WHAT "ISSUED" HAS TO MEAN, AND WHY THE WORKER CHECKS IT.
+ *
+ * The node adopts a renewed certificate with no restart: its front door
+ * watches this exact pair of paths and swaps the running TLS context the
+ * moment their file identity changes (net/https_server.h). That makes this
+ * function the seam where a renewal becomes end-to-end rather than two
+ * halves that happen to exist -- so "success" here is defined as "the node's
+ * next connection will serve this", not "two files were written".
+ *
+ * The three checks below are exactly the three the node's ssl_ctx_build()
+ * makes, asked here of the bytes on disk. A pair that fails any of them is
+ * refused by the node and the front door keeps serving the OLD certificate,
+ * which is the right behaviour there and a silent half-renewal here -- so it
+ * is reported as a failure by the program that caused it. The fourth check
+ * is not the node's: a leaf that names itself as its own issuer is a
+ * self-signed placeholder, never something a certificate authority issued,
+ * and writing one to the CA-issued path would defeat the whole point of
+ * keeping those two paths distinct. */
+static bool issued_pair_is_servable(const char *cert_path, const char *key_path)
+{
+    FILE *cf = fopen(cert_path, "rb");
+    X509 *leaf = cf ? PEM_read_X509(cf, NULL, NULL, NULL) : NULL;
+    if (cf)
+        fclose(cf);
+    if (!leaf)
+        LOG_FAIL("acme", "the chain written to %s does not read back as a "
+                         "certificate", cert_path);
+
+    FILE *kf = fopen(key_path, "rb");
+    EVP_PKEY *key = kf ? PEM_read_PrivateKey(kf, NULL, NULL, NULL) : NULL;
+    if (kf)
+        fclose(kf);
+
+    const bool key_ok = key != NULL;
+    const bool matches = key_ok && X509_check_private_key(leaf, key) == 1;
+    const bool ca_issued =
+        X509_NAME_cmp(X509_get_issuer_name(leaf), X509_get_subject_name(leaf))
+        != 0;
+    EVP_PKEY_free(key);
+    X509_free(leaf);
+
+    if (!key_ok)
+        LOG_FAIL("acme", "the key written to %s does not read back as a "
+                         "private key", key_path);
+    if (!matches)
+        LOG_FAIL("acme", "the key at %s does not belong to the certificate at "
+                         "%s; the node would refuse this pair and keep serving "
+                         "the certificate it already has", key_path, cert_path);
+    if (!ca_issued)
+        LOG_FAIL("acme", "the leaf written to %s names itself as its own "
+                         "issuer; that is a self-signed certificate, not one a "
+                         "certificate authority issued", cert_path);
+    return true;
+}
+
+
 bool acme_client_obtain(const struct acme_client_config *cfg)
 {
     if (!cfg)
@@ -545,7 +602,8 @@ bool acme_client_obtain(const struct acme_client_config *cfg)
         /* Key first, then chain: a reader that sees the new chain must never
          * find the old key beside it. */
         ok = wellformed && write_key_pem(cert_key, cfg->cert_key_path) &&
-             write_private(cfg->cert_path, chain.body, chain.body_len, false);
+             write_private(cfg->cert_path, chain.body, chain.body_len, false) &&
+             issued_pair_is_servable(cfg->cert_path, cfg->cert_key_path);
         if (ok)
             LOG_INFO("acme", "issued a %zu-certificate chain for %s", count,
                      cfg->domain);

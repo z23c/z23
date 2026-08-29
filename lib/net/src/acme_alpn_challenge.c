@@ -5,7 +5,10 @@
  * The whole hook into the front door is acme_alpn_install(): one ALPN
  * selection callback. Everything else — the armed state, the ephemeral key,
  * the certificate — lives here, so lib/net/src/https_server.c gains a single
- * line and no new concept.
+ * line and no new concept. The certificate SKELETON is not built here: it is
+ * the one in lib/net/src/acme_selfsigned.c, shared with the boot placeholder,
+ * so there is a single answer to "what does a certificate this node signs
+ * look like".
  */
 
 #if !defined(_WIN32)
@@ -16,12 +19,11 @@
 
 #include "net/acme_arm_file.h"
 #include "net/acme_b64url.h"
+#include "net/acme_selfsigned.h"
 
 #include <openssl/asn1.h>
-#include <openssl/bn.h>
 #include <openssl/err.h>
 #include <openssl/objects.h>
-#include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <openssl/x509v3.h>
 
@@ -44,39 +46,16 @@ bool acme_alpn_challenge_digest(const char *key_authz, uint8_t out[32])
     return true;
 }
 
-/* A domain that reaches a certificate we sign, and a TLS SNI comparison, is
- * worth checking rather than trusting. LDH labels only. */
-static bool domain_is_sane(const char *domain)
-{
-    if (!domain || !domain[0])
-        return false;
-    const size_t len = strlen(domain);
-    if (len > ACME_MAX_DOMAIN)
-        return false;
-    size_t label = 0;
-    for (size_t i = 0; i < len; i++) {
-        const unsigned char c = (unsigned char)domain[i];
-        if (c == '.') {
-            if (label == 0)
-                return false;
-            label = 0;
-            continue;
-        }
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '-' || c == '*';
-        if (!ok)
-            return false;
-        if (++label > 63)
-            return false;
-    }
-    return label != 0;
-}
-
 /* ── the challenge certificate ───────────────────────────────────────── */
 
-static bool set_acme_identifier(X509 *cert, const uint8_t digest[32])
+/* RFC 8737 §3: extnValue is the DER encoding of an OCTET STRING holding the
+ * digest — so the digest is wrapped twice, once by ASN.1 here and once by
+ * the extension's own extnValue OCTET STRING. Returns an extension the
+ * caller owns; the skeleton around it (key, serial, validity, subject,
+ * subjectAltName, self-issuance, signature) is built by the one builder in
+ * acme_selfsigned.c, which is also what writes the boot placeholder. */
+static X509_EXTENSION *make_acme_identifier(const uint8_t digest[32])
 {
-    bool ok = false;
     ASN1_OCTET_STRING *payload = ASN1_OCTET_STRING_new();
     ASN1_OCTET_STRING *wrapper = NULL;
     ASN1_OBJECT *obj = NULL;
@@ -87,9 +66,6 @@ static bool set_acme_identifier(X509 *cert, const uint8_t digest[32])
         goto done;
     if (ASN1_OCTET_STRING_set(payload, digest, 32) != 1)
         goto done;
-    /* RFC 8737 §3: extnValue is the DER encoding of an OCTET STRING holding
-     * the digest — so the digest is wrapped twice, once by ASN.1 here and
-     * once by the extension's own extnValue OCTET STRING below. */
     const int der_len = i2d_ASN1_OCTET_STRING(payload, &der);
     if (der_len <= 0 || !der)
         goto done;
@@ -100,51 +76,13 @@ static bool set_acme_identifier(X509 *cert, const uint8_t digest[32])
     if (!obj)
         goto done;
     ext = X509_EXTENSION_create_by_OBJ(NULL, obj, 1 /* critical */, wrapper);
-    if (!ext)
-        goto done;
-    ok = X509_add_ext(cert, ext, -1) == 1;
 
 done:
-    X509_EXTENSION_free(ext);
     ASN1_OBJECT_free(obj);
     ASN1_OCTET_STRING_free(wrapper);
     OPENSSL_free(der);
     ASN1_OCTET_STRING_free(payload);
-    if (!ok)
-        LOG_FAIL("acme", "cannot attach the acmeIdentifier extension");
-    return true;
-}
-
-static bool set_subject_alt_name(X509 *cert, const char *domain)
-{
-    bool ok = false;
-    GENERAL_NAMES *names = GENERAL_NAMES_new();
-    GENERAL_NAME *name = GENERAL_NAME_new();
-    ASN1_IA5STRING *dns = ASN1_IA5STRING_new();
-    X509_EXTENSION *ext = NULL;
-
-    if (!names || !name || !dns)
-        goto done;
-    if (ASN1_STRING_set(dns, domain, (int)strlen(domain)) != 1)
-        goto done;
-    GENERAL_NAME_set0_value(name, GEN_DNS, dns);
-    dns = NULL; /* owned by `name` now */
-    if (sk_GENERAL_NAME_push(names, name) <= 0)
-        goto done;
-    name = NULL; /* owned by `names` now */
-    ext = X509V3_EXT_i2d(NID_subject_alt_name, 0, names);
-    if (!ext)
-        goto done;
-    ok = X509_add_ext(cert, ext, -1) == 1;
-
-done:
-    X509_EXTENSION_free(ext);
-    ASN1_IA5STRING_free(dns);
-    GENERAL_NAME_free(name);
-    GENERAL_NAMES_free(names);
-    if (!ok)
-        LOG_FAIL("acme", "cannot attach the subjectAltName for %s", domain);
-    return true;
+    return ext;
 }
 
 bool acme_alpn_challenge_certificate(const char *domain, const char *key_authz,
@@ -154,59 +92,34 @@ bool acme_alpn_challenge_certificate(const char *domain, const char *key_authz,
         return false;
     *out_cert = NULL;
     *out_key = NULL;
-    if (!domain_is_sane(domain))
+    if (!acme_domain_is_ldh(domain))
         LOG_FAIL("acme", "refusing to build a challenge certificate for a "
                          "domain that is not a plain LDH name");
     uint8_t digest[32];
     if (!acme_alpn_challenge_digest(key_authz, digest))
         return false;
 
-    EVP_PKEY *key = EVP_EC_gen("P-256");
-    X509 *cert = X509_new();
-    BIGNUM *serial = BN_new();
-    bool ok = false;
-    if (!key || !cert || !serial)
-        goto done;
-    if (BN_rand(serial, 128, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY) != 1)
-        goto done;
-    if (!BN_to_ASN1_INTEGER(serial, X509_get_serialNumber(cert)))
-        goto done;
-    if (X509_set_version(cert, 2 /* v3 */) != 1)
-        goto done;
-    /* Backdated an hour so a CA whose clock runs behind ours still sees a
-     * valid certificate; short-lived because it exists for one handshake. */
-    if (!X509_gmtime_adj(X509_getm_notBefore(cert), -3600) ||
-        !X509_gmtime_adj(X509_getm_notAfter(cert), 7 * 24 * 3600))
-        goto done;
-    if (X509_set_pubkey(cert, key) != 1)
-        goto done;
-    {
-        X509_NAME *subject = X509_get_subject_name(cert);
-        if (X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
-                                       (const unsigned char *)domain, -1, -1,
-                                       0) != 1)
-            goto done;
-        if (X509_set_issuer_name(cert, subject) != 1)
-            goto done;
-    }
-    if (!set_subject_alt_name(cert, domain))
-        goto done;
-    if (!set_acme_identifier(cert, digest))
-        goto done;
-    if (X509_sign(cert, key, EVP_sha256()) == 0)
-        goto done;
-    ok = true;
+    X509_EXTENSION *ext = make_acme_identifier(digest);
+    if (!ext)
+        LOG_FAIL("acme", "cannot attach the acmeIdentifier extension");
 
-done:
-    BN_free(serial);
-    if (!ok) {
-        X509_free(cert);
-        EVP_PKEY_free(key);
-        LOG_FAIL("acme", "cannot build the TLS-ALPN-01 challenge certificate for %s",
-                 domain);
-    }
-    *out_cert = cert;
-    *out_key = key;
+    /* Backdated an hour so a CA whose clock runs behind ours still sees a
+     * valid certificate; short-lived because it exists for one handshake.
+     * No subject O: a challenge certificate is presented only to a CA that
+     * is mid-validation, never to a browser, and the CA reads the
+     * acmeIdentifier extension, not the name. */
+    const struct acme_selfsigned_spec spec = {
+        .domain = domain,
+        .organization = NULL,
+        .backdate_seconds = 3600,
+        .lifetime_seconds = 7 * 24 * 3600,
+        .extra = ext,
+    };
+    const bool ok = acme_selfsigned_build(&spec, out_cert, out_key);
+    X509_EXTENSION_free(ext);
+    if (!ok)
+        LOG_FAIL("acme", "cannot build the TLS-ALPN-01 challenge certificate "
+                         "for %s", domain);
     return true;
 }
 
