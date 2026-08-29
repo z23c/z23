@@ -7879,8 +7879,10 @@ ZCL_SERVICE_EXTRA_FLAGS ?=
 ZCL_SERVICE_FILESERVICE_PEER ?=
 ZCL_SERVICE_CONNECT_PEER ?=
 ZCL_SERVICE_ADDNODE_PEER ?=
+# Space-separated list of additional -addnode peers for the LaunchAgent.
+ZCL_SERVICE_ADDNODE_PEERS ?=
 ZCL_SERVICE_ENV_VARS ?=
-ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)$(if $(ZCL_SERVICE_ADDNODE_PEER),<string>-addnode=$(ZCL_SERVICE_ADDNODE_PEER)</string>)
+ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)$(if $(ZCL_SERVICE_ADDNODE_PEER),<string>-addnode=$(ZCL_SERVICE_ADDNODE_PEER)</string>)$(foreach p,$(ZCL_SERVICE_ADDNODE_PEERS),<string>-addnode=$(p)</string>)
 
 .PHONY: service-install
 service-install:

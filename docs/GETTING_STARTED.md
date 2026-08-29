@@ -481,6 +481,9 @@ known-good z23 peer can bootstrap this Mac without isolating it:
 make dev-service-install ZCL_SERVICE_CONNECT_PEER="192.168.1.50:8033"
 # or, keep normal peers and also use this one as a snapshot seed:
 make dev-service-install ZCL_SERVICE_ADDNODE_PEER="192.168.1.50:8033"
+# or, seed from several known z23 peers at once:
+make dev-service-install \
+  ZCL_SERVICE_ADDNODE_PEERS="192.168.1.50:8033 192.168.1.51:8033"
 ```
 
 Installing a fetched snapshot into the canonical daily-driver datadir
