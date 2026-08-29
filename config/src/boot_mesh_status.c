@@ -35,6 +35,9 @@
 /* Receipts are valid at most this long after observation; bounded well under
  * the protocol lifetime ceiling so matches_request can accept them. */
 #define MESH_STATUS_RECEIPT_VALIDITY_SECONDS 30u
+#define MESH_STATUS_RESPONDER_REPLAY_MAX 256u
+#define MESH_STATUS_RESPONDER_REPLAY_MS UINT64_C(30000)
+#define MESH_STATUS_RESPONDER_RATE_PER_SECOND 4u
 
 static zcl_mutex_t g_mesh_lock;
 static _Atomic int g_mesh_lock_state;
@@ -46,11 +49,23 @@ struct mesh_status_pending {
     bool done;
     struct mesh_status_request_v1 request;
     uint8_t expected_responder_master[32];
+    uint8_t expected_responder_online[32];
     uint64_t generation;   /* g_mesh_generation at begin */
     uint64_t expires_mono; /* seconds */
     struct mesh_status_receipt_v1 receipt;
 };
 static struct mesh_status_pending g_pending[MESH_STATUS_PENDING_MAX];
+
+struct mesh_status_seen_request {
+    bool used;
+    uint8_t remote_static[32];
+    uint8_t transcript_hash[32];
+    uint8_t request_id[32];
+    uint64_t connection_generation;
+    uint64_t seen_mono_ms;
+};
+static struct mesh_status_seen_request
+    g_seen_requests[MESH_STATUS_RESPONDER_REPLAY_MAX];
 
 /* Quiet-drop counters: in-namespace garbage and unauthenticated probes are
  * local policy events, never offences against the peer. */
@@ -59,6 +74,8 @@ static _Atomic uint64_t g_mesh_dropped_malformed;
 static _Atomic uint64_t g_mesh_dropped_unknown_kind;
 static _Atomic uint64_t g_mesh_receipts_unsolicited;
 static _Atomic uint64_t g_mesh_receipts_refused;
+static _Atomic uint64_t g_mesh_requests_replayed;
+static _Atomic uint64_t g_mesh_requests_rate_limited;
 
 static void mesh_lock(void)
 {
@@ -82,6 +99,72 @@ static uint64_t mesh_now_mono(void)
 {
     return (uint64_t)(platform_time_monotonic_ms() / 1000);
 }
+
+/* Application replay/rate gate. Noise record counters stop ciphertext replay,
+ * but an authenticated requester can still resend a decoded request in a new
+ * record. One exact request is admitted once per transcript generation, and
+ * each authenticated session receives a small bounded cadence. */
+static bool mesh_responder_request_admit(
+    const struct mesh_status_request_v1 *request,
+    const struct v2_transport_snapshot *session, uint64_t now_mono_ms)
+{
+    if (!request || !session || !session->established) {
+        LOG_ERROR("net.mesh_status", "responder admit: invalid session input");
+        return false;
+    }
+    mesh_lock();
+    struct mesh_status_seen_request *slot = NULL;
+    size_t recent = 0;
+    for (size_t i = 0; i < MESH_STATUS_RESPONDER_REPLAY_MAX; i++) {
+        struct mesh_status_seen_request *seen = &g_seen_requests[i];
+        if (seen->used &&
+            (now_mono_ms < seen->seen_mono_ms ||
+             now_mono_ms - seen->seen_mono_ms >=
+                 MESH_STATUS_RESPONDER_REPLAY_MS))
+            memset(seen, 0, sizeof(*seen));
+        if (!seen->used) {
+            if (!slot)
+                slot = seen;
+            continue;
+        }
+        bool same_session =
+            seen->connection_generation == session->connection_generation &&
+            memcmp(seen->remote_static, session->remote_static, 32) == 0 &&
+            memcmp(seen->transcript_hash, session->transcript_hash, 32) == 0;
+        if (!same_session)
+            continue;
+        if (memcmp(seen->request_id, request->request_id, 32) == 0) {
+            zcl_mutex_unlock(&g_mesh_lock);
+            atomic_fetch_add(&g_mesh_requests_replayed, 1);
+            return false;
+        }
+        if (now_mono_ms >= seen->seen_mono_ms &&
+            now_mono_ms - seen->seen_mono_ms < UINT64_C(1000))
+            recent++;
+    }
+    if (!slot || recent >= MESH_STATUS_RESPONDER_RATE_PER_SECOND) {
+        zcl_mutex_unlock(&g_mesh_lock);
+        atomic_fetch_add(&g_mesh_requests_rate_limited, 1);
+        return false;
+    }
+    slot->used = true;
+    memcpy(slot->remote_static, session->remote_static, 32);
+    memcpy(slot->transcript_hash, session->transcript_hash, 32);
+    memcpy(slot->request_id, request->request_id, 32);
+    slot->connection_generation = session->connection_generation;
+    slot->seen_mono_ms = now_mono_ms;
+    zcl_mutex_unlock(&g_mesh_lock);
+    return true;
+}
+
+#ifdef ZCL_TESTING
+bool boot_mesh_status_test_responder_admit(
+    const struct mesh_status_request_v1 *request,
+    const struct v2_transport_snapshot *session, uint64_t now_mono_ms)
+{
+    return mesh_responder_request_admit(request, session, now_mono_ms);
+}
+#endif
 
 /* ── Pure decision ───────────────────────────────────────────────────── */
 
@@ -152,14 +235,15 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
         return MESH_STATUS_RECEIPT_INTERNAL;
 
     const struct vcs_zcode_dht_delegation *live = NULL;
+    size_t live_count = 0;
     for (size_t i = 0; i < delegation_count; i++) {
         if (memcmp(delegations[i].noise_static_pubkey, session->remote_static,
                    32) == 0) {
             live = &delegations[i];
-            break;
+            live_count++;
         }
     }
-    if (!live)
+    if (live_count != 1)
         return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
 
     char pairing_id[MESH_PAIRING_ID_HEX + 1];
@@ -258,10 +342,11 @@ bool boot_mesh_status_receipt_accept(
     const struct mesh_status_receipt_v1 *receipt,
     const struct mesh_status_request_v1 *request,
     const struct v2_transport_snapshot *session,
-    const uint8_t expected_responder_master[32])
+    const uint8_t expected_responder_master[32],
+    const uint8_t expected_responder_online[32])
 {
     if (!receipt || !request || !session || !session->established ||
-        !expected_responder_master)
+        !expected_responder_master || !expected_responder_online)
         return false;
     /* The receipt must bind the CURRENT session with the sending node: a
      * receipt arriving on a newer or different connection is refused. */
@@ -270,6 +355,8 @@ bool boot_mesh_status_receipt_accept(
         memcmp(receipt->responder_noise_static, session->remote_static,
                32) != 0 ||
         memcmp(receipt->responder_master_pubkey, expected_responder_master,
+               32) != 0 ||
+        memcmp(receipt->responder_online_pubkey, expected_responder_online,
                32) != 0)
         return false;
     return mesh_status_receipt_v1_matches_request(receipt, request) ==
@@ -332,9 +419,9 @@ static bool mesh_local_identity(struct node_db *ndb, const char *datadir,
                   "ACTIVE in the local ZID projection");
         return false;
     }
-    if (!vcs_zcode_dht_online_key_load_or_create(datadir, online_seed_out,
-                                                 online_pub_out, error,
-                                                 sizeof(error))) {
+    if (!vcs_zcode_dht_online_key_load(datadir, online_seed_out,
+                                      online_pub_out, error,
+                                      sizeof(error))) {
         LOG_ERROR("net.mesh_status",
                   "responder identity unavailable: online key (%s)", error);
         return false;
@@ -441,6 +528,10 @@ static void mesh_respond(struct msg_processor *mp, struct p2p_node *node,
         atomic_fetch_add(&g_mesh_dropped_malformed, 1);
         return;
     }
+    if (!mesh_responder_request_admit(
+            &request, &session,
+            (uint64_t)platform_time_monotonic_ms()))
+        return;
     if (!mp->params || !mp->net_mgr || !svc || !svc->datadir) {
         LOG_ERROR("net.mesh_status", "respond: composition incomplete");
         return;
@@ -543,32 +634,33 @@ bool mesh_status_request_id_free(const uint8_t request_id[32])
 }
 
 /* Admit the pending entry before the request is sent so a fast receipt can
- * never arrive to a missing slot. Evicts expired entries, then the oldest. */
+ * never arrive to a missing slot. Expired entries are reclaimed; a table of
+ * live requests refuses admission rather than destroying prior work. */
 bool mesh_status_pending_admit(const struct mesh_status_request_v1 *request,
                                const uint8_t expected_responder_master[32],
+                               const uint8_t expected_responder_online[32],
                                uint64_t generation)
 {
+    if (!request || !expected_responder_master ||
+        !expected_responder_online || generation == 0) {
+        LOG_ERROR("net.mesh_status", "pending admit: invalid binding input");
+        return false;
+    }
     uint64_t now_mono = mesh_now_mono();
     mesh_lock();
     mesh_pending_cleanup_locked(now_mono);
     struct mesh_status_pending *slot = NULL;
-    size_t oldest = 0;
     for (size_t i = 0; i < MESH_STATUS_PENDING_MAX; i++) {
         if (!g_pending[i].used && !slot) {
             slot = &g_pending[i];
-            continue;
         }
-        if (g_pending[i].used &&
-            g_pending[i].expires_mono < g_pending[oldest].expires_mono)
-            oldest = i;
     }
-    if (!slot && g_pending[oldest].used)
-        slot = &g_pending[oldest];
     if (slot) {
         memset(slot, 0, sizeof(*slot));
         slot->used = true;
         slot->request = *request;
         memcpy(slot->expected_responder_master, expected_responder_master, 32);
+        memcpy(slot->expected_responder_online, expected_responder_online, 32);
         slot->generation = generation;
         slot->expires_mono =
             now_mono + MESH_STATUS_REQUEST_LIFETIME_SECONDS + 5u;
@@ -622,7 +714,8 @@ static void mesh_receive(struct p2p_node *node, const uint8_t *wire,
     }
     bool accepted = boot_mesh_status_receipt_accept(
         &receipt, &entry->request, &session,
-        entry->expected_responder_master);
+        entry->expected_responder_master,
+        entry->expected_responder_online);
     if (accepted) {
         entry->receipt = receipt;
         entry->done = true;
@@ -699,6 +792,7 @@ void boot_mesh_status_wire(struct boot_svc_ctx *svc)
     if (!g_mesh_generation)
         g_mesh_generation++;
     memset(g_pending, 0, sizeof(g_pending));
+    memset(g_seen_requests, 0, sizeof(g_seen_requests));
     zcl_mutex_unlock(&g_mesh_lock);
 }
 
@@ -710,5 +804,6 @@ void boot_mesh_status_shutdown(void)
     if (!g_mesh_generation)
         g_mesh_generation++;
     memset(g_pending, 0, sizeof(g_pending));
+    memset(g_seen_requests, 0, sizeof(g_seen_requests));
     zcl_mutex_unlock(&g_mesh_lock);
 }

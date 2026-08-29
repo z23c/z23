@@ -5,9 +5,9 @@
  * pairing preflight, session lookup, pending admission, request send) lives
  * in boot_mesh_status_requester.c while boot_mesh_status.c keeps the shared
  * state, the pure helpers, the responder lane, receipt ingress, poll, and
- * lifecycle. These declarations are all that crosses that seam, so they
- * live here and nowhere else — nothing outside those two translation units
- * may include this header.
+ * lifecycle. Production code outside those two translation units must not
+ * include this header; the focused wire test includes it to exercise the
+ * exact bounded-table contract.
  */
 
 #ifndef ZCL_CONFIG_BOOT_MESH_STATUS_INTERNAL_H
@@ -27,12 +27,13 @@ struct p2p_node;
 struct boot_svc_ctx *mesh_status_service(uint64_t *generation_out);
 
 /* Pending-table primitives for the requester lane; each takes the lane lock
- * internally. admit evicts expired entries, then the oldest, and binds the
- * entry to the given service generation. retract clears the entry only when
- * it still names this exact request and has not completed. */
+ * internally. admit evicts expired entries and refuses a still-full table;
+ * it never destroys a live request. retract clears the entry only when it
+ * still names this exact request and has not completed. */
 bool mesh_status_request_id_free(const uint8_t request_id[32]);
 bool mesh_status_pending_admit(const struct mesh_status_request_v1 *request,
                                const uint8_t expected_responder_master[32],
+                               const uint8_t expected_responder_online[32],
                                uint64_t generation);
 void mesh_status_pending_retract(const uint8_t request_id[32]);
 
