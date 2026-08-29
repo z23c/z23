@@ -225,7 +225,7 @@ bool mesh_pairing_service_list(
     if (max > MESH_PAIRING_LIST_MAX)
         max = MESH_PAIRING_LIST_MAX;
     if (!db_mesh_pairing_count_states(ndb, now, counts))
-        return false;
+        LOG_FAIL("mesh_pairing", "list: count states failed");
     struct db_mesh_pairing *rows = zcl_calloc(
         max, sizeof(*rows), "mesh_pairing.redacted_list");
     if (!rows) {
