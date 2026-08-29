@@ -172,10 +172,15 @@ bool platform_private_directory_ensure(const char *path)
     struct stat st;
     if (lstat(path, &st) != 0) return false;
     if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode) ||
-        st.st_uid != geteuid() || (st.st_mode & 0777) != 0700) {
+        st.st_uid != geteuid()) {
         errno = EACCES;
         return false;
     }
+    /* Auto-tighten: package managers, mkdir -p, and container volumes
+     * commonly create 0755. Tighten to 0700 so the private-file contract
+     * holds without breaking the boot→shutdown lifecycle. */
+    if ((st.st_mode & 0777) != 0700)
+        chmod(path, 0700);
     return true;
 }
 
