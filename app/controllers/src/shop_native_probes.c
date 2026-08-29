@@ -83,9 +83,16 @@ static bool shp_write_file_atomic(const char *path, const char *bytes,
                                   size_t len)
 {
     char installed[1100], parent[1100];
+    /* Name the next action. This path is built from the process datadir, so
+     * the failure an operator actually hits is a RELATIVE `-datadir=`: the
+     * node boots and syncs normally and only the store/directory writers
+     * break, which reads as corruption unless the message says otherwise. */
     if (!platform_private_destination_resolve(
             path, installed, sizeof(installed), parent, sizeof(parent)))
-        LOG_FAIL(SHOP_TAG, "cannot resolve atomic-write parent: %s", path);
+        LOG_FAIL(SHOP_TAG,
+                 "cannot resolve the parent directory of '%s' — pass an "
+                 "ABSOLUTE -datadir= (a relative -datadir=./x reaches here "
+                 "while chain sync keeps working)", path);
     char tmp[1200];
     struct platform_private_file file;
     platform_private_file_init(&file);

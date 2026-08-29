@@ -2235,6 +2235,23 @@ void zcl_native_handle_rom_fetch_bundle(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* dev.agent.* — the checkout questions an agent asks most often, answered as
+ * one typed envelope so no agent has to compose shell. Deliberately NOT
+ * dev-build-only: an agent has the plain `z23` it just built, and a compat
+ * leaf redirecting to a second binary is the dead end this branch removes.
+ * Handlers in tools/command/native_devagent_command.c and
+ * native_devagent_mutate_command.c; they spawn only through lib/util spawn
+ * and link none of the dev-only devloop executors. */
+void zcl_native_handle_dev_agent_ready(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_test(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_mutate(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* Dev-build-only executors.  The catalog binds these only when
  * ZCL_DEV_BUILD is set; release objects neither reference nor link them. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)

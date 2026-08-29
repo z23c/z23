@@ -34,11 +34,24 @@ verify_source_epoch() {
 }
 
 if [ "${1:-}" = --selftest ]; then
+    # `! cmd` is EXEMPT from set -e — bash does not exit for a command "whose
+    # return value is being inverted with !", and the ERR trap is exempt for
+    # the same reason. Both negative controls below used to be written that
+    # way, so neither could fail this selftest whatever verify_source_epoch
+    # returned: a source-epoch mismatch would have printed PASS. refute()
+    # exits for itself and names the assertion.
+    refute() {
+        if "$@"; then
+            printf 'c23-portable-release: selftest FAILED — expected non-zero from: %s\n' \
+                "$*" >&2
+            exit 1
+        fi
+    }
     a="$(printf epoch-a | sha256sum | awk '{print $1}')"
     b="$(printf epoch-b | sha256sum | awk '{print $1}')"
     verify_source_epoch "$a" "$a" "$a"
-    ! verify_source_epoch "$a" "$b" "$a" >/dev/null 2>&1
-    ! verify_source_epoch "$a" "$a" "$b" >/dev/null 2>&1
+    refute verify_source_epoch "$a" "$b" "$a" >/dev/null 2>&1
+    refute verify_source_epoch "$a" "$a" "$b" >/dev/null 2>&1
     echo "c23-portable-release: selftest PASS"
     exit 0
 fi
