@@ -14,6 +14,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	consensus_install_refusal \
 	consensus_state_install_runtime_refusal \
 	consensus_state_publication_cas_refusal \
+	datadir_privacy \
 	directory_compat \
 	directory_transaction \
 	disk_space \
@@ -134,6 +135,17 @@ ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_SOURCES := \
 	lib/json/src/json.c \
 	lib/base/src/safe_alloc.c \
 	lib/base/src/result.c
+ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_SOURCES := \
+	lib/platform/tests/datadir_privacy_windows_acceptance.c \
+	lib/util/src/util.c \
+	core/chainparams/src/chainparamsbase.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_FLAGS := \
+	-ffunction-sections -fdata-sections
+ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_LIBS := \
+	-Wl,--gc-sections -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_FLAGS := \
 	-DZCL_TESTING
 

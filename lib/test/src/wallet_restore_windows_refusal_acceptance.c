@@ -44,19 +44,36 @@ static bool write_sentinel(const char *path, const char *bytes)
     return ok;
 }
 
+static bool path_concat(char *out, size_t out_size, const char *left,
+                        const char *right)
+{
+    size_t left_size = strlen(left);
+    size_t right_size = strlen(right);
+    if (left_size >= out_size || right_size >= out_size - left_size)
+        return false;
+    memcpy(out, left, left_size);
+    memcpy(out + left_size, right, right_size + 1u);
+    return true;
+}
+
 int main(void)
 {
     char temp[MAX_PATH], dir[MAX_PATH], sentinel[MAX_PATH];
     char node_db[MAX_PATH], lock_path[MAX_PATH];
+    char leaf[64];
     DWORD n = GetTempPathA(sizeof(temp), temp);
     if (!n || n >= sizeof(temp)) return 2;
-    snprintf(dir, sizeof(dir), "%sz23-wr-refusal-%lu-%llu", temp,
-             (unsigned long)GetCurrentProcessId(),
-             (unsigned long long)GetTickCount64());
+    int leaf_size = snprintf(leaf, sizeof(leaf), "z23-wr-refusal-%lu-%llu",
+                             (unsigned long)GetCurrentProcessId(),
+                             (unsigned long long)GetTickCount64());
+    if (leaf_size <= 0 || (size_t)leaf_size >= sizeof(leaf) ||
+        !path_concat(dir, sizeof(dir), temp, leaf) ||
+        !path_concat(sentinel, sizeof(sentinel), dir, "/sentinel.sqlite") ||
+        !path_concat(node_db, sizeof(node_db), dir, "/node.db") ||
+        !path_concat(lock_path, sizeof(lock_path), dir,
+                     "/wallet-recovery.lock"))
+        return 3;
     if (!CreateDirectoryA(dir, NULL)) return 3;
-    snprintf(sentinel, sizeof(sentinel), "%s/sentinel.sqlite", dir);
-    snprintf(node_db, sizeof(node_db), "%s/node.db", dir);
-    snprintf(lock_path, sizeof(lock_path), "%s/wallet-recovery.lock", dir);
     const char expected[] = "synthetic-wallet-restore-sentinel";
     if (!write_sentinel(sentinel, expected)) return 4;
 

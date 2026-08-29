@@ -2391,7 +2391,6 @@ bool connman_init(struct connman *cm, const struct chain_params *params,
         return false;
     if (!platform_socket_runtime_init())
         return false;
-
     /* Load peer-scoring config from environment. Safe to call multiple
      * times; late env-var changes don't matter since connman_init runs
      * once per process startup. Done here so every binary that spins up
@@ -2399,6 +2398,7 @@ bool connman_init(struct connman *cm, const struct chain_params *params,
     peer_scoring_init();
 
     memset(cm, 0, sizeof(*cm));
+    atomic_init(&cm->dial_bounded_wait.deadline_us, 0);
     net_manager_init(&cm->manager);
     zcl_mutex_init(&cm->dht_hint_lock);
     cm->manager.owner = cm;
@@ -3414,8 +3414,8 @@ void connman_observe_loop_liveness(struct connman *cm,
                                             memory_order_relaxed);
     out->dial_tid = atomic_load_explicit(&cm->dial_thread_tid,
                                          memory_order_relaxed);
+    out->dial_bounded_wait_until_us = thread_bounded_wait_deadline(&cm->dial_bounded_wait);
 }
-
 bool connman_runtime_progress_fresh(struct connman *cm, int64_t max_age_us)
 {
     if (!cm || !cm->started)

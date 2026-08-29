@@ -169,7 +169,6 @@ bool chaos_fault_reorg_during_artifact_download(uint64_t seed,
              blocker_str, never_staged, never_reactivated);
     return true;
 }
-
 /* ══════════════════════════════════════════════════════════════════════
  * (k) slow-loris seeder — bounded stall, never a silent hang
  * ══════════════════════════════════════════════════════════════════════ */
@@ -622,4 +621,3 @@ bool chaos_fault_peer_disconnect_mid_body_download(
     free(hashes);
     return true;
 }
-

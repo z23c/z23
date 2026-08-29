@@ -11,6 +11,7 @@
 #include "net/anchor_peers.h"
 #include "net/onion_discovery.h"
 #include "chain/chainparams.h"
+#include "util/thread_work_probe.h"
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -304,6 +305,11 @@ struct connman {
      * disable the wedge detector. */
     _Atomic long     message_thread_tid;
     _Atomic long     dial_thread_tid;
+    /* Explicit lease for an operation that intentionally blocks the dial
+     * loop. Unlike CPU/I/O counters, this remains observable while the kernel
+     * parks the thread; unlike a blanket grace period, it expires at the
+     * operation's declared timeout. */
+    struct thread_bounded_wait dial_bounded_wait;
 };
 
 /* Persist a newly learned NODE_V2TRANSPORT capability in the existing
@@ -438,6 +444,7 @@ struct connman_loop_liveness {
     int64_t dial_last_progress_us;      /* 0 = the loop has never run */
     long    message_tid;                /* 0 = not published yet */
     long    dial_tid;                   /* 0 = not published yet */
+    int64_t dial_bounded_wait_until_us; /* 0 = no declared wait */
 };
 void connman_observe_loop_liveness(struct connman *cm,
                                    struct connman_loop_liveness *out);
