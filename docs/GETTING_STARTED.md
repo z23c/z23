@@ -90,8 +90,9 @@ archives are cached and builds are offline. Exact versions, hashes, and the
 vendoring model are in [`docs/BUILD.md`](BUILD.md).
 
 **Optional — the real Tor onion service.** The default build links a Tor
-*stub*, so `-tor` runs the node without publishing a `.onion`. To build the
-real embedded Tor:
+*stub*, which cannot publish a `.onion`. The durable service therefore leaves
+Tor disabled unless the operator explicitly requests it. To build the real
+embedded Tor:
 
 ```bash
 make tor-full
@@ -434,7 +435,12 @@ after `git clone` into `~/zclassic23`; if you cloned elsewhere, edit the
 (a stable external IP, seed peers) go in `~/.config/zclassic23/env` — copy
 [`deploy/zclassic23.env.example`](../deploy/zclassic23.env.example) and edit
 it; the unit sources this file optionally, so a fresh clone without it still
-starts cleanly.
+starts cleanly and syncs over clearnet. The unit does not request Tor by
+default because the default build links the offline stub. After building the
+real implementation with `make tor-full`, set `ZCL_TOR_FLAG=-tor` in that
+environment file to request the onion service. An explicit request remains
+fail-closed: service readiness waits for onion descriptor publication rather
+than silently reporting a clearnet-only node as ready.
 
 **On macOS**, install the binary once, then use the provided LaunchAgent:
 

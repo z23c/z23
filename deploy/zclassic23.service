@@ -49,7 +49,7 @@ TimeoutStartSec=14400
 WatchdogSec=120
 NotifyAccess=main
 
-# P5.2: operator-specific flags (externalip + addnodes) live in
+# P5.2: operator-specific flags (Tor + externalip + addnodes) live in
 # ~/.config/zclassic23/env, NOT here. The `-` prefix makes the file
 # optional: a fresh clone without the env file still starts cleanly and
 # discovers peers through the compiled-in seeds, the .onion directory
@@ -63,6 +63,7 @@ NotifyAccess=main
 # EnvironmentFile is deliberately later so operator values override these.
 Environment="ZCL_EXTERNALIP_FLAG="
 Environment="ZCL_ADDNODE_FLAGS="
+Environment="ZCL_TOR_FLAG="
 Environment="ZCL_CHECKPOINT_BUNDLE_SOURCE="
 EnvironmentFile=-%h/.config/zclassic23/env
 
@@ -97,7 +98,7 @@ ExecStart=%h/zclassic23/build/bin/zcl-nodectl launch %h/zclassic23/build/bin/z23
     -rpcport=18232 \
     -listen \
     -txindex \
-    -tor \
+    $ZCL_TOR_FLAG \
     $ZCL_EXTERNALIP_FLAG \
     $ZCL_ADDNODE_FLAGS \
     -showmetrics=0
