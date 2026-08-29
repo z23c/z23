@@ -2,7 +2,7 @@
  * purpose: Verify Windows codeindex build surfaces refuse without I/O. */
 #if defined(_WIN32)
 
-#include "codeindex_priv.h"
+#include "../../codeindex/src/codeindex_priv.h"
 #include "codeindex/codeindex_build.h"
 
 #ifndef WIN32_LEAN_AND_MEAN

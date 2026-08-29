@@ -2,7 +2,7 @@
  * purpose: Verify every Windows snapshot export surface refuses inertly. */
 #if defined(_WIN32)
 
-#include "consensus_state_snapshot_export_internal.h"
+#include "../../config/src/consensus_state_snapshot_export_internal.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

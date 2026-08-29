@@ -2,7 +2,7 @@
  * purpose: Verify Windows consensus export sealing refuses without mutation. */
 #if defined(_WIN32)
 
-#include "consensus_state_snapshot_export_internal.h"
+#include "../../config/src/consensus_state_snapshot_export_internal.h"
 
 #include <stdint.h>
 #include <stdio.h>

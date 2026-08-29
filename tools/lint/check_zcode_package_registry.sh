@@ -39,9 +39,9 @@ mapfile -t monolith_sources < <(
     make -s --no-print-directory print-zcode-monolith-lib-sources |
         sed -n '/^lib\/.*\/src\/.*\.c$/p'
 )
-platform_alternatives=(
-    lib/platform/src/os_sandbox_linux.c
-    lib/platform/src/os_sandbox_stub.c
+platform_alternative_groups=(
+    "lib/platform/src/os_sandbox_linux.c lib/platform/src/os_sandbox_stub.c"
+    "lib/vcs/src/vcs_devloop.c lib/vcs/src/vcs_devloop_windows.c"
 )
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
@@ -50,8 +50,10 @@ if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
 fi
 
 for source in "${package_sources[@]}"; do
-    for alternative in "${platform_alternatives[@]}"; do
-        [[ "$source" == "$alternative" ]] && continue 2
+    for group in "${platform_alternative_groups[@]}"; do
+        for alternative in $group; do
+            [[ "$source" == "$alternative" ]] && continue 3
+        done
     done
     count=0
     for compiled in "${monolith_sources[@]}"; do
@@ -63,16 +65,23 @@ for source in "${package_sources[@]}"; do
     fi
 done
 
-platform_count=0
-for alternative in "${platform_alternatives[@]}"; do
-    for compiled in "${monolith_sources[@]}"; do
-        [[ "$compiled" == "$alternative" ]] && ((platform_count += 1))
+for group in "${platform_alternative_groups[@]}"; do
+    platform_count=0
+    chosen=""
+    for alternative in $group; do
+        for compiled in "${monolith_sources[@]}"; do
+            if [[ "$compiled" == "$alternative" ]]; then
+                ((platform_count += 1))
+                chosen="$alternative"
+            fi
+        done
     done
+    if (( platform_count != 1 )); then
+        echo "check-zcode-package-registry: FAIL — platform alternative group appears $platform_count times in LIB_SRCS ($group)" >&2
+        exit 1
+    fi
+    echo "zcode package registry: exactly one host alternative selected: $chosen"
 done
-if (( platform_count != 1 )); then
-    echo "check-zcode-package-registry: FAIL — platform sandbox alternatives appear $platform_count times in LIB_SRCS" >&2
-    exit 1
-fi
 
 codec_consumers=(
     lib/vcs/src/package_release.c

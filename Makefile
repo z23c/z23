@@ -2916,7 +2916,7 @@ ZCODE_PACKAGE_BASE_ASAN_BIN := $(BIN_DIR)/zcode-package-base-test-asan
 ZCODE_PACKAGE_SHA3_ASAN_BIN := $(BIN_DIR)/zcode-package-sha3-test-asan
 ZCODE_PACKAGE_CODEC_ASAN_BIN := $(BIN_DIR)/zcode-package-codec-test-asan
 ZCODE_PACKAGE_REGISTRY_CHECK_BIN := $(BIN_DIR)/zcode-package-registry-check
-.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test zcode-package-foundation-test zcode-package-asan zclassic23-package-sign
+.PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test zcode-package-foundation-test zcode-package-registry-check zcode-package-asan zclassic23-package-sign
 zcode-package-base-test: $(ZCODE_PACKAGE_BASE_TEST_BIN)
 	@$(ZCODE_PACKAGE_BASE_TEST_BIN)
 $(ZCODE_PACKAGE_BASE_TEST_BIN): lib/base/tests/test_base.c \
@@ -2944,6 +2944,8 @@ $(ZCODE_PACKAGE_CODEC_TEST_BIN): lib/codec/tests/test_codec.c \
 	    -Ilib/codec/include -Ilib/base/include -o $@ $^
 
 zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test
+
+zcode-package-registry-check: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 
 # Permanent memory/undefined-behavior gate for the self-hosted package
 # foundation and its complete signed evidence lifecycle.  The first three
@@ -3012,7 +3014,7 @@ $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
 		lib/vcs/src/package_capsule.c lib/vcs/src/package_release.c \
 		lib/json/src/json.c lib/codec/src/cursor.c lib/sha3/src/sha3.c \
 		lib/base/src/safe_alloc.c lib/base/src/log_level.c \
-		lib/platform/src/clock.c
+		lib/platform/src/clock.c lib/platform/src/directory_compat.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -D_GNU_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
 	    -O0 -Wall -Wextra -Werror -pedantic \
