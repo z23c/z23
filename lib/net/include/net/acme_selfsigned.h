@@ -48,9 +48,23 @@
 #include <stdbool.h>
 
 /* Goes in the subject as O=. Deliberately a sentence, not a code: whoever
- * reads it is looking at a certificate they did not expect. */
+ * reads it is looking at a certificate they did not expect.
+ *
+ * It must also FIT. X.509 caps organizationName at ub_organization_name
+ * (64), and OpenSSL does not truncate an over-long value -- it refuses the
+ * entry outright. A 69-byte sentence here made X509_NAME_add_entry_by_txt()
+ * fail, so set_subject() failed, so acme_selfsigned_write() never wrote the
+ * placeholder pair at all. That is not a cosmetic bug: the placeholder is
+ * the only thing that breaks the certificate bootstrap deadlock, so a brand
+ * new host could never obtain its first certificate. The failure was
+ * invisible on any host that already had one. Hence the assertion: this
+ * length is load-bearing, and the compiler now says so. */
 #define ACME_SELFSIGNED_ORGANIZATION \
-    "Z23 SELF-SIGNED PLACEHOLDER - NOT ISSUED BY ANY CERTIFICATE AUTHORITY"
+    "Z23 SELF-SIGNED PLACEHOLDER - NOT FROM A CERTIFICATE AUTHORITY"
+
+static_assert(sizeof(ACME_SELFSIGNED_ORGANIZATION) - 1 <= ub_organization_name,
+              "O= must fit X.509 ub_organization_name, or OpenSSL refuses it "
+              "and the node cannot write its self-signed placeholder");
 
 /* The name used when the operator set no -httpsdomain. A placeholder is
  * presented to nobody who checks it, so the value only has to be a legal

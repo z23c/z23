@@ -50,6 +50,29 @@ void https_server_stop(void);
  * has been set. */
 void https_server_watch_certificate(const char *cert_path, const char *key_path);
 
+/* ── More than one name on one listener ───────────────────────────────
+ *
+ * Name an ADDITIONAL host this listener answers for, and the certificate
+ * pair to present when a client asks for that name in TLS SNI. Everything
+ * above stays the default and the fallback: a client that sends no SNI, one
+ * that sends a name nobody registered here, and a server with no additional
+ * names at all are all served the pair from https_server_watch_certificate()
+ * — the handshake always completes, it is never refused over a name.
+ *
+ * The pair is WATCHED, not merely loaded: it is adopted with no restart the
+ * moment it appears or is renewed, on the same trigger and with the same
+ * refusals as the default pair, and independently of it. A name whose
+ * certificate has not been issued yet costs the other names nothing.
+ *
+ * Call it before or after the listener starts; calling it again for a name
+ * already registered re-points that name at a new pair, and the name keeps
+ * serving whatever it had until the new pair loads. `name` must be a plain
+ * LDH domain name. Returns false, having changed nothing, when the name is
+ * not one, when either path is missing, or when the table is full. */
+bool https_server_watch_certificate_for_name(const char *name,
+                                             const char *cert_path,
+                                             const char *key_path);
+
 /* Look at the watched pair now and swap if it changed. Returns true only
  * when a new pair was actually installed. A pair that does not load, or
  * whose key does not match its certificate, is REFUSED and the running

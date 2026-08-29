@@ -166,6 +166,145 @@ static bool cert_file_id_same(const struct cert_file_id *a,
            a->size == b->size && a->mtime_sec == b->mtime_sec;
 }
 
+/* ── More than one name on one listener (TLS SNI) ─────────────────────
+ *
+ * WHY. One host can be asked for by more than one name — an explorer at one
+ * name and an installer origin at another — and a certificate authority
+ * issues per name. With a single context the name that is not in the
+ * certificate fails the handshake with a name mismatch, which is a hard
+ * failure the client cannot work around.
+ *
+ * WHAT IS ADDED, AND WHAT IS NOT. Each ADDITIONAL name gets its own entry
+ * here: its own watched pair, its own last-seen file identity, its own
+ * SSL_CTX built by the same ssl_ctx_build() as the default. The default
+ * context above is unchanged and stays the answer for every case that is not
+ * an exact match — no name configured, no SNI sent, or a name nobody
+ * configured. A server with no additional names never reaches any of this;
+ * the callback returns before it looks at anything, so the wire is byte for
+ * byte what it was.
+ *
+ * LOCKING. The same g_cert_mutex as the default context, for the same
+ * reason and with the same discipline: held for pointer work and small
+ * copies only, never across a file read, a context build, or a handshake.
+ * Every reader takes a counted reference (sni_ctx_acquire) before using a
+ * context, so a reload racing an in-flight handshake drops a reference
+ * rather than freeing something in use.
+ *
+ * Entries are append-only for the life of a listener — a name is added, its
+ * certificate is replaced in place, and the whole table is torn down in
+ * ssl_ctx_retire_all(). Slot indices are therefore stable, which is what
+ * lets the refresh below drop the lock between reading a slot and
+ * publishing into it. */
+#define HTTPS_MAX_SNI_NAMES 8
+
+struct sni_cert {
+    char name[256];                 /* the name in SNI, as configured */
+    char cert[1024];
+    char key[1024];
+    SSL_CTX *ctx;                   /* NULL until the pair first loads */
+    struct cert_file_id seen_cert;
+    struct cert_file_id seen_key;
+};
+
+/* Guarded by g_cert_mutex. g_sni_count only ever grows, and only under that
+ * mutex; it is read without it in exactly one place (the fast path of the
+ * servername callback) where a stale zero costs nothing but a default
+ * certificate on one handshake — hence the atomic mirror. */
+static struct sni_cert g_sni[HTTPS_MAX_SNI_NAMES];
+static unsigned g_sni_count = 0;
+static _Atomic unsigned g_sni_names_configured = 0;
+
+/* SNI names are ASCII (LDH) and case-insensitive; a client is free to send
+ * any case. Deliberately not strcasecmp(): that one is locale-sensitive, and
+ * a locale where 'I' does not lowercase to 'i' would silently change which
+ * certificate a host serves. */
+static bool sni_name_equal(const char *a, const char *b)
+{
+    if (!a || !b)
+        return false;
+    size_t i = 0;
+    for (; a[i] && b[i]; i++) {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb - 'A' + 'a');
+        if (ca != cb)
+            return false;
+    }
+    return a[i] == '\0' && b[i] == '\0';
+}
+
+/* A counted reference to the context configured for `name`, or NULL when no
+ * such name is configured or its pair has not loaded yet. Caller frees. */
+static SSL_CTX *sni_ctx_acquire(const char *name)
+{
+    SSL_CTX *ctx = NULL;
+    pthread_mutex_lock(&g_cert_mutex);
+    for (unsigned i = 0; i < g_sni_count; i++) {
+        if (!sni_name_equal(g_sni[i].name, name))
+            continue;
+        ctx = g_sni[i].ctx;
+        if (ctx && SSL_CTX_up_ref(ctx) != 1)
+            ctx = NULL;
+        break;
+    }
+    pthread_mutex_unlock(&g_cert_mutex);
+    return ctx;
+}
+
+/* Pick the certificate for the name this client asked for.
+ *
+ * ORDER AGAINST TLS-ALPN-01, WHICH MATTERS MORE THAN ANYTHING ELSE HERE.
+ * OpenSSL runs the extension finalisers in extension order, and server_name
+ * comes before application_layer_protocol_negotiation — so this callback
+ * runs FIRST and the ALPN callback (acme_alpn_install) runs after it. That
+ * is the right way round, and it is the reason the ACME challenge still
+ * wins: this callback swaps the connection's SSL_CTX, which resets the
+ * connection's certificate to the new context's; the ALPN callback then sets
+ * an SSL-SCOPED certificate with SSL_use_certificate(), which overrides the
+ * context's for this connection only. A per-name context therefore cannot
+ * displace a challenge certificate. It also cannot lose the ALPN callback
+ * itself: every context, default and per-name, is built by ssl_ctx_build()
+ * and so carries the same acme_alpn_install() responder. If the order were
+ * ever the other way round the challenge certificate would be discarded and
+ * no certificate could be renewed — test_https_sni_select asserts the
+ * outcome from the wire rather than trusting this paragraph.
+ *
+ * NOACK, not an alert, for every case that keeps the default certificate.
+ * Refusing the handshake because a name is unknown would take a bare-IP
+ * client, an old client that sends no SNI, and any name the operator has not
+ * configured off the server entirely. The default certificate is served
+ * instead and the server simply does not claim to have accepted the name —
+ * which is exactly the wire behaviour of a server with no callback at all,
+ * so the single-certificate default is unchanged. */
+static int sni_servername_cb(SSL *ssl, int *al, void *arg)
+{
+    (void)arg;
+    (void)al;
+    if (atomic_load(&g_sni_names_configured) == 0)
+        return SSL_TLSEXT_ERR_NOACK;
+
+    const char *name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+    if (!name || !name[0])
+        return SSL_TLSEXT_ERR_NOACK;
+
+    SSL_CTX *ctx = sni_ctx_acquire(name);
+    if (!ctx)
+        return SSL_TLSEXT_ERR_NOACK;
+
+    /* SSL_set_SSL_CTX takes its own reference; ours is released right after,
+     * so the connection holds exactly one and a concurrent reload frees
+     * nothing that is still in use. */
+    const bool swapped = SSL_set_SSL_CTX(ssl, ctx) != NULL;
+    SSL_CTX_free(ctx);
+    if (!swapped) {
+        LOG_WARN("https", "cannot present the certificate configured for "
+                          "this name; serving the default one");
+        return SSL_TLSEXT_ERR_NOACK;
+    }
+    return SSL_TLSEXT_ERR_OK;
+}
+
 /* THE one place a TLS context is built. Start and reload both come through
  * here, so a reloaded context cannot quietly differ from the one the
  * listener started with — same minimum protocol version, same TLS-ALPN-01
@@ -187,6 +326,12 @@ static SSL_CTX *ssl_ctx_build(const char *cert_path, const char *key_path)
      * validation is in flight for the name in SNI. Port 80 is deliberately not
      * forwarded here, so this is the only challenge type the node can answer
      * -- see net/acme_challenge.h. */
+    /* Certificate selection by the name the client asked for. Installed on
+     * EVERY context, default and per-name alike, so that whichever context a
+     * connection lands on is shaped identically — and, in particular, still
+     * carries the TLS-ALPN-01 responder installed just above. */
+    SSL_CTX_set_tlsext_servername_callback(ctx, sni_servername_cb);
+
     if (!acme_alpn_install(ctx))
         why = "the TLS-ALPN-01 certificate responder could not be installed";
     else if (SSL_CTX_use_certificate_chain_file(ctx, cert_path) <= 0)
@@ -257,6 +402,9 @@ static void ssl_ctx_install(SSL_CTX *ctx, const struct cert_file_id *cert_id,
 
 static void ssl_ctx_retire_all(void)
 {
+    SSL_CTX *retired[HTTPS_MAX_SNI_NAMES];
+    unsigned retired_n = 0;
+
     pthread_mutex_lock(&g_cert_mutex);
     SSL_CTX *old = g_ssl_ctx;
     g_ssl_ctx = NULL;
@@ -264,10 +412,22 @@ static void ssl_ctx_retire_all(void)
     g_watch_key[0] = '\0';
     memset(&g_seen_cert, 0, sizeof(g_seen_cert));
     memset(&g_seen_key, 0, sizeof(g_seen_key));
+    /* The per-name table goes with it: a stopped listener holds no name.
+     * References are collected and dropped outside the lock, the same
+     * discipline the default context uses. */
+    for (unsigned i = 0; i < g_sni_count; i++) {
+        if (g_sni[i].ctx)
+            retired[retired_n++] = g_sni[i].ctx;
+    }
+    memset(g_sni, 0, sizeof(g_sni));
+    g_sni_count = 0;
+    atomic_store(&g_sni_names_configured, 0u);
     atomic_store(&g_cert_self_signed, false);
     pthread_mutex_unlock(&g_cert_mutex);
     if (old)
         SSL_CTX_free(old);
+    for (unsigned i = 0; i < retired_n; i++)
+        SSL_CTX_free(retired[i]);
 }
 
 /* Say which of the two kinds is on the wire. A self-signed certificate makes
@@ -335,6 +495,145 @@ void https_server_watch_certificate(const char *cert_path, const char *key_path)
     pthread_mutex_unlock(&g_cert_mutex);
 }
 
+bool https_server_watch_certificate_for_name(const char *name,
+                                             const char *cert_path,
+                                             const char *key_path)
+{
+    if (!name || !cert_path || !cert_path[0] || !key_path || !key_path[0])
+        LOG_FAIL("https", "a name needs both a certificate path and a key "
+                          "path before it can be served");
+    /* The same predicate the challenge certificate builder uses. A name that
+     * is not a plain LDH name cannot appear in SNI from any client that
+     * matters, and refusing it here is also what keeps a configured name
+     * from being anything but a name. */
+    if (!acme_domain_is_ldh(name))
+        LOG_FAIL("https", "refusing to serve a certificate for a name that is "
+                          "not a plain LDH domain name");
+    if (strlen(name) >= sizeof(g_sni[0].name) ||
+        strlen(cert_path) >= sizeof(g_sni[0].cert) ||
+        strlen(key_path) >= sizeof(g_sni[0].key))
+        LOG_FAIL("https", "the certificate paths for %s do not fit", name);
+
+    bool ok = false;
+    pthread_mutex_lock(&g_cert_mutex);
+    unsigned slot = g_sni_count;
+    for (unsigned i = 0; i < g_sni_count; i++) {
+        if (sni_name_equal(g_sni[i].name, name)) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < HTTPS_MAX_SNI_NAMES) {
+        snprintf(g_sni[slot].name, sizeof(g_sni[slot].name), "%s", name);
+        snprintf(g_sni[slot].cert, sizeof(g_sni[slot].cert), "%s", cert_path);
+        snprintf(g_sni[slot].key, sizeof(g_sni[slot].key), "%s", key_path);
+        /* Newly named, so nothing has been inspected yet — the same reset
+         * the default watch does, and for the same reason: absent is a real
+         * observation, and it is what makes the pair APPEARING a change.
+         * Any context already in service for this name stays in service
+         * until a loadable pair replaces it. */
+        memset(&g_sni[slot].seen_cert, 0, sizeof(g_sni[slot].seen_cert));
+        memset(&g_sni[slot].seen_key, 0, sizeof(g_sni[slot].seen_key));
+        if (slot == g_sni_count)
+            g_sni_count++;
+        atomic_store(&g_sni_names_configured, g_sni_count);
+        ok = true;
+    }
+    pthread_mutex_unlock(&g_cert_mutex);
+    if (!ok)
+        LOG_FAIL("https", "the front door serves at most %d additional names; "
+                          "%s was not added",
+                 HTTPS_MAX_SNI_NAMES, name);
+    return true;
+}
+
+/* One pass over the per-name table, same shape as the default pair's refresh
+ * below: read the slot under the lock, stat outside it, claim the
+ * observation under the lock so two workers racing build one context, build
+ * outside it, publish under it. Returns true when at least one name's
+ * context was actually replaced.
+ *
+ * A name whose pair is absent or unloadable is skipped, not fatal, and does
+ * not disturb any other name — the point of separate contexts is that one
+ * name's certificate expiring, renewing, or arriving late is invisible to
+ * every other name and to the default. */
+static bool sni_certificates_refresh(void)
+{
+    bool swapped = false;
+
+    for (unsigned i = 0; i < HTTPS_MAX_SNI_NAMES; i++) {
+        char name[sizeof(g_sni[0].name)];
+        char cert_path[sizeof(g_sni[0].cert)];
+        char key_path[sizeof(g_sni[0].key)];
+        struct cert_file_id seen_cert;
+        struct cert_file_id seen_key;
+
+        pthread_mutex_lock(&g_cert_mutex);
+        const bool live = i < g_sni_count;
+        if (live) {
+            snprintf(name, sizeof(name), "%s", g_sni[i].name);
+            snprintf(cert_path, sizeof(cert_path), "%s", g_sni[i].cert);
+            snprintf(key_path, sizeof(key_path), "%s", g_sni[i].key);
+            seen_cert = g_sni[i].seen_cert;
+            seen_key = g_sni[i].seen_key;
+        }
+        pthread_mutex_unlock(&g_cert_mutex);
+        if (!live)
+            break;
+
+        struct cert_file_id cert_id;
+        struct cert_file_id key_id;
+        (void)cert_file_id_read(cert_path, &cert_id);
+        (void)cert_file_id_read(key_path, &key_id);
+        if (!cert_id.present || !key_id.present)
+            continue;
+        if (cert_file_id_same(&cert_id, &seen_cert) &&
+            cert_file_id_same(&key_id, &seen_key))
+            continue;
+
+        pthread_mutex_lock(&g_cert_mutex);
+        const bool claimed = i < g_sni_count &&
+                             sni_name_equal(g_sni[i].name, name) &&
+                             (!cert_file_id_same(&g_sni[i].seen_cert, &cert_id) ||
+                              !cert_file_id_same(&g_sni[i].seen_key, &key_id));
+        if (claimed) {
+            g_sni[i].seen_cert = cert_id;
+            g_sni[i].seen_key = key_id;
+        }
+        pthread_mutex_unlock(&g_cert_mutex);
+        if (!claimed)
+            continue;
+
+        SSL_CTX *ctx = ssl_ctx_build(cert_path, key_path);
+        if (!ctx) {
+            LOG_WARN("https", "refusing to serve %s from the pair at %s; the "
+                              "front door keeps whatever it had for that name",
+                     name, cert_path);
+            continue;
+        }
+
+        SSL_CTX *old = NULL;
+        pthread_mutex_lock(&g_cert_mutex);
+        if (i < g_sni_count && sni_name_equal(g_sni[i].name, name)) {
+            old = g_sni[i].ctx;
+            g_sni[i].ctx = ctx;
+            ctx = NULL;
+        }
+        pthread_mutex_unlock(&g_cert_mutex);
+        if (ctx) {
+            /* The slot was renamed underneath us. Nothing was published. */
+            SSL_CTX_free(ctx);
+            continue;
+        }
+        if (old)
+            SSL_CTX_free(old);
+        swapped = true;
+        printf("HTTPS: serving %s from its own certificate at %s\n",
+               name, cert_path);
+    }
+    return swapped;
+}
+
 bool https_server_reload_certificate(void)
 {
     char cert_path[sizeof(g_watch_cert)];
@@ -366,6 +665,13 @@ bool https_server_certificate_refresh(void)
     if (!serving)
         return false;
 
+    /* Every additional name is renewed on the same trigger and by the same
+     * discipline as the default pair. Done FIRST and unconditionally, so a
+     * default pair that never changes cannot starve a name whose certificate
+     * did. With no additional names configured this is a single load of a
+     * zeroed counter and returns immediately. */
+    const bool sni_swapped = sni_certificates_refresh();
+
     struct cert_file_id cert_id;
     struct cert_file_id key_id;
     (void)cert_file_id_read(cert_path, &cert_id);
@@ -373,10 +679,10 @@ bool https_server_certificate_refresh(void)
     /* Not there yet is the normal state of a node waiting for its first
      * certificate. Not an error, and not worth a line. */
     if (!cert_id.present || !key_id.present)
-        return false;
+        return sni_swapped;
     if (cert_file_id_same(&cert_id, &seen_cert) &&
         cert_file_id_same(&key_id, &seen_key))
-        return false;
+        return sni_swapped;
 
     /* Claim the observation before doing the work. Two worker threads racing
      * here means exactly one builds a context; and a pair that fails to load
@@ -391,9 +697,9 @@ bool https_server_certificate_refresh(void)
     }
     pthread_mutex_unlock(&g_cert_mutex);
     if (!claimed)
-        return false;
+        return sni_swapped;
 
-    return cert_swap_from(cert_path, key_path);
+    return cert_swap_from(cert_path, key_path) || sni_swapped;
 }
 
 bool https_server_certificate_is_self_signed(void)

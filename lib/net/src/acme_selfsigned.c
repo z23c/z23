@@ -104,11 +104,19 @@ static bool set_subject(X509 *cert, const char *domain, const char *org)
     if (X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC,
                                    (const unsigned char *)domain, -1, -1,
                                    0) != 1)
-        LOG_FAIL("acme", "cannot set the subject CN to %s", domain);
+        LOG_FAIL("acme",
+                 "cannot set the subject CN to %s (%zu bytes; X.509 caps the "
+                 "common name at %d and OpenSSL refuses an over-long value "
+                 "rather than truncating it)",
+                 domain, strlen(domain), ub_common_name);
     if (org && org[0] &&
         X509_NAME_add_entry_by_txt(subject, "O", MBSTRING_ASC,
                                    (const unsigned char *)org, -1, -1, 0) != 1)
-        LOG_FAIL("acme", "cannot label the certificate subject");
+        LOG_FAIL("acme",
+                 "cannot label the certificate subject with O=%s (%zu bytes; "
+                 "X.509 caps the organization name at %d and OpenSSL refuses "
+                 "an over-long value rather than truncating it)",
+                 org, strlen(org), ub_organization_name);
     /* Self-issued by construction: issuer IS the subject. This is what
      * acme_certificate_is_self_issued() later reads back. */
     if (X509_set_issuer_name(cert, subject) != 1)
