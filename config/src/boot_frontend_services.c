@@ -31,6 +31,7 @@
 #include "net/acme_arm_file.h"
 #include "net/acme_challenge.h"
 #include "net/acme_selfsigned.h"
+#include "platform/directory_compat.h"
 #include "util/util.h"
 #include "net/onion_service.h"
 #include "net/tor_integration.h"
@@ -290,7 +291,7 @@ static bool boot_https_explorer_start(void *ctx)
              "%s/ssl/self-signed-placeholder-key.pem", svc->datadir);
     snprintf(handoff_path, sizeof(handoff_path), "%s/ssl/%s", svc->datadir,
              ACME_HANDOFF_FILENAME);
-    if (mkdir(ssl_dir, 0700) != 0 && errno != EEXIST) {
+    if (platform_directory_create(ssl_dir, 0700) != 0 && errno != EEXIST) {
         printf("HTTPS: cannot create %s - block explorer not on clearnet\n",
                ssl_dir);
         return true;
