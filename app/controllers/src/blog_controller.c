@@ -238,13 +238,12 @@ static int blog_discover_onion_peers_wallet(const char *datadir,
         max = sizeof(rows) / sizeof(rows[0]);
 
     memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open_runtime(&ndb, db_path,
-                              "blog.onion_discovery_wallet"))
+    if (!node_db_open_existing_runtime(&ndb, db_path,
+                                       "blog.onion_discovery_wallet"))
         return 0;
 
     int found = 0;
-    int row_count = db_wallet_tx_recent_raw(&ndb, rows,
-        sizeof(rows) / sizeof(rows[0]));
+    int row_count = db_wallet_tx_recent_raw(&ndb, rows, max);
     for (int ri = 0; ri < row_count && found < (int)max; ++ri) {
         const uint8_t *raw = rows[ri].raw_tx;
         int raw_len = (int)rows[ri].raw_tx_len;
@@ -345,8 +344,8 @@ int blog_discover_onion_peers_chain(const char *datadir,
 
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open_runtime(&ndb, db_path,
-                              "blog.onion_discovery_chain"))
+    if (!node_db_open_existing_runtime(&ndb, db_path,
+                                       "blog.onion_discovery_chain"))
         LOG_RETURN(0, "blog", "discover_onion_peers_chain: cannot open %s",
                    db_path);
 
