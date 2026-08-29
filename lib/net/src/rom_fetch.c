@@ -865,9 +865,8 @@ bool rom_fetch_download_parallel(const struct rom_fetch_peer *peers,
  * binding slot. "RMF" + zero padding. */
 static const uint8_t RF_ROM_MANIFEST_MAC_TAG[32] = { 'R', 'M', 'F' };
 
-/* A stalled/absent manifest reply must fall back FAST, not sit on the 120 s
- * chunk-IO timeout — the manifest fetch precedes the whole download. */
-#define RF_MANIFEST_IO_TIMEOUT_SEC 15
+/* RF_MANIFEST_IO_TIMEOUT_SEC lives in rom_fetch_internal.h — the directory
+ * fetch (rom_fetch_directory.c) uses the same budget. */
 
 bool rom_fetch_verify_chunk(const uint8_t *data, uint32_t len,
                             const uint8_t expected_chunk_sha3[32])
@@ -1035,108 +1034,6 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     return true;
 }
 
-/* ── Directory-listing fetch (clearnet peer discovery) ──────────────── */
-
-/* Must byte-match FS_ROM_LIST_MAC_TAG in file_service.c: the listing reply
- * rides fs_send_chunk_fast's MAC scheme with this constant in the 32-byte
- * binding slot. "RLS" + zero padding. */
-static const uint8_t RF_ROM_LIST_MAC_TAG[32] = { 'R', 'L', 'S' };
-
-bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
-                             char *buf, size_t cap)
-{
-    if (!peer_addr || !peer_addr[0] || !buf || cap == 0)
-        LOG_FAIL(RF_SUBSYS, "directory: null/empty arg");
-
-    platform_socket_t fd = rf_connect(peer_addr, port);
-    if (fd == PLATFORM_SOCKET_INVALID)
-        return false; /* rf_connect logged; caller just skips this seed */
-
-    /* Short recv window: a legacy (RLS-unaware) seeder never replies, so a fast
-     * timeout is the fall-back signal rather than a 120 s stall. */
-    (void)platform_socket_set_receive_timeout(
-        fd, RF_MANIFEST_IO_TIMEOUT_SEC * 1000);
-
-    struct fs_session s;
-    fs_session_init(&s, fd);
-    uint8_t zero_root[32];
-    memset(zero_root, 0, sizeof(zero_root));
-    if (!fs_handshake(&s, zero_root, true)) {
-        rf_session_close(&s, fd);
-        LOG_INFO(RF_SUBSYS, "directory: handshake failed with %s:%u — skipping "
-                 "seed", peer_addr, (unsigned)port);
-        return false;
-    }
-
-    /* Request: ["RLS"(3)]. */
-    uint8_t req[FS_ROM_LIST_REQUEST_SIZE];
-    memcpy(req, "RLS", 3);
-    if (!fs_send_frame(&s, FS_REQUEST, req, sizeof(req))) {
-        rf_session_close(&s, fd);
-        LOG_INFO(RF_SUBSYS, "directory: request send failed to %s:%u — skipping "
-                 "seed", peer_addr, (unsigned)port);
-        return false;
-    }
-
-    /* Reply is size/body/MAC; FS_DONE parses as an invalid size and is skipped. */
-    uint8_t hdr[4];
-    if (!rf_recv_exact(fd, hdr, 4)) {
-        rf_session_close(&s, fd);
-        LOG_INFO(RF_SUBSYS, "directory: no reply from %s:%u (legacy seeder?) — "
-                 "skipping seed", peer_addr, (unsigned)port);
-        return false;
-    }
-    uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) |
-                    ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-    /* Bounded by the caller's cap, leaving one byte for the NUL terminator. A
-     * zero-length body or one at/over cap (incl. the FS_DONE refusal) fails. */
-    if (size == 0 || size >= cap) {
-        rf_session_close(&s, fd);
-        LOG_INFO(RF_SUBSYS, "directory: implausible body size %u (cap %zu) from "
-                 "%s:%u — skipping seed", size, cap, peer_addr, (unsigned)port);
-        return false;
-    }
-    if (!rf_recv_exact(fd, (uint8_t *)buf, size)) {
-        rf_session_close(&s, fd);
-        LOG_INFO(RF_SUBSYS, "directory: body read failed from %s:%u — skipping "
-                 "seed", peer_addr, (unsigned)port);
-        return false;
-    }
-    uint8_t mac_wire[32];
-    if (!rf_recv_exact(fd, mac_wire, 32)) {
-        rf_session_close(&s, fd);
-        LOG_INFO(RF_SUBSYS, "directory: MAC read failed from %s:%u — skipping "
-                 "seed", peer_addr, (unsigned)port);
-        return false;
-    }
-    platform_socket_close(fd);
-
-    /* Transport MAC: SHA3(key || recv_counter || "RLS"tag || body), matching the
-     * serve side's fs_send_chunk_fast(body, tag). */
-    uint8_t mac_expect[32];
-    struct sha3_256_ctx mctx;
-    sha3_256_init(&mctx);
-    sha3_256_write(&mctx, s.key, 32);
-    sha3_256_write(&mctx, (const unsigned char *)&s.recv_counter, 8);
-    sha3_256_write(&mctx, RF_ROM_LIST_MAC_TAG, 32);
-    sha3_256_write(&mctx, (const uint8_t *)buf, size);
-    sha3_256_finalize(&mctx, mac_expect);
-    memory_cleanse(&mctx, sizeof(mctx));
-    fs_session_cleanup(&s);
-    uint8_t diff = 0;
-    for (int i = 0; i < 32; i++)
-        diff |= mac_wire[i] ^ mac_expect[i];
-    if (diff != 0) {
-        LOG_INFO(RF_SUBSYS, "directory: MAC mismatch from %s:%u — skipping seed",
-                 peer_addr, (unsigned)port);
-        return false;
-    }
-
-    buf[size] = '\0';
-    LOG_INFO(RF_SUBSYS, "directory: got %u-byte listing from %s:%u",
-             size, peer_addr, (unsigned)port);
-    return true;
-}
 
 /* ── Per-chunk-verified download with durable resume ────────────────── */
 

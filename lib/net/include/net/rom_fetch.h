@@ -298,4 +298,18 @@ bool rom_fetch_download_verified_parallel(const struct rom_fetch_peer *peers,
                                           rom_fetch_progress_cb cb,
                                           void *cb_ctx);
 
+#ifdef ZCL_TESTING
+/* Test-only control of the peer-DISCOVERY stall bound (rom_fetch_get_directory's
+ * recv window). It shortens a WAIT; it changes no digest check, no MAC check,
+ * no size bound and no refusal — the identical verification runs whatever this
+ * is set to. A test uses it to prove "a seed that accepts and never speaks is
+ * abandoned and the next seed is still tried" without spending the production
+ * wait, and asserts the DEFAULT against
+ * rom_fetch_directory_io_timeout_default_ms_for_test() rather than asserting a
+ * wall-clock duration. Passing ms <= 0 restores the default. */
+void rom_fetch_set_directory_io_timeout_ms_for_test(int ms);
+int  rom_fetch_directory_io_timeout_ms_for_test(void);
+int  rom_fetch_directory_io_timeout_default_ms_for_test(void);
+#endif
+
 #endif /* ZCL_NET_ROM_FETCH_H */

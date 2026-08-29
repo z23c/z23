@@ -47,6 +47,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 
 /* SQLite-magic-prefixed deterministic content the serve path accepts + the
@@ -929,11 +932,386 @@ static int case_seed_set(void)
     return failures;
 }
 
+/* ── Peer-DISCOVERED seeds ───────────────────────────────────────────────
+ *
+ * The gap these close: peers ALREADY advertise their file-service port over
+ * the zfileaddr P2P message and this node ALREADY caches it (handle_zfileaddr
+ * -> boot_save_file_service -> db_file_service_save). Nothing ever read that
+ * cache back, so a node run with NO operator flags assembled ZERO file-service
+ * seeds — the compiled clearnet list is deliberately empty — the instant-on
+ * fetch was never attempted, and the node fell back to a from-genesis IBD. The
+ * missing piece was the CONSUMER (config/src/boot_bundle_fetch_peer_seeds.c).
+ *
+ * What must stay true, and is asserted below: making a seed easier to FIND
+ * must not make its bytes easier to ACCEPT. A peer-discovered seed is an
+ * ADDRESS; it travels the identical verification path an operator-named seed
+ * travels, and a peer-discovered seed serving bytes that do not match the
+ * committed digest is refused exactly as a flag-supplied one is.
+ *
+ * No wall-clock duration is asserted anywhere here — only relationships and
+ * outcomes, because this fleet deliberately includes slow 7200rpm boxes. */
+
+/* (1) PURE: does a cached peer endpoint become a seed? Only if that peer
+ * actually advertised a file-service port. */
+static int case_peer_seed_offer_filter(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: a peer becomes an instant-on seed IFF it "
+         "advertised a file-service port, dialed at THAT port") {
+        struct app_context ctx;
+        boot_bundle_fetch_disarm_peer_seeds();
+
+        /* Baseline: no flags, no peers → the pre-existing empty set. This is
+         * the stranger's `seeds_empty` boot. */
+        memset(&ctx, 0, sizeof(ctx));
+        size_t compiled_seeds = 0;
+        while (ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[compiled_seeds])
+            compiled_seeds++;
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == compiled_seeds);
+        ASSERT(boot_bundle_fetch_armed_peer_seed_count() == 0);
+
+        /* A cached peer row that names NO file-service port (the peer never
+         * sent zfileaddr) is NOT offered — the count is unchanged from the
+         * baseline even though the row is armed and visible to the assembler.
+         * This is the "did not advertise ⇒ not a seed" half. */
+        boot_bundle_fetch_arm_peer_seed_for_test("203.0.113.20", 0);
+        ASSERT(boot_bundle_fetch_armed_peer_seed_count() == 1);
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == compiled_seeds);
+
+        /* The same peer, having advertised a port, IS offered. */
+        boot_bundle_fetch_disarm_peer_seeds();
+        boot_bundle_fetch_arm_peer_seed_for_test("203.0.113.20", 18034);
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == compiled_seeds + 1);
+
+        /* Mixed set: only the advertisers count. */
+        boot_bundle_fetch_arm_peer_seed_for_test("203.0.113.21", 0);
+        boot_bundle_fetch_arm_peer_seed_for_test("203.0.113.22", 18035);
+        ASSERT(boot_bundle_fetch_armed_peer_seed_count() == 3);
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == compiled_seeds + 2);
+
+        /* THE PEER'S OWN PORT IS USED, NOT FS_PORT — proven WITHOUT a socket,
+         * by de-duplication. A live node's peer set really does mix 18034 and
+         * 18035, so substituting the default would silently dial the wrong
+         * service. An explicit -fileservice naming the SAME host at the SAME
+         * port the peer advertised collapses onto the peer-discovered entry;
+         * the same host at any other port does not. */
+        boot_bundle_fetch_disarm_peer_seeds();
+        boot_bundle_fetch_arm_peer_seed_for_test("203.0.113.20", 18035);
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.connect_only = true;   /* keep the compiled list out of the count */
+        ctx.file_service_peer = "203.0.113.20:18035";
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 1);
+        /* FS_PORT is NOT what this peer advertised, so it must not collapse. */
+        char fs_default[64];
+        snprintf(fs_default, sizeof(fs_default), "203.0.113.20:%u",
+                 (unsigned)FS_PORT);
+        ctx.file_service_peer = fs_default;
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 2);
+
+        /* PRECEDENCE + ADDITIVITY: every operator-named source keeps its slot
+         * and the peer-discovered seed is added after them, never instead of
+         * them. */
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.connect_only = true;
+        ctx.file_service_peer = "198.51.100.9:19034";
+        ctx.connect_peers[0] = "203.0.113.7:8033";
+        ctx.n_connect_peers = 1;
+        boot_bundle_fetch_disarm_peer_seeds();
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 2); /* pre-existing pair */
+        boot_bundle_fetch_arm_peer_seed_for_test("203.0.113.21", 18034);
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 3);
+
+        /* Bounded: the assembler never overruns its seed array however many
+         * peers are armed. */
+        boot_bundle_fetch_disarm_peer_seeds();
+        for (int i = 0; i < 32; i++) {
+            char h[64];
+            snprintf(h, sizeof(h), "203.0.113.%d", 100 + i);
+            boot_bundle_fetch_arm_peer_seed_for_test(h, 18034);
+        }
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.connect_only = true;
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) <= ROM_FETCH_MAX_WORKERS);
+
+        /* Disarming restores the exact pre-existing behaviour. */
+        boot_bundle_fetch_disarm_peer_seeds();
+        memset(&ctx, 0, sizeof(ctx));
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == compiled_seeds);
+        ASSERT(boot_bundle_fetch_armed_peer_seed_count() == 0);
+    } _test_next:;
+    boot_bundle_fetch_disarm_peer_seeds();
+    return failures;
+}
+
+/* A loopback ROM seeder for the two network cases below. Registers one
+ * synthetic artifact and starts the REAL file-service serve path on an
+ * OS-assigned port (never a fixed port: this host runs a live node). */
+struct bbf_seeder {
+    char     dir[256];
+    uint8_t *content;
+    size_t   size;
+    struct rom_artifact art;
+    uint16_t port;
+};
+
+static bool bbf_seeder_start(struct bbf_seeder *s)
+{
+    memset(s, 0, sizeof(*s));
+    rom_seed_reset();
+    rom_seed_set_peer_bps_cap(1ull << 30);
+    rom_seed_set_global_bps_cap(1ull << 30);
+    test_make_tmpdir(s->dir, sizeof(s->dir), "bbf_peerseed_srv", "ok");
+    s->size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;
+    s->content = malloc(s->size);
+    if (!s->content)
+        return false;
+    bbf_gen_content(s->content, s->size);
+    if (!bbf_write_file(s->dir, "consensus-state-bundle-3056758.sqlite",
+                        s->content, s->size))
+        return false;
+    if (rom_seed_register(s->dir, "consensus-state-bundle-3056758.sqlite",
+                          NULL, &s->art) != ROM_REG_OK)
+        return false;
+    fs_server_start(s->dir, 0);
+    for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+        platform_sleep_ms(50);
+    if (!fs_server_is_running())
+        return false;
+    s->port = fs_server_get_port();
+    return s->port != 0;
+}
+
+static void bbf_seeder_stop(struct bbf_seeder *s)
+{
+    fs_server_stop();
+    free(s->content);
+    s->content = NULL;
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/consensus-state-bundle-3056758.sqlite", s->dir);
+    unlink(p);
+    test_rm_rf_recursive(s->dir);
+    rom_seed_reset();
+}
+
+/* Write a <datadir>/bundles/directory.json hint for the seeder's artifact.
+ * `corrupt_whole` flips one bit of the committed whole-file digest — the
+ * bytes on the wire are then perfectly good but do not match what the client
+ * committed to, which is precisely what the content proof must catch. */
+static bool bbf_write_hint(const char *datadir, const struct rom_artifact *a,
+                           bool corrupt_whole)
+{
+    char b[512];
+    snprintf(b, sizeof(b), "%s/bundles", datadir);
+    if (mkdir(b, 0700) != 0)
+        return false;
+    uint8_t whole[32];
+    memcpy(whole, a->whole_sha3, 32);
+    if (corrupt_whole)
+        whole[0] ^= 0x01;
+    char digest_hex[65], whole_hex[65];
+    HexStr(a->chunk_root, 32, false, digest_hex, sizeof(digest_hex));
+    HexStr(whole, 32, false, whole_hex, sizeof(whole_hex));
+    char json[1024];
+    int n = snprintf(json, sizeof(json),
+                     "{\"count\":1,\"artifacts\":[{\"kind\":\"consensus_bundle\","
+                     "\"digest\":\"%s\",\"whole_sha3\":\"%s\",\"size\":%llu,"
+                     "\"chunk_size\":%u,\"chunks\":%u,\"height\":3056758}]}",
+                     digest_hex, whole_hex,
+                     (unsigned long long)a->size_bytes, a->chunk_size,
+                     a->num_chunks);
+    if (n <= 0 || (size_t)n >= sizeof(json))
+        return false;
+    return bbf_write_file(b, "directory.json", (const uint8_t *)json,
+                          strlen(json));
+}
+
+/* (2) END TO END: a peer-discovered seed reaches the fetch path with NO
+ * operator flag, and its bytes are accepted or refused on EXACTLY the same
+ * terms as a flag-supplied seed's. */
+static int case_peer_seed_e2e_and_verification(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: a peer-discovered seed lands a bundle with no "
+         "operator flag, and corrupt bytes from it are refused exactly as "
+         "corrupt bytes from a flag-supplied seed are") {
+        struct bbf_seeder srv;
+        boot_bundle_fetch_disarm_peer_seeds();
+        ASSERT(bbf_seeder_start(&srv));
+
+        /* (a) NO operator flags at all — no -fileservice, no -connect, no
+         * -addnode — and the compiled clearnet list is empty. The ONLY seed is
+         * the peer that advertised its file-service port over zfileaddr and
+         * whose endpoint this node cached. Before this consumer existed that
+         * boot assembled zero seeds and never attempted the fetch. */
+        char cdir[256];
+        test_make_tmpdir(cdir, sizeof(cdir), "bbf_peerseed_ok", "ok");
+        struct app_context ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.datadir = cdir;
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 0); /* the stranger today */
+        boot_bundle_fetch_arm_peer_seed_for_test("127.0.0.1", srv.port);
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 1);
+        ASSERT(bbf_write_hint(cdir, &srv.art, false));
+        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx));
+        char *landed = boot_autodetect_consensus_bundle(cdir);
+        ASSERT(landed != NULL);
+        free(landed);
+
+        /* (b) The SAME peer-discovered seed, same wire bytes, but the client
+         * committed to a digest those bytes do not match: REFUSED, nothing
+         * lands, no sovereign marker. Discovery made the seed findable; it did
+         * not make its bytes acceptable. */
+        char bdir[256];
+        test_make_tmpdir(bdir, sizeof(bdir), "bbf_peerseed_bad", "ok");
+        struct app_context bctx;
+        memset(&bctx, 0, sizeof(bctx));
+        bctx.datadir = bdir;
+        ASSERT(bbf_write_hint(bdir, &srv.art, true));
+        ASSERT(!boot_bundle_fetch_maybe(bdir, &bctx));
+        char *bad_auto = boot_autodetect_consensus_bundle(bdir);
+        ASSERT(bad_auto == NULL);
+        free(bad_auto);
+        ASSERT(!boot_consensus_bundle_marker_exists(bdir));
+
+        /* (c) The SAME corrupt commitment against a FLAG-supplied seed (same
+         * seeder, named with -fileservice, peer source disarmed) fails in
+         * exactly the same way. Same outcome, same absence of a marker — the
+         * two seed provenances are indistinguishable to the verifier, which is
+         * the whole claim. */
+        boot_bundle_fetch_disarm_peer_seeds();
+        char fdir[256];
+        test_make_tmpdir(fdir, sizeof(fdir), "bbf_flagseed_bad", "ok");
+        struct app_context fctx;
+        memset(&fctx, 0, sizeof(fctx));
+        fctx.datadir = fdir;
+        char peer_hp[64];
+        snprintf(peer_hp, sizeof(peer_hp), "127.0.0.1:%u", (unsigned)srv.port);
+        fctx.file_service_peer = peer_hp;
+        fctx.connect_only = true;
+        ASSERT(boot_bundle_fetch_seed_count(&fctx) == 1);
+        ASSERT(bbf_write_hint(fdir, &srv.art, true));
+        ASSERT(!boot_bundle_fetch_maybe(fdir, &fctx));
+        char *flag_auto = boot_autodetect_consensus_bundle(fdir);
+        ASSERT(flag_auto == NULL);
+        free(flag_auto);
+        ASSERT(!boot_consensus_bundle_marker_exists(fdir));
+
+        /* And the GOOD commitment through the flag-supplied seed still lands —
+         * so (b) and (c) are refusals of the DIGEST, not of the provenance. */
+        char gdir[256];
+        test_make_tmpdir(gdir, sizeof(gdir), "bbf_flagseed_ok", "ok");
+        struct app_context gctx;
+        memset(&gctx, 0, sizeof(gctx));
+        gctx.datadir = gdir;
+        gctx.file_service_peer = peer_hp;
+        gctx.connect_only = true;
+        ASSERT(bbf_write_hint(gdir, &srv.art, false));
+        ASSERT(boot_bundle_fetch_maybe(gdir, &gctx));
+        char *good_auto = boot_autodetect_consensus_bundle(gdir);
+        ASSERT(good_auto != NULL);
+        free(good_auto);
+
+        test_rm_rf_recursive(cdir);
+        test_rm_rf_recursive(bdir);
+        test_rm_rf_recursive(fdir);
+        test_rm_rf_recursive(gdir);
+        bbf_seeder_stop(&srv);
+    } _test_next:;
+    boot_bundle_fetch_disarm_peer_seeds();
+    return failures;
+}
+
+/* (3) A peer that ADVERTISES the file service but does not serve costs a
+ * BOUNDED amount of time and is then dropped — the remaining seeds are still
+ * tried and the bundle still lands.
+ *
+ * The bound is structural, not timed here: rom_fetch_get_directory gives up
+ * after RF_CONNECT_TIMEOUT_MS + its recv window, discovery `continue`s to the
+ * next seed, and the non-answering seed is left OUT of the download peer set
+ * (struct bbf_discovery.live) so it can never re-enter the per-chunk rotation.
+ * The recv window is shortened for this case so the machine is not made to sit
+ * out the production wait; the test asserts the DEFAULT is unchanged rather
+ * than asserting any elapsed duration. */
+static int case_peer_seed_stall_is_bounded(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: a seed that advertises but stalls is abandoned "
+         "and dropped; the remaining seeds still land the bundle") {
+        struct bbf_seeder srv;
+        boot_bundle_fetch_disarm_peer_seeds();
+
+        /* The production default must be the real one; the override is a
+         * WAIT, not a check. */
+        ASSERT(rom_fetch_directory_io_timeout_ms_for_test() ==
+               rom_fetch_directory_io_timeout_default_ms_for_test());
+        ASSERT(rom_fetch_directory_io_timeout_default_ms_for_test() > 0);
+
+        /* A listener that completes the TCP handshake and then never speaks —
+         * the expensive shape a bounded wait exists for. Never accept(): the
+         * kernel backlog completes the connect, so the client gets a live
+         * socket and no reply. */
+        int stall_fd = socket(AF_INET, SOCK_STREAM, 0);
+        ASSERT(stall_fd >= 0);
+        int one = 1;
+        (void)setsockopt(stall_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        sa.sin_port = 0; /* OS-assigned */
+        ASSERT(bind(stall_fd, (struct sockaddr *)&sa, sizeof(sa)) == 0);
+        ASSERT(listen(stall_fd, 8) == 0);
+        socklen_t slen = sizeof(sa);
+        ASSERT(getsockname(stall_fd, (struct sockaddr *)&sa, &slen) == 0);
+        uint16_t stall_port = ntohs(sa.sin_port);
+        ASSERT(stall_port != 0);
+
+        ASSERT(bbf_seeder_start(&srv));
+        rom_fetch_set_directory_io_timeout_ms_for_test(400);
+        ASSERT(rom_fetch_directory_io_timeout_ms_for_test() == 400);
+
+        /* Two peer-discovered seeds, the stalling one FIRST so it cannot be
+         * skipped by luck of ordering. No operator flags at all. */
+        char cdir[256];
+        test_make_tmpdir(cdir, sizeof(cdir), "bbf_peerseed_stall", "ok");
+        boot_bundle_fetch_arm_peer_seed_for_test("127.0.0.1", stall_port);
+        boot_bundle_fetch_arm_peer_seed_for_test("127.0.0.1", srv.port);
+        struct app_context ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.datadir = cdir;
+        /* Both are offered: the stall is discovered by CONTACTING the peer,
+         * not by pre-judging it. */
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 2);
+
+        /* No local hint: discovery runs, the stalling seed is abandoned and
+         * dropped, and the surviving seed carries the download. */
+        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx));
+        char *landed = boot_autodetect_consensus_bundle(cdir);
+        ASSERT(landed != NULL);
+        free(landed);
+
+        /* Restore the production bound for every later case. */
+        rom_fetch_set_directory_io_timeout_ms_for_test(0);
+        ASSERT(rom_fetch_directory_io_timeout_ms_for_test() ==
+               rom_fetch_directory_io_timeout_default_ms_for_test());
+
+        close(stall_fd);
+        test_rm_rf_recursive(cdir);
+        bbf_seeder_stop(&srv);
+    } _test_next:;
+    rom_fetch_set_directory_io_timeout_ms_for_test(0);
+    boot_bundle_fetch_disarm_peer_seeds();
+    return failures;
+}
+
 int test_boot_bundle_fetch(void)
 {
     printf("\n=== boot_bundle_fetch ===\n");
     int failures = 0;
     failures += case_seed_set();
+    failures += case_peer_seed_offer_filter();
+    failures += case_peer_seed_e2e_and_verification();
+    failures += case_peer_seed_stall_is_bounded();
     failures += case_gate();
     failures += case_network_gate();
     failures += case_pick();

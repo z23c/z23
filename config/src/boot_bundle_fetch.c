@@ -488,6 +488,29 @@ struct bbf_discovery {
     size_t n_bundles;
     struct rom_fetch_manifest header_seed;
     bool have_header_seed;
+    /* THE STALL DROP. Only the seeds that actually ANSWERED the directory
+     * request are carried into the download. A seed that refused, stalled, or
+     * was unreachable during discovery has already demonstrated it does not
+     * serve, and its cost is bounded there: at most RF_CONNECT_TIMEOUT_MS
+     * (10 s) + the directory recv window (RF_MANIFEST_IO_TIMEOUT_SEC, 15 s) =
+     * <= 25 s, once, with the whole sweep capped at ROM_FETCH_MAX_WORKERS (8)
+     * seeds. Carrying it into the download instead would put it in the
+     * per-chunk round-robin, where each attempt may sit on the 120 s chunk-IO
+     * timeout and be retried every round — the "retried forever" shape this
+     * exists to prevent. Dropping it costs nothing: a seed that cannot answer
+     * a few hundred bytes of directory JSON is not going to serve gigabytes.
+     *
+     * This matters most for a peer-DISCOVERED seed (config/src/
+     * boot_bundle_fetch_peer_seeds.c): a peer may advertise NODE_FILESERVICE
+     * and then not serve, and that must cost a bounded amount of time exactly
+     * once. It applies identically to an operator-named seed — the two are
+     * treated the same everywhere.
+     *
+     * NOTE the one path this does not cover: when a LOCAL bundles/
+     * directory.json hint is present, discovery never runs, so nothing has
+     * been probed and the full assembled seed set is used, as before. */
+    struct rom_fetch_peer live[ROM_FETCH_MAX_WORKERS];
+    size_t n_live;
 };
 /* Query each seed for its directory listing over the FS "RLS" wire, pick both
  * the consensus-bundle and header-seed manifests each advertises, and require
@@ -524,9 +547,17 @@ static bool bbf_discover_from_peers(const char *datadir,
     const size_t ccap = sizeof(bundle_cands) / sizeof(bundle_cands[0]);
     for (size_t i = 0; i < np; i++) {
         if (!rom_fetch_get_directory(peers[i].addr, peers[i].port, body,
-                                     BBF_DIRECTORY_JSON_MAX + 1))
+                                     BBF_DIRECTORY_JSON_MAX + 1)) {
+            /* Bounded, once, then dropped — see struct bbf_discovery.live. */
+            LOG_INFO(BBF_SUBSYS,
+                     "discovery: seed %s:%u did not serve a directory listing "
+                     "— dropping it from this boot's download seed set",
+                     peers[i].addr, (unsigned)peers[i].port);
             continue;
+        }
         responded++;
+        if (out->n_live < ROM_FETCH_MAX_WORKERS)
+            out->live[out->n_live++] = peers[i];
         bool is_explicit = explicit_first && i == 0;
         struct rom_fetch_manifest m;
         memset(&m, 0, sizeof(m));
@@ -688,6 +719,22 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
         if (!bbf_discover_from_peers(datadir, peers, np, explicit_first, &disc))
             return false; /* fail-open: normal P2P IBD is the path */
     }
+    /* Drop the seeds that did not serve a directory listing — see struct
+     * bbf_discovery.live for the bound and why a non-serving seed must not
+     * reach the per-chunk download rotation. When discovery did not run (a
+     * local directory.json hint was used) n_live is 0 and the full assembled
+     * set is kept, exactly as before. */
+    const struct rom_fetch_peer *dl_peers = peers;
+    size_t dl_np = np;
+    if (disc.n_live > 0) {
+        dl_peers = disc.live;
+        dl_np = disc.n_live;
+        if (dl_np < np)
+            LOG_INFO(BBF_SUBSYS,
+                     "instant-on: downloading from the %zu of %zu seed(s) that "
+                     "answered discovery; the rest are dropped for this boot",
+                     dl_np, np);
+    }
     /* Headers FIRST: the bundle install DEFERS on the header chain reaching the
      * checkpoint (checkpoint_bundle_install_ready), so the header seed is on the
      * critical path — download it before the (larger) bundle so the in-process
@@ -696,7 +743,8 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
      * chain still arrives via P2P, just slower). */
     bool any = false;
     if (header_needed && disc.have_header_seed) {
-        if (boot_bundle_fetch_download(datadir, peers, np, &disc.header_seed)) {
+        if (boot_bundle_fetch_download(datadir, dl_peers, dl_np,
+                                       &disc.header_seed)) {
             any = true;
             LOG_INFO(BBF_SUBSYS, "instant-on: header-chain seed landed — the "
                      "in-process import climbs the header frontier (no serial "
@@ -715,7 +763,7 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
      * boundary either way). */
     if (bundle_needed) {
         for (size_t bi = 0; bi < disc.n_bundles; bi++) {
-            if (boot_bundle_fetch_download(datadir, peers, np,
+            if (boot_bundle_fetch_download(datadir, dl_peers, dl_np,
                                            &disc.bundles[bi])) {
                 any = true;
                 break;

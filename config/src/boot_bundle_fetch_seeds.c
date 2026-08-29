@@ -8,6 +8,7 @@
 #include "boot_bundle_fetch_seeds_internal.h"
 
 #include "config/boot.h"                       /* struct app_context */
+#include "config/boot_bundle_fetch.h"          /* peer-source seam types */
 #include "config/bundle_fetch_seeds.h"         /* ZCL_BUNDLE_FETCH_CLEARNET_SEEDS */
 #include "net/file_service.h"                  /* FS_PORT default */
 #include "net/rom_fetch.h"
@@ -26,8 +27,43 @@
  * refused so 39xxx fixture sinks cannot be rewritten to FS_PORT. */
 #define BBF_MAINNET_P2P_PORT 8033
 
+/* Upper bound on endpoints one provider call may hand back in a single sweep.
+ * The assembler's OWN bound, so a future provider cannot make it unbounded.
+ * The seed array itself (ROM_FETCH_MAX_WORKERS) still binds how many land. */
+#define BBF_PEER_SOURCE_MAX 16
+
+/* The registered peer-endpoint provider. Process-global, like the rest of the
+ * boot seams; NULL (the default) means the assembler behaves exactly as it did
+ * before this source existed. */
+static boot_bundle_peer_source_fn g_peer_source = NULL;
+static void *g_peer_source_ctx = NULL;
+
+void boot_bundle_fetch_set_peer_source(boot_bundle_peer_source_fn fn, void *ctx)
+{
+    g_peer_source = fn;
+    g_peer_source_ctx = fn ? ctx : NULL;
+}
+
 /* Append host[:port] to peers[] (default port FS_PORT). No-op when full or the
  * host does not fit rom_fetch_peer.addr. */
+void bbf_add_peer_at_port(struct rom_fetch_peer *peers, size_t *np, size_t cap,
+                          const char *host, uint16_t port)
+{
+    if (!peers || !np || *np >= cap || !host || !host[0] || port == 0)
+        return;
+    if (strlen(host) >= sizeof(peers[0].addr))
+        return;
+
+    /* De-dup on (addr, port). */
+    for (size_t i = 0; i < *np; i++)
+        if (peers[i].port == port && strcmp(peers[i].addr, host) == 0)
+            return;
+
+    snprintf(peers[*np].addr, sizeof(peers[*np].addr), "%s", host);
+    peers[*np].port = port;
+    (*np)++;
+}
+
 void bbf_add_peer(struct rom_fetch_peer *peers, size_t *np, size_t cap,
                   const char *host_port)
 {
@@ -49,17 +85,7 @@ void bbf_add_peer(struct rom_fetch_peer *peers, size_t *np, size_t cap,
             *colon = '\0';
         }
     }
-    if (!host[0] || strlen(host) >= sizeof(peers[0].addr))
-        return;
-
-    /* De-dup on (addr, port). */
-    for (size_t i = 0; i < *np; i++)
-        if (peers[i].port == port && strcmp(peers[i].addr, host) == 0)
-            return;
-
-    snprintf(peers[*np].addr, sizeof(peers[*np].addr), "%s", host);
-    peers[*np].port = port;
-    (*np)++;
+    bbf_add_peer_at_port(peers, np, cap, host, port);
 }
 
 /* Does this value NAME a port? Same split rule as bbf_add_peer (LAST ':' + a
@@ -165,6 +191,48 @@ size_t bbf_assemble_seeds(const struct app_context *ctx,
     if (ctx) {
         for (int i = 0; i < ctx->n_addnode_peers; i++)
             (void)bbf_add_connect_seed(peers, &np, cap, ctx->addnode_peers[i]);
+    }
+
+    /* LAST, lowest precedence: peers that told US, over the existing zfileaddr
+     * P2P advertisement, where their file service listens — cached in the
+     * file_services table and handed here by the registered provider
+     * (config/src/boot_bundle_fetch_peer_seeds.c). This is the only source
+     * that needs no operator input at all, which is exactly why it must not
+     * outrank a source the operator DID name: every earlier source keeps its
+     * slot, and the discovery quorum still prefers the explicit -fileservice
+     * candidate.
+     *
+     * The "did it advertise?" filter lives HERE rather than in the provider so
+     * "advertised ⇒ offered, did not advertise ⇒ not offered" is one pure,
+     * directly testable decision. A peer that advertised and then does not
+     * serve costs one bounded discovery attempt (<= RF_CONNECT_TIMEOUT_MS +
+     * the directory recv window, ~25 s worst case; see the stall bound note in
+     * lib/net/src/rom_fetch.c) and is then DROPPED — bbf_discover_from_peers
+     * `continue`s past it and, per struct bbf_discovery.live, it never enters
+     * the per-chunk download rotation.
+     *
+     * The peer's OWN advertised port is used verbatim; FS_PORT is never
+     * substituted. Seeders legitimately listen elsewhere (18034 and 18035 seen
+     * on one live node's peer set), and dialing a port the peer did not name
+     * is a guess, not a discovery.
+     *
+     * Offering an address grants it nothing: the bytes it serves ride the
+     * identical transport-MAC + per-chunk SHA3 + whole-file SHA3 path an
+     * operator-named seed rides, and the install still binds to the compiled
+     * checkpoint. */
+    if (g_peer_source) {
+        struct boot_bundle_peer_seed found[BBF_PEER_SOURCE_MAX];
+        memset(found, 0, sizeof(found));
+        size_t n = g_peer_source(g_peer_source_ctx, found,
+                                 sizeof(found) / sizeof(found[0]));
+        if (n > sizeof(found) / sizeof(found[0]))
+            n = sizeof(found) / sizeof(found[0]);
+        for (size_t i = 0; i < n; i++) {
+            if (found[i].port == 0)
+                continue; /* peer never advertised a file service */
+            bbf_add_peer_at_port(peers, &np, cap, found[i].host,
+                                 found[i].port);
+        }
     }
     return np;
 }

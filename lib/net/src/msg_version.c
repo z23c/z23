@@ -631,8 +631,21 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
          * TCP connection — we just tell them which port to connect to
          * for the fast file service. They cache it in SQLite for
          * sticky reconnection across restarts.
-         * Message: "zfileaddr" with [2-byte port]. */
-        {
+         * Message: "zfileaddr" with [2-byte port].
+         *
+         * ONLY WHEN THE LISTENER IS ACTUALLY UP. This used to send
+         * fs_server_get_port() unconditionally, and that getter returns the
+         * compiled FS_PORT default even when no file service is running — so a
+         * node with the service off still told every ZCL23 peer "my file
+         * service is at 18034". That claim now matters: the receiver caches it
+         * (handle_zfileaddr → db_file_service_save) and the instant-on bundle
+         * fetch uses the cache as a seed source
+         * (config/src/boot_bundle_fetch_peer_seeds.c). An advertisement nobody
+         * can honour costs a fresh node a bounded but real fetch attempt, so
+         * do not make it. Saying nothing is the correct, fail-closed answer;
+         * a node that starts its file service later advertises on its next
+         * handshake. */
+        if (fs_server_is_running()) {
             uint8_t faddr[2];
             uint16_t fport = fs_server_get_port();
             memcpy(faddr, &fport, 2);
