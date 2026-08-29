@@ -72,7 +72,7 @@ set the command reports on Linux.
 
 Started a durable LaunchAgent against mainnet on 2026-08-28:
 
-- Service command: `z23 -datadir=/Users/rentamac/.zclassic-c23
+- Service command: `z23 -datadir=$HOME/.zclassic-c23
   -operator-lane=canonical -listen -txindex -allow-clearnet-snapshot-fetch
   -addnode=205.209.104.118:8033`
 - Proven tip (`hstar`) reached **~10,000** before the snapshot path engaged.
