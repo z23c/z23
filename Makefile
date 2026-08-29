@@ -4231,7 +4231,8 @@ LINT_FAST_GATES := \
     check-supervisor-registration \
     check-vendor-provenance \
     check-windows-platform-seam \
-    check-pipefail-status-pipe
+    check-pipefail-status-pipe \
+    check-doc-counts
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
