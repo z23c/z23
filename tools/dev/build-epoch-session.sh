@@ -50,6 +50,9 @@ OWNER_PID="${17}"
 VERIFY_TOOL="${18:-tools/dev/source-identity.sh}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
+HOST_SYSTEM="$(uname -s 2>/dev/null || printf 'unknown')"
+HOST_IS_MSYS=0
+case "$HOST_SYSTEM" in MINGW*|MSYS*) HOST_IS_MSYS=1 ;; esac
 
 case "$MODE" in acquire|check|verify) ;; *) fail "unknown mode: $MODE" ;; esac
 
@@ -78,7 +81,7 @@ find_make_owner()
 process_parent()
 {
     local pid="$1" ppid=""
-    case "$(uname -s 2>/dev/null)" in
+    case "$HOST_SYSTEM" in
         MINGW*|MSYS*)
             ppid=$(sed -n '1p' "/proc/$pid/ppid" 2>/dev/null)
             # MSYS/Cygwin /proc is sparse for orphan or init-parented
@@ -93,7 +96,7 @@ process_parent()
 process_comm()
 {
     local pid="$1" comm=""
-    case "$(uname -s 2>/dev/null)" in
+    case "$HOST_SYSTEM" in
         MINGW*|MSYS*)
             comm=$(sed -n 's/^Name:[[:space:]]*//p' "/proc/$pid/status" \
                 2>/dev/null)
@@ -132,11 +135,13 @@ if [ -n "$resolved_owner" ]; then
     OWNER_PID="$resolved_owner"
 elif "$SELF_DIR/process-start-token.sh" "$OWNER_PID" >/dev/null 2>&1; then
     :
-# Some execution environments (headless MSYS2/Git Bash launched by a service
-# wrapper) orphan every shell so the Make ancestor is not visible through
-# /proc.  In that case the current recipe shell is still a live child of Make
-# and is a safe-enough owner token for this build.
-elif "$SELF_DIR/process-start-token.sh" "$$" >/dev/null 2>&1; then
+# Headless MSYS2 service wrappers can hide the Make ancestor from /proc and
+# native ps.  Accept the live recipe process only on that host and only when
+# Make exported a positive nesting level.  Other hosts retain the strict
+# ancestor-or-explicit-owner requirement.
+elif [ "$HOST_IS_MSYS" = 1 ] &&
+     [[ "${MAKELEVEL:-}" =~ ^[1-9][0-9]*$ ]] &&
+     "$SELF_DIR/process-start-token.sh" "$$" >/dev/null 2>&1; then
     OWNER_PID="$$"
 elif [ "$MODE" != acquire ]; then
     OWNER_PID="$$"
