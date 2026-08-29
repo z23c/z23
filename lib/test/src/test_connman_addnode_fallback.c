@@ -1,105 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "platform/time_compat.h"
-#include "platform/socket_compat.h"
 #include "test/test_core.h"
 #include "coins/undo.h"
 #include "net/connman.h"
-#include "net/netbase.h"
 #include "net/tor_integration.h"
 #include "net/onion_v3_address.h"
 #include "storage/census_read.h"
 #include "util/blocker.h"
 #include <unistd.h>
-
-/* ── Blackholed loopback endpoint ─────────────────────────────────────────
- * A listening socket whose accept queue is deliberately saturated and never
- * drained: the kernel drops further SYNs, so a non-blocking connect(2) to it
- * stays IN_PROGRESS for the whole DEFAULT_CONNECT_TIMEOUT window and then
- * loses. That is exactly what a blackholed seed looks like to the dialer, and
- * it is reproduced here with no external network, no routing assumptions and
- * no timing luck — everything is 127.0.0.1.
- *
- * Kept deliberately fail-SAFE across platforms: if some host does NOT drop the
- * excess SYNs, the dials merely complete quickly and the elapsed-time
- * assertion still holds. The assertion that actually pins the defect (the
- * scheduler asking for a fan at all) does not depend on this behaviour. */
-#define DIAL_FAN_TEST_N 3u        /* = the fixed clearnet seed tier size */
-#define DIAL_BLACKHOLE_FILLERS 8
-
-struct dial_blackhole {
-    platform_socket_t listener;
-    platform_socket_t fillers[DIAL_BLACKHOLE_FILLERS];
-    size_t            nfillers;
-    uint16_t          port;
-};
-
-static void dial_blackhole_close(struct dial_blackhole *bh)
-{
-    if (!bh)
-        return;
-    for (size_t i = 0; i < bh->nfillers; i++)
-        if (bh->fillers[i] != PLATFORM_SOCKET_INVALID)
-            platform_socket_close(bh->fillers[i]);
-    bh->nfillers = 0;
-    if (bh->listener != PLATFORM_SOCKET_INVALID) {
-        platform_socket_close(bh->listener);
-        bh->listener = PLATFORM_SOCKET_INVALID;
-    }
-}
-
-static bool dial_blackhole_open(struct dial_blackhole *bh)
-{
-    if (!bh)
-        return false;
-    memset(bh, 0, sizeof(*bh));
-    bh->listener = PLATFORM_SOCKET_INVALID;
-    for (size_t i = 0; i < DIAL_BLACKHOLE_FILLERS; i++)
-        bh->fillers[i] = PLATFORM_SOCKET_INVALID;
-
-    bh->listener = platform_socket_open(AF_INET, SOCK_STREAM, IPPROTO_TCP,
-                                        true, false);
-    if (bh->listener == PLATFORM_SOCKET_INVALID)
-        return false;
-    (void)platform_socket_set_reuse_address(bh->listener, true);
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sa.sin_port = 0;                       /* ephemeral */
-    if (platform_socket_bind(bh->listener, (struct sockaddr *)&sa,
-                             sizeof(sa)) != 0) {
-        dial_blackhole_close(bh);
-        return false;
-    }
-    /* Smallest backlog the platform will honour, then fill it. */
-    if (platform_socket_listen(bh->listener, 0) != 0) {
-        dial_blackhole_close(bh);
-        return false;
-    }
-    size_t salen = sizeof(sa);
-    if (platform_socket_local_address(bh->listener, (struct sockaddr *)&sa,
-                                      &salen) != 0) {
-        dial_blackhole_close(bh);
-        return false;
-    }
-    bh->port = ntohs(sa.sin_port);
-    if (bh->port == 0) {
-        dial_blackhole_close(bh);
-        return false;
-    }
-
-    for (size_t i = 0; i < DIAL_BLACKHOLE_FILLERS; i++) {
-        platform_socket_t s = platform_socket_open(AF_INET, SOCK_STREAM,
-                                                   IPPROTO_TCP, true, true);
-        if (s == PLATFORM_SOCKET_INVALID)
-            break;
-        bh->fillers[bh->nfillers++] = s;
-        (void)platform_socket_connect(s, (struct sockaddr *)&sa, sizeof(sa));
-    }
-    return true;
-}
 
 static void test_set_ipv4(struct net_address *addr,
                           uint8_t a, uint8_t b, uint8_t c, uint8_t d,
@@ -2028,46 +1937,17 @@ int test_connman_addnode_fallback(void)
     }
 
 
-    /* ── Concurrent dial fan (ZCL_DIAL_SCHEDULER_WIDTH) ────────────────────
-     * A cold node's outbound scheduler must dial its candidates as ONE
-     * concurrent batch sharing a single DEFAULT_CONNECT_TIMEOUT window. With a
-     * scheduler width of 1 the batch machinery was reachable but never fed
-     * more than one candidate, so N blackholed addresses (e.g. the three fixed
-     * clearnet seeds on the day one of them dies) cost N x 5 s of dead time
-     * before anything else was tried. Two halves, both required:
-     *   (a) the scheduler must ASK for a fan on a cold node (this is the half
-     *       that fails at width 1), while every cap still binds;
-     *   (b) the batch must then dial that fan CONCURRENTLY — measured against
-     *       real blackholed loopback endpoints, one window not N. */
-    printf("connman_addnode_fallback: cold node dials candidates as one "
-           "concurrent batch, not serially... ");
+    /* free_slots/free_nodes are observations, not locked reservations. A
+     * positive scheduler decision therefore admits exactly one attempt. */
+    printf("connman_addnode_fallback: unreserved dial admission stays serial... ");
     {
-        chain_params_select(CHAIN_MAIN);
-        const struct chain_params *params = chain_params_get();
-        struct connman cm;
-        struct node_signals sigs;
-        struct dial_blackhole bh[DIAL_FAN_TEST_N];
-        memset(&sigs, 0, sizeof(sigs));
-        memset(bh, 0, sizeof(bh));
-        bool ok = connman_init(&cm, params, &sigs);
-
-        /* (a) The scheduler's per-batch width decision. A cold node (zero
-         * healthy outbound peers, all 8 outbound slots free) must ask for a
-         * concurrent fan of at least DIAL_FAN_TEST_N. At width 1 this is 1
-         * and the assertion fails — which is the point of the test. */
+        bool ok = true;
         size_t want_cold = connman_dial_scheduler_want_for_test(
             true, 0, true, MAX_OUTBOUND_CONNECTIONS,
             DEFAULT_MAX_PEER_CONNECTIONS);
-        ok = ok && want_cold >= DIAL_FAN_TEST_N;
-
-        /* The caps are NOT weakened by the wider fan. Each bound must still
-         * clamp the fan on its own:
-         *   - free outbound slots (MAX_OUTBOUND_CONNECTIONS is never blown),
-         *   - remaining total node capacity (max_connections),
-         *   - the rate gate (no dial at all when it says no),
-         *   - the at-floor "gentle" policy (still exactly one probe). */
+        ok = ok && want_cold == 1;
         ok = ok && connman_dial_scheduler_want_for_test(
-                       true, 0, true, 2, DEFAULT_MAX_PEER_CONNECTIONS) == 2;
+                       true, 0, true, 2, DEFAULT_MAX_PEER_CONNECTIONS) == 1;
         ok = ok && connman_dial_scheduler_want_for_test(
                        true, 0, true, MAX_OUTBOUND_CONNECTIONS, 1) == 1;
         ok = ok && connman_dial_scheduler_want_for_test(
@@ -2077,52 +1957,14 @@ int test_connman_addnode_fallback(void)
                        true, ZCL_PEER_FLOOR_HEALTHY, false,
                        MAX_OUTBOUND_CONNECTIONS,
                        DEFAULT_MAX_PEER_CONNECTIONS) == 1;
-        /* Never wider than the candidate/in-flight/poll buffers. */
         ok = ok && connman_dial_scheduler_want_for_test(
-                       true, 0, true, MAX_OUTBOUND_CONNECTIONS,
-                       DEFAULT_MAX_PEER_CONNECTIONS) <=
-                   MAX_OUTBOUND_CONNECTIONS;
-
-        /* (b) DIAL_FAN_TEST_N blackholed loopback endpoints as explicit
-         * addnodes: distinct ports, so each is a distinct service, and
-         * 127.0.0.0/8 addnodes are the operator-local shape the gatherer
-         * exempts from the /16 concentration cap. */
-        for (size_t i = 0; ok && i < DIAL_FAN_TEST_N; i++) {
-            ok = dial_blackhole_open(&bh[i]);
-            if (!ok) break;
-            struct net_address addr;
-            test_set_ipv4(&addr, 127, 0, 0, 1, bh[i].port);
-            cm.addnodes[cm.num_addnodes++] = addr;
-        }
-
-        struct connman_dial_candidate batch[MAX_OUTBOUND_CONNECTIONS + 1];
-        size_t nbatch = 0;
-        if (ok) {
-            memset(batch, 0, sizeof(batch));
-            nbatch = connman_gather_dial_candidates(&cm, batch, want_cold);
-            /* The gather must hand the batch the whole fan, not one address. */
-            ok = ok && nbatch >= DIAL_FAN_TEST_N;
-        }
-
-        int64_t elapsed_ms = 0;
-        if (ok) {
-            int64_t t0 = platform_time_monotonic_ms();
-            connman_dial_batch_for_test(&cm, batch, nbatch);
-            elapsed_ms = platform_time_monotonic_ms() - t0;
-            /* Serial would be nbatch x DEFAULT_CONNECT_TIMEOUT (>= 15 s for
-             * three blackholes); concurrent is one shared window. Two windows
-             * of slack keeps this insensitive to scheduling noise while still
-             * separating it from the serial cost by a wide margin. */
-            ok = ok && elapsed_ms < (int64_t)(2 * DEFAULT_CONNECT_TIMEOUT);
-        }
-
-        connman_free(&cm);
-        for (size_t i = 0; i < DIAL_FAN_TEST_N; i++)
-            dial_blackhole_close(&bh[i]);
+                       true, 0, true, 0,
+                       DEFAULT_MAX_PEER_CONNECTIONS) == 0;
+        ok = ok && connman_dial_scheduler_want_for_test(
+                       true, 0, true, MAX_OUTBOUND_CONNECTIONS, 0) == 0;
         if (ok) printf("OK\n");
         else {
-            printf("FAIL (want_cold=%zu nbatch=%zu elapsed_ms=%lld)\n",
-                   want_cold, nbatch, (long long)elapsed_ms);
+            printf("FAIL (want_cold=%zu)\n", want_cold);
             failures++;
         }
     }

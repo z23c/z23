@@ -6,28 +6,30 @@
 # THIS IS NOT THE INSTALLER. It is the smallest honest thing that can stand
 # in front of one:
 #   1. refuse a machine we publish no runtime for, naming the ones we do;
-#   2. learn the release pin from THREE independent systems — baked in below,
-#      a DNS TXT record, and the source repository — refusing unless all
-#      reachable ones agree;
+#   2. compare the release pin carried by THREE consistency channels — baked
+#      in below, a DNS TXT record, and the source repository — refusing unless
+#      all reachable ones agree;
 #   3. verify the served installer against that pin BEFORE a line of it runs;
 #   4. hand off, passing every attestation through so the installer judges the
 #      same evidence itself.
 #
-# Short enough that a careful person reads it before handing it to a shell —
-# the only honest form of a one-line install. Nothing it fetches runs unless
-# its digest was named by systems the web server does not control. Under ~200
-# lines is a constraint: tests live in install_selftest.sh, so no test code
-# ships in the bytes a stranger reads.
+# This file is already executing when these checks run. A curl-to-shell user
+# trusts the z23.sh TLS origin for these first-stage bytes; a compromised origin
+# can replace both this program and its checks. The pin protects only fetched
+# second-stage and release bytes after an honestly obtained front door starts.
+# An independently verified bootstrap must download this file and verify it
+# against an anchor obtained outside z23.sh before executing it.
 #
-# POSIX sh, because the published bootstrap ends in `sh` and that is often
-# dash: no bashisms, no [[ ]], no `set -o pipefail` (not POSIX). Every
+# POSIX sh, because the future convenience bootstrap ends in `sh` and that is
+# often dash: no bashisms, no [[ ]], no `set -o pipefail` (not POSIX). Every
 # status-carrying test here is pipeline-free, so none can invert on SIGPIPE.
 # No prompt and no terminal is required — this runs under a coding agent as
 # often as a person, and every refusal names the thing it protects, never the
 # shape of the caller.
 #
-# Usage: the published bootstrap fetches this and runs it with sh (see
-#        docs/work/BOOTSTRAP_PLAN.md); --print-pin resolves and installs nothing.
+# No public bootstrap is currently published: the baked pin is the all-zero
+# sentinel and this scaffold refuses. See docs/work/BOOTSTRAP_PLAN.md.
+# --print-pin resolves the consistency channels and installs nothing.
 set -euf
 # build_release.sh produces x86_64-linux only today, so that is the whole
 # published set. Refusing a machine we do not publish for, by name, beats
@@ -36,8 +38,9 @@ PUBLISHED_PLATFORMS=" linux-x86_64 "
 ORIGIN="${Z23_INSTALL_TEST_ORIGIN:-https://z23.sh}"
 PIN_DNS_NAME="${Z23_INSTALL_TEST_PIN_DNS:-_z23-pin.z23.sh}"
 PIN_REPO_URL="${Z23_INSTALL_TEST_PIN_REPO_URL:-https://raw.githubusercontent.com/ZclassiC23/zclassic/main/packaging/install/RELEASE_PIN}"
-# Source 1 of 3: baked into these bytes, rewritten by the release cutter.
-# The all-zero sentinel means NO RELEASE IS PINNED YET.
+# Channel 1 of 3: baked into these bytes, rewritten by the release cutter.
+# It is not an external trust anchor for a copy of this file fetched from the
+# same origin. The all-zero sentinel means NO RELEASE IS PINNED YET.
 PIN_ZERO=0000000000000000000000000000000000000000000000000000000000000000
 PIN_BAKED="z23-pin-v1:$PIN_ZERO:$PIN_ZERO"
 # Harness hook, not an install knob: anyone who can set your environment
@@ -112,13 +115,13 @@ repo_pin() { # Source 3 of 3.
     REPO_PIN="$repo_txt"
 }
 
-# The judgement. Two answered pins that differ REFUSE — never a majority
+# The consistency judgement. Two answered pins that differ REFUSE — never a majority
 # vote: disagreement means a rollback, a half-finished publish or a
 # compromise, and installing the winner would hide it. Fewer than two answered
 # also REFUSE — one source is not corroboration. Exactly two agreeing proceed,
-# loudly: taking over the web server alone still does not change what a
-# stranger installs, while demanding all three hands a veto to any resolver
-# that drops TXT.
+# loudly. This protects later fetches only after this exact program has begun;
+# it does not authenticate the first-stage program itself. Demanding all three
+# would hand a veto to any resolver that drops TXT.
 consider() { # origin pin unreachable-reason
     if [ -n "$2" ]; then
         ANSWERED=$((ANSWERED + 1))
@@ -180,7 +183,7 @@ consider baked "$BAKED_PIN" "$BAKED_WHY"
 consider dns "$DNS_PIN" "$DNS_WHY"
 consider repo "$REPO_PIN" "$REPO_WHY"
 [ "$ANSWERED" -ge 2 ] \
-    || die "release pin quorum: $ANSWERED of 3 sources answered, two independent sources are required (unreachable: ${UNREACHABLE:-none})"
+    || die "release pin quorum: $ANSWERED of 3 sources answered, two independent sources are required for pin consistency; this does not authenticate the first-stage script (unreachable: ${UNREACHABLE:-none})"
 [ "$ANSWERED" -ge 3 ] \
     || say "release pin agreed by $ANSWERED of 3 sources (unreachable: $UNREACHABLE)"
 pin_parse "$AGREED_PIN" || die "agreed pin is not a z23-pin-v1 record"
@@ -192,6 +195,9 @@ GOT_INSTALLER="$(sha256_file "$WORK/install_z23.sh")" || die "could not hash the
 [ "$GOT_INSTALLER" = "$PIN_INSTALLER" ] \
     || die "installer digest mismatch — $ORIGIN served bytes the agreed release pin does not name"
 
+# The current convenience default is the same domain. An operator may select
+# any mirror with Z23_RELEASE_SOURCE, but automatic decentralized discovery and
+# failover do not exist yet.
 set -- "--source=${Z23_RELEASE_SOURCE:-$ORIGIN/release/$PLATFORM}" \
     "--manifest-sha256=$PIN_MANIFEST" \
     "$(attest_arg baked "$BAKED_PIN" "$BAKED_WHY")" \

@@ -5,9 +5,9 @@
 # Same job and same discipline as packaging/install/install.sh:
 #   1. decide whether a runtime is published for THIS machine, and name the
 #      ones that are if it is not;
-#   2. learn the release pin from THREE independent systems - a value baked
-#      in below, a DNS TXT record on the domain, and the source repository -
-#      and refuse unless they agree;
+#   2. compare a release pin carried by THREE consistency channels - a value
+#      baked in below, a DNS TXT record, and the source repository - and refuse
+#      unless they agree;
 #   3. verify the real installer's bytes against that agreed pin BEFORE one
 #      line of it runs;
 #   4. hand off, passing every attestation through so the installer judges
@@ -16,10 +16,15 @@
 # TODAY THERE IS NO WINDOWS RUNTIME. packaging/release/build_release.sh is
 # x86_64-linux only, so $PublishedPlatforms below is empty for Windows and
 # this script refuses cleanly, having downloaded nothing and changed nothing.
-# It is written so the day that release lands is a one-line change to that
-# table plus a pin - not a rewrite: the pin agreement, the digest check and
-# the handoff are all here and all exercised by -SelfTest, which runs the
-# judgement in both directions without touching the network.
+# Enabling Windows requires a native package, a second-stage PowerShell
+# installer, a Windows service lifecycle, and a platform-index authority. The
+# current single-manifest pin cannot describe different platform releases.
+# Changing the table below is therefore not a sufficient release action.
+#
+# These checks run only after this file is already executing. An irm-to-iex
+# user trusts the z23.sh TLS origin for these first-stage bytes. A verified
+# bootstrap must authenticate this file against an anchor obtained outside
+# z23.sh before executing it.
 #
 # No prompt and no terminal is required: this runs under a coding agent as
 # often as under a person, and every refusal names the thing it protects,
@@ -33,8 +38,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# What we publish. Windows is absent on purpose - see the header. Adding
-# 'windows-x86_64' here is what turns this script on.
+# What we publish. Windows is absent on purpose; do not add a platform until
+# the native package, installer, service lifecycle, and platform index pass.
 $PublishedPlatforms = @()
 $LinuxPublished = 'linux-x86_64'
 
@@ -42,8 +47,9 @@ $Origin = if ($env:Z23_INSTALL_TEST_ORIGIN) { $env:Z23_INSTALL_TEST_ORIGIN } els
 $PinDnsName = if ($env:Z23_INSTALL_TEST_PIN_DNS) { $env:Z23_INSTALL_TEST_PIN_DNS } else { '_z23-pin.z23.sh' }
 $PinRepoUrl = if ($env:Z23_INSTALL_TEST_PIN_REPO_URL) { $env:Z23_INSTALL_TEST_PIN_REPO_URL } else { 'https://raw.githubusercontent.com/ZclassiC23/zclassic/main/packaging/install/RELEASE_PIN' }
 
-# Source 1 of 3: the pin baked into these bytes, rewritten by the release
-# cutter. The all-zero sentinel means NO RELEASE IS PINNED YET.
+# Channel 1 of 3: the pin baked into these bytes, rewritten by the release
+# cutter. It is not an external trust anchor for this file. The all-zero
+# sentinel means NO RELEASE IS PINNED YET.
 $PinZero = '0' * 64
 $PinBaked = "z23-pin-v1:${PinZero}:${PinZero}"
 if ($env:Z23_INSTALL_TEST_BAKED_PIN) { $PinBaked = $env:Z23_INSTALL_TEST_BAKED_PIN }
@@ -108,7 +114,7 @@ function Resolve-Pin {
         }
     }
     if ($answered.Count -lt 2) {
-        throw "release pin quorum: $($answered.Count) of 3 sources answered, two independent sources are required (unreachable: $missing)"
+        throw "release pin quorum: $($answered.Count) of 3 sources answered, two independent sources are required for pin consistency; this does not authenticate the first-stage script (unreachable: $missing)"
     }
     if ($answered.Count -lt 3) {
         Write-Note "release pin agreed by $($answered.Count) of 3 sources (unreachable: $missing)"
@@ -271,7 +277,7 @@ $platform = Get-Platform
 if ($PublishedPlatforms -notcontains $platform) {
     Write-Refusal "no Z23 runtime is published for $platform; published: $LinuxPublished"
     Write-Note "nothing was downloaded and nothing on this machine was changed."
-    Write-Note "the Linux runtime is published and installs from a Linux shell; docs/work/BOOTSTRAP_PLAN.md carries the line."
+    Write-Note "Linux packaging exists, but no public bootstrap is pinned; see docs/work/BOOTSTRAP_PLAN.md."
     exit 1
 }
 
@@ -296,6 +302,8 @@ try {
         throw "installer digest mismatch - $Origin served bytes the agreed release pin does not name"
     }
 
+    # This is a centralized convenience default. Automatic decentralized
+    # mirror discovery and failover do not exist yet.
     $source = if ($env:Z23_RELEASE_SOURCE) { $env:Z23_RELEASE_SOURCE } else { "$Origin/release/$platform" }
     $argv = @("--source=$source", "--manifest-sha256=$($pin.Manifest)")
     foreach ($a in $attestations) {

@@ -1,11 +1,13 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Z23 Blog
 
 Blog is the reference Rails-style Z23 application:
 
-Every participating node serves the blog at `/blog` on its own HTTPS and
-onion endpoints. There is no canonical mount and no privileged host: the
-path is identical everywhere, and which node you read it from is your
-choice, not the network's.
+A node with the optional blog-capable frontend enabled serves `/blog` on each
+configured HTTPS or onion route. The route is local availability, not proof
+that every node exposes a frontend or stores the requested post. There is no
+canonical host and no endpoint gains authority by serving the path.
 
 - **Model:** `BlogPost` and `BlogPublicationReceipt` use the project
   ActiveRecord lifecycle and schema migration v28. Relationships are explicit:

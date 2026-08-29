@@ -110,6 +110,41 @@ static const char *const ALLOWLIST[] = {
 };
 #define ALLOWLIST_COUNT (sizeof ALLOWLIST / sizeof ALLOWLIST[0])
 
+/* Closed legacy exemption set. The text baseline may delete a row or lower
+ * its ceiling, but it cannot mint a new exemption or raise an old one. Keeping
+ * the landing ceilings in compiled policy makes that promise enforceable. */
+struct legacy_ceiling {
+    const char *path;
+    long maximum;
+};
+static const struct legacy_ceiling LEGACY_CEILINGS[] = {
+    { "config/src/boot.c", 4001 },
+    { "config/src/boot_refold_staged.c", 1810 },
+    { "lib/codeindex/src/codeindex_merkle.c", 1776 },
+    { "lib/hotswap/src/hotswap_activate.c", 2325 },
+    { "lib/kernel/src/command_registry.c", 2403 },
+    { "lib/net/src/connman.c", 3432 },
+    { "lib/net/src/download.c", 1793 },
+    { "lib/net/src/fast_sync.c", 1688 },
+    { "lib/net/src/file_service.c", 3058 },
+    { "lib/net/src/msg_headers.c", 2370 },
+    { "lib/net/src/msgprocessor.c", 3031 },
+    { "lib/net/src/msgprocessor_snapshot.c", 1810 },
+    { "lib/net/src/net.c", 2373 },
+    { "lib/net/src/onion_directory.c", 1516 },
+    { "lib/net/src/peer_lifecycle.c", 1634 },
+    { "lib/net/src/rom_fetch.c", 1599 },
+    { "lib/platform/src/os_sandbox_linux.c", 1526 },
+    { "lib/vcs/src/package_reward.c", 1986 },
+    { "lib/vcs/src/package_swarm_node.c", 2015 },
+    { "lib/vcs/src/vcs_devloop.c", 2390 },
+    { "lib/wallet/src/wallet.c", 1560 },
+    { "lib/wallet/src/wallet_sqlite.c", 1603 },
+    { "src/main_cli_modes.c", 4275 },
+};
+#define LEGACY_CEILING_COUNT \
+    (sizeof LEGACY_CEILINGS / sizeof LEGACY_CEILINGS[0])
+
 /* Scan roots. depth 0 = unlimited; depth 1 = that directory's own files
  * only (src/ holds the binary's composition entrypoint and nothing deeper). */
 struct scan_root {
@@ -199,6 +234,14 @@ static struct baseline_row *find_row(struct policy_run *run, const char *path)
     return NULL;
 }
 
+static long legacy_ceiling_for(const char *path)
+{
+    for (size_t i = 0; i < LEGACY_CEILING_COUNT; i++)
+        if (strcmp(LEGACY_CEILINGS[i].path, path) == 0)
+            return LEGACY_CEILINGS[i].maximum;
+    return -1;
+}
+
 /* ── Repo-root anchoring ────────────────────────────────────────────────
  *
  * Every path this gate reports is repo-relative, and it must find the tree
@@ -262,6 +305,7 @@ static bool load_baseline(struct policy_run *run, const char *file)
     root_join(abs_path, sizeof abs_path, file);
     FILE *fp = fopen(abs_path, "rb");
     if (!fp) return true;
+    const bool enforce_closed_set = strcmp(file, DEFAULT_BASELINE_PATH) == 0;
 
     char line[PATH_MAX_LEN + 64];
     while (fgets(line, (int)sizeof line, fp)) {
@@ -279,6 +323,14 @@ static bool load_baseline(struct policy_run *run, const char *file)
         path_start[path_len] = '\0';
         long recorded = strtol(num, NULL, 10);
         if (recorded <= 0) continue;
+        long ceiling = legacy_ceiling_for(path_start);
+        if (enforce_closed_set && (ceiling < 0 || recorded > ceiling)) {
+            fprintf(stderr, GATE_NAME ": FATAL — baseline row is not a "
+                    "shrink-only legacy exemption: %s %ld\n",
+                    path_start, recorded);
+            run->walk_failed = true;
+            continue;
+        }
 
         if (run->row_count == run->row_cap) {
             size_t next = run->row_cap ? run->row_cap * 2 : 64;
@@ -404,32 +456,41 @@ static void walk(struct policy_run *run, const char *rel_dir, int depth,
     struct platform_directory_list files = { 0 };
     char abs_dir[PATH_MAX_LEN];
     root_join(abs_dir, sizeof abs_dir, rel_dir);
-    if (platform_directory_list_regular_sorted(abs_dir, &files)) {
-        for (size_t i = 0; i < files.count; i++) {
-            const char *name = files.entries[i].name;
-            if (!has_c_suffix(name)) continue;
-            if (production && is_transient_fixture(name)) continue;
-            char rel[PATH_MAX_LEN];
-            if (snprintf(rel, sizeof rel, "%s/%s", rel_dir, name) >=
-                (int)sizeof rel)
-                continue;
-            if (is_allowlisted(rel)) { run->allowlisted++; continue; }
-            long loc = count_lines(rel);
-            if (loc < 0) {
-                fprintf(stderr, GATE_NAME ": FATAL — cannot read %s\n", rel);
-                run->walk_failed = true;
-                continue;
-            }
-            run->scanned++;
-            classify(run, rel, loc);
-        }
-        platform_directory_list_free(&files);
+    if (!platform_directory_list_regular_sorted(abs_dir, &files)) {
+        fprintf(stderr, GATE_NAME ": FATAL — cannot list scan root %s\n",
+                rel_dir);
+        run->walk_failed = true;
+        return;
     }
+    for (size_t i = 0; i < files.count; i++) {
+        const char *name = files.entries[i].name;
+        if (!has_c_suffix(name)) continue;
+        if (production && is_transient_fixture(name)) continue;
+        char rel[PATH_MAX_LEN];
+        if (snprintf(rel, sizeof rel, "%s/%s", rel_dir, name) >=
+            (int)sizeof rel)
+            continue;
+        if (is_allowlisted(rel)) { run->allowlisted++; continue; }
+        long loc = count_lines(rel);
+        if (loc < 0) {
+            fprintf(stderr, GATE_NAME ": FATAL — cannot read %s\n", rel);
+            run->walk_failed = true;
+            continue;
+        }
+        run->scanned++;
+        classify(run, rel, loc);
+    }
+    platform_directory_list_free(&files);
 
     if (max_depth > 0 && depth + 1 >= max_depth) return;
 
     struct platform_directory_list dirs = { 0 };
-    if (!platform_directory_list_real_sorted(abs_dir, &dirs)) return;
+    if (!platform_directory_list_real_sorted(abs_dir, &dirs)) {
+        fprintf(stderr, GATE_NAME ": FATAL — cannot descend scan root %s\n",
+                rel_dir);
+        run->walk_failed = true;
+        return;
+    }
     for (size_t i = 0; i < dirs.count; i++) {
         const char *name = dirs.entries[i].name;
         if (skip_directory(name, production)) continue;
