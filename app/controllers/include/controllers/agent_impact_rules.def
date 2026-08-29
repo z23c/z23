@@ -1286,7 +1286,7 @@ AGENT_IMPACT_RULE("config/src/boot_network_monitor.c|config/include/config/boot_
  * fail-safe-architecture, UX_PLAN, WIRE_COMPILE_CACHE), which meant a lane
  * that retired any OTHER page could take a green targeted run and a red
  * `make lint`. The whole directory maps to the lint group for that reason. */
-AGENT_IMPACT_RULE("docs/work/README.md|docs/work/*.md|docs/work/*/*.md", "make_lint_gates")
+AGENT_IMPACT_RULE("docs/work/README.md|docs/work/*.md|docs/work/*/*.md|docs/experiments/*.md", "make_lint_gates")
 /* Lane: stranger-join docs (docs/JOIN.md, GETTING_STARTED, README, commons
  * quickstart). These four pages are the whole path a person with one fresh
  * clone and no contacts follows to get a node onto the network, so a change
