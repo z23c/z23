@@ -210,6 +210,7 @@ int test_recovery_policy(void);
 int test_oracle_policy(void);
 int test_quorum_oracle(void);
 int test_db_txn(void);
+int test_model_fields(void);
 int test_sync_service(void);
 int test_node_db_catchup_service(void);
 int test_catchup_lifecycle_service(void);

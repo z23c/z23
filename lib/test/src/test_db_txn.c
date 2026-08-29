@@ -12,6 +12,8 @@
 #include "test/test_core.h"
 #include "models/db_txn.h"
 #include "models/database.h"
+#include "models/activerecord.h"
+#include "models/ar_after_commit.h"
 #include "event/event.h"
 
 #include <pthread.h>
@@ -756,6 +758,297 @@ static int t_poisoned_commit_recovery(void)
     return failures;
 }
 
+
+/* ── after_commit: a hook that must not outrun durability ────────
+ *
+ * after_save fires when the STATEMENT steps. Inside a transaction that is
+ * too early for anything an external observer can see, because a later
+ * ROLLBACK erases the row the observer was already told about. These tests
+ * drive a small fixture model through the real AR_ADHOC_SAVE lifecycle
+ * against a real in-memory node_db, so the queue, the transaction boundary
+ * hooks in node_db_begin/commit/rollback and AR_FINISH_SAVE are all under
+ * test together rather than mocked.
+ *
+ * The rollback case is the whole point of the feature and is asserted first
+ * among them: hooks queued and then rolled back must NOT fire. */
+
+struct ac_row {
+    int64_t id;
+    int64_t value;
+};
+
+DEFINE_MODEL_CALLBACKS(ac_fixture)
+
+static int      g_ac_commit_fired;
+static int      g_ac_save_fired;
+static int64_t  g_ac_commit_values[8];
+
+static void ac_after_commit_hook(void *record, void *ctx)
+{
+    (void)ctx;
+    const struct ac_row *r = record;
+    if (g_ac_commit_fired < (int)(sizeof(g_ac_commit_values) /
+                                  sizeof(g_ac_commit_values[0])))
+        g_ac_commit_values[g_ac_commit_fired] = r->value;
+    g_ac_commit_fired++;
+}
+
+static void ac_after_save_hook(void *record, void *ctx)
+{
+    (void)record; (void)ctx;
+    g_ac_save_fired++;
+}
+
+static bool ac_fixture_validate(const struct ac_row *r, struct ar_errors *e)
+{
+    ar_errors_clear(e);
+    validates_custom(e, r != NULL, "row", "is null");
+    return !ar_errors_any(e);
+}
+
+static bool ac_fixture_save(struct node_db *ndb, const struct ac_row *r)
+{
+    sqlite3_stmt *s = NULL;
+    struct ar_callbacks *cbs = db_ac_fixture_callbacks();
+    AR_ADHOC_SAVE(ndb, s,
+        "INSERT INTO ac_fixture(id,value) VALUES(?,?)",
+        cbs, "ac_fixture", r, ac_fixture_validate,
+        AR_BIND_INT(s, 1, r->id);
+        AR_BIND_INT(s, 2, r->value));
+}
+
+/* Register once — ar_callbacks accumulates, and these tests run in one
+ * process. Counters, not registrations, are what each test resets. */
+static void ac_register_hooks_once(void)
+{
+    static bool done = false;
+    if (done) return;
+    struct ar_callbacks *cbs = db_ac_fixture_callbacks();
+    ar_register_after_save(cbs, ac_after_save_hook);
+    ar_register_after_commit(cbs, ac_after_commit_hook,
+                             sizeof(struct ac_row));
+    done = true;
+}
+
+static void ac_reset_counters(void)
+{
+    g_ac_commit_fired = 0;
+    g_ac_save_fired = 0;
+    memset(g_ac_commit_values, 0, sizeof(g_ac_commit_values));
+    ar_after_commit_reset();
+}
+
+/* Open an in-memory node_db with the fixture table present. */
+static bool ac_open(struct node_db *ndb)
+{
+    memset(ndb, 0, sizeof(*ndb));
+    if (!node_db_open(ndb, ":memory:")) return false;
+    if (!node_db_exec(ndb, "CREATE TABLE IF NOT EXISTS ac_fixture("
+                           "id INTEGER PRIMARY KEY, value INTEGER)")) {
+        node_db_close(ndb);
+        return false;
+    }
+    ac_register_hooks_once();
+    ac_reset_counters();
+    return true;
+}
+
+static int ac_row_count(struct node_db *ndb)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "SELECT COUNT(*) FROM ac_fixture", -1, &s,
+                           NULL) != SQLITE_OK)
+        return -1;
+    int n = sqlite3_step(s) == SQLITE_ROW ? (int)sqlite3_column_int64(s, 0) : -1;
+    sqlite3_finalize(s);
+    return n;
+}
+
+/* ── THE test: queued and rolled back must NOT fire ──────────── */
+
+static int t_after_commit_not_fired_on_rollback(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    if (!ac_open(&ndb)) { printf("ac: open failed\n"); return 1; }
+
+    struct db_txn *txn = db_txn_begin(&ndb, "test.after_commit.rollback");
+    struct ac_row a = { .id = 1, .value = 111 };
+    struct ac_row b = { .id = 2, .value = 222 };
+    bool saved = txn && ac_fixture_save(&ndb, &a) && ac_fixture_save(&ndb, &b);
+
+    DT_RUN("ac: after_save fired at statement time, after_commit did not",
+           saved && g_ac_save_fired == 2 && g_ac_commit_fired == 0 &&
+           ar_after_commit_pending() == 2);
+
+    db_txn_rollback(txn);
+    db_txn_auto_rollback(&txn);
+
+    DT_RUN("ac: ROLLBACK discards the queue — no hook fires",
+           g_ac_commit_fired == 0 && ar_after_commit_pending() == 0);
+    DT_RUN("ac: and the rows the hooks would have announced are gone",
+           ac_row_count(&ndb) == 0);
+
+    /* A rolled-back queue must not resurface on the NEXT commit. */
+    struct db_txn *txn2 = db_txn_begin(&ndb, "test.after_commit.rollback.next");
+    struct ac_row c = { .id = 3, .value = 333 };
+    bool saved2 = txn2 && ac_fixture_save(&ndb, &c) && db_txn_commit(txn2);
+    db_txn_auto_rollback(&txn2);
+    DT_RUN("ac: the next commit fires only its own hook, not the discarded one",
+           saved2 && g_ac_commit_fired == 1 && g_ac_commit_values[0] == 333);
+
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* ── Commit path: fires once each, in registration order ─────── */
+
+static int t_after_commit_fires_on_commit(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    if (!ac_open(&ndb)) { printf("ac: open failed\n"); return 1; }
+
+    struct db_txn *txn = db_txn_begin(&ndb, "test.after_commit.commit");
+    struct ac_row a = { .id = 1, .value = 10 };
+    struct ac_row b = { .id = 2, .value = 20 };
+    struct ac_row c = { .id = 3, .value = 30 };
+    bool saved = txn && ac_fixture_save(&ndb, &a) &&
+                 ac_fixture_save(&ndb, &b) && ac_fixture_save(&ndb, &c);
+
+    DT_RUN("ac: nothing fires while the transaction is open",
+           saved && g_ac_commit_fired == 0 && ar_after_commit_pending() == 3);
+
+    bool committed = saved && db_txn_commit(txn);
+    db_txn_auto_rollback(&txn);
+
+    DT_RUN("ac: the outermost commit fires each hook exactly once, in order",
+           committed && g_ac_commit_fired == 3 &&
+           g_ac_commit_values[0] == 10 &&
+           g_ac_commit_values[1] == 20 &&
+           g_ac_commit_values[2] == 30 &&
+           ar_after_commit_pending() == 0);
+
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* ── A queued hook sees the record as it was saved ───────────── */
+
+static int t_after_commit_sees_a_copy(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    if (!ac_open(&ndb)) { printf("ac: open failed\n"); return 1; }
+
+    struct db_txn *txn = db_txn_begin(&ndb, "test.after_commit.copy");
+    struct ac_row a = { .id = 1, .value = 4242 };
+    bool saved = txn && ac_fixture_save(&ndb, &a);
+    /* The caller's record is routinely a stack local that is gone, or reused,
+     * by commit time. Mutating it here stands in for that. */
+    a.value = -1;
+    bool committed = saved && db_txn_commit(txn);
+    db_txn_auto_rollback(&txn);
+
+    DT_RUN("ac: the hook receives the record as saved, not as later mutated",
+           committed && g_ac_commit_fired == 1 &&
+           g_ac_commit_values[0] == 4242);
+
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* ── Outside a transaction the hook fires immediately ────────── */
+
+static int t_after_commit_immediate_without_transaction(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    if (!ac_open(&ndb)) { printf("ac: open failed\n"); return 1; }
+
+    struct ac_row a = { .id = 1, .value = 77 };
+    bool saved = ac_fixture_save(&ndb, &a);
+
+    DT_RUN("ac: with no transaction open the hook fires immediately",
+           saved && g_ac_commit_fired == 1 && g_ac_commit_values[0] == 77 &&
+           ar_after_commit_pending() == 0 && ar_after_commit_depth() == 0);
+
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* ── Only the OUTERMOST commit drains ────────────────────────── */
+
+static int t_after_commit_only_outermost_drains(void)
+{
+    int failures = 0;
+    ac_reset_counters();
+
+    /* Drive the boundary API directly: db_txn_begin refuses to nest and
+     * SQLite refuses a nested BEGIN, so this is the only way to assert the
+     * nesting rule itself rather than the wrapper that currently prevents
+     * nesting. */
+    struct ac_row a = { .id = 1, .value = 9 };
+    ar_after_commit_note_begin();
+    ar_after_commit_note_begin();
+    bool queued = ar_after_commit_enqueue(ac_after_commit_hook, NULL, &a,
+                                          sizeof(a));
+
+    ar_after_commit_note_commit(true);
+    DT_RUN("ac: an inner commit does not fire early",
+           queued && ar_after_commit_depth() == 1 &&
+           g_ac_commit_fired == 0 && ar_after_commit_pending() == 1);
+
+    ar_after_commit_note_commit(true);
+    DT_RUN("ac: the outermost commit drains",
+           ar_after_commit_depth() == 0 && g_ac_commit_fired == 1 &&
+           ar_after_commit_pending() == 0);
+
+    /* A failed COMMIT leaves the transaction open, so the queue must survive
+     * for the ROLLBACK that has to follow. */
+    ac_reset_counters();
+    ar_after_commit_note_begin();
+    (void)ar_after_commit_enqueue(ac_after_commit_hook, NULL, &a, sizeof(a));
+    ar_after_commit_note_commit(false);
+    DT_RUN("ac: a FAILED commit neither fires nor discards",
+           g_ac_commit_fired == 0 && ar_after_commit_pending() == 1 &&
+           ar_after_commit_depth() == 1);
+    ar_after_commit_note_rollback();
+    DT_RUN("ac: the rollback that follows discards it",
+           g_ac_commit_fired == 0 && ar_after_commit_pending() == 0 &&
+           ar_after_commit_depth() == 0);
+
+    ac_reset_counters();
+    return failures;
+}
+
+/* ── Fail closed rather than skip an observer ────────────────── */
+
+static int t_after_commit_refuses_without_a_record_size(void)
+{
+    int failures = 0;
+    ac_reset_counters();
+    struct ac_row a = { .id = 1, .value = 5 };
+
+    ar_after_commit_note_begin();
+    bool refused = !ar_after_commit_enqueue(ac_after_commit_hook, NULL, &a, 0);
+    DT_RUN("ac: a hook with no record size is REFUSED, never silently skipped",
+           refused && ar_after_commit_pending() == 0 &&
+           g_ac_commit_fired == 0);
+    ar_after_commit_note_rollback();
+
+    /* Registration itself refuses a zero size, so the refusal above is a
+     * belt-and-braces backstop rather than the only guard. */
+    struct ar_callbacks probe;
+    ar_callbacks_init(&probe);
+    DT_RUN("ac: registering an after_commit hook without a size is refused",
+           !ar_register_after_commit(&probe, ac_after_commit_hook, 0) &&
+           !ar_register_after_commit(&probe, NULL, sizeof(struct ac_row)) &&
+           probe.n_after_commit == 0);
+
+    ac_reset_counters();
+    return failures;
+}
 /* ── Aggregator ─────────────────────────────────────────────── */
 
 int test_db_txn(void)
@@ -781,6 +1074,12 @@ int test_db_txn(void)
     failures += t_failed_commit_rolls_back();
     failures += t_busy_snapshot_rollback_rebegin();
     failures += t_poisoned_commit_recovery();
+    failures += t_after_commit_not_fired_on_rollback();
+    failures += t_after_commit_fires_on_commit();
+    failures += t_after_commit_sees_a_copy();
+    failures += t_after_commit_immediate_without_transaction();
+    failures += t_after_commit_only_outermost_drains();
+    failures += t_after_commit_refuses_without_a_record_size();
 
     event_clear_observers(EV_DB_TXN_BEGIN);
     event_clear_observers(EV_DB_TXN_COMMIT);

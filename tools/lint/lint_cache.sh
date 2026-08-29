@@ -104,6 +104,7 @@ check-framework-filename-suffix check-no-raw-clock-outside-platform
 check-sysinit-ordering check-sandbox-wired check-no-shellouts
 check-no-writer-below-sealed-frontier check-peer-floor-single-source
 check-proc-self-shim check-no-raw-sqlite-in-controllers check-supervisor-domain
+check-model-column-drift
 check-thread-supervision check-file-purpose check-group-purpose
 check-no-orphan-placement check-file-size-ceiling check-operator-needed-sink
 check-condition-cooldown check-doc-accuracy check-doc-counts

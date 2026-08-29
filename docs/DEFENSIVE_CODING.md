@@ -197,6 +197,27 @@ site). The same gate ratchets that the plaintext model saves never return.
 | mempool_entry | Validate fee + size envelope | (none) |
 | tx_index | Validate txid + block height | (none) |
 
+### after_commit — for anything an observer can see
+
+`after_save` fires when the **statement** steps, not when the **transaction**
+commits. Saves do happen inside transactions
+(`app/services/src/blog_publication.c` wraps `db_blog_post_save` in
+`db_txn_begin`/`db_txn_commit`) and some `after_save` hooks have effects the
+database cannot take back — `wallet_tx_after_save` emits `EV_WALLET_TX_SAVED`
+and pushes a wallet projection. Put those together and an external observer
+can be told about a row a later `ROLLBACK` erases.
+
+`ar_register_after_commit(cbs, fn, sizeof(*record))`
+(`app/models/include/models/ar_after_commit.h`) queues a hook instead: it
+fires once, in registration order, after the **outermost** transaction
+commits, and not at all if the transaction rolls back. Outside a transaction
+it fires immediately after the statement succeeds. A queued hook is handed a
+copy of the record, which is why the size is mandatory; a save whose hook can
+neither fire nor be queued **returns false** rather than skipping an observer.
+`after_save` is unchanged — a model with no `after_commit` hook behaves
+exactly as before. Use `after_commit`, not `after_save`, for an emitted event,
+a pushed projection, or any other notification that leaves the process.
+
 ---
 
 ## 7. CI gates — the final enforcer
@@ -735,6 +756,21 @@ assert green).
   move reads behind projections/models, writes through the AR lifecycle.
   Override `// raw-controller-sql-ok`.
 
+- **`check-model-column-drift`** (RATCHET) —
+  `tools/lint/check_model_column_drift.sh`. A model in `app/models/src/` must
+  not hand-maintain the column indices of a multi-column row read: two or more
+  distinct literal indices in `AR_READ_*` / `AR_COL_*` is the shape where
+  inserting a column in the middle of the SQL column list silently shifts
+  every index below it, with no compiler error and no test failure unless a
+  test covers that exact field. Fix: declare the fields once in
+  `app/models/include/models/def/<model>_fields.def` and derive the column
+  string, read index and bind position through
+  `app/models/include/models/model_fields.h` (worked examples: `blog_post.c`,
+  `market_download.c`, `tx_index.c`). Baseline
+  `tools/lint/model_column_drift_baseline.txt` (may only shrink; a baselined
+  file that stops violating must lose its line). Per-line override
+  `// model-columns-ok: <reason>`.
+
 - **Gate #21: `check-supervisor-domain`** (FAIL) —
   `tools/lint/check_supervisor_domain.sh`. Production `supervisor_register(`
   calls under `app/`, `config/`, `lib/` must use
@@ -1011,6 +1047,7 @@ add/remove a gate.
 - `check-sysinit-ordering`
 - `check-sandbox-wired`
 - `check-no-raw-sqlite-in-controllers`
+- `check-model-column-drift`
 - `check-no-shellouts`
 - `check-no-writer-below-sealed-frontier`
 - `check-peer-floor-single-source`

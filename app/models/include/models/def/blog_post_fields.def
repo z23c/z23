@@ -1,0 +1,70 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * blog_post_fields.def — the persisted columns of the BlogPost family,
+ * declared ONCE. See models/model_fields.h for what is derived from these
+ * lists and why nothing here may be spelled out a second time.
+ *
+ * Order is meaning: it is the SQL column order, the SELECT read index, and
+ * the INSERT bind position, all at the same time. Insert a field in the
+ * middle and all three move together. Nothing else needs editing.
+ */
+
+/* blog_posts — the immutable, wallet-signed publication event.
+ * `signature` is a bounded inline blob whose declared length is stored in its
+ * own column; ZCL_MODEL_VARBLOB_LEN cross-checks the two and zeroes both when
+ * they disagree, so a truncated row can never present a partial signature. */
+#define BLOG_POST_FIELDS \
+    ZCL_MODEL_BLOB       (event_id,          event_id,      32),  \
+    ZCL_MODEL_TEXT       (blog_name,         blog_name),          \
+    ZCL_MODEL_TEXT       (slug,              slug),               \
+    ZCL_MODEL_TEXT       (title,             title),              \
+    ZCL_MODEL_TEXT       (body,              body),               \
+    ZCL_MODEL_BLOB       (author_key_id,     author_key_id, 20),  \
+    ZCL_MODEL_BLOB       (author_pubkey,     author_pubkey, 33),  \
+    ZCL_MODEL_TEXT       (author_address,    author_address),     \
+    ZCL_MODEL_BLOB       (chain_id,          chain_id,      32),  \
+    ZCL_MODEL_U64        (sequence,          sequence),           \
+    ZCL_MODEL_BLOB       (previous_event_id, previous_event_id, 32), \
+    ZCL_MODEL_I64        (event_created_at,  event_created_at),   \
+    ZCL_MODEL_VARBLOB    (signature,         signature, signature_len), \
+    ZCL_MODEL_VARBLOB_LEN(signature_len,     signature, signature_len), \
+    ZCL_MODEL_I64        (stored_at,         stored_at)
+
+/* Compact index projection over the same table: no 16 KiB body or signature
+ * payload per row. A projection is its own list, so its read indices are
+ * derived from the columns it actually selects. */
+#define BLOG_POST_SUMMARY_FIELDS \
+    ZCL_MODEL_BLOB(event_id,         event_id, 32), \
+    ZCL_MODEL_TEXT(blog_name,        blog_name),    \
+    ZCL_MODEL_TEXT(slug,             slug),         \
+    ZCL_MODEL_TEXT(title,            title),        \
+    ZCL_MODEL_TEXT(author_address,   author_address), \
+    ZCL_MODEL_U64 (sequence,         sequence),     \
+    ZCL_MODEL_I64 (event_created_at, event_created_at)
+
+/* Read-only JOIN projection over op_returns -> transactions -> connected
+ * blocks. Its column names are table-qualified and two of its members are
+ * NULL-presence flags, so the row body stays hand-written; only the column
+ * list and the column indices are derived. That is enough to remove the
+ * drift — the SELECT and the indices now come from one place. Index names
+ * key on the MEMBER, because a qualified SQL name is not an identifier. */
+#define BLOG_CHAIN_ANCHOR_FIELDS \
+    ZCL_MODEL_BLOB(o.txid,         txid, 32),                 \
+    ZCL_MODEL_I64 (o.block_height, op_return_height),         \
+    ZCL_MODEL_BLOB(t.block_hash,   transaction_block_hash, 32), \
+    ZCL_MODEL_I64 (t.block_height, transaction_block_height), \
+    ZCL_MODEL_BLOB(b.hash,         canonical_block_hash, 32)
+
+/* blog_publication_receipts — a reorg-aware observation that an exact ZBLG
+ * OP_RETURN anchor appeared in the node's projections. `block_hash` is stored
+ * NULL while unresolved, which is why it is the nullable-blob kind. */
+#define BLOG_PUBLICATION_RECEIPT_FIELDS \
+    ZCL_MODEL_BLOB         (txid,          txid,          32), \
+    ZCL_MODEL_BLOB         (event_id,      event_id,      32), \
+    ZCL_MODEL_TEXT         (blog_name,     blog_name),         \
+    ZCL_MODEL_BLOB         (author_key_id, author_key_id, 20), \
+    ZCL_MODEL_BLOB         (znam_reg_txid, znam_reg_txid, 32), \
+    ZCL_MODEL_BLOB_NULLABLE(block_hash,    block_hash,    32), \
+    ZCL_MODEL_I64          (block_height,  block_height),      \
+    ZCL_MODEL_ENUM         (status,        status, enum blog_publication_status), \
+    ZCL_MODEL_I64          (observed_at,   observed_at)
