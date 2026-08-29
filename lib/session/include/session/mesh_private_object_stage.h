@@ -4,7 +4,7 @@
 #ifndef ZCL_SESSION_MESH_PRIVATE_OBJECT_STAGE_H
 #define ZCL_SESSION_MESH_PRIVATE_OBJECT_STAGE_H
 
-#include "session/mesh_private_object_proto.h"
+#include "session/mesh_private_object_frame.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -24,6 +24,7 @@ enum mesh_private_object_stage_error {
     MESH_PRIVATE_OBJECT_STAGE_AUTH,
     MESH_PRIVATE_OBJECT_STAGE_INCOMPLETE,
     MESH_PRIVATE_OBJECT_STAGE_ROOT,
+    MESH_PRIVATE_OBJECT_STAGE_CANCELLED,
 };
 
 struct mesh_private_object_stage;
@@ -45,6 +46,16 @@ void mesh_private_object_stage_close(struct mesh_private_object_stage *stage);
 enum mesh_private_object_stage_error mesh_private_object_stage_put_v1(
     struct mesh_private_object_stage *stage, uint32_t chunk_index,
     const uint8_t *sealed, size_t sealed_len);
+
+/* Cancellation is a monotonic terminal record appended to the durable
+ * journal. The first successful call flushes the exact canonical CANCEL
+ * frame before returning; an exact replay is idempotent. */
+enum mesh_private_object_stage_error mesh_private_object_stage_cancel_v1(
+    struct mesh_private_object_stage *stage,
+    const struct mesh_private_object_cancel_v1 *cancel);
+bool mesh_private_object_stage_cancelled_v1(
+    const struct mesh_private_object_stage *stage,
+    struct mesh_private_object_cancel_v1 *cancel_out);
 
 bool mesh_private_object_stage_has_v1(
     const struct mesh_private_object_stage *stage, uint32_t chunk_index);

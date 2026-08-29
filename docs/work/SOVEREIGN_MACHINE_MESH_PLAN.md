@@ -123,7 +123,7 @@ transport, and independent-host route receipts remain acceptance work.
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
 | Fleet view | Implemented locally: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget); rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, fixed replay/cadence bounds protect both ends, and a supervised, sync-subordinate scheduler refreshes paired-machine status automatically (bounded in-flight, cooldown/backoff, admitted only at chain tip with clear disk, memory, and DB). A current signed direct endpoint can trigger a bounded Noise-only dial, but grants no authority and carries no private frame before identity proof. Every verified receipt persists through the one serialized db_service writer; offline machines stay listed | Independent-host direct-route receipts; multiple direct candidates and onion failover |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
-| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, and restart resume | Private dispatcher and queue, atomic no-clobber plaintext publication, cancellation wiring, signed receipts, and independent-host acceptance |
+| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, verifies the complete ciphertext root, and persists one terminal canonical cancellation that survives reconnect without mutating grant authority. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, restart resume, and durable cancellation | Private dispatcher and queue, atomic no-clobber plaintext publication, signed completion/cancellation receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
@@ -474,9 +474,13 @@ The phases below are delivered in this dependency order:
    implemented; record independent-host native service and signed status
    receipts, then add bounded multiple-direct and onion route selection without
    changing authority when the path changes;
-8. complete the two-sided capability plan/commit, renewal, cancellation, and
-   sticky-revocation lifecycle for the next typed operation;
-9. add the encrypted private-object envelope and resumable transfer before any
+8. in progress: the signed bounded capability lifecycle codec and sticky local
+   grant revocation exist; add target-side plan/commit, renewal, remote
+   cancellation/revocation acknowledgement, and two-host agreement for the
+   next typed operation;
+9. in progress: the encrypted private-object envelope, resumable ciphertext
+   receiver, and durable terminal cancellation exist; add the dispatcher,
+   atomic no-clobber plaintext publication, and signed receipts before any
    remote execution surface;
 10. bind existing immutable build/test actions to paired capabilities;
 11. add local-service tunnels and the separately granted terminal worker; and
@@ -972,6 +976,19 @@ peers, never production wallet state.
   cross-linked. Six affected native groups passed with zero failures and zero
   skips. Native Windows node operation remains unclaimed until a
   retained-directory SQLite VFS and native-host acceptance exist.
+- 2026-08-29T19:17:40-04:00 / 2026-08-29T23:17:40Z: a signed,
+  allocation-free capability lifecycle codec added canonical PROPOSAL, COMMIT,
+  GRANT, REFUSAL, RENEW, CANCEL, and ACK frames with exact lengths, closed
+  operation/result vocabularies, bounded resource fields, mandatory ambient
+  authority denials, per-kind SHA3 domains, and Ed25519 evidence. Private
+  object cancellation now appends and flushes the existing canonical CANCEL
+  frame to the confined stage journal before terminal success. Reopen accepts
+  only active or exactly-cancelled lengths; malformed, torn, oversized,
+  wrong-kind, zero-id, and wrong-transfer tails refuse. A fresh re-signed offer
+  on a different Noise transcript cannot resurrect the stable cancelled
+  transfer. The three focused groups ran cold with zero failures and skips;
+  native GCC and MinGW strict syntax checks passed. Target-side capability
+  plan/commit and network dispatch remain open.
 
 ## Completion rule
 

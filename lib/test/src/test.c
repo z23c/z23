@@ -1243,6 +1243,8 @@ int main(int argc, char **argv)
       failures += test_mesh_route(); }
     { extern int test_mesh_capability_grant(void);
       failures += test_mesh_capability_grant(); }
+    { extern int test_mesh_capability_proto(void);
+      failures += test_mesh_capability_proto(); }
     { extern int test_mesh_pairing_controller(void);
       failures += test_mesh_pairing_controller(); }
     { extern int test_mesh_status_proto(void);
