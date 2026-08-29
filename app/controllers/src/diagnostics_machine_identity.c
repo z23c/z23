@@ -4,10 +4,13 @@
 #include "controllers/diagnostics_internal.h"
 
 #include "config/boot_zcode_dht.h"
+#include "config/runtime.h"
 #include "hotswap/hotswap.h"
 #include "json/json.h"
+#include "models/mesh_pairing.h"
 #include "platform/os_sandbox.h"
 #include "platform/os_proc.h"
+#include "platform/time_compat.h"
 #include "services/binary_staleness_service.h"
 #include "util/clientversion.h"
 
@@ -177,6 +180,29 @@ static void push_runtime_capabilities(struct json_value *out)
     json_free(&hotswap);
 }
 
+static bool push_pairing(struct json_value *out, bool identity_ready)
+{
+    struct db_mesh_pairing_counts counts = {0};
+    struct node_db *ndb = app_runtime_node_db();
+    int64_t now = (int64_t)platform_time_wall_unix();
+    bool observed = app_runtime_node_db_handle_open(ndb) && now > 0 &&
+                    db_mesh_pairing_count_states(ndb, now, &counts);
+    struct json_value pairing = {0};
+    json_set_object(&pairing);
+    json_push_kv_bool(&pairing, "identity_prerequisites_ready", identity_ready);
+    json_push_kv_bool(&pairing, "local_authority_implemented", true);
+    json_push_kv_bool(&pairing, "records_observed", observed);
+    json_push_kv_int(&pairing, "total", observed ? counts.total : -1);
+    json_push_kv_int(&pairing, "active", observed ? counts.active : -1);
+    json_push_kv_int(&pairing, "expired", observed ? counts.expired : -1);
+    json_push_kv_int(&pairing, "revoked", observed ? counts.revoked : -1);
+    json_push_kv_bool(&pairing, "remote_status_protocol_implemented", false);
+    json_push_kv_bool(&pairing, "private_mesh_ready", false);
+    json_push_kv(out, "pairing", &pairing);
+    json_free(&pairing);
+    return observed;
+}
+
 bool machine_identity_dump_state_json(struct json_value *out, const char *key)
 {
     if (!out)
@@ -197,13 +223,7 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
 
     bool identity_ready = binary_ready && v2_ready && noise_identity_ready &&
                           dht_ready;
-    struct json_value pairing = {0};
-    json_set_object(&pairing);
-    json_push_kv_bool(&pairing, "identity_prerequisites_ready", identity_ready);
-    json_push_kv_bool(&pairing, "implemented", false);
-    json_push_kv_bool(&pairing, "private_mesh_ready", false);
-    json_push_kv(out, "pairing", &pairing);
-    json_free(&pairing);
+    bool pairing_store_ready = push_pairing(out, identity_ready);
 
     struct json_value blockers = {0};
     json_set_array(&blockers);
@@ -215,10 +235,15 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
         push_string_item(&blockers, "NOISE_IDENTITY_UNAVAILABLE");
     if (!dht_ready)
         push_string_item(&blockers, "AUTHENTICATED_DHT_INACTIVE");
-    push_string_item(&blockers, "PAIRING_NOT_IMPLEMENTED");
+    if (!pairing_store_ready)
+        push_string_item(&blockers, "PAIRING_STORE_UNAVAILABLE");
+    push_string_item(&blockers, "REMOTE_STATUS_PROTOCOL_UNAVAILABLE");
     json_push_kv(out, "blockers", &blockers);
     json_free(&blockers);
-    json_push_kv_str(out, "next_action",
-                     "enable v2 and authenticated DHT identity, then implement explicit two-sided pairing");
+    json_push_kv_str(
+        out, "next_action",
+        identity_ready
+            ? "complete owner-confirmed pairing, then add the paired status request and receipt"
+            : "enable v2 and authenticated DHT identity before pairing");
     return true;
 }

@@ -105,6 +105,15 @@ int test_mesh_pairing(void)
                   MESH_PAIRING_OK);
         ASSERT(mesh_pairing_allows(&row, MESH_PAIRING_CAP_STATUS_READ, 2500));
         ASSERT(!mesh_pairing_allows(&row, MESH_PAIRING_CAP_STATUS_READ, 3000));
+        struct db_mesh_pairing_counts counts;
+        ASSERT(db_mesh_pairing_count_states(&ndb, 2500, &counts));
+        ASSERT_EQ(counts.total, 1);
+        ASSERT_EQ(counts.active, 1);
+        ASSERT_EQ(counts.expired, 0);
+        ASSERT_EQ(counts.revoked, 0);
+        ASSERT(db_mesh_pairing_count_states(&ndb, 3000, &counts));
+        ASSERT_EQ(counts.active, 0);
+        ASSERT_EQ(counts.expired, 1);
         ASSERT_EQ(mesh_pairing_service_authorize_status(
                       &ndb, row.pairing_id, &delegation,
                       delegation.noise_static_pubkey, 2500),
@@ -129,6 +138,12 @@ int test_mesh_pairing(void)
         ASSERT(db_mesh_pairing_find(&ndb, row.pairing_id, &row));
         ASSERT_EQ(row.revoked_at, 2600);
         ASSERT_EQ(row.revocation_generation, 1);
+        struct db_mesh_pairing_counts counts;
+        ASSERT(db_mesh_pairing_count_states(&ndb, 2800, &counts));
+        ASSERT_EQ(counts.total, 1);
+        ASSERT_EQ(counts.active, 0);
+        ASSERT_EQ(counts.expired, 0);
+        ASSERT_EQ(counts.revoked, 1);
         ASSERT_EQ(mesh_pairing_service_authorize_status(
                       &ndb, row.pairing_id, &delegation,
                       delegation.noise_static_pubkey, 2800),

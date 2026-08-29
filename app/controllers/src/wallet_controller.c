@@ -30,8 +30,6 @@ void rpc_wallet_set_coins_tip(struct coins_view_cache *tip)
     wallet_rpc_context_set_coins_tip(tip);
 }
 
-
-
 static bool rpc_getnewaddress(const struct json_value *params, bool help,
                                struct json_value *result)
 {
@@ -744,15 +742,12 @@ static bool rpc_keypoolrefill(const struct json_value *params, bool help,
     return true;
 }
 
-
 #if defined(_WIN32) && defined(__clang__)
-/* Keep the registration fan-out out of Clang's Windows whole-program
- * inliner.  Folding the child registrars into this coordinator produces a
- * roughly 1.6 MiB frame and trips the native PE main-thread stack probe. */
+/* Prevent Windows whole-program inlining: the child registrars otherwise
+ * produce a roughly 1.6 MiB frame and trip the native PE stack probe. */
 __attribute__((optnone))
 #elif defined(_WIN32) && defined(__GNUC__)
-__attribute__((optimize("no-inline", "no-inline-functions",
-                        "no-inline-small-functions")))
+__attribute__((optimize("no-inline", "no-inline-functions", "no-inline-small-functions")))
 #endif
 void register_wallet_rpc_commands(struct rpc_table *t)
 {

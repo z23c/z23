@@ -15,6 +15,92 @@ chooses which identities may act on each machine, which operations they may
 perform, and when that authority ends. Pairing, renewal, and revocation are
 explicit local acts.
 
+## One owner journey
+
+The finished product has one obvious progression. Names below describe the
+target command tree; only commands identified as implemented in the current
+state table are available today.
+
+```text
+inspect this machine
+    -> exchange a short-lived signed invite
+    -> compare one short fingerprint on both machines
+    -> pair with status-read authority only
+    -> see all paired machines and their honest online/offline state
+    -> grant one additional typed capability when it is first needed
+    -> transfer an exact file, run one bounded task, or open one local service
+    -> inspect its signed receipt
+    -> revoke the grant or machine without contacting a coordinator
+```
+
+The eventual command families are deliberately narrow:
+
+```text
+ops mesh identity
+ops mesh pair plan|commit|list|revoke
+ops mesh machines
+ops mesh file offer|fetch|status|cancel
+ops mesh task submit|status|cancel|result
+ops mesh tunnel open|status|renew|close
+ops mesh service plan|commit|health|rollback
+```
+
+Every mutating family uses plan/commit where the consequence survives the
+request. No command accepts a shell command, ambient environment, unrestricted
+path, wallet secret, canonical datadir, or arbitrary executable.
+
+## Architecture
+
+There is no fleet server and no privileged machine. Each node owns the same
+four boundaries:
+
+```text
+permissionless discovery hints
+        |
+        v
+Noise + active ZID authenticated session
+        |
+        v
+target-local pairing, capability, expiry, replay and revocation decision
+        |
+        +----> typed control request ----> bounded native handler
+        |
+        +----> immutable object root ----> public or private transfer lane
+                                            |
+                                            v
+                                  exact signed/refused receipt
+```
+
+Discovery is replaceable and untrusted. Session identity is cryptographic.
+Authority is local to the target. Data is content-addressed. Receipts are
+evidence, not authority. An offline machine is represented as unknown/offline,
+never deleted from an owner's view merely because a coordinator cannot see it.
+
+The control plane carries small versioned requests, capabilities, revocations,
+status capsules, and receipts. The data plane carries bounded immutable
+objects. Large file bytes, build inputs, artifacts, logs, and application
+bundles never ride inside control messages.
+
+## Current truthful state
+
+| Capability | Current state | What remains before a product claim |
+| --- | --- | --- |
+| Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
+| Pairing authority | Implemented internally: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation | Two-sided wire ceremony and owner-facing plan/commit/list/revoke commands |
+| Fleet view | Not implemented | Signed remote status request/response plus a local online/offline projection |
+| Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
+| Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
+| Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
+| Interactive access | Not implemented | Capability-gated tunnels to existing SSH, RDP, or screen-sharing services |
+| Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
+| Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
+| macOS | Native C23 development/application path exists; node support must report embedded Tor unavailable | Native node/session receipts and truthful confinement/tunnel capability probes |
+| Windows | Native UCRT64 `z23.exe` builds; WSL2 runs the Linux node | Native runtime/service acceptance and Windows confinement/tunnel capability probes |
+
+No row may be promoted from partial to implemented because another operating
+system passed, because a simulator passed, or because one maintainer-owned
+machine happened to work.
+
 ## Security boundary
 
 The mesh carries narrowly typed requests, immutable objects, and signed
@@ -218,7 +304,50 @@ relevant state and ABI invariants. A restart is the correct safe operation when
 those invariants are absent. No hot-swap class may load fetched C directly into
 the node process.
 
+### Efficient update strategy
+
+The mesh distributes content once and rebuilds only where platform identity
+requires it:
+
+1. publish one exact source/package root and dependency lock;
+2. reuse an accepted platform artifact when its source, compiler, flags, ABI,
+   sealed-core root, and local policy all match;
+3. otherwise compile once on that machine or request bounded reproduction from
+   another consenting machine of the same platform class;
+4. hot-swap only an allowlisted stateless read module after in-process probe;
+5. generation-switch an isolated service or accepted app cartridge after
+   readiness proof; and
+6. gracefully restart the node for networking, storage, wallet, consensus, or
+   ABI/state changes, retaining an exact rollback binary.
+
+This avoids unconditional rebuilds on every machine without treating a Linux
+ELF, a macOS Mach-O, and a Windows PE as interchangeable. Source identity is
+portable; native artifacts are platform- and toolchain-bound.
+
 ## Delivery phases
+
+### Critical implementation queue
+
+The phases below are delivered in this dependency order:
+
+1. correct the local identity capsule so it reports the pairing authority that
+   exists without claiming a remote protocol;
+2. expose pairing list/revoke locally, without creating a way to bypass the
+   authenticated-session acceptance service;
+3. define and fuzz the bounded status request/response wire, transcript binding,
+   nonce, expiry, and signed receipt;
+4. connect the wire only after Noise plus active ZID authentication and prove
+   revocation races fail closed;
+5. project responses into `ops mesh machines` with honest offline/unknown state;
+6. add the encrypted private-object envelope and resumable transfer before any
+   remote execution surface;
+7. bind existing immutable build/test actions to paired capabilities;
+8. add local-service tunnels; and
+9. add service-island and app-cartridge activation last.
+
+Each item lands with a local adversarial test and then an independent-host
+receipt. Work does not skip forward because a later UI can be demonstrated
+against fixtures.
 
 ### Phase 0: measure and close transport prerequisites
 
@@ -382,6 +511,14 @@ peers, never production wallet state.
   database reopen, expiry is fail-closed, and sticky revocation survives a
   second reopen without timestamp or generation drift. This is local authority
   storage only; no remote status request is wired or claimed yet.
+- 2026-08-28T19:54:30-04:00 / 2026-08-28T23:54:30Z: the live identity
+  capsule stopped describing all pairing as absent. It now reports that local
+  authority exists, exposes only redacted active/expired/revoked counts, and
+  separately names the remote status protocol as unavailable. `mesh_pairing`,
+  `syncdiag_rpc`, `models`, `db_migration_idempotent`, `make_lint_gates`, and
+  `rpc`, `command_registry_catalog`, and `native_api_contract` passed cold with
+  zero skips; `make lint-fast` passed 20/20 gates and `make lint` passed
+  158/158 gates.
 
 ## Completion rule
 

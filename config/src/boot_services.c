@@ -516,14 +516,9 @@ static void boot_register_core_liveness_and_reducer(
 }
 
 /* ── Runtime service startup (called from app_init) ────────── */
-
-bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
-                               bool *has_keys);
-
 /* Decide whether the ground-truth wallet join is useful without touching the
  * global UTXO corpus. A probe failure withholds the optional rebuild. */
-bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
-                               bool *has_keys)
+bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos, bool *has_keys)
 {
     sqlite3_stmt *stmt = NULL;
     if (!db || !has_utxos || !has_keys) {
@@ -546,17 +541,11 @@ bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos,
     sqlite3_finalize(stmt);
     return false;
 }
-
 #if defined(_WIN32) && defined(__clang__)
-/* LLVM's Windows whole-program pass otherwise folds this startup coordinator
- * and dozens of service callees into a 1.7 MiB frame, exceeding the native
- * PE main-thread stack before the first service call. Keep this one-time
- * coordinator unoptimized so each already-optimized callee retains its own
- * bounded frame. */
-__attribute__((optnone))
+    __attribute__((optnone)) /* Bound the Windows startup coordinator frame. */
 #elif defined(_WIN32) && defined(__GNUC__)
-__attribute__((optimize("no-inline", "no-inline-functions",
-                        "no-inline-small-functions")))
+    __attribute__((optimize("no-inline", "no-inline-functions",
+                            "no-inline-small-functions")))
 #endif
 bool app_init_services(struct app_context *ctx,
                         const struct chain_params *params,
