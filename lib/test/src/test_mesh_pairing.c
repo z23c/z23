@@ -6,7 +6,12 @@
 #include "test/test_core.h"
 
 #include "config/boot_mesh_pairing.h"
+#include "config/boot_mesh_status.h"
+#include "base/cleanse.h"
 #include "base/hex.h"
+#include "crypto/ed25519.h"
+#include "json/json.h"
+#include "models/mesh_machine_observation.h"
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
 #include "net/v2_identity.h"
@@ -75,6 +80,55 @@ static bool mesh_fixture(struct node_db *ndb, const char *path,
     return db_zid_identity_save(ndb, &identity);
 }
 
+static bool mesh_observation_fixture(
+    const struct db_mesh_pairing *pairing, int64_t observed_unix,
+    const char *capsule, struct db_mesh_machine_observation *out)
+{
+    if (!pairing || !capsule || !out || observed_unix <= 0)
+        return false;
+    struct mesh_status_receipt_v1 receipt = {0};
+    receipt.version = MESH_STATUS_PROTO_VERSION;
+    receipt.flags = MESH_STATUS_PROTO_FLAGS_NONE;
+    receipt.status = MESH_STATUS_RECEIPT_OK;
+    mesh_fill32(receipt.request_id, 0xa1);
+    mesh_fill32(receipt.request_root, 0xa2);
+    memcpy(receipt.network_genesis, pairing->network_genesis, 32);
+    if (!zcl_hex_decode_lower(pairing->pairing_id, receipt.pairing_id, 32))
+        return false;
+    memcpy(receipt.responder_master_pubkey, pairing->peer_master_pubkey, 32);
+    memcpy(receipt.responder_noise_static, pairing->peer_noise_pubkey, 32);
+    uint8_t online_seed[32], secret[32];
+    mesh_fill32(online_seed, 0xb1);
+    ed25519_keypair(receipt.responder_online_pubkey, secret, online_seed);
+    memory_cleanse(secret, sizeof(secret));
+    mesh_fill32(receipt.transcript_hash, 0xa3);
+    receipt.connection_generation = 1;
+    receipt.revocation_generation = 0;
+    receipt.observed_unix = (uint64_t)observed_unix;
+    receipt.expires_unix = (uint64_t)observed_unix + 30;
+    receipt.capsule_len = (uint16_t)strlen(capsule);
+    memcpy(receipt.capsule, capsule, receipt.capsule_len);
+    if (mesh_status_capsule_v1_root(receipt.capsule, receipt.capsule_len,
+                                    receipt.capsule_root) !=
+            MESH_STATUS_PROTO_OK ||
+        mesh_status_receipt_v1_sign(&receipt, online_seed) !=
+            MESH_STATUS_PROTO_OK)
+        return false;
+    memset(out, 0, sizeof(*out));
+    memcpy(out->pairing_id, pairing->pairing_id, sizeof(out->pairing_id));
+    if (mesh_status_receipt_v1_encode(
+            &receipt, out->receipt_wire, sizeof(out->receipt_wire),
+            &out->receipt_len) != MESH_STATUS_PROTO_OK ||
+        mesh_status_receipt_v1_root(&receipt, out->receipt_root) !=
+            MESH_STATUS_PROTO_OK)
+        return false;
+    out->status = receipt.status;
+    out->observed_unix = observed_unix;
+    out->expires_unix = observed_unix + 30;
+    out->received_unix = observed_unix + 1;
+    return true;
+}
+
 int test_mesh_pairing(void)
 {
     int failures = 0;
@@ -125,6 +179,89 @@ int test_mesh_pairing(void)
         struct db_mesh_pairing persisted;
         ASSERT(db_mesh_pairing_find(&ndb, row.pairing_id, &persisted));
         ASSERT_EQ(persisted.delegation_sequence, 7);
+        PASS();
+    }
+
+    TEST("mesh machine observation: exact latest receipt survives reopen") {
+        struct db_mesh_pairing pairing;
+        ASSERT_EQ(db_mesh_pairing_list(&ndb, &pairing, 1), 1);
+        struct db_mesh_machine_observation latest;
+        ASSERT(mesh_observation_fixture(&pairing, 2400, "{}", &latest));
+        ASSERT(db_mesh_machine_observation_save(&ndb, &latest));
+        /* An exact replay is idempotent. */
+        latest.received_unix++;
+        ASSERT(db_mesh_machine_observation_save(&ndb, &latest));
+
+        struct db_mesh_machine_view view;
+        ASSERT_EQ(db_mesh_machine_observation_list(&ndb, &view, 1, 2500), 1);
+        ASSERT(view.has_observation);
+        ASSERT_STR_EQ(view.pairing.pairing_id, pairing.pairing_id);
+        ASSERT_STR_EQ(view.observation.pairing_id, pairing.pairing_id);
+        ASSERT_EQ(view.observation.status, MESH_STATUS_RECEIPT_OK);
+        ASSERT_EQ(view.observation.observed_unix, 2400);
+        ASSERT_EQ(view.observation.expires_unix, 2430);
+        ASSERT_EQ(view.observation.received_unix, 2402);
+        ASSERT_EQ(view.observation.receipt_len, latest.receipt_len);
+        ASSERT(memcmp(view.observation.receipt_wire, latest.receipt_wire,
+                      latest.receipt_len) == 0);
+        ASSERT(memcmp(view.observation.receipt_root, latest.receipt_root,
+                      32) == 0);
+
+        struct json_value machines;
+        json_init(&machines);
+        boot_mesh_status_machines_test_render(&ndb, 2401, &machines);
+        ASSERT_STR_EQ(json_get_str(json_get(&machines, "schema")),
+                      "zcl.mesh.machines.v1");
+        ASSERT_EQ(json_get_int(json_get(&machines, "total")), 1);
+        ASSERT_EQ(json_get_int(json_get(&machines, "returned_fresh")), 1);
+        const struct json_value *items = json_get(&machines, "machines");
+        const struct json_value *item = json_at(items, 0);
+        ASSERT_STR_EQ(json_get_str(json_get(item, "observation_state")),
+                      "fresh");
+        ASSERT(json_get(item, "peer_master_pubkey") == NULL);
+        ASSERT(json_get(item, "peer_noise_pubkey") == NULL);
+        json_free(&machines);
+
+        /* Stale evidence remains visible and does not become "never seen". */
+        ASSERT_EQ(db_mesh_machine_observation_list(&ndb, &view, 1, 5000), 1);
+        ASSERT(view.has_observation);
+        ASSERT_EQ(view.observation.expires_unix, 2430);
+        node_db_close(&ndb);
+        ASSERT(node_db_open(&ndb, path));
+        ASSERT_EQ(db_mesh_machine_observation_list(&ndb, &view, 1, 5000), 1);
+        ASSERT(view.has_observation);
+        ASSERT_EQ(view.observation.observed_unix, 2400);
+        json_init(&machines);
+        boot_mesh_status_machines_test_render(&ndb, 5000, &machines);
+        ASSERT_EQ(json_get_int(json_get(&machines, "returned_stale")), 1);
+        items = json_get(&machines, "machines");
+        item = json_at(items, 0);
+        ASSERT_STR_EQ(json_get_str(json_get(item, "observation_state")),
+                      "stale");
+        json_free(&machines);
+        PASS();
+    }
+
+    TEST("mesh machine observation: older and same-time equivocation refuse") {
+        struct db_mesh_pairing pairing;
+        ASSERT_EQ(db_mesh_pairing_list(&ndb, &pairing, 1), 1);
+        struct db_mesh_machine_observation older;
+        ASSERT(mesh_observation_fixture(&pairing, 2300, "{}", &older));
+        ASSERT(!db_mesh_machine_observation_save(&ndb, &older));
+        struct db_mesh_machine_observation equivocation;
+        ASSERT(mesh_observation_fixture(&pairing, 2400, "{\"changed\":true}",
+                                        &equivocation));
+        ASSERT(!db_mesh_machine_observation_save(&ndb, &equivocation));
+
+        struct db_mesh_machine_observation tampered = equivocation;
+        tampered.receipt_root[0] ^= 1;
+        ASSERT(!db_mesh_machine_observation_save(&ndb, &tampered));
+        struct db_mesh_machine_view view;
+        ASSERT_EQ(db_mesh_machine_observation_list(&ndb, &view, 1, 5000), 1);
+        ASSERT(view.has_observation);
+        ASSERT_EQ(view.observation.observed_unix, 2400);
+        ASSERT(memcmp(view.observation.receipt_root, equivocation.receipt_root,
+                      32) != 0);
         PASS();
     }
 

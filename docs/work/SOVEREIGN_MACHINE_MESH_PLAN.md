@@ -90,7 +90,7 @@ bundles never ride inside control messages.
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Wire connected: pairing-bound signed status request/receipt over Noise plus a unique active ZID delegation; requester acceptance pins the responder's delegated online signing key, and fixed replay/cadence bounds protect both ends | Local online/offline projection (`ops mesh machines`), durable exact receipt evidence, and independent-host receipts |
+| Fleet view | Wire and durable local projection connected: pairing-bound signed status receipts pin the responder's unique active delegated online key; `ops mesh machines` lists bounded redacted pairings from schema-v77 exact receipt evidence as fresh, stale, or unknown without network I/O | Automatic bounded refresh scheduling and independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
@@ -352,11 +352,12 @@ The phases below are delivered in this dependency order:
    exists without claiming a remote protocol;
 2. completed: pairing list/revoke is owner-visible locally without creating a
    way to bypass the authenticated-session acceptance service;
-3. define and fuzz the bounded status request/response wire, transcript binding,
-   nonce, expiry, and signed receipt;
-4. connect the wire only after Noise plus active ZID authentication and prove
-   revocation races fail closed;
-5. project responses into `ops mesh machines` with honest offline/unknown state;
+3. completed: define and fuzz the bounded status request/response wire,
+   transcript binding, nonce, expiry, and signed receipt;
+4. completed: connect the wire only after Noise plus active ZID authentication
+   and prove revocation races fail closed;
+5. completed: project responses into `ops mesh machines` with honest fresh,
+   stale, and unknown state;
 6. add the encrypted private-object envelope and resumable transfer before any
    remote execution surface;
 7. bind existing immutable build/test actions to paired capabilities;
@@ -607,6 +608,15 @@ peers, never production wallet state.
   fingerprint decode, distinct reason→code mapping); `mesh`,
   `command_registry`, `native_api_contract`, and `rpc` groups all passed
   with zero skips, and `make lint-fast` and `make lint` both passed.
+- 2026-08-29: queue item 5 added schema-v77 latest-observation storage and
+  `ops mesh machines`. Terminal status polling persists the exact verified
+  signed receipt wire and root only after delegated identity and current Noise
+  session acceptance. The local read performs no dial, exposes fingerprints
+  rather than raw public keys, and distinguishes fresh, stale, and never-seen
+  evidence. Older or same-time equivocal receipts cannot replace the durable
+  row; exact replay is idempotent. Fixture acceptance proves restart retention,
+  stale/unknown separation, redaction, migration idempotence, and strict MinGW
+  C23 syntax. Automatic refresh and independent-host evidence remain open.
 
 ## Completion rule
 
