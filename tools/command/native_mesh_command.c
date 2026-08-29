@@ -138,6 +138,7 @@ static void mesh_status_apply_refusal(struct zcl_command_reply *reply,
     const char *code = json_get_str(json_get(body, "code"));
     const char *message = json_get_str(json_get(body, "message"));
     bool transient = code && (strcmp(code, "peer_not_connected") == 0 ||
+                              strcmp(code, "peer_identity_unavailable") == 0 ||
                               strcmp(code, "busy") == 0 ||
                               strcmp(code, "send_failed") == 0);
     zcl_command_reply_fail(

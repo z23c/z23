@@ -80,6 +80,12 @@ enum mesh_machine_state mesh_machine_derive_state(
         case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE:
             detail = "local_identity_unavailable";
             break;
+        case MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE:
+            /* The peer IS connected (a live session exists), but it has no
+             * unique active ZID delegation bound to that session — an
+             * authority gap, not a transport gap, so not UNREACHABLE. */
+            detail = "peer_identity_unavailable";
+            break;
         default:
             detail = "status_lane_unavailable";
             break;
@@ -163,6 +169,14 @@ struct mesh_machine_probe {
     enum mesh_status_receipt_status receipt_status;
     bool outstanding;
 };
+
+/* A fleet burst must fit the status lane's pending table on an empty table:
+ * upstream admission now refuses a still-full table instead of evicting the
+ * oldest live request, so a cap above PENDING_MAX would make a machines
+ * call self-congest its own probes into BUSY. The wire test pins the same
+ * relationship at run time. */
+_Static_assert(MESH_MACHINES_FLEET_MAX <= MESH_STATUS_PENDING_MAX,
+               "fleet probe burst must fit the mesh status pending table");
 
 static void mesh_machines_block(struct mesh_machines_report *out,
                                 const char *blocker)

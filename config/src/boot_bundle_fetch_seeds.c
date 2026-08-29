@@ -116,12 +116,12 @@ static bool bbf_add_connect_seed(struct rom_fetch_peer *peers, size_t *np,
      * on the same host before adding an auto-derived port. */
     char host[128];
     snprintf(host, sizeof(host), "%s", host_port);
-    char *colon = strrchr(host, ':');
-    if (colon) {
+    char *host_colon = strrchr(host, ':');
+    if (host_colon) {
         char *end = NULL;
-        long p = strtol(colon + 1, &end, 10);
+        long p = strtol(host_colon + 1, &end, 10);
         if (end && *end == '\0' && p >= 1 && p <= 65535)
-            *colon = '\0';
+            *host_colon = '\0';
     }
     if (!host[0] || strlen(host) >= sizeof(peers[0].addr))
         return false;
@@ -139,11 +139,11 @@ static bool bbf_add_connect_seed(struct rom_fetch_peer *peers, size_t *np,
         return true;
     }
 
-    colon = strrchr(host_port, ':');
-    if (!colon || !colon[1])
+    const char *port_colon = strrchr(host_port, ':');
+    if (!port_colon || !port_colon[1])
         return false;
     char *end = NULL;
-    long p = strtol(colon + 1, &end, 10);
+    long p = strtol(port_colon + 1, &end, 10);
     if (!end || *end != '\0' || p < 1 || p > 65535)
         return false;
 

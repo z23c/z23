@@ -12,13 +12,16 @@
 
 #include "config/boot_mesh_status.h"
 #include "config/boot_mesh_machines.h"
+#include "../../../config/src/boot_mesh_status_internal.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
+#include "json/json.h"
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
 #include "net/v2_identity.h"
 #include "net/v2_transport.h"
+#include "platform/private_directory.h"
 #include "services/mesh_pairing_service.h"
 #include "validation/main_constants.h"
 #include "vcs/zcode_dht_delegation.h"
@@ -141,7 +144,8 @@ static bool mesh_wire_fixture_open(struct mesh_wire_fixture *f,
     snprintf(respdir, sizeof(respdir), "%s/resp", dir);
     char error[160];
     uint8_t peer_noise_priv[32], resp_noise_priv[32];
-    bool loaded = mkdir(reqdir, 0700) == 0 && mkdir(respdir, 0700) == 0 &&
+    bool loaded = platform_private_directory_create(reqdir) &&
+                  platform_private_directory_create(respdir) &&
                   v2_identity_load_or_create(reqdir, peer_noise_priv,
                                              f->peer_noise_pub, error,
                                              sizeof(error)) &&
@@ -388,7 +392,8 @@ int test_mesh_status_wire(void)
                   MESH_STATUS_PROTO_OK);
         ASSERT(boot_mesh_status_receipt_accept(&decoded, &received,
                                                &f.ini_snap,
-                                               f.resp_master_pub));
+                                               f.resp_master_pub,
+                                               f.resp_online_pub));
 
         /* An oversize capsule is refused, never truncated mid-document. */
         uint8_t too_big[MESH_STATUS_CAPSULE_MAX + 1];
@@ -468,6 +473,13 @@ int test_mesh_status_wire(void)
         ASSERT_EQ(boot_mesh_status_decide(&f.ndb, &request, &f.res_snap, NULL,
                                           0, f.genesis, MESH_WIRE_NOW, &rg),
                   MESH_STATUS_RECEIPT_DELEGATION_INVALID);
+        struct vcs_zcode_dht_delegation ambiguous[2] = {
+            f.peer_delegation, f.peer_delegation,
+        };
+        ASSERT_EQ(boot_mesh_status_decide(
+                      &f.ndb, &request, &f.res_snap, ambiguous, 2,
+                      f.genesis, MESH_WIRE_NOW, &rg),
+                  MESH_STATUS_RECEIPT_DELEGATION_INVALID);
         /* Foreign network genesis names no local authority. */
         uint8_t foreign[32];
         mesh_fill32(foreign, 0x42);
@@ -490,13 +502,38 @@ int test_mesh_status_wire(void)
         ASSERT(mesh_wire_sign_roundtrip(&f, &request, MESH_STATUS_RECEIPT_OK,
                                         capsule, &receipt));
         ASSERT(boot_mesh_status_receipt_accept(&receipt, &request,
-                                               &f.ini_snap, f.resp_master_pub));
+                                               &f.ini_snap, f.resp_master_pub,
+                                               f.resp_online_pub));
+
+        struct json_value receipt_view;
+        json_init(&receipt_view);
+        boot_mesh_status_receipt_test_render(&receipt_view, &receipt);
+        ASSERT(json_get(&receipt_view, "responder_master_fingerprint") != NULL);
+        ASSERT(json_get(&receipt_view, "responder_online_fingerprint") != NULL);
+        ASSERT(json_get(&receipt_view, "responder_master_pubkey") == NULL);
+        ASSERT(json_get(&receipt_view, "responder_online_pubkey") == NULL);
+        json_free(&receipt_view);
 
         /* Wrong responder master. */
         uint8_t wrong_master[32];
         mesh_fill32(wrong_master, 0xEE);
         ASSERT(!boot_mesh_status_receipt_accept(&receipt, &request,
-                                                &f.ini_snap, wrong_master));
+                                                &f.ini_snap, wrong_master,
+                                                f.resp_online_pub));
+        /* A self-consistent signature under an arbitrary embedded online key
+         * is not responder lineage. The expected active delegation key wins. */
+        uint8_t wrong_seed[32], wrong_online[32], wrong_secret[32];
+        mesh_fill32(wrong_seed, 0xD4);
+        ed25519_keypair(wrong_online, wrong_secret, wrong_seed);
+        memory_cleanse(wrong_secret, sizeof(wrong_secret));
+        struct mesh_status_receipt_v1 wrong_lineage = receipt;
+        memcpy(wrong_lineage.responder_online_pubkey, wrong_online, 32);
+        ASSERT_EQ(mesh_status_receipt_v1_sign(&wrong_lineage, wrong_seed),
+                  MESH_STATUS_PROTO_OK);
+        memory_cleanse(wrong_seed, sizeof(wrong_seed));
+        ASSERT(!boot_mesh_status_receipt_accept(
+            &wrong_lineage, &request, &f.ini_snap, f.resp_master_pub,
+            f.resp_online_pub));
         /* Receipt for a different request id. */
         struct mesh_status_request_v1 other;
         mesh_wire_request(&f, pairing_id, MESH_WIRE_NOW - 10,
@@ -504,20 +541,23 @@ int test_mesh_status_wire(void)
         other.request_id[0] ^= 1;
         ASSERT(!boot_mesh_status_receipt_accept(&receipt, &other,
                                                 &f.ini_snap,
-                                                f.resp_master_pub));
+                                                f.resp_master_pub,
+                                                f.resp_online_pub));
         /* Bad signature. */
         struct mesh_status_receipt_v1 tampered = receipt;
         tampered.signature[0] ^= 1;
         ASSERT(!boot_mesh_status_receipt_accept(&tampered, &request,
                                                 &f.ini_snap,
-                                                f.resp_master_pub));
+                                                f.resp_master_pub,
+                                                f.resp_online_pub));
         /* A receipt delivered on a DIFFERENT session never completes the
          * pending entry, even though it verifies against the request. */
         uint8_t other_ini_priv[32], other_res_priv[32], other_pub[32];
         char error[160], other_req[320], other_resp[320];
         snprintf(other_req, sizeof(other_req), "%s/other_req", dir);
         snprintf(other_resp, sizeof(other_resp), "%s/other_resp", dir);
-        ASSERT(mkdir(other_req, 0700) == 0 && mkdir(other_resp, 0700) == 0);
+        ASSERT(platform_private_directory_create(other_req) &&
+               platform_private_directory_create(other_resp));
         ASSERT(v2_identity_load_or_create(other_req, other_ini_priv,
                                           other_pub, error,
                                           sizeof(error)));
@@ -534,9 +574,78 @@ int test_mesh_status_wire(void)
         ASSERT(v2_transport_snapshot(ini2, &other_snap));
         ASSERT(!boot_mesh_status_receipt_accept(&receipt, &request,
                                                 &other_snap,
-                                                f.resp_master_pub));
+                                                f.resp_master_pub,
+                                                f.resp_online_pub));
         v2_transport_free(ini2);
         v2_transport_free(res2);
+        PASS();
+    }
+
+    TEST("mesh status wire: a full pending table returns BUSY without "
+         "evicting a live request") {
+        boot_mesh_status_wire(NULL);
+        uint64_t generation = 0;
+        (void)mesh_status_service(&generation);
+        uint8_t master[32], online[32];
+        mesh_fill32(master, 0xB1);
+        mesh_fill32(online, 0xB2);
+        bool admitted_all = generation != 0;
+        struct mesh_status_request_v1 request;
+        memset(&request, 0, sizeof(request));
+        for (size_t i = 0; i < MESH_STATUS_PENDING_MAX; i++) {
+            memset(request.request_id, 0, sizeof(request.request_id));
+            request.request_id[0] = (uint8_t)(i + 1u);
+            admitted_all = admitted_all && mesh_status_pending_admit(
+                &request, master, online, generation);
+        }
+        memset(request.request_id, 0, sizeof(request.request_id));
+        request.request_id[0] = 0xF1;
+        bool overflow_admitted = mesh_status_pending_admit(
+            &request, master, online, generation);
+        uint8_t first_id[32] = {1};
+        enum boot_mesh_status_poll_state first_state =
+            boot_mesh_status_poll(first_id, NULL);
+        enum boot_mesh_status_poll_state overflow_state =
+            boot_mesh_status_poll(request.request_id, NULL);
+        boot_mesh_status_shutdown();
+        ASSERT(admitted_all);
+        ASSERT(!overflow_admitted);
+        ASSERT_EQ(first_state, MESH_STATUS_POLL_PENDING);
+        ASSERT_EQ(overflow_state, MESH_STATUS_POLL_UNKNOWN);
+        PASS();
+    }
+
+    TEST("mesh status wire: responder replay and cadence are bounded per "
+         "authenticated session") {
+        boot_mesh_status_wire(NULL);
+        struct mesh_status_request_v1 request;
+        memset(&request, 0, sizeof(request));
+        request.request_id[0] = 1;
+        bool first = boot_mesh_status_test_responder_admit(
+            &request, &f.res_snap, 1000);
+        bool duplicate = boot_mesh_status_test_responder_admit(
+            &request, &f.res_snap, 1000);
+        bool burst = true;
+        for (uint8_t id = 2; id <= 4; id++) {
+            request.request_id[0] = id;
+            burst = burst && boot_mesh_status_test_responder_admit(
+                &request, &f.res_snap, 1000);
+        }
+        request.request_id[0] = 5;
+        bool rate_limited = boot_mesh_status_test_responder_admit(
+            &request, &f.res_snap, 1000);
+        bool next_window = boot_mesh_status_test_responder_admit(
+            &request, &f.res_snap, 2001);
+        request.request_id[0] = 1;
+        bool after_replay_window = boot_mesh_status_test_responder_admit(
+            &request, &f.res_snap, 32001);
+        boot_mesh_status_shutdown();
+        ASSERT(first);
+        ASSERT(!duplicate);
+        ASSERT(burst);
+        ASSERT(!rate_limited);
+        ASSERT(next_window);
+        ASSERT(after_replay_window);
         PASS();
     }
 
@@ -687,6 +796,24 @@ int test_mesh_status_wire(void)
                       &detail),
                   MESH_MACHINE_UNKNOWN);
         ASSERT_STR_EQ(detail, "request_lost");
+        /* Upstream receipt-binding: a connected peer without a unique active
+         * delegation is an authority gap, UNKNOWN — never UNREACHABLE, since
+         * the session itself is live. */
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_UNKNOWN);
+        ASSERT_STR_EQ(detail, "peer_identity_unavailable");
+        PASS();
+    }
+
+    TEST("mesh machines: fleet burst always fits the status pending table") {
+        /* Upstream admission refuses a still-full pending table instead of
+         * evicting the oldest live request; a fleet cap above the table
+         * bound would self-congest a machines call into BUSY rows. The
+         * compile-time twin of this pin lives in boot_mesh_machines.c. */
+        ASSERT(MESH_MACHINES_FLEET_MAX <= MESH_STATUS_PENDING_MAX);
         PASS();
     }
 

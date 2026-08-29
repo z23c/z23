@@ -7,6 +7,7 @@
 #include "config/boot_mesh_status.h"
 
 #include "base/hex.h"
+#include "crypto/sha3.h"
 #include "json/json.h"
 #include "net/v2_identity.h"
 #include "rpc/server.h"
@@ -84,6 +85,10 @@ static bool rpc_mesh_status_request(const struct json_value *params, bool help,
         case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE:
             message = "this node's filed ZID delegation is unavailable";
             break;
+        case MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE:
+            message = "the paired peer has no unique active ZID delegation "
+                      "bound to this Noise session";
+            break;
         case MESH_STATUS_BEGIN_BUSY:
             message = "the bounded pending-request table is full";
             break;
@@ -114,6 +119,18 @@ static bool rpc_mesh_status_request(const struct json_value *params, bool help,
  * times, and the decoded capsule JSON. The receipt reached this point only
  * after signature, request-binding, session-binding, and responder-identity
  * verification. */
+static void receipt_fingerprint(const char *domain, const uint8_t key[32],
+                                char out[65])
+{
+    struct sha3_256_ctx hash;
+    uint8_t digest[32];
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const uint8_t *)domain, strlen(domain));
+    sha3_256_write(&hash, key, 32);
+    sha3_256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+}
+
 static void receipt_view_json(struct json_value *result,
                               const struct mesh_status_receipt_v1 *receipt)
 {
@@ -129,10 +146,12 @@ static void receipt_view_json(struct json_value *result,
     json_push_kv_str(result, "request_id", hex);
     zcl_hex_encode(receipt->pairing_id, 32, hex);
     json_push_kv_str(result, "pairing_id", hex);
-    zcl_hex_encode(receipt->responder_master_pubkey, 32, hex);
-    json_push_kv_str(result, "responder_master_pubkey", hex);
-    zcl_hex_encode(receipt->responder_online_pubkey, 32, hex);
-    json_push_kv_str(result, "responder_online_pubkey", hex);
+    receipt_fingerprint("zcl.mesh.master.fingerprint.v1",
+                        receipt->responder_master_pubkey, hex);
+    json_push_kv_str(result, "responder_master_fingerprint", hex);
+    receipt_fingerprint("zcl.mesh.online.fingerprint.v1",
+                        receipt->responder_online_pubkey, hex);
+    json_push_kv_str(result, "responder_online_fingerprint", hex);
     uint8_t fingerprint[32];
     if (v2_identity_public_fingerprint(receipt->responder_noise_static,
                                        fingerprint)) {
@@ -162,6 +181,14 @@ static void receipt_view_json(struct json_value *result,
         }
     }
 }
+
+#ifdef ZCL_TESTING
+void boot_mesh_status_receipt_test_render(
+    struct json_value *result, const struct mesh_status_receipt_v1 *receipt)
+{
+    receipt_view_json(result, receipt);
+}
+#endif
 
 static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
                                  struct json_value *result)
