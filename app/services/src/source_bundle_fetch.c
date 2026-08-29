@@ -77,7 +77,11 @@
  * rather than truncating. */
 #define SBF_DIRECTORY_MAX 8192
 
-/* One exact immutable artifact several peers may all be offering. */
+/* One exact immutable artifact several peers may all be offering. Peers are
+ * grouped by the artifact's WHOLE advertised identity (see sbf_candidate_add)
+ * so that honest replicas of the same bundle become FAILOVER for a single
+ * download, while a genuinely different byte sequence claiming the same source
+ * root becomes a separate candidate that must be refused on its own. */
 struct sbf_candidate {
     struct rom_fetch_manifest manifest;
     struct rom_fetch_peer peers[SOURCE_BUNDLE_FETCH_MAX_PEERS];
@@ -264,7 +268,16 @@ static uint8_t *sbf_download_candidate(const struct sbf_candidate *c,
      * write it into a directory the caller owns. Deriving it from chunk_root
      * ourselves keeps concurrent candidates from colliding while keeping the
      * whole path caller-controlled; the ".stage" suffix keeps a scratch
-     * directory from ever classifying as a seedable ".zvsb". */
+     * directory from ever classifying as a seedable ".zvsb".
+     *
+     * The WHOLE 32 bytes, never a prefix. chunk_root here is a peer-chosen
+     * value: an attacker picks the bytes it advertises, so a truncated stem is
+     * a name an attacker can aim at. Two candidates in one call that landed on
+     * the same staging leaf would share a .part and a resume journal, which is
+     * exactly the poisoning sbf_staging_clear exists to prevent. At the full
+     * width the leaf is as collision-free as the content address itself.
+     * lib/test/src/test_source_bundle_fetch.c's planted-resume case derives
+     * this same name and must stay in step with it. */
     char stem[65];
     HexStr(c->manifest.chunk_root, 32, false, stem, sizeof(stem));
     char name[ROM_FETCH_NAME_MAX];

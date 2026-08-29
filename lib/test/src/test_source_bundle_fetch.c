@@ -98,9 +98,19 @@ static bool sbft_bundle(const char *dir, uint8_t root_out[32],
 
 /* Start the real file service on `datadir` and return its OS-assigned port
  * (0 on failure). Port 0 everywhere: a fixed port would collide with a second
- * copy of this suite, or with anything else on the box. */
+ * copy of this suite, or with anything else on the box.
+ *
+ * The leading stop is not decoration. fs_server_start() returns SILENTLY when
+ * a server is already running (lib/net/src/file_service.c) and keeps the
+ * datadir it was started with, so a case that exits early — an ASSERT jumps
+ * straight to _test_next: and skips its own fs_server_stop() — would leave the
+ * NEXT case serving chunk reads out of a stale, already-deleted directory.
+ * That reads as "read_chunk: validated open failed" on every chunk and turns
+ * one honest failure into a second, unrelated-looking one. Each case owns its
+ * own server. */
 static uint16_t sbft_serve(const char *datadir)
 {
+    fs_server_stop();
     fs_server_start(datadir, 0);
     for (int w = 0; w < 40 && !fs_server_is_running(); w++)
         platform_sleep_ms(50);
@@ -1097,16 +1107,6 @@ static int test_leaf_end_to_end(void)
  * The requirement is not "the plant is detected" but the same one the whole
  * module rests on: the caller gets bytes that rederive to the root it asked
  * for, or it gets nothing. */
-static void sbft_hex8(const uint8_t v[8], char out[17])
-{
-    static const char d[] = "0123456789abcdef";
-    for (int i = 0; i < 8; i++) {
-        out[i * 2] = d[v[i] >> 4];
-        out[i * 2 + 1] = d[v[i] & 0x0F];
-    }
-    out[16] = '\0';
-}
-
 static int test_planted_resume_state_refused(void)
 {
     int failures = 0;
@@ -1148,11 +1148,19 @@ static int test_planted_resume_state_refused(void)
         uint16_t port = sbft_serve(sdir);
         ASSERT(port != 0);
 
-        /* The staging leaf the fetcher will use: derived from chunk_root,
-         * exactly as app/services/src/source_bundle_fetch.c derives it. */
-        char stem[17];
-        sbft_hex8(art.chunk_root, stem);
-        char name[64], part[1200], jrnl[1300];
+        /* The staging leaf the fetcher will use: the FULL 32-byte chunk_root
+         * in hex, exactly as app/services/src/source_bundle_fetch.c derives
+         * it (sbf_download_candidate). The width is load-bearing on both
+         * sides. If this name stops matching the one the fetcher picks, the
+         * plant simply sits in a file the fetcher never looks at, and the test
+         * quietly stops testing anything — which is how it last broke: the
+         * service moved from an 8-byte stem to the whole root and this side
+         * did not follow. The staging-directory-empty assertion below is what
+         * catches that, because a plant the fetcher never named is also a
+         * plant it never cleans up. */
+        char stem[65];
+        sbft_hex32(art.chunk_root, stem);
+        char name[128], part[1200], jrnl[1300];
         snprintf(name, sizeof(name), "zvsb-stage-%s.stage", stem);
         snprintf(part, sizeof(part), "%s%s", name, ROM_FETCH_PART_SUFFIX);
         snprintf(jrnl, sizeof(jrnl), "%s.journal", part);
@@ -1226,9 +1234,10 @@ static int test_planted_resume_state_refused(void)
  * out of each file's OWN ZVSB header at registration (rom_seed_register), so a
  * seeder that writes the honest 32 bytes into the header of eight different
  * bundles advertises eight artifacts, with eight DIFFERENT chunk_roots, all
- * claiming the honest tree. sbf_candidate_add groups by chunk_root, so those
- * do not merge — they are eight separate candidates, and one peer has filled
- * the set before any other peer is asked.
+ * claiming the honest tree. sbf_candidate_add groups on the artifact's whole
+ * identity — chunk_root, whole_sha3, size, chunk_size and chunk count, all
+ * five — so those do not merge; they are eight separate candidates, and this
+ * one peer is the only peer, so it fills the set.
  *
  * What this test pins, and why each half matters:
  *
@@ -1238,14 +1247,30 @@ static int test_planted_resume_state_refused(void)
  *   error), and the staging directory is empty afterwards. That half must
  *   never change.
  *
- *   THE BUDGET IS EXHAUSTIBLE BY ONE PEER. candidates_tried reaching the cap
- *   from a single seeder is the finding, not a feature: sbf_candidate_add
- *   returns false once the set is full, and source_bundle_fetch discards that
- *   false, so a HONEST peer asked afterwards has its offer dropped by the cap
- *   rather than tried. That cannot be shown end-to-end here — one process
- *   hosts one file service and one rom_seed registry — so this pins the
- *   precondition, exactly. If per-peer fairness is ever added, this assertion
- *   is meant to go red and be re-stated against the new rule. */
+ *   A SOLE SEEDER STILL GETS THE WHOLE BUDGET, and that is now correct rather
+ *   than a finding. When this case was written, sbf_discover_peer had no
+ *   per-peer share at all, so the first peer asked took every slot and a
+ *   HONEST peer asked afterwards had its offer dropped by the cap rather than
+ *   tried; the comment here said so and asked to be re-stated if fairness
+ *   ever landed. Fairness landed: sbf_discover_peer now takes a
+ *   candidate_limit and source_bundle_fetch reserves one slot for every peer
+ *   not yet asked (limit = MAX_CANDIDATES - peers_after), which
+ *   test_one_peer_cannot_fill_candidate_set pins end-to-end with a flooder
+ *   ahead of an honest peer. This case is the OTHER side of that rule: with
+ *   exactly one peer in the list there is nobody to reserve for, so the
+ *   reservation is zero and the sole seeder may legitimately spend all
+ *   MAX_CANDIDATES slots — and every one of them must still be downloaded,
+ *   refused by the caller's own root, and left unmaterialized. The assertion
+ *   below therefore pins the fairness arithmetic at peers_after == 0; a
+ *   regression that made the reservation unconditional would starve an honest
+ *   single-peer fetch and fail here.
+ *
+ *   RESIDUAL, stated so it is not mistaken for solved: the reservation
+ *   saturates. limit is only reduced while peers_after < MAX_CANDIDATES, so a
+ *   caller passing MORE than MAX_CANDIDATES peers gives the FIRST one the
+ *   whole set again. That is not a regression — it is the old behaviour
+ *   surviving in the tail — but it is the case per-peer fairness does not yet
+ *   cover. */
 static int test_one_seeder_fills_the_candidate_set(void)
 {
     int failures = 0;
@@ -1321,10 +1346,15 @@ static int test_one_seeder_fills_the_candidate_set(void)
         ASSERT(sbft_dir_empty(cdir));
         ASSERT(rom_peer_is_deprioritized("127.0.0.1", port));
 
-        /* THE FINDING: one seeder, one directory listing, and the whole
-         * candidate budget is spent. A later honest peer would have nowhere
-         * left to be added (sbf_candidate_add's cap, whose false return
-         * source_bundle_fetch discards). */
+        /* One seeder, one directory listing, and the whole candidate budget
+         * is spent — legitimately, because it is the ONLY peer and the
+         * per-peer reservation (MAX_CANDIDATES - peers_after) is zero here.
+         * Reserving a slot with nobody to reserve it for would starve an
+         * honest single-peer fetch, so this is the arithmetic's lower edge and
+         * it must hold. The upper edge — a flooder ahead of an honest peer
+         * getting only its share — is test_one_peer_cannot_fill_candidate_set.
+         * peers_offering counts a peer only when at least one of its offers
+         * was actually taken, which for this seeder is all eight. */
         ASSERT(m.peers_asked == 1 && m.peers_offering == 1);
         ASSERT(m.candidates_tried == SOURCE_BUNDLE_FETCH_MAX_CANDIDATES);
 

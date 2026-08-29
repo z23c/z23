@@ -33,14 +33,25 @@
  * ── What a hostile peer can and cannot cause ──────────────────────────
  *
  * CAN: waste bounded BYTES; waste time that is NOT fully bounded (see the time
- * bound below); and, listed before the honest peers, DENY the fetch outright —
- * one seeder may advertise up to ROM_FETCH_MAX_ARTIFACTS (8) artifacts and
- * SOURCE_BUNDLE_FETCH_MAX_CANDIDATES is also 8, so ONE hostile seeder asked
- * first can fill every candidate slot with distinct chunk_roots all claiming
- * the honest source_root (the advertised root is read out of each file's own
- * ZVSB header, which the attacker writes), and a later honest peer's offer is
- * then dropped by the cap in sbf_candidate_add rather than tried.
- * Refusing it is still fail-closed (the caller gets a named refusal and zero
+ * bound below); and spend candidate slots. One seeder may advertise up to
+ * ROM_FETCH_MAX_ARTIFACTS (8) artifacts with eight DISTINCT chunk_roots all
+ * claiming the honest source_root — the advertised root is read out of each
+ * file's own ZVSB header, which the attacker writes — and
+ * SOURCE_BUNDLE_FETCH_MAX_CANDIDATES is also 8.
+ *
+ * What stops that from being an outright DENIAL is a per-peer share:
+ * source_bundle_fetch reserves one candidate slot for each peer it has not yet
+ * asked (limit = MAX_CANDIDATES - peers_after) and sbf_discover_peer stops
+ * taking offers from the current peer at that limit. So a flooder listed first
+ * cannot leave a later honest peer with nowhere to be added, and a sole peer —
+ * with nobody to reserve for — still gets the whole set, which is the right
+ * answer when it is the only peer there is.
+ *
+ * RESIDUAL, because the reservation saturates: limit is only reduced while
+ * peers_after is below MAX_CANDIDATES, so a caller passing MORE than
+ * MAX_CANDIDATES peers hands the FIRST one the entire set again and the honest
+ * peers past that point are dropped by the cap rather than tried. Refusing is
+ * still fail-closed either way (the caller gets a named refusal and zero
  * bytes), but "the search continues until it finds the right one" is only true
  * while a slot is left. Nothing here is consulted against the deprioritize
  * list — see the note on rom_peer_note_bad_chunk in the .c file.
@@ -103,10 +114,12 @@
  * bounds the total cost of a swarm that is entirely hostile. */
 #define SOURCE_BUNDLE_FETCH_MAX_PEERS 16u
 
-/* Distinct artifacts (by chunk_root) downloaded before the search gives up.
- * Peers offering the SAME artifact are grouped and tried together as failover
- * for one candidate, so this counts genuinely different byte sequences claiming
- * the same source root — i.e. how many substitution attempts are absorbed. */
+/* Distinct artifacts downloaded before the search gives up. Peers offering the
+ * SAME artifact — same chunk_root, whole_sha3, size, chunk_size and chunk
+ * count, all five, so that a peer cannot ride an honest candidate's failover
+ * list on a partial match — are grouped and tried together as failover for one
+ * candidate, so this counts genuinely different byte sequences claiming the
+ * same source root, i.e. how many substitution attempts are absorbed. */
 #define SOURCE_BUNDLE_FETCH_MAX_CANDIDATES 8u
 
 /* ceil(VCS_SOURCE_BUNDLE_MAX_WIRE_BYTES / ROM_SEED_CHUNK_SIZE): the largest
