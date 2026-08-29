@@ -6162,6 +6162,55 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
 	    packages/zutf8/src/zutf8.c
 
+# ── Behavioral fingerprinting (lib/fingerprint) ──────────────────────────
+# `make fingerprint-scan` indexes what every in-tree function DOES rather than
+# what it is called: it derives which functions are pure and synthesisable,
+# generates a call harness for each one, runs them on a shape-seeded corpus
+# under several configurations, and reports the fingerprintable coverage, the
+# measured false-purity rate, and any two differently-named functions that
+# agree on every input. Nothing in it is hand-tagged.
+#
+# It is a development tool, not a gate: it needs the whole object tree, takes
+# minutes, and its useful output is a report. The registered `test_fingerprint`
+# group is the part that runs in the suite.
+FPSCAN_BIN = $(BIN_DIR)/fpscan
+FP_WORK = $(BUILD_DIR)/fingerprint
+FP_TREE_ARCHIVE = $(FP_WORK)/libtree.a
+FP_SRCS = tools/fingerprint_scan.c $(wildcard lib/fingerprint/src/*.c) \
+    lib/base/src/safe_alloc.c
+# Probe translation units are GENERATED, so warnings there are noise about the
+# generator rather than about the tree; -w keeps a compile FAILURE meaningful
+# (it excludes that probe) without a warning ever doing so.
+# -flto STAYS, and dropping it is a trap worth naming: $(OBJ_DIR)'s objects are
+# built with -flto=auto, so they are slim LTO objects with no machine code in
+# them. Link the archive without LTO and every tree symbol comes back
+# undefined — measured: 1532 of 1532 probes blamed and excluded, and the run
+# still finishes "successfully" reporting zero fingerprintable functions.
+FP_PROBE_CFLAGS = $(filter-out -Werror -O3,$(BUILD_ONLY_CFLAGS)) \
+    -I. -Ilib/fingerprint/include
+FP_PROBE_LDFLAGS = $(LDFLAGS)
+
+.PHONY: fpscan fingerprint-scan
+fpscan: $(FPSCAN_BIN)
+$(FPSCAN_BIN): $(FP_SRCS) \
+    lib/fingerprint/include/fingerprint/fingerprint.h \
+    lib/fingerprint/include/fingerprint/fp_runtime.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Ilib/fingerprint/include -Ilib/base/include -o $@ $(FP_SRCS)
+
+fingerprint-scan: $(FPSCAN_BIN) build-only
+	@mkdir -p $(FP_WORK)
+	@rm -f $(FP_TREE_ARCHIVE)
+	@find $(OBJ_DIR) -name '*.o' -print0 | xargs -0 ar rcs $(FP_TREE_ARCHIVE)
+	@git ls-files '*.c' '*.h' | grep -v '^vendor/' > $(FP_WORK)/sources.txt
+	$(FPSCAN_BIN) --root=. --work=$(FP_WORK) --cc='$(CC)' \
+	    --files-from=$(FP_WORK)/sources.txt \
+	    --cflags='$(FP_PROBE_CFLAGS)' --ldflags='$(FP_PROBE_LDFLAGS)' \
+	    --libs='$(NODE_C23_TOR_LIBS) $(LIBS)' --archive=$(FP_TREE_ARCHIVE) \
+	    --jobs=$$(getconf _NPROCESSORS_ONLN)
+
 # Drive tools/scripts/onion_pair_watch.sh --selftest and validate the
 # host-local pair ledger when present. Does not spawn nodes.
 .PHONY: check-onion-pair-watch

@@ -131,6 +131,23 @@ service that walks the adapter registry is
 <!-- claim: symbol-absent vcs_package_store_open lib/metaverse/src/adapter_content.c # the read path opens no store -->
 <!-- claim: symbol-present mv_cas_path lib/metaverse/src/manifest_read.c # CAS byte verification without a store handle -->
 
+`lib/fingerprint/` derives a *behavioral* fingerprint for a function: it
+judges (fail-closed) whether a definition is pure and synthesisable, generates
+a call harness from the signature alone, runs it over a corpus seeded from the
+canonical signature SHAPE rather than from the function, and hashes the
+observed outputs. Two functions with the same fingerprint are a **candidate**
+semantic duplicate — name-, comment- and spelling-blind — never a proof. The
+driver is `make fingerprint-scan`; `--select-only` prints just the coverage
+breakdown. Read the LIMITS block at the top of
+`lib/fingerprint/include/fingerprint/fingerprint.h` before quoting any number
+it prints: only a small, honestly-measured slice of the tree is fingerprintable
+at all, and a match on a corpus that never reached a validator's accepting set
+means nothing (which is why the tool refuses to report a function whose output
+never varied).
+<!-- claim: file-present lib/fingerprint/include/fingerprint/fingerprint.h # the fingerprint contract and its limits -->
+<!-- claim: symbol-present fp_index_select lib/fingerprint/src/fp_select.c # the fail-closed candidate filter -->
+<!-- claim: symbol-absent system lib/fingerprint/src/fp_index.c # the scanner spawns nothing -->
+
 ### Reusable C23 packages — `packages/`
 
 The 76 Commons packages (`zhex`, `zbuf`, `zjson`, …), one directory per
@@ -167,7 +184,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1026
+test_groups: 1027
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
