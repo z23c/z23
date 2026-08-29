@@ -16,7 +16,15 @@
 # apostrophe inside a single-quoted inline awk program swallows the rest of the
 # script — see docs/AGENT_TRAPS.md.
 
-function emit(  leaf, cls, reason, rest) {
+function quote_count(s,   i, n) {
+    n = 0
+    for (i = 1; i <= length(s); i++)
+        if (substr(s, i, 1) == "\"")
+            n++
+    return n
+}
+
+function emit(  leaf, cls, reason, rest, form) {
     if (buf == "")
         return
     leaf = "?"
@@ -32,8 +40,16 @@ function emit(  leaf, cls, reason, rest) {
                 reason = substr(rest, RSTART + 1, RLENGTH - 2)
         }
     }
+    # A well-formed row carries exactly two string literals — the leaf and the
+    # reason — hence exactly four quote characters. A bare `"` typed inside the
+    # reason prose is invisible to every check above (the reason still parses,
+    # just truncated at the stray quote) and yet would not compile the day a
+    # consumer #includes this table as C. Report the count and let the gate
+    # decide, so the row is caught while it is being written rather than by the
+    # first build that tries to use it.
+    form = (quote_count(buf) == 4) ? "WELLFORMED" : "MALFORMED"
     gsub(/\t/, " ", reason)
-    printf "%s\t%s\t%s\n", leaf, cls, reason
+    printf "%s\t%s\t%s\t%s\n", leaf, cls, reason, form
     buf = ""
 }
 

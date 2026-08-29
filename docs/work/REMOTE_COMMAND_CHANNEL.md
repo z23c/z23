@@ -251,8 +251,9 @@ p95 edit-to-visible against a 250 ms gate, against minutes for a full rebuild
 and restart.
 
 **The class table.** Both hot-swap leaves and the source fetch are
-`owner_capability` — the only three leaves in that class besides the two log
-reads. Everything else in `dev` and `zcode` is `never_remote`.
+`owner_capability`. They are three of the seven leaves in that class; the other
+four are bounded log and diagnostic-bundle reads. Everything else in `dev` and
+`zcode` is `never_remote`.
 
 The composed loop is: edit locally, publish the workspace by content root, then
 for each machine ask it to fetch that exact root and hot-swap to it. The remote
@@ -269,6 +270,34 @@ the command channel**. The wire carries a 32-byte hash. The target fetches the
 bytes over the existing content-addressed path, verifies them against that hash
 itself, and refuses anything that does not match. A compromised control channel
 can therefore name a source root; it cannot substitute one.
+
+### Where this loop is real today: Linux dev builds only
+
+The two halves of the composition do **not** have the same platform reach, and
+conflating them would overstate the whole thing.
+
+*The channel and the source fetch are portable.* The registry, the file-service
+session and content-addressed source fetch build wherever the binary builds —
+that is reason 1 above, and the reason the channel is worth having at all.
+
+*The hot-swap half is not.* `lib/hotswap/src/hotswap_loader.c` nests the entire
+`dlopen` implementation inside `#ifdef ZCL_DEV_BUILD` and then inside
+`#if defined(__linux__) && !defined(_WIN32)`. Every other combination —
+macOS, Windows, and any release build on any platform — compiles the
+`ZCL_HOTSWAP_LOADER_UNAVAILABLE` stub instead, which returns `false` with a
+rejection stage and reason and loads nothing. It fails closed, loudly, by
+design; it does not degrade.
+
+So the honest statement of the fleet dev loop today is: **`z23 remote <node> dev
+hotswap --source-root=<hash>` is a Linux dev-build loop.** On a macOS or Windows
+node, and on any release build, the remote call would reach the leaf and the
+leaf would refuse — which is the correct behavior and still not a working loop.
+Those machines converge by fetching the source root and rebuilding, at rebuild
+cost, not at hot-swap cost. Nothing in this design changes that, and the next
+increment must not be reported as a fleet-wide hot-swap loop until a non-Linux
+activation path exists. `AGENTS.md` records the same boundary for the platform
+baseline generally: named unavailable paths refuse rather than claim Linux
+guarantees.
 
 ## The classification and its gate
 
@@ -289,13 +318,20 @@ rather than being restated here, so there is one place to read and one place to
 change.
 
 [`tools/lint/check_remote_command_classes.sh`](../../tools/lint/check_remote_command_classes.sh)
-(wired into `make lint`) asserts five things, all fail-closed: every registry
+(wired into `make lint`) asserts six things, all fail-closed: every registry
 leaf has a row; every row names a live leaf; no leaf is classified twice; every
-class token is known; and every `read_only` or `owner_capability` row states a
-reason. It has no baseline — the tree is clean, and a baseline would only be
-somewhere to hide the next omission. Its `--selftest` plants each defect class
-in a fixture and asserts the red, because a gate nobody has watched fail is not
-an assertion.
+class token is known; every `read_only` or `owner_capability` row states a
+reason; and every row is two well-formed C string literals. The last one earned
+its place immediately — the table is X-macro data that nothing `#include`s yet,
+so no compiler is watching it, and the first draft of the table shipped two rows
+with a bare quote typed inside the reason prose. Those rows passed all five
+other checks (the reason parses, silently truncated at the stray quote) and
+would not have compiled on the day a consumer arrived.
+
+It has no baseline — the tree is clean, and a baseline would only be somewhere
+to hide the next omission. Its `--selftest` plants each defect class in a
+fixture and asserts the red, because a gate nobody has watched fail is not an
+assertion.
 
 The direction that matters is the first one. The table's default is
 `never_remote`, so a **missing** row is safe today — and that is exactly what

@@ -173,8 +173,6 @@ REMOTE_COMMAND_CLASS("ops.debug.rom_fetch.status", REMOTE_CLASS_READ_ONLY,
     "ROM fetch progress counters")
 REMOTE_COMMAND_CLASS("ops.mesh.status", REMOTE_CLASS_READ_ONLY,
     "mesh reachability projection; the fleet's own liveness question")
-REMOTE_COMMAND_CLASS("ops.mesh.machines", REMOTE_CLASS_READ_ONLY,
-    "which machines this node has paired with, by name; no pairing secret")
 REMOTE_COMMAND_CLASS("ops.mesh.join_status", REMOTE_CLASS_READ_ONLY,
     "mesh join progress projection")
 REMOTE_COMMAND_CLASS("ops.recovery.status", REMOTE_CLASS_READ_ONLY,
@@ -200,7 +198,7 @@ REMOTE_COMMAND_CLASS("ops.telemetry.runtime.services", REMOTE_CLASS_READ_ONLY,
 REMOTE_COMMAND_CLASS("ops.telemetry.runtime.threads", REMOTE_CLASS_READ_ONLY,
     "thread counters")
 REMOTE_COMMAND_CLASS("ops.telemetry.runtime.resources", REMOTE_CLASS_READ_ONLY,
-    "CPU and memory counters; the "is this box wedged" question")
+    "CPU and memory counters; the is-this-box-wedged question")
 REMOTE_COMMAND_CLASS("ops.telemetry.storage.summary", REMOTE_CLASS_READ_ONLY,
     "storage telemetry roll-up")
 REMOTE_COMMAND_CLASS("ops.telemetry.storage.database", REMOTE_CLASS_READ_ONLY,
@@ -264,7 +262,7 @@ REMOTE_COMMAND_CLASS("dev.hotswap.probe", REMOTE_CLASS_OWNER_CAPABILITY,
 REMOTE_COMMAND_CLASS("dev.hotswap.apply", REMOTE_CLASS_OWNER_CAPABILITY,
     "the fleet dev loop's activation step, and the reason this channel exists. The capability must name this leaf explicitly and expire. Remote class only SUBTRACTS authority: hotswap_activation_authorized() still requires -hotswap-activate, ZCL_HOTSWAP_ACTIVATE=1 and the dev datadir, and still refuses the canonical datadir, after the remote check has passed.")
 REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.fetch", REMOTE_CLASS_OWNER_CAPABILITY,
-    "lets a remote node converge to a named source root by pulling and verifying it ITSELF. source_bundle_fetch() accepts nothing that vcs_source_bundle_verify() does not match against the caller-supplied root, so the capability grants "go find these bytes", never "trust these bytes".")
+    "lets a remote node converge to a named source root by pulling and verifying it ITSELF. source_bundle_fetch() accepts nothing that vcs_source_bundle_verify() does not match against the caller-supplied root, so the capability grants go-find-these-bytes, never trust-these-bytes.")
 REMOTE_COMMAND_CLASS("ops.logs", REMOTE_CLASS_OWNER_CAPABILITY,
     "a bounded log read is the second thing a fleet driver needs and the first thing that leaks: log bodies carry operator paths, peer addresses and datadir names. Bounded and useful, so not never_remote; leaky, so never read_only.")
 REMOTE_COMMAND_CLASS("ops.debug.bundle", REMOTE_CLASS_OWNER_CAPABILITY,
@@ -586,7 +584,7 @@ REMOTE_COMMAND_CLASS("dev.generation.compact", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.diagnose.latest", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.diagnose.show", REMOTE_CLASS_NEVER, "")
 
-/* OPS — 35 never_remote leaves.
+/* OPS — 36 never_remote leaves.
  *
  * What survives the promotions above, by kind.
  *
@@ -598,6 +596,20 @@ REMOTE_COMMAND_CLASS("dev.diagnose.show", REMOTE_CLASS_NEVER, "")
  *
  *   Work starters. ops.selftest and ops.recovery.rebuild spend the target's
  *   resources on request.
+ *
+ *   ops.mesh.machines belongs in that group and reads like it does not, which
+ *   is why it is called out rather than left in the list. Its name and its
+ *   *_READ macro say "list paired machines", and its registered description
+ *   says the rest: the call runs a bounded live refresh, probing up to 8 active
+ *   records over the established Noise status lane on a collective 12-second
+ *   budget and PERSISTING each verified receipt before rendering. It never
+ *   dials, so it is not a reachability lever — but it is still one remote
+ *   request that spends the target's time, touches eight other machines and
+ *   writes durable state, which is not a side-effect-free read whatever the
+ *   macro shape claims. It is also the pairing roster, and this table's own
+ *   rule puts "which peers are paired" in NEVER. The read a fleet driver
+ *   actually wants from one box is ops.mesh.status, promoted above, which
+ *   projects reachability and dials nothing.
  *
  *   The trust surface this channel rides on. ops.mesh.identity reveals this
  *   node's identity; ops.mesh.pair.plan / .commit / .list / .revoke and
@@ -636,6 +648,7 @@ REMOTE_COMMAND_CLASS("ops.debug.rom_seed.enable", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_seed.disable", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_seed.publish", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_fetch.bundle", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.machines", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.identity", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.pair.plan", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.pair.commit", REMOTE_CLASS_NEVER, "")

@@ -51,10 +51,17 @@
 #      unexplained permission is the one a later reader cannot audit or remove.
 #      REMOTE_CLASS_NEVER rows carry an empty reason by design — their argument
 #      is the section comment above their group.
+#   6. Every row is two well-formed C string literals. The table is X-macro data
+#      that nothing #includes yet, so no compiler is watching it; a bare quote
+#      typed in the reason prose passes checks 1-5 (the reason parses, silently
+#      truncated) and detonates on whoever writes the first consumer. This check
+#      was added because exactly that had happened twice in the first draft.
 #
-# There is NO baseline and no allowlist. The tree is clean today (610 leaves,
-# 610 rows), so a shrink-only baseline would only be a place to hide the next
-# omission.
+# There is NO baseline and no allowlist. The tree is clean, so a shrink-only
+# baseline would only be a place to hide the next omission. Do not type the
+# current leaf count into this comment — the gate prints the live counts on
+# every run, and a frozen number here would go stale the next time somebody
+# registers a command.
 #
 # Usage:
 #   tools/lint/check_remote_command_classes.sh            # the gate
@@ -77,11 +84,14 @@ GATE=check_remote_command_classes
 LEAF_AWK="tools/lint/command_leaf_paths.awk"
 ROW_AWK="tools/lint/remote_command_class_rows.awk"
 
-# Floors. Production carries 578 typed leaves + 32 agent-contract methods. The
-# floors sit below the live counts with headroom so an ordinary addition never
-# trips them, but an emptied or renamed source does. A floor is not a baseline:
-# it may only ever move DOWN if the surface genuinely shrinks, and it never
-# excuses a missing row.
+# Floors against a HOLLOW scan, not against the leaf count. If a rename or a
+# parser change makes one of the two sources read as empty, every set
+# difference below is trivially satisfied and the gate reports a confident
+# clean over nothing. These floors sit well under the live populations, so an
+# ordinary addition or removal never trips them while an emptied source does.
+# A floor is not a baseline: it may only ever move DOWN, and only when the
+# surface genuinely shrank. It never excuses a missing row. Run the gate to see
+# the current counts rather than reading them from a comment.
 TYPED_FLOOR=500
 AGENT_FLOOR=25
 
@@ -200,6 +210,21 @@ run_gate() {
         echo "  Refusing needs no defence; permitting does. Say why." >&2
     fi
 
+    # (6) row that would not compile. The table is C X-macro data, but nothing
+    # #includes it yet, so no compiler is watching it. A bare quote typed inside
+    # the reason prose passes every check above — the reason still parses, just
+    # silently truncated — and detonates on whoever writes the first consumer.
+    local malformed=""
+    malformed=$(awk -F'\t' '$4 != "WELLFORMED" { print $1 }' "$tmp/rows")
+    if [ -n "$malformed" ]; then
+        rc=1
+        echo "$GATE: FAIL — rows that are not two well-formed C string literals:" >&2
+        printf '    %s\n' "$malformed" >&2
+        echo "  A row is REMOTE_COMMAND_CLASS(\"leaf\", CLASS, \"reason\") and holds" >&2
+        echo "  exactly two string literals. Escape or remove quotes in the reason;" >&2
+        echo "  this table has to compile the day something includes it." >&2
+    fi
+
     if [ "$rc" -eq 0 ]; then
         echo "$GATE: OK — $rows_n rows cover $(wc -l < "$tmp/registry") command leaves" \
              "($typed_n typed, $agent_n agent-contract)."
@@ -241,7 +266,6 @@ TABLE
         ZCL_REMOTE_CLASS_DEF_DIR="$base/commands" \
         ZCL_REMOTE_CLASS_AGENT_DEF="$base/agent.def" \
         ZCL_REMOTE_CLASS_TABLE="$table" \
-        ZCL_REMOTE_CLASS_FLOOR_OVERRIDE=1 \
             run_gate >/dev/null 2>&1
         rc=$?
         set -e
@@ -278,6 +302,12 @@ TABLE
     sed -e 's/REMOTE_CLASS_READ_ONLY, "bounded read"/REMOTE_CLASS_READ_ONLY, ""/' \
         "$base/table.def" > "$tmp/noreason.def"
     probe "unexplained permission fails" 1 "$tmp/noreason.def"
+
+    # A bare quote in the reason prose: still parses, still non-empty, still a
+    # known class token — and would not compile.
+    sed -e 's/bounded read/a bounded "peek" only/' \
+        "$base/table.def" > "$tmp/strayquote.def"
+    probe "stray quote in reason fails" 1 "$tmp/strayquote.def"
 
     probe "missing table is FATAL" 2 "$tmp/does-not-exist.def"
 
