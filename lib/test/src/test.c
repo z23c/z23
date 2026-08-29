@@ -1253,6 +1253,8 @@ int main(int argc, char **argv)
       failures += test_mesh_private_object_proto(); }
     { extern int test_mesh_private_object_crypto(void);
       failures += test_mesh_private_object_crypto(); }
+    { extern int test_mesh_private_object_grant_pipeline(void);
+      failures += test_mesh_private_object_grant_pipeline(); }
     { extern int test_mesh_private_object_root(void);
       failures += test_mesh_private_object_root(); }
     { extern int test_mesh_private_object_frame(void);

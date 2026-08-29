@@ -343,6 +343,19 @@ static int stable_reconnect_identity(void)
         ASSERT(memcmp(context, trial_context, 32) == 0);
         ASSERT(memcmp(transfer, trial_id, 32) == 0);
 
+        trial = offer;
+        trial.grant_id[0] ^= 1;
+        ASSERT_EQ(mesh_private_object_offer_key_context_v1(
+                      &trial, trial_context),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT(memcmp(context, trial_context, 32) == 0);
+        ASSERT_EQ(mesh_private_object_offer_transfer_id_v1(
+                      &trial, trial_id),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT(memcmp(transfer, trial_id, 32) == 0);
+        ASSERT_EQ(mesh_private_object_offer_v1_validate(&trial),
+                  MESH_PRIVATE_OBJECT_PROTO_SIGNATURE);
+
         trial.target_master_pubkey[0] ^= 1;
         ASSERT_EQ(mesh_private_object_offer_key_context_v1(
                       &trial, trial_context),

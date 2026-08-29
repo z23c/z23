@@ -18,7 +18,7 @@ static const char offer_root_domain[] = "zcl.mesh.private-object.offer.v1";
 static const char offer_request_id_domain[] =
     "zcl.mesh.private-object.offer.request-id.v1";
 static const char offer_key_context_domain[] =
-    "zcl.mesh.private-object.offer.key-context.v1";
+    "zcl.mesh.private-object.offer.key-context.v2";
 static const char offer_transfer_id_domain[] =
     "zcl.mesh.private-object.transfer-id.v1";
 
@@ -78,8 +78,9 @@ const char *mesh_private_object_proto_error_string(
 }
 
 static enum mesh_private_object_proto_error offer_shape(
-    const struct mesh_private_object_offer_v1 *offer, bool require_request_id,
-    bool require_ciphertext_root, bool require_signature)
+    const struct mesh_private_object_offer_v1 *offer, bool require_grant_id,
+    bool require_request_id, bool require_ciphertext_root,
+    bool require_signature)
 {
     if (!offer)
         return MESH_PRIVATE_OBJECT_PROTO_NULL;
@@ -88,7 +89,7 @@ static enum mesh_private_object_proto_error offer_shape(
     if (offer->flags != MESH_PRIVATE_OBJECT_FLAGS_NONE)
         return MESH_PRIVATE_OBJECT_PROTO_FLAGS;
     const uint8_t *critical[] = {
-        offer->network_genesis, offer->pairing_id, offer->grant_id,
+        offer->network_genesis, offer->pairing_id,
         offer->source_master_pubkey, offer->source_noise_static,
         offer->source_online_pubkey, offer->target_master_pubkey,
         offer->target_noise_static, offer->transcript_hash,
@@ -97,6 +98,8 @@ static enum mesh_private_object_proto_error offer_shape(
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
         if (!bytes_nonzero(critical[i], 32))
             return MESH_PRIVATE_OBJECT_PROTO_FIELD;
+    if (require_grant_id && !bytes_nonzero(offer->grant_id, 32))
+        return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     if (offer->connection_generation == 0)
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     if (require_request_id && !bytes_nonzero(offer->request_id, 32))
@@ -170,7 +173,7 @@ static enum mesh_private_object_proto_error offer_signing_root(
     const struct mesh_private_object_offer_v1 *offer, uint8_t out[32])
 {
     enum mesh_private_object_proto_error error =
-        offer_shape(offer, true, true, false);
+        offer_shape(offer, true, true, true, false);
     if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
         return error;
     uint8_t wire[OFFER_UNSIGNED_BYTES];
@@ -199,7 +202,7 @@ mesh_private_object_offer_request_id_v1_derive(
     memset(material.request_id, 0, sizeof(material.request_id));
     memset(material.signature, 0, sizeof(material.signature));
     enum mesh_private_object_proto_error error =
-        offer_shape(&material, false, true, false);
+        offer_shape(&material, true, false, true, false);
     if (error != MESH_PRIVATE_OBJECT_PROTO_OK) {
         memory_cleanse(&material, sizeof(material));
         return error;
@@ -229,7 +232,7 @@ mesh_private_object_offer_key_context_v1(
     if (!offer || !out)
         return MESH_PRIVATE_OBJECT_PROTO_NULL;
     enum mesh_private_object_proto_error error =
-        offer_shape(offer, false, false, false);
+        offer_shape(offer, false, false, false, false);
     if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
         return error;
     uint8_t fields[36];
@@ -247,7 +250,6 @@ mesh_private_object_offer_key_context_v1(
 #define STABLE32(field) sha3_256_write(&sha, offer->field, 32)
     STABLE32(network_genesis);
     STABLE32(pairing_id);
-    STABLE32(grant_id);
     STABLE32(source_master_pubkey);
     STABLE32(source_noise_static);
     STABLE32(target_master_pubkey);
@@ -291,7 +293,7 @@ enum mesh_private_object_proto_error mesh_private_object_offer_v1_validate(
     const struct mesh_private_object_offer_v1 *offer)
 {
     enum mesh_private_object_proto_error error =
-        offer_shape(offer, true, true, true);
+        offer_shape(offer, true, true, true, true);
     uint8_t root[32];
     if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
         return error;

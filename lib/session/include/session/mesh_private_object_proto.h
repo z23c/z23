@@ -118,9 +118,10 @@ enum mesh_private_object_proto_error
 mesh_private_object_offer_request_id_v1_derive(
     const struct mesh_private_object_offer_v1 *offer,
     const uint8_t grant_nonce[32], uint8_t out[32]);
-/* Stable pre-encryption context. It binds every offer field except the
- * ciphertext root, nonce-proving request id, and signature, which necessarily
- * become known only after ciphertext exists. */
+/* Stable pre-encryption context. It binds the object geometry, identities,
+ * pairing, and encryption keys. The ciphertext root and target-issued grant
+ * id necessarily become known only after encryption; the signed offer and
+ * nonce-proving request id bind both before admission. */
 enum mesh_private_object_proto_error
 mesh_private_object_offer_key_context_v1(
     const struct mesh_private_object_offer_v1 *offer, uint8_t out[32]);

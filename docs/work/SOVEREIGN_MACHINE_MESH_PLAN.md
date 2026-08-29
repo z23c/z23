@@ -475,9 +475,11 @@ The phases below are delivered in this dependency order:
    receipts, then add bounded multiple-direct and onion route selection without
    changing authority when the path changes;
 8. in progress: the signed bounded capability lifecycle codec and sticky local
-   grant revocation exist; add target-side plan/commit, renewal, remote
-   cancellation/revocation acknowledgement, and two-host agreement for the
-   next typed operation;
+   grant revocation exist; the private-object encryption context no longer
+   depends on the later ciphertext-bound grant identifier. Add a canonical
+   private-object template rooted by the proposal, then target-side
+   plan/commit, renewal, remote cancellation/revocation acknowledgement, and
+   two-host agreement for the next typed operation;
 9. in progress: the encrypted private-object envelope, resumable ciphertext
    receiver, and durable terminal cancellation exist; add the dispatcher,
    atomic no-clobber plaintext publication, and signed receipts before any
@@ -989,6 +991,15 @@ peers, never production wallet state.
   transfer. The three focused groups ran cold with zero failures and skips;
   native GCC and MinGW strict syntax checks passed. Target-side capability
   plan/commit and network dispatch remain open.
+- 2026-08-29T19:39:55-04:00 / 2026-08-29T23:39:55Z: a real two-chunk
+  private-object pipeline removed a protocol construction cycle. The sender
+  now derives the stable encryption context before either `grant_id` or
+  `ciphertext_root` exists, encrypts and roots the ciphertext, then derives the
+  target's ciphertext-bound durable grant and signs the complete offer. The
+  final request and offer signature still bind the grant and root; changing
+  either is refused. The new registered group and the protocol and chunk
+  crypto groups passed cold with zero failures and skips. A root-bound
+  private-object capability template and target-side plan/commit remain open.
 
 ## Completion rule
 
