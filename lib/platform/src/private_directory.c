@@ -145,7 +145,8 @@ bool platform_private_directory_open_validated(const char *path,
     if (!native_handle || !private_directory_wide(path, wide))
         return false;
     HANDLE directory = CreateFileW(
-        wide, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        wide, FILE_LIST_DIRECTORY | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES |
+                  READ_CONTROL,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -175,14 +176,21 @@ bool platform_private_directory_ensure(const char *path)
 {
     if (!path || !path[0]) { errno = EINVAL; return false; }
     if (mkdir(path, 0700) != 0 && errno != EEXIST) return false;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
-    if (lstat(path, &st) != 0) return false;
-    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode) ||
-        st.st_uid != geteuid() || (st.st_mode & 0777) != 0700) {
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid()) {
+        if (fd >= 0) close(fd);
         errno = EACCES;
         return false;
     }
-    return true;
+    /* Auto-tighten: package managers, mkdir -p, and container volumes
+     * commonly create 0755. Tighten to 0700 so the private-file contract
+     * holds without breaking the boot→shutdown lifecycle. */
+    bool ok = ((st.st_mode & 0777) == 0700 || fchmod(fd, 0700) == 0) &&
+              fstat(fd, &st) == 0 && (st.st_mode & 0777) == 0700;
+    close(fd);
+    return ok;
 }
 
 bool platform_private_directory_create(const char *path)

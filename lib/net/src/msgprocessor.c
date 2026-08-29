@@ -230,8 +230,8 @@ void msgprocessor_test_tx_mark_seen(const struct uint256 *hash) {
  * the synchronous path so peer scoring, relay, and tip transition semantics
  * remain unchanged; only historical catch-up block bodies are deep-cloned into
  * this bounded worker queue. */
-#define MSG_BLOCK_INTAKE_CAP 128
-#define MSG_BLOCK_INTAKE_DRAIN_BATCH 128
+#define MSG_BLOCK_INTAKE_CAP 1024
+#define MSG_BLOCK_INTAKE_DRAIN_BATCH 256
 #define MSG_BLOCK_INTAKE_LOG_KEEPALIVE_SECS 15
 #define MSG_BLOCK_INTAKE_DROP_BLOCKER_ID "net.block_intake_body_dropped"
 
@@ -313,12 +313,10 @@ static void msg_block_intake_name_drop_blocker(uint64_t dropped_total)
         return;
     char reason[384];
     snprintf(reason, sizeof(reason),
-             "block bodies received and DESTROYED because the %d-slot P2P "
-             "intake ring was full: dropped=%llu cumulative. Every drop is a "
-             "body paid for on the wire and thrown away, then re-downloaded. "
-             "The reducer is not draining bodies as fast as peers deliver "
-             "them; if the successor of the tip is among the dropped, the "
-             "chain cannot advance at all.",
+             "%d-slot P2P intake full: dropped=%llu cumulative. Received "
+             "block bodies were discarded and must be requested again. The "
+             "reducer is draining slower than peers deliver; a dropped tip "
+             "successor can prevent chain advance.",
              MSG_BLOCK_INTAKE_CAP, (unsigned long long)dropped_total);
     struct blocker_record rec;
     if (blocker_init(&rec, MSG_BLOCK_INTAKE_DROP_BLOCKER_ID, "net.block_intake",

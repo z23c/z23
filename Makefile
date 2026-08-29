@@ -478,13 +478,12 @@ ZCLASSIC23_CHAOS_BIN = $(BIN_DIR)/zclassic23-chaos
 CHAOS_SEEDS ?= 64
 CHAOS_SWEEP_SCENARIO ?= tools/sim/scenarios/seeded_peer_churn.scenario
 
-# The make-vendor merge introduced the `vendor:` target ahead of `all:`, which
-# made `vendor` the implicit first target (and thus the default goal). A bare
-# `make` would then only build the vendored libs, never the binary. Pin the
-# default goal back to `all` so `git clone && make vendor && make` (and a plain
-# `make`) builds the node as expected; the auto-vendor prerequisite machinery
-# still pulls missing archives in transparently.
-.DEFAULT_GOAL := all
+# A bare `make` builds the public node only. The previous `all` default also
+# linked the monolithic test harness and every auxiliary tool, making the
+# obvious first-run command pay for artifacts it did not ask for. `make all`
+# retains that complete bundle; test and tool targets remain explicit. The
+# auto-vendor prerequisite machinery still supplies missing pinned archives.
+.DEFAULT_GOAL := z23
 
 # App layer (MVC)
 APP_DIRS = models controllers views services supervisors conditions jobs
@@ -1325,7 +1324,7 @@ else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_DEPFILE_SIN
 ZCL_DEPFILE_PROFILES := dev-tsan
 else ifneq ($(filter coverage coverage-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := coverage
-else ifneq ($(filter fuzz fuzz-ci fuzz-ci-leaks fuzz-replay fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter fuzz fuzz-ci fuzz-ci-leaks fuzz-replay fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_mesh_status_proto,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := fuzz
 else ifneq ($(filter lint lint-fast watcher-safety-gates dev-failure-execution-id ff t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES :=
@@ -7100,7 +7099,7 @@ FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	-fno-sanitize=alignment $(ZCL_FUZZ_EXTRA_CFLAGS)
 FUZZ_LIBS = $(TOR_LIBS) $(LIBS)
 
-FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science
+FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science $(BIN_DIR)/fuzz_mesh_status_proto
 # Keep the line above literal and keep one `$(BIN_DIR)/fuzz_<kind>:` rule per
 # harness below: check_fuzz_artifact_replay.sh derives the corpus<->binary map
 # from those rule lines, and background_quality_lane.sh derives its kind list
@@ -7174,11 +7173,12 @@ check-fuzz-ci-tools: check-fuzz-toolchain
 
 fuzz: check-fuzz-toolchain $(FUZZ_TARGETS)
 
-.PHONY: fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_zcode_commons fuzz_zcode_dht fuzz_zcode_science
+.PHONY: fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_zcode_commons fuzz_zcode_dht fuzz_zcode_science fuzz_mesh_status_proto
 fuzz_ecdsa: $(BIN_DIR)/fuzz_ecdsa
 fuzz_zcode_commons: $(BIN_DIR)/fuzz_zcode_commons
 fuzz_zcode_dht: $(BIN_DIR)/fuzz_zcode_dht
 fuzz_zcode_science: $(BIN_DIR)/fuzz_zcode_science
+fuzz_mesh_status_proto: $(BIN_DIR)/fuzz_mesh_status_proto
 fuzz_block: $(BIN_DIR)/fuzz_block
 fuzz_script: $(BIN_DIR)/fuzz_script
 fuzz_p2p: $(BIN_DIR)/fuzz_p2p
@@ -7240,6 +7240,9 @@ $(BIN_DIR)/fuzz_zcode_dht: $(FUZZ_OBJ_DIR)/tools/fuzz/fuzz_zcode_dht.o $(FUZZ_OB
 	$(FUZZ_LINK)
 
 $(BIN_DIR)/fuzz_zcode_science: $(FUZZ_OBJ_DIR)/tools/fuzz/fuzz_zcode_science.o $(FUZZ_OBJS) | check-fuzz-toolchain
+	$(FUZZ_LINK)
+
+$(BIN_DIR)/fuzz_mesh_status_proto: $(FUZZ_OBJ_DIR)/tools/fuzz/fuzz_mesh_status_proto.o $(FUZZ_OBJS) | check-fuzz-toolchain
 	$(FUZZ_LINK)
 
 fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)

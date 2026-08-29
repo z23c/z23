@@ -256,6 +256,14 @@ scan_counts() {
     ' "$@"
 }
 
+existing_files()
+{
+    local path
+    for path in "$@"; do
+        [ -f "$path" ] && printf '%s\n' "$path"
+    done
+}
+
 # ── --selftest ───────────────────────────────────────────────────────────
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
@@ -443,6 +451,11 @@ FIXTURE
         echo "$GATE: SELFTEST FAILED — tools/scripts/sh_str.sh carries the shape it exists to replace" >&2
         exit 2
     fi
+    mapfile -t existing_fixture < <(existing_files "$self" "$tmp/deleted.sh")
+    if [ "${#existing_fixture[@]}" -ne 1 ] || [ "${existing_fixture[0]}" != "$self" ]; then
+        echo "$GATE: SELFTEST FAILED — deleted tracked files were not excluded from the scan" >&2
+        exit 2
+    fi
 
     echo "[$GATE] SELFTEST PASS (clean passes; stale baseline rows and plain, REINDENTED and one-line violations all fail; a value pipeline, a converted site, a commented-out violation and a non-printf grep -q do not count; a no-pipefail script is exempt; this gate and sh_str.sh are clean)"
     exit 0
@@ -459,7 +472,8 @@ if [ -n "${ZCL_PIPEFAIL_GATE_SCAN_GLOB:-}" ]; then
     mapfile -t scan_files < <(ls -1 ${ZCL_PIPEFAIL_GATE_SCAN_GLOB} 2>/dev/null || true)
     FILE_FLOOR="${ZCL_PIPEFAIL_GATE_FILE_FLOOR:-1}"
 else
-    mapfile -t scan_files < <(git ls-files '*.sh')
+    mapfile -t tracked_shell_files < <(git ls-files '*.sh')
+    mapfile -t scan_files < <(existing_files "${tracked_shell_files[@]}")
     FILE_FLOOR="${ZCL_PIPEFAIL_GATE_FILE_FLOOR:-200}"
 fi
 

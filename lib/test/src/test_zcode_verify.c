@@ -3366,6 +3366,15 @@ static int t_task_publish_gate(void)
                  exported == VCS_ZCODE_TASK_CONTEXT_OK && allowed);
         json_free(&result);
 
+        spec.expiry = (uint64_t)now + 86401u;
+        json_init(&result);
+        allowed = boot_zcode_dht_task_pointer_publish_gate(&spec, &result);
+        ZV_CHECK("task gate: a pointer cannot outlive its task",
+                 !allowed &&
+                 zv_str_is(&result, "code",
+                           "TASK_POINTER_OUTLIVES_TASK"));
+        json_free(&result);
+
         /* (e) The same context behind a pointer naming a DIFFERENT task:
          * the binding refusal. */
         uint8_t flipped[32];

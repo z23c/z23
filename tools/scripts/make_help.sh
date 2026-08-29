@@ -27,8 +27,8 @@ MAKEFILE="$ROOT/Makefile"
 read -r -d '' ENTRIES <<'TABLE' || true
 first	doctor	what this host is still missing, with the exact install line
 first	setup	arm the git hooks and generate compile_commands.json (idempotent)
-first	vendor	one-time build of the vendored static archives from pinned sources
-first	all	build the node, the CLI and the test binary
+first	z23	build the public node (bare make does the same; vendor setup is automatic)
+loop	all	build the node plus the monolithic test harness and auxiliary tools
 loop	new-app	scaffold a GUI app from zhello: make new-app NAME=myapp, then make myapp
 loop	build-only	compile every translation unit, no link — genuinely parallel under -j
 loop	syntax-check	whole-tree no-link syntax pass in one compiler invocation

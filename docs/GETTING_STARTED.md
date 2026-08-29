@@ -6,9 +6,8 @@ This is the generic, fresh-machine setup guide: build the binary, then run it
 either as a **production** full node + block explorer, or as an isolated
 **development** instance. [`README.md`](../README.md) is the project overview;
 [`docs/BUILD.md`](BUILD.md) is the focused build reference (vendored-library
-sources/versions, fast dev-compile targets, sanitizer profiles); the
-[`z23-dev`](../.claude/skills/z23-dev/SKILL.md) skill is the deep
-developer workflow (code navigator, hot-swap tiers, push traps).
+sources/versions, fast dev-compile targets, sanitizer profiles), and
+[`docs/DEVELOPING.md`](DEVELOPING.md) is the model-neutral developer workflow.
 [`docs/HANDOFF.md`](HANDOFF.md) is maintainer-only live state for the
 project's own hosted node — skip it unless you're operating that host.
 
@@ -63,11 +62,15 @@ find are not sufficient for either.
 ```bash
 git clone https://github.com/z23c/z23.git
 cd z23
-make -j"$(getconf _NPROCESSORS_ONLN)" z23
+make doctor
+make setup
+make -j4 z23
 ```
 
-On Linux, bare `make -j"$(getconf _NPROCESSORS_ONLN)"` also builds the RPC
-client tools. The
+This bounded command is suitable for a 16 GB machine, including a slow disk.
+Increase `-j4` only after observing available memory and I/O wait. Use
+`make -j4 all` only when you also need the monolithic test harness and every
+auxiliary command-line tool. The
 published node is a C23 executable with pinned project dependencies linked
 statically; it does not inherit GTK/WebKit or the C++ LevelDB runtime from the
 build host. The build fails closed if the ELF or Mach-O dependency audit finds
@@ -124,7 +127,20 @@ make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel   # canonical runner; do not
 make lint            # defensive-coding + doc-accuracy gates
 ```
 
-### macOS capability boundary
+### Platform capability boundary
+
+| Host | Public node | Development loop | Resident hot swap |
+| --- | --- | --- | --- |
+| Linux | Full node | Full native workflow | Eligible read-only C23 leaves |
+| WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow |
+| macOS arm64 | Native node | Build and focused tests; polling watcher only | Unavailable; rebuild/restart |
+| Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart |
+
+Windows setup and the boundary between native MSYS2 and WSL2 are documented in
+[`WINDOWS.md`](WINDOWS.md). Never share `build/` or `vendor/lib/` between
+native Windows and WSL.
+
+#### macOS
 
 The arm64 macOS build includes the node, wallet, P2P and RPC services,
 databases, and native cryptography. The following Linux-specific facilities

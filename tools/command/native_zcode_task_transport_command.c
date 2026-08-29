@@ -21,10 +21,10 @@
  *                      already held and verified
  *
  * A task object is unsigned by design: it is a content-addressed
- * constraint set, not an identity claim. The authenticity of a POSTING is
- * the signed POINTER/PROVIDER pair in VCS_ZCODE_TASK_DHT_NAMESPACE
- * (governed by AGENT_SCOPE grants like every namespace); the integrity of
- * the task is its root. The carrier contributes the part a stranger
+ * constraint set, not an identity claim. Record signatures identify the
+ * publishing key; receiver verification binds the task bytes, and local
+ * sovereignty policy decides visibility. AGENT_SCOPE remains dormant. The
+ * carrier contributes the part a stranger
  * cannot re-derive from the task wire alone — the goal preimage and the
  * proof policy bytes — cross-bound so sha3(goal.bin) equals
  * task.goal_root and the policy wire roots to task.proof_policy_root.
@@ -268,8 +268,11 @@ void zcl_native_handle_zcode_task_offer(
     (void)json_push_kv(&reply->data, "provider_publish_input", &publish);
     json_free(&publish);
     json_init(&publish);
+    uint64_t pointer_window = (uint64_t)task.expires_unix - now;
+    if (pointer_window > ZTT_POINTER_WINDOW_S)
+        pointer_window = ZTT_POINTER_WINDOW_S;
     ztl_publish_input(&publish, "pointer", VCS_ZCODE_TASK_DHT_NAMESPACE,
-                      task_hex, context_hex, now, ZTT_POINTER_WINDOW_S);
+                      task_hex, context_hex, now, pointer_window);
     (void)json_push_kv(&reply->data, "pointer_publish_input", &publish);
     json_free(&publish);
 
@@ -569,9 +572,10 @@ void zcl_native_handle_zcode_task_board(
         return;
     }
 
-    bool own_store = false;
-    struct vcs_package_store *store =
-        ztl_open_store(request, &own_store, "zcode.task");
+    /* READ means no recovery, lock creation, garbage collection, or directory
+     * creation in a caller-selected datadir. Enrich only through a store the
+     * hosting daemon already owns; otherwise report bytes-not-held. */
+    struct vcs_package_store *store = vcs_package_store_global();
     int64_t now = (int64_t)platform_time_wall_unix();
     struct json_value rows;
     const struct json_value *in_rows = json_get(&records.data, "records");
@@ -622,7 +626,6 @@ void zcl_native_handle_zcode_task_board(
         (void)json_push_back(&rows, &entry);
         json_free(&entry);
     }
-    ztl_close_store(store, own_store);
     zcl_command_reply_free(&records);
 
     (void)json_push_kv_str(&reply->data, "namespace",

@@ -534,9 +534,9 @@ no new CAS object and no new wire message. The same task context always
 roots to the same deterministic context root.
 
 A task object is deliberately **unsigned**. It is a content-addressed
-constraint set, not an identity claim: the authenticity of a *posting* is
-the signed POINTER/PROVIDER pair in the `zclassic23.task` namespace
-(governed by scoped-agent grants like every namespace); the integrity of
+constraint set, not an identity claim. POINTER/PROVIDER signatures identify
+the publishing key; each receiver's STORE, INDEX, and DISCOVER policy controls
+local visibility. Scoped-agent governance remains dormant. The integrity of
 the task is its root. The carrier contributes the cross-bindings a
 stranger cannot re-derive from the task wire alone — `sha3-256(goal.bin)`
 must equal `task.goal_root`, and the policy wire must root to

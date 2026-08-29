@@ -1241,9 +1241,9 @@ This is a C23 project, so the edit loop should compile only what changed.
   `ZCL_HOTSWAP_PRELOAD=<module.so>` on a one-shot CLI) runs the freshly
   compiled body in the CLI process — the observable seconds-scale dev loop.
   The GENERATION (manifest/staging) mechanism stays contained: `make hotswap`,
-  `tools/dev/hotswap-running-dev.sh`, `deploy-dev-lane.sh` public activation,
-  watcher `auto`/`apply` modes, and `dev.change.apply` still refuse before
-  publication. Use `make hotswap-sim` for the focused deterministic
+  `deploy-dev-lane.sh` public activation, watcher `auto`/`apply` modes, and
+  `dev.change.apply` still refuse before publication. Use `make hotswap-sim`
+  for the focused deterministic
   simulated-network proof; `make sim-fast` remains the broader checked-in
   scenario and seeded replay suite.
 - For no-build terminal probes, prefer native commands like `z23 status`

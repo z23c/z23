@@ -421,6 +421,70 @@ static bool fixture_provider_record(
       dir, genesis, "science", transport_root, record);
 }
 
+static bool board_prefix_policy(
+    void *ctx, enum vcs_zcode_sovereignty_action action,
+    const struct vcs_zcode_sovereignty_subject *subject)
+{
+  (void)ctx;
+  if (!subject)
+    return false;
+  return action != VCS_ZCODE_SOVEREIGNTY_DISCOVER ||
+         subject->semantic_root[0] == UINT8_MAX;
+}
+
+static int test_record_board_filters_before_limit(void)
+{
+  int failures = 0;
+  TEST("zcode dht board: denied prefix cannot hide an allowed tail") {
+    char dir[] = "/tmp/zcl_dht_board_policy_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x81, sizeof(genesis));
+    memset(noise, 0x82, sizeof(noise));
+    ASSERT(fixture_identity(dir, 0x83, genesis, noise));
+    struct vcs_zcode_dht_service_params params = {
+        .datadir = dir,
+        .transport_enabled = true,
+        .now = {.wall_unix = 1500, .monotonic_s = 1500},
+        .chain_verify = chain_ok,
+        .policy_decide = board_prefix_policy,
+    };
+    memcpy(params.network_genesis, genesis, 32);
+    memcpy(params.local_noise_static, noise, 32);
+    struct vcs_zcode_dht_service *service =
+        vcs_zcode_dht_service_create(&params);
+    ASSERT(service != NULL);
+
+    struct vcs_zcode_dht_record record;
+    uint8_t semantic[32];
+    for (size_t i = 0; i < 65; i++) {
+      memset(semantic, (uint8_t)(i + 1u), sizeof(semantic));
+      if (i == 64)
+        memset(semantic, UINT8_MAX, sizeof(semantic));
+      ASSERT(fixture_pointer_record_named(
+          dir, genesis, "zclassic23.task", semantic,
+          (uint8_t)(i + 1u), 1, &record));
+      ASSERT_EQ(vcs_zcode_dht_record_store_put(
+                    service->record_store, &record, 1500),
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    }
+    struct vcs_zcode_dht_record row[1];
+    size_t allowed_total = 0;
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_scan(
+                  service, 1500, VCS_ZCODE_DHT_RECORD_POINTER,
+                  "zclassic23.task", row, 1, &allowed_total),
+              1u);
+    ASSERT_EQ(allowed_total, 1u);
+    ASSERT_EQ(row[0].semantic_root[0], UINT8_MAX);
+
+    vcs_zcode_dht_service_free(service, test_time(1500));
+    cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 #define MULTI_NODES 12u
 #define MULTI_MAX_NODES 20u
 
@@ -4921,6 +4985,7 @@ int test_zcode_dht_service(void) {
   failures += test_record_transport_and_restart();
   failures += test_record_operation_table_cap();
   failures += test_agent_scope_dormant();
+  failures += test_record_board_filters_before_limit();
   failures += test_record_collect_tick_debounce();
   failures += test_sparse_iterative_network();
   failures += test_sparse_space16_network();

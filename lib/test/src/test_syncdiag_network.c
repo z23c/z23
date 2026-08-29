@@ -38,10 +38,21 @@ int syncdiag_cases_network(void)
                             "local_noise_fingerprint_sha3") != NULL;
         ok = ok && dht && dht->type == JSON_OBJ;
         ok = ok && pairing && pairing->type == JSON_OBJ;
-        ok = ok && !json_get_bool(json_get(pairing, "implemented"));
-        ok = ok && !json_get_bool(json_get(pairing, "private_mesh_ready"));
+        const struct json_value *local_authority =
+            pairing ? json_get(pairing, "local_authority_implemented") : NULL;
+        const struct json_value *remote_protocol = pairing
+            ? json_get(pairing, "remote_status_protocol_implemented") : NULL;
+        const struct json_value *mesh_ready =
+            pairing ? json_get(pairing, "private_mesh_ready") : NULL;
+        ok = ok && local_authority && local_authority->type == JSON_BOOL &&
+             json_get_bool(local_authority);
+        ok = ok && remote_protocol && remote_protocol->type == JSON_BOOL &&
+             !json_get_bool(remote_protocol);
+        ok = ok && mesh_ready && mesh_ready->type == JSON_BOOL &&
+             !json_get_bool(mesh_ready);
         ok = ok && blockers && blockers->type == JSON_ARR;
-        ok = ok && json_array_has_str(blockers, "PAIRING_NOT_IMPLEMENTED");
+        ok = ok && json_array_has_str(
+                           blockers, "REMOTE_STATUS_PROTOCOL_UNAVAILABLE");
 
         char encoded[4096];
         size_t encoded_len = json_write(&result, encoded, sizeof(encoded));

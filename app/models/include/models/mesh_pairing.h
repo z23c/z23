@@ -28,6 +28,13 @@ struct db_mesh_pairing {
     uint64_t revocation_generation;
 };
 
+struct db_mesh_pairing_counts {
+    int64_t total;
+    int64_t active;
+    int64_t expired;
+    int64_t revoked;
+};
+
 struct ar_callbacks *db_mesh_pairing_callbacks(void);
 
 /* Stable local key for one network/master/static-key tuple. No mutable policy
@@ -47,6 +54,8 @@ bool db_mesh_pairing_find(struct node_db *ndb, const char *pairing_id,
                           struct db_mesh_pairing *out);
 int db_mesh_pairing_list(struct node_db *ndb, struct db_mesh_pairing *out,
                          size_t max);
+bool db_mesh_pairing_count_states(struct node_db *ndb, int64_t now,
+                                  struct db_mesh_pairing_counts *out);
 
 /* Idempotent sticky revocation. The first transition increments the durable
  * generation; later calls preserve the original timestamp and generation. */

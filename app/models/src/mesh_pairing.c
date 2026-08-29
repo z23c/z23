@@ -176,6 +176,37 @@ int db_mesh_pairing_list(struct node_db *ndb, struct db_mesh_pairing *out,
         mesh_pairing_read(&out[count], st));
 }
 
+bool db_mesh_pairing_count_states(struct node_db *ndb, int64_t now,
+                                  struct db_mesh_pairing_counts *out)
+{
+    if (!ndb || !ndb->open || now <= 0 || !out)
+        LOG_FAIL("mesh_pairing", "count_states: bad args");
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st = NULL;
+    AR_PREPARE_RET(ndb, st,
+        "SELECT COUNT(*),"
+        "COALESCE(SUM(CASE WHEN revoked_at=0 AND expires_at>? "
+        "THEN 1 ELSE 0 END),0),"
+        "COALESCE(SUM(CASE WHEN revoked_at=0 AND expires_at<=? "
+        "THEN 1 ELSE 0 END),0),"
+        "COALESCE(SUM(CASE WHEN revoked_at!=0 THEN 1 ELSE 0 END),0) "
+        "FROM mesh_pairings", false);
+    AR_BIND_INT(st, 1, now);
+    AR_BIND_INT(st, 2, now);
+    if (!AR_STEP_ROW(st)) {
+        AR_FINALIZE(st);
+        LOG_FAIL("mesh_pairing", "count_states: query returned no row");
+    }
+    out->total = AR_COL_INT(st, 0);
+    out->active = AR_COL_INT(st, 1);
+    out->expired = AR_COL_INT(st, 2);
+    out->revoked = AR_COL_INT(st, 3);
+    AR_FINALIZE(st);
+    return out->total >= 0 && out->active >= 0 && out->expired >= 0 &&
+           out->revoked >= 0 &&
+           out->total == out->active + out->expired + out->revoked;
+}
+
 bool db_mesh_pairing_revoke(struct node_db *ndb, const char *pairing_id,
                             int64_t revoked_at)
 {

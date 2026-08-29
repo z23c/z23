@@ -5830,6 +5830,7 @@ static int test_zd_task_context(void)
                       NULL),
                   VCS_ZCODE_TASK_CONTEXT_OK);
         ASSERT(tiny_len == sizeof(goal_text) - 1u);
+        ASSERT(memcmp(tiny_goal, goal_text, sizeof(tiny_goal)) == 0);
         uint8_t flipped[32];
         memcpy(flipped, task_root, 32);
         flipped[0] ^= 1u;

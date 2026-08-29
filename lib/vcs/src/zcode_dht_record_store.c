@@ -319,41 +319,6 @@ size_t vcs_zcode_dht_record_store_scan(
   return count;
 }
 
-size_t vcs_zcode_dht_record_store_scope_grants(
-    const struct vcs_zcode_dht_record_store *store,
-    const char namespace_name[VCS_ZCODE_DHT_RECORD_NAMESPACE_BYTES],
-    const uint8_t master_pubkey[32], uint64_t now_unix,
-    uint8_t founder_out[32], uint8_t *granted, size_t granted_capacity)
-{
-  if (founder_out)
-    memset(founder_out, 0, 32);
-  if (!store || !namespace_name || !master_pubkey || (!granted && granted_capacity))
-    return 0;
-  size_t total = 0, collected = 0;
-  uint64_t founder_sequence = 0;
-  for (size_t i = 0; i < store->count; i++) {
-    const struct vcs_zcode_dht_record *record = &store->entries[i].record;
-    if (record->kind != VCS_ZCODE_DHT_RECORD_AGENT_SCOPE ||
-        strcmp(record->namespace_name, namespace_name) != 0 ||
-        memcmp(record->delegation.doc.master_pubkey, master_pubkey, 32) != 0 ||
-        now_unix < record->not_before || now_unix >= record->expiry)
-      continue;
-    if (collected < granted_capacity) {
-      memcpy(granted + collected * 32, record->transport_root, 32);
-      collected++;
-    }
-    /* Strict < keeps the first grant in the store's canonical order when
-     * two streams share a sequence, so the founder is deterministic. */
-    if (!total || record->sequence < founder_sequence) {
-      founder_sequence = record->sequence;
-      if (founder_out)
-        memcpy(founder_out, record->delegation.online_pubkey, 32);
-    }
-    total++;
-  }
-  return total;
-}
-
 static void digest_entries(const struct vcs_zcode_dht_record_store *store,
                            uint8_t out[32])
 {

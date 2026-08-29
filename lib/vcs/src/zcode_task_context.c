@@ -268,8 +268,10 @@ enum vcs_zcode_task_context_error vcs_zcode_task_context_admit(
                 if (task_out) *task_out = task;
                 if (task_root_out) memcpy(task_root_out, task_root, 32);
                 if (goal_len_out) *goal_len_out = goal_len;
-                if (goal_out && goal_len <= goal_cap)
-                    memcpy(goal_out, goal, goal_len);
+                if (goal_out) {
+                    size_t copied = goal_len < goal_cap ? goal_len : goal_cap;
+                    memcpy(goal_out, goal, copied);
+                }
             }
         }
     }
