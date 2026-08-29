@@ -68,11 +68,13 @@ CURL_MINIMUM_VERSION="8.4.0"
 #   --attest=<origin>=z23-pin-v1:<manifest-sha256>:<installer-sha256>
 #   --attest-unreachable=<origin>=<reason>
 #
-# The GATHERER (packaging/install/install.sh, packaging/install/install.ps1)
-# classifies each source as answered-with-a-pin or unreachable-for-<reason>.
-# This script is the JUDGE. Judging here as well as in the front door is
-# deliberate duplication, not an oversight: sh, bash and PowerShell cannot
-# share a file, and each of the three must be able to refuse on its own.
+# The GATHERER is the C23 front door (tools/install/z23_bootstrap.c over
+# lib/install), which packaging/install/install.sh fetches and digest-checks
+# before running. It classifies each source as answered-with-a-pin or
+# unreachable-for-<reason>. This script is the JUDGE. Judging here as well as
+# in the front door is deliberate duplication, not an oversight: this file is
+# fetched and run ALONE, so it cannot link lib/install, and it must be able to
+# refuse on its own evidence rather than on the gatherer's word.
 #
 # POLICY, stated plainly so it can be argued with:
 #   * ANY two answered pins that differ -> REFUSE. We never majority-vote.
@@ -104,7 +106,7 @@ ATTESTED_MANIFEST_SHA256=""
 # The one 64-lowercase-hex validator in this file; every hex check goes
 # through it (the pin halves above, and the --manifest-sha256 argument in
 # fetch_into below).
-# zcl-identity-parser-allow: this script ships ALONE — packaging/install/install.sh
+# zcl-identity-parser-allow: this script ships ALONE — the C23 front door
 # fetches just this file into a mktemp dir and runs it there, so there is no
 # tools/scripts/source_identity_lib.sh beside it to source, and a second
 # shipped file would break the two-digest z23-pin-v1 release pin.

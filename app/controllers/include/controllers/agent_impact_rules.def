@@ -2695,3 +2695,10 @@ AGENT_IMPACT_RULE("lib/test/src/test_zendp.c", "zendp zendp_records make_lint_ga
  * change here must also re-prove the catalog and native-API contracts that
  * decide what the release binary advertises. */
 AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent.h|tools/command/native_devagent_command.c|tools/command/native_devagent_mutate_command.c|lib/test/src/test_devagent_surface.c", "devagent_surface command_registry_catalog native_api_contract command_input_bounds make_lint_gates")
+/* The install front door. lib/install is pure judgement with no in-tree
+ * dependencies, so the only things that can observe a change to it are its
+ * own group and check-z23-release-install, which drives the real
+ * build/bin/z23-bootstrap and the served shim end to end. The shim and the
+ * PowerShell twin ride the same rule because their contract with the
+ * bootstrap — the digest gate and the forwarded argv — is asserted there. */
+AGENT_IMPACT_RULE("lib/install/src/*|lib/install/include/install/*|tools/install/*|packaging/install/*|lib/test/src/test_z23_front_door.c", "z23_front_door make_lint_gates")
