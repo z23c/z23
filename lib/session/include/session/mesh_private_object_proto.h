@@ -10,7 +10,10 @@
 
 #define MESH_PRIVATE_OBJECT_PROTO_VERSION 1u
 #define MESH_PRIVATE_OBJECT_FLAGS_NONE 0u
+#define MESH_PRIVATE_OBJECT_TAG_BYTES UINT32_C(16)
 #define MESH_PRIVATE_OBJECT_CHUNK_BYTES UINT32_C(65536)
+#define MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES \
+    (MESH_PRIVATE_OBJECT_CHUNK_BYTES - MESH_PRIVATE_OBJECT_TAG_BYTES)
 #define MESH_PRIVATE_OBJECT_MAX_OBJECT_BYTES UINT64_C(1073741824)
 #define MESH_PRIVATE_OBJECT_MAX_CIPHERTEXT_BYTES UINT64_C(2147483648)
 #define MESH_PRIVATE_OBJECT_MAX_LIFETIME_SECONDS UINT64_C(600)
@@ -94,6 +97,7 @@ struct mesh_private_object_offer_expectation_v1 {
     uint8_t transcript_hash[32];
     uint64_t connection_generation;
     uint64_t pairing_revocation_generation;
+    uint8_t request_id[32];
     uint8_t plaintext_root[32];
     uint8_t ciphertext_root[32];
     uint64_t exact_object_size_bytes;
@@ -103,6 +107,19 @@ struct mesh_private_object_offer_expectation_v1 {
 
 const char *mesh_private_object_proto_error_string(
     enum mesh_private_object_proto_error error);
+/* Derive the request id from the target-local grant nonce and every unsigned
+ * offer field except request_id itself. The sender must do this before sign;
+ * the receiver re-derives it from its durable grant before claim. */
+enum mesh_private_object_proto_error
+mesh_private_object_offer_request_id_v1_derive(
+    const struct mesh_private_object_offer_v1 *offer,
+    const uint8_t grant_nonce[32], uint8_t out[32]);
+/* Stable pre-encryption context. It binds every offer field except the
+ * ciphertext root, nonce-proving request id, and signature, which necessarily
+ * become known only after ciphertext exists. */
+enum mesh_private_object_proto_error
+mesh_private_object_offer_key_context_v1(
+    const struct mesh_private_object_offer_v1 *offer, uint8_t out[32]);
 enum mesh_private_object_proto_error mesh_private_object_offer_v1_validate(
     const struct mesh_private_object_offer_v1 *offer);
 enum mesh_private_object_proto_error mesh_private_object_offer_v1_sign(

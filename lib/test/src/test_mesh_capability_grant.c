@@ -37,15 +37,20 @@ static bool capability_grant(const struct db_mesh_pairing *pairing,
 {
     memset(out, 0, sizeof(*out));
     memcpy(out->pairing_id, pairing->pairing_id, sizeof(out->pairing_id));
+    capability_fill32(out->target_master_pubkey, 0x91);
+    capability_fill32(out->target_noise_static, 0xa1);
     out->operation = MESH_CAPABILITY_PRIVATE_OBJECT_RECEIVE;
     capability_fill32(out->plaintext_root, discriminator);
     capability_fill32(out->ciphertext_root, (uint8_t)(discriminator + 1));
-    out->object_size_bytes = 1000;
-    out->ciphertext_size_bytes = 1100;
-    out->storage_limit_bytes = 4096;
-    out->transfer_limit_bytes = 4096;
-    out->chunk_limit = 2;
-    out->max_chunk_bytes = 1024;
+    out->object_size_bytes =
+        MESH_CAPABILITY_GRANT_CHUNK_PAYLOAD_BYTES + 1u;
+    out->chunk_count = 2;
+    out->ciphertext_size_bytes = out->object_size_bytes +
+        (uint64_t)MESH_CAPABILITY_GRANT_CHUNK_TAG_BYTES * out->chunk_count;
+    out->storage_limit_bytes =
+        out->ciphertext_size_bytes + out->object_size_bytes;
+    out->transfer_limit_bytes = out->ciphertext_size_bytes;
+    out->max_chunk_bytes = MESH_CAPABILITY_GRANT_CHUNK_BYTES;
     out->wall_limit_seconds = 60;
     capability_fill32(out->nonce, (uint8_t)(discriminator + 2));
     out->deny_mask = MESH_CAPABILITY_DENY_MANDATORY;
@@ -53,6 +58,135 @@ static bool capability_grant(const struct db_mesh_pairing *pairing,
     out->not_before = 2100;
     out->expires_at = 3000;
     return mesh_capability_grant_id_derive(out, out->grant_id);
+}
+
+static int exact_and_geometry(struct node_db *ndb,
+                              const struct db_mesh_pairing *pairing)
+{
+    int failures = 0;
+    TEST_CASE("mesh capability grant binds target and canonical geometry") {
+        struct db_mesh_capability_grant grant, found, trial;
+        struct ar_errors errors;
+        ASSERT(capability_grant(pairing, 0x41, &grant));
+        ASSERT(db_mesh_capability_grant_insert(ndb, &grant));
+        ASSERT(db_mesh_capability_grant_insert(ndb, &grant));
+        ASSERT(db_mesh_capability_grant_find(ndb, grant.grant_id, &found));
+        ASSERT_EQ(found.chunk_count, 2);
+        ASSERT_EQ(found.max_chunk_bytes, 65536);
+        ASSERT_EQ(found.deny_mask, UINT64_C(255));
+        ASSERT(memcmp(found.target_noise_static,
+                      grant.target_noise_static, 32) == 0);
+
+        trial = grant;
+        trial.target_master_pubkey[0] ^= 1;
+        ASSERT(!db_mesh_capability_grant_validate(&trial, &errors));
+        trial = grant;
+        trial.max_chunk_bytes--;
+        ASSERT(mesh_capability_grant_id_derive(&trial, trial.grant_id));
+        ASSERT(!db_mesh_capability_grant_validate(&trial, &errors));
+        trial = grant;
+        trial.ciphertext_size_bytes++;
+        trial.storage_limit_bytes++;
+        trial.transfer_limit_bytes++;
+        ASSERT(mesh_capability_grant_id_derive(&trial, trial.grant_id));
+        ASSERT(!db_mesh_capability_grant_validate(&trial, &errors));
+        trial = grant;
+        trial.storage_limit_bytes--;
+        ASSERT(mesh_capability_grant_id_derive(&trial, trial.grant_id));
+        ASSERT(!db_mesh_capability_grant_validate(&trial, &errors));
+        trial = grant;
+        trial.deny_mask &= ~MESH_CAPABILITY_DENY_INSTALL;
+        ASSERT(mesh_capability_grant_id_derive(&trial, trial.grant_id));
+        ASSERT(!db_mesh_capability_grant_validate(&trial, &errors));
+
+        trial = grant;
+        trial.object_size_bytes = MESH_CAPABILITY_GRANT_CHUNK_PAYLOAD_BYTES;
+        trial.chunk_count = 1;
+        trial.ciphertext_size_bytes = trial.object_size_bytes + 16;
+        trial.storage_limit_bytes =
+            trial.ciphertext_size_bytes + trial.object_size_bytes;
+        trial.transfer_limit_bytes = trial.ciphertext_size_bytes;
+        ASSERT(mesh_capability_grant_id_derive(&trial, trial.grant_id));
+        ASSERT(db_mesh_capability_grant_validate(&trial, &errors));
+    } TEST_END
+    return failures;
+}
+
+static int claim_complete_restart(struct node_db *ndb, const char *path,
+                                  const struct db_mesh_pairing *pairing)
+{
+    int failures = 0;
+    TEST_CASE("mesh capability grant claims, resumes, and completes exactly") {
+        struct db_mesh_capability_grant grant, found;
+        uint8_t transfer[32], other[32];
+        capability_fill32(transfer, 0xc1);
+        capability_fill32(other, 0xd1);
+        ASSERT(capability_grant(pairing, 0x51, &grant));
+        ASSERT(db_mesh_capability_grant_insert(ndb, &grant));
+        ASSERT_EQ(db_mesh_capability_grant_claim(
+                      ndb, grant.grant_id, transfer, 0, 0, 2099),
+                  MESH_CAPABILITY_CLAIM_REFUSED);
+        ASSERT_EQ(db_mesh_capability_grant_claim(
+                      ndb, grant.grant_id, transfer, 0, 0, 2200),
+                  MESH_CAPABILITY_CLAIM_NEW);
+        ASSERT_EQ(db_mesh_capability_grant_claim(
+                      ndb, grant.grant_id, transfer, 0, 0, 2201),
+                  MESH_CAPABILITY_CLAIM_RESUME);
+        ASSERT_EQ(db_mesh_capability_grant_claim(
+                      ndb, grant.grant_id, other, 0, 0, 2201),
+                  MESH_CAPABILITY_CLAIM_REFUSED);
+        node_db_close(ndb);
+        ASSERT(node_db_open(ndb, path));
+        ASSERT_EQ(db_mesh_capability_grant_claim(
+                      ndb, grant.grant_id, transfer, 0, 0, 2202),
+                  MESH_CAPABILITY_CLAIM_RESUME);
+        ASSERT_EQ(db_mesh_capability_grant_complete(
+                      ndb, grant.grant_id, other, 0, 0, 2203),
+                  MESH_CAPABILITY_COMPLETE_REFUSED);
+        ASSERT_EQ(db_mesh_capability_grant_complete(
+                      ndb, grant.grant_id, transfer, 0, 0, 2203),
+                  MESH_CAPABILITY_COMPLETE_NEW);
+        ASSERT_EQ(db_mesh_capability_grant_complete(
+                      ndb, grant.grant_id, transfer, 0, 0, 2204),
+                  MESH_CAPABILITY_COMPLETE_REPLAY);
+        ASSERT(db_mesh_capability_grant_find(ndb, grant.grant_id, &found));
+        ASSERT_EQ(found.claimed_at, 2200);
+        ASSERT_EQ(found.consumed_at, 2203);
+        ASSERT(db_mesh_capability_grant_revoke(ndb, grant.grant_id, 2205));
+        ASSERT_EQ(db_mesh_capability_grant_complete(
+                      ndb, grant.grant_id, transfer, 0, 0, 2206),
+                  MESH_CAPABILITY_COMPLETE_REFUSED);
+    } TEST_END
+    return failures;
+}
+
+static int revocation_races(struct node_db *ndb,
+                            struct db_mesh_pairing *pairing)
+{
+    int failures = 0;
+    TEST_CASE("mesh capability grant revocation wins claim and completion") {
+        struct db_mesh_capability_grant revoked, blocked;
+        uint8_t transfer[32];
+        capability_fill32(transfer, 0xe1);
+        ASSERT(capability_grant(pairing, 0x61, &revoked));
+        ASSERT(db_mesh_capability_grant_insert(ndb, &revoked));
+        ASSERT(db_mesh_capability_grant_revoke(ndb, revoked.grant_id, 2200));
+        ASSERT(db_mesh_capability_grant_revoke(ndb, revoked.grant_id, 2300));
+        ASSERT_EQ(db_mesh_capability_grant_claim(
+                      ndb, revoked.grant_id, transfer, 0, 0, 2400),
+                  MESH_CAPABILITY_CLAIM_REFUSED);
+
+        ASSERT(capability_grant(pairing, 0x71, &blocked));
+        ASSERT(db_mesh_capability_grant_insert(ndb, &blocked));
+        ASSERT_EQ(db_mesh_capability_grant_claim(
+                      ndb, blocked.grant_id, transfer, 0, 0, 2300),
+                  MESH_CAPABILITY_CLAIM_NEW);
+        ASSERT(db_mesh_pairing_revoke(ndb, pairing->pairing_id, 2400));
+        ASSERT_EQ(db_mesh_capability_grant_complete(
+                      ndb, blocked.grant_id, transfer, 0, 0, 2500),
+                  MESH_CAPABILITY_COMPLETE_REFUSED);
+    } TEST_END
+    return failures;
 }
 
 int test_mesh_capability_grant(void)
@@ -63,72 +197,14 @@ int test_mesh_capability_grant(void)
     snprintf(path, sizeof(path), "%s/node.db", dir);
     struct node_db ndb = {0};
     struct db_mesh_pairing pairing;
-
-    TEST("mesh capability grant: exact authority is durable and insert-only") {
-        ASSERT(node_db_open(&ndb, path));
-        ASSERT(capability_pairing(&ndb, &pairing));
-        struct db_mesh_capability_grant grant, found;
-        ASSERT(capability_grant(&pairing, 0x41, &grant));
-        ASSERT(db_mesh_capability_grant_insert(&ndb, &grant));
-        ASSERT(db_mesh_capability_grant_insert(&ndb, &grant));
-        ASSERT(db_mesh_capability_grant_find(&ndb, grant.grant_id, &found));
-        ASSERT_EQ(found.object_size_bytes, 1000);
-        ASSERT_EQ(found.ciphertext_size_bytes, 1100);
-        ASSERT_EQ(found.deny_mask, MESH_CAPABILITY_DENY_MANDATORY);
-
-        struct ar_errors errors;
-        struct db_mesh_capability_grant widened = grant;
-        widened.transfer_limit_bytes++;
-        ASSERT(!db_mesh_capability_grant_validate(&widened, &errors));
-        widened = grant;
-        widened.deny_mask &= ~MESH_CAPABILITY_DENY_WALLET;
-        ASSERT(mesh_capability_grant_id_derive(&widened, widened.grant_id));
-        ASSERT(!db_mesh_capability_grant_validate(&widened, &errors));
-        PASS();
+    if (!node_db_open(&ndb, path) || !capability_pairing(&ndb, &pairing)) {
+        failures++;
+        goto done;
     }
-
-    TEST("mesh capability grant: consume is one-use and survives restart") {
-        struct db_mesh_capability_grant grant, found;
-        ASSERT(capability_grant(&pairing, 0x51, &grant));
-        ASSERT(db_mesh_capability_grant_insert(&ndb, &grant));
-        ASSERT(!db_mesh_capability_grant_consume(
-            &ndb, grant.grant_id, grant.nonce, 2099));
-        uint8_t wrong_nonce[32];
-        capability_fill32(wrong_nonce, 0xee);
-        ASSERT(!db_mesh_capability_grant_consume(
-            &ndb, grant.grant_id, wrong_nonce, 2200));
-        ASSERT(db_mesh_capability_grant_consume(
-            &ndb, grant.grant_id, grant.nonce, 2200));
-        ASSERT(!db_mesh_capability_grant_consume(
-            &ndb, grant.grant_id, grant.nonce, 2201));
-        node_db_close(&ndb);
-        ASSERT(node_db_open(&ndb, path));
-        ASSERT(db_mesh_capability_grant_find(&ndb, grant.grant_id, &found));
-        ASSERT_EQ(found.consumed_at, 2200);
-        PASS();
-    }
-
-    TEST("mesh capability grant: revoke is sticky and pairing revoke wins") {
-        struct db_mesh_capability_grant revoked, blocked, found;
-        ASSERT(capability_grant(&pairing, 0x61, &revoked));
-        ASSERT(db_mesh_capability_grant_insert(&ndb, &revoked));
-        ASSERT(db_mesh_capability_grant_revoke(&ndb, revoked.grant_id, 2200));
-        ASSERT(db_mesh_capability_grant_revoke(&ndb, revoked.grant_id, 2300));
-        ASSERT(db_mesh_capability_grant_find(&ndb, revoked.grant_id, &found));
-        ASSERT_EQ(found.revoked_at, 2200);
-        ASSERT_EQ(found.revocation_generation, 1);
-        ASSERT(!db_mesh_capability_grant_consume(
-            &ndb, revoked.grant_id, revoked.nonce, 2400));
-
-        ASSERT(capability_grant(&pairing, 0x71, &blocked));
-        ASSERT(db_mesh_capability_grant_insert(&ndb, &blocked));
-        ASSERT(db_mesh_pairing_revoke(&ndb, pairing.pairing_id, 2400));
-        ASSERT(!db_mesh_capability_grant_consume(
-            &ndb, blocked.grant_id, blocked.nonce, 2500));
-        PASS();
-    }
-
-_test_next:
+    failures += exact_and_geometry(&ndb, &pairing);
+    failures += claim_complete_restart(&ndb, path, &pairing);
+    failures += revocation_races(&ndb, &pairing);
+done:
     if (ndb.open)
         node_db_close(&ndb);
     test_rm_rf_recursive(dir);

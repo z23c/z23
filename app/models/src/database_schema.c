@@ -58,32 +58,40 @@ static const char *SCHEMA[] = {
     "CREATE INDEX IF NOT EXISTS idx_mesh_pairings_active"
     " ON mesh_pairings(revoked_at,expires_at)",
 
-    /* Insert-only, one-use private-object receive authority. The pairing is
-     * the subject identity; exact roots, limits, nonce and mandatory denials
-     * prevent this row from becoming ambient machine authority. */
+    /* Private-object grants bind both machines and move monotonically from
+     * available to claimed to completed. Sealed chunks are canonical 64 KiB
+     * records with 65,520 plaintext bytes and a 16-byte authentication tag. */
     "CREATE TABLE IF NOT EXISTS mesh_capability_grants("
     "grant_id TEXT PRIMARY KEY CHECK(length(grant_id)=64),"
     "pairing_id TEXT NOT NULL REFERENCES mesh_pairings(pairing_id) "
     "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
+    "target_master_pubkey BLOB NOT NULL CHECK(length(target_master_pubkey)=32),"
+    "target_noise_static BLOB NOT NULL CHECK(length(target_noise_static)=32),"
     "operation INTEGER NOT NULL CHECK(operation=1),"
     "plaintext_root BLOB NOT NULL CHECK(length(plaintext_root)=32),"
     "ciphertext_root BLOB NOT NULL CHECK(length(ciphertext_root)=32),"
     "object_size_bytes INTEGER NOT NULL CHECK(object_size_bytes BETWEEN 1 AND 1073741824),"
-    "ciphertext_size_bytes INTEGER NOT NULL CHECK(ciphertext_size_bytes>=object_size_bytes AND ciphertext_size_bytes<=2147483648),"
-    "storage_limit_bytes INTEGER NOT NULL CHECK(storage_limit_bytes>=ciphertext_size_bytes AND storage_limit_bytes<=2147483648),"
+    "ciphertext_size_bytes INTEGER NOT NULL CHECK(ciphertext_size_bytes<=2147483648),"
+    "storage_limit_bytes INTEGER NOT NULL CHECK(storage_limit_bytes>=ciphertext_size_bytes+object_size_bytes AND storage_limit_bytes<=3221225472),"
     "transfer_limit_bytes INTEGER NOT NULL CHECK(transfer_limit_bytes>=ciphertext_size_bytes AND transfer_limit_bytes<=2147483648),"
-    "chunk_limit INTEGER NOT NULL CHECK(chunk_limit BETWEEN 1 AND 4096),"
-    "max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes BETWEEN 1 AND 4194304),"
-    "wall_limit_seconds INTEGER NOT NULL CHECK(wall_limit_seconds BETWEEN 1 AND 86400),"
+    "max_chunk_bytes INTEGER NOT NULL CHECK(max_chunk_bytes=65536),"
+    "chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 1 AND 16389),"
+    "wall_limit_seconds INTEGER NOT NULL CHECK(wall_limit_seconds BETWEEN 1 AND 600),"
     "nonce BLOB NOT NULL CHECK(length(nonce)=32),"
-    "deny_mask INTEGER NOT NULL CHECK(deny_mask=63),"
+    "deny_mask INTEGER NOT NULL CHECK(deny_mask=255),"
     "issued_at INTEGER NOT NULL CHECK(issued_at>0),"
     "not_before INTEGER NOT NULL CHECK(not_before>=issued_at),"
     "expires_at INTEGER NOT NULL CHECK(expires_at>not_before AND expires_at-issued_at<=2592000),"
-    "consumed_at INTEGER NOT NULL DEFAULT 0 CHECK(consumed_at=0 OR (consumed_at>=not_before AND consumed_at<expires_at)),"
+    "transfer_id BLOB NOT NULL DEFAULT X'' CHECK(length(transfer_id) IN (0,32)),"
+    "claimed_at INTEGER NOT NULL DEFAULT 0 CHECK(claimed_at>=0),"
+    "consumed_at INTEGER NOT NULL DEFAULT 0 CHECK(consumed_at>=0),"
     "revoked_at INTEGER NOT NULL DEFAULT 0 CHECK(revoked_at=0 OR revoked_at>=issued_at),"
     "revocation_generation INTEGER NOT NULL DEFAULT 0 CHECK((revoked_at=0 AND revocation_generation=0) OR (revoked_at>0 AND revocation_generation>0)),"
-    "CHECK(chunk_limit*max_chunk_bytes>=ciphertext_size_bytes))",
+    "CHECK(chunk_count=(object_size_bytes+65519)/65520),"
+    "CHECK(ciphertext_size_bytes=object_size_bytes+16*chunk_count),"
+    "CHECK((claimed_at=0 AND length(transfer_id)=0 AND consumed_at=0) OR "
+    "(claimed_at>=not_before AND claimed_at<expires_at AND length(transfer_id)=32 "
+    "AND (consumed_at=0 OR (consumed_at>=claimed_at AND consumed_at<expires_at)))))",
 
     "CREATE INDEX IF NOT EXISTS idx_mesh_capability_grants_pairing_state"
     " ON mesh_capability_grants(pairing_id,revoked_at,consumed_at,expires_at)",

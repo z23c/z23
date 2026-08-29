@@ -24,7 +24,7 @@ static bool all_zero(const void *bytes, size_t count)
 }
 
 static bool make_offer(struct mesh_private_object_offer_v1 *offer,
-                       const uint8_t seed[32])
+                       const uint8_t seed[32], const uint8_t grant_nonce[32])
 {
     uint8_t secret[32];
     memset(offer, 0, sizeof(*offer));
@@ -42,17 +42,22 @@ static bool make_offer(struct mesh_private_object_offer_v1 *offer,
     fill32(offer->transcript_hash, 0xe1);
     offer->connection_generation = UINT64_C(0x1020304050607080);
     offer->pairing_revocation_generation = 7;
-    fill32(offer->request_id, 0x12);
     fill32(offer->plaintext_root, 0x32);
     fill32(offer->ciphertext_root, 0x52);
-    offer->object_size_bytes = MESH_PRIVATE_OBJECT_CHUNK_BYTES + 17u;
-    offer->ciphertext_size_bytes = offer->object_size_bytes + 32u;
+    offer->object_size_bytes =
+        MESH_PRIVATE_OBJECT_CHUNK_PLAINTEXT_BYTES + 17u;
+    offer->ciphertext_size_bytes = offer->object_size_bytes +
+                                   2u * MESH_PRIVATE_OBJECT_TAG_BYTES;
     offer->chunk_size = MESH_PRIVATE_OBJECT_CHUNK_BYTES;
     offer->chunk_count = 2;
     fill32(offer->ephemeral_x25519_pubkey, 0x72);
     offer->issued_unix = UINT64_C(1800000000);
     offer->expires_unix = offer->issued_unix + 60;
     offer->deny_mask = MESH_PRIVATE_OBJECT_DENY_REQUIRED;
+    if (mesh_private_object_offer_request_id_v1_derive(
+            offer, grant_nonce, offer->request_id) !=
+        MESH_PRIVATE_OBJECT_PROTO_OK)
+        return false;
     return mesh_private_object_offer_v1_sign(offer, seed) ==
            MESH_PRIVATE_OBJECT_PROTO_OK;
 }
@@ -72,6 +77,7 @@ static void make_expectation(
     COPY32(target_master_pubkey);
     COPY32(target_noise_static);
     COPY32(transcript_hash);
+    COPY32(request_id);
     COPY32(plaintext_root);
     COPY32(ciphertext_root);
 #undef COPY32
@@ -87,11 +93,13 @@ static int roundtrip_and_root(void)
 {
     int failures = 0;
     TEST_CASE("private object offer has one canonical signed wire") {
-        uint8_t seed[32], wire[MESH_PRIVATE_OBJECT_OFFER_V1_WIRE_BYTES];
+        uint8_t seed[32], grant_nonce[32];
+        uint8_t wire[MESH_PRIVATE_OBJECT_OFFER_V1_WIRE_BYTES];
         uint8_t again[sizeof(wire)], root[32], decoded_root[32];
         struct mesh_private_object_offer_v1 offer, decoded;
         fill32(seed, 0x55);
-        ASSERT(make_offer(&offer, seed));
+        fill32(grant_nonce, 0x15);
+        ASSERT(make_offer(&offer, seed, grant_nonce));
         ASSERT_EQ(mesh_private_object_offer_v1_validate(&offer),
                   MESH_PRIVATE_OBJECT_PROTO_OK);
         ASSERT_EQ(mesh_private_object_offer_v1_encode(&offer, wire),
@@ -116,12 +124,13 @@ static int strict_wire_and_signature(void)
 {
     int failures = 0;
     TEST_CASE("private object offer rejects wire and signature tampering") {
-        uint8_t seed[32], other_seed[32];
+        uint8_t seed[32], other_seed[32], grant_nonce[32];
         uint8_t wire[MESH_PRIVATE_OBJECT_OFFER_V1_WIRE_BYTES + 1];
         struct mesh_private_object_offer_v1 offer, decoded, trial;
         fill32(seed, 0x55);
         fill32(other_seed, 0x75);
-        ASSERT(make_offer(&offer, seed));
+        fill32(grant_nonce, 0x15);
+        ASSERT(make_offer(&offer, seed, grant_nonce));
         ASSERT_EQ(mesh_private_object_offer_v1_encode(&offer, wire),
                   MESH_PRIVATE_OBJECT_PROTO_OK);
         ASSERT_EQ(mesh_private_object_offer_v1_decode(&decoded, wire,
@@ -162,10 +171,11 @@ static int shape_limits_and_downgrade(void)
 {
     int failures = 0;
     TEST_CASE("private object offer rejects unsafe shape and deny downgrade") {
-        uint8_t seed[32];
+        uint8_t seed[32], grant_nonce[32];
         struct mesh_private_object_offer_v1 offer, trial;
         fill32(seed, 0x55);
-        ASSERT(make_offer(&offer, seed));
+        fill32(grant_nonce, 0x15);
+        ASSERT(make_offer(&offer, seed, grant_nonce));
 
         trial = offer; trial.version = 0;
         ASSERT_EQ(mesh_private_object_offer_v1_sign(&trial, seed),
@@ -186,7 +196,7 @@ static int shape_limits_and_downgrade(void)
         trial.object_size_bytes = MESH_PRIVATE_OBJECT_MAX_OBJECT_BYTES + 1;
         ASSERT_EQ(mesh_private_object_offer_v1_sign(&trial, seed),
                   MESH_PRIVATE_OBJECT_PROTO_LIMIT);
-        trial = offer; trial.ciphertext_size_bytes = trial.object_size_bytes - 1;
+        trial = offer; trial.ciphertext_size_bytes--;
         ASSERT_EQ(mesh_private_object_offer_v1_sign(&trial, seed),
                   MESH_PRIVATE_OBJECT_PROTO_LIMIT);
         trial = offer;
@@ -227,11 +237,16 @@ static int expectation_binding(void)
 {
     int failures = 0;
     TEST_CASE("private object offer matches exact grant and live session") {
-        uint8_t seed[32];
+        uint8_t seed[32], grant_nonce[32], derived[32];
         struct mesh_private_object_offer_v1 offer;
         struct mesh_private_object_offer_expectation_v1 expected, trial;
         fill32(seed, 0x55);
-        ASSERT(make_offer(&offer, seed));
+        fill32(grant_nonce, 0x15);
+        ASSERT(make_offer(&offer, seed, grant_nonce));
+        ASSERT_EQ(mesh_private_object_offer_request_id_v1_derive(
+                      &offer, grant_nonce, derived),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT(memcmp(derived, offer.request_id, 32) == 0);
         make_expectation(&expected, &offer);
         ASSERT_EQ(mesh_private_object_offer_v1_matches(
                       &offer, &expected, offer.issued_unix),
@@ -261,6 +276,7 @@ static int expectation_binding(void)
         WRONG32(target_master_pubkey);
         WRONG32(target_noise_static);
         WRONG32(transcript_hash);
+        WRONG32(request_id);
         WRONG32(plaintext_root);
         WRONG32(ciphertext_root);
 #undef WRONG32
@@ -284,6 +300,12 @@ static int expectation_binding(void)
         ASSERT_EQ(mesh_private_object_offer_v1_matches(
                       &offer, &trial, offer.issued_unix),
                   MESH_PRIVATE_OBJECT_PROTO_EXPECTATION);
+        uint8_t wrong_nonce[32];
+        fill32(wrong_nonce, 0x16);
+        ASSERT_EQ(mesh_private_object_offer_request_id_v1_derive(
+                      &offer, wrong_nonce, derived),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT(memcmp(derived, offer.request_id, 32) != 0);
     } TEST_END
     return failures;
 }
