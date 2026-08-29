@@ -76,10 +76,10 @@ int test_acme_worker(void)
     int failures = 0;
 
     if (!binary_present()) {
-        printf("acme_worker: SKIP (%s not built — run `make` or "
-               "`make zclassic23-acme`; nothing was asserted in this run)\n",
+        printf("acme_worker: FAIL (%s is a required test prerequisite; "
+               "nothing can be asserted without it)\n",
                WORKER_BIN);
-        return 0;
+        return 1;
     }
 
     static char out[256 * 1024];

@@ -371,6 +371,11 @@ static bool boot_https_explorer_start(void *ctx)
         char alt_dir[1024], alt_cert[1152], alt_key[1152];
         if (!alt || !alt[0])
             continue;
+        if (!acme_domain_is_ldh(alt) || strchr(alt, '*')) {
+            printf("HTTPS: refusing invalid extra name %s before creating "
+                   "any certificate path\n", alt);
+            continue;
+        }
         if (snprintf(alt_dir, sizeof(alt_dir), "%s/ssl/%s", svc->datadir,
                      alt) >= (int)sizeof(alt_dir)) {
             printf("HTTPS: the path for the extra name %s does not fit; that "

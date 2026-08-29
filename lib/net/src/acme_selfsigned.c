@@ -44,22 +44,27 @@ bool acme_domain_is_ldh(const char *domain)
     if (len > 253)
         return false;
     size_t label = 0;
+    size_t label_start = 0;
     for (size_t i = 0; i < len; i++) {
         const unsigned char c = (unsigned char)domain[i];
         if (c == '.') {
-            if (label == 0)
+            if (label == 0 || domain[i - 1] == '-')
                 return false;
             label = 0;
+            label_start = i + 1u;
             continue;
         }
+        if (label == 0 && c == '-')
+            return false;
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '-' || c == '*';
+                        (c >= '0' && c <= '9') || c == '-' ||
+                        (c == '*' && i == 0 && len > 2 && domain[1] == '.');
         if (!ok)
             return false;
         if (++label > 63)
             return false;
     }
-    return label != 0;
+    return label != 0 && domain[len - 1] != '-' && label_start < len;
 }
 
 /* ── the skeleton ────────────────────────────────────────────────────── */

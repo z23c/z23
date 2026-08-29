@@ -195,6 +195,11 @@ package_from_bin() {
         || die "stripped z23 exceeds documented glibc/GLIBCXX symbol floor"
     ZCL_C23_MAX_GLIBC=GLIBC_2.38 bash "$NODE_AUDIT" "$out_dir/z23" \
         || die "stripped z23 failed the C23 node ABI audit"
+    ZCL_SYMBOL_FLOOR_BIN="$out_dir/zclassic23-acme" bash "$FLOOR_GATE" \
+        || die "certificate worker exceeds documented glibc/GLIBCXX symbol floor"
+    ZCL_C23_MAX_GLIBC=GLIBC_2.38 bash "$NODE_AUDIT" \
+        "$out_dir/zclassic23-acme" \
+        || die "certificate worker failed the C23 binary ABI audit"
     (cd "$out_dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \
         || die "SHA256SUMS does not match packaged files"
 

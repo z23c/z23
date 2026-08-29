@@ -2391,7 +2391,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2413,7 +2413,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -4589,18 +4589,19 @@ ACME_WORKER_SRCS = \
 	lib/net/src/acme_arm_file.c \
 	lib/net/src/acme_b64url.c \
 	lib/net/src/acme_renewal.c \
+	lib/net/src/acme_selfsigned.c \
 	lib/json/src/json.c \
 	lib/base/src/log_level.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
 ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
 	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
-ACME_WORKER_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
+ACME_WORKER_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
 
 .PHONY: zclassic23-acme
 zclassic23-acme: $(BIN_DIR)/zclassic23-acme
-$(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
+$(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
 		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
@@ -7903,6 +7904,8 @@ install -m 755 $(BIN_DIR)/zclassic23-package-verify \
 	"$(DESTDIR)$(PREFIX)/bin/zclassic23-package-verify"; \
 install -m 755 $(BIN_DIR)/zclassic23-package-sign \
 	"$(DESTDIR)$(PREFIX)/bin/zclassic23-package-sign"; \
+install -m 755 $(BIN_DIR)/zclassic23-acme \
+	"$(DESTDIR)$(PREFIX)/bin/zclassic23-acme"; \
 if [ -z "$(DESTDIR)" ]; then \
 	install -d "$(HOME)/.config/systemd/user"; \
 	sed -e 's|%h/zclassic23/build/bin/zcl-nodectl|$(PREFIX)/bin/zcl-nodectl|' \
@@ -7912,11 +7915,11 @@ if [ -z "$(DESTDIR)" ]; then \
 	(systemctl --user daemon-reload 2>/dev/null || true); \
 	echo "installed systemd --user unit; start: systemctl --user start zclassic23"; \
 fi; \
-echo "make install: node, RPC, package verifier + offline signer -> $(DESTDIR)$(PREFIX)/bin"
+echo "make install: node, RPC, package verifier, signer + certificate worker -> $(DESTDIR)$(PREFIX)/bin"
 endef
 
 .PHONY: install
-install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign
+install: vendor-ready zclassic23 zcl-rpc zcl-nodectl zclassic23-package-verify zclassic23-package-sign zclassic23-acme
 	@$(INSTALL_C23_PRODUCTS)
 
 # ── macOS launchd service (the launchd equivalent of systemd linger) ──

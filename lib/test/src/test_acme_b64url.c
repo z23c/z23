@@ -102,6 +102,12 @@ int test_acme_b64url(void)
                  !acme_b64url_decode("Zm9vY", buf, sizeof(buf), &n));
         AB_CHECK("a decode that would overflow the buffer is refused",
                  !acme_b64url_decode("Zm9vYmFy", buf, 2, &n));
+        AB_CHECK("a non-empty decode requires an output buffer",
+                 !acme_b64url_decode("Zg", NULL, 1, &n));
+        AB_CHECK("non-canonical two-character pad bits are refused",
+                 !acme_b64url_decode("Zh", buf, sizeof(buf), &n));
+        AB_CHECK("non-canonical three-character pad bits are refused",
+                 !acme_b64url_decode("Zm9", buf, sizeof(buf), &n));
         AB_CHECK("whitespace is refused",
                  !acme_b64url_decode("Zm9v YmFy", buf, sizeof(buf), &n));
     }
