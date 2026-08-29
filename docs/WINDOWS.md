@@ -176,6 +176,38 @@ push. Do not disable `StrictHostKeyChecking`, embed a token in a remote URL, or
 commit credentials. Fetch current `origin/main`, integrate it, run the affected
 gates, push, and verify the exact remote SHA.
 
+## Linux-host syntax coverage of `_WIN32` code
+
+`gcc` and `clang` on a POSIX host never take the `_WIN32` branch, so a
+Windows-only syntax error or a bad `#include` sits undetected until a Windows
+machine hits it. Two gates close different parts of that gap; they are not
+substitutes for each other, and neither is a substitute for the native UCRT64
+build.
+
+| Gate | What a compiler actually reads | What it does not do |
+| --- | --- | --- |
+| `make windows-acceptance-compile` | The catalogued acceptance programs in `lib/platform/tests/windows_acceptance.mk` (98 subject `.c` files when this section landed) | Does not read the rest of the `_WIN32` set |
+| `check-windows-cross-syntax` (`make lint`) | Every `.c` under `lib/`, `app/`, `config/`, `core/`, `domain/`, and `ports/` whose text contains `_WIN32` (236 files when this section landed) | Syntax-only: no objects, no archives, no link, no Wine run |
+
+The syntax sweep uses `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only` and
+every directory named `include` (plus `-I.` and `-Itools`, so
+`command/native_command.h` is findable). The file set is self-maintaining: a
+file that gains Windows code joins the gate. When mingw is not installed the
+gate prints `SKIP` and exits 0; that is not a pass.
+
+Honest remainder, measured on the landing host:
+
+- 227 of 236 compiled clean.
+- 6 files failed only because `vendor/include/openssl/*.h` is not built on
+  this machine. Those are skipped by header name (`openssl/…`), not by file
+  name, and are graded for real the day the vendor openssl headers exist.
+- 3 files remain on a shrink-only baseline next to the gate script:
+  lib/test/src/test_net.c and lib/test/src/test_parallel.c (POSIX TUs that
+  mention `_WIN32` only to skip Windows, so the whole-file syntax check still
+  hits sys/socket.h / sys/wait.h), and
+  lib/test/src/test_zcode_creation_attribution.c (POSIX two-argument mkdir
+  against mingw's one-argument mkdir). The baseline may only shrink.
+
 ## Native-port completion criteria
 
 The UCRT64 lane becomes a supported full-node lane only when all of these are

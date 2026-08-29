@@ -144,6 +144,8 @@ lint_cache_never_reason() {
             echo "invokes clang/gcc over ~1174 translation units; skips or fails on the installed clang major version" ;;
         check-windows-platform-seam)
             echo "invokes x86_64-w64-mingw32-gcc over the platform seam; reports UNOBSERVED (not a pass) when mingw is absent from the box" ;;
+        check-windows-cross-syntax)
+            echo "invokes x86_64-w64-mingw32-gcc -fsyntax-only over every _WIN32 translation unit; reports SKIP (not a pass) when mingw is absent from the box" ;;
         check-api-reference-generated)
             echo "compiles and runs a C generator with cc" ;;
         check-describe-budget)

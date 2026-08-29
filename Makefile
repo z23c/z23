@@ -10267,6 +10267,17 @@ check-windows-acceptance:
 # END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
+# Syntax-only mingw sweep of every .c under lib/ app/ config/ core/ domain/
+# ports/ whose text contains _WIN32. windows-acceptance-compile cross-links
+# the catalogued acceptance programs; gcc/clang on this box never take the
+# _WIN32 branch of the rest, so a Windows-only syntax error sat undetected.
+# -fsyntax-only, no objects, no archives. SKIP (exit 0, not a pass) when
+# mingw is absent.
+check-windows-cross-syntax:
+	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
+	@./tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh
+
+
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
 # existing ones. This is the excavator: a shrink-only ratchet over the cast
@@ -11318,6 +11329,7 @@ LINT_GATES := \
     check-clang-portability \
     check-windows-platform-seam \
     check-windows-acceptance \
+    check-windows-cross-syntax \
     check-result-discard \
     check-c23-only \
     check-no-python \
