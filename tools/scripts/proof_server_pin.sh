@@ -294,11 +294,17 @@ run_self_test() {
 
         local body
         body="$(selftest_git -C "$tmp" for-each-ref --format='%(contents)' "refs/tags/${newtag}")"
-        printf '%s\n' "$body" | grep -qx "host=example-host"        || selftest_note "tag message missing exact host= line"
-        printf '%s\n' "$body" | grep -qx "commit=${commit}"         || selftest_note "tag message missing exact commit= line"
-        printf '%s\n' "$body" | grep -qx "source_id=${src}"         || selftest_note "tag message missing exact source_id= line"
-        printf '%s\n' "$body" | grep -qx "artifact_sha256=${art}"   || selftest_note "tag message missing exact artifact_sha256= line"
-        printf '%s\n' "$body" | grep -qE '^recorded_utc=[0-9TZ-]+$' || selftest_note "tag message missing a well-formed recorded_utc= line"
+        # Here-strings, not `printf | grep -q`. Under the `set -o pipefail`
+        # at the top of this file, `grep -q` exits the instant it matches,
+        # and if the writer has not finished it takes SIGPIPE — so the
+        # pipeline yields 141 and the `||` branch fires ON A MATCH, reporting
+        # a present line as missing. A here-string has no pipeline and no
+        # writer to kill, so the exit status is grep's own.
+        grep -qx "host=example-host"        <<<"$body" || selftest_note "tag message missing exact host= line"
+        grep -qx "commit=${commit}"         <<<"$body" || selftest_note "tag message missing exact commit= line"
+        grep -qx "source_id=${src}"         <<<"$body" || selftest_note "tag message missing exact source_id= line"
+        grep -qx "artifact_sha256=${art}"   <<<"$body" || selftest_note "tag message missing exact artifact_sha256= line"
+        grep -qE '^recorded_utc=[0-9TZ-]+$' <<<"$body" || selftest_note "tag message missing a well-formed recorded_utc= line"
     fi
 
     # (3) refusals: each must exit non-zero, leave no new tag behind, AND

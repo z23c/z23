@@ -1,6 +1,17 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Focused native acceptance for Windows SQLite lifetime path recognition. */
 
+/* struct db_lifetime_scope is stack-allocated by value below (its address is
+ * taken across two enter/leave pairs), so a true opaque forward declaration
+ * cannot work here — the compiler needs the complete type at the declaration
+ * site. Re-declaring a byte-for-byte mirror of the struct in a lib/-owned
+ * header would silently desync from models/database_lifetime.h on the next
+ * field change, trading a visible layering violation for an invisible ABI
+ * one. This acceptance test also exists specifically to exercise the real
+ * production db_lifetime_* implementation end-to-end on Windows (the same
+ * reasoning already applied one file over, see
+ * rpc_client_transport_windows_acceptance.c's controllers/rpc_client.h
+ * include), so a reimplementation would defeat its purpose. */
 #include "models/database_lifetime.h" // lib-layer-ok:windows-db-lifetime-acceptance
 
 #include <sqlite3.h>

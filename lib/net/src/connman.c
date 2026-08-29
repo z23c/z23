@@ -341,357 +341,6 @@ void connman_set_known_zcl23_peer_source(
     cm->known_zcl23_peers_ctx = ctx;
 }
 
-/* ── Onion-directory seed walk ──────────────────────────────────────
- *
- * A /directory.json response carries BOTH a clearnet endpoint and the
- * advertising node's `onion` field. Consuming only the clearnet half means
- * a node can never learn about an onion peer from another onion peer: the
- * onion graph is never transitively walked, and an onion-only node is
- * invisible to everyone it has not personally met. So we harvest both,
- * strictly ALONGSIDE the clearnet half (which is untouched and still runs
- * first). A relayed hostname buys exactly one thing — one more place to
- * look.
- *
- * Discipline (docs/work/NAT_AND_ONION_TRANSPORT.md): a directory record is
- * a HINT about WHERE to look, never proof of WHO is there. Harvested
- * onions are therefore only ADDED (onion_service_directory_learn — INSERT
- * OR IGNORE, so hearsay never overwrites a row we measured), and a row is
- * credited with CONTACT only when WE complete a fetch against it.
- *
- * Bounded on every axis a hostile directory could inflate: one extra hop
- * of depth, a per-response hint cap, a follow budget per window and a
- * dedupe ring so a cycle (A lists B, B lists A) terminates. Caps, parser
- * and follow budget: onion_service.h. The budget is a WALL-CLOCK bound as
- * much as a fan-out one — this runs on the discovery thread and each fetch
- * blocks — so depth-1 fetches also get a shorter deadline than a
- * configured seed, and g_stop aborts between hops. */
-#define ONION_RELAY_FETCH_TIMEOUT 20
-
-static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
-                                      int depth, bool pin_endpoints);
-
-/* Fetch /directory.json from a .onion seed and add clearnet IPs. Entry
- * point for every existing caller — signature unchanged. */
-static void try_onion_seed_fetch(struct connman *cm, const char *onion)
-{
-    (void)try_onion_seed_fetch_depth(cm, onion, 0, false);
-}
-
-/* Record one MEASURED dial outcome — the census bridge in
- * net/onion_service.h, which refreshes an EXISTING row and never inserts.
- * A successful fetch calls learn() first so the row exists to refresh. */
-static void onion_seed_note_dial(const char *onion, bool reachable)
-{
-    struct onion_directory_observation obs;
-    memset(&obs, 0, sizeof(obs));
-    snprintf(obs.hostname, sizeof(obs.hostname), "%s", onion ? onion : "");
-    obs.reachable = reachable;
-    obs.observed_unix = (int64_t)platform_time_wall_time_t();
-    obs.best_height = -1;
-    (void)onion_service_directory_observe(&obs, 1, NULL);
-}
-
-static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
-                                      int depth, bool pin_endpoints)
-{
-    if (!cm || !onion) return -1;
-    printf("Onion seed: fetching /directory.json from %s (depth=%d)...\n",
-           onion, depth);
-    fflush(stdout);
-
-    struct onion_fetch_result result = {0};
-    int rc = tor_integration_fetch_onion_blocking(
-        onion, "/directory.json", &result,
-        depth == 0 ? 60 : ONION_RELAY_FETCH_TIMEOUT);
-    if (rc < 0 || result.status != 200 || !result.body) {
-        printf("Onion seed: fetch failed (rc=%d status=%d)\n",
-               rc, result.status);
-        /* Bumps this row's failure count only; never inserts, never
-         * refreshes last_seen — a failed dial carries no identity. */
-        onion_seed_note_dial(onion, false);
-        if (result.body) free(result.body);
-        return -1;
-    }
-
-    /* We reached it ourselves: this one IS contact, not hearsay. learn()
-     * makes sure the row exists (a configured seed may never have been
-     * advertised to us); the observation then stamps last_success. The
-     * node's OWN app advertisement rides along — its self row is skipped
-     * by the relay-hint learn loop below, so it is extracted here. */
-    char self_apps[ONION_DIR_APPS_CSV_MAX + 1];
-    (void)onion_directory_apps_for_onion((const char *)result.body, onion,
-                                         self_apps, sizeof(self_apps));
-    (void)onion_service_directory_learn(onion, 0, 0, 0, self_apps);
-    onion_seed_note_dial(onion, true);
-
-    /* Fallback when a directory response omits/malforms clearnet_port —
-     * the advertising node's OWN configured P2P port, not a literal that
-     * silently assumes mainnet. */
-    uint16_t default_port = (cm->params && cm->params->nDefaultPort > 0 &&
-                             cm->params->nDefaultPort <= 65535)
-                                ? (uint16_t)cm->params->nDefaultPort
-                                : 8033;
-
-    /* Parse minimal JSON: extract clearnet_ip and clearnet_port fields */
-    const char *p = (const char *)result.body;
-    int added = 0;
-    while ((p = strstr(p, "\"clearnet_ip\":\"")) != NULL) {
-        p += 15; /* skip "clearnet_ip":" */
-        const char *end = strchr(p, '"');
-        if (!end || end == p) { p++; continue; }
-
-        char ip[64];
-        size_t iplen = (size_t)(end - p);
-        if (iplen >= sizeof(ip)) { p = end; continue; }
-        memcpy(ip, p, iplen);
-        ip[iplen] = '\0';
-        p = end + 1;
-
-        /* Find clearnet_port */
-        uint16_t port = default_port;
-        const char *pp = strstr(p, "\"clearnet_port\":");
-        if (pp && pp - p < 50) {
-            const char *port_text = pp + 16;
-            char *port_end = NULL;
-            unsigned long parsed_port = strtoul(port_text, &port_end, 10);
-            if (port_end != port_text && parsed_port > 0 &&
-                parsed_port <= 65535)
-                port = (uint16_t)parsed_port;
-        }
-
-        /* Add to address manager */
-        if (ip[0] && strcmp(ip, "0.0.0.0") != 0) {
-            struct net_address addr;
-            memset(&addr, 0, sizeof(addr));
-            /* Parse IPv4 */
-            unsigned a, b, c, d;
-            char trailing;
-            if (sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d,
-                       &trailing) == 4 &&
-                a <= 255 && b <= 255 && c <= 255 && d <= 255) {
-                /* IPv4-mapped IPv6 */
-                unsigned char ip4[4] = {(unsigned char)a, (unsigned char)b,
-                                        (unsigned char)c, (unsigned char)d};
-                net_addr_set_ipv4(&addr.svc.addr, ip4);
-                addr.svc.port = port;
-                addr.nServices = NODE_NETWORK;
-                struct net_addr src;
-                net_addr_init(&src);
-                addrman_add(&cm->manager.addrman, &addr, &src, 0);
-                if (pin_endpoints)
-                    connman_open_connection(cm, &addr);
-                added++;
-                printf("Onion seed: discovered clearnet peer %s:%d\n",
-                       ip, port);
-            }
-        }
-    }
-
-    /* ── Second, ADDITIVE pass: the onion half of the same response ──
-     * Runs after the clearnet loop above and cannot alter anything it
-     * did. Every hint is persisted into our own directory (INSERT OR
-     * IGNORE — hearsay never overwrites a row we measured) so the
-     * transitive knowledge survives a restart and is re-served by our own
-     * /directory + /search, and a bounded few are followed one hop for
-     * their clearnet entries. The parser drops our own hostname and the
-     * one we just fetched from, so a walk cannot bounce between two
-     * nodes. */
-    const char *self_onion = tor_integration_get_onion_address();
-    struct onion_relay_hint hints[ONION_RELAY_PER_RESPONSE];
-    int nh = onion_directory_parse_relay_hints(
-        (const char *)result.body,
-        (self_onion && self_onion[0]) ? self_onion : onion,
-        hints, ONION_RELAY_PER_RESPONSE);
-    int learned = 0, followed = 0;
-    for (int i = 0; i < nh; i++) {
-        if (strcmp(hints[i].hostname, onion) == 0)
-            continue;                       /* the node we just fetched */
-        if (onion_service_directory_learn(hints[i].hostname, hints[i].port,
-                                          hints[i].height, hints[i].last_seen,
-                                          hints[i].apps))
-            learned++;
-    }
-
-    /* GETTING A FIRST PEER OUTRANKS ENRICHING THE GRAPH. The depth-1
-     * follow is up to ONION_RELAY_FOLLOW_BUDGET blocking fetches of
-     * ONION_RELAY_FETCH_TIMEOUT each, and it runs on the same discovery
-     * thread as the peer-of-last-resort onion pass. Transitive discovery
-     * only matters once we already HAVE peers, so below the healthy floor
-     * it is skipped outright rather than delaying the last-resort path by
-     * minutes on a cold boot. */
-    if (depth < ONION_RELAY_MAX_DEPTH &&
-        cm->manager.num_nodes >= (size_t)ZCL_PEER_FLOOR_HEALTHY) {
-        int64_t now = (int64_t)platform_time_wall_time_t();
-        for (int i = 0; i < nh && !g_stop; i++) {
-            if (strcmp(hints[i].hostname, onion) == 0)
-                continue;
-            if (!onion_directory_claim_relay_follow(hints[i].hostname, now))
-                continue;
-            followed++;
-            (void)try_onion_seed_fetch_depth(cm, hints[i].hostname,
-                                             depth + 1, false);
-        }
-    }
-    printf("Onion seed: added %d clearnet peers, %d onion peers advertised "
-           "by %s (%d recorded, %d followed)\n",
-           added, nh, onion, learned, followed);
-
-    free(result.body);
-    return added;
-}
-
-int connman_add_onion_seed(struct connman *cm, const char *onion)
-{
-    if (!cm || !onion_hostname_valid(onion) || g_stop ||
-        !tor_integration_is_dial_ready())
-        return -1;
-    return try_onion_seed_fetch_depth(cm, onion, 0, true);
-}
-
-
-/* How many hosts from our OWN persisted onion directory one pass may dial,
- * and how many clearnet peers are enough to stop dialling them. Each entry
- * costs a blocking depth-0 Tor fetch on the discovery thread, so this is a
- * WALL-CLOCK bound as much as a fan-out one — the same discipline the
- * transitive relay follow above is written to. */
-#define ONION_DIR_DIAL_CANDIDATES 8
-#define ONION_DIR_DIAL_ENOUGH     8
-/* Ring for the per-pass dedupe: 32 operator lines + this tier + the
- * chainparams array + 8 on-chain hosts all fit with room to spare. */
-#define ONION_PASS_SEEN_MAX       64
-
-/* One pass's already-fetched set, so a host that appears in two tiers
- * (operator file AND the directory, say) costs one fetch, not two. Small,
- * stack-local, linear — the whole pass is bounded at a few dozen entries. */
-struct onion_pass_seen {
-    char host[ONION_PASS_SEEN_MAX][64];
-    int  n;
-};
-
-static bool onion_pass_claim(struct onion_pass_seen *seen, const char *host)
-{
-    if (!seen || !host || !host[0]) return false;
-    for (int i = 0; i < seen->n; i++)
-        if (strcmp(seen->host[i], host) == 0)
-            return false;
-    if (seen->n >= ONION_PASS_SEEN_MAX)
-        return true;    /* over the ring: still fetch, just stop tracking */
-    size_t host_len = strlen(host);
-    if (host_len >= sizeof(seen->host[0]))
-        return false;
-    memcpy(seen->host[seen->n], host, host_len + 1u);
-    seen->n++;
-    return true;
-}
-
-/* Run the onion-directory bootstrap pass. Tiers, in order:
- *
- *   1. the operator-curated file (~/.config/zclassic23/onion-seeds),
- *   2. THIS NODE'S OWN persisted onion directory — every host it has
- *      learned from a peer's /directory.json or measured itself,
- *   3. the chainparams onionSeeds[] array (a constant that ages the moment
- *      it ships; entries have been found dead — see chainparams.c),
- *   4. any .onion peers the on-chain ZDIR projection named.
- *
- * The two RUNTIME sources come first: both can change without a rebuild.
- * Tier 2 closes the loop this pass used to leave open — learned hostnames
- * were re-served but never dialed, so that knowledge died at every boot.
- * On a fresh node the tier is empty and the pass behaves as before.
- *
- * Shared by the discovery thread's below-floor branch and
- * connman_kick_onion_seeds() so both reach an identical supplier set.
- * Requires outbound dynhost queueing; no wait for descriptor publication. */
-static void run_onion_seed_pass(struct connman *cm)
-{
-    if (!cm || !cm->params || g_stop) return;
-    if (g_connect_only) return;
-    if (!tor_integration_is_dial_ready()) return;
-
-    struct onion_pass_seen seen;
-    seen.n = 0;
-
-    /* Tier 1 — operator-curated onion seeds (one .onion per line, #
-     * comments). The zero-rebuild primary: an operator adds a supplier
-     * with no code change and no restart of anybody else. */
-    const char *home = getenv("HOME");
-    if (home) {
-        char path[512];
-        snprintf(path, sizeof(path),
-                 "%s/.config/zclassic23/onion-seeds", home);
-        FILE *fp = fopen(path, "re");
-        if (fp) {
-            char line[256];
-            int n = 0;
-            while (n < 32 && !g_stop && fgets(line, sizeof(line), fp)) {
-                char *p = line;
-                while (*p == ' ' || *p == '\t') p++;
-                if (*p == '#' || *p == '\n' || *p == '\0') continue;
-                char *end = strpbrk(p, " \t\r\n#");
-                if (end) *end = '\0';
-                if (strstr(p, ".onion") && onion_pass_claim(&seen, p)) {
-                    try_onion_seed_fetch(cm, p);
-                    n++;
-                }
-            }
-            fclose(fp);
-        }
-    }
-
-    /* Tier 2 — our own persisted directory, measured contacts first. */
-    {
-        struct onion_dial_candidate cand[ONION_DIR_DIAL_CANDIDATES];
-        memset(cand, 0, sizeof(cand));
-        int n = onion_service_directory_dial_candidates(
-            cand, ONION_DIR_DIAL_CANDIDATES);
-        int dialed = 0, harvested = 0;
-        for (int i = 0; i < n && !g_stop; i++) {
-            /* GETTING A FIRST PEER OUTRANKS ENRICHING THE GRAPH: once this
-             * tier has produced enough clearnet endpoints to work with,
-             * stop spending 60 s apiece and let the connect loop run. */
-            if (harvested >= ONION_DIR_DIAL_ENOUGH) break;
-            if (!onion_pass_claim(&seen, cand[i].hostname)) continue;
-            int added = try_onion_seed_fetch_depth(cm, cand[i].hostname,
-                                                   0, false);
-            dialed++;
-            if (added > 0) harvested += added;
-        }
-        if (n > 0)
-            LOG_INFO("connman",
-                     "onion bootstrap: own directory offered %d host%s, "
-                     "dialed %d, harvested %d clearnet peer%s",
-                     n, n == 1 ? "" : "s", dialed, harvested,
-                     harvested == 1 ? "" : "s");
-    }
-
-    /* Tier 3 — hardcoded chainparams onion seeds. */
-    for (size_t i = 0; i < cm->params->nOnionSeeds && !g_stop; i++)
-        if (onion_pass_claim(&seen, cm->params->onionSeeds[i]))
-            try_onion_seed_fetch(cm, cm->params->onionSeeds[i]);
-
-    /* Tier 4 — .onion peers discovered on-chain (ZSLP scan) — same
-     * Tor-native source the boot-time discovery pass uses. */
-    if (cm->onion_peer_discover && cm->onion_peer_datadir) {
-        struct onion_peer peers[16];
-        int found = cm->onion_peer_discover(cm->onion_peer_datadir,
-                                            peers, 16);
-        for (int i = 0; i < found && i < 8 && !g_stop; i++) {
-            if (peers[i].hostname[0] && strstr(peers[i].hostname, ".onion") &&
-                onion_pass_claim(&seen, peers[i].hostname))
-                try_onion_seed_fetch(cm, peers[i].hostname);
-        }
-    }
-}
-
-void connman_kick_onion_seeds(struct connman *cm)
-{
-    if (!cm || g_stop || g_connect_only) return;
-    LOG_INFO("connman", "peer-of-last-resort: querying onion-directory seeds");
-    run_onion_seed_pass(cm);
-    /* Persist whatever clearnet hosts we just harvested so a subsequent
-     * crash/restart before the periodic flush does not lose them. */
-    connman_save_addrman(cm);
-}
-
 static bool connman_seed_discovery_needed(size_t healthy_outbound)
 {
     return healthy_outbound < (size_t)ZCL_PEER_FLOOR_HEALTHY;
@@ -791,12 +440,12 @@ static void *thread_dns_seed(void *arg)
     /* Onion-directory bootstrap: operator-curated seeds
      * (~/.config/zclassic23/onion-seeds), then the chainparams onionSeeds,
      * then any .onion peers the ZSLP scan above found — the SAME
-     * run_onion_seed_pass() the below-floor retry loop and the operator
+     * connman_run_onion_seed_pass() the below-floor retry loop and the operator
      * peer-of-last-resort remedy (connman_kick_onion_seeds()) both use, so
      * the boot path can never drift from either of them. (Previously this
      * block re-implemented its own copy of the operator-file + chainparams
      * loop inline; consolidated so a future seed-source change only needs
-     * one edit.) run_onion_seed_pass() checks tor_integration_is_dial_ready()
+     * one edit.) connman_run_onion_seed_pass() checks tor_integration_is_dial_ready()
      * and g_stop/g_connect_only itself. Gated on "few peers" so a fresh
      * boot that already found peers via DNS/fixed seeds skips the
      * (up to 60s-per-seed, blocking) Tor round-trips.
@@ -809,20 +458,20 @@ static void *thread_dns_seed(void *arg)
      * the retry below runs this same pass. */
     if (!g_stop && remembered == 0 &&
         connman_seed_discovery_needed(connman_outbound_healthy_count(cm)))
-        run_onion_seed_pass(cm);
+        connman_run_onion_seed_pass(cm);
 
     /* Only NOW fetch from the .onion peers the projection named. This used
-     * to run BEFORE run_onion_seed_pass(), which is the peer-of-last-resort
+     * to run BEFORE connman_run_onion_seed_pass(), which is the peer-of-last-resort
      * path: each fetch blocks up to 60 s and can spend a depth-1 follow
      * budget on top, so on a cold boot with no peers the graph-enrichment
      * work delayed the "we have fewer than 3 peers, go get some" fallback by
      * minutes. Getting a first peer always outranks enriching the graph.
-     * run_onion_seed_pass() already fetches from this same source when we
+     * connman_run_onion_seed_pass() already fetches from this same source when we
      * are below the floor, so this pass is the above-floor case and the
      * dedupe ring keeps a host from being fetched twice in a window. */
     if (!g_stop && n_discovered > 0 && tor_integration_is_dial_ready()) {
         for (int i = 0; i < n_discovered && i < 3 && !g_stop; i++)
-            try_onion_seed_fetch(cm, discovered[i].hostname);
+            connman_onion_seed_fetch_one(cm, discovered[i].hostname);
     }
 
     /* If still no peers after 15s, retry everything.
@@ -836,7 +485,7 @@ static void *thread_dns_seed(void *arg)
         printf("No peers found, retrying all discovery methods...\n");
         seed_from_fixed(cm);
         dns_seed_resolve(cm);
-        run_onion_seed_pass(cm);
+        connman_run_onion_seed_pass(cm);
     }
 
     /* Adaptive peer discovery:
@@ -887,7 +536,7 @@ static void *thread_dns_seed(void *arg)
              * + operator + known-peer seeds while below the floor.
              * Blocking fetches are fine on this dedicated discovery
              * thread. */
-            run_onion_seed_pass(cm);
+            connman_run_onion_seed_pass(cm);
             /* Persist immediately after a seed round: we just learned a
              * fresh host set and the node is degraded — protect it. */
             connman_save_addrman(cm);

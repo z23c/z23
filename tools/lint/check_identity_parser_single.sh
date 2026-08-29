@@ -68,8 +68,11 @@
 # tools/ship.sh once carried two remote inline parsers as permanent
 # exemptions. The fleet publisher now binds the running /proc executable
 # SHA-256 to the locally source-proven candidate instead, so the production
-# marker budget has ratcheted to zero. The marker machinery remains because
-# its selftest proves a future exemption cannot be added silently.
+# marker budget ratcheted to zero. It is back at ONE, for
+# tools/scripts/install_z23.sh only — see MARKER_CEILING below for why that
+# one file cannot be migrated. The marker machinery is bounded in two
+# directions and its selftest proves a future exemption cannot be added
+# silently, in either detection class.
 #
 # --selftest plants a fresh inline copy of both classes in a sandboxed
 # tools/ tree, proves the gate FAILS on it, then removes it and proves
@@ -91,8 +94,23 @@ RATCHET_CEILING=16
 # catching the tenth copy. MARKER_ALLOWED_FILES is the second half: WHICH
 # files may carry the marker at all, so a marker planted in a file that
 # was never named here fails regardless of the count.
-MARKER_CEILING=0
-MARKER_ALLOWED_FILES=()
+# tools/scripts/install_z23.sh carries the ONE marker in the budget below.
+# Its attest_is_sha256() is a genuine 64-hex validator and a genuine Class-A
+# shape — but this gate's normal remedy ("source
+# tools/scripts/source_identity_lib.sh instead") provably cannot apply to it:
+# install_z23.sh is a SHIPPED RELEASE ARTIFACT that the front door
+# (packaging/install/install.sh) fetches ALONE into a mktemp directory and
+# runs there, with no repository and no sibling library beside it. Shipping a
+# second file to source would also break the two-digest
+# z23-pin-v1:<manifest>:<installer> pin published in three independent
+# places. The validator itself is load-bearing: it checks the two 64-hex
+# halves of that pin, and the installer must judge that evidence
+# independently of the front door, or a captive portal's junk answer counts
+# as an agreeing pin. So the grant is exactly what the mechanism was built
+# for: ONE marker, in ONE named file. Both bounds stay — the ceiling caps how
+# many exemptions exist at all, the allowlist caps WHERE one may be written.
+MARKER_CEILING=1
+MARKER_ALLOWED_FILES=(tools/scripts/install_z23.sh)
 
 # ── --selftest ───────────────────────────────────────────────────────────
 if [ "${1:-}" = "--selftest" ]; then
@@ -169,6 +187,21 @@ FIXTURE
 x=$(printf %s "$1" | grep -oE '"source_id_sha256"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1)
 FIXTURE
 )"
+    # Class A, both shapes, with the marker directly above the function
+    # HEADER — which is where a reviewer writes it, and (for a multi-line
+    # body) NOT within 8 lines of the closing brace the count fires on.
+    class_a_marked="$(cat <<'FIXTURE'
+# zcl-identity-parser-allow: fixture, cannot source the lib here
+is_sha256() { [[ "${1:-}" =~ ^[0-9a-f]{64}$ ]]; }
+FIXTURE
+)"
+    class_a_marked_multiline="$(cat <<'FIXTURE'
+# zcl-identity-parser-allow: fixture, cannot source the lib here
+totally_unrelated_name_not_on_any_list() {
+    [[ "${1:-}" =~ ^[0-9a-f]{64}$ ]]
+}
+FIXTURE
+)"
 
     expect pass "a clean consumer with no copy was reported as a violation" ""
     expect fail "an inline is_sha256() definition (class A, named) did not fail the gate" \
@@ -185,6 +218,26 @@ FIXTURE
         "$class_b_marked"
     expect pass "reverting left a stray marker violation" ""
 
+    # The SAME three proofs for CLASS A. Before fn_start/fn_allow existed,
+    # last_allow was read at exactly one place — the class-B branch — so the
+    # gate's own documented exemption could not be applied to a class-A copy
+    # at all, no matter where the marker was written.
+    expect pass "a zcl-identity-parser-allow-marked class-A copy (single-line) in the allowed file was still counted as debt" \
+        "$class_a_marked"
+    expect pass "reverting the marked single-line class-A copy left a violation" ""
+    expect pass "a zcl-identity-parser-allow-marked class-A copy (multi-line body) in the allowed file was still counted as debt; the marker above the HEADER must survive the body" \
+        "$class_a_marked_multiline"
+    expect pass "reverting the marked multi-line class-A copy left a violation" ""
+    # And the marker must exempt only what it marks: an UNMARKED class-A copy
+    # in the very same allowlisted file must still fail. Without this, wiring
+    # last_allow into class A could exempt everything and nobody would see it.
+    expect fail "an UNMARKED class-A copy in the allowlisted file stopped failing — the class-A marker wiring exempts too much" \
+        "$class_a_copy"
+    expect pass "reverting the unmarked class-A copy did not clear the violation" ""
+    expect fail "an UNMARKED renamed structural class-A copy in the allowlisted file stopped failing" \
+        "$class_a_renamed_copy"
+    expect pass "reverting the unmarked renamed class-A copy did not clear the violation" ""
+
     # The marker bound, second half: the SAME marked copy, but planted in a
     # file that is NOT in ZCL_IDENTITY_PARSER_MARKER_ALLOWED, must fail —
     # a marker cannot exempt a copy in a file nobody named.
@@ -198,6 +251,22 @@ FIXTURE
     rc=0; run_sandbox || rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "$GATE: SELFTEST FAILED — reverting the unauthorized marker did not clear the violation" >&2
+        exit 2
+    fi
+
+    # Same bound, class A: a marked class-A copy in a file nobody named must
+    # still fail. A validator that cannot source the library has to be argued
+    # for by NAME in MARKER_ALLOWED_FILES, not by writing a comment.
+    plant_other "$class_a_marked"
+    rc=0; run_sandbox || rc=$?
+    plant_other ""
+    if [ "$rc" -eq 0 ]; then
+        echo "$GATE: SELFTEST FAILED — a zcl-identity-parser-allow-marked class-A copy in an unauthorized file was not caught" >&2
+        exit 2
+    fi
+    rc=0; run_sandbox || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "$GATE: SELFTEST FAILED — reverting the unauthorized class-A marker did not clear the violation" >&2
         exit 2
     fi
 
@@ -220,7 +289,7 @@ FIXTURE
         exit 2
     fi
 
-    echo "[$GATE] SELFTEST PASS (clean passes; named and renamed class-A copies fail; class-B copies fail; reverted copies pass; an allowlisted+in-budget marker does not count; a marker in an unauthorized file, or over MARKER_CEILING, fails)"
+    echo "[$GATE] SELFTEST PASS (clean passes; named and renamed class-A copies fail; class-B copies fail; reverted copies pass; an allowlisted+in-budget marker does not count, in class A — single-line AND multi-line body — as well as class B; an UNMARKED class-A copy in that same file still fails; a marker in an unauthorized file, or over MARKER_CEILING, fails in either class)"
     exit 0
 fi
 
@@ -270,10 +339,15 @@ gate_require_scanned "${#scan_files[@]}" "${ZCL_IDENTITY_PARSER_FILE_FLOOR:-5}" 
 # invoking grep or sed on the same line — plain JSON construction
 # (printf '"source_id_sha256":"%s"') is excluded on purpose.
 # A `zcl-identity-parser-allow` marker within the previous 8 lines exempts
-# a class-B match entirely (the two ship.sh remote-side sites) — bounded
-# separately below by count_markers(), since an unbounded marker is its
-# own hole in the ratchet (any future copy anywhere could be exempted
-# forever by pasting the same comment near it).
+# a match in EITHER class — bounded separately below by MARKER_CEIL and
+# MARKER_ALLOWED, since an unbounded marker is its own hole in the ratchet
+# (any future copy anywhere could be exempted forever by pasting the same
+# comment near it). It once covered class B only, which meant the gate's
+# own documented exemption could not be applied to the case that actually
+# needed it: a short 64-hex validator in a file that cannot source the
+# library because it ships standalone. For class A the marker sits above
+# the function HEADER, so the window is measured from the header line, not
+# from the closing brace (see fn_start/fn_allow below).
 scan_counts() {
     # The class-B needle is built from sprintf("%c") rather than typed as a
     # quoted/backslashed literal: the data being searched is shell SOURCE
@@ -313,6 +387,7 @@ scan_counts() {
             path = FILENAME; count = 0; last_allow = -1000
             infunc = 0; pending_open = 0; brace_depth = 0
             body_lines = 0; body_has_sig = 0; too_long = 0
+            fn_start = 0; fn_allow = -1000
         }
         {
             line = $0
@@ -334,12 +409,19 @@ scan_counts() {
             # ---- Class A2: structural, name-independent (see has_sig) ----
             if (!infunc && !pending_open) {
                 if (trimmed ~ /^[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{.*$/) {
+                    # A function BEGINS here (single-line or multi-line body).
+                    # The allow-marker sits above the HEADER, so the marker
+                    # state is captured at the header and carried to the close
+                    # — reading last_allow at the closing brace instead would
+                    # push the marker out of the 8-line window for any body
+                    # longer than that, and silently un-exempt it.
+                    fn_start = FNR; fn_allow = last_allow
                     body_text = trimmed
                     sub(/^[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{/, "", body_text)
                     if (body_text ~ /\}[ \t]*;?[ \t]*$/) {
                         one = body_text
                         sub(/\}[ \t]*;?[ \t]*$/, "", one)
-                        if (has_sig(one)) count++
+                        if (has_sig(one) && FNR - last_allow > 8) count++
                     } else {
                         infunc = 1; brace_depth = 1
                         body_lines = 0; body_has_sig = 0; too_long = 0
@@ -351,6 +433,10 @@ scan_counts() {
                 }
             } else if (pending_open) {
                 if (trimmed == "{") {
+                    # Second entry point for a function body (the `name()`
+                    # line and its `{` on separate lines). Same capture: the
+                    # marker is above the `name()` header, two lines up.
+                    fn_start = FNR; fn_allow = last_allow
                     infunc = 1; pending_open = 0; brace_depth = 1
                     body_lines = 0; body_has_sig = 0; too_long = 0
                 } else {
@@ -361,7 +447,8 @@ scan_counts() {
                 tmp2 = line; closes = gsub(/\}/, "}", tmp2)
                 newdepth = brace_depth + opens - closes
                 if (newdepth <= 0) {
-                    if (!too_long && body_lines <= BODY_LIMIT && body_has_sig) count++
+                    if (!too_long && body_lines <= BODY_LIMIT && body_has_sig &&
+                        fn_start - fn_allow > 8) count++
                     infunc = 0; brace_depth = 0
                 } else {
                     if (trimmed ~ /[^ \t]/) body_lines++
@@ -437,15 +524,14 @@ fi
 
 # ── Marker bound ─────────────────────────────────────────────────────────
 # The `zcl-identity-parser-allow:` marker (see scan_counts()) fully exempts
-# a Class-B match from debt. Left unbounded, ANY future copy anywhere under
+# a Class-A or Class-B match from debt. Left unbounded, ANY future copy under
 # $SCAN_ROOT could dodge the ratchet forever just by pasting that comment
 # near it — a hole in a gate whose entire job is catching the next copy.
 # Bound it two ways, same shrink-only shape as the baseline sum:
 #   1. the total marker count may not exceed MARKER_CEIL.
-#   2. a marker may only appear in a file named in MARKER_ALLOWED — the
-#      production allowlist is empty today. A marker anywhere is a violation
-#      regardless of the
-#      count, because it exempts a copy this gate was never told about.
+#   2. a marker may only appear in a file named in MARKER_ALLOWED. A marker
+#      in any other file is a violation regardless of the count, because it
+#      exempts a copy this gate was never told about.
 declare -A marker_file_count=()
 marker_total=0
 for f in "${scan_files[@]}"; do
