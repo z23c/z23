@@ -7,6 +7,7 @@
 #include "controllers/native_handler_body.h"
 #include "controllers/strong_params.h"
 #include "controllers/wallet_helpers.h"
+#include "base/safe_alloc.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
 #include "models/database.h"
@@ -173,8 +174,20 @@ static void via_recover_mempool_intents(struct node_db *ndb)
     struct wallet_rpc_context *ctx = wallet_rpc_context_current();
     if (!ctx)
         return;
-    struct vault_intent_row rows[100];
+    struct vault_intent_row *rows = zcl_calloc(
+        100, sizeof(*rows), "vault intent mempool recovery rows");
+    if (!rows) {
+        LOG_WARN("vault_intent", "startup exact-transaction restore "
+                 "deferred: recovery row allocation failed");
+        return;
+    }
     int count = vault_intent_list(ndb, rows, 100);
+    if (count < 0) {
+        LOG_WARN("vault_intent", "startup exact-transaction restore "
+                 "deferred: durable intent scan failed");
+        free(rows);
+        return;
+    }
     for (int i = 0; i < count; i++) {
         if (rows[i].state != VAULT_INTENT_MEMPOOL_ACCEPTED ||
             !rows[i].wallet_scope[0])
@@ -191,8 +204,18 @@ static void via_recover_mempool_intents(struct node_db *ndb)
         }
         json_free(&result);
     }
+    free(rows);
 }
 
+#if defined(_WIN32) && defined(__clang__)
+/* This registrar also performs bounded startup recovery. Keep that recovery
+ * graph out of Clang's Windows whole-program inliner so its caller does not
+ * acquire a roughly 1.6 MiB native stack frame. */
+__attribute__((optnone))
+#elif defined(_WIN32) && defined(__GNUC__)
+__attribute__((optimize("no-inline", "no-inline-functions",
+                        "no-inline-small-functions")))
+#endif
 void register_vault_intent_async_rpc_commands(struct rpc_table *table)
 {
     const struct rpc_command commands[] = {

@@ -139,7 +139,8 @@ bool platform_private_directory_open_validated(const char *path,
     if (!native_handle || !private_directory_wide(path, wide))
         return false;
     HANDLE directory = CreateFileW(
-        wide, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL,
+        wide, FILE_LIST_DIRECTORY | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES |
+                  READ_CONTROL,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);

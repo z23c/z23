@@ -745,6 +745,15 @@ static bool rpc_keypoolrefill(const struct json_value *params, bool help,
 }
 
 
+#if defined(_WIN32) && defined(__clang__)
+/* Keep the registration fan-out out of Clang's Windows whole-program
+ * inliner.  Folding the child registrars into this coordinator produces a
+ * roughly 1.6 MiB frame and trips the native PE main-thread stack probe. */
+__attribute__((optnone))
+#elif defined(_WIN32) && defined(__GNUC__)
+__attribute__((optimize("no-inline", "no-inline-functions",
+                        "no-inline-small-functions")))
+#endif
 void register_wallet_rpc_commands(struct rpc_table *t)
 {
     struct rpc_command cmds[] = {

@@ -18,21 +18,234 @@
 
 #if defined(_WIN32)
 
-#include <stdio.h>
+#include "platform/directory_transaction.h"
+#include "platform/private_directory.h"
+#include "platform/rng.h"
 
-/* The POSIX implementation below proves a stable directory-relative snapshot
- * while copying a SQLite main/WAL family into disposable storage. Windows must
- * not approximate that transaction with mutable pathnames. Refuse at each
- * exported execution boundary before creating, copying, opening, or removing
- * anything in either the datadir or a staging directory. */
+#include <sqlite3.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <windows.h>
+
+struct windows_preflight_source {
+    const char *leaf;
+    struct platform_directory_child child;
+    struct platform_directory_child_info identity;
+    bool exists;
+};
+
+static bool windows_info_equal(const struct platform_directory_child_info *a,
+                               const struct platform_directory_child_info *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+        a->file_low == b->file_low && a->file_high == b->file_high &&
+        a->link_count == b->link_count &&
+        a->modified_seconds == b->modified_seconds &&
+        a->modified_nanoseconds == b->modified_nanoseconds &&
+        a->changed_seconds == b->changed_seconds &&
+        a->changed_nanoseconds == b->changed_nanoseconds &&
+        a->current_user_only == b->current_user_only;
+}
+
+static bool windows_source_open(struct platform_directory_transaction *dir,
+                                struct windows_preflight_source *source)
+{
+    platform_directory_child_init(&source->child);
+    enum platform_directory_result result =
+        platform_directory_child_open_result(dir, source->leaf, false, false,
+                                             &source->child, NULL);
+    source->exists = result == PLATFORM_DIRECTORY_OK;
+    return result == PLATFORM_DIRECTORY_MISSING ||
+        (source->exists &&
+         platform_directory_child_info(&source->child, &source->identity) &&
+         source->identity.current_user_only);
+}
+
+static bool windows_source_unchanged(
+    struct platform_directory_transaction *dir,
+    struct windows_preflight_source *source)
+{
+    struct platform_directory_child named;
+    platform_directory_child_init(&named);
+    enum platform_directory_result result =
+        platform_directory_child_open_result(dir, source->leaf, false, false,
+                                             &named, NULL);
+    if (!source->exists)
+        return result == PLATFORM_DIRECTORY_MISSING;
+    struct platform_directory_child_info retained = {0}, current = {0};
+    bool ok = result == PLATFORM_DIRECTORY_OK &&
+        platform_directory_child_info(&source->child, &retained) &&
+        platform_directory_child_info(&named, &current) &&
+        windows_info_equal(&source->identity, &retained) &&
+        windows_info_equal(&source->identity, &current);
+    platform_directory_child_close(&named);
+    return ok;
+}
+
+static bool windows_copy_source(
+    struct platform_directory_transaction *destination,
+    struct windows_preflight_source *source)
+{
+    if (!source->exists) return true;
+    struct platform_directory_child output;
+    platform_directory_child_init(&output);
+    if (!platform_directory_child_create(destination, source->leaf, &output))
+        return false;
+    uint8_t buffer[64u * 1024u];
+    uint64_t offset = 0;
+    bool ok = true;
+    while (offset < source->identity.size) {
+        size_t want = sizeof(buffer);
+        uint64_t left = source->identity.size - offset;
+        if (left < want) want = (size_t)left;
+        int64_t got = platform_directory_child_read(
+            &source->child, buffer, want, offset);
+        if (got <= 0 ||
+            !platform_directory_child_write_exact(
+                &output, buffer, (size_t)got, offset)) {
+            ok = false;
+            break;
+        }
+        offset += (uint64_t)got;
+    }
+    if (ok) ok = platform_directory_child_truncate(&output, offset) &&
+                 platform_directory_child_flush(&output);
+    platform_directory_child_close(&output);
+    return ok;
+}
+
+static bool windows_temp_path(char out[32768])
+{
+    wchar_t wide[32768];
+    DWORD length = GetTempPathW(32768, wide);
+    uint8_t random[16];
+    if (length == 0 || length >= 32768 || !rng_fill(random, sizeof(random)))
+        return false;
+    char suffix[33];
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(random); ++i) {
+        suffix[i * 2u] = hex[random[i] >> 4];
+        suffix[i * 2u + 1u] = hex[random[i] & 15u];
+    }
+    suffix[32] = 0;
+    int utf8 = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide,
+                                    (int)length, out, 32768, NULL, NULL);
+    int written = utf8 > 0
+        ? snprintf(out + utf8, 32768u - (size_t)utf8,
+                   "z23-preflight-%s", suffix) : -1;
+    return utf8 > 0 && written > 0 &&
+        (size_t)written < 32768u - (size_t)utf8;
+}
+
+static bool windows_inspect_snapshot(const char *path, char *reason,
+                                     size_t reason_size)
+{
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(path, &db,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
+                             NULL);
+    bool ok = rc == SQLITE_OK &&
+        sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static void windows_sources_close(struct windows_preflight_source files[3])
+{
+    for (size_t i = 0; i < 3; ++i)
+        platform_directory_child_close(&files[i].child);
+}
+
+static bool windows_family_preflight(
+    struct platform_directory_transaction *source_dir, const char *datadir,
+    const char *base, bool *present)
+{
+    char wal[80], shm[80];
+    int nw = snprintf(wal, sizeof(wal), "%s-wal", base);
+    int ns = snprintf(shm, sizeof(shm), "%s-shm", base);
+    if (nw <= 0 || (size_t)nw >= sizeof(wal) ||
+        ns <= 0 || (size_t)ns >= sizeof(shm)) return false;
+    struct windows_preflight_source files[3] = {
+        {.leaf = base}, {.leaf = wal}, {.leaf = shm}};
+    bool ok = true;
+    for (size_t i = 0; ok && i < 3; ++i)
+        ok = windows_source_open(source_dir, &files[i]);
+    *present = ok && files[0].exists;
+    if (ok && !files[0].exists)
+        ok = !files[1].exists && !files[2].exists;
+    if (!ok || !*present) {
+        windows_sources_close(files);
+        return ok;
+    }
+
+    char temp[32768] = {0};
+    bool created = false;
+    for (unsigned attempt = 0; !created && attempt < 32u; ++attempt) {
+        if (!windows_temp_path(temp)) break;
+        created = platform_private_directory_create(temp);
+    }
+    struct platform_directory_transaction copy;
+    platform_directory_transaction_init(&copy);
+    ok = created && platform_directory_transaction_open(&copy, temp);
+    for (size_t i = 0; ok && i < 2; ++i)
+        ok = windows_copy_source(&copy, &files[i]);
+    if (ok) ok = platform_directory_transaction_flush(&copy);
+    for (size_t i = 0; ok && i < 3; ++i)
+        ok = windows_source_unchanged(source_dir, &files[i]);
+
+    char snapshot[32768];
+    int n = snprintf(snapshot, sizeof(snapshot), "%s\\%s", temp, base);
+    char reason[512] = {0};
+    if (ok && (n <= 0 || (size_t)n >= sizeof(snapshot) ||
+               !windows_inspect_snapshot(snapshot, reason, sizeof(reason)))) {
+        fprintf(stderr,
+                "FATAL: normal node boot refused before datadir mutation: %s\n",
+                reason[0] ? reason : "kernel snapshot inspection failed");
+        ok = false;
+    }
+    for (size_t i = 0; ok && i < 3; ++i)
+        ok = windows_source_unchanged(source_dir, &files[i]);
+    windows_sources_close(files);
+
+    static const char *const suffixes[] = {"", "-wal", "-shm", "-journal"};
+    for (size_t i = 0; created && i < 4; ++i) {
+        char leaf[80];
+        int nl = snprintf(leaf, sizeof(leaf), "%s%s", base, suffixes[i]);
+        enum platform_directory_result removed = nl > 0 &&
+            (size_t)nl < sizeof(leaf)
+                ? platform_directory_child_unlink_result(&copy, leaf)
+                : PLATFORM_DIRECTORY_INVALID;
+        if (removed != PLATFORM_DIRECTORY_OK &&
+            removed != PLATFORM_DIRECTORY_MISSING)
+            ok = false;
+    }
+    platform_directory_transaction_close(&copy);
+    if (created && !platform_private_directory_remove_empty(temp)) ok = false;
+    (void)datadir;
+    return ok;
+}
+
 bool boot_mint_anchor_normal_boot_preflight(const char *datadir)
 {
-    (void)datadir;
-    fprintf(stderr,
-            "REFUSED: mint-anchor preflight is unavailable on Windows until "
-            "the directory-handle-relative containment transaction is "
-            "qualified\n");
-    return false;
+    struct platform_directory_transaction source;
+    platform_directory_transaction_init(&source);
+    if (!datadir || !datadir[0] ||
+        !platform_directory_transaction_open(&source, datadir))
+        return false;
+    bool consensus_present = false, legacy_present = false;
+    bool ok = windows_family_preflight(&source, datadir, "consensus.db",
+                                       &consensus_present) &&
+              windows_family_preflight(&source, datadir, "progress.kv",
+                                       &legacy_present) &&
+              !(consensus_present && legacy_present);
+    platform_directory_transaction_close(&source);
+    if (!ok && consensus_present && legacy_present)
+        fprintf(stderr,
+                "FATAL: normal node boot refused: both consensus.db and "
+                "progress.kv kernel families exist\n");
+    return ok;
 }
 
 bool boot_mint_anchor_preflight_run_all(const char *datadir,
