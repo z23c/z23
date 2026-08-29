@@ -644,7 +644,8 @@ DEVLOOP_INCLUDES = -Itools/dev
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
 DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
-	tools/dev/windows_headless_run.c
+	tools/dev/windows_headless_run.c \
+	tools/dev/grok_report.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
@@ -7922,8 +7923,10 @@ ZCL_SERVICE_EXTRA_FLAGS ?=
 ZCL_SERVICE_FILESERVICE_PEER ?=
 ZCL_SERVICE_CONNECT_PEER ?=
 ZCL_SERVICE_ADDNODE_PEER ?=
+# Space-separated list of additional -addnode peers for the LaunchAgent.
+ZCL_SERVICE_ADDNODE_PEERS ?=
 ZCL_SERVICE_ENV_VARS ?=
-ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)$(if $(ZCL_SERVICE_ADDNODE_PEER),<string>-addnode=$(ZCL_SERVICE_ADDNODE_PEER)</string>)
+ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)$(if $(ZCL_SERVICE_ADDNODE_PEER),<string>-addnode=$(ZCL_SERVICE_ADDNODE_PEER)</string>)$(foreach p,$(ZCL_SERVICE_ADDNODE_PEERS),<string>-addnode=$(p)</string>)
 
 .PHONY: service-install
 service-install:

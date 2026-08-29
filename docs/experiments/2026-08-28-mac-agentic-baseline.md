@@ -108,3 +108,4 @@ Subsequent fixes:
 - `47cc9e78a` — add `ZCL_SERVICE_FILESERVICE_PEER` so Mac nodes can bootstrap from another z23 node's file service.
 - `ad42404bc` — treat `-addnode=HOST:8033` peers as file-service snapshot seeds without forcing connect-only mode, so z23 nodes help each other bootstrap while keeping normal peer discovery.
 - `9eb439fe4` — support `ZCL_SERVICE_ENV_VARS` in the LaunchAgent; required for `ZCL_DEPLOY_ALLOW_CANONICAL=1` so a fetched snapshot can install into the canonical datadir.
+- *(this slice)* — suppress `sync_violation_lag` outbound peer rotation while a staged checkpoint bundle is waiting for headers to reach the checkpoint, so the ZCL23 fast-sync peer feeding those headers is not disconnected during the long header crawl. Also add `ZCL_SERVICE_ADDNODE_PEERS` for multiple snapshot-seed peers, and stop `tools/dev/grok_report.c` from being linked into the node binary.
