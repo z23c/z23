@@ -28,7 +28,7 @@ This layer mints no identifier of its own and never becomes an authority; it
 records which authority to ask.
 
 Naming the authority answers *who to ask*. It does not answer *what makes
-that answer expensive to falsify*, and the eight kinds do not share an answer.
+that answer expensive to falsify*, and the nine kinds do not share an answer.
 A blob's root is checkable by anyone holding the bytes and nobody else's
 cooperation. A ZNAM registration is an ordering question that only chain state
 answers. A hosted-service row is this node asserting something about itself.
@@ -94,7 +94,7 @@ this onion. Recording that honestly is what makes the other two classes
 credible, because a reader who finds one overstated claim is right to discount
 all of them.
 
-### 2. Assignment for the eight kinds
+### 2. Assignment for the nine kinds
 
 | Kind | Authority (existing) | Settlement |
 |---|---|---|
@@ -106,6 +106,7 @@ all of them.
 | `endpoint_onion` | `net.onion_service` | `LOCAL_DECLARATION` |
 | `storefront_product` | `store.product` | `LOCAL_DECLARATION` |
 | `contract_swap` | `swap.contract` | `CHAIN_ANCHORED_INCOMPLETE` (see §3) |
+| `character_sheet` | `metaverse.character_sheet` | `CONTENT_ADDRESSED` |
 
 <!-- claim: symbol-present CHAIN_ANCHORED_INCOMPLETE lib/metaverse -->
 
@@ -113,6 +114,18 @@ The table above is the prose form of `METAVERSE_KIND_TABLE` in
 `lib/metaverse/include/metaverse/property_id.h`, whose fourth column carries
 the settlement class. That table is the authority; if this document and it ever
 disagree, the table is right.
+
+`character_sheet` reaches `CONTENT_ADDRESSED` from a different direction than
+the two above it, and the difference is worth stating. `content` and
+`zcode_package` are content-addressed because a store holds the bytes and the
+id is their hash. A character has **no store at all**: its id is the hash of
+the birth seed plus the rules revision, and the whole sheet is recomputed from
+that seed by `lib/metaverse/src/character_sheet.c`. A node that has never met
+the owner verifies a visiting character by hashing what it was handed. That is
+the mechanism the class names, so the class is honest — and it is also why the
+kind's adapter row is `MV_UNAVAILABLE`: nothing on disk *enumerates* the seeds
+this operator holds, which is a separate question from whether one can be
+checked.
 
 `znam_name` and `zslp_asset` are the clear proof-of-work members: both are
 OP_RETURN records whose meaning is entirely an ordering question — first
@@ -223,11 +236,11 @@ being misquoted.
   hashrate. Nothing above changes that ordering.
 
 - **`LOCAL_DECLARATION` kinds carry no external settlement whatsoever.** Three
-  of the eight kinds are in that class. For those records the node is stating
+  of the nine kinds are in that class. For those records the node is stating
   a belief about itself; a reader who treats them as verified has been
   misled by the reader, not by the record.
 
-- **Most kinds have no reader yet.** Six of the eight adapter rows carry an
+- **Most kinds have no reader yet.** Five of the nine adapter rows carry an
   `unavailable_reason` instead of a `list`/`show` pair, so their settlement
   class is a declared property of the design before it is an observable
   property of the catalog output.

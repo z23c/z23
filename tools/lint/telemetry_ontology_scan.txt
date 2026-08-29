@@ -92,4 +92,4 @@ TABLE storage   lib/util/include/util/telemetry/storage_fields.def   1
 TABLE wallet    lib/util/include/util/telemetry/wallet_fields.def    1
 TABLE agents    lib/util/include/util/telemetry/agents_fields.def    1
 TABLE zcode     lib/util/include/util/telemetry/zcode_fields.def     1
-TABLE metaverse lib/util/include/util/telemetry/metaverse_fields.def 13
+TABLE metaverse lib/util/include/util/telemetry/metaverse_fields.def 14

@@ -62,10 +62,20 @@ static const char *const k_verb_names[MVAP_VERB__COUNT] = {
 #undef MVAP_VERB_NAME
 };
 
-static const char *const k_kind_names[MVAP_KIND__COUNT] = {
+/* One name per wire kind, in wire order. Deliberately sized BY ITS
+ * INITIALIZER rather than by MVAP_KIND__COUNT: written the other way, a kind
+ * added to enum mvap_kind without a name here just grew the array by one NULL
+ * and mvap_kind_name() started handing NULL to every caller that logs it. The
+ * assertion below turns that omission into a build failure. It is written
+ * from experience — adding character_sheet hit exactly that hole, and a test
+ * run is a run too late for a name that reaches a log line. */
+static const char *const k_kind_names[] = {
     "any", "content", "zcode", "name", "asset", "service", "endpoint",
-    "product", "contract",
+    "product", "contract", "character",
 };
+_Static_assert(sizeof k_kind_names / sizeof k_kind_names[0] ==
+                   (size_t)MVAP_KIND__COUNT,
+               "every wire kind needs a name in k_kind_names, in wire order");
 
 const char *mvap_verb_name(uint32_t verb)
 {
@@ -76,7 +86,7 @@ const char *mvap_verb_name(uint32_t verb)
 
 const char *mvap_kind_name(uint16_t kind)
 {
-    if (kind >= MVAP_KIND__COUNT)
+    if (kind >= MVAP_KIND__COUNT || !k_kind_names[kind])
         return "unknown";
     return k_kind_names[kind];
 }

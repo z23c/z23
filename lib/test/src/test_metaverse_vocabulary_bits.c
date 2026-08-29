@@ -98,8 +98,8 @@ _Static_assert(METAVERSE_ACTION_REVOKE == 0x00001000u,
 
 /* The kind table's shape, pinned the same way: a kind added or removed
  * without this gate being updated in the same change does not compile. */
-_Static_assert(METAVERSE_KIND_COUNT == 9,
-               "METAVERSE_KIND_TABLE holds 8 kinds plus UNKNOWN; update this "
+_Static_assert(METAVERSE_KIND_COUNT == 10,
+               "METAVERSE_KIND_TABLE holds 9 kinds plus UNKNOWN; update this "
                "gate and the adapter registry in the SAME change");
 
 /* Contract §1: HOST is one of the twelve ACTIONS, and it changes local state

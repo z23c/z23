@@ -652,6 +652,12 @@ ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)
 ZCL_TEST_GROUP(metaverse_catalog)
 ZCL_TEST_GROUP(node_character)
+/* A role-playing character held as content-addressed property, whose six
+ * attributes are derived from a birth chart. The assertion the group exists
+ * for is that the attribute TOTAL is identical for every character over many
+ * thousands of seeds — the anti-grinding property, since the owner picks the
+ * birth moment — while the chart still decides a genuinely varying spread. */
+ZCL_TEST_GROUP(character_sheet)
 ZCL_TEST_GROUP(metaverse_site)
 ZCL_TEST_GROUP(site_routes)
 ZCL_TEST_GROUP(space)

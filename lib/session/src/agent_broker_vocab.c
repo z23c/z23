@@ -85,6 +85,7 @@ _Static_assert((int)MVAP_KIND_SERVICE  == (int)METAVERSE_KIND_HOSTED_SERVICE, "k
 _Static_assert((int)MVAP_KIND_ENDPOINT == (int)METAVERSE_KIND_ENDPOINT_ONION, "kind 6");
 _Static_assert((int)MVAP_KIND_PRODUCT  == (int)METAVERSE_KIND_STOREFRONT_PRODUCT, "kind 7");
 _Static_assert((int)MVAP_KIND_CONTRACT == (int)METAVERSE_KIND_CONTRACT_SWAP, "kind 8");
+_Static_assert((int)MVAP_KIND_CHARACTER == (int)METAVERSE_KIND_CHARACTER_SHEET, "kind 9");
 _Static_assert((int)MVAP_KIND__COUNT   == (int)METAVERSE_KIND_COUNT,
                "the wire kind vocabulary and METAVERSE_KIND_TABLE must have "
                "the same number of kinds");

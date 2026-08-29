@@ -46,7 +46,7 @@
  * the line below is a BUILD failure — a per-kind flag that quietly stopped
  * being emitted is the same silent-omission defect the adapter registry's own
  * static_assert exists to prevent, one layer up. */
-static_assert((int)METAVERSE_KIND_COUNT == 9,
+static_assert((int)METAVERSE_KIND_COUNT == 10,
               "a property kind was added or removed: add (or drop) its "
               "reader_<kind> TL_LEAF row in util/telemetry/metaverse_fields.def "
               "and its MV_SET_READER line below, then update this count");
@@ -120,6 +120,7 @@ bool metaverse_dump_state_fill(struct metaverse_snapshot *snap)
     MV_SET_READER(snap, reader_storefront_product,
                   METAVERSE_KIND_STOREFRONT_PRODUCT);
     MV_SET_READER(snap, reader_contract_swap, METAVERSE_KIND_CONTRACT_SWAP);
+    MV_SET_READER(snap, reader_character_sheet, METAVERSE_KIND_CHARACTER_SHEET);
 
     return true;
 }

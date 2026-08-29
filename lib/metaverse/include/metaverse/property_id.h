@@ -116,6 +116,15 @@ enum metaverse_settlement {
  *       wired, funding-confirmation tracking is not. Hence the honest
  *       fourth class rather than a PROOF_OF_WORK label with permanently
  *       unknown numbers under it.
+ *   character_sheet          the id is the hash of the character's own birth
+ *       seed plus the rules revision that reads it, and the whole sheet is
+ *       RECOMPUTED from that seed (metaverse/character_sheet.h). A node the
+ *       owner has never met verifies a visiting character by hashing what it
+ *       was handed — no registry to consult and no claim of the owner's to
+ *       take on faith. That is the definition of CONTENT_ADDRESSED, and it is
+ *       why the authority column names the derivation itself rather than a
+ *       store: there is no seed store, and inventing one would mint a second
+ *       ownership truth for an object that already names itself.
  *
  * Room to extend is deliberate: world/object kinds land as further rows,
  * never as a parallel enum.
@@ -143,7 +152,9 @@ enum metaverse_settlement {
     X(STOREFRONT_PRODUCT, "storefront_product", "store.product",             \
       LOCAL_DECLARATION,         7u)                                         \
     X(CONTRACT_SWAP,      "contract_swap",      "swap.contract",             \
-      CHAIN_ANCHORED_INCOMPLETE, 8u)
+      CHAIN_ANCHORED_INCOMPLETE, 8u)                                         \
+    X(CHARACTER_SHEET,    "character_sheet",    "metaverse.character_sheet", \
+      CONTENT_ADDRESSED,         9u)
 
 enum metaverse_kind {
     /* Zero is not a kind. A zeroed struct is an explicitly invalid id, so

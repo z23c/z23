@@ -60,6 +60,18 @@
 #define MV_ADAPTER_CONTRACT_SWAP                                             \
     MV_UNAVAILABLE("swap contracts live in db_swap_contract (node.db), "     \
                    "which this read path may not open")
+/* Content-addressed, and still unreadable from a datadir — the two are not in
+ * tension. A character is verified by RECOMPUTING it from the birth seed the
+ * holder presents (metaverse/character_sheet.h), which needs no store at all;
+ * what does not exist yet is anywhere on disk that ENUMERATES the seeds this
+ * operator holds. Until a seed store exists, "list every character here" has
+ * no honest datadir-only answer, so the row states that instead of returning
+ * an empty list that would read as "this node owns no characters". */
+#define MV_ADAPTER_CHARACTER_SHEET                                           \
+    MV_UNAVAILABLE("a character is verified by recomputing it from the "     \
+                   "birth seed presented with it; no datadir path "          \
+                   "enumerates the seeds this node holds, so the catalog "   \
+                   "cannot list them")
 
 /* ── Proof that every kind declared exactly one of the two forms ─────────── */
 
