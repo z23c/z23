@@ -112,6 +112,14 @@ bool consensus_export_output_open(
     struct consensus_export_output_binding *output,
     struct consensus_state_export_result *result);
 void consensus_export_output_close(struct consensus_export_output_binding *output);
+
+/* Install the private sqlite3_vfs that routes every database I/O to the
+ * binding's retained anonymous staging descriptor, registered under a
+ * process-unique name held in output->vfs_name. Defined in
+ * consensus_state_snapshot_export_output_vfs.c — split out of the exporter
+ * entry TU along the file-size ceiling seam (E1); this is the only symbol
+ * that crosses. Never registered on Windows. */
+bool output_vfs_register(struct consensus_export_output_binding *output);
 void consensus_export_run_after_bind_hook(void);
 bool consensus_export_digest_nonzero(const uint8_t digest[32]);
 

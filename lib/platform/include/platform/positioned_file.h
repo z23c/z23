@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Concurrent cursor-free reads from one verified regular file. */
+ * Purpose: handle-based read-only regular-file abstraction with offset reads
+ * that do not share a seek cursor, a symlink/reparse-point-safe open beneath
+ * a trusted directory, and identity/executable/private-ACL checks, portable
+ * across POSIX and Windows. */
 #ifndef ZCL_PLATFORM_POSITIONED_FILE_H
 #define ZCL_PLATFORM_POSITIONED_FILE_H
 
@@ -27,25 +30,29 @@ struct platform_positioned_file_snapshot {
     uint64_t file_high;
 };
 
-/* Compare defined metadata fields only. Structure padding is indeterminate
- * and must never participate in an identity or stability decision. */
-static inline bool platform_positioned_file_snapshot_equal(
-    const struct platform_positioned_file_snapshot *left,
-    const struct platform_positioned_file_snapshot *right)
-{
-    return left && right && left->size == right->size &&
-           left->modified_seconds == right->modified_seconds &&
-           left->modified_nanoseconds == right->modified_nanoseconds &&
-           left->changed_seconds == right->changed_seconds &&
-           left->changed_nanoseconds == right->changed_nanoseconds &&
-           left->volume == right->volume &&
-           left->file_low == right->file_low &&
-           left->file_high == right->file_high;
-}
-
 void platform_positioned_file_init(struct platform_positioned_file *file);
+/* Open a regular file WITHOUT following a symlink/reparse point at the final
+ * component, so a link planted at a content path cannot redirect the read.
+ * This is the right call for every datadir, market, snapshot and CAS path. */
 bool platform_positioned_file_open(struct platform_positioned_file *file,
                                    const char *utf8_path);
+/* Open the regular file a path RESOLVES to, following symlinks/reparse
+ * points. This exists for identifying an external tool the host installs
+ * behind an indirection the operator chose: on a Debian-family box
+ * /usr/bin/cc is a symlink into /etc/alternatives and /usr/bin/as is a
+ * symlink to x86_64-linux-gnu-as, so the no-follow open above refuses both
+ * with ELOOP and a toolchain identity cannot be captured at all. It restores
+ * exactly the reach realpath() gave those callers before they were bound to
+ * handles, while keeping the content hash and the stamp bound to the handle
+ * that was actually opened.
+ *
+ * ONLY for a fixed, compiled-in, trusted tool location. Never for datadir,
+ * market, or any other path an attacker can influence: following a link is
+ * precisely the property platform_positioned_file_open() refuses, and
+ * platform_positioned_file_open_beneath() is the confined form. Both still
+ * refuse a directory and any non-regular object. */
+bool platform_positioned_file_open_resolved(
+    struct platform_positioned_file *file, const char *utf8_path);
 /* Open a slash-separated relative path beneath a trusted real directory,
  * without following a symlink/reparse point at any component. */
 bool platform_positioned_file_open_beneath(
@@ -57,6 +64,17 @@ bool platform_positioned_file_size(const struct platform_positioned_file *file,
 bool platform_positioned_file_snapshot(
     const struct platform_positioned_file *file,
     struct platform_positioned_file_snapshot *snapshot);
+/* Compare two snapshots FIELD-WISE. The struct carries 8 bytes of alignment
+ * padding (after each nanoseconds member), and neither the assignment inside
+ * platform_positioned_file_snapshot nor C itself defines what those padding
+ * bytes hold — so `memcmp` over the whole object compares stack garbage and
+ * reports two snapshots of one unchanged file as DIFFERENT. Every
+ * read-then-prove-stable caller must use this predicate, never memcmp.
+ * Structure padding is indeterminate and must never participate in an
+ * identity or stability decision. */
+bool platform_positioned_file_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b);
 /* Return the canonical path of the opened object, bound to its handle. */
 bool platform_positioned_file_path(
     const struct platform_positioned_file *file, char *utf8_path,

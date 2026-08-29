@@ -94,6 +94,27 @@ int main(void)
     failed |= !platform_positioned_file_snapshot(&file, &snapshot) ||
               snapshot.size != 32 || snapshot.file_low == 0;
     platform_positioned_file_close(&file);
+
+    /* The same existing file spelled with forward slashes. Callers join
+     * paths with '/' and plain Win32 rewrites those for them, but the \\?\
+     * prefix the open path prepends turns every path parse OFF -- a
+     * surviving '/' reaches the object manager as a filename character and
+     * CreateFileW fails with ERROR_INVALID_NAME. UTF-8 is self-synchronising,
+     * so no byte of a multi-byte sequence can be a backslash and this
+     * byte-wise rewrite is safe. */
+    char utf8_forward[sizeof(utf8_path)];
+    for (size_t i = 0; i < sizeof(utf8_forward); i++) {
+        utf8_forward[i] = utf8_path[i] == '\\' ? '/' : utf8_path[i];
+        if (!utf8_path[i]) break;
+    }
+    struct platform_positioned_file forward;
+    platform_positioned_file_init(&forward);
+    uint64_t forward_size = 0;
+    failed |= !platform_positioned_file_open(&forward, utf8_forward) ||
+              !platform_positioned_file_size(&forward, &forward_size) ||
+              forward_size != 32;
+    platform_positioned_file_close(&forward);
+
     DeleteFileW(path);
     if (failed) return 5;
     puts("positioned_file_acceptance: PASS");

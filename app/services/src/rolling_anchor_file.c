@@ -8,18 +8,6 @@
 #include <stdio.h>
 #include <string.h>
 
-bool rolling_anchor_snapshot_equal(
-    const struct platform_positioned_file_snapshot *a,
-    const struct platform_positioned_file_snapshot *b)
-{
-    return a->size == b->size &&
-           a->modified_seconds == b->modified_seconds &&
-           a->modified_nanoseconds == b->modified_nanoseconds &&
-           a->changed_seconds == b->changed_seconds &&
-           a->changed_nanoseconds == b->changed_nanoseconds &&
-           a->volume == b->volume && a->file_low == b->file_low &&
-           a->file_high == b->file_high;
-}
 
 bool rolling_anchor_parent_flush(const char *path)
 {

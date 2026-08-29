@@ -1,5 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Declare shared owner-and-SYSTEM Windows ACL validation. */
+ * Purpose: Windows-only internal helper shared by private_directory.c and
+ * directory_transaction.c — builds the owner+SYSTEM-exclusive security
+ * descriptor stamped on a new private directory/file, and validates that an
+ * already-open handle's real owner and DACL still match it (no inherited or
+ * extra ACEs). Compiles to an empty translation unit on POSIX, where
+ * private-ness is enforced by mode bits instead. */
 #ifndef ZCL_PLATFORM_PRIVATE_ACL_INTERNAL_H
 #define ZCL_PLATFORM_PRIVATE_ACL_INTERNAL_H
 

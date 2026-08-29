@@ -9,10 +9,12 @@
  *   seed, different protocol-level outcomes, no way to bisect a failure.
  *
  *   This header offers a one-pointer abstraction: production resolves
- *   to a static vtable that wraps `getrandom(2)` (with `/dev/urandom`
- *   as a fallback for ancient kernels). Tests and the simulator can
- *   install an injected RNG with `rng_set_default(...)`. Same call
- *   sites, deterministic behavior under a seeded harness.
+ *   to a static vtable over the host CSPRNG -- `getrandom(2)` on Linux
+ *   (with `/dev/urandom` as a fallback for ancient kernels),
+ *   `arc4random_buf` on Darwin, `BCryptGenRandom` on Windows. Every
+ *   arm fails closed; none of them has a weak fallback. Tests and the
+ *   simulator can install an injected RNG with `rng_set_default(...)`.
+ *   Same call sites, deterministic behavior under a seeded harness.
  *
  *   Crucially, the production path is unchanged — `rng_fill` still
  *   reads from the kernel CSPRNG. The abstraction has zero security

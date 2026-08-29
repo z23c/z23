@@ -98,6 +98,55 @@ bool mesh_obs_outcome_from_name(const char *name, enum mesh_obs_outcome *out)
     return false;
 }
 
+/* ── build-target tokens ────────────────────────────────────────────────
+ *
+ * Compile-time only. A runtime uname() would answer a different question
+ * ("what is this process sitting on"), and on a cross-built or emulated
+ * host the two answers differ — which is exactly when a reader most needs
+ * to know what the BINARY was built for. An unnamed target reports
+ * "unknown" rather than "": "" is reserved for an emitter that said
+ * nothing at all, and the two must stay distinguishable. */
+const char *mesh_obs_platform_os(void)
+{
+#if defined(__APPLE__)
+    return "macos";
+#elif defined(_WIN32)
+    return "windows";
+#elif defined(__linux__)
+    return "linux";
+#else
+    return "unknown";
+#endif
+}
+
+const char *mesh_obs_platform_arch(void)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#else
+    return "unknown";
+#endif
+}
+
+bool mesh_obs_platform_token_ok(const char *tok)
+{
+    if (!tok)
+        return false;
+    size_t n = strnlen(tok, MESH_OBS_PLATFORM_MAX);
+    if (n >= MESH_OBS_PLATFORM_MAX)
+        return false;               /* unterminated within the bound */
+    for (size_t i = 0; i < n; i++) {
+        char c = tok[i];
+        bool lower = (c >= 'a' && c <= 'z');
+        bool digit = (c >= '0' && c <= '9');
+        if (!lower && !digit && c != '_')
+            return false;
+    }
+    return true;                    /* n == 0 is valid: "said nothing" */
+}
+
 /* ── emit ───────────────────────────────────────────────────────────── */
 
 static void push_anchors(struct json_value *self,
@@ -144,6 +193,11 @@ static void push_self(struct json_value *root, const struct mesh_obs_self *s)
     json_set_object(&o);
     json_push_kv_str(&o, "onion", s->onion);
     json_push_kv_str(&o, "source_id", s->source_id);
+    /* What this binary was BUILT FOR, beside what built it. Together with
+     * tor_stub_build they let a reader separate "this operator built
+     * without Tor" from "this platform has no Tor to build". */
+    json_push_kv_str(&o, "os", s->os);
+    json_push_kv_str(&o, "arch", s->arch);
     json_push_kv_int(&o, "tip_height", s->tip_height);
     json_push_kv_str(&o, "tip_hash_hex", s->tip_hash_hex);
     json_push_kv_str(&o, "tip_chainwork_hex", s->tip_chainwork_hex);
@@ -280,6 +334,27 @@ static bool mo_take_str(struct mo_parse_ctx *c, const struct json_value *obj,
     return true;
 }
 
+/* A build-target token. Unlike a stage or an outcome, the value is NOT
+ * checked against a closed set this build knows: an emitter running an OS
+ * this build has never heard of is carried through verbatim, because
+ * refusing it would drop the first node of every new platform — the exact
+ * blindness this field exists to remove. Only a MALFORMED token is
+ * refused: an over-long one as "string_too_long" by the shared reader
+ * above, and a bad charset under its own "bad_platform_token" so the two
+ * are never conflated in a refusal tally. */
+static bool mo_take_platform(struct mo_parse_ctx *c,
+                             const struct json_value *obj, const char *key,
+                             char *dst)
+{
+    if (!mo_take_str(c, obj, key, dst, MESH_OBS_PLATFORM_MAX))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mesh_obs_platform_token_ok(dst)) {
+        dst[0] = '\0';
+        return mo_refuse(c, "bad_platform_token");
+    }
+    return true;
+}
+
 /* An optional hash field: empty is "unknown"; anything present must be a
  * well-formed 64-hex string. */
 static bool mo_take_hash(struct mo_parse_ctx *c, const struct json_value *obj,
@@ -411,6 +486,10 @@ static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
         return false;   // raw-return-ok:refusal-named-in-reason-out
     if (!mo_take_str(c, self, "source_id", dst->source_id,
                      sizeof(dst->source_id)))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_platform(c, self, "os", dst->os))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_platform(c, self, "arch", dst->arch))
         return false;   // raw-return-ok:refusal-named-in-reason-out
     if (!mo_take_int(c, self, "tip_height", 0, "negative_height",
                      &dst->tip_height))

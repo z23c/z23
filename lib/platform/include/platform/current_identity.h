@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Declare diagnostic identity lookup for the current host account. */
+ * Purpose: name the OS account running this process as one printable string --
+ * "sid:S-1-5-…" on Windows, "uid:1000" on POSIX -- so a refusal can report
+ * WHO was refused. Diagnostic only; never an authorization input. */
 #ifndef ZCL_PLATFORM_CURRENT_IDENTITY_H
 #define ZCL_PLATFORM_CURRENT_IDENTITY_H
 

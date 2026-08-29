@@ -377,6 +377,9 @@ bool zcl_hotswap_service_publish(
     return true;
 }
 
+/* Host exclusions nest INSIDE the plain `#ifdef ZCL_DEV_BUILD` region so a
+ * dl* call site can never leave the dev-only region (check-hotswap-dev-only
+ * reads that exact toggle; a release build must link zero dl* code). */
 #ifdef ZCL_DEV_BUILD
 #if defined(__linux__) && !defined(_WIN32)
 struct service_handle_slot {

@@ -47,6 +47,7 @@
 #include "support/cleanse.h"
 #include "util/thread_registry.h"
 #include "util/thread_liveness.h"
+#include "util/thread_work_probe.h"
 #include "util/blocker.h"
 
 /* -connect mode: only connect to specified peers, no seeds */
@@ -2229,9 +2230,20 @@ bool connman_run_message_cycle(struct connman *cm)
 
     /* Phase 2: send first. A received block can drive local reducer work
      * that takes locks or waits on validation workers. Queued getdata
-     * dispatch must not sit behind that heavy local processing. */
+     * dispatch must not sit behind that heavy local processing.
+     *
+     * The progress marker is restamped once per PEER here and in phase 3,
+     * not once per cycle at the loop top. A cycle is an unbounded batch: one
+     * peer asking for a run of blocks off a rotating disk can hold it open
+     * for minutes, so a per-cycle marker reports "dead" for the honest reason
+     * "this machine is slow". A per-peer marker reports what a liveness gate
+     * actually wants to know — peer steps are still completing. Cost is one
+     * vDSO clock read per peer per cycle. */
     for (size_t i = 0; i < snap_count; i++) {
         struct p2p_node *node = snap[i];
+        atomic_store_explicit(&cm->message_last_progress_us,
+                              platform_time_monotonic_us(),
+                              memory_order_relaxed);
         /* Peer may have disconnected mid-iteration — ref_count still
          * keeps the pointer valid, but there's no point talking to a
          * dead socket. */
@@ -2254,6 +2266,9 @@ bool connman_run_message_cycle(struct connman *cm)
     /* Phase 3: then process bounded inbound work, NO lock held. */
     for (size_t i = 0; i < snap_count; i++) {
         struct p2p_node *node = snap[i];
+        atomic_store_explicit(&cm->message_last_progress_us,
+                              platform_time_monotonic_us(),
+                              memory_order_relaxed);
         if (node->disconnect) continue;
 
         bool has_recv_messages = false;
@@ -2322,6 +2337,14 @@ static void *thread_message_handler(void *arg)
 {
     struct connman *cm = (struct connman *)arg;
     uint64_t msg_cycles = 0;
+
+    /* Publish this thread's kernel id so a liveness gate can ask the kernel
+     * whether THIS thread is still doing work when the loop marker below has
+     * gone quiet — a slow cycle and a wedged cycle look identical from the
+     * marker alone. */
+    atomic_store_explicit(&cm->message_thread_tid,
+                          thread_work_probe_self_tid(),
+                          memory_order_relaxed);
 
     while (!g_stop) {
         atomic_store_explicit(&cm->message_last_progress_us,
@@ -3372,6 +3395,25 @@ void connman_get_message_cycle_stats(
                                            memory_order_relaxed);
     out->wakes = atomic_load_explicit(&cm->message_wakes,
                                       memory_order_relaxed);
+}
+
+void connman_observe_loop_liveness(struct connman *cm,
+                                   struct connman_loop_liveness *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!cm)
+        return;
+    out->started = cm->started;
+    out->message_last_progress_us = atomic_load_explicit(
+        &cm->message_last_progress_us, memory_order_relaxed);
+    out->dial_last_progress_us = atomic_load_explicit(
+        &cm->dial_scheduler_last_progress_us, memory_order_relaxed);
+    out->message_tid = atomic_load_explicit(&cm->message_thread_tid,
+                                            memory_order_relaxed);
+    out->dial_tid = atomic_load_explicit(&cm->dial_thread_tid,
+                                         memory_order_relaxed);
 }
 
 bool connman_runtime_progress_fresh(struct connman *cm, int64_t max_age_us)

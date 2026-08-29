@@ -85,7 +85,13 @@ static bool wb_fixture_init(struct wb_fixture *f, const char *tag)
     snprintf(f->backup_dir, sizeof(f->backup_dir),
              "/tmp/zcl_wb_test_%d_%s_dst", (int)getpid(), tag);
     mkdir(f->datadir, 0755);
+    /* backup_dir reaches platform_private_directory_ensure (via
+     * wallet_backup_run_once / wallet_backup_start -> wbs_ensure_backup_dir),
+     * which requires the directory to be exactly 0700 and refuses rather than
+     * narrowing a wider one. mkdir's mode argument is masked by the process
+     * umask, so state the mode a second time instead of hoping for it. */
     mkdir(f->backup_dir, 0700);
+    chmod(f->backup_dir, 0700);
     snprintf(f->dbpath, sizeof(f->dbpath), "%s/node.db", f->datadir);
     return node_db_open(&f->ndb, f->dbpath);
 }
@@ -729,17 +735,33 @@ static bool wb_read_blob(const char *path, uint8_t **out, size_t *outlen)
 /* Local scratch dir for encryption tests — avoids /tmp (user
  * preference) and keeps files inside the working tree so parallel
  * agents in separate worktrees don't collide. */
-#define WB_ENC_SCRATCH_DIR "./test-tmp"
+#define WB_ENC_SCRATCH_REL "./test-tmp"
 
-static void wb_enc_ensure_scratch(void)
+/* Create that directory and return it as an ABSOLUTE path.
+ *
+ * wallet_backup_encrypt_file / _decrypt_file write through
+ * wbs_write_file_atomic -> platform_private_path_resolve, which realpath()s
+ * the destination's parent and refuses any pathname that does not start at
+ * the root. A relative destination is rejected before a byte is written
+ * ("destination parent is not a safe real directory"), so the fixture must
+ * hand these primitives the absolute spelling of the same in-tree dir. */
+static const char *wb_enc_ensure_scratch(void)
 {
-    mkdir(WB_ENC_SCRATCH_DIR, 0755);
+    static char dir[512];
+    mkdir(WB_ENC_SCRATCH_REL, 0755);
+    if (dir[0])
+        return dir;
+    char cwd[384];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return WB_ENC_SCRATCH_REL;   /* caller's write then fails loudly */
+    snprintf(dir, sizeof(dir), "%s/test-tmp", cwd);
+    return dir;
 }
 
 static int t_encrypt_roundtrip(void)
 {
     int failures = 0;
-    wb_enc_ensure_scratch();
+    const char *scratch = wb_enc_ensure_scratch();
 
     /* Deterministic plaintext large enough to span many ChaCha20
      * blocks (and far larger than the old 2KB stack limit). */
@@ -749,9 +771,9 @@ static int t_encrypt_roundtrip(void)
         plain[i] = (uint8_t)((i * 37 + 11) & 0xff);
 
     char src[256], enc[256], dst[256];
-    snprintf(src, sizeof(src), WB_ENC_SCRATCH_DIR "/wbenc_%d_src.bin",   (int)getpid());
-    snprintf(enc, sizeof(enc), WB_ENC_SCRATCH_DIR "/wbenc_%d_enc.bin",   (int)getpid());
-    snprintf(dst, sizeof(dst), WB_ENC_SCRATCH_DIR "/wbenc_%d_plain.bin", (int)getpid());
+    snprintf(src, sizeof(src), "%s/wbenc_%d_src.bin", scratch,   (int)getpid());
+    snprintf(enc, sizeof(enc), "%s/wbenc_%d_enc.bin", scratch,   (int)getpid());
+    snprintf(dst, sizeof(dst), "%s/wbenc_%d_plain.bin", scratch, (int)getpid());
 
     wb_write_blob(src, plain, plain_len);
 
@@ -788,13 +810,13 @@ static int t_encrypt_roundtrip(void)
 static int t_encrypt_wrong_password(void)
 {
     int failures = 0;
-    wb_enc_ensure_scratch();
+    const char *scratch = wb_enc_ensure_scratch();
 
     const char *plain = "attack at dawn";
     char src[256], enc[256], dst[256];
-    snprintf(src, sizeof(src), WB_ENC_SCRATCH_DIR "/wbenc_%d_wrong_src.bin",   (int)getpid());
-    snprintf(enc, sizeof(enc), WB_ENC_SCRATCH_DIR "/wbenc_%d_wrong_enc.bin",   (int)getpid());
-    snprintf(dst, sizeof(dst), WB_ENC_SCRATCH_DIR "/wbenc_%d_wrong_plain.bin", (int)getpid());
+    snprintf(src, sizeof(src), "%s/wbenc_%d_wrong_src.bin", scratch,   (int)getpid());
+    snprintf(enc, sizeof(enc), "%s/wbenc_%d_wrong_enc.bin", scratch,   (int)getpid());
+    snprintf(dst, sizeof(dst), "%s/wbenc_%d_wrong_plain.bin", scratch, (int)getpid());
 
     wb_write_blob(src, (const uint8_t *)plain, strlen(plain));
 
@@ -817,13 +839,13 @@ static int t_encrypt_wrong_password(void)
 static int t_encrypt_tamper_detected(void)
 {
     int failures = 0;
-    wb_enc_ensure_scratch();
+    const char *scratch = wb_enc_ensure_scratch();
 
     const char *plain = "every byte of the header is authenticated";
     char src[256], enc[256], dst[256];
-    snprintf(src, sizeof(src), WB_ENC_SCRATCH_DIR "/wbenc_%d_tamper_src.bin",   (int)getpid());
-    snprintf(enc, sizeof(enc), WB_ENC_SCRATCH_DIR "/wbenc_%d_tamper_enc.bin",   (int)getpid());
-    snprintf(dst, sizeof(dst), WB_ENC_SCRATCH_DIR "/wbenc_%d_tamper_plain.bin", (int)getpid());
+    snprintf(src, sizeof(src), "%s/wbenc_%d_tamper_src.bin", scratch,   (int)getpid());
+    snprintf(enc, sizeof(enc), "%s/wbenc_%d_tamper_enc.bin", scratch,   (int)getpid());
+    snprintf(dst, sizeof(dst), "%s/wbenc_%d_tamper_plain.bin", scratch, (int)getpid());
 
     wb_write_blob(src, (const uint8_t *)plain, strlen(plain));
     ZCL_TEST_SETUP(wallet_backup_encrypt_file(src, enc, "pw"));
@@ -997,10 +1019,10 @@ static int t_encrypt_requires_password(void)
 static int t_rotation_counts_enc(void)
 {
     int failures = 0;
-    wb_enc_ensure_scratch();
+    const char *scratch = wb_enc_ensure_scratch();
 
     char dir[256];
-    snprintf(dir, sizeof(dir), WB_ENC_SCRATCH_DIR "/wbenc_%d_rotate",
+    snprintf(dir, sizeof(dir), "%s/wbenc_%d_rotate", scratch,
              (int)getpid());
     mkdir(dir, 0700);
 

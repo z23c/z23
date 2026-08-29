@@ -74,7 +74,15 @@ void vcs_package_prepared_free(struct vcs_package_prepared *prepared);
  * present, only those exact paths (which must include zcode-package.json)
  * enter the manifest and build recipe. This lets a real module expose a
  * package subset without copying source bytes. It creates and persists
- * nothing. */
+ * nothing.
+ *
+ * out->lock is the package's DECLARATION graph, not its transitive closure:
+ * one directory is all prepare() reads, and a declared dependency is named
+ * only by a root that nothing here can resolve to metadata. It therefore
+ * carries the target plus its directly declared edges at depth 1, with
+ * direct_deps 0 on each of them because this graph records no edge out of
+ * them. The resolved DAG is vcs_package_lock_resolve(), which takes a loader
+ * and is what the install lifecycle pins into a build receipt. */
 enum vcs_package_prepare_error vcs_package_prepare(
     const struct vcs_package_prepare_options *options,
     struct vcs_package_prepared *out, char *detail, size_t detail_cap);

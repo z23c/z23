@@ -6,6 +6,15 @@
  * SQLite, the blocker registry, or a shell.  This platform seam owns the one
  * durable boot-failure counter format and pins the selected executable inode
  * before returning it to the caller for descriptor-backed execution.
+ *
+ * Availability: this seam requires directory-handle-relative resolution
+ * (openat/mkdirat/renameat/unlinkat with O_NOFOLLOW and O_DIRECTORY) and a
+ * descriptor-bound exec.  Where the host supplies neither — Windows today,
+ * matching platform_execve_fd()'s refusal in process_compat.h — every entry
+ * point below, including the pure parser, fails closed by returning false
+ * with errno set to ENOTSUP and a named reason in the error buffer.  errno
+ * therefore distinguishes an unavailable platform from a real input or IO
+ * failure.  Nothing here emulates the guarantees it cannot provide.
  */
 #ifndef ZCL_PLATFORM_OS_BINARY_SLOTS_H
 #define ZCL_PLATFORM_OS_BINARY_SLOTS_H

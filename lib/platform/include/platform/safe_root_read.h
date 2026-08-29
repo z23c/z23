@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Bounded descriptor-relative reads beneath a trusted root. */
+ * Purpose: read one file beneath a trusted root directory by resolving each
+ * path component as its own handle/fd, so no component can be redirected by
+ * a symlink or Windows reparse point, on POSIX and Windows. */
 #ifndef ZCL_PLATFORM_SAFE_ROOT_READ_H
 #define ZCL_PLATFORM_SAFE_ROOT_READ_H
 

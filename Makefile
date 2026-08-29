@@ -16,12 +16,20 @@ export ZCL_VENDOR_OFFLINE
 export ZCL_USE_CCACHE
 endif
 
+
+# The Windows API floor is ONE value. The product build below and the mingw
+# cross-compile of the acceptance catalog (windows_acceptance.mk) must agree:
+# a catalog compiled at a different floor grades a Windows the product does
+# not ship, and the disagreement is invisible because both sides compile.
+# That is exactly what happened -- 217d3eb6e raised the product to the
+# Windows 10 baseline and left the catalog at 0x0600.
+ZCL_WINDOWS_API_FLOOR := -D_WIN32_WINNT=0x0A00
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
 ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
 CC = gcc
 CXX ?= g++
-ZCL_PLATFORM_CPPFLAGS = -D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN \
+ZCL_PLATFORM_CPPFLAGS = $(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
 	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS = -l:libregex.a -l:libtre.a -l:libintl.a \
@@ -37,8 +45,19 @@ ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
 	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
 	-Dst_ctim=st_ctimespec -fblocks
 ZCL_LTO_FLAG = -flto=thin
-ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
-	-framework QuartzCore -framework CoreVideo \
+# Apple's linker has no weak-undefined default: lib/net/tor_integration.c
+# declares the vendored Tor and dynhost entry points ZCL_WEAK_IMPORT and tests
+# each against NULL at runtime, and on Darwin that only links if the linker is
+# told each name is allowed to stay undefined. That permission is STUB
+# scaffolding, so it is spent only on a stub link. Keeping it on a real-Tor
+# link would be fail-open: a name the vendored archive stopped defining (a
+# rename in vendor/tor, a module dropped from an include.am) would link
+# silently as a NULL weak symbol and surface as a dead onion at runtime instead
+# of as an undefined symbol at build time. Gate it on the same TOR_FULL the
+# link inputs use, so the real-Tor link is strict. ZCL_PLATFORM_NODE_LIBS is
+# recursively expanded and reaches LIBS/NODE_C23_LIBS (also recursive) well
+# after TOR_FULL is defined below, so the reference resolves at use time.
+ZCL_DARWIN_TOR_WEAK_UNDEFS = \
 	-Wl,-U,_dynhost_client_fetch -Wl,-U,_dynhost_get_global_service \
 	-Wl,-U,_dynhost_stream_close -Wl,-U,_dynhost_stream_open \
 	-Wl,-U,_dynhost_stream_write -Wl,-U,_ed25519_secret_key_from_seed \
@@ -48,6 +67,9 @@ ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
 	-Wl,-U,_tor_free_ -Wl,-U,_tor_malloc_zero_ \
 	-Wl,-U,_dynhost_reassembly_cap -Wl,-U,_dynhost_reassembly_admits \
 	-Wl,-U,_dynhost_webserver_has_complete_request
+ZCL_PLATFORM_NODE_LIBS = -framework Cocoa -framework CoreGraphics \
+	-framework QuartzCore -framework CoreVideo \
+	$(if $(TOR_FULL),,$(ZCL_DARWIN_TOR_WEAK_UNDEFS))
 ZCL_CXX_RUNTIME_LIB = -lc++
 ZCL_WARN_MAYBE_UNINITIALIZED =
 ZCL_TEST_STACK_SETUP = :
@@ -342,10 +364,18 @@ WINDOWS_HEADLESS_RUN_BIN = $(BIN_DIR)/z23-headless-run.exe
 ifeq ($(ZCL_HOST_WINDOWS),1)
 windows-headless-run: $(WINDOWS_HEADLESS_RUN_BIN)
 
-$(WINDOWS_HEADLESS_RUN_BIN): tools/dev/windows_headless_run.c
+# The launcher routes its allocations through the shared wrappers, so it is
+# no longer a single self-contained translation unit: it needs their header
+# and their definition. Left out, this rule fails on a real Windows host at
+# the #include, and nothing on a POSIX host would notice, because there is no
+# rule here to run. lib/platform/tests/windows_acceptance.mk carries the same
+# two inputs so a Linux box cross-links the same program.
+$(WINDOWS_HEADLESS_RUN_BIN): tools/dev/windows_headless_run.c \
+		lib/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic \
-		-D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -municode $< -o $@
+		-Ilib/base/include \
+		-D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -municode $^ -o $@
 
 windows-headless-run-selftest: $(WINDOWS_HEADLESS_RUN_BIN)
 	@root="$$(cygpath -aw .)"; runner="$$(cygpath -aw $<)"; \
@@ -945,11 +975,26 @@ DEV_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(
 
 # Use vendor/tor/libtor.a when Tor is built from source.
 # Tor: use full Tor if built, otherwise fall back to stub.
+#
+# The selection is host-independent and evidence-based: it asks whether the
+# four embedded-Tor archives EXIST, never which OS is running. Darwin used to
+# be pinned to the stub by an outer $(filter Darwin,...) arm that ignored
+# TOR_FULL entirely, so a Mac that had successfully run `make tor-full` still
+# linked the offline stub — and `mvp-onion-local`, which gates on $(TOR_FULL)
+# rather than on the archives the link actually consumed, would then have
+# claimed the real onion path was armed while the binary held a
+# tor_run_main that returns -1. Upstream Tor is macOS-capable (configure.ac
+# carries its own darwin* arms); what a Mac lacks is the SYSTEM OpenSSL,
+# libevent, and zlib development trees Tor's configure discovers on Linux, and
+# tools/scripts/build_tor_full.sh now points configure at the vendored copies
+# this repository already builds. A Mac without those archives simply has no
+# vendor/tor/libtor.a, so this wildcard stays empty and the stub is selected
+# for the same reason it is on any other host that never opted in.
 TOR_FULL = $(wildcard vendor/tor/libtor.a \
 	vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
 	vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
 	vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a)
-TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),-Lvendor/lib -ltor_stub,$(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub))
+TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub)
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
 # OpenSSL 3.0 (Apache 2.0), libevent and zlib are vendored and statically
@@ -976,7 +1021,9 @@ LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
 # bootstrap reads use the in-tree C23
 # reader; every other third-party input is an exact pinned static archive.
 NODE_C23_CFLAGS = $(CFLAGS) -DZCL_C23_NODE -UHAVE_GTK -UHAVE_WEBKIT
-NODE_C23_TOR_LIBS = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libtor_stub.a,$(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a))
+# Same archives-not-OS rule as TOR_LIBS above; see the comment there for why
+# the Darwin arm is gone.
+NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a)
 NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) vendor/lib/libsqlite3.a \
 	vendor/lib/libevent.a vendor/lib/libevent_openssl.a \
 	vendor/lib/libevent_pthreads.a vendor/lib/libssl.a \
@@ -1619,12 +1666,32 @@ presentation-portability: presentation-demo
 		printf '%s\n' 'presentation-portability: MinGW unavailable (Windows cross-link skipped)'; \
 	fi
 
+# Defined BEFORE the catalog include: the catalog assigns its per-program
+# variables with :=, so anything it references must already hold a value.
+ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
+ZCL_WINDOWS_ACCEPTANCE_AR ?= x86_64-w64-mingw32-ar
+ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
+
+# An acceptance program that reaches real sqlite3 needs a mingw archive, and
+# vendor/lib cannot supply one: that tree holds exactly one slot per archive
+# with no target segment, so a mingw libsqlite3.a there would overwrite the
+# host build the node itself links against. Build a private copy under the
+# acceptance dir from the same vendored amalgamation, so this gate depends on
+# nothing being installed on the host. Warnings are off for this translation
+# unit only -- it is vendored third-party source, and the strict flags below
+# still apply to every file we wrote.
+ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
+$(ZCL_WINDOWS_ACCEPTANCE_SQLITE): vendor/sqlite3.c
+	@mkdir -p $(@D)
+	$(ZCL_WINDOWS_ACCEPTANCE_CC) -std=c2x -O2 -w $(ZCL_WINDOWS_API_FLOOR) \
+		-DWIN32_LEAN_AND_MEAN -DSQLITE_OMIT_LOAD_EXTENSION \
+		-DSQLITE_THREADSAFE=1 -c vendor/sqlite3.c -o $(@D)/sqlite3.o
+	$(ZCL_WINDOWS_ACCEPTANCE_AR) rcs $@ $(@D)/sqlite3.o
+
 include lib/platform/tests/windows_acceptance.mk
 
-ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
-ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
-ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c23 -O2 -Wall -Wextra -Werror \
-	-pedantic -static -D_POSIX_C_SOURCE=200809L -D_WIN32_WINNT=0x0600 \
+ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
+	-pedantic -static -D_POSIX_C_SOURCE=200809L $(ZCL_WINDOWS_API_FLOOR) \
 	-DWIN32_LEAN_AND_MEAN -D__USE_MINGW_ANSI_STDIO=1 \
 	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) \
 	$(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) \
@@ -1634,7 +1701,7 @@ ZCL_WINDOWS_ACCEPTANCE_BINS := $(addprefix \
 
 define ZCL_WINDOWS_ACCEPTANCE_RULE
 $$(ZCL_WINDOWS_ACCEPTANCE_DIR)/$(1).exe: \
-	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES)
+	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES) $$(ZCL_WINDOWS_ACCEPTANCE_$(1)_LIBDEPS)
 	@mkdir -p $$(@D)
 	$$(ZCL_WINDOWS_ACCEPTANCE_CC) $$(ZCL_WINDOWS_ACCEPTANCE_FLAGS) \
 		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_FLAGS) \
@@ -2813,6 +2880,9 @@ zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
 .PHONY: check-zcode-package-registry print-zcode-monolith-lib-sources
 check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 	@tools/lint/check_zcode_package_registry.sh
+.PHONY: check-zcode-package-standalone
+check-zcode-package-standalone:
+	@tools/lint/check_zcode_package_standalone.sh
 .PHONY: check-package-anatomy
 check-package-anatomy:
 	@./tools/lint/check_package_anatomy.sh --selftest
@@ -2822,7 +2892,8 @@ print-zcode-monolith-lib-sources:
 $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
         config/zcode_package_registry.def \
 		config/zcode_c23_commons_app.def \
-		lib/vcs/src/package_prepare.c lib/vcs/src/package_manifest.c \
+		lib/vcs/src/package_prepare.c lib/vcs/src/package_prepare_schema.c \
+		lib/vcs/src/package_manifest.c \
 		lib/vcs/src/package_recipe.c lib/vcs/src/package_deps.c \
 		lib/vcs/src/package_capsule.c lib/vcs/src/package_release.c \
 		lib/json/src/json.c lib/codec/src/cursor.c lib/sha3/src/sha3.c \
@@ -4088,7 +4159,8 @@ LINT_FAST_GATES := \
     check-equihash-params \
     check-framework-shape \
     check-supervisor-registration \
-    check-vendor-provenance
+    check-vendor-provenance \
+    check-windows-platform-seam
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
@@ -4702,9 +4774,14 @@ $(BIN_DIR)/corpus-census: tools/corpus_census.c \
 		lib/base/src/safe_alloc.c \
 		lib/codec/src/cursor.c lib/json/src/json.c \
 		lib/platform/src/rng.c lib/platform/src/clock.c \
-		lib/platform/src/file_metadata.c lib/platform/src/os_proc.c \
 		lib/platform/src/positioned_file.c \
-		lib/platform/src/private_directory.c lib/platform/src/private_file.c
+		lib/platform/src/read_mapping.c \
+		lib/platform/src/private_file.c \
+		lib/platform/src/private_directory.c \
+		lib/platform/src/private_acl_internal.c \
+		lib/platform/src/file_metadata.c \
+		lib/platform/src/directory_compat.c \
+		lib/platform/src/os_proc.c
 	@mkdir -p $(dir $@)
 	# --gc-sections: ed25519's batch-verify path (never called here) pulls
 	# zcl_random_secret_bytes -> sealed-tree random.c; the collector drops it.
@@ -4753,7 +4830,8 @@ corpus-census: $(BIN_DIR)/corpus-census
 .PHONY: tools/package-factory
 tools/package-factory: $(BIN_DIR)/package-factory
 $(BIN_DIR)/package-factory: tools/package_factory.c \
-		lib/vcs/src/package_prepare.c lib/vcs/src/package_manifest.c \
+		lib/vcs/src/package_prepare.c lib/vcs/src/package_prepare_schema.c \
+		lib/vcs/src/package_manifest.c \
 		lib/vcs/src/package_recipe.c lib/vcs/src/package_deps.c \
 		lib/vcs/src/package_capsule.c lib/vcs/src/package_release.c \
 		lib/vcs/src/package_build.c lib/vcs/src/package_reproduce.c \
@@ -5298,9 +5376,9 @@ $(BIN_DIR)/ldb_verify_c23: tools/ldb_verify_c23.c \
 		lib/storage/src/ldb_reader_version.c \
 		lib/storage/src/ldb_reader_db.c \
 		lib/storage/src/ldb_reader_api.c \
+		lib/util/src/crc32c.c lib/base/src/safe_alloc.c \
 		lib/platform/src/positioned_file.c \
-		lib/platform/src/read_mapping.c \
-		lib/util/src/crc32c.c lib/base/src/safe_alloc.c
+		lib/platform/src/read_mapping.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
@@ -9552,6 +9630,28 @@ check-no-gnu-va-args:
 	@echo "══ LINT: C23 __VA_OPT__, never the GNU comma-swallowing extension ══"
 	@./tools/lint/check_no_gnu_va_args.sh
 
+# struct platform_positioned_file_snapshot (lib/platform/include/platform/
+# positioned_file.h) is 64 bytes wide but holds only 56 bytes of fields --
+# two uint32_t nanosecond members sit in front of wider int64_t/uint64_t
+# ones, so the compiler inserts 8 bytes of alignment padding it never has to
+# initialize. A raw `memcmp(&before, &after, sizeof(before))` over the whole
+# struct reads that padding and can report an unchanged file as CHANGED.
+# This exact defect landed THREE TIMES (twenty test groups red the second
+# time, commit 44c45f255); the fix already exists as
+# platform_positioned_file_snapshot_equal(). This gate: for every .c/.h file
+# in scope, collect identifiers declared as a plain (non-pointer)
+# `struct platform_positioned_file_snapshot <name>[, <name>...];` object,
+# then flag any memcmp()/bcmp() in that SAME file naming one of those
+# identifiers as its first or second argument. Narrow and text-based by
+# design -- see the script's own header for exactly what it cannot see
+# (a helper function doing the memcmp elsewhere, a macro-wrapped memcmp, a
+# multi-line call).
+.PHONY: check-no-snapshot-struct-memcmp
+check-no-snapshot-struct-memcmp:
+	@echo "══ LINT: no raw memcmp/bcmp over struct platform_positioned_file_snapshot ══"
+	@./tools/lint/check_no_snapshot_struct_memcmp.sh --self-test
+	@./tools/lint/check_no_snapshot_struct_memcmp.sh
+
 # Second-compiler portability. The node ships as one whole-program GCC build,
 # so nothing ever asked a different compiler whether the tree is well-formed
 # and GCC-only spellings landed invisibly — including real undefined behaviour
@@ -9561,6 +9661,77 @@ check-no-gnu-va-args:
 check-clang-portability:
 	@echo "══ LINT: second-compiler portability (clang -std=c23 -pedantic) ══"
 	@./tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh
+
+# Windows cross-compile check for the platform seam (lib/platform/src/*.c),
+# the layer whose entire job is hiding OS differences behind one header per
+# primitive. mingw-w64 is already on the dev reference host and already
+# cross-links the presentation demo (see presentation-portability above); this
+# gate spends that same toolchain on a syntax-only pass over every seam file
+# and ratchets realized diagnostics against a recorded baseline, so a file
+# that newly stops cross-compiling for Windows fails the build instead of
+# surfacing later as a human-caught revert. Reports UNOBSERVED, never a pass,
+# when mingw is absent.
+check-windows-platform-seam:
+	@echo "══ LINT: Windows platform-seam cross-compile (mingw -fsyntax-only) ══"
+	@./tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh
+
+# ─────────────────────────────────────────────────────────────────────────
+# BEGIN windows-acceptance lane — one contiguous block, nothing above or below
+# this belongs to it.
+#
+# The platform-seam acceptance programs live in lib/test/src/,
+# lib/platform/tests/ and lib/base/tests/, and are cross-compiled for Windows
+# by the catalog in lib/platform/tests/windows_acceptance.mk (included near
+# the top of this file, where ZCL_WINDOWS_ACCEPTANCE_FLAGS is defined).
+#
+# That catalog was invoked by NOTHING until this entry existed:
+# `windows-acceptance-compile` appeared in a .PHONY list and in no gate, no CI
+# path and no script. Dozens of acceptance programs with real per-test source
+# lists were standing in for the verification of the macOS/Windows seam
+# without a compiler ever reading them on a clean tree. A catalog nothing runs
+# is the same false green as no catalog.
+#
+# And a catalog nothing RECONCILES is the next false green along, which this
+# gate went through for real: test_directory_watcher.c and
+# test_watcher_record.c sat under lib/platform/tests read by nothing at all --
+# no catalog row, no Makefile rule, not in lib/platform/zcode-package.json --
+# while this target printed a clean PASS. So the work is now in
+# tools/lint/check_windows_acceptance.sh, which does TWO steps in this order:
+#
+#   1. RECONCILE — every acceptance program on disk must be a source in a
+#      ZCL_WINDOWS_ACCEPTANCE_*_SOURCES row, or the entry point of a group
+#      registered in tools/dev/test_group_catalog.def, or an EXEMPT row with a
+#      written reason. Anything else is exit 1 naming the file, and an empty
+#      scan set is a hard failure rather than a clean pass. Needs no compiler,
+#      so it runs for everyone.
+#   2. COMPILE — then what this target always did: a mingw cross-link at the
+#      product's own API floor ($(ZCL_WINDOWS_API_FLOOR), shared with
+#      ZCL_PLATFORM_CPPFLAGS so the two can never drift apart again).
+#
+# Compile, not execute: these are Windows binaries and this is a POSIX host.
+# `make windows-acceptance` additionally runs them under Wine and REFUSES
+# rather than skipping when Wine is absent.
+#
+# UNOBSERVED contract: with no mingw toolchain the compile step prints
+# UNOBSERVED, in that word, and exits 0 -- an outside contributor is never
+# blocked by a cross-compiler they do not have -- but UNOBSERVED is not a pass
+# and is not cached. The reconcile step has already run by then either way.
+#
+# --self-test runs first on every invocation because a gate not proven able to
+# go red is not evidence: it plants an undeclared program in a throwaway
+# fixture, asserts the red names it, and asserts the pass returns once it is
+# removed.
+#
+# Wired into LINT_GATES, which takes three files as a set: the list entry
+# below, a gate_command() row in tools/lint/run_lint.sh, and a row in
+# docs/DEFENSIVE_CODING.md. check-lint-gate-wiring enforces all three
+# together, because a half-wired gate makes `make lint` exit 2 for EVERY
+# gate, not just this one.
+.PHONY: check-windows-acceptance
+check-windows-acceptance:
+	@./tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh
+# END windows-acceptance lane
+# ─────────────────────────────────────────────────────────────────────────
 
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
@@ -9869,7 +10040,8 @@ check-verification-coverage:
 # Fault injection at daemon-reload and restart must restore both the executable
 # and its systemd identity intent; the success case must qualify the /proc
 # executable bytes and status command before considering activation complete.
-check-ship-remote-transaction:
+# jsonq: ship.sh's release-candidate real-Tor gate reads candidate JSON with it.
+check-ship-remote-transaction: jsonq
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/ship.sh --selftest
 	@./tools/ship_selftest.sh
@@ -10431,6 +10603,7 @@ LINT_GATES := \
     check-malloc \
     check-byte-order-codec-single \
     check-zcode-package-registry \
+    check-zcode-package-standalone \
     check-package-anatomy \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
@@ -10563,7 +10736,10 @@ LINT_GATES := \
     check-telemetry-ontology \
     check-privileged-transition-receipt \
     check-no-gnu-va-args \
+    check-no-snapshot-struct-memcmp \
     check-clang-portability \
+    check-windows-platform-seam \
+    check-windows-acceptance \
     check-result-discard \
     check-c23-only \
     check-no-python \
@@ -10579,15 +10755,19 @@ LINT_GATES := \
     check-tor-dial-prewarm \
     check-fleet-source-status
 
-# The driver execs gate scripts directly, so the two gates backed by a built
-# tool (check-core-seal, check-observability-pairing, and the package root
-# projection checker) need their binaries
-# present before it starts; in serial mode those deps ride the check-* rules.
+# The driver execs gate scripts directly, so every gate backed by a built tool
+# (check-core-seal, check-observability-pairing, the package root projection
+# checker, and jsonq for check-ship-remote-transaction / check-onion-pair-watch)
+# needs its binary present before it starts; in serial mode those deps ride the
+# check-* rules. jsonq was the one missing from this list: on a checkout where
+# it had not been built, `make lint` failed check-ship-remote-transaction in
+# about 30 ms and — because that gate's selftest was a silent assertion chain —
+# with a completely empty failure log.
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
@@ -10612,11 +10792,11 @@ endif
 # read build output, git config, /proc, or untracked worktree state. Each
 # carries its reason in tools/lint/lint_cache.sh, and each always runs.
 .PHONY: lint-cached lint-cold-audit
-lint-cached: tools/core_seal tools/check_observability_pairing
+lint-cached: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
 	@tools/lint/run_lint.sh --cache --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed (cached where inputs were unchanged) ══"
 
-lint-cold-audit: tools/core_seal tools/check_observability_pairing
+lint-cold-audit: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN)
 	@tools/lint/run_lint.sh --cold-audit --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed, every cache hit verified against a fresh run ══"
 
@@ -10826,7 +11006,9 @@ check-restart-follow:
 .PHONY: tools/postmortem_to_scenario
 tools/postmortem_to_scenario: $(BIN_DIR)/postmortem_to_scenario
 $(BIN_DIR)/postmortem_to_scenario: tools/postmortem_to_scenario.c \
-		lib/sim/src/postmortem.c lib/sim/src/seed_tape.c \
+		lib/sim/src/postmortem.c lib/sim/src/postmortem_archive.c \
+		lib/sim/src/postmortem_inventory.c \
+		lib/sim/src/postmortem_stub.c lib/sim/src/seed_tape.c \
 		lib/platform/src/clock.c lib/platform/src/rng.c \
 		lib/util/src/signal_handler.c lib/util/src/clientversion.c \
 		lib/util/src/async_safe_write.c \

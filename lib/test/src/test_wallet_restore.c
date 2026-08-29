@@ -50,7 +50,27 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define WR_DIR "./test-tmp"
+/* Fixture scratch root, as an ABSOLUTE path.
+ *
+ * wallet_backup_encrypt_file and the restore service write through
+ * wbs_write_file_atomic -> platform_private_path_resolve, which realpath()s
+ * the destination's parent and refuses any pathname that does not start at
+ * the root. A relative fixture path is rejected before a byte is written, so
+ * every path built here is anchored at the working directory. */
+#define WR_DIR_REL "./test-tmp"
+
+static const char *wr_dir(void)
+{
+    static char dir[512];
+    mkdir(WR_DIR_REL, 0755);
+    if (dir[0])
+        return dir;
+    char cwd[384];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return WR_DIR_REL;   /* caller's write then fails loudly */
+    snprintf(dir, sizeof(dir), "%s/test-tmp", cwd);
+    return dir;
+}
 
 #define WR_CHECK(name, expr) do {                    \
     printf("wallet_restore: %s... ", (name));        \
@@ -277,7 +297,7 @@ static int wr_test_rescan_reports_missing_bodies(void)
     memset(&g_wr_wallet, 0, sizeof(g_wr_wallet));
     struct wallet_rescan_report rep;
     int found = wallet_rescan_report(&g_wr_wallet, &chain, 0, 4,
-                                     WR_DIR, &rep);
+                                     wr_dir(), &rep);
 
     WR_CHECK("rescan over body-less heights finds nothing", found == 0);
     WR_CHECK("rescan counted a non-empty range", rep.blocks_in_range >= 1);
@@ -301,16 +321,19 @@ static int wr_test_rescan_reports_missing_bodies(void)
 int test_wallet_restore(void)
 {
     int failures = 0;
-    mkdir(WR_DIR, 0755);
-
     char src_db[256], backup_dir[256], target[256], target_db[320];
-    snprintf(src_db, sizeof(src_db), WR_DIR "/wr_%d_src.db", (int)getpid());
-    snprintf(backup_dir, sizeof(backup_dir), WR_DIR "/wr_%d_bk", (int)getpid());
-    snprintf(target, sizeof(target), WR_DIR "/wr_%d_target", (int)getpid());
+    const char *scratch = wr_dir();
+    snprintf(src_db, sizeof(src_db), "%s/wr_%d_src.db", scratch, (int)getpid());
+    snprintf(backup_dir, sizeof(backup_dir), "%s/wr_%d_bk", scratch, (int)getpid());
+    snprintf(target, sizeof(target), "%s/wr_%d_target", scratch, (int)getpid());
     snprintf(target_db, sizeof(target_db), "%s/node.db", target);
     wr_rm(src_db);
     wr_rmdir_datadir(target);
+    /* wallet_backup_run_once -> wbs_ensure_backup_dir ->
+     * platform_private_directory_ensure requires exactly 0700 and refuses a
+     * wider directory. mkdir is umask-masked, so restate the mode. */
     mkdir(backup_dir, 0700);
+    chmod(backup_dir, 0700);
 
     /* ---- source wallet with transparent AND shielded rows ---- */
     struct node_db ndb;
@@ -364,7 +387,10 @@ int test_wallet_restore(void)
 
     {   /* a path that does not exist */
         struct wallet_restore_request bad = req;
-        bad.backup_path = WR_DIR "/no_such_backup.sqlite";
+        char missing[512];
+        snprintf(missing, sizeof(missing), "%s/no_such_backup.sqlite",
+                 wr_dir());
+        bad.backup_path = missing;
         WR_CHECK("refuses a backup path that does not exist",
                  !wallet_restore_run(&bad, &rep).ok);
     }

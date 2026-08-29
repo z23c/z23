@@ -45,6 +45,7 @@
 #include "util/supervisor.h"
 #include "util/supervisor_backstop.h"
 #include "util/thread_registry.h"
+#include "util/thread_work_probe.h"
 #include "net/tor_integration.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -300,25 +301,170 @@ static bool boot_sd_watchdog_runtime_pillars(bool sweep_alive,
     return sweep_alive && tick_alive && connman_alive;
 }
 
+/* ── What a runtime pillar is allowed to measure ─────────────────────────
+ *
+ * Every pillar below used to be one question: "did this loop get back to the
+ * top of itself within WATCHDOG_USEC?" That question is not about the loop. It
+ * is about how much work the loop was handed and how fast the machine
+ * underneath it runs, and it graded honest nodes dead for the wrong reasons:
+ *
+ *   - The DIAL SCHEDULER. One pass of thread_open_connections() is permitted
+ *     by its own code to block for DEFAULT_CONNECT_TIMEOUT on the clearnet
+ *     race and then a whole ONION_STREAM_CONNECT_TIMEOUT_MS budget per onion
+ *     candidate, with one retry on a FRESH budget after a torn-down circuit.
+ *     That permitted budget is larger than the entire watchdog window, so on
+ *     any node dialing a slow or dead hidden service the marker goes stale by
+ *     construction while the thread is doing exactly what it was told to do.
+ *     Observed on the development fleet: five-minute gaps between passes,
+ *     every one of them ending in a successful dial.
+ *
+ *   - The MESSAGE PUMP. A cycle serves whatever the connected peers asked
+ *     for. On a rotating disk one run of getblock takes longer than the
+ *     window; on an SSD it does not. Same node, same code, opposite verdict.
+ *
+ *   - The TICK RUNNER. run_due_ticks() is serial, so the heartbeat freezes
+ *     for as long as the slowest child's on_tick takes — again a disk-speed
+ *     measurement, not a wedge.
+ *
+ * The fix is not a bigger number; a bigger number is the same defect further
+ * away. It is to ask a second question the machine's speed cannot answer:
+ * is the KERNEL still doing work on this thread's behalf? CPU time, major
+ * faults and block-I/O bytes all advance for a thread that is computing, page
+ * faulting under memory pressure, or waiting on a slow device — and none of
+ * them advance for a thread deadlocked on a mutex or parked on a futex that
+ * will never be posted. A slow machine does less work per second; it never
+ * does zero. See util/thread_work_probe.h.
+ *
+ * So each pillar is now `marker fresh OR that thread is working`, and a
+ * pillar is dead only when BOTH are false — which is the definition of the
+ * thing this watchdog exists to kill. What this cannot see is a thread
+ * spinning in a livelock: it burns CPU and reads as working. That is a
+ * different failure with a different detector (the supervisor tree's
+ * NO_PROGRESS contracts) and must never be claimed as covered here. */
+static bool boot_sd_watchdog_pillar_alive(bool marker_fresh,
+                                          bool thread_working)
+{
+    return marker_fresh || thread_working;
+}
+
+/* Both connman loops must be alive. The conjunction is safe now that each
+ * term is a liveness observation rather than an activity one: before this,
+ * ANDing two "did the loop come round" markers meant either loop blocking on
+ * its own honest budget killed the process. */
+static bool boot_sd_watchdog_connman_alive(bool msg_marker_fresh,
+                                           bool msg_working,
+                                           bool dial_marker_fresh,
+                                           bool dial_working)
+{
+    return boot_sd_watchdog_pillar_alive(msg_marker_fresh, msg_working) &&
+           boot_sd_watchdog_pillar_alive(dial_marker_fresh, dial_working);
+}
+
+/* One work-probe slot per gated thread. Touched only by the pet thread. */
+struct wd_work_slot {
+    long                      tid;
+    struct thread_work_sample prev;
+    bool                      have_prev;
+};
+static struct wd_work_slot g_work_tick;
+static struct wd_work_slot g_work_msg;
+static struct wd_work_slot g_work_dial;
+
+/* Did the kernel do work on `tid` since the previous pet period? A tid we
+ * cannot read — no such thread yet, a non-Linux host, a sandbox that denies
+ * /proc — reports NOT working, so the gate falls back to the marker alone
+ * exactly as it behaved before this probe existed. Unobservable is never
+ * evidence of life. */
+static bool boot_sd_watchdog_thread_working(struct wd_work_slot *slot, long tid)
+{
+    struct thread_work_sample now;
+    if (!slot)
+        return false;
+    if (!thread_work_probe_sample(tid, &now)) {
+        slot->have_prev = false;
+        return false;
+    }
+    bool advanced = slot->have_prev && slot->tid == tid &&
+                    thread_work_probe_advanced(&slot->prev, &now);
+    slot->tid       = tid;
+    slot->prev      = now;
+    slot->have_prev = true;
+    return advanced;
+}
+
 /* A healthy sweep alone is insufficient: the sweep intentionally runs apart
  * from child callbacks, the message handler, and the dial scheduler. Gate the
  * keepalive on all three execution pillars so a frozen worker cannot be hidden
- * by an otherwise-live monitoring thread. */
+ * by an otherwise-live monitoring thread.
+ *
+ * Sampling happens on every pet period, not only when a marker is stale, so
+ * the "since last period" comparison is always over one period. It is four
+ * reads of kernel-generated pseudo-files per period; they take no node lock
+ * and issue no block-device I/O, so they cannot be delayed by the storage
+ * whose slowness this whole function exists to stop mistaking for death. */
 static bool boot_sd_watchdog_runtime_alive(void)
 {
     int64_t bound_us = boot_sd_watchdog_freshness_bound_us();
+    int64_t now_us   = platform_time_monotonic_us();
+
     /* run_due_ticks() is serial. A permanently wedged callback starves every
-     * later periodic callback, so the runner remains a runtime pillar. Slow
-     * but useful bulk work is admitted by the separate
-     * recent_progress && sweep_alive path below; removing this check would
-     * let a dead runner live forever whenever connman remained responsive. */
-    bool tick_alive = !supervisor_tick_runner_running() ||
-                      supervisor_tick_runner_last_hb_age_us() < bound_us;
-    bool connman_alive = !g_sd_watchdog_ctx ||
-                         connman_runtime_progress_fresh(
-                             g_sd_watchdog_ctx->connman, bound_us);
+     * later periodic callback, so the runner remains a runtime pillar. */
+    bool tick_running = supervisor_tick_runner_running();
+    bool tick_working = boot_sd_watchdog_thread_working(
+        &g_work_tick, supervisor_tick_runner_tid());
+    bool tick_alive = !tick_running ||
+                      boot_sd_watchdog_pillar_alive(
+                          supervisor_tick_runner_last_hb_age_us() < bound_us,
+                          tick_working);
+
+    struct connman_loop_liveness ll;
+    connman_observe_loop_liveness(
+        g_sd_watchdog_ctx ? g_sd_watchdog_ctx->connman : NULL, &ll);
+    bool msg_working  = boot_sd_watchdog_thread_working(&g_work_msg,
+                                                        ll.message_tid);
+    bool dial_working = boot_sd_watchdog_thread_working(&g_work_dial,
+                                                        ll.dial_tid);
+    bool msg_fresh  = ll.message_last_progress_us > 0 &&
+                      now_us - ll.message_last_progress_us >= 0 &&
+                      now_us - ll.message_last_progress_us < bound_us;
+    bool dial_fresh = ll.dial_last_progress_us > 0 &&
+                      now_us - ll.dial_last_progress_us >= 0 &&
+                      now_us - ll.dial_last_progress_us < bound_us;
+    /* A connman that has not started yet is not a wedge — the same carve-out
+     * connman_runtime_progress_fresh() makes for its own callers. */
+    bool connman_alive = !ll.started ||
+                         boot_sd_watchdog_connman_alive(msg_fresh, msg_working,
+                                                        dial_fresh,
+                                                        dial_working);
     return boot_sd_watchdog_runtime_pillars(
         boot_sd_watchdog_supervisor_alive(), tick_alive, connman_alive);
+}
+
+/* Name every pillar for the withhold/resume log line. Withholding the ping
+ * asks systemd to SIGABRT this process; an operator reading the journal must
+ * be told WHICH leg refused, not just that one did. */
+static void boot_sd_watchdog_describe_pillars(char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    int64_t bound_us = boot_sd_watchdog_freshness_bound_us();
+    int64_t now_us   = platform_time_monotonic_us();
+    struct connman_loop_liveness ll;
+    connman_observe_loop_liveness(
+        g_sd_watchdog_ctx ? g_sd_watchdog_ctx->connman : NULL, &ll);
+    int64_t msg_age  = ll.message_last_progress_us > 0
+                           ? now_us - ll.message_last_progress_us : -1;
+    int64_t dial_age = ll.dial_last_progress_us > 0
+                           ? now_us - ll.dial_last_progress_us : -1;
+    snprintf(out, cap,
+             "sweep=%d tick_running=%d tick_hb_age_us=%lld "
+             "connman_started=%d msg_age_us=%lld dial_age_us=%lld "
+             "bound_us=%lld work_probe=%d",
+             (int)boot_sd_watchdog_supervisor_alive(),
+             (int)supervisor_tick_runner_running(),
+             (long long)supervisor_tick_runner_last_hb_age_us(),
+             (int)ll.started, (long long)msg_age, (long long)dial_age,
+             (long long)bound_us, (int)thread_work_probe_supported());
 }
 
 /* boot_progress freshness, shared by the collect tick (STATUS label) and
@@ -380,6 +526,20 @@ bool boot_sd_watchdog_test_runtime_pillars(bool sweep_alive,
     return boot_sd_watchdog_runtime_pillars(sweep_alive, tick_alive,
                                             connman_alive);
 }
+
+bool boot_sd_watchdog_test_pillar_alive(bool marker_fresh, bool thread_working)
+{
+    return boot_sd_watchdog_pillar_alive(marker_fresh, thread_working);
+}
+
+bool boot_sd_watchdog_test_connman_alive(bool msg_marker_fresh,
+                                         bool msg_working,
+                                         bool dial_marker_fresh,
+                                         bool dial_working)
+{
+    return boot_sd_watchdog_connman_alive(msg_marker_fresh, msg_working,
+                                          dial_marker_fresh, dial_working);
+}
 #endif
 
 /* PET half. Sleeps in 1 s slices so boot_sd_watchdog_stop's pthread_join
@@ -410,21 +570,22 @@ static void *boot_sd_watchdog_pet_main(void *arg)
          * once, not once per period. */
         static bool s_last_pet = true;
         if (pet != s_last_pet) {
+            /* `runtime=0` alone cost hours of archaeology: it names the
+             * conjunction, not the term. Print every pillar's raw observation
+             * so the journal answers "which leg refused, and by how much"
+             * without a rebuild. */
+            char pillars[256];
+            boot_sd_watchdog_describe_pillars(pillars, sizeof(pillars));
             if (pet) {
                 LOG_INFO("boot",
-                         "[sd_watchdog] pinging again: sweep=%d runtime=%d "
-                         "recent_progress=%d",
-                         (int)boot_sd_watchdog_supervisor_alive(),
-                         (int)boot_sd_watchdog_runtime_alive(),
-                         (int)recent);
+                         "[sd_watchdog] pinging again: recent_progress=%d %s",
+                         (int)recent, pillars);
             } else {
                 LOG_WARN("boot",
                          "[sd_watchdog] WITHHOLDING the watchdog ping — "
                          "systemd will kill this process unless it resumes: "
-                         "sweep=%d runtime=%d recent_progress=%d",
-                         (int)boot_sd_watchdog_supervisor_alive(),
-                         (int)boot_sd_watchdog_runtime_alive(),
-                         (int)recent);
+                         "recent_progress=%d %s",
+                         (int)recent, pillars);
             }
             s_last_pet = pet;
         }

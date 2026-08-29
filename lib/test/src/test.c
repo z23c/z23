@@ -1080,6 +1080,7 @@ int main(int argc, char **argv)
     failures += test_script();
     failures += test_net();
     failures += test_netbase_split_host_port();
+    failures += test_nat_route_dump();
     failures += test_connman_addnode_fallback();
     failures += test_transaction();
     failures += test_mempool();

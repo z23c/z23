@@ -175,7 +175,8 @@ bool mmb_leaf_store_remap(struct mmb_leaf_store *store)
     if ((st.st_size % 32) != 0)
         return false;
     if (!mmb_leaf_store_sync(store))
-        LOG_FAIL("mmb_leaf_store", "sync before remap failed for %s", store->path);
+        LOG_FAIL("mmb_leaf_store", "sync before remap failed for %s",
+                store->path);
 
     store->num_leaves = (uint64_t)st.st_size / 32;
     store->capacity = store->num_leaves;

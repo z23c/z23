@@ -4,6 +4,7 @@
 
 #include "platform/time_compat.h"
 #include "platform/socket_compat.h"
+#include "platform/private_file.h"
 #include "rpc/httpserver.h"
 #include "httpserver_transport.h"
 #include "rpc/http_middleware.h"
@@ -38,14 +39,6 @@
 
 #define RPC_HTTP_WORKERS 4
 #define RPC_HTTP_QUEUE_CAP 64
-
-/* Upper bound on a single serialized JSON-RPC response body. Generous
- * enough for the largest legitimate responses (gettxoutsetinfo, a full
- * listunspent / getrawmempool true) while bounding the one-shot
- * allocation an authenticated client can drive. A response that would
- * exceed this returns a proper RPC error envelope instead of a partial
- * or out-of-band send. */
-#define RPC_HTTP_MAX_RESP_BYTES ((size_t)128 * 1024 * 1024)
 
 /* ── SINGLE-OWNER INVARIANT for accepted sockets ───────────────────
  *
@@ -178,41 +171,6 @@ static struct thread_liveness_child g_rpc_worker_liveness = { .id = SUPERVISOR_I
 static struct thread_liveness_child g_rpc_listen_liveness = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_rpc_tls_liveness    = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_rpc_cookie_liveness = { .id = SUPERVISOR_INVALID_ID };
-
-bool rpc_http_test_build_response_envelope(bool rpc_ok,
-                                           const char *method,
-                                           struct json_value *rpc_result,
-                                           const struct json_value *id,
-                                           struct json_value *response)
-{
-    struct json_value null_err = {0};
-    struct json_value null_res = {0};
-    bool ok = true;
-
-    if (!rpc_result || !id || !response)
-        return false;
-
-    json_init(response);
-    json_set_object(response);
-
-    if (rpc_ok) {
-        ok = ok && json_push_kv(response, "result", rpc_result);
-        json_set_null(&null_err);
-        ok = ok && json_push_kv(response, "error", &null_err);
-        json_free(&null_err);
-    } else {
-        json_set_null(&null_res);
-        ok = ok && json_push_kv(response, "result", &null_res);
-        json_free(&null_res);
-        if (rpc_result->type == JSON_OBJ)
-            ok = ok && json_push_kv_str(rpc_result, "method",
-                                        method ? method : "");
-        ok = ok && json_push_kv(response, "error", rpc_result);
-    }
-
-    ok = ok && json_push_kv(response, "id", id);
-    return ok;
-}
 
 /* Both credential buffers in check_auth() below are 512 bytes and both strings
  * are NUL-terminated inside them, so no live length can reach this bound. */
@@ -526,10 +484,10 @@ static struct rpc_conn dequeue_client(void)
 
 /* ── Admission-queue test surface ──────────────────────────────────
  *
- * Same convention as rpc_http_test_build_response_envelope above:
- * production and the regression test drive the EXACT same admission
- * path, so the single-owner invariant is proved on the real code
- * rather than on a copy of it. */
+ * Same convention as rpc_http_test_build_response_envelope in
+ * httpserver_response.c: production and the regression test drive the
+ * EXACT same admission path, so the single-owner invariant is proved on
+ * the real code rather than on a copy of it. */
 
 bool rpc_http_test_queue_admit(platform_socket_t fd)
 {
@@ -578,67 +536,6 @@ void rpc_http_test_queue_stats(struct rpc_http_queue_stats *out)
     out->reclaimed_stale   = g_client_reclaimed_stale;
     out->rejected_busy     = g_client_rejected_busy;
     pthread_mutex_unlock(&g_client_queue_mutex);
-}
-
-/* Two-pass serialization of a JSON-RPC response. json_write() returns
- * the FULL required length regardless of the buffer it is handed (it
- * only writes where pos < buflen, and a zero-length buffer is never
- * dereferenced), so we size first with a zero-length probe, reject
- * anything past RPC_HTTP_MAX_RESP_BYTES, then allocate exactly len+1
- * and write the body. This replaces the old fixed 4 MiB buffer whose
- * unclamped length was fed straight to write() — for a response larger
- * than the buffer that read (len - 4 MiB) bytes past the allocation and
- * shipped adjacent heap memory to the client (crash/DoS + info-leak).
- *
- * On success: *out_buf owns a heap buffer the caller must free(), and
- * *out_len is the exact body length to send. Returns false (with
- * *out_buf == NULL) on OOM or when the response exceeds the cap; the
- * caller sends a proper RPC error envelope instead.
- *
- * Exposed (non-static) so the regression test exercises the exact same
- * sizing path the HTTP response uses — same convention as
- * rpc_http_test_build_response_envelope above. */
-bool rpc_http_test_serialize_response(const struct json_value *response,
-                                      char **out_buf, size_t *out_len)
-{
-    if (!response || !out_buf || !out_len) {
-        if (out_buf) *out_buf = NULL;
-        if (out_len) *out_len = 0;
-        return false;
-    }
-    *out_buf = NULL;
-    *out_len = 0;
-
-    /* Pass 1: size the body without writing (zero-length buffer). */
-    size_t need = json_write(response, NULL, 0);
-    if (need > RPC_HTTP_MAX_RESP_BYTES) {
-        LOG_FAIL("rpc", "response too large: %zu > %zu bytes", need,
-                 RPC_HTTP_MAX_RESP_BYTES);
-        return false;
-    }
-
-    char *buf = zcl_malloc(need + 1, "http_resp_buf");
-    if (!buf) {
-        LOG_FAIL("rpc", "response buffer alloc failed: %zu bytes", need + 1);
-        return false;
-    }
-
-    /* Pass 2: write exactly into a buffer sized to hold the whole body.
-     * json_write writes the NUL only when pos < buflen; need+1 guarantees
-     * room for it, and the returned length is the body length to send. */
-    size_t wrote = json_write(response, buf, need + 1);
-    if (wrote != need) {
-        /* Should be impossible (the two passes serialize the same value),
-         * but never ship a length that disagrees with what we wrote. Free
-         * before logging since LOG_FAIL returns. */
-        free(buf);
-        LOG_FAIL("rpc", "response size mismatch: sized %zu wrote %zu", need,
-                 wrote);
-    }
-
-    *out_buf = buf;
-    *out_len = wrote;
-    return true;
 }
 
 static void handle_client(struct rpc_conn conn)
@@ -1087,11 +984,19 @@ static void *tls_listen_thread_fn(void *arg)
             platform_socket_close(client_fd);
             continue;
         }
+        /* Computed into a variable rather than split across the #if arms of a
+         * single `if (`: the split form opens a brace in each arm and closes
+         * it in neither, so any tool counting braces without evaluating the
+         * preprocessor loses track of the enclosing function from here on. */
 #if defined(_WIN32)
-        if (client_fd > INT_MAX || SSL_set_fd(ssl, (int)client_fd) != 1) {
+        /* Winsock's SOCKET is handle-sized; SSL_set_fd takes an int, so
+         * refuse a descriptor that cannot round-trip rather than truncate. */
+        const bool fd_bound = client_fd <= INT_MAX &&
+                              SSL_set_fd(ssl, (int)client_fd) == 1;
 #else
-        if (SSL_set_fd(ssl, client_fd) != 1) {
+        const bool fd_bound = SSL_set_fd(ssl, client_fd) == 1;
 #endif
+        if (!fd_bound) {
             SSL_free(ssl);
             platform_socket_close(client_fd);
             continue;
@@ -1144,27 +1049,34 @@ static SSL_CTX *tls_init(const char *cert_path, const char *key_path)
     return ctx;
 }
 
-/* ── Cookie file write (atomic, owner-only) ─────────────────────────
- * Create the RPC cookie restrictively in one step instead of
- * fopen("w") (which honors the umask → typically world-readable) THEN
- * chmod(0600): that create-then-chmod leaves a window where any local
- * user can read the credentials, which grant full wallet access
- * (including dumpprivkey/z_exportkey). open(O_CREAT|O_EXCL, 0600)
- * guarantees the file is owner-only from the instant it exists; we
- * unlink first so O_EXCL succeeds on rotation/restart. Returns NULL on
- * failure (caller logs context). */
-static FILE *rpc_cookie_fopen_secure(const char *path)
+/* ── Cookie file write (single-step, owner-private) ─────────────────
+ * The cookie grants full wallet access (dumpprivkey / z_exportkey), so it
+ * must never exist — not even for an instant — readable by anyone but the
+ * user running the node. It is created restrictively in ONE step, never
+ * create-then-tighten, and any stale cookie is dropped first so the
+ * exclusive create wins on rotation. Returns false on failure.
+ *   open(path, O_CREAT|O_EXCL, 0600) is that guarantee on POSIX but NOT on
+ * Windows, where the CRT `pmode` sets only the read-only ATTRIBUTE and no
+ * ACL — the cookie would be readable by everyone the parent directory
+ * admits. platform_private_file_create() means the same on both: POSIX
+ * open(O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW, 0600); Windows
+ * CreateFileW with an explicit D:P(A;;FA;;;SY)(A;;FA;;;<user>) descriptor —
+ * owner plus SYSTEM only, from the instant the file exists. */
+static bool rpc_cookie_write_secure(const char *path, const char *user,
+                                    const char *password)
 {
-    /* Drop any stale cookie so O_EXCL can win the create race; O_EXCL
-     * refuses to follow a symlink an attacker may have planted. */
-    unlink(path);
-    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0)
-        return NULL;
-    FILE *f = fdopen(fd, "w");
-    if (!f)
-        close(fd);
-    return f;
+    char body[sizeof(g_rpc_user) + sizeof(g_rpc_password) + 2];
+    int n = snprintf(body, sizeof(body), "%s:%s", user, password);
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    (void)platform_private_file_unlink_missing_ok(path);
+    bool ok = n > 0 && (size_t)n < sizeof(body) &&
+              platform_private_file_create(path, &file) &&
+              platform_private_file_write_at(&file, body, (size_t)n, 0);
+    platform_private_file_close(&file);
+    memory_cleanse(body, sizeof(body));
+    if (!ok) (void)platform_private_file_unlink_missing_ok(path);
+    return ok;
 }
 
 /* ── Cookie rotation ────────────────────────────────────────────── */
@@ -1188,14 +1100,10 @@ void rpc_http_cookie_rotate(void)
              "%016llx%016llx",
              (unsigned long long)r1, (unsigned long long)r2);
 
-    /* Write new cookie to disk (owner-only, no world-readable window) */
-    if (g_cookie_file[0]) {
-        FILE *f = rpc_cookie_fopen_secure(g_cookie_file);
-        if (f) {
-            fprintf(f, "%s:%s", g_rpc_user, g_rpc_password);
-            fclose(f);
-        }
-    }
+    /* Write new cookie to disk (owner-private, no wider-access window) */
+    if (g_cookie_file[0])
+        (void)rpc_cookie_write_secure(g_cookie_file, g_rpc_user,
+                                      g_rpc_password);
     pthread_mutex_unlock(&g_cookie_mutex);
     printf("RPC cookie rotated\n");
 }
@@ -1272,26 +1180,21 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
 
         snprintf(g_cookie_file, sizeof(g_cookie_file),
                  "%s/.cookie", datadir);
-        /* Create owner-only (0600) atomically — never a world-readable
-         * window between create and chmod. */
-        FILE *f = rpc_cookie_fopen_secure(g_cookie_file);
-        if (f) {
-            fprintf(f, "%s:%s", g_rpc_user, g_rpc_password);
-            fclose(f);
+        if (rpc_cookie_write_secure(g_cookie_file, g_rpc_user,
+                                    g_rpc_password))
             printf("RPC cookie written to %s\n", g_cookie_file);
-        }
 
         /* Record the bound RPC port alongside the cookie. NOT secret (the
          * port is visible to anyone who can already reach the loopback
-         * listener), so a plain world-readable file is fine — no
-         * rpc_cookie_fopen_secure() needed. This is what lets a CLI
-         * invocation of the form `-rpcport=<N>` (no `-datadir=`) find the
-         * right sibling datadir by scanning `<HOME>/.zclassic-c23*` for one
-         * whose recorded port matches (see cli_autodiscover_datadir_for_port
-         * in src/main.c) instead of guessing the default datadir's cookie
-         * and getting an indistinguishable 401. Best-effort like the cookie
-         * write above: a failure here only degrades auto-discovery, it
-         * never blocks RPC startup. */
+         * listener), so a plain world-readable file is fine — no private
+         * create needed. This is what lets a CLI invocation of the form
+         * `-rpcport=<N>` (no `-datadir=`) find the right sibling datadir by
+         * scanning `<HOME>/.zclassic-c23*` for one whose recorded port
+         * matches (see cli_autodiscover_datadir_for_port in src/main.c)
+         * instead of guessing the default datadir's cookie and getting an
+         * indistinguishable 401. Best-effort like the cookie write above: a
+         * failure here only degrades auto-discovery, it never blocks RPC
+         * startup. */
         snprintf(g_rpc_port_file, sizeof(g_rpc_port_file),
                  "%s/.rpcport", datadir);
         FILE *pf = fopen(g_rpc_port_file, "w");
@@ -1409,9 +1312,8 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                 g_tls_listen_fd = platform_socket_open(
                     AF_INET, SOCK_STREAM, 0, true, false);
                 if (g_tls_listen_fd != PLATFORM_SOCKET_INVALID) {
-                    int topt = 1;
-                    (void)platform_socket_set_reuse_address(g_tls_listen_fd,
-                                                            topt != 0);
+                    char terr[32]; /* Winsock errors have no strerror() */
+                    (void)platform_socket_set_reuse_address(g_tls_listen_fd, true);
 
                     struct sockaddr_in taddr;
                     memset(&taddr, 0, sizeof(taddr));
@@ -1422,12 +1324,14 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                     if (platform_socket_bind(g_tls_listen_fd,
                             (struct sockaddr *)&taddr, sizeof(taddr)) < 0) {
                         fprintf(stderr, "RPC TLS: bind port %u failed: %s\n",  // obs-ok:helper-context-logged
-                                g_tls_port, strerror(errno));
+                                g_tls_port, platform_socket_error_string(
+                                    platform_socket_last_error(), terr, sizeof(terr)));
                         platform_socket_close(g_tls_listen_fd);
                         g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
                     } else if (platform_socket_listen(g_tls_listen_fd, 8) < 0) {
                         fprintf(stderr, "RPC TLS: listen failed: %s\n",  // obs-ok:helper-context-logged
-                                strerror(errno));
+                                platform_socket_error_string(
+                                    platform_socket_last_error(), terr, sizeof(terr)));
                         platform_socket_close(g_tls_listen_fd);
                         g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
                     }

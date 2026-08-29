@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Resolve the current host account identity without granting authority. */
+ * Purpose: the two implementations behind platform/current_identity.h --
+ * Windows token SID lookup and the POSIX getuid form. Diagnostic only;
+ * never an authorization input. */
 #include "platform/current_identity.h"
 
 #include <stdint.h>

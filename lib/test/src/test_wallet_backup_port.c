@@ -238,7 +238,11 @@ int test_wallet_backup_port(void)
         char svc_dir[256];
         snprintf(svc_dir, sizeof(svc_dir),
                  WBP_DIR "/wbp_%d_svc_out", (int)getpid());
+        /* wallet_backup_run_once hands this to wbs_ensure_backup_dir ->
+         * platform_private_directory_ensure, which requires exactly 0700 and
+         * refuses a wider directory. mkdir is umask-masked, so restate it. */
         mkdir(svc_dir, 0700);
+        chmod(svc_dir, 0700);
 
         char out_path[512] = {0};
         int64_t out_keys = -1;

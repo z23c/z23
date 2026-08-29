@@ -50,6 +50,16 @@
  * declaration list is sorted at parse time), so the whole walk — and hence
  * the wire and the lock root — is deterministic.
  *
+ * DEPTH IS THE LONGEST PATH FROM THE TARGET, not the shortest and not the
+ * distance the walk first reached the node by. It is therefore a valid
+ * LAYERING of the DAG: depth(dependency) > depth(dependent) holds on every
+ * edge, so a node at level k needs nothing above level k, and max(depth) + 1
+ * is the true number of build levels. A shortest-path rule would place a
+ * package that is BOTH a direct dependency and a dependency of another
+ * dependency at level 1 beside the thing that needs it, which is not a
+ * layering and understates the chain. Depth is a pure function of the graph,
+ * so two nodes that resolve the same closure agree on it byte for byte.
+ *
  * The lock root is SHA3-256 over the frozen domain (hashed WITH its
  * trailing 0x00 byte, the package_manifest convention) followed by the
  * canonical wire. It is the value a build receipt commits, so a build can
@@ -138,7 +148,7 @@ struct vcs_package_lock_node {
     uint8_t root[32];
     char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
     char semver[VCS_PACKAGE_RELEASE_SEMVER_MAX + 1u];
-    uint16_t depth;       /* 0 = the target package */
+    uint16_t depth;       /* longest path from the target; 0 = the target */
     uint16_t direct_deps; /* declared edges out of this node */
 };
 

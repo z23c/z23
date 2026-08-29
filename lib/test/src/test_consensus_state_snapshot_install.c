@@ -141,8 +141,9 @@ static int boot_install_gate_alias_tests(const char *root)
 }
 
 /* Post-install node.db `utxos` mirror reset (icb_reset_utxo_mirror in
- * boot_install_consensus_bundle.c, exercised here via the ZCL_TESTING
- * seam boot_install_consensus_bundle_reset_utxo_mirror_for_test). A stale
+ * config/src/consensus_state_install_derived_state.c, exercised here via the
+ * ZCL_TESTING seam boot_install_consensus_bundle_reset_utxo_mirror_for_test
+ * — which lives in consensus_state_install_runtime.c). A stale
  * mirror left ABOVE (or anywhere around) a freshly installed bundle height
  * is a derived-projection artifact, never a consensus input — see
  * lane E5's utxo_recovery.rewind_overshoot incident (a 3,718-row mirror

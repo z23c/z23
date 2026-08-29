@@ -3,6 +3,8 @@
  * See lib/base/include/base/log_level.h for the contract. */
 
 #include "base/log_level.h"
+#include "base/utc_tm.h"
+#include "base/stdio_lock.h"
 
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -11,33 +13,6 @@
 #include <time.h>
 
 static atomic_int g_zcl_log_level = ZCL_LOG_ALL;
-
-static bool zcl_log_utc_tm(time_t now, struct tm *out)
-{
-#if defined(_WIN32)
-    return gmtime_s(out, &now) == 0;
-#else
-    return gmtime_r(&now, out) != NULL;
-#endif
-}
-
-static void zcl_log_stream_lock(FILE *stream)
-{
-#if defined(_WIN32)
-    _lock_file(stream);
-#else
-    flockfile(stream);
-#endif
-}
-
-static void zcl_log_stream_unlock(FILE *stream)
-{
-#if defined(_WIN32)
-    _unlock_file(stream);
-#else
-    funlockfile(stream);
-#endif
-}
 
 void zcl_log_level_set(enum zcl_log_level level)
 {
@@ -88,7 +63,7 @@ void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
      * log_level.c without the platform clock objects. */
     time_t now = time(NULL);  // platform-ok:leaf-log-sink-no-clock-dependency
     struct tm tmv;
-    if (zcl_log_utc_tm(now, &tmv) &&
+    if (zcl_utc_tm(now, &tmv) &&
         strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv) > 0) {
         /* ts ready */
     } else {
@@ -97,7 +72,7 @@ void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
 
     /* One flockfile'd sequence: the prefix and the body stay a single
      * unbroken line even with many LOG_* threads racing on stderr. */
-    zcl_log_stream_lock(stderr);
+    zcl_stdio_lock(stderr);
     (void)fprintf(stderr,  // obs-ok:log-sink-is-the-observable-surface
                   "%s %s ", ts, zcl_log_level_token(level));
     va_list ap;
@@ -105,5 +80,5 @@ void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
     (void)vfprintf(stderr,  // obs-ok:log-sink-is-the-observable-surface
                    fmt, ap);
     va_end(ap);
-    zcl_log_stream_unlock(stderr);
+    zcl_stdio_unlock(stderr);
 }

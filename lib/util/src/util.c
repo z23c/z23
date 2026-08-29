@@ -6,6 +6,7 @@
 
 #include "util/util.h"
 #include "chain/chainparamsbase.h"
+#include "platform/private_directory.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -342,6 +343,31 @@ static void AppendNetworkDataDir(char *path, size_t path_size)
 #endif
 }
 
+/* Create the data directory so that only the user running the node can read
+ * it. The datadir holds the wallet and the RPC cookie, so a wider ACL hands
+ * out spending authority.
+ *
+ * CreateDirectoryA(path, NULL) did not do this: a NULL security descriptor
+ * means the new directory INHERITS the parent's ACL, so
+ * `zclassic -datadir=D:\node` gave every principal in D:\'s default
+ * `Users: Modify` entry read access to the wallet. The POSIX arm was already
+ * mkdir(path, 0700). platform_private_directory_ensure() is the portable
+ * primitive that means the same thing on both: POSIX mkdir(path, 0700) then
+ * an owner/exact-0700-mode/no-symlink re-check of the result; Windows
+ * CreateDirectoryW with an explicit owner+SYSTEM-only descriptor then a
+ * re-check of the live handle's actual ACL, owner and reparse state.
+ *
+ * The result is discarded, exactly as the mkdir() it replaces discarded
+ * EEXIST. What both arms guarantee is that a directory THIS process creates
+ * is owner-private; neither repairs, nor refuses to use, a directory an
+ * operator already created with wider access — SetDataDir/GetDataDir have no
+ * error channel, and turning a pre-existing datadir into a boot failure is a
+ * product decision, not a fix for the inherited-ACL defect. */
+static void EnsurePrivateDataDir(const char *path)
+{
+    (void)platform_private_directory_ensure(path);
+}
+
 void SetDataDir(const char *datadir)
 {
     ClearDataDirCache();
@@ -352,13 +378,8 @@ void SetDataDir(const char *datadir)
     snprintf(cachedDataDirNet, sizeof(cachedDataDirNet), "%s", datadir);
     AppendNetworkDataDir(cachedDataDirNet, sizeof(cachedDataDirNet));
 
-#ifdef _WIN32
-    CreateDirectoryA(cachedDataDir, NULL);
-    CreateDirectoryA(cachedDataDirNet, NULL);
-#else
-    mkdir(cachedDataDir, 0700);
-    mkdir(cachedDataDirNet, 0700);
-#endif
+    EnsurePrivateDataDir(cachedDataDir);
+    EnsurePrivateDataDir(cachedDataDirNet);
 }
 
 void GetDataDir(bool fNetSpecific, char *out, size_t out_size)
@@ -380,11 +401,7 @@ void GetDataDir(bool fNetSpecific, char *out, size_t out_size)
         AppendNetworkDataDir(out, out_size);
     }
 
-#ifdef _WIN32
-    CreateDirectoryA(out, NULL);
-#else
-    mkdir(out, 0700);
-#endif
+    EnsurePrivateDataDir(out);
 
     snprintf(cached, 4096, "%s", out);
 }

@@ -19,6 +19,10 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
+/* Windows gets CNG only; the POSIX descriptor fallback below is compiled
+ * out there. Linux additionally needs <sys/random.h> for getrandom(2).
+ * Darwin uses arc4random_buf and needs neither, so it pulls in no
+ * descriptor headers at all. */
 #elif defined(__linux__)
 #include <fcntl.h>
 #include <sys/random.h>
@@ -83,20 +87,30 @@ static bool real_fill(void *self, uint8_t *out, size_t len)
     if (!out) return false;
 
 #if defined(_WIN32)
-    size_t filled = 0;
-    while (filled < len) {
-        size_t remaining = len - filled;
-        ULONG part = remaining > ULONG_MAX ? ULONG_MAX : (ULONG)remaining;
-        NTSTATUS status = BCryptGenRandom(
-            NULL, out + filled, part, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-        if (!BCRYPT_SUCCESS(status)) {
+    /* CNG's system-preferred RNG (hAlgorithm must be NULL when the
+     * BCRYPT_USE_SYSTEM_PREFERRED_RNG flag is used). It is the kernel
+     * CSPRNG, needs no provider handle to open or close, and is
+     * thread-safe — the same shape as the Darwin arm above.
+     *
+     * BCryptGenRandom either fills the whole request or fails; there
+     * is no short-fill status. Its length is a 32-bit ULONG while
+     * `len` is a 64-bit size_t, so chunk rather than truncating the
+     * cast — a truncated cast would return an under-filled buffer and
+     * report success. */
+    size_t done = 0;
+    while (done < len) {
+        size_t want = len - done;
+        if (want > (size_t)0x40000000u) want = (size_t)0x40000000u; /* 1 GiB */
+        NTSTATUS st = BCryptGenRandom(NULL, (PUCHAR)(out + done),
+                                      (ULONG)want,
+                                      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (!BCRYPT_SUCCESS(st)) {
             fprintf(stderr,
-                    "[platform] %s:%d %s(): BCryptGenRandom failed "
-                    "status=0x%08lx\n",
-                    __FILE__, __LINE__, __func__, (unsigned long)status);
+                "[platform] %s:%d %s(): BCryptGenRandom failed status=0x%08lx\n",
+                __FILE__, __LINE__, __func__, (unsigned long)st);
             return false;
         }
-        filled += part;
+        done += want;
     }
     return true;
 #elif defined(__APPLE__)

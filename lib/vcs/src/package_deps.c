@@ -302,6 +302,9 @@ static enum vcs_package_deps_error deps_push(
     return VCS_PACKAGE_DEPS_OK;
 }
 
+/* One emitted node's outgoing edges, parallel to lock->nodes. The DFS pops
+ * its frames as it goes, so the graph would otherwise be unavailable by the
+ * time the depth pass needs to see all of it at once. */
 static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
                                              const struct deps_frame *f,
                                              struct vcs_package_deps *graph,
@@ -323,25 +326,68 @@ static enum vcs_package_deps_error deps_emit(struct vcs_package_lock *out,
     return VCS_PACKAGE_DEPS_OK;
 }
 
-/* Assign topology-derived maximum depths after the duplicate-free build order
- * is known. A first-visit DFS depth depends on root sort order when one node is
- * both a direct and transitive dependency; the lock wire must not. */
+/* DEPTH IS THE LONGEST PATH FROM THE TARGET -- never the shortest, and never
+ * whatever distance the traversal happened to reach a node by first.
+ *
+ * The DFS stamps each node with the length of the FIRST path that reached it
+ * and then skips a root it has already emitted, so a node that is BOTH a
+ * direct dependency and a dependency-of-a-dependency keeps whichever distance
+ * the walk saw first. That is a property of the traversal, not of the graph,
+ * and it silently flattens a real multi-level DAG into a one-level star:
+ * commons-demo -> {base, codec, json} with codec -> base and json -> base is a
+ * three-level graph, but the walk reaches base directly first and reports two.
+ *
+ * Longest path is the only assignment under which the number is a valid
+ * LAYERING of the DAG: it guarantees depth(dependency) > depth(dependent) for
+ * EVERY edge, so a reader that has built every node below level k can build
+ * level k. Shortest path breaks exactly that -- it puts base at level 1
+ * alongside codec, which needs base -- and so cannot be used to stage a build
+ * or to state how deep the dependency chain actually runs.
+ *
+ * One reverse pass settles it. Emit order is build order (every node appears
+ * after all of its dependencies), so walking it backwards visits every
+ * dependent BEFORE the dependency it needs; a node's own depth is therefore
+ * already final when its outgoing edges are relaxed. Each dependency's index
+ * must be strictly earlier than its dependent's (WIRE_ORDER) or that
+ * finality assumption is false. */
 static enum vcs_package_deps_error deps_normalize_depths(
-    struct vcs_package_lock *lock, const struct vcs_package_deps *graph)
+    struct vcs_package_lock *lock, const struct vcs_package_deps *graph,
+    char *detail, size_t detail_cap)
 {
     for (size_t i = 0; i < lock->count; i++)
         lock->nodes[i].depth = 0;
     for (size_t i = lock->count; i-- > 0;) {
         struct vcs_package_lock_node *node = &lock->nodes[i];
         const struct vcs_package_deps *deps = &graph[i];
-        if (node->depth >= VCS_PACKAGE_LOCK_MAX_DEPTH && deps->count > 0)
+        if (node->depth >= VCS_PACKAGE_LOCK_MAX_DEPTH && deps->count > 0) {
+            char hex[65];
+            deps_hexify(node->root, hex);
+            deps_detail(detail, detail_cap,
+                        "root %s sits %u levels under the target, past %u",
+                        hex, (unsigned)node->depth,
+                        VCS_PACKAGE_LOCK_MAX_DEPTH);
             return VCS_PACKAGE_DEPS_ERR_DEPTH;
+        }
         uint16_t dependency_depth = (uint16_t)(node->depth + 1u);
         for (size_t d = 0; d < deps->count; d++) {
             size_t dependency = vcs_package_lock_find(lock,
                                                        deps->items[d].root);
-            if (dependency == SIZE_MAX || dependency >= i)
+            if (dependency == SIZE_MAX) {
+                char hex[65];
+                deps_hexify(deps->items[d].root, hex);
+                deps_detail(detail, detail_cap,
+                            "root %s is an edge with no node in the closure",
+                            hex);
+                return VCS_PACKAGE_DEPS_ERR_UNRESOLVED;
+            }
+            if (dependency >= i) {
+                char hex[65];
+                deps_hexify(deps->items[d].root, hex);
+                deps_detail(detail, detail_cap,
+                            "root %s is not ordered before its dependent in "
+                            "the closure", hex);
                 return VCS_PACKAGE_DEPS_ERR_WIRE_ORDER;
+            }
             if (lock->nodes[dependency].depth < dependency_depth)
                 lock->nodes[dependency].depth = dependency_depth;
         }
@@ -411,7 +457,7 @@ enum vcs_package_deps_error vcs_package_lock_resolve(
     }
     free(stack);
     if (err == VCS_PACKAGE_DEPS_OK)
-        err = deps_normalize_depths(out, graph);
+        err = deps_normalize_depths(out, graph, detail, detail_cap);
     free(graph);
     if (err != VCS_PACKAGE_DEPS_OK)
         vcs_package_lock_init(out);

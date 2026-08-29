@@ -15,21 +15,33 @@
  *                                   the mp_handle_zcl23_sync dispatcher,
  *                                   the requester-side push_chunk_request
  *                                   / push_block_piece_request /
- *                                   parse_block_piece_payload_refs, and the
- *                                   fc_rate_* FlyClient-challenge limiter.
- *   msgprocessor_snapshot_payload.c — verified block-piece reducer intake.
+ *                                   parse_block_piece_payload_refs.
+ *   msgprocessor_snapshot_fcrate.c — the fc_rate_* FlyClient-challenge
+ *                                   rate limiter (table, mutex, admit +
+ *                                   flood-score check) plus its
+ *                                   deterministic test surface, split out
+ *                                   of msgprocessor_snapshot.c — shares no
+ *                                   state with the rest of the dispatcher
+ *                                   except the two calls into it from the
+ *                                   MSG_FC_CHALLENGE branch.
+ *   msgprocessor_snapshot_payload.c — verified block-piece reducer intake
+ *                                   (mp_block_payload_submit_all).
  *   msgprocessor_snapshot_serve.c — the SERVE side: cached offer/manifest
  *                                   /block-manifest publish+accessor
  *                                   APIs, send_snapshot_offer_msg,
  *                                   push_manifest, push_block_manifest,
- *                                   build_block_piece_payloads, the
- *                                   zchunkreq/zblkreq client-puzzle PoW
- *                                   guard, and the per-message-command
+ *                                   build_block_piece_payloads, and the
+ *                                   per-message-command
  *                                   serve handlers the dispatcher calls
  *                                   into (mp_serve_snapshot_req,
  *                                   mp_serve_chunk_req, mp_serve_block_req)
  *                                   plus the PEER_SNAPSHOT_SERVING chunk
  *                                   send loop (mp_snapshot_send_tick_serve).
+ *   msgprocessor_snapshot_pow.c   — the zchunkreq/zblkreq client-puzzle
+ *                                   PoW guard: the arming flag, the
+ *                                   adaptive-difficulty load window, and
+ *                                   the deterministic-clock test surface
+ *                                   over both.
  *   msgprocessor_block_swarm_abandon.c — the shared fail-closed transition
  *                                   from block swarm to legacy body fetch.
  *
@@ -91,6 +103,19 @@ void mp_block_swarm_mark_complete_through_height(
  * cap. */
 #define BLOCK_PIECE_MAX_BLOCK_BYTES 2000000u
 
+/* ── msgprocessor_snapshot_fcrate.c: called from the MSG_FC_CHALLENGE
+ * branch of mp_handle_zcl23_sync in msgprocessor_snapshot.c ──────────── */
+
+/* Acquire this peer's FlyClient-challenge token at now_ms. Returns true
+ * when the challenge may be answered; false means drop it silently. */
+bool fc_rate_acquire(node_id_t peer_id, int64_t now_ms);
+
+/* Returns true the first time this is called after peer_id's bucket empties
+ * (letting the caller register one PEER_OFFENCE_FLOOD per episode); false
+ * on subsequent calls within the same flood. dropped_out, if non-NULL, gets
+ * the peer's current lifetime drop count. */
+bool fc_rate_should_score(node_id_t peer_id, uint32_t *dropped_out);
+
 /* ── msgprocessor_snapshot_serve.c: called from the mp_handle_zcl23_sync
  * dispatcher and mp_snapshot_send_tick in msgprocessor_snapshot.c ──── */
 
@@ -105,6 +130,16 @@ void mp_serve_chunk_req(struct msg_processor *mp, struct p2p_node *node,
 /* Serve a zblkreq (peer asking for one block piece by index). */
 void mp_serve_block_req(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s);
+
+/* Admit a zchunkreq/zblkreq at the current wall clock. `nonce` is the
+ * peer-supplied puzzle solution, NULL when the request carried none.
+ * Returns true when the request may be served — always true while the
+ * guard is disarmed. The only call that crosses from the serve handlers
+ * into msgprocessor_snapshot_pow.c; every other entry point of that file
+ * is either its own static detail or the public test surface declared in
+ * net/msgprocessor.h. */
+bool msg_snapshot_pow_admit(uint8_t request_kind, uint32_t request_index,
+                            const uint64_t *nonce);
 
 /* The PEER_SNAPSHOT_SERVING half of mp_snapshot_send_tick: streams
  * snapshot chunks to a peer we're actively serving. Returns true if the

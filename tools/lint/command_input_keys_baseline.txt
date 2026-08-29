@@ -140,6 +140,4 @@ dev.publication.collect include_evidence_wires # collector fixes this true only 
 dev.publication.collect board # the records board arm lives in the nested handler; the collector builds its own private discovery request and request->input never reaches that arm.
 app.presentation.publication-status namespace # the model reads this only from the node's internal signed-record projection; request->input never reaches it.
 app.presentation.publication-status semantic_root # the model reads this only from the node's internal signed pointer projection; request->input never reaches it.
-zcode.task.board kind # task board fixes this to pointer in its private local-record projection; request->input never reaches it.
-zcode.task.board namespace # task board fixes this to zclassic23.task in its private local-record projection; request->input never reaches it.
-zcode.task.board board # task board fixes this true in its private local-record projection; request->input never reaches it.
+zcode.task.board board  # handler injects fixed board=true into a private records request and forwards that object; zcode.task.board declares only datadir, so the kernel rejects board from an operator and request->input never reaches the nested read.

@@ -78,25 +78,44 @@ static bool reader_hash_at(void *ctx, int64_t height,
 static struct mesh_obs_slot g_slots[MESH_OBS_SLOTS_MAX + 1];
 static pthread_mutex_t g_slots_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void push_slot_coverage(struct json_value *out, int n)
+/* PURE RENDER. It reads the slots handed to it and nothing else — no
+ * static, no clock, no chain — which is what makes it drivable from a test
+ * with constructed slots. Declared in observation_site_controller.h. */
+void mesh_observation_push_slot_coverage_json(struct json_value *out,
+                                              const struct mesh_obs_slot *slots,
+                                              size_t n)
 {
+    if (!out)
+        return;
     struct json_value arr = {0};
     json_set_array(&arr);
-    for (int i = 0; i < n; i++) {
+    for (size_t i = 0; slots && i < n; i++) {
         struct json_value s = {0};
         json_set_object(&s);
-        json_push_kv_str(&s, "onion", g_slots[i].onion);
+        json_push_kv_str(&s, "onion", slots[i].onion);
         json_push_kv_str(&s, "fetch",
-                         mesh_obs_outcome_name(g_slots[i].fetch));
+                         mesh_obs_outcome_name(slots[i].fetch));
         /* Elapsed is published beside the budget on EVERY outcome, so a
          * spent budget and a refusal can never be byte-identical. */
-        json_push_kv_int(&s, "elapsed_us", g_slots[i].elapsed_us);
-        json_push_kv_int(&s, "deadline_us", g_slots[i].deadline_us);
-        json_push_kv_int(&s, "fetched_unix", g_slots[i].fetched_unix);
-        json_push_kv_bool(&s, "parsed", g_slots[i].parsed);
-        json_push_kv_str(&s, "refusal", g_slots[i].refusal);
+        json_push_kv_int(&s, "elapsed_us", slots[i].elapsed_us);
+        json_push_kv_int(&s, "deadline_us", slots[i].deadline_us);
+        json_push_kv_int(&s, "fetched_unix", slots[i].fetched_unix);
+        json_push_kv_bool(&s, "parsed", slots[i].parsed);
+        json_push_kv_str(&s, "refusal", slots[i].refusal);
         json_push_kv_int(&s, "record_sampled_unix",
-                         g_slots[i].rec.self.sampled_unix);
+                         slots[i].rec.self.sampled_unix);
+        /* WHAT KIND OF MACHINE THIS IS, beside its onion. Verbatim from the
+         * record: a token this build has never heard of is shown as it was
+         * written, and "" — the emitter said nothing — is published AS "",
+         * never filled in from this reader's own build target and never
+         * defaulted to a popular platform. An operator reading a blank here
+         * must be reading silence, not a guess.
+         *
+         * Published only. The composer cannot see these fields (it is not
+         * given them), so nothing downstream can turn a platform into a
+         * grade. */
+        json_push_kv_str(&s, "record_os", slots[i].rec.self.os);
+        json_push_kv_str(&s, "record_arch", slots[i].rec.self.arch);
         json_push_back(&arr, &s);
         json_free(&s);
     }
@@ -151,7 +170,7 @@ bool mesh_observation_compose_dump_state_json(struct json_value *out,
 
     mesh_observation_compose(g_slots, (size_t)n, &reader, &budget,
                              platform_time_wall_unix(), &c);
-    push_slot_coverage(out, n);
+    mesh_observation_push_slot_coverage_json(out, g_slots, (size_t)n);
     pthread_mutex_unlock(&g_slots_lock);
 
     /* 1. COVERAGE FIRST, always. */

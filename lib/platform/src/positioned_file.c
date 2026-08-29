@@ -1,12 +1,34 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Concurrent cursor-free reads from one verified regular file. */
+ * Purpose: POSIX (pread/openat) and Win32 (overlapped ReadFile/NtCreateFile)
+ * implementation of platform/positioned_file.h — offset reads, the
+ * symlink/reparse-point-safe open_beneath, and the is_executable/is_private
+ * identity checks. */
 #include "platform/positioned_file.h"
+#include "windows_path_internal.h"
+
+#include "base/safe_alloc.h"
 
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Arm-independent: the snapshot struct's layout (and therefore its padding
+ * hazard) is identical on every platform, so the equality predicate has one
+ * definition ahead of the per-arm implementations below. */
+bool platform_positioned_file_snapshot_equal(
+    const struct platform_positioned_file_snapshot *a,
+    const struct platform_positioned_file_snapshot *b)
+{
+    return a && b && a->size == b->size &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds &&
+           a->volume == b->volume && a->file_low == b->file_low &&
+           a->file_high == b->file_high;
+}
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -22,61 +44,53 @@ static HANDLE positioned_handle(const struct platform_positioned_file *file)
     return file ? (HANDLE)file->native : INVALID_HANDLE_VALUE;
 }
 
-static bool positioned_wide(const char *utf8, wchar_t out[32768])
-{
-    if (!utf8 || !utf8[0]) return false;
-    wchar_t plain[32768];
-    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1,
-                                plain, 32768);
-    if (n <= 0) return false;
-    if (wcsncmp(plain, L"\\\\?\\", 4) == 0) {
-        wmemcpy(out, plain, (size_t)n);
-        return true;
-    }
-    if (plain[0] == L'\\' && plain[1] == L'\\') {
-        if ((size_t)n + 6 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\UNC\\", 8);
-        wmemcpy(out + 8, plain + 2, (size_t)n - 2);
-        return true;
-    }
-    if (plain[0] && plain[1] == L':' &&
-        (plain[2] == L'\\' || plain[2] == L'/')) {
-        if ((size_t)n + 4 >= 32768) return false;
-        wmemcpy(out, L"\\\\?\\", 4);
-        wmemcpy(out + 4, plain, (size_t)n);
-        return true;
-    }
-    wmemcpy(out, plain, (size_t)n);
-    return true;
-}
-
 void platform_positioned_file_init(struct platform_positioned_file *file)
 {
     if (file) file->native = (uintptr_t)INVALID_HANDLE_VALUE;
 }
 
-bool platform_positioned_file_open(struct platform_positioned_file *file,
-                                   const char *path)
+/* follow=false opens the link itself and then refuses it, which is the
+ * content-path contract; follow=true opens what it points at, which is the
+ * trusted-tool contract. See positioned_file.h for which callers may ask
+ * for which. */
+static bool positioned_open_path(struct platform_positioned_file *file,
+                                 const char *path, bool follow)
 {
     wchar_t wide[32768];
-    if (!file || !positioned_wide(path, wide)) return false;
+    if (!file || !platform_windows_wide_path(path, wide)) return false;
     platform_positioned_file_close(file);
     HANDLE handle = CreateFileW(
         wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
-            FILE_FLAG_OVERLAPPED,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
+            (follow ? 0u : (DWORD)FILE_FLAG_OPEN_REPARSE_POINT),
         NULL);
     if (handle == INVALID_HANDLE_VALUE) return false;
+    /* When we followed the reparse point the handle names the TARGET, so
+     * only a directory is disqualifying; the target of a followed link is
+     * legitimately not itself a reparse point. */
+    DWORD refuse = FILE_ATTRIBUTE_DIRECTORY |
+                   (follow ? 0u : (DWORD)FILE_ATTRIBUTE_REPARSE_POINT);
     BY_HANDLE_FILE_INFORMATION info = {0};
     if (!GetFileInformationByHandle(handle, &info) ||
-        (info.dwFileAttributes &
-         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        (info.dwFileAttributes & refuse) != 0) {
         CloseHandle(handle);
         return false;
     }
     file->native = (uintptr_t)handle;
     return true;
+}
+
+bool platform_positioned_file_open(struct platform_positioned_file *file,
+                                   const char *path)
+{
+    return positioned_open_path(file, path, false);
+}
+
+bool platform_positioned_file_open_resolved(
+    struct platform_positioned_file *file, const char *path)
+{
+    return positioned_open_path(file, path, true);
 }
 
 bool platform_positioned_file_open_beneath(
@@ -87,7 +101,7 @@ bool platform_positioned_file_open_beneath(
         relative[0] == '\\' || strchr(relative, '\\'))
         return false;
     wchar_t root_wide[32768], relative_wide[32768];
-    if (!positioned_wide(root, root_wide) ||
+    if (!platform_windows_wide_path(root, root_wide) ||
         MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative, -1,
                             relative_wide, 32768) <= 0)
         return false;
@@ -306,7 +320,7 @@ bool platform_positioned_file_is_private(
         dacl && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
         !GetTokenInformation(token, TokenUser, NULL, 0, &bytes) &&
         GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) user = malloc(bytes); /* raw-alloc-ok:win32-token-sid */
+    if (ok) user = zcl_malloc(bytes, "positioned_file_token_user");
     ok = ok && user && GetTokenInformation(token, TokenUser, user, bytes,
                                             &bytes) &&
          CreateWellKnownSid(WinLocalSystemSid, NULL, system_buffer,
@@ -387,12 +401,23 @@ void platform_positioned_file_init(struct platform_positioned_file *file)
     if (file) file->native = (uintptr_t)-1;
 }
 
-bool platform_positioned_file_open(struct platform_positioned_file *file,
-                                   const char *path)
+/* follow=false keeps O_NOFOLLOW, which is the content-path contract;
+ * follow=true drops it, which is the trusted-tool contract. See
+ * positioned_file.h for which callers may ask for which. The S_ISREG
+ * refusal below is unconditional either way. */
+static bool positioned_open_path(struct platform_positioned_file *file,
+                                 const char *path, bool follow)
 {
     if (!file || !path || !path[0]) return false;
     platform_positioned_file_close(file);
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    /* O_NONBLOCK so a FIFO (or any other blocking-open node) cannot park
+     * this thread FOREVER before the S_ISREG check below gets to refuse
+     * it. The refusal was always correct; it just arrived after the open
+     * had already hung. O_NONBLOCK has no effect on a regular file, so
+     * the success path is unchanged. os_binary_slots.c opens with it at
+     * all three of its sites for exactly this reason. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK |
+                            (follow ? 0 : O_NOFOLLOW));
     if (fd < 0) return false;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -401,6 +426,18 @@ bool platform_positioned_file_open(struct platform_positioned_file *file,
     }
     file->native = (uintptr_t)fd;
     return true;
+}
+
+bool platform_positioned_file_open(struct platform_positioned_file *file,
+                                   const char *path)
+{
+    return positioned_open_path(file, path, false);
+}
+
+bool platform_positioned_file_open_resolved(
+    struct platform_positioned_file *file, const char *path)
+{
+    return positioned_open_path(file, path, true);
 }
 
 bool platform_positioned_file_open_beneath(
@@ -423,8 +460,15 @@ bool platform_positioned_file_open_beneath(
         if (!part[0] || strcmp(part, ".") == 0 || strcmp(part, "..") == 0) {
             close(fd); return false;
         }
+        /* O_NONBLOCK for the same reason as platform_positioned_file_open
+         * above: the S_ISREG refusal below the loop cannot run until the
+         * open returns, so a FIFO leaf would park this thread forever.
+         * This is the market SERVING path, so a private file that is
+         * regular at registration and replaced by a FIFO before serving
+         * would wedge a serving thread. No-op on regular files and on
+         * the O_DIRECTORY components, so it is unconditional. */
         int next = openat(fd, part, O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
-                          (slash ? O_DIRECTORY : O_NONBLOCK));
+                          O_NONBLOCK | (slash ? O_DIRECTORY : 0));
         close(fd);
         if (next < 0) return false;
         fd = next;

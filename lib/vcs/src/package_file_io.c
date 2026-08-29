@@ -7,18 +7,6 @@
 
 #include <string.h>
 
-bool vcs_package_file_snapshot_equal(
-    const struct platform_positioned_file_snapshot *a,
-    const struct platform_positioned_file_snapshot *b)
-{
-    return a->size == b->size && a->volume == b->volume &&
-           a->file_low == b->file_low && a->file_high == b->file_high &&
-           a->modified_seconds == b->modified_seconds &&
-           a->modified_nanoseconds == b->modified_nanoseconds &&
-           a->changed_seconds == b->changed_seconds &&
-           a->changed_nanoseconds == b->changed_nanoseconds;
-}
-
 bool vcs_package_file_exists(const char *path)
 {
     struct platform_positioned_file file;

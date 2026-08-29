@@ -1,5 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Implement retained private-directory child transactions. */
+ * Purpose: implementation of platform/directory_transaction.h. Windows route
+ * opens/creates via NtCreateFile with FILE_OPEN_REPARSE_POINT so a reparse
+ * point is detected rather than followed, and validates the private ACL
+ * (private_acl_internal.h); POSIX route uses openat/renameat(2)/flock(2)/
+ * fsync with O_NOFOLLOW. Both refuse a leaf name that could escape the
+ * directory (path separators, `.`/`..`, reserved Windows device stems) and
+ * fsync the parent directory after every create/replace/unlink. */
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
@@ -319,7 +325,7 @@ bool platform_directory_child_replace(struct platform_directory_transaction *d,
     size_t name_bytes = wcslen(wide) * sizeof(wchar_t);
     struct rename_ex { ULONG flags; HANDLE root; ULONG length; WCHAR name[1]; };
     size_t bytes = offsetof(struct rename_ex, name) + name_bytes;
-    struct rename_ex *info = zcl_calloc(1, bytes, "directory-rename-info");
+    struct rename_ex *info = zcl_calloc(1, bytes, "directory_transaction_rename_ex");
     if (!info) return false;
     /* POSIX_SEMANTICS is defined only in combination with replacement.
      * A no-clobber rename must pass zero flags; the proven NT class-65 call
@@ -400,6 +406,11 @@ void platform_directory_lock_release(struct platform_directory_lock *lock)
 bool platform_directory_transaction_list_regular(
     struct platform_directory_transaction *d, struct platform_directory_names *out)
 {
+    /* Zero the out-parameter before anything that can fail, including the
+     * resolve below, which fails with every argument non-NULL. A caller
+     * that frees the name list on a false return would otherwise free
+     * indeterminate pointers. The NULL-d check rides after the memset for
+     * the same reason rather than returning ahead of it. */
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     nt_query_directory_file_fn query = resolve_nt_query_directory_file();
@@ -422,12 +433,11 @@ bool platform_directory_transaction_list_regular(
                 int chars = (int)(entry->FileNameLength / sizeof(wchar_t));
                 int need = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
                     entry->FileName, chars, NULL, 0, NULL, NULL);
-                char *name = need > 0
-                    ? zcl_malloc((size_t)need + 1u, "directory-child-name")
-                    : NULL;
+                char *name = need > 0 ? zcl_malloc((size_t)need + 1u,
+                    "directory_transaction_list_name") : NULL;
                 char **items = name ? zcl_realloc(out->items,
-                    (out->count + 1u) * sizeof(*items), "directory-child-list")
-                    : NULL;
+                    (out->count + 1u) * sizeof(*items),
+                    "directory_transaction_list_items") : NULL;
                 if (!items || WideCharToMultiByte(CP_UTF8,
                     WC_ERR_INVALID_CHARS, entry->FileName, chars, name, need,
                     NULL, NULL) != need) {

@@ -109,7 +109,6 @@ lib/storage/src/consensus_state_bundle_codec.c
 lib/storage/src/event_log.c
 lib/storage/src/event_log_payloads.c
 lib/storage/src/ldb_reader_format.c
-lib/storage/src/progress_store.c
 lib/storage/src/seal_kv.c
 lib/validation/src/check_block.c
 lib/vcs/src/package_reward.c

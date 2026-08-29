@@ -23,7 +23,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#define EXEC_PATH_MAX 4096
+
+#include "zcode_benchmark_executor_internal.h"
+
 static const uint8_t result_v1_magic[8] = {'Z','C','B','E','N','C','\r','\n'};
 static const uint8_t result_v2_magic[8] = {'Z','C','B','E','N','2','\r','\n'};
 static bool exec_hex32(const char *hex, uint8_t out[32])
@@ -348,123 +350,11 @@ static struct zcl_result exec_runner_fork(const char *bench_dir,
     free(buf);
     return ZCL_OK;
 }
-/* ── the sandbox canary self-check (escape-suite pattern) ────────────── */
-static int exec_canary_fs(const char *bench_dir)
-{
-    char probe[EXEC_PATH_MAX];
-    int n = snprintf(probe, sizeof(probe), "%s/selfcheck.probe", bench_dir);
-    if (n <= 0 || (size_t)n >= sizeof(probe)) return 71;
-    struct os_sandbox_path_rule rules[] = {
-        { .path = bench_dir, .allow_read = true, .allow_write = true,
-          .allow_create = true },
-    };
-    struct os_sandbox_profile profile =
-        os_sandbox_session_child_profile(rules, 1);
-    profile.rlimits.as_bytes = OS_SANDBOX_RLIMIT_KEEP;
-    profile.rlimits.nproc = OS_SANDBOX_RLIMIT_KEEP;
-    /* KEEP nofile too: the canary inherits the parent's fds across fork and
-     * rlimits apply before the Landlock ruleset fd exists (see the runner
-     * child for why the session default of 16 fails EMFILE). */
-    profile.rlimits.nofile = OS_SANDBOX_RLIMIT_KEEP;
-    if (!os_sandbox_enter(&profile).ok) return 70;
-    if (!os_sandbox_active()) return 71;
-    int in = open(probe, O_CREAT | O_RDWR, 0600);
-    if (in < 0) return 72; /* granted dir must stay usable */
-    close(in);
-    int out = open("/etc/passwd", O_RDONLY);
-    if (out >= 0) {
-        close(out);
-        return 73; /* escape: outside the grant */
-    }
-    if (errno != EACCES) return 74;
-    return 0;
-}
-static int exec_canary_socket(const char *bench_dir)
-{
-    struct os_sandbox_path_rule rules[] = {
-        { .path = bench_dir, .allow_read = true },
-    };
-    struct os_sandbox_profile profile =
-        os_sandbox_session_child_profile(rules, 1);
-    profile.rlimits.as_bytes = OS_SANDBOX_RLIMIT_KEEP;
-    profile.rlimits.nproc = OS_SANDBOX_RLIMIT_KEEP;
-    /* KEEP nofile too: the canary inherits the parent's fds across fork and
-     * rlimits apply before the Landlock ruleset fd exists (see the runner
-     * child for why the session default of 16 fails EMFILE). */
-    profile.rlimits.nofile = OS_SANDBOX_RLIMIT_KEEP;
-    if (!os_sandbox_enter(&profile).ok) return 70;
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    (void)s;
-    return 6; /* reached only if socket was not denied */
-}
-static int exec_canary_exec(const char *bench_dir)
-{
-    struct os_sandbox_path_rule rules[] = {
-        { .path = bench_dir, .allow_read = true },
-    };
-    struct os_sandbox_profile profile =
-        os_sandbox_session_child_profile(rules, 1);
-    profile.rlimits.as_bytes = OS_SANDBOX_RLIMIT_KEEP;
-    profile.rlimits.nproc = OS_SANDBOX_RLIMIT_KEEP;
-    /* KEEP nofile too: the canary inherits the parent's fds across fork and
-     * rlimits apply before the Landlock ruleset fd exists (see the runner
-     * child for why the session default of 16 fails EMFILE). */
-    profile.rlimits.nofile = OS_SANDBOX_RLIMIT_KEEP;
-    if (!os_sandbox_enter(&profile).ok) return 70;
-    execve("/bin/true", (char *const[]){ "/bin/true", NULL },
-           (char *const[]){ NULL });
-    return 5; /* reached only if exec was not denied */
-}
-typedef int (*exec_canary_fn)(const char *);
-static bool exec_canary_wait(pid_t pid, int *status)
-{
-    for (;;) {
-        pid_t w = waitpid(pid, status, 0);
-        if (w == pid) return true;
-        if (w < 0 && errno == EINTR) continue;
-        return false;
-    }
-}
-struct zcl_result zcode_benchmark_executor_sandbox_selfcheck(
-    const char *bench_dir)
-{
-    if (!bench_dir)
-        return ZCL_ERR(-1, "selfcheck: no bench dir");
-    if (os_sandbox_landlock_abi() < 1 || !os_sandbox_seccomp_supported())
-        return ZCL_ERR(-1, "confinement backend unavailable");
-    static const struct {
-        exec_canary_fn fn;
-        const char *name;
-    } canaries[] = {
-        { exec_canary_fs, "fs-grant" },
-        { exec_canary_socket, "socket-deny" },
-        { exec_canary_exec, "exec-deny" },
-    };
-    for (size_t i = 0; i < sizeof(canaries) / sizeof(canaries[0]); i++) {
-        pid_t pid = fork();
-        if (pid < 0)
-            return ZCL_ERR(-1, "canary fork failed");
-        if (pid == 0)
-            _exit(canaries[i].fn(bench_dir));
-        int status = 0;
-        if (!exec_canary_wait(pid, &status))
-            return ZCL_ERR(-1, "canary wait failed");
-        bool ok;
-        if (i == 0) {
-            ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-        } else {
-            ok = WIFSIGNALED(status) && WTERMSIG(status) == SIGSYS;
-        }
-        if (!ok)
-            return ZCL_ERR(-1, "canary %s: unexpected status %#x",
-                           canaries[i].name, (unsigned)status);
-    }
-    char probe[EXEC_PATH_MAX];
-    int n = snprintf(probe, sizeof(probe), "%s/selfcheck.probe", bench_dir);
-    if (n > 0 && (size_t)n < sizeof(probe))
-        (void)unlink(probe);
-    return ZCL_OK;
-}
+
+/* The sandbox canary self-check (zcode_benchmark_executor_sandbox_selfcheck
+ * and its escape-suite probes) lives in
+ * app/services/src/zcode_benchmark_sandbox_selfcheck.c. */
+
 /* ── shared run context ──────────────────────────────────────────────── */
 struct exec_context {
     struct vcs_zcode_study_spec_v1 study;

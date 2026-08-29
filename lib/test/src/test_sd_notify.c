@@ -36,6 +36,7 @@
 #include "util/sd_notify.h"
 #include "config/boot_internal.h"   /* boot_sd_watchdog_test_pet_decide */
 #include "net/tor_integration.h"
+#include "util/thread_work_probe.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -381,6 +382,143 @@ int test_sd_notify(void)
             !boot_sd_watchdog_test_runtime_pillars(false, true, true));
         SDN_CHECK("runtime pillars: stale connman stops the ping",
             !boot_sd_watchdog_test_runtime_pillars(true, true, false));
+    }
+
+    /* ── a pillar measures the SUBJECT, not the machine ─────────────────
+     *
+     * Each runtime pillar used to be one question — "did this loop get back
+     * to the top of itself within WATCHDOG_USEC?" — and that question is
+     * answered by the machine's speed, not by the node's health:
+     *
+     *   - one pass of the dial scheduler may block on DEFAULT_CONNECT_TIMEOUT
+     *     plus a full onion-connect budget PER onion candidate, with a retry
+     *     on a fresh budget, which is longer than the whole watchdog window;
+     *   - one message cycle serves whatever the peers asked for, and a run of
+     *     getblock off a rotating disk outlasts the window that the same code
+     *     fits inside easily on an SSD;
+     *   - run_due_ticks() is serial, so the runner heartbeat freezes for as
+     *     long as the slowest child's on_tick takes.
+     *
+     * All three were observed killing a node that was demonstrably working.
+     * A pillar is now `marker fresh OR the kernel says that thread is doing
+     * work`, so a slow machine is admitted and a frozen one is not. These
+     * rows pin BOTH directions; the kill rows below are the ones that must
+     * never be quietly weakened. */
+    {
+        /* NOT killed: healthy work in flight behind a stale marker. */
+        SDN_CHECK("pillar: fresh marker is alive",
+            boot_sd_watchdog_test_pillar_alive(true, false));
+        SDN_CHECK("pillar: stale marker but the thread is working is alive",
+            boot_sd_watchdog_test_pillar_alive(false, true));
+
+        /* KILLED: neither evidence. This is the wedge. */
+        SDN_CHECK("pillar: stale marker AND no kernel work is DEAD",
+            !boot_sd_watchdog_test_pillar_alive(false, false));
+
+        /* The live devfleet failure, verbatim: a node dialing a slow hidden
+         * service, whose dial pass legitimately outran the window while both
+         * threads kept working. It must survive. */
+        SDN_CHECK("connman: slow onion dial + slow disk, both threads working",
+            boot_sd_watchdog_test_connman_alive(false, true, false, true));
+        SDN_CHECK("connman: both markers fresh",
+            boot_sd_watchdog_test_connman_alive(true, false, true, false));
+
+        /* KILL PATH. A wedged loop is one that neither turned over nor did
+         * any work, and EITHER loop being wedged must still stop the ping —
+         * a live message pump must not vouch for a dead dial scheduler, or
+         * the other way round. */
+        SDN_CHECK("connman: wedged message pump still stops the ping",
+            !boot_sd_watchdog_test_connman_alive(false, false, true, true));
+        SDN_CHECK("connman: wedged dial scheduler still stops the ping",
+            !boot_sd_watchdog_test_connman_alive(true, true, false, false));
+        SDN_CHECK("connman: both loops wedged stops the ping",
+            !boot_sd_watchdog_test_connman_alive(false, false, false, false));
+
+        /* And the whole gate, end to end, for the wedge: a frozen connman
+         * with no boot progress must still reach a withheld ping. */
+        bool wedged_runtime = boot_sd_watchdog_test_runtime_pillars(
+            /*sweep=*/true, /*tick=*/true,
+            boot_sd_watchdog_test_connman_alive(false, false, false, false));
+        SDN_CHECK("gate: a wedged connman drives runtime_alive false",
+            !wedged_runtime);
+        SDN_CHECK("gate: wedged connman + no boot progress withholds the ping",
+            !boot_sd_watchdog_test_pet_decide(
+                boot_sd_watchdog_test_keepalive_supervisor(
+                    wedged_runtime, /*sweep=*/true, /*progress=*/false)));
+
+        /* Mirror row: the SAME node, same stale markers, but the kernel says
+         * the threads are working — it must be petted. If this row and the
+         * one above ever agree, the watchdog has stopped distinguishing slow
+         * from wedged and is worthless in one direction or the other. */
+        bool slow_runtime = boot_sd_watchdog_test_runtime_pillars(
+            /*sweep=*/true, /*tick=*/true,
+            boot_sd_watchdog_test_connman_alive(false, true, false, true));
+        SDN_CHECK("gate: a slow-but-working connman keeps runtime_alive",
+            slow_runtime);
+        SDN_CHECK("gate: slow node with no boot progress is still petted",
+            boot_sd_watchdog_test_pet_decide(
+                boot_sd_watchdog_test_keepalive_supervisor(
+                    slow_runtime, /*sweep=*/true, /*progress=*/false)));
+        SDN_CHECK("gate: slow and wedged must not reach the same verdict",
+            slow_runtime != wedged_runtime);
+    }
+
+    /* ── the work probe itself ──────────────────────────────────────────
+     * The probe is the only thing standing between "slow" and "wedged", so
+     * its refusal to guess is part of the contract: an unreadable subject is
+     * never reported as working. */
+    {
+        struct thread_work_sample a = { .observed = true, .cpu_ticks = 10,
+                                        .major_faults = 3, .io_bytes = 100 };
+        struct thread_work_sample b = a;
+        SDN_CHECK("probe: identical samples are not work",
+            !thread_work_probe_advanced(&a, &b));
+        b = a; b.cpu_ticks++;
+        SDN_CHECK("probe: cpu time advancing is work",
+            thread_work_probe_advanced(&a, &b));
+        b = a; b.major_faults++;
+        SDN_CHECK("probe: a major fault is work (page-in under pressure)",
+            thread_work_probe_advanced(&a, &b));
+        b = a; b.io_bytes += 4096;
+        SDN_CHECK("probe: block I/O is work (a slow disk is still a disk)",
+            thread_work_probe_advanced(&a, &b));
+
+        /* SKIP is not a pass. An unobserved sample on either side means the
+         * caller learned nothing, and nothing must never read as alive. */
+        struct thread_work_sample unobserved = { 0 };
+        b = a; b.cpu_ticks += 1000;
+        SDN_CHECK("probe: unobserved prev is not work",
+            !thread_work_probe_advanced(&unobserved, &b));
+        SDN_CHECK("probe: unobserved now is not work",
+            !thread_work_probe_advanced(&a, &unobserved));
+        SDN_CHECK("probe: NULL is not work",
+            !thread_work_probe_advanced(NULL, &b) &&
+            !thread_work_probe_advanced(&a, NULL));
+        SDN_CHECK("probe: a tid that names no thread is not observable",
+            !thread_work_probe_sample(0, &b) && !b.observed);
+
+        /* On Linux this MUST work. A silently blind probe degrades the whole
+         * gate back to marker-only — the very bug being fixed — and would do
+         * it without a single failing test, so this is asserted rather than
+         * guarded by `if (supported)`. An earlier draft of the /proc/stat
+         * parser was blind exactly this way and every other row above still
+         * passed. */
+#if defined(__linux__)
+        SDN_CHECK("probe: per-thread kernel counters are readable on Linux",
+            thread_work_probe_supported());
+        long self = thread_work_probe_self_tid();
+        SDN_CHECK("probe: this thread has an OS thread id", self > 0);
+        struct thread_work_sample before, after;
+        SDN_CHECK("probe: this thread is observable",
+            thread_work_probe_sample(self, &before) && before.observed);
+        volatile uint64_t spin = 0;
+        for (uint64_t i = 0; i < 200000000ULL; i++)
+            spin += i;
+        (void)spin;
+        SDN_CHECK("probe: a busy thread reads as working",
+            thread_work_probe_sample(self, &after) && after.observed &&
+            thread_work_probe_advanced(&before, &after));
+#endif
     }
 
     /* ── the backstop must be WEAKER than the policy it backs ──

@@ -27,13 +27,19 @@
  * boundary. */
 #define PERF_SPEND_FEE 1
 
-/* Upper bound on a single point's workload, so a fat --blocks/--txs-per-block
- * on the command line cannot ask for a run that never finishes. The default
- * ladder's largest point is ~1.6k funding blocks; this leaves ample room. */
+/* Upper bound on a single point's untimed setup, so a fat
+ * --blocks/--txs-per-block/--funding-multiple on the command line cannot ask
+ * for a run that never finishes. The default ladder's largest point mints
+ * 12,288 setup blocks (768 * 8 * 2); this leaves ample room. */
 #define PERF_MAX_FUNDING_BLOCKS 200000
 
-/* Sample buffer bound (the median is taken over these). */
+/* Sample buffer bound (the minimum is taken over these). */
 #define PERF_MAX_REPS 64
+
+/* Upper bound on `funding_multiple`. The armed arm's untimed funding phase is
+ * O(n^2) in the map size, so this keeps a command-line value from turning setup
+ * into the whole run. */
+#define PERF_MAX_FUNDING_MULTIPLE 16
 
 /* ── One measured sample ─────────────────────────────────────────────── */
 
@@ -76,10 +82,16 @@ static bool perf_make_spend(struct transaction *tx,
 
 /* Run ONE sample of the workload at `blocks` measured blocks.
  *
- * Three phases:
- *   1. FUNDING (untimed) — mint `blocks * txs_per_block` coinbase-only blocks
- *      and keep every coinbase txid. This is what pre-loads the UTXO map, so
- *      the map's live-entry count scales with the workload.
+ * Four phases:
+ *   1a. BALLAST (untimed) — `funding_multiple - 1` coinbase-only blocks per
+ *      spendable one, txids discarded. Never spent, never looked up. They sit
+ *      in the UTXO map AHEAD of the coins the measured phase will spend, which
+ *      is the whole point: see `funding_multiple` in sim/simnet_perf.h. Both
+ *      the ballast and the funding scale with the ladder point, so the growth
+ *      ratio's meaning is unchanged.
+ *   1b. FUNDING (untimed) — mint `blocks * txs_per_block` coinbase-only blocks
+ *      and keep every coinbase txid. These are the coins the measured phase
+ *      spends.
  *   2. MATURITY FILLER (untimed) — COINBASE_MATURITY more coinbase-only blocks
  *      so the OLDEST funded coinbase is spendable by the real maturity
  *      predicate. Because the measured phase consumes funded coinbases in mint
@@ -91,19 +103,24 @@ static bool perf_make_spend(struct transaction *tx,
  *      time is attributed to `build` (this file assembling the txs) and `fold`
  *      (merkle root + the REAL connect_block, i.e. the coins-view work).
  *
- * Only phase 3 is timed; phases 1-2 are setup that sizes the map. */
+ * Only phase 3 is timed; phases 1a-2 are setup that sizes the map. */
 static bool perf_one_sample(const struct simnet_perf_config *cfg, int blocks,
                             struct perf_sample *out)
 {
     const int per_block = cfg->txs_per_block;
-    const size_t funding = (size_t)blocks * (size_t)per_block;
+    /* Coinbases the measured phase will actually spend. */
+    const size_t spendable = (size_t)blocks * (size_t)per_block;
+    /* Coinbases minted purely to sit in front of them in the map — see
+     * `funding_multiple` in sim/simnet_perf.h. Their txids are never needed,
+     * so they cost no memory here. */
+    const size_t ballast = spendable * (size_t)(cfg->funding_multiple - 1);
 
     memset(out, 0, sizeof(*out));
 
     struct uint256 *funded =
-        zcl_malloc(funding * sizeof(*funded), "simnet_perf_funded");
+        zcl_malloc(spendable * sizeof(*funded), "simnet_perf_funded");
     if (!funded)
-        LOG_FAIL("simnet_perf", "OOM allocating %zu funded txids", funding);
+        LOG_FAIL("simnet_perf", "OOM allocating %zu funded txids", spendable);
 
     struct transaction *block_txs =
         zcl_calloc((size_t)per_block, sizeof(*block_txs), "simnet_perf_txs");
@@ -130,8 +147,24 @@ static bool perf_one_sample(const struct simnet_perf_config *cfg, int blocks,
         }
     }
 
-    /* Phase 1: funding. */
-    for (size_t i = 0; ok && i < funding; i++) {
+    /* Phase 1a: map ballast. Minted BEFORE the spendable funding, and the
+     * order is load-bearing — coins_map (lib/coins/src/coins_view.c) is open
+     * addressing with linear probing, so under the collapsed hash every key
+     * probes from slot 0 and a coin's lookup cost is its POSITION in the
+     * insertion run, not the map's size. Ballast minted first therefore sits
+     * in front of every spendable coin and deepens all of them; ballast minted
+     * last sits behind them and is never probed. Measured, scale 1: ballast
+     * last moved the armed/clean ratio 4.4x -> 4.8x, ballast first moved it
+     * 4.4x -> 6.3-8.4x. */
+    for (size_t i = 0; ok && i < ballast; i++) {
+        if (!simnet_mint_coinbase(&s, NULL)) {
+            LOG_ERROR("simnet_perf", "ballast mint %zu rejected", i);
+            ok = false;
+        }
+    }
+
+    /* Phase 1b: spendable funding. */
+    for (size_t i = 0; ok && i < spendable; i++) {
         if (!simnet_mint_coinbase(&s, &funded[i])) {
             LOG_ERROR("simnet_perf", "funding mint %zu rejected", i);
             ok = false;
@@ -219,22 +252,36 @@ static bool perf_one_sample(const struct simnet_perf_config *cfg, int blocks,
     return ok;
 }
 
-/* ── Median helper ───────────────────────────────────────────────────── */
+/* ── Estimator ───────────────────────────────────────────────────────── */
 
-static int perf_cmp_i64(const void *a, const void *b)
+/* Minimum of `n` samples (n >= 1) — NOT the mean, and no longer the median.
+ *
+ * Why the minimum. Timing noise on this box is ONE-SIDED: contention, cache
+ * eviction by a co-resident worker, SMT sibling pressure and page faults can
+ * only ever ADD time to a sample, never remove it. (Using
+ * clock_thread_cpu_ns() removes plain scheduler preemption from the count, but
+ * not memory-bandwidth or cache/SMT interference, which inflate CPU time too.)
+ * Under a one-sided error model the minimum is the maximum-likelihood estimate
+ * of the uncontaminated cost, and it is the only estimator whose error goes to
+ * zero as reps grow; a median still reports whatever the middle sample's
+ * contamination happened to be.
+ *
+ * This also makes the detector self-test STRICTLY harder to satisfy, which is
+ * the point. test_simnet_perf asserts `armed >= 4.0 * clean` per ladder point.
+ * Additive noise d on both arms drags the observed ratio (A+d)/(C+d) toward
+ * 1.0, so a contaminated CLEAN sample is what breaks a true positive — and a
+ * contaminated ARMED sample is what could manufacture a false one. The minimum
+ * strips d from both arms: it cannot inflate the armed arm into passing, and it
+ * cannot inflate the clean arm into failing. Measured: a solo run on a loaded
+ * box put clean scale-1 at 9556 ns/tx against a 4795 ns/tx floor — a 2.0x
+ * one-sided inflation on an 8 ms measurement window. */
+static int64_t perf_min(const int64_t *v, size_t n)
 {
-    int64_t x = *(const int64_t *)a;
-    int64_t y = *(const int64_t *)b;
-    return (x > y) - (x < y);
-}
-
-/* Median of `n` values (n >= 1). Sorts `v` in place. A median — not a mean —
- * because this box runs other work: one preempted sample must not move the
- * reported figure. */
-static int64_t perf_median(int64_t *v, size_t n)
-{
-    qsort(v, n, sizeof(*v), perf_cmp_i64);
-    return v[n / 2];
+    int64_t m = v[0];
+    for (size_t i = 1; i < n; i++)
+        if (v[i] < m)
+            m = v[i];
+    return m;
 }
 
 /* ── Public surface ──────────────────────────────────────────────────── */
@@ -250,7 +297,8 @@ void simnet_perf_config_defaults(struct simnet_perf_config *cfg)
     cfg->scales[1] = 2;
     cfg->scales[2] = 4;
     cfg->scale_count = 3;
-    cfg->reps = 1;
+    cfg->reps = SIMNET_PERF_DEFAULT_REPS;
+    cfg->funding_multiple = SIMNET_PERF_DEFAULT_FUNDING_MULTIPLE;
     cfg->inject = SIMNET_PERF_INJECT_NONE;
 }
 
@@ -269,6 +317,10 @@ bool simnet_perf_run(const struct simnet_perf_config *cfg,
     if (cfg->reps < 1 || cfg->reps > PERF_MAX_REPS)
         LOG_FAIL("simnet_perf", "reps=%d must be 1..%d", cfg->reps,
                  PERF_MAX_REPS);
+    if (cfg->funding_multiple < 1 ||
+        cfg->funding_multiple > PERF_MAX_FUNDING_MULTIPLE)
+        LOG_FAIL("simnet_perf", "funding_multiple=%d must be 1..%d",
+                 cfg->funding_multiple, PERF_MAX_FUNDING_MULTIPLE);
     for (size_t i = 0; i < cfg->scale_count; i++) {
         if (cfg->scales[i] < 1)
             LOG_FAIL("simnet_perf", "scales[%zu]=%d must be >= 1", i,
@@ -278,7 +330,7 @@ bool simnet_perf_run(const struct simnet_perf_config *cfg,
                      "scales must strictly increase (scales[%zu]=%d <= %d)",
                      i, cfg->scales[i], cfg->scales[i - 1]);
         int64_t funding = (int64_t)cfg->blocks * cfg->scales[i] *
-                          cfg->txs_per_block;
+                          cfg->txs_per_block * cfg->funding_multiple;
         if (funding > PERF_MAX_FUNDING_BLOCKS)
             LOG_FAIL("simnet_perf",
                      "scale %d needs %lld funding blocks, over the %d cap",
@@ -299,13 +351,19 @@ bool simnet_perf_run(const struct simnet_perf_config *cfg,
         struct simnet_perf_point *pt = &out->points[p];
         pt->scale = cfg->scales[p];
         pt->blocks = blocks;
-        pt->funding_blocks = (uint64_t)blocks * (uint64_t)cfg->txs_per_block;
+        pt->funding_blocks = (uint64_t)blocks * (uint64_t)cfg->txs_per_block *
+                             (uint64_t)cfg->funding_multiple;
 
         /* One DISCARDED warm-up sample per point (r == -1), then `reps`
-         * measured ones. Without it the first point of the ladder absorbs the
-         * process's page faults, malloc arena growth, and cold icache, which
-         * inflates the denominator of the growth ratio and would flatter every
-         * result. Same discipline as tools/simd_bench.c. */
+         * measured ones, of which perf_min() keeps the fastest. Without the
+         * warm-up the first point of the ladder absorbs the process's page
+         * faults, malloc arena growth, and cold icache, which inflates the
+         * denominator of the growth ratio and would flatter every result.
+         * (perf_min() would discard a cold sample anyway — a cold sample is
+         * never the minimum — so the explicit warm-up is now belt-and-braces
+         * rather than load-bearing; it is kept because `make sim-perf`'s
+         * absolute growth budget was calibrated with it. Same discipline as
+         * tools/simd_bench.c.) */
         for (int r = -1; r < reps; r++) {
             struct perf_sample sample;
             if (!perf_one_sample(cfg, blocks, &sample))
@@ -322,8 +380,8 @@ bool simnet_perf_run(const struct simnet_perf_config *cfg,
             pt->tip_height = sample.tip_height;
         }
 
-        pt->build_cpu_ns = perf_median(build_samples, (size_t)reps);
-        pt->fold_cpu_ns = perf_median(fold_samples, (size_t)reps);
+        pt->build_cpu_ns = perf_min(build_samples, (size_t)reps);
+        pt->fold_cpu_ns = perf_min(fold_samples, (size_t)reps);
         pt->total_cpu_ns = pt->build_cpu_ns + pt->fold_cpu_ns;
         pt->fold_ns_per_tx = pt->fold_cpu_ns / (int64_t)pt->measured_txs;
         pt->total_ns_per_block = pt->total_cpu_ns / (int64_t)blocks;

@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Hold owner-private cross-process locks through retained files. */
+ * Purpose: implementation of platform/process_lock.h — wraps
+ * platform_private_file's exclusive-create/lock/close around one retained
+ * cross-process lock file, tracking `held` so acquiring twice or releasing
+ * an unheld lock is a no-op rather than a double-lock/double-close. */
 #include "platform/process_lock.h"
 
 void platform_process_lock_init(struct platform_process_lock *lock)

@@ -695,6 +695,9 @@ int test_zcode_package_registry(void)
                        expected->name, expected->name, expected->dir,
                        content, release, recipe, lock, capsule,
                        expected->publisher_pubkey, signature);
+                printf("    fix: tools/scripts/zcode_registry_rederive.sh\n"
+                       "    (this root is also pinned in each dependent's\n"
+                       "     zcode-package.json; the script settles both)\n");
             }
             ASSERT_STR_EQ(content, expected->content_root);
             ASSERT_STR_EQ(release, expected->release_root);

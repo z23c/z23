@@ -4,6 +4,7 @@
 #include "test/test_core.h"
 #include "event/event.h"
 #include "sync/sync_state.h"
+#include "json/json.h"
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -828,6 +829,88 @@ static int test_crash_handler_stderr_survives_exit(void)
     return failures;
 }
 
+
+
+/* The error accumulator's JSON has one consumer, api_json_push_recent_errors,
+ * and that consumer replaces an unparseable document with an empty array
+ * rather than reporting a failure. A malformed dump therefore reads to an
+ * operator as "no recent errors" -- the exact opposite of the truth -- with
+ * nothing in any log to say so. These tests parse the dump the same way the
+ * consumer does, so that silence cannot happen again unobserved. */
+static int test_error_ring_dump_json_parses(void)
+{
+    int failures = 0;
+
+    TEST("error_ring_dump_json is parseable JSON for 0, 1 and many errors") {
+        static const int counts[] = { 0, 1, 2, ERROR_RING_SIZE + 3 };
+
+        for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+            struct error_ring ring;
+            error_ring_init(&ring);
+            for (int i = 0; i < counts[c]; i++) {
+                char msg[32];
+                snprintf(msg, sizeof(msg), "err%d", i);
+                error_ring_observer(EV_DB_ERROR, 0, msg, (uint32_t)strlen(msg),
+                                    &ring);
+            }
+
+            char buf[2048];
+            size_t len = error_ring_dump_json(&ring, buf, sizeof(buf));
+            ASSERT(len > 0);
+            ASSERT(len < sizeof(buf));
+
+            struct json_value doc;
+            json_init(&doc);
+            ASSERT(json_read(&doc, buf, len));
+
+            const struct json_value *total = json_get(&doc, "total");
+            ASSERT(total != NULL);
+            ASSERT(json_get_int(total) == counts[c]);
+
+            const struct json_value *errors = json_get(&doc, "errors");
+            ASSERT(errors != NULL);
+            /* The ring keeps the most recent ERROR_RING_SIZE entries, so the
+             * array length is the count clamped to the ring, while "total"
+             * stays the lifetime count. */
+            size_t expect = (size_t)(counts[c] < ERROR_RING_SIZE
+                                     ? counts[c] : ERROR_RING_SIZE);
+            ASSERT(errors->num_children == expect);
+
+            json_free(&doc);
+        }
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+/* A buffer too small to hold even an empty result must be refused, not
+ * written into. The clamping arithmetic in the dump is all size_t, so a size
+ * under three wraps and turns every clamp into a huge value. */
+static int test_error_ring_dump_json_tiny_buffer(void)
+{
+    int failures = 0;
+
+    TEST("error_ring_dump_json refuses a buffer it cannot fill") {
+        struct error_ring ring;
+        error_ring_init(&ring);
+        error_ring_observer(EV_DB_ERROR, 0, "boom", 4, &ring);
+
+        char guard[8];
+        memset(guard, 'X', sizeof(guard));
+        for (size_t sz = 0; sz < 3; sz++) {
+            ASSERT(error_ring_dump_json(&ring, guard, sz) == 0);
+            /* Nothing was written at any offset. */
+            for (size_t i = 0; i < sizeof(guard); i++)
+                ASSERT(guard[i] == 'X');
+        }
+        ASSERT(error_ring_dump_json(NULL, guard, sizeof(guard)) == 0);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_event(void)
 {
     int failures = 0;
@@ -856,6 +939,8 @@ int test_event(void)
     failures += test_concurrent_emit();
     failures += test_async_dispatch_lifecycle();
     failures += test_crash_handler_stderr_survives_exit();
+    failures += test_error_ring_dump_json_parses();
+    failures += test_error_ring_dump_json_tiny_buffer();
 
     return failures;
 }

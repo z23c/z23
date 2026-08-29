@@ -44,6 +44,9 @@ static bool ar_read(const char *path, int32_t *anchor, int *count)
     char buf[64];
     int64_t got = platform_positioned_file_read(
         &file, buf, (size_t)before.size, 0);
+    /* Field-wise, never memcmp: the snapshot struct has alignment padding
+     * whose bytes are undefined, so a whole-object compare reports the SAME
+     * unchanged file as changed and silently loses the budget count. */
     bool ok = got == (int64_t)before.size &&
               platform_positioned_file_snapshot(&file, &after) &&
               platform_positioned_file_snapshot_equal(&before, &after);

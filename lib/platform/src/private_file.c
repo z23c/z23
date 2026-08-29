@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Handle-bound private file publication across POSIX and Win32. */
+ *
+ * purpose: exclusive-create, lock, and durable-retire operations on a
+ * single private file, portable across POSIX and Windows. */
 #include "platform/private_file.h"
 #include "base/safe_alloc.h"
 
@@ -255,8 +257,8 @@ bool platform_private_file_replace(struct platform_private_file *f,
   if (bytes > UINT32_MAX - sizeof(FILE_RENAME_INFO))
     return false;
   size_t allocation = sizeof(FILE_RENAME_INFO) + bytes;
-  FILE_RENAME_INFO *rename_info = zcl_calloc(
-      1, allocation, "platform-private-file-rename");
+  FILE_RENAME_INFO *rename_info =
+      zcl_calloc(1, allocation, "private_file_rename_info");
   if (!rename_info)
     return false;
   rename_info->ReplaceIfExists = TRUE;

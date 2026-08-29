@@ -42,6 +42,7 @@ ZCL_TEST_GROUP(shared_validators_zcl_address)
 ZCL_TEST_GROUP(script)
 ZCL_TEST_GROUP(net)
 ZCL_TEST_GROUP(netbase_split_host_port)
+ZCL_TEST_GROUP(nat_route_dump)
 ZCL_TEST_GROUP(transaction)
 ZCL_TEST_GROUP(mempool)
 ZCL_TEST_GROUP(accept_to_mempool)
@@ -871,6 +872,7 @@ ZCL_TEST_GROUP(oracle_policy)
 ZCL_TEST_GROUP(quorum_oracle)
 ZCL_TEST_GROUP(mesh_observation)
 ZCL_TEST_GROUP(mesh_observation_compose)
+ZCL_TEST_GROUP(mesh_observation_dump)
 ZCL_TEST_GROUP(script_interp_edge)
 ZCL_TEST_GROUP(script_interp_edges)
 ZCL_TEST_GROUP(sighash_edge)
@@ -969,6 +971,29 @@ ZCL_TEST_GROUP(params_fetch)
  * dispatch when the OS reports them — the arm64 mirror of sha256_isa_parity's
  * reachability leg. */
 ZCL_TEST_GROUP(arm_hw_tiers)
+/* platform-seam lane: the acceptance programs that used to live under
+ * tools/tests/ and executed ONLY when a human ran the now-deleted
+ * tools/scripts/winacceptance.sh by hand. The Windows-refusal members of that
+ * set are cross-linked by lib/platform/tests/windows_acceptance.mk; these are
+ * the members that run natively, so they belong in the suite where every run
+ * executes them. */
+ZCL_TEST_GROUP(socket_resolve)
+ZCL_TEST_GROUP(private_link_no_clobber)
+ZCL_TEST_GROUP(running_image_positioned)
+ZCL_TEST_GROUP(read_mapping_positioned)
+ZCL_TEST_GROUP(file_ops_copy)
+ZCL_TEST_GROUP(boot_refusal_identity)
+ZCL_TEST_GROUP(boot_shutdown_marker_persistence)
+ZCL_TEST_GROUP(replay_receipt_root)
+/* dev-loop watcher lane: the two probe programs that arrived under
+ * lib/platform/tests with NO reader at all -- no windows_acceptance.mk row,
+ * no Makefile rule, not in lib/platform/zcode-package.json. Both have real
+ * POSIX arms, so unlike the Windows-refusal set they execute here. These are
+ * the only groups that drive lib/platform/src/directory_watcher.c (inotify
+ * arm) and lib/platform/src/watcher_record.c at all: every production caller
+ * of the watcher family sits behind #if defined(_WIN32). */
+ZCL_TEST_GROUP(directory_watcher)
+ZCL_TEST_GROUP(watcher_record)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)

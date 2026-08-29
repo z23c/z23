@@ -76,6 +76,8 @@ enum vcs_package_prepare_error vcs_package_scan_layout(
 #include "json/json.h"
 #include "util/safe_alloc.h"
 
+#include "package_prepare_internal.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -391,61 +393,6 @@ static bool prepare_copy_field(char *out, size_t cap, const char *value)
     return true;
 }
 
-static bool prepare_key_allowed(const char *key, const char *const *allowed,
-                                size_t allowed_count)
-{
-    for (size_t i = 0; i < allowed_count; i++)
-        if (strcmp(key, allowed[i]) == 0)
-            return true;
-    return false;
-}
-
-static bool prepare_meta_closed(const struct json_value *meta,
-                                char *detail, size_t detail_cap)
-{
-    static const char *const top_keys[] = {
-        "schema", "name", "semver", "language", "license",
-        "include_dir", "source_dir", "dependencies", "files",
-    };
-    static const char *const dep_keys[] = { "root", "name", "semver" };
-    for (size_t i = 0; i < meta->num_children; i++) {
-        if (!prepare_key_allowed(meta->keys[i], top_keys,
-                                 sizeof(top_keys) / sizeof(top_keys[0]))) {
-            if (detail && detail_cap)
-                (void)snprintf(detail, detail_cap,
-                               "unknown metadata key: %s", meta->keys[i]);
-            return false;
-        }
-    }
-    const struct json_value *dependencies = json_get(meta, "dependencies");
-    if (!dependencies || dependencies->type != JSON_ARR)
-        return false;
-    for (size_t i = 0; i < dependencies->num_children; i++) {
-        const struct json_value *dep = &dependencies->children[i];
-        if (dep->type != JSON_OBJ)
-            return false;
-        for (size_t j = 0; j < dep->num_children; j++) {
-            if (!prepare_key_allowed(dep->keys[j], dep_keys,
-                                     sizeof(dep_keys) / sizeof(dep_keys[0]))) {
-                if (detail && detail_cap)
-                    (void)snprintf(detail, detail_cap,
-                                   "dependency %zu unknown key: %s", i,
-                                   dep->keys[j]);
-                return false;
-            }
-        }
-    }
-    const struct json_value *files = json_get(meta, "files");
-    if (files && files->type != JSON_ARR)
-        return false;
-    if (files) {
-        for (size_t i = 0; i < files->num_children; i++)
-            if (files->children[i].type != JSON_STR)
-                return false;
-    }
-    return true;
-}
-
 static const struct vcs_package_file *prepare_manifest_find(
     const struct vcs_package_manifest *manifest, const char *path)
 {
@@ -615,6 +562,23 @@ static enum vcs_package_prepare_error prepare_finish(
         json_free(&meta);
         return VCS_PACKAGE_PREPARE_ERR_LOCK;
     }
+    /* THIS IS THE DECLARATION GRAPH, NOT THE TRANSITIVE CLOSURE, AND THE
+     * DIFFERENCE IS LOAD-BEARING. prepare() reads ONE directory. A declared
+     * dependency is named only by its 32-byte root, and nothing here can turn
+     * a root into that package's own metadata: there is no store handle, no
+     * index, and no root -> directory map in the options. So this lock states
+     * exactly what this package's own zcode-package.json says and nothing
+     * more -- the target, its directly declared edges, and depth 1 for each
+     * of them, which is the true longest path in a graph that HAS no other
+     * edges. `direct_deps` is 0 on a dependency node for the same reason: this
+     * graph records no edge out of it. That is a complete statement about the
+     * declaration, not a truncated one about the closure.
+     *
+     * The real transitive DAG -- deduplicated, cycle-checked, with
+     * longest-path depth and true direct_deps -- is vcs_package_lock_resolve()
+     * in package_deps.c, which takes a loader and is what the install
+     * lifecycle pins into a build receipt. A caller that needs the closure
+     * must go through that, never through this projection. */
     for (size_t i = 0; i < deps.count; i++) {
         struct vcs_package_lock_node *node = &out->lock.nodes[out->lock.count++];
         memcpy(node->root, deps.items[i].root, 32);

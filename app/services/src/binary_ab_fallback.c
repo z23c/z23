@@ -82,10 +82,10 @@ static bool binary_ab_open_staging(const char *destination,
 {
     for (unsigned attempt = 0; attempt < 16; ++attempt) {
         uint8_t nonce[16];
-        if (!rng_fill(nonce, sizeof(nonce))) {
-            LOG_WARN("binary_ab", "staging nonce generation failed");
-            return false;
-        }
+        if (!rng_fill(nonce, sizeof(nonce)))
+            LOG_FAIL("binary_ab",
+                     "open_staging(%s): no entropy for the staging suffix",
+                     destination);
         char suffix[2 * sizeof(nonce) + 1];
         for (size_t i = 0; i < sizeof(nonce); ++i)
             (void)snprintf(suffix + 2 * i, 3, "%02x", nonce[i]);

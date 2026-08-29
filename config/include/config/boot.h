@@ -769,7 +769,7 @@ size_t boot_snapshot_drop_bodiless_have_data_above_seed_for_test(
     struct main_state *ms, const char *datadir, int seed_h,
     bool trust_existing_block_files);
 /* Unit surface for the post-install node.db `utxos` mirror reset (see
- * icb_reset_utxo_mirror in config/src/consensus_state_install_runtime.c): wipes the
+ * icb_reset_utxo_mirror in config/src/consensus_state_install_derived_state.c): wipes the
  * mirror + its utxo_commitment cache and resets the sync cursor to -1 so
  * utxo_mirror_sync_service rebuilds it from the freshly installed coins_kv.
  * `ndb` must already be open. */

@@ -307,7 +307,11 @@ int zcl_devloop_cli_main(const char **args, int nargs)
     return print_menu(path);
 }
 
-#if !defined(_WIN32)
+/* Stop predicate for the POSIX watch worker. Guard matches its ONE caller
+ * exactly (the ZCL_DEV_BUILD arm of zcl_devloop_watch_worker_main, non-Win32
+ * branch); guarding on !_WIN32 alone left it defined with no caller in a
+ * release build, which clang reports as an unused function. */
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32)
 static bool worker_lease_stopped(void *opaque)
 { return platform_watcher_lease_wait_stop(opaque, 0); }
 #endif

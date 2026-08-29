@@ -1458,6 +1458,12 @@ void hotswap_activation_reset_for_testing(void)
     atomic_store(&g_dlclose_count, 0);
 }
 
+/* Dynamic activation lives behind the plain `#ifdef ZCL_DEV_BUILD` region
+ * this file has always used: a release build must link zero dl* code, and
+ * the check-hotswap-dev-only gate reads that exact toggle. Host exclusions
+ * nest INSIDE it (same shape as the __APPLE__ branches below) so folding
+ * one into the outer condition can never move a dl* call site out of the
+ * dev-only region. */
 #ifdef ZCL_DEV_BUILD
 #if defined(__linux__) && !defined(_WIN32)
 

@@ -126,6 +126,7 @@ static void ib_make_dir(char *dir, size_t dirlen, const char *tag)
     /* platform_private_directory_ensure requires exactly 0700 on any dir
      * it is handed to validate (EACCES otherwise) — mint them private. */
     mkdir(dir, 0700);
+    chmod(dir, 0700);
 }
 
 /* A datadir that also needs a blocks/ subdir for write_block_to_disk. */

@@ -1,9 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: Implement shared owner-and-SYSTEM Windows ACL validation. */
+ * Purpose: Windows-only implementation of private_acl_internal.h —
+ * synthesizes an SDDL descriptor granting full access solely to the current
+ * user's SID and SYSTEM, and validates that an open handle's owner and DACL
+ * (exactly two non-inherited allow ACEs, one per grantee) still match it.
+ * An empty translation unit on POSIX. */
 #include "private_acl_internal.h"
 #include "base/safe_alloc.h"
 
 #if defined(_WIN32)
+#include "base/safe_alloc.h"
+
 #include <aclapi.h>
 #include <sddl.h>
 #include <stdio.h>
@@ -20,7 +26,7 @@ static bool current_user(struct platform_private_acl *acl)
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &acl->token) &&
               !GetTokenInformation(acl->token, TokenUser, NULL, 0, &size) &&
               GetLastError() == ERROR_INSUFFICIENT_BUFFER;
-    if (ok) acl->user = zcl_malloc(size, "private-acl-token-user");
+    if (ok) acl->user = zcl_malloc(size, "private_acl_token_user");
     return ok && acl->user &&
            GetTokenInformation(acl->token, TokenUser, acl->user, size, &size);
 }

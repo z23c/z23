@@ -281,6 +281,10 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
         return DEV_ACTIVATION_E_STAGE;
     }
 #if !defined(_WIN32)
+    /* The manifest is sealed here, but the DIRECTORY is not: publishing it
+     * proves sole ownership by requiring mode 0700, so a staging directory
+     * already sealed to 0555 could never be published at all. The
+     * directory is sealed below, once it has landed at its final name. */
     (void)chmod(tmp_manifest, 0444);
 #endif
     bool published = platform_private_directory_publish_no_clobber(
@@ -296,6 +300,9 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
         }
     }
 #if !defined(_WIN32)
+    /* Sealed only now, and only for the directory this call published:
+     * the loser of a publish race must not re-mode the winner's
+     * generation. */
     if (published && chmod(txn->candidate_dir, 0555) != 0) {
         LOG_ERR("dev-activation", "candidate chmod failed: %s",
                 strerror(errno));
