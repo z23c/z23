@@ -740,7 +740,9 @@ static bool rpc_romseed_list(const struct json_value *params, bool help,
         HexStr(arts[i].chunk_root, 32, false, hex, sizeof(hex));
         json_push_kv_str(&entry, "kind",
             arts[i].kind == ROM_ARTIFACT_CONSENSUS_BUNDLE ? "consensus_bundle" :
-            arts[i].kind == ROM_ARTIFACT_HEADER_SEED ? "header_seed" : "unknown");
+            arts[i].kind == ROM_ARTIFACT_HEADER_SEED ? "header_seed" :
+            arts[i].kind == ROM_ARTIFACT_SOURCE_BUNDLE ? "source_bundle" :
+            "unknown");
         json_push_kv_str(&entry, "filename", arts[i].filename);
         json_push_kv_str(&entry, "digest", hex);
         json_push_kv_int(&entry, "size_bytes", (int64_t)arts[i].size_bytes);
@@ -797,4 +799,9 @@ void register_market_rpc_commands(struct rpc_table *t)
      * gate) lives in market_content_rpc.c and registers here for the same
      * reason. */
     register_market_content_rpc_commands(t);
+    /* Offering one local source tree by its ZVCS root lives in
+     * source_bundle_publish_rpc.c — a serve-side surface over the same free
+     * artifact tier romseed_register uses — and registers here for the same
+     * reason. */
+    register_source_bundle_rpc_commands(t);
 }

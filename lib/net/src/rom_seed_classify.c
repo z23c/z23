@@ -94,6 +94,14 @@ enum rom_artifact_kind rom_seed_classify(const char *filename)
         return ROM_ARTIFACT_CONSENSUS_BUNDLE;
     if (strcmp(base, "block_index.bin") == 0)
         return ROM_ARTIFACT_HEADER_SEED;
+    /* A ZVCS source bundle is named by its content, not by a pattern the
+     * network agrees on, so the SUFFIX is all a name can say. A bare ".zvsb"
+     * (an empty stem — a dotfile) is not a name, so require at least one
+     * character before it. The header content check below is what actually
+     * admits the file. */
+    if (strlen(base) > strlen(ROM_SEED_SOURCE_BUNDLE_SUFFIX) &&
+        str_has_suffix(base, ROM_SEED_SOURCE_BUNDLE_SUFFIX))
+        return ROM_ARTIFACT_SOURCE_BUNDLE;
     return ROM_ARTIFACT_UNKNOWN;
 }
 
@@ -134,14 +142,44 @@ enum rom_artifact_kind rom_seed_kind_from_name(const char *name)
         return ROM_ARTIFACT_CONSENSUS_BUNDLE;
     if (strcmp(name, "header_seed") == 0)
         return ROM_ARTIFACT_HEADER_SEED;
+    if (strcmp(name, "source_bundle") == 0)
+        return ROM_ARTIFACT_SOURCE_BUNDLE;
     return ROM_ARTIFACT_UNKNOWN;
+}
+
+uint64_t rom_seed_kind_min_bytes(enum rom_artifact_kind kind)
+{
+    return kind == ROM_ARTIFACT_SOURCE_BUNDLE
+        ? (uint64_t)ROM_SEED_SOURCE_BUNDLE_MIN_BYTES
+        : (uint64_t)ROM_SEED_MIN_ARTIFACT_BYTES;
+}
+
+bool rom_seed_source_bundle_root(const uint8_t *header, size_t n,
+                                 uint8_t out[32])
+{
+    /* Byte-for-byte source_bundle_magic in lib/vcs/src/source_bundle.c. */
+    static const uint8_t zvsb_magic[8] = { 'Z', 'V', 'S', 'B', 'Z',
+                                           '\r', '\n', 0 };
+    if (!header || !out || n < ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES)
+        return false;
+    if (memcmp(header, zvsb_magic, sizeof(zvsb_magic)) != 0)
+        return false;
+    /* VCS_SOURCE_BUNDLE_VERSION / _CODEC_ZLIB, both 1 and both u16 LE. A
+     * future codec would need its own row here before it could be advertised;
+     * until then an unknown one is simply not findable through this path. */
+    uint16_t version = (uint16_t)(header[8] | ((uint16_t)header[9] << 8));
+    uint16_t codec = (uint16_t)(header[10] | ((uint16_t)header[11] << 8));
+    if (version != 1u || codec != 1u)
+        return false;
+    memcpy(out, header + ROM_SEED_SOURCE_BUNDLE_ROOT_OFFSET, 32);
+    return true;
 }
 
 bool rom_seed_kind_content_ok(enum rom_artifact_kind kind,
                               const uint8_t *header, size_t n,
                               uint64_t size_bytes)
 {
-    if (size_bytes < ROM_SEED_MIN_ARTIFACT_BYTES ||
+    if (size_bytes < rom_seed_kind_min_bytes(kind) ||
         size_bytes > ROM_SEED_MAX_ARTIFACT_BYTES)
         return false;
     switch (kind) {
@@ -157,6 +195,13 @@ bool rom_seed_kind_content_ok(enum rom_artifact_kind kind,
     case ROM_ARTIFACT_HEADER_SEED:
         /* Header seed has no strong magic; the size band is the guard. */
         return true;
+    case ROM_ARTIFACT_SOURCE_BUNDLE: {
+        /* A .zvsb whose header does not parse is not offered at all — the
+         * same fail-before-advertise rule the SQLite magic gives the
+         * consensus bundle. */
+        uint8_t root[32];
+        return rom_seed_source_bundle_root(header, n, root);
+    }
     case ROM_ARTIFACT_UNKNOWN:
     default:
         return false;

@@ -112,7 +112,32 @@ enum rom_artifact_kind {
     ROM_ARTIFACT_UNKNOWN = 0,
     ROM_ARTIFACT_CONSENSUS_BUNDLE = 1,  /* consensus-state-bundle-<h>.sqlite */
     ROM_ARTIFACT_HEADER_SEED = 2,       /* header-chain seed (block_index.bin) */
+    ROM_ARTIFACT_SOURCE_BUNDLE = 3,     /* ZVCS source bundle, "<name>.zvsb"  */
 };
+
+/* ── ZVCS source-bundle header shape (FIND key only) ─────────────────
+ *
+ * A ".zvsb" file is the compressed transport lib/vcs/src/source_bundle.c
+ * writes: an 8-byte magic, u16 version, u16 codec, then the 32-byte ZVCS TREE
+ * ROOT the bundle commits to, then three u64 length fields — 68 bytes in all,
+ * followed by at least one compressed byte.
+ *
+ * lib/net may not include lib/vcs (the two modules are deliberately
+ * independent — see config/lib_module_order.def), so the four numbers below
+ * are restated here rather than shared. That duplication is SAFE IN ONE
+ * DIRECTION ONLY, and the direction is the whole point: rom_seed uses these
+ * bytes to decide what to ADVERTISE, never what to ACCEPT. If they ever drift
+ * from VCS_SOURCE_BUNDLE_* the worst outcome is that a bundle stops being
+ * findable — a fetcher's acceptance still runs vcs_source_bundle_verify()
+ * against the caller's own tree root, which reads the same header itself and
+ * rehashes the entire manifest and every blob. lib/test/src/
+ * test_source_bundle_fetch.c includes BOTH headers and asserts the two sets
+ * agree, so the drift is caught by a gate rather than by a silent outage. */
+#define ROM_SEED_SOURCE_BUNDLE_SUFFIX        ".zvsb"
+#define ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES  68u
+#define ROM_SEED_SOURCE_BUNDLE_ROOT_OFFSET   12u
+#define ROM_SEED_SOURCE_BUNDLE_MIN_BYTES \
+    (ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES + 1u)
 
 /* A registered, content-verified artifact. `chunk_root` (SHA3 over the
  * concatenated per-chunk digests) is the artifact's content identity — it is
@@ -128,6 +153,13 @@ struct rom_artifact {
     uint8_t  whole_sha3[32];              /* SHA3-256 of the whole file        */
     uint8_t  chunk_root[32];              /* SHA3-256 over per-chunk digests   */
     uint8_t  chunk_sha3[ROM_SEED_MAX_CHUNKS][32];
+    /* ROM_ARTIFACT_SOURCE_BUNDLE only: the ZVCS tree root read out of the
+     * bundle header ON DISK at registration (never a sidecar, never a peer's
+     * claim). Advertised in the directory listing so a fetcher holding only a
+     * 64-hex source root can find WHICH artifact to ask for. It is an INDEX,
+     * not an authority: nothing in lib/net accepts bytes because of it. */
+    uint8_t  source_root[32];
+    bool     has_source_root;
     int64_t  registered_at;
     bool     used;
 };
@@ -154,6 +186,20 @@ enum rom_artifact_kind rom_seed_classify(const char *filename);
  * or unrecognized name — the back-compat default a legacy directory (no kind
  * field) parses to. Pure, no I/O. */
 enum rom_artifact_kind rom_seed_kind_from_name(const char *name);
+
+/* Smallest file size that can be a valid artifact of `kind`. The ROM kinds
+ * share ROM_SEED_MIN_ARTIFACT_BYTES (one SQLite page); a source bundle is a
+ * 68-byte header plus at least one compressed byte, so a small but perfectly
+ * valid source tree would otherwise be unseedable. Pure, no I/O. */
+uint64_t rom_seed_kind_min_bytes(enum rom_artifact_kind kind);
+
+/* Read the ZVCS tree root out of a source bundle's leading bytes: requires
+ * `n` >= ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES, the ZVSB magic, and the version
+ * and codec this build knows. Returns false (leaving `out` untouched) for any
+ * other bytes. Pure, no I/O — and a FIND key only, see the block comment on
+ * ROM_SEED_SOURCE_BUNDLE_SUFFIX above. */
+bool rom_seed_source_bundle_root(const uint8_t *header, size_t n,
+                                 uint8_t out[32]);
 
 /* Structural content check for a kind, given the first `n` header bytes and the
  * total file size. Pure — this is what makes a corrupt/truncated file fail

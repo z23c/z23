@@ -108,7 +108,20 @@ bool net_name_is_onion(const char *name)
     int port = 0;
     split_host_port(name, host, sizeof(host), &port);
     size_t len = strlen(host);
-    return len > 6 && strcmp(host + len - 6, ".onion") == 0;
+    if (len > 0 && host[len - 1] == '.')
+        len--;
+    static const char suffix[] = ".onion";
+    if (len <= sizeof(suffix) - 1u)
+        return false;
+    const char *tail = host + len - (sizeof(suffix) - 1u);
+    for (size_t i = 0; i < sizeof(suffix) - 1u; i++) {
+        char c = tail[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c + ('a' - 'A'));
+        if (c != suffix[i])
+            return false;
+    }
+    return true;
 }
 
 bool lookup_onion(const char *name, struct net_service *result,

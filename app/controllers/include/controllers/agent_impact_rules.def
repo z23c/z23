@@ -123,7 +123,7 @@ AGENT_IMPACT_RULE("lib/net/src/download.c|lib/net/include/net/download.h|lib/tes
 AGENT_IMPACT_RULE("lib/net/src/tor_integration.c|lib/net/src/tor_config_log.c|lib/net/src/tor_fetch.c|lib/net/src/tor_request_state.c|lib/net/src/onion_identity.c|lib/net/src/onion_service.c|lib/net/include/net/tor_integration.h|lib/net/include/net/tor_request_state.h|config/src/boot_frontend_services.c|config/include/config/boot_internal.h|lib/test/src/test_tor.c|lib/test/src/test_onion_persistence.c|tools/scripts/install_z23.sh", "test_tor onion_persistence make_lint_gates")
 /* Raw dynhost-stream onion P2P dialer (no SOCKS): the socketpair bridge,
  * its public header, and its fail-closed unit tests. */
-AGENT_IMPACT_RULE("lib/net/src/onion_stream.c|lib/net/src/onion_stream_telemetry.c|lib/net/include/net/onion_stream.h|lib/net/include/net/onion_stream_telemetry.h|lib/test/src/test_onion_stream.c|lib/test/src/test_onion_bridge.c", "onion_stream onion_bridge net test_tor connman_addnode_fallback make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/onion_stream.c|lib/net/src/onion_stream_telemetry.c|lib/net/include/net/onion_stream.h|lib/net/include/net/onion_stream_telemetry.h|lib/test/src/test_onion_stream.c|lib/test/src/test_onion_bridge.c", "onion_stream onion_bridge net test_tor connman_addnode_fallback rom_fetch_onion make_lint_gates")
 /* The relayed onion peer directory: its freshness rule decides whether a
  * learned endpoint is dialable at all, its port/height fields are what a
  * stranger with no contacts acts on, and its rejection path is the node
@@ -193,8 +193,18 @@ AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_handshake
 AGENT_IMPACT_RULE("lib/net/src/fast_sync*.c|lib/net/include/net/fast_sync*.h|lib/test/src/test_fast_sync_coins_export.c|lib/test/src/test_fast_sync_coins_artifact.c|lib/test/src/test_file_service_pow_gate.c", "fast_sync fast_sync_coins_export fast_sync_coins_artifact file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/puzzle.c|lib/net/include/net/puzzle.h|lib/test/src/test_puzzle.c", "puzzle net file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/onion_service.c|lib/net/include/net/onion_service.h|lib/net/src/onion_ratelimit.c|lib/net/include/net/onion_ratelimit.h", "net onion_bootstrap tor make_lint_gates")
-AGENT_IMPACT_RULE("lib/net/src/rom_seed.c|lib/net/src/rom_seed_classify.c|lib/net/src/rom_seed_throttle.c|lib/net/src/rom_seed_report.c|lib/net/src/rom_seed_internal.h|lib/net/include/net/rom_seed.h|lib/test/src/test_rom_seed.c|app/controllers/src/rom_seed_controller.c", "rom_seed rom_manifest file_controller make_lint_gates")
-AGENT_IMPACT_RULE("lib/net/src/rom_fetch.c|lib/net/src/rom_fetch_directory.c|lib/net/src/rom_fetch_status.c|lib/net/src/rom_fetch_internal.h|lib/net/include/net/rom_fetch.h|lib/test/src/test_rom_fetch.c|app/controllers/src/rom_fetch_controller.c", "rom_fetch rom_manifest rom_journal_resume file_controller make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/rom_fetch.c|lib/net/src/rom_fetch_directory.c|lib/net/src/rom_fetch_transport.c|lib/net/src/rom_fetch_transport.h|lib/net/src/rom_fetch_status.c|lib/net/src/rom_fetch_internal.h|lib/net/include/net/rom_fetch.h|lib/test/src/test_rom_fetch.c|lib/test/src/test_rom_fetch_onion.c|app/controllers/src/rom_fetch_controller.c", "rom_fetch rom_fetch_onion rom_manifest rom_journal_resume file_controller source_bundle_fetch make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/rom_seed.c|lib/net/src/rom_seed_classify.c|lib/net/src/rom_seed_throttle.c|lib/net/src/rom_seed_report.c|lib/net/src/rom_seed_internal.h|lib/net/include/net/rom_seed.h|lib/test/src/test_rom_seed.c|app/controllers/src/rom_seed_controller.c", "rom_seed rom_manifest file_controller source_bundle_fetch source_bundle_publish make_lint_gates")
+/* Identity-free source retrieval rides the ROM artifact transport, so its own
+ * group AND the ROM groups are the honest impact set: a change to either half
+ * can break the other. rom_seed/rom_fetch above also name source_bundle_fetch
+ * for the same reason. */
+AGENT_IMPACT_RULE("app/services/src/source_bundle_fetch.c|app/services/include/services/source_bundle_fetch.h|lib/test/src/test_source_bundle_fetch.c|tools/command/native_zcode_source_bundle_command.c", "source_bundle_fetch rom_fetch rom_seed native_api_contract make_lint_gates")
+/* The serve side of the same loop. It shares the artifact registry with
+ * rom_seed and the leaf file with fetch, so both of those groups belong in its
+ * impact set: a registry or classification change is exactly what would turn a
+ * published bundle into one nobody can find. */
+AGENT_IMPACT_RULE("app/services/src/source_bundle_publish.c|app/services/include/services/source_bundle_publish.h|app/controllers/src/source_bundle_publish_rpc.c|app/controllers/src/file_market_controller.c|app/controllers/include/controllers/file_market_controller.h|lib/test/src/test_source_bundle_publish.c|tools/command/native_zcode_source_bundle_command.c", "source_bundle_publish source_bundle_fetch rom_seed file_controller native_api_contract make_lint_gates")
 
 AGENT_IMPACT_RULE("app/models/src/*.c|app/models/include/models/*.h|lib/test/src/test_models*.c", "models make_lint_gates")
 AGENT_IMPACT_RULE("app/models/src/database_migrate_features.c|app/models/include/models/database.h|lib/test/src/test_db_migration_idempotent.c|lib/test/src/test_schema_migration.c", "db_migration_idempotent schema_migration models make_lint_gates")
@@ -2386,7 +2396,21 @@ AGENT_IMPACT_RULE("lib/net/src/msgprocessor_snapshot_payload.c", "block_swarm_lo
  * rf_recv_exact(). The parent rule's rom_manifest, rom_journal_resume and
  * file_controller groups are left off -- they drive the manifest, journal and
  * controller layers above this seam and open no socket through it. */
-AGENT_IMPACT_RULE("lib/net/src/rom_fetch_transport.c|lib/net/src/rom_fetch_transport.h", "rom_fetch make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/rom_fetch_transport.c|lib/net/src/rom_fetch_transport.h", "rom_fetch rom_fetch_onion make_lint_gates")
+
+/* The Tor route of that same seam. rom_fetch_transport.c picks a transport
+ * from the address itself, so an edit there can silently send a .onion name
+ * to getaddrinfo (where it can never resolve) or a clearnet name into a
+ * circuit. test_rom_fetch_onion.c observes WHICH route each address took --
+ * the raw-stream backend records the exact onion host it was asked to dial,
+ * and the clearnet case asserts that backend was never opened while a real
+ * loopback listener accepted -- plus the fail-closed refusal of a malformed
+ * .onion and the separation of the clearnet and onion budgets. It reuses
+ * onion_stream.c's dial loop and its stage ledger, so onion_stream and
+ * onion_bridge ride along: a change to either moves what this group asserts.
+ * rom_fetch is on the list because the shared rf_connect() seam is the thing
+ * under test. */
+AGENT_IMPACT_RULE("lib/test/src/test_rom_fetch_onion.c", "rom_fetch_onion rom_fetch onion_stream onion_bridge make_lint_gates")
 
 /* The ROM seeding policy: enable/consensus gates, per-peer caps, upload
  * admission and its counters. test_rom_seed_policy.c calls fourteen of its

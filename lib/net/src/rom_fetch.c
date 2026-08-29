@@ -102,7 +102,9 @@ bool rom_fetch_manifest_sane(const struct rom_fetch_manifest *m)
 {
     if (!m)
         return false;
-    if (m->size_bytes < ROM_SEED_MIN_ARTIFACT_BYTES ||
+    /* Per-kind floor — a source bundle is legitimately under one SQLite page.
+     * `kind` is a peer claim: PLAUSIBILITY, never trust. */
+    if (m->size_bytes < rom_seed_kind_min_bytes(m->kind) ||
         m->size_bytes > ROM_SEED_MAX_ARTIFACT_BYTES)
         return false;
     /* The serve side chunks at exactly ROM_SEED_CHUNK_SIZE; a peer claiming
@@ -174,16 +176,14 @@ int rom_fetch_parse_directory(const char *json_body,
         m.size_bytes = (uint64_t)size;
         m.chunk_size = (uint32_t)csize;
         m.num_chunks = (uint32_t)chunks;
-        /* Optional "kind" token (untrusted, cosmetic — the digests are the
-         * trust anchor). Absent/unrecognized → ROM_ARTIFACT_UNKNOWN, the legacy
-         * back-compat shape the size-based picker still handles. */
+        /* "kind", "height" and "source_root" are OPTIONAL untrusted peer
+         * claims, outside manifest_sane's trust check on purpose: the first
+         * two steer the picker, source_root only lets a caller FIND a bundle
+         * before re-proving it. Detail is on struct rom_fetch_manifest. */
         m.kind = rom_seed_kind_from_name(json_get_str(json_get(e, "kind")));
-        /* Optional "height" (untrusted, download-cosmetic — NOT part of the
-         * manifest_sane trust check; see rom_fetch_manifest.height). Absent /
-         * negative -> 0, the legacy no-height default the size-based picker
-         * still handles. */
         int64_t height = json_get_int(json_get(e, "height"));
         m.height = height > 0 ? height : 0;
+        m.has_source_root = rf_parse_digest(e, "source_root", m.source_root);
         if (!rom_fetch_manifest_sane(&m))
             continue;
         m.used = true;
@@ -866,7 +866,10 @@ bool rom_fetch_download_parallel(const struct rom_fetch_peer *peers,
 static const uint8_t RF_ROM_MANIFEST_MAC_TAG[32] = { 'R', 'M', 'F' };
 
 /* RF_MANIFEST_IO_TIMEOUT_SEC lives in rom_fetch_internal.h — the directory
- * fetch (rom_fetch_directory.c) uses the same budget. */
+ * fetch (rom_fetch_directory.c) uses the same budget. Both reach it through
+ * rf_probe_io_timeout_ms(), which scales the window for the transport the
+ * address implies: a stalled reply over a Tor circuit must not be read as a
+ * legacy seeder just because circuits are slower than sockets. */
 
 bool rom_fetch_verify_chunk(const uint8_t *data, uint32_t len,
                             const uint8_t expected_chunk_sha3[32])
@@ -938,8 +941,9 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
 
     /* Shorten the recv window: a legacy (RMF-unaware) seeder never replies, so
      * a fast timeout is the fall-back signal rather than a 120 s stall. */
+    const int64_t rmf_deadline_ms = platform_time_monotonic_ms() + rf_probe_io_timeout_ms(peer_addr);
     (void)platform_socket_set_receive_timeout(
-        fd, RF_MANIFEST_IO_TIMEOUT_SEC * 1000);
+        fd, rf_probe_io_timeout_ms(peer_addr));
 
     struct fs_session s;
     fs_session_init(&s, fd);
@@ -965,7 +969,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
 
     /* Reply is size/blob/MAC; FS_DONE parses as an invalid size and falls back. */
     uint8_t hdr[4];
-    if (!rf_recv_exact(fd, hdr, 4)) {
+    if (!rf_recv_exact_until(fd, hdr, 4, rmf_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: no reply from %s:%u (legacy seeder?) — "
                  "falling back", peer_addr, (unsigned)port);
@@ -984,14 +988,14 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     }
 
     uint8_t blob[ROM_SEED_MANIFEST_BLOB_MAX];
-    if (!rf_recv_exact(fd, blob, size)) {
+    if (!rf_recv_exact_until(fd, blob, size, rmf_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: blob read failed from %s:%u — falling "
                  "back", peer_addr, (unsigned)port);
         return false;
     }
     uint8_t mac_wire[32];
-    if (!rf_recv_exact(fd, mac_wire, 32)) {
+    if (!rf_recv_exact_until(fd, mac_wire, 32, rmf_deadline_ms)) {
         rf_session_close(&s, fd);
         LOG_INFO(RF_SUBSYS, "manifest: MAC read failed from %s:%u — falling "
                  "back", peer_addr, (unsigned)port);
