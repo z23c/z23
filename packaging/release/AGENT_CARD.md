@@ -45,7 +45,7 @@ guessing a command's arguments.
 | `z23 core wallet status` | Balance, key counts, whether the wallet is unlocked |
 | `z23 vault list` | Everything this node owns, one row per asset class |
 | `z23 ops health` | Bounded health check for scripted polling |
-| `z23 zcode package verify --input='{"root":"<hex>"}'` | Whether a package's claimed bytes match a quorum of independent verifiers |
+| `z23 zcode package verify --datadir=$HOME/.zclassic-c23 --input='{"root":"<hex>"}'` | Whether a package's claimed bytes match a quorum of independent verifiers |
 
 Every response is a JSON object (`"schema":"zcl.result.v1"` for an executed
 leaf, `"schema":"zcl.command_menu.v1"` for a branch). Add `--view=summary` or
