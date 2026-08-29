@@ -1669,7 +1669,10 @@ presentation-portability: presentation-demo
 # Defined BEFORE the catalog include: the catalog assigns its per-program
 # variables with :=, so anything it references must already hold a value.
 ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
-ZCL_WINDOWS_ACCEPTANCE_AR ?= x86_64-w64-mingw32-ar
+ZCL_WINDOWS_CROSS_AR := $(shell \
+	command -v x86_64-w64-mingw32-ar 2>/dev/null)
+ZCL_WINDOWS_ACCEPTANCE_AR ?= $(if \
+	$(ZCL_WINDOWS_CROSS_AR),x86_64-w64-mingw32-ar,ar)
 ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 
 # An acceptance program that reaches real sqlite3 needs a mingw archive, and
@@ -1718,7 +1721,10 @@ windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
 windows-acceptance: windows-acceptance-compile
 
 ifeq ($(ZCL_HOST_WINDOWS),1)
+windows-acceptance: windows-headless-run-selftest
+
 	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		"$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
@@ -1731,6 +1737,7 @@ else
 		exit 2; \
 	}; \
 	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		WINEDEBUG=-all wine "$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
@@ -1738,6 +1745,16 @@ else
 	done; \
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 endif
+
+.PHONY: windows-service-install windows-service-status windows-service-remove
+windows-service-install: z23
+	@packaging/windows/install-service.sh install
+
+windows-service-status:
+	@packaging/windows/install-service.sh status
+
+windows-service-remove:
+	@packaging/windows/install-service.sh remove
 
 # ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
 # `make <app>` opens a real window on this host and prints the timestamp it
