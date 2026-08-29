@@ -98,7 +98,7 @@ latest_failure_log() {
            [ "$log_mtime" -lt "$cutoff_mtime" ]; then
             continue
         fi
-        if rg -q '(^|[.][.][.] )FAIL$|SOME TESTS FAILED|Failed groups:' "$f" 2>/dev/null; then
+        if grep -qaE '(^|[.][.][.] )FAIL$|SOME TESTS FAILED|Failed groups:' "$f" 2>/dev/null; then
             printf '%s\n' "$f"
             return 0
         fi
@@ -110,7 +110,7 @@ EOF
 failure_summary() {
     local log="$1"
     [ -n "$log" ] || return 0
-    rg '(^|[.][.][.] )FAIL$|SOME TESTS FAILED|Failed groups:' "$log" 2>/dev/null |
+    grep -aE '(^|[.][.][.] )FAIL$|SOME TESTS FAILED|Failed groups:' "$log" 2>/dev/null |
         head -12 |
         tr '\n' '; ' |
         sed 's/[; ][; ]*$//'

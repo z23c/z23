@@ -598,7 +598,7 @@ MKT_PGID_A="$(mkt_spawn "$MKT_DD_A" "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" "127.0
 mkt_wait_rpc "$MKT_DD_A" "$A_RPC" "$MKT_PGID_A" || mkt_die "seller A RPC warmup failed"
 MKT_PGID_B="$(mkt_spawn "$MKT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
 mkt_wait_rpc "$MKT_DD_B" "$B_RPC" "$MKT_PGID_B" || mkt_die "buyer B RPC warmup failed"
-! rg -q "unrecognized flag" "$MKT_DD_A/node.log" "$MKT_DD_B/node.log" ||
+! grep -qaF "unrecognized flag" "$MKT_DD_A/node.log" "$MKT_DD_B/node.log" ||
     mkt_die "a boot flag was not recognized"
 
 # ── Phase 0: both nodes bootstrap Tor to the public network ──────────
