@@ -10,6 +10,8 @@
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
 #include "util/safe_alloc.h"
+#include "net/rom_fetch.h"
+#include "services/source_bundle_fetch.h"
 #include "vcs/source_bundle.h"
 #include "vcs/source_package_checkout.h"
 #include "vcs/package_store.h"
@@ -381,6 +383,156 @@ void zcl_native_handle_zcode_source_bundle_checkout(
     zsb_render(&reply->data, root, &metrics);
     (void)json_push_kv_bool(&reply->data, "checked_out", true);
     (void)json_push_kv_str(&reply->data, "destination", destination_real);
+}
+
+/* ── Fetch: the same bundle, arriving over the wire ──────────────────
+ *
+ * Everything below the parse is the identity-free path this leaf exists for:
+ * the ONLY input that decides acceptance is `source_root`, and it is the
+ * caller's own. See app/services/src/source_bundle_fetch.c for the trust model
+ * and the bound on a hostile peer. This handler contributes exactly two things
+ * the service deliberately does not do: it parses the operator's peer list, and
+ * it commits the verified bytes — with the SAME O_EXCL/O_NOFOLLOW exclusive
+ * write `create` uses, so a fetch can no more overwrite an existing file or
+ * follow a symlink than a create can. */
+
+/* Split "host:port" (or "[v6]:port") into a rom_fetch_peer. Rejects an empty
+ * host, an over-length host, a missing/zero/out-of-range port, and anything
+ * with no ':' at all — a peer entry is never guessed at, because guessing a
+ * port is how a fetcher ends up hardcoding one. Real deployments do NOT agree
+ * on 18034; the port is per-node and must be stated. */
+static bool zsb_parse_peer(const char *text, struct rom_fetch_peer *out)
+{
+    if (!text || !out) return false;
+    const char *colon = strrchr(text, ':');
+    if (!colon || colon == text || !colon[1]) return false;
+    size_t host_len = (size_t)(colon - text);
+    const char *host = text;
+    if (host_len >= 2 && host[0] == '[' && host[host_len - 1] == ']') {
+        host++;
+        host_len -= 2;
+    }
+    if (host_len == 0 || host_len >= sizeof(out->addr)) return false;
+    long port = 0;
+    for (const char *p = colon + 1; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        port = port * 10 + (*p - '0');
+        if (port > 65535) return false;
+    }
+    if (port <= 0) return false;
+    memset(out, 0, sizeof(*out));
+    memcpy(out->addr, host, host_len);
+    out->addr[host_len] = '\0';
+    out->port = (uint16_t)port;
+    return true;
+}
+
+/* Parse the required "peers" value: a comma-separated list of "host:port".
+ * A STRING rather than a JSON array because the command registry types every
+ * unlisted input key as a string, so an array shape is unreachable from the
+ * CLI — and a leaf whose only documented invocation is refused at normalize is
+ * a leaf nobody can run.
+ *
+ * EVERY entry must parse. A list that silently dropped its malformed half
+ * would let one typo look exactly like an unreachable swarm, which is the
+ * confusion this whole path exists to remove. Returns the count, or 0 for any
+ * refusal. */
+static size_t zsb_parse_peers(const struct json_value *input,
+                              struct rom_fetch_peer *out, size_t max)
+{
+    const char *csv = zsb_str(input, "peers");
+    if (!csv || !csv[0]) return 0;
+    size_t n = 0;
+    while (*csv) {
+        const char *comma = strchr(csv, ',');
+        size_t len = comma ? (size_t)(comma - csv) : strlen(csv);
+        char entry[160];
+        if (len == 0 || len >= sizeof(entry) || n >= max) return 0;
+        memcpy(entry, csv, len);
+        entry[len] = '\0';
+        if (!zsb_parse_peer(entry, &out[n])) return 0;
+        n++;
+        csv = comma ? comma + 1 : csv + len;
+    }
+    return n;
+}
+
+/* The staging directory is the output's own parent — deliberately not a
+ * separate argument. It keeps the leaf's shape at (source_root, output, peers),
+ * and it means the transient .part/.journal files live under the same explicit
+ * scratch path the operator already named for the result. */
+static bool zsb_parent_dir(const char *path, char *out, size_t out_size)
+{
+    const char *slash = strrchr(path, '/');
+#if defined(_WIN32)
+    const char *back = strrchr(path, '\\');
+    if (back && (!slash || back > slash)) slash = back;
+#endif
+    if (!slash || slash == path) return false;
+    size_t len = (size_t)(slash - path);
+    if (len == 0 || len >= out_size) return false;
+    memcpy(out, path, len);
+    out[len] = '\0';
+    return true;
+}
+
+void zcl_native_handle_zcode_source_bundle_fetch(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    const char *output = zsb_str(request->input, "output");
+    struct rom_fetch_peer peers[SOURCE_BUNDLE_FETCH_MAX_PEERS];
+    char staging[ZSB_PATH_MAX];
+    uint8_t root[32];
+    size_t npeers = zsb_parse_peers(request->input, peers,
+                                    SOURCE_BUNDLE_FETCH_MAX_PEERS);
+    if (!output || !zsb_root(request->input, root) || npeers == 0 ||
+        !zcl_native_zcode_workspace_is_explicit_scratch(output) ||
+        !zsb_parent_dir(output, staging, sizeof(staging))) {
+        zsb_fail(reply, "BAD_SOURCE_BUNDLE_FETCH_INPUT", "validate",
+                 "source_root, a non-empty comma-separated peers list of host:port entries, and an explicit scratch output path inside an existing directory are required");
+        return;
+    }
+
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    struct source_bundle_fetch_metrics metrics;
+    enum source_bundle_fetch_result result = source_bundle_fetch(
+        peers, npeers, root, staging, &wire, &wire_len, &metrics);
+    if (result != SOURCE_BUNDLE_FETCH_OK) {
+        /* No output file was ever opened — the fetch service is not told the
+         * output path at all, so "materialized: 0" here is structural.
+         * A candidate that ARRIVED and was refused reports the content
+         * check's own reason ("tree-root-mismatch" for a substitution,
+         * "bundle-limit" for a truncation, "compression-codec" for garbage);
+         * collapsing those into one message would hide which attack ran. */
+        zsb_fail(reply, "SOURCE_BUNDLE_FETCH_REFUSED", "fetch",
+                 result == SOURCE_BUNDLE_FETCH_ERR_ROOT
+                     ? vcs_source_bundle_result_string(metrics.last_refusal)
+                     : source_bundle_fetch_result_string(result));
+        return;
+    }
+    if (!zsb_write_exclusive(output, wire, wire_len)) {
+        free(wire);
+        zsb_fail(reply, "SOURCE_BUNDLE_OUTPUT_REFUSED", "fetch",
+                 "output must be a new no-follow file in an existing scratch directory");
+        return;
+    }
+    free(wire);
+    zsb_render(&reply->data, root, &metrics.bundle);
+    (void)json_push_kv_str(&reply->data, "output", output);
+    (void)json_push_kv_int(&reply->data, "wire_bytes", (int64_t)wire_len);
+    (void)json_push_kv_int(&reply->data, "peers_asked", metrics.peers_asked);
+    (void)json_push_kv_int(&reply->data, "peers_offering",
+                           metrics.peers_offering);
+    (void)json_push_kv_int(&reply->data, "candidates_tried",
+                           metrics.candidates_tried);
+    (void)json_push_kv_int(&reply->data, "candidates_refused",
+                           metrics.candidates_refused);
+    (void)json_push_kv_bool(&reply->data, "fetched", true);
+    (void)json_push_kv_bool(&reply->data, "verified", true);
+    (void)json_push_kv_bool(&reply->data, "signer_required", false);
+    (void)json_push_kv_bool(&reply->data, "accepted", false);
 }
 
 void zcl_native_handle_zcode_source_package_checkout(

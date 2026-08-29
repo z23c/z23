@@ -76,6 +76,15 @@ struct rom_fetch_manifest {
      * prefer the NEWEST bundle across mixed-height seeds. The digests remain the
      * sole content anchor and CHECKPOINT_ROM binds the installed state. */
     int64_t height;
+    /* ROM_ARTIFACT_SOURCE_BUNDLE entries only: the ZVCS tree root the seeder
+     * SAYS this bundle carries (directory.json "source_root"). Like `kind` and
+     * `height` this is an untrusted peer claim and is NOT checked by
+     * rom_fetch_manifest_sane. It exists so a caller holding only a 64-hex
+     * source root can pick WHICH artifact to ask for; the caller then proves
+     * the delivered bytes against its OWN copy of that root. A peer that lies
+     * here buys one wasted download and nothing else. */
+    uint8_t source_root[32];
+    bool has_source_root;
 };
 
 /* Progress callback for rom_fetch_download: called after each chunk lands
