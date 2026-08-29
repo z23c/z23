@@ -794,10 +794,12 @@ void boot_mesh_status_wire(struct boot_svc_ctx *svc)
     memset(g_pending, 0, sizeof(g_pending));
     memset(g_seen_requests, 0, sizeof(g_seen_requests));
     zcl_mutex_unlock(&g_mesh_lock);
+    boot_mesh_status_refresh_start(svc);
 }
 
 void boot_mesh_status_shutdown(void)
 {
+    boot_mesh_status_refresh_shutdown();
     mesh_lock();
     g_mesh_svc = NULL;
     g_mesh_generation++;

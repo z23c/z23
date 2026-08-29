@@ -5,6 +5,7 @@
  * honest state machine and, once terminal, the verified receipt view. */
 
 #include "config/boot_mesh_status.h"
+#include "config/db_service.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -17,11 +18,11 @@
 #include "session/mesh_status_proto.h"
 #include "util/log_macros.h"
 
-#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
 static struct node_db *g_mesh_status_ndb;
+static struct db_service *g_mesh_status_dbsvc;
 
 #define MESH_MACHINES_VIEW_MAX 16u
 
@@ -192,29 +193,6 @@ static void receipt_view_json(struct json_value *result,
     }
 }
 
-static bool receipt_persist(const struct mesh_status_receipt_v1 *receipt)
-{
-    if (!g_mesh_status_ndb || !receipt ||
-        receipt->observed_unix > INT64_MAX ||
-        receipt->expires_unix > INT64_MAX)
-        return false;
-    struct db_mesh_machine_observation row;
-    memset(&row, 0, sizeof(row));
-    zcl_hex_encode(receipt->pairing_id, 32, row.pairing_id);
-    if (mesh_status_receipt_v1_encode(
-            receipt, row.receipt_wire, sizeof(row.receipt_wire),
-            &row.receipt_len) != MESH_STATUS_PROTO_OK ||
-        mesh_status_receipt_v1_root(receipt, row.receipt_root) !=
-            MESH_STATUS_PROTO_OK)
-        return false;
-    row.status = receipt->status;
-    row.observed_unix = (int64_t)receipt->observed_unix;
-    row.expires_unix = (int64_t)receipt->expires_unix;
-    row.received_unix = (int64_t)platform_time_wall_time_t();
-    return row.received_unix > 0 &&
-           db_mesh_machine_observation_save(g_mesh_status_ndb, &row);
-}
-
 static const char *mesh_pairing_state(const struct db_mesh_pairing *pairing,
                                       int64_t now)
 {
@@ -381,7 +359,7 @@ static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
         return true;
     case MESH_STATUS_POLL_OK:
     case MESH_STATUS_POLL_REFUSED:
-        if (!receipt_persist(&receipt)) {
+        if (!boot_mesh_status_receipt_persist(g_mesh_status_dbsvc, &receipt)) {
             rpc_error(result, "OBSERVATION_PERSIST_FAILED",
                       "the verified receipt could not be stored durably");
             return true;
@@ -394,13 +372,16 @@ static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
 }
 
 void boot_mesh_status_register_rpc(struct rpc_table *table,
-                                   struct node_db *ndb)
+                                   struct node_db *ndb,
+                                   struct db_service *dbsvc)
 {
-    if (!table || !ndb) {
-        LOG_ERROR("net.mesh_status", "RPC registration requires node_db");
+    if (!table || !ndb || !dbsvc) {
+        LOG_ERROR("net.mesh_status",
+                  "RPC registration requires node_db and db_service");
         return;
     }
     g_mesh_status_ndb = ndb;
+    g_mesh_status_dbsvc = dbsvc;
     const struct rpc_command commands[] = {
         {"mesh", "mesh_status_request", rpc_mesh_status_request, true},
         {"mesh", "mesh_status_poll", rpc_mesh_status_poll, true},
