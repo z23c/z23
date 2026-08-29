@@ -307,11 +307,9 @@ bool boot_mesh_machines_refresh(struct node_db *ndb, struct db_service *dbsvc,
             probe->receipt_status = receipt.status;
             if (!boot_mesh_status_receipt_persist(dbsvc, &receipt)) {
                 LOG_ERROR(MESH_MACHINES_TAG,
-                          "refresh: verified receipt for pairing %.8s could "
-                          "not be persisted on the db_service lane; the live "
-                          "verdict stands but the durable evidence was not "
-                          "updated",
-                          receipt.pairing_id);
+                          "refresh: verified receipt could not be persisted "
+                          "on the db_service lane; the live verdict stands "
+                          "but the durable evidence was not updated");
             }
             if (polled == MESH_STATUS_POLL_OK) {
                 size_t row = 0;

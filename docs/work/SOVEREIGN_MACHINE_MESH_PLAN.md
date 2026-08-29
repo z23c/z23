@@ -825,7 +825,6 @@ peers, never production wallet state.
   evidence. Older or same-time equivocal receipts cannot replace the durable
   row; exact replay is idempotent. Fixture acceptance proves restart retention,
   stale/unknown separation, redaction, migration idempotence, and strict MinGW
-<<<<<<< HEAD
   C23 syntax. Automatic refresh and independent-host evidence remain open.
 - 2026-08-29: queue item 5 landed the fleet view. `ops mesh machines` (RPC
   method `mesh_machines`) projects every durable pairing record — active,
