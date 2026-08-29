@@ -34,6 +34,7 @@
 #include "kernel/command_registry.h"
 #include "net/file_service.h"
 #include "net/rom_fetch.h"
+#include "net/rom_journal.h"
 #include "net/rom_peer_scoring.h"
 #include "net/rom_seed.h"
 #include "platform/time_compat.h"
@@ -826,6 +827,146 @@ static int test_leaf_end_to_end(void)
     return failures;
 }
 
+/* ── (h) A PRE-PLANTED resume state cannot substitute the answer ─────── */
+
+/* ADVERSARIAL. Every case above attacks the WIRE. This one attacks the
+ * staging directory, which is the other way bytes can reach the caller: the
+ * download layer keeps a durable resume journal, and a set journal bit is
+ * defined to mean "this chunk is already on disk AND digest-verified", so a
+ * `.part` plus a journal that marks every chunk done is a claim that the
+ * download is already finished. The fetch leaf hands the download layer the
+ * OUTPUT'S OWN PARENT DIRECTORY as staging
+ * (tools/command/native_zcode_source_bundle_command.c, zsb_parent_dir), so
+ * anything that can write to the operator's scratch directory can plant that
+ * claim — and the staging leaf name is derived from the artifact's chunk_root,
+ * which is public in every peer's directory listing.
+ *
+ * So: plant a WELL-FORMED impostor bundle (one that verifies perfectly under
+ * its own root, relabelled to the honest root — the same substitution case (b)
+ * builds) under all three staging names, padded to the honest artifact's exact
+ * byte length so nothing but a content digest can tell them apart, with a
+ * journal that says every chunk is done and verified. Then ask for the honest
+ * root.
+ *
+ * The requirement is not "the plant is detected" but the same one the whole
+ * module rests on: the caller gets bytes that rederive to the root it asked
+ * for, or it gets nothing. */
+static void sbft_hex8(const uint8_t v[8], char out[17])
+{
+    static const char d[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) {
+        out[i * 2] = d[v[i] >> 4];
+        out[i * 2 + 1] = d[v[i] & 0x0F];
+    }
+    out[16] = '\0';
+}
+
+static int test_planted_resume_state_refused(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: a staging directory pre-planted with a "
+         "well-formed impostor and a journal claiming the download is already "
+         "complete still yields only bytes that rederive to the asked-for "
+         "root") {
+        sbft_open_caps();
+        char hroot[] = "/tmp/zcl_sbfetch_plant_honest_XXXXXX";
+        char eroot[] = "/tmp/zcl_sbfetch_plant_evil_XXXXXX";
+        char sroot[] = "/tmp/zcl_sbfetch_plant_srv_XXXXXX";
+        char croot[] = "/tmp/zcl_sbfetch_plant_cli_XXXXXX";
+        char *hdir = mkdtemp(hroot), *edir = mkdtemp(eroot),
+             *sdir = mkdtemp(sroot), *cdir = mkdtemp(croot);
+        ASSERT(hdir && edir && sdir && cdir);
+        ASSERT(sbft_make_tree(hdir, 'A'));
+        ASSERT(sbft_make_tree(edir, 'B'));
+
+        uint8_t honest_root[32], evil_root[32];
+        uint8_t *honest = NULL, *evil = NULL;
+        size_t honest_len = 0, evil_len = 0;
+        ASSERT(sbft_bundle(hdir, honest_root, &honest, &honest_len));
+        ASSERT(sbft_bundle(edir, evil_root, &evil, &evil_len));
+        ASSERT(memcmp(honest_root, evil_root, 32) != 0);
+
+        /* Well-formed under its OWN root before it is relabelled — so what
+         * follows is about the content check, never about a malformed file. */
+        struct vcs_source_bundle_metrics vm;
+        ASSERT(vcs_source_bundle_verify(evil, evil_len, evil_root, &vm) ==
+               VCS_SOURCE_BUNDLE_OK);
+        memcpy(evil + ROM_SEED_SOURCE_BUNDLE_ROOT_OFFSET, honest_root, 32);
+
+        /* The honest seeder, and the artifact identity a planter can read
+         * straight out of its public directory listing. */
+        ASSERT(sbft_write(sdir, "tree.zvsb", honest, honest_len));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "tree.zvsb", NULL, &art) == ROM_REG_OK);
+        ASSERT(art.num_chunks >= 1);
+        uint16_t port = sbft_serve(sdir);
+        ASSERT(port != 0);
+
+        /* The staging leaf the fetcher will use: derived from chunk_root,
+         * exactly as app/services/src/source_bundle_fetch.c derives it. */
+        char stem[17];
+        sbft_hex8(art.chunk_root, stem);
+        char name[64], part[1200], jrnl[1300];
+        snprintf(name, sizeof(name), "zvsb-stage-%s.stage", stem);
+        snprintf(part, sizeof(part), "%s%s", name, ROM_FETCH_PART_SUFFIX);
+        snprintf(jrnl, sizeof(jrnl), "%s.journal", part);
+
+        /* Padded to the honest artifact's EXACT length, so size alone can
+         * never be what rejects it. */
+        uint8_t *plant = calloc(1, honest_len);
+        ASSERT(plant != NULL);
+        memcpy(plant, evil, evil_len < honest_len ? evil_len : honest_len);
+        ASSERT(memcmp(plant, honest, honest_len) != 0);
+        ASSERT(sbft_write(cdir, name, plant, honest_len));
+        ASSERT(sbft_write(cdir, part, plant, honest_len));
+
+        /* A journal that claims every chunk is durable AND digest-verified —
+         * the strongest lie the resume format can tell. */
+        char jpath[1400];
+        snprintf(jpath, sizeof(jpath), "%s/%s", cdir, jrnl);
+        struct rom_journal *j = rom_journal_open(jpath, art.chunk_root,
+                                                 art.whole_sha3,
+                                                 art.chunk_size,
+                                                 art.num_chunks);
+        ASSERT(j != NULL);
+        for (uint32_t i = 0; i < art.num_chunks; i++)
+            ASSERT(rom_journal_mark(j, i));
+        ASSERT(rom_journal_count_done(j) == art.num_chunks);
+        rom_journal_close(j);
+
+        struct rom_fetch_peer peer;
+        sbft_peer(&peer, port);
+        uint8_t *got = NULL;
+        size_t got_len = 0;
+        struct source_bundle_fetch_metrics m;
+        ASSERT(source_bundle_fetch(&peer, 1, honest_root, cdir, &got, &got_len,
+                                   &m) == SOURCE_BUNDLE_FETCH_OK);
+
+        /* The planted bytes are NOT what came back; the honest ones are, and
+         * they re-prove against the caller's own root. */
+        ASSERT(got != NULL && got_len == honest_len);
+        ASSERT(memcmp(got, plant, honest_len) != 0);
+        ASSERT(memcmp(got, honest, honest_len) == 0);
+        ASSERT(vcs_source_bundle_verify(got, got_len, honest_root, &vm) ==
+               VCS_SOURCE_BUNDLE_OK);
+        /* And the plant is gone rather than left to poison the next call. */
+        ASSERT(sbft_dir_empty(cdir));
+
+        free(plant);
+        free(got);
+        free(honest);
+        free(evil);
+        fs_server_stop();
+        test_cleanup_tmpdir(cdir);
+        test_cleanup_tmpdir(sdir);
+        test_cleanup_tmpdir(edir);
+        test_cleanup_tmpdir(hdir);
+        sbft_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_source_bundle_fetch(void)
 {
     int failures = 0;
@@ -837,5 +978,6 @@ int test_source_bundle_fetch(void)
     failures += test_stalled_peer_failover();
     failures += test_no_peer_named_refusal();
     failures += test_leaf_end_to_end();
+    failures += test_planted_resume_state_refused();
     return failures;
 }
