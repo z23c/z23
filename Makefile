@@ -4167,7 +4167,8 @@ LINT_FAST_GATES := \
     check-framework-shape \
     check-supervisor-registration \
     check-vendor-provenance \
-    check-windows-platform-seam
+    check-windows-platform-seam \
+    check-pipefail-status-pipe
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)

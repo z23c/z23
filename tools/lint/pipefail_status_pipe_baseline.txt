@@ -7,8 +7,12 @@
 #
 # Fix a row: use str_contains/str_lacks from tools/scripts/sh_str.sh, or
 # extract the match into a variable (drop -q, so grep drains stdin) and
-# test the STRING. Then lower or delete the number here. Adding a row
-# for a NEW file is not a fix — a file with no row may carry ZERO.
+# test the STRING. For a REGEX needle, where str_contains (fixed-needle
+# only) does not apply, feed grep a here-string instead:
+#     grep -qE "$RE" <<<"$haystack"
+# which is not a pipeline, so nothing can invert. Then lower or delete the
+# number here. Adding a row for a NEW file is not a fix — a file with no
+# row may carry ZERO.
 #
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_pipefail_status_pipe.sh
 deploy/migrate-role-names-selftest.sh 3
@@ -50,7 +54,6 @@ tools/scripts/network_disruption_recovery_stopwatch.sh 3
 tools/scripts/node_slo_probe.sh 5
 tools/scripts/promotion_receipt.sh 8
 tools/scripts/proof_server_pin.sh 5
-tools/scripts/pr_security_scan.sh 4
 tools/scripts/slo_hold_judge.sh 13
 tools/scripts/soak_evidence.sh 4
 tools/scripts/stopwatch_skip_class.sh 1
