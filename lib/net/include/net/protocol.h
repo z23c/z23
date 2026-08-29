@@ -29,6 +29,13 @@ enum {
      * strip). In the zcl23-reserved high range, same family as NODE_BOOTSTRAP;
      * ignored by zclassicd. */
     NODE_NOISE_TRANSPORT = (1 << 25),
+    /* NOTE — file-service (bundle-seeder) capability is NOT a service bit and
+     * must not become one. It is advertised by the "zfileaddr" P2P message
+     * (sent in lib/net/src/msg_version.c after a ZCL23 handshake, handled by
+     * handle_zfileaddr in lib/net/src/msgprocessor.c), because a service bit
+     * carries no PORT and seeders legitimately run on ports other than
+     * FS_PORT. Adding a bit here would be a second, weaker mechanism beside
+     * the one that already works. */
 };
 
 enum {

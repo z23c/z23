@@ -45,6 +45,7 @@ static const char *kind_name(enum rom_artifact_kind k)
     switch (k) {
     case ROM_ARTIFACT_CONSENSUS_BUNDLE: return "consensus_bundle";
     case ROM_ARTIFACT_HEADER_SEED:      return "header_seed";
+    case ROM_ARTIFACT_SOURCE_BUNDLE:    return "source_bundle";
     case ROM_ARTIFACT_UNKNOWN:
     default:                            return "unknown";
     }
@@ -133,15 +134,31 @@ size_t rom_seed_directory_json(char *buf, size_t max)
         HexStr(arts[i].chunk_root, 32, false, digest_hex, sizeof(digest_hex));
         char whole_hex[65];
         HexStr(arts[i].whole_sha3, 32, false, whole_hex, sizeof(whole_hex));
+        /* A source bundle additionally advertises the ZVCS tree root read out
+         * of its own header at registration. It is the INDEX a fetcher holding
+         * only a 64-hex root searches on; it grants nothing, because the
+         * fetcher re-derives that root from the delivered bytes before it
+         * accepts them. Omitted entirely for the ROM kinds so their entries
+         * stay byte-identical to what every existing peer already parses. */
+        char source_field[96];
+        source_field[0] = '\0';
+        if (arts[i].has_source_root) {
+            char source_hex[65];
+            HexStr(arts[i].source_root, 32, false, source_hex,
+                   sizeof(source_hex));
+            (void)snprintf(source_field, sizeof(source_field),
+                           ",\"source_root\":\"%s\"", source_hex);
+        }
         w = snprintf(buf + off, max - off,
                      "%s{\"kind\":\"%s\",\"digest\":\"%s\",\"whole_sha3\":\"%s\","
                      "\"size\":%llu,\"chunk_size\":%u,\"chunks\":%u,"
-                     "\"height\":%lld}",
+                     "\"height\":%lld%s}",
                      emitted ? "," : "", kind_name(arts[i].kind),
                      digest_hex, whole_hex,
                      (unsigned long long)arts[i].size_bytes,
                      arts[i].chunk_size, arts[i].num_chunks,
-                     (long long)rom_artifact_advertised_height(&arts[i]));
+                     (long long)rom_artifact_advertised_height(&arts[i]),
+                     source_field);
         if (w < 0 || (size_t)w >= max - off) {
             /* Overflow — close the array at what we have so the JSON stays
              * well-formed rather than truncating mid-object. */

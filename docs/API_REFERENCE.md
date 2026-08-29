@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 750 |
+| Registry entries (branches + leaves) | 752 |
 | Top-level roots | 12 |
 | Branches | 174 |
-| Leaves (dispatchable command paths) | 576 |
-| … `ready` (live handler in this build) | 520 |
+| Leaves (dispatchable command paths) | 578 |
+| … `ready` (live handler in this build) | 522 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 203 |
+| Leaves with `effect=mutate` | 205 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 115 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 243 | 58 | 185 |
+| `config/commands/zcode.def` | 245 | 58 | 187 |
 | `config/commands/zcode_science.def` | 25 | 7 | 18 |
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1078,6 +1078,8 @@ represented by its children's sections.
 | `zcode workspace source bundle verify` | ready | read / read / public · foreground/high | **`bundle`**, **`source_root`** | `zcl.zcode_source_bundle_verify.v1` | `z23 zcode workspace source bundle verify --input='{"bundle":"/tmp/source.zvsb","source_root":"<64hex>"}'` | Verify and rederive a compressed ZVCS source bundle |
 | `zcode workspace source bundle import` | ready | mutate / app-write / operator · foreground/high | **`bundle`**, **`source_root`**, **`workspace`** | `zcl.zcode_source_bundle_import.v1` | `z23 zcode workspace source bundle import --input='{"bundle":"/tmp/source.zvsb","source_root":"<64hex>","workspace":"/tmp/zvcs-scratch"}'` | Import a verified source bundle into the existing ZVCS CAS |
 | `zcode workspace source bundle checkout` | ready | mutate / app-write / operator · foreground/high | **`bundle`**, **`source_root`**, **`workspace`**, **`destination`** | `zcl.zcode_source_bundle_checkout.v1` | `z23 zcode workspace source bundle checkout --input='{"bundle":"/tmp/source.zvsb","source_root":"<64hex>","workspace":"/tmp/zvcs-scratch","destination":"/tmp/source-scratch"}'` | Reconstruct an exact source tree without Git |
+| `zcode workspace source bundle fetch` | ready | mutate / app-write / operator · foreground/high | **`source_root`**, **`output`**, **`peers`** | `zcl.zcode_source_bundle_fetch.v1` | `z23 zcode workspace source bundle fetch --input='{"source_root":"<64hex>","output":"/tmp/source.zvsb","peers":"203.0.113.7:18034,198.51.100.9:18035"}'` | Fetch a source bundle from peers by its content root |
+| `zcode workspace source bundle publish` | ready | mutate / app-write / operator · foreground/high | **`workspace`**, **`source_root`** | `zcl.zcode_source_bundle_publish.v1` | `z23 zcode workspace source bundle publish --input='{"workspace":"/src"}'` | Offer a workspace to peers by its content root |
 
 #### `zcode.workspace.source.package` — P2P source carrier reconstruction
 

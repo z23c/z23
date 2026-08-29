@@ -696,6 +696,16 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
      * path (P2P IBD / the operator bundle remain the fallback). Downloads bytes
      * only — it NEVER installs; the autodetect + CHECKPOINT_ROM authority is the
      * sole sovereignty gate and is not weakened here. */
+    /* Discovery, not trust: arm the peer-discovered seed source FIRST so the
+     * weld can reach a seeder with no operator flag at all. It reads back the
+     * file_services table — the file-service endpoints peers advertised to
+     * this node over the existing zfileaddr message and boot_save_file_service
+     * already persisted — and offers them at LOWEST precedence behind every
+     * operator-named seed, at each peer's OWN advertised port. An address is
+     * all it contributes; the content verification and the CHECKPOINT_ROM
+     * install authority below are untouched. Never fails boot; a first-ever
+     * boot with an empty table arms nothing and behaves exactly as before. */
+    boot_bundle_fetch_arm_peer_seeds(ndb);
     (void)boot_bundle_fetch_maybe(ctx->datadir, ctx);
 
     /* Import the swarm-downloaded header-chain seed (block_index.bin) into the

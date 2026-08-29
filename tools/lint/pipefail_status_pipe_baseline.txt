@@ -53,7 +53,6 @@ tools/scripts/mvp_scoreboard.sh 2
 tools/scripts/network_disruption_recovery_stopwatch.sh 3
 tools/scripts/node_slo_probe.sh 5
 tools/scripts/promotion_receipt.sh 8
-tools/scripts/proof_server_pin.sh 5
 tools/scripts/slo_hold_judge.sh 13
 tools/scripts/soak_evidence.sh 4
 tools/scripts/stopwatch_skip_class.sh 1

@@ -29,6 +29,13 @@ void register_market_moderation_rpc_commands(struct rpc_table *t);
  * gate, implemented in app/controllers/src/market_content_rpc.c.
  * register_market_rpc_commands calls this; callers do not. */
 void register_market_content_rpc_commands(struct rpc_table *t);
+/* Publishing one local source tree as a free artifact peers can fetch by its
+ * ZVCS tree root, implemented in
+ * app/controllers/src/source_bundle_publish_rpc.c. It shares this table
+ * because the artifact it registers is served by the same free tier
+ * romseed_register offers into; it touches no node_db.
+ * register_market_rpc_commands calls this; callers do not. */
+void register_source_bundle_rpc_commands(struct rpc_table *t);
 
 #ifdef ZCL_TESTING
 /* One-shot deterministic seam after plan-token validation and before the

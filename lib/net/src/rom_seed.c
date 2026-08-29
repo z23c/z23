@@ -179,7 +179,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
         return ROM_REG_ERR_NOT_FOUND;
     }
     uint64_t size_bytes = snapshot.size;
-    if (size_bytes < ROM_SEED_MIN_ARTIFACT_BYTES) {
+    if (size_bytes < rom_seed_kind_min_bytes(kind)) {
         platform_positioned_file_close(&file);
         LOG_WARN(ROM_SUBSYS, "register: '%s' too small (%llu bytes)",
                  filename, (unsigned long long)size_bytes);
@@ -249,12 +249,22 @@ enum rom_register_result rom_seed_register(const char *datadir,
         if (rc != ROM_REG_OK)
             break;
 
-        /* Content check on the first bytes of chunk 0. */
-        if (ci == 0 &&
-            !rom_seed_kind_content_ok(kind, buf, got < 16 ? got : 16,
-                                      size_bytes)) {
-            rc = ROM_REG_ERR_CORRUPT;
-            break;
+        /* Content check on the first bytes of chunk 0. The window is the
+         * largest any kind needs (the 68-byte ZVSB header); the SQLite check
+         * still reads only its own leading 16 and rejects a short window. */
+        if (ci == 0) {
+            size_t window = got < ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES
+                ? (size_t)got : (size_t)ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES;
+            if (!rom_seed_kind_content_ok(kind, buf, window, size_bytes)) {
+                rc = ROM_REG_ERR_CORRUPT;
+                break;
+            }
+            /* The source root is read from the SAME bytes the digests above
+             * are being folded over — never from a name, a sidecar, or a
+             * peer's claim. content_ok already proved it parses. */
+            if (kind == ROM_ARTIFACT_SOURCE_BUNDLE)
+                art.has_source_root =
+                    rom_seed_source_bundle_root(buf, window, art.source_root);
         }
 
         sha3_256_write(&whole_ctx, buf, got);
@@ -377,14 +387,63 @@ static int rom_seed_scan_bundles_subdir(const char *datadir)
             rom_seed_scan_capped(dirpath, seen);
             break;
         }
-        if (rom_seed_classify(e->d_name) == ROM_ARTIFACT_UNKNOWN)
-            continue;
+        enum rom_artifact_kind k = rom_seed_classify(e->d_name);
+        if (k == ROM_ARTIFACT_UNKNOWN || k == ROM_ARTIFACT_SOURCE_BUNDLE)
+            continue;   /* source bundles get the LAST pass — see below */
         if (rom_seed_count() >= (int)ROM_SEED_MAX_ARTIFACTS)
             break;
 
         char relname[ROM_SEED_NAME_MAX];
         int rn = snprintf(relname, sizeof(relname), "%s/%s",
                           ROM_SEED_BUNDLES_SUBDIR, e->d_name);
+        if (rn <= 0 || (size_t)rn >= sizeof(relname))
+            continue;
+
+        if (rom_seed_register(datadir, relname, NULL, NULL) == ROM_REG_OK)
+            registered++;
+    }
+    closedir(d);
+    return registered;
+}
+
+/* Register every ZVCS source bundle (".zvsb") in ONE directory: the datadir
+ * root when `subdir` is NULL, else <datadir>/<subdir> with the registered name
+ * carrying the "<subdir>/<name>" shape rom_seed_read_chunk resolves. Split
+ * from the walks above so it can run AFTER them — see the call site. Same
+ * entry cap, same registry cap, same "absent directory is normal" rule. */
+static int rom_seed_scan_source_bundles(const char *datadir,
+                                        const char *subdir)
+{
+    char dirpath[1024];
+    int dn = subdir
+        ? snprintf(dirpath, sizeof(dirpath), "%s/%s", datadir, subdir)
+        : snprintf(dirpath, sizeof(dirpath), "%s", datadir);
+    if (dn <= 0 || (size_t)dn >= sizeof(dirpath))
+        return 0;
+
+    DIR *d = opendir(dirpath);
+    if (!d)
+        return 0;
+
+    int registered = 0;
+    unsigned seen = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (atomic_load(&g_scan_cancel))
+            break;
+        if (++seen > ROM_SEED_SCAN_ENTRY_CAP) {
+            rom_seed_scan_capped(dirpath, seen);
+            break;
+        }
+        if (rom_seed_classify(e->d_name) != ROM_ARTIFACT_SOURCE_BUNDLE)
+            continue;
+        if (rom_seed_count() >= (int)ROM_SEED_MAX_ARTIFACTS)
+            break;
+
+        char relname[ROM_SEED_NAME_MAX];
+        int rn = subdir
+            ? snprintf(relname, sizeof(relname), "%s/%s", subdir, e->d_name)
+            : snprintf(relname, sizeof(relname), "%s", e->d_name);
         if (rn <= 0 || (size_t)rn >= sizeof(relname))
             continue;
 
@@ -440,8 +499,9 @@ int rom_seed_scan_datadir(const char *datadir)
             rom_seed_scan_capped(datadir, seen);
             break;
         }
-        if (rom_seed_classify(e->d_name) == ROM_ARTIFACT_UNKNOWN)
-            continue;
+        enum rom_artifact_kind k = rom_seed_classify(e->d_name);
+        if (k == ROM_ARTIFACT_UNKNOWN || k == ROM_ARTIFACT_SOURCE_BUNDLE)
+            continue;   /* source bundles get the LAST pass — see below */
         if (rom_seed_is_exact_name(e->d_name))
             continue;   /* already looked up by name above */
         if (rom_seed_count() >= (int)ROM_SEED_MAX_ARTIFACTS)
@@ -453,6 +513,17 @@ int rom_seed_scan_datadir(const char *datadir)
 
     /* One level into <datadir>/bundles/ — see rom_seed_scan_bundles_subdir. */
     registered += rom_seed_scan_bundles_subdir(datadir);
+
+    /* Source bundles LAST, in both locations. The registry is a fixed 8 slots
+     * and a datadir may hold arbitrarily many .zvsb files, so letting them
+     * compete with the consensus bundle and the header seed in readdir order
+     * would let a pile of source bundles silently stop a node seeding the
+     * artifacts a FRESH NODE cannot boot without. Ordering is the whole fix:
+     * the state artifacts take their slots first and whatever is left over
+     * carries source. */
+    registered += rom_seed_scan_source_bundles(datadir, NULL);
+    registered += rom_seed_scan_source_bundles(datadir,
+                                               ROM_SEED_BUNDLES_SUBDIR);
 
     if (registered > 0)
         LOG_INFO(ROM_SUBSYS, "scan: registered %d artifact(s) in '%s'",

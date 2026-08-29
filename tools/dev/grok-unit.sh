@@ -137,7 +137,14 @@ fi
         printf 'This unit was dispatched without a test group. Say plainly in your\n'
         printf 'report what is therefore unverified.\n\n'
     fi
-    printf 'Do not create commits or publish branches. Leave the work in the tree.\n\n'
+    # Worded to avoid the literal VCS verbs on purpose. check-no-unattended-publish
+    # scans scripts for them in ANY context, including inside a string, because a
+    # string is one eval away from being a command. It cannot tell a prohibition
+    # from an instruction, and it is right not to try: the day it starts parsing
+    # intent is the day something publishes past it. So say this in plain words.
+    printf 'Leave every change uncommitted in the working tree. Do not record\n'
+    printf 'them in version control and do not publish them to any remote --\n'
+    printf 'a person reads this diff before any of that happens.\n\n'
     printf 'FINALLY, ONLY AFTER ALL WORK IS COMPLETE, print one JSON object\n'
     printf 'matching this shape and nothing after it:\n'
     printf '{"files_touched":["path"],"group":"name","groups_ran":0,'

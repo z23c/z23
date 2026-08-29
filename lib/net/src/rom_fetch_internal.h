@@ -11,8 +11,12 @@
  *
  * The split is by responsibility:
  *   rom_fetch.c        — the wire drivers: whole-file and per-chunk-
- *                         verified download (serial + parallel), manifest
- *                         and directory-listing fetch, chunk fetch/verify.
+ *                         verified download (serial + parallel), the "RMF"
+ *                         per-chunk manifest fetch, chunk fetch/verify.
+ *   rom_fetch_directory.c — the "RLS" directory-listing fetch: DISCOVERY,
+ *                         i.e. the one call aimed at a peer whose only claim
+ *                         to be a seeder is that it said so, and therefore
+ *                         the one that owns the stall bound.
  *   rom_fetch_status.c — the fetch-status observability side: the g_status
  *                         record every driver above narrates progress into
  *                         (rf_note_begin/progress/end) and its two readers
@@ -30,6 +34,13 @@
 
 #include "net/rom_fetch.h"
 #include <stdint.h>
+
+/* A stalled/absent reply on a PRE-download probe (the "RMF" per-chunk manifest
+ * in rom_fetch.c, the "RLS" directory listing in rom_fetch_directory.c) must
+ * fall back FAST, not sit on the 120 s chunk-IO timeout: both probes precede
+ * the download and both may be aimed at a peer whose only claim to be a seeder
+ * is that it said so. ONE number, shared, so the two probes cannot drift. */
+#define RF_MANIFEST_IO_TIMEOUT_SEC 15
 
 /* ── rom_fetch_status.c: called from every download driver in rom_fetch.c
  * to narrate progress into the shared status record ──────────────────── */

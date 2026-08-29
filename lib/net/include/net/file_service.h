@@ -175,6 +175,10 @@ void fs_server_stop(void);
 bool fs_server_is_running(void);
 uint16_t fs_server_get_port(void);
 bool fs_server_refresh_manifest(void);
+/* NOTE: whether to ADVERTISE this node's file service to a peer is decided by
+ * fs_server_is_running() at the one "zfileaddr" send site
+ * (lib/net/src/msg_version.c). There is no separate advertisement predicate
+ * and no service bit — see the note in net/protocol.h. */
 
 /* Diagnostics dump (`ops state --subsystem=file_service`).
  * See CLAUDE.md "Adding state introspection". Reentrant-safe; initializes out. */
