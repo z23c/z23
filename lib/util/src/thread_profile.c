@@ -2,8 +2,8 @@
  *
  * In-process thread CPU profiler. See util/thread_profile.h.
  *
- * Two /proc/self/task snapshots `sample_ms` apart; per-thread user+system
- * CPU-tick delta over the window; name + current wchan; a one-line verdict.
+ * Two thread snapshots `sample_ms` apart (per-thread user+system CPU-tick
+ * delta over the window; name + current wchan; a one-line verdict).
  * Bounded, read-only, and robust to a thread that races the sample window.
  */
 
@@ -13,20 +13,17 @@
 #include "util/safe_alloc.h"
 #include "platform/time_compat.h"
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <tlhelp32.h>
-#else
 #include <ctype.h>
 #include <dirent.h>
-#include <unistd.h>
-#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <pthread.h>
+#endif
 
 struct tp_entry {
     long     tid;
@@ -35,77 +32,11 @@ struct tp_entry {
     bool     found2;
     char     name[32];    /* thread comm */
     char     wchan[48];   /* current kernel wait channel */
-#if defined(_WIN32)
-    HANDLE   handle;      /* retained so a recycled tid cannot change identity */
-#endif
 };
-
-#if defined(_WIN32)
-static uint64_t tp_filetime_ticks(const FILETIME *time)
-{
-    return ((uint64_t)time->dwHighDateTime << 32) | time->dwLowDateTime;
-}
-
-static bool tp_read_handle_ticks(HANDLE thread, uint64_t *out)
-{
-    FILETIME created, exited, kernel, user;
-    if (!thread || !GetThreadTimes(thread, &created, &exited, &kernel, &user))
-        return false;
-    *out = tp_filetime_ticks(&kernel) + tp_filetime_ticks(&user);
-    return true;
-}
-
-static int tp_collect_sample1(struct tp_entry *e, int cap)
-{
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return -1;
-    THREADENTRY32 entry = { .dwSize = sizeof(entry) };
-    DWORD process = GetCurrentProcessId();
-    int n = 0;
-    if (Thread32First(snapshot, &entry)) {
-        do {
-            if (entry.th32OwnerProcessID != process || n >= cap) continue;
-            HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION,
-                                       FALSE, entry.th32ThreadID);
-            uint64_t ticks = 0;
-            if (!thread || !tp_read_handle_ticks(thread, &ticks)) {
-                if (thread) CloseHandle(thread);
-                continue;
-            }
-            e[n].tid = (long)entry.th32ThreadID;
-            e[n].ticks1 = ticks;
-            e[n].ticks2 = ticks;
-            e[n].found2 = false;
-            e[n].handle = thread;
-            snprintf(e[n].name, sizeof(e[n].name), "tid-%lu",
-                     (unsigned long)entry.th32ThreadID);
-            snprintf(e[n].wchan, sizeof(e[n].wchan), "-");
-            n++;
-        } while (Thread32Next(snapshot, &entry));
-    }
-    CloseHandle(snapshot);
-    return n;
-}
-
-static void tp_collect_sample2(struct tp_entry *e, int n)
-{
-    for (int i = 0; i < n; i++) {
-        uint64_t ticks = 0;
-        e[i].found2 = tp_read_handle_ticks(e[i].handle, &ticks);
-        if (e[i].found2) e[i].ticks2 = ticks;
-    }
-}
-
-static void tp_entries_close(struct tp_entry *e, int n)
-{
-    for (int i = 0; i < n; i++)
-        if (e[i].handle) CloseHandle(e[i].handle);
-}
-
-#else
 
 /* Read up to cap-1 bytes of `path` into `buf`, NUL-terminated. Returns bytes
  * read (0 on any failure — a racing thread whose file vanished is not fatal). */
+#if !defined(__APPLE__)
 static size_t tp_read_file(const char *path, char *buf, size_t cap)
 {
     if (cap == 0) return 0;
@@ -143,8 +74,104 @@ static bool tp_parse_stat_ticks(const char *stat, uint64_t *out)
     *out = (uint64_t)utime + (uint64_t)stime;
     return true;
 }
+#endif /* !__APPLE__ */
+
+/* Darwin has no /proc/self/task: the same two snapshots come from Mach. Each
+ * entry is keyed by the stable thread identifier (THREAD_IDENTIFIER_INFO), and
+ * cpu time (THREAD_BASIC_INFO user+system, seconds+microseconds) is scaled
+ * into the same clk_tck tick unit the /proc sampler reports, so the shared
+ * delta/verdict math below is identical on both platforms. wchan has no Mach
+ * equivalent ("-"); the pthread name (or "?") stands in for comm. */
+#if defined(__APPLE__)
+static bool tp_mach_ticks(thread_act_t thread, int64_t clk_tck, uint64_t *out)
+{
+    struct thread_basic_info info;
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(thread, THREAD_BASIC_INFO, (thread_info_t)&info,
+                    &count) != KERN_SUCCESS)
+        return false; /* raced out of the task — skip */
+    uint64_t us = (uint64_t)info.user_time.seconds * 1000000u +
+                  (uint64_t)info.user_time.microseconds +
+                  (uint64_t)info.system_time.seconds * 1000000u +
+                  (uint64_t)info.system_time.microseconds;
+    /* A thread with zero cpu time is real (the /proc sampler reports 0 too);
+     * only a failed thread_info means "gone". */
+    *out = us * (uint64_t)clk_tck / 1000000u;
+    return true;
+}
+
+static uint64_t tp_mach_id(thread_act_t thread)
+{
+    struct thread_identifier_info id;
+    mach_msg_type_number_t count = THREAD_IDENTIFIER_INFO_COUNT;
+    if (thread_info(thread, THREAD_IDENTIFIER_INFO, (thread_info_t)&id,
+                    &count) != KERN_SUCCESS)
+        return 0;
+    return id.thread_id;
+}
+
+static void tp_mach_name(thread_act_t thread, char *out, size_t cap)
+{
+    pthread_t pthread = pthread_from_mach_thread_np(thread);
+    if (pthread && pthread_getname_np(pthread, out, cap) == 0 && out[0])
+        return;
+    snprintf(out, cap, "?");
+}
+
+/* Snapshot every live thread's identifier + cpu ticks (+ name at sample 1).
+ * Returns the count, or -1 when the thread list cannot be read. */
+static int tp_mach_collect(struct tp_entry *e, int cap, int64_t clk_tck,
+                           bool sample1)
+{
+    thread_act_array_t list = NULL;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &list, &count) != KERN_SUCCESS)
+        return -1;
+    int n = 0;
+    for (mach_msg_type_number_t i = 0; i < count; i++) {
+        uint64_t id = tp_mach_id(list[i]);
+        uint64_t t = 0;
+        if (id == 0 || !tp_mach_ticks(list[i], clk_tck, &t))
+            continue; /* raced out of the task between calls — skip */
+        if (sample1) {
+            if (n >= cap) break;
+            e[n].tid = (long)id;
+            e[n].ticks1 = t;
+            e[n].ticks2 = t;
+            e[n].found2 = false;
+            tp_mach_name(list[i], e[n].name, sizeof(e[n].name));
+            snprintf(e[n].wchan, sizeof(e[n].wchan), "-");
+            n++;
+        } else {
+            for (int j = 0; j < cap; j++) {
+                if ((uint64_t)e[j].tid != id) continue;
+                e[j].ticks2 = t;
+                e[j].found2 = true;
+                tp_mach_name(list[i], e[j].name, sizeof(e[j].name));
+                break;
+            }
+        }
+    }
+    if (list && vm_deallocate(mach_task_self(), (vm_address_t)list,
+                              (vm_size_t)(count * sizeof(*list))) !=
+                  KERN_SUCCESS)
+        n = -1;
+    return n;
+}
+
+static int tp_collect_sample1(struct tp_entry *e, int cap, int64_t clk_tck)
+{
+    return tp_mach_collect(e, cap, clk_tck, true);
+}
+
+static void tp_collect_sample2(struct tp_entry *e, int n, int64_t clk_tck)
+{
+    (void)tp_mach_collect(e, n, clk_tck, false);
+}
+#endif /* __APPLE__ */
 
 /* Read one thread's cpu ticks from /proc/self/task/<tid>/stat. */
+#if !defined(__APPLE__)
 static bool tp_read_ticks(long tid, uint64_t *out)
 {
     char path[64];
@@ -181,8 +208,9 @@ static void tp_read_wchan(long tid, char *out, size_t cap)
 
 /* Collect the numeric tids currently under /proc/self/task into e[].tid,
  * recording sample-1 ticks and the thread name. Returns the count. */
-static int tp_collect_sample1(struct tp_entry *e, int cap)
+static int tp_collect_sample1(struct tp_entry *e, int cap, int64_t clk_tck)
 {
+    (void)clk_tck; /* the /proc sampler reads ticks already in clk_tck units */
     DIR *d = opendir("/proc/self/task");
     if (!d) return -1;
     int n = 0;
@@ -207,8 +235,9 @@ static int tp_collect_sample1(struct tp_entry *e, int cap)
 
 /* Re-read each known tid for sample-2 ticks + current wchan/name. A tid that
  * vanished stays found2=false and is dropped from the report. */
-static void tp_collect_sample2(struct tp_entry *e, int n)
+static void tp_collect_sample2(struct tp_entry *e, int n, int64_t clk_tck)
 {
+    (void)clk_tck;
     for (int i = 0; i < n; i++) {
         uint64_t t = 0;
         if (!tp_read_ticks(e[i].tid, &t)) continue; /* exited mid-window */
@@ -218,13 +247,7 @@ static void tp_collect_sample2(struct tp_entry *e, int n)
         tp_read_name(e[i].tid, e[i].name, sizeof(e[i].name));
     }
 }
-
-static void tp_entries_close(struct tp_entry *e, int n)
-{
-    (void)e;
-    (void)n;
-}
-#endif
+#endif /* !__APPLE__ */
 
 static int tp_cmp_desc(const void *a, const void *b)
 {
@@ -253,21 +276,16 @@ bool thread_profile_sample(const struct thread_profile_opts *opts,
         zcl_malloc(sizeof(*e) * THREAD_PROFILE_MAX, "thread_profile.entries");
     if (!e) return false;
 
-#if defined(_WIN32)
-    /* GetThreadTimes is expressed in 100-nanosecond units. */
-    int64_t clk_tck = INT64_C(10000000);
-#else
     int64_t clk_tck = sysconf(_SC_CLK_TCK);
     if (clk_tck <= 0) clk_tck = 100;
-#endif
 
     int64_t t0 = platform_time_monotonic_us();
-    int n = tp_collect_sample1(e, THREAD_PROFILE_MAX);
+    int n = tp_collect_sample1(e, THREAD_PROFILE_MAX, clk_tck);
     if (n < 0) { free(e); return false; }
 
     platform_sleep_ms(sample_ms);
 
-    tp_collect_sample2(e, n);
+    tp_collect_sample2(e, n, clk_tck);
     int64_t elapsed_us = platform_time_monotonic_us() - t0;
     if (elapsed_us <= 0) elapsed_us = (int64_t)sample_ms * 1000;
     double elapsed_ms = (double)elapsed_us / 1000.0;
@@ -349,7 +367,6 @@ bool thread_profile_sample(const struct thread_profile_opts *opts,
     json_push_kv(out, "threads", &threads);
     json_free(&threads);
 
-    tp_entries_close(e, n);
     free(e);
     return true;
 }
