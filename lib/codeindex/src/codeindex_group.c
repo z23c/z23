@@ -147,6 +147,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/codec") == 0) return "allocation-free bounded reader/writer cursors over caller-owned buffers";
     if (strcmp(group, "lib/commons_demo") == 0) return "standalone C23 Commons application core composed from base, codec, and JSON packages";
     if (strcmp(group, "lib/coins") == 0) return "the UTXO set: coins view, undo data, compression, SHA3 UTXO commitment";
+    if (strcmp(group, "lib/astro") == 0) return "deterministic positional astronomy: one exact fixed-grid numeric type, CORDIC trigonometry over it, and reproducible birth-chart assembly";
     if (strcmp(group, "lib/core") == 0) return "small consensus-adjacent primitives: amount, random, time-since-epoch helpers";
     if (strcmp(group, "lib/sha3") == 0) return "scalar FIPS-202 SHA3/SHAKE primitives";
     if (strcmp(group, "lib/crypto") == 0) return "hash/cipher/PoW primitives and batched SHA3 acceleration: SHA-2, Blake2, ChaCha20-Poly1305, Ed25519, Equihash";

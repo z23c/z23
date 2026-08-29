@@ -2688,3 +2688,6 @@ AGENT_IMPACT_RULE("app/services/include/services/network_telemetry.h|lib/util/in
 AGENT_IMPACT_RULE("lib/util/include/util/telemetry_ontology.def|lib/util/src/telemetry_ontology.c|lib/test/src/test_telemetry_ontology.c", "telemetry_ontology telemetry_network make_lint_gates")
 /* The ZENDP group's own test source. */
 AGENT_IMPACT_RULE("lib/test/src/test_zendp.c", "zendp zendp_records make_lint_gates")
+/* lib/astro is a self-contained leaf: it references no other module, so its
+ * only proof is its own group. */
+AGENT_IMPACT_RULE("lib/astro/src/*|lib/astro/include/astro/*|lib/test/src/test_astro.c", "astro make_lint_gates")

@@ -72,6 +72,14 @@ LIB_MODULE("json")
 /* Standalone Commons demo core depends on base, codec, and json. */
 LIB_MODULE("commons_demo")
 LIB_MODULE("encoding")
+/* Deterministic positional astronomy: one exact fixed-grid numeric type,
+ * CORDIC trigonometry over it, and birth-chart assembly. It is ranked with
+ * the leaf utilities because it references NOTHING — not even lib/base. That
+ * is deliberate rather than incidental: the module's whole claim is that a
+ * chart is a pure function of its input bits, and a dependency on logging,
+ * allocation or a clock would be a way for the answer to differ between two
+ * nodes. It links libc only, and not libm. */
+LIB_MODULE("astro")
 /* Bounded native bitmap windows. The public API is platform-neutral; the
  * vendored RGFW implementation is private to lib/presentation. */
 LIB_MODULE("presentation")
