@@ -28,7 +28,20 @@ decision over exact canonical task, candidate, action, and receipt objects.
 
 ## 1. Orient
 
-Start by identifying the checkout and preserving existing work:
+On a new Linux, macOS, or Windows machine, run this first — it compiles with
+a plain `cc` and does not require a C23 toolchain:
+
+```bash
+make doctor-env
+```
+
+It reports the compiler (`-std=c23` capability, not a version parse), git,
+`vendor/tor` submodule state, make, optional mingw/ccache/zcc, the stack
+soft limit, CPU count, and free disk. Each failing required check prints the
+exact fix command for this platform. `make doctor` remains the separate
+package-prerequisite doctor (`tools/scripts/vendor_prereqs.tsv`).
+
+Then identify the checkout and preserve existing work:
 
 ```bash
 pwd
