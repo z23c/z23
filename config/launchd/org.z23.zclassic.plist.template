@@ -16,6 +16,8 @@
         @EXTRA_FLAGS@
     </array>
 
+    @ENV_VARS@
+
     <key>RunAtLoad</key>
     <true/>
 

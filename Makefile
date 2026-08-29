@@ -7922,6 +7922,7 @@ ZCL_SERVICE_EXTRA_FLAGS ?=
 ZCL_SERVICE_FILESERVICE_PEER ?=
 ZCL_SERVICE_CONNECT_PEER ?=
 ZCL_SERVICE_ADDNODE_PEER ?=
+ZCL_SERVICE_ENV_VARS ?=
 ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)$(if $(ZCL_SERVICE_ADDNODE_PEER),<string>-addnode=$(ZCL_SERVICE_ADDNODE_PEER)</string>)
 
 .PHONY: service-install
@@ -7940,9 +7941,19 @@ dev-service-install: | $(BIN_DIR)/z23
 .PHONY: __service-install
 __service-install:
 	@mkdir -p $(ZCL_LAUNCHD_DIR) "$(ZCL_DATADIR)"
-	@sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
-	     -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
-	     -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
+	@env_vars=''; \
+	if [ -n "$(ZCL_SERVICE_ENV_VARS)" ]; then \
+	    env_vars='<key>EnvironmentVariables</key>\n    <dict>'; \
+	    for kv in $(ZCL_SERVICE_ENV_VARS); do \
+	        key=$${kv%%=*}; val=$${kv#*=}; \
+	        env_vars="$$env_vars\n        <key>$$key</key>\n        <string>$$val</string>"; \
+	    done; \
+	    env_vars="$$env_vars\n    </dict>"; \
+	fi; \
+	sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
+	    -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
+	    -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
+	    -e "s|@ENV_VARS@|$$env_vars|g" \
 	    config/launchd/org.z23.zclassic.plist.template \
 	    > "$(ZCL_LAUNCHD_PLIST)"
 	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
