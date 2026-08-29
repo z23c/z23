@@ -77,6 +77,13 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23
 make windows-acceptance
 ```
 
+The tracked pre-push hook re-enters the UCRT64 shell once when Git launches it
+from a minimal MINGW/MSYS environment, then runs `make windows-acceptance` by
+default. Linux and macOS retain `make pre-push-ci`. An explicit
+`ZCL_PREPUSH_CMD` override still receives the exact semantic changed-file list,
+so changing the platform gate cannot turn a range-aware push into a whole-tree
+guess.
+
 Install the audited canonical binary as a supervised per-user Task Scheduler
 job with one command:
 
