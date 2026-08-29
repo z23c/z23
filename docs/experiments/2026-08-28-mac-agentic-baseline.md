@@ -68,6 +68,24 @@ The capsule works; actual private-mesh pairing is gated on enabling v2 transport
 and an authenticated DHT identity, which is the same cross-platform prerequisite
 set the command reports on Linux.
 
+## Mainnet sync observation
+
+Started a durable LaunchAgent against mainnet on 2026-08-28:
+
+- Service command: `z23 -datadir=/Users/rentamac/.zclassic-c23
+  -operator-lane=canonical -listen -txindex -allow-clearnet-snapshot-fetch`
+- Proven tip (`hstar`) reached **7,463** within ~15 minutes of starting.
+- Network tip: **~3,232,000** blocks.
+- Headers download extremely fast (150k+ in minutes).
+- Block-body P2P fetch is the bottleneck: the connected legacy `MagicBean`
+  peers and the single `zclassic23` peer keep stalling on body requests.
+- `-allow-clearnet-snapshot-fetch` alone is insufficient; the hardcoded
+  clearnet file-service seed list is intentionally empty. Fast sync from a
+  snapshot requires a runtime `-fileservice=HOST:18034` peer (another synced
+  z23 node) or an operator-supplied snapshot artifact.
+- Once this node finishes syncing, its own file service on port 18034 will
+  advertise a manifest and can serve other z23 nodes.
+
 ## Slice landed
 
 Commit `dd432ea6a` (macOS: launchd service support and quality-job portability)
@@ -79,3 +97,9 @@ adds:
 - macOS service instructions in `docs/GETTING_STARTED.md`.
 - macOS portability fixes for the quality-job guard/retention scripts.
 - Impact-rule mapping for `config/launchd/*`.
+
+Subsequent fixes:
+
+- `394921b08` — fix LaunchAgent flag syntax (`-datadir=DIR`, `-operator-lane=NAME`).
+- `f6afd6ed5` — support `ZCL_SERVICE_EXTRA_FLAGS` and document fast-sync snapshot option.
+- `47cc9e78a` — add `ZCL_SERVICE_FILESERVICE_PEER` so Mac nodes can bootstrap from another z23 node's file service.
