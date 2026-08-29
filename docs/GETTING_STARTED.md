@@ -483,6 +483,18 @@ make dev-service-install ZCL_SERVICE_CONNECT_PEER="192.168.1.50:8033"
 make dev-service-install ZCL_SERVICE_ADDNODE_PEER="192.168.1.50:8033"
 ```
 
+Installing a fetched snapshot into the canonical daily-driver datadir
+(`~/.zclassic-c23`) requires an explicit opt-in environment variable:
+
+```bash
+make dev-service-install \
+  ZCL_SERVICE_ADDNODE_PEER="192.168.1.50:8033" \
+  ZCL_SERVICE_ENV_VARS="ZCL_DEPLOY_ALLOW_CANONICAL=1"
+```
+
+Without it, the bundle is verified and registered but the install is deferred
+until you set the variable, so the default remains safe.
+
 A minimal from-scratch example, if you'd rather not use the tracked unit
 (substitute your own paths/ports):
 
