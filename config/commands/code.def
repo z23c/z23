@@ -218,6 +218,35 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_find)
 
+ZCL_COMMAND_READY_READ(
+    "code.have", "code", "",
+    "Ask whether this checkout already does X, before building it",
+    "Capabilities matching a CONCEPT, not a symbol name: the query is stemmed "
+    "(\"validation\" reaches `validates_*`, \"hashing\" reaches the hash "
+    "primitives) and matched against symbol names, doc comments, file "
+    "purposes, paths and groups. Each hit names the header that owns the API, "
+    "the matching symbols, and `used_by_files` — how many files hold a "
+    "recorded CALL SITE of it, which is what separates a live capability from "
+    "dead code. `verdict` (ALREADY EXISTS / PARTIAL / NOT FOUND) is derived "
+    "from those same rendered numbers, so it cannot claim more than the "
+    "evidence shown. A candidate must match every query term or it is not "
+    "returned at all; NOT FOUND means the recorded text does not say so, and "
+    "`searched` reports exactly what was looked at. Blind spots: usage through "
+    "function pointers or dlopen is not a recorded call site, and a header "
+    "with no comment and opaque symbol names has no text to match.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,have,already,exists,capability,reuse,duplicate,search",
+    "zcl.code_have_input.v1",
+    "zcl.code_have.v1", "text,limit", "text",
+    "z23 code have validation",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_have)
+
 /* Provenance sub-branch. Every leaf here answers "what produced this?" about
  * the codebase itself rather than reading it: which tree state produced an
  * answer (merkle), which code writes a durable fact (facts), which code

@@ -70,7 +70,14 @@ void capture_doc(struct scan_ctx *c, size_t content_start, size_t end);
 const char *doc_for(const struct scan_ctx *c, size_t seg_start,
                     size_t tok_off);
 
+/* Bytes the purpose derivation reads out of one comment line before it clips.
+ * Deliberately ABOVE CI_FILE_PURPOSE_MAX: the stored field's own fit check is
+ * then the thing that decides a cut, and it reports the cut. If this were the
+ * smaller of the two, an over-long purpose would be clipped here in silence
+ * and the field would never know it was handed a fragment. */
+#define CI_FILE_PURPOSE_CAPTURE_MAX (CI_FILE_PURPOSE_MAX + 64)
+
 /* Derive the file's one-line purpose from its leading block comment. */
-void ci_file_purpose(const struct scan_ctx *c, char out[160]);
+void ci_file_purpose(const struct scan_ctx *c, char out[CI_FILE_PURPOSE_MAX]);
 
 #endif /* ZCL_CODEINDEX_SCAN_INTERNAL_H */

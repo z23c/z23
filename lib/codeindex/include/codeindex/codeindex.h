@@ -56,11 +56,32 @@ struct ci_symbol {
     bool partial;
 };
 
+/* Capacity of a file's one-line self-description.
+ *
+ * SIZED FROM THE CORPUS, NOT GUESSED. At 160 this field truncated real
+ * purposes: one full rebuild of this tree cut 16 files, the longest by 95
+ * bytes, and every cut emitted a WARN line into whatever stream the caller was
+ * reading. The clause a purpose loses first is its END — the part that says
+ * what the file is FOR — which is exactly the text a capability search ranks
+ * on, so the truncation was not only noisy, it degraded the answer.
+ *
+ * The number: with the field temporarily raised to 1024 and the whole tree
+ * reindexed (2026-08-29), the longest stored purpose measured 260 bytes and
+ * exactly one file exceeded 250. 320 clears that maximum by 60 bytes without
+ * paying for a kilobyte in every `struct ci_file` array in the tree.
+ *
+ * The scanner's capture buffer is deliberately LARGER than this field (see
+ * CI_FILE_PURPOSE_CAPTURE_MAX), so a purpose that ever outgrows the corpus is
+ * cut by zcl_text_fit — which says so — rather than clipped in silence by the
+ * capture. Fail loud, never quiet: a returning WARN is the signal to re-measure
+ * and raise this, not to widen the capture. */
+#define CI_FILE_PURPOSE_MAX 320
+
 /* A source file and the group it maps to. */
 struct ci_file {
     char path[256];
     char group[64];
-    char purpose[160];
+    char purpose[CI_FILE_PURPOSE_MAX];
 };
 
 /* A node in the group hierarchy (lib/<mod>, app/<shape>, core, …). */

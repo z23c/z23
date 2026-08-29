@@ -35,8 +35,13 @@
  * added refs.enclosing. "rev1" = the reverse-include generation: it adds the
  * includes(dep_path) index AND admits `.def` registries into the scanned file
  * set, so a store built by the previous generation both lacks the index and
- * cannot report a .def's content hash. */
-#define CI_SCHEMA_VERSION "rev1"
+ * cannot report a .def's content hash. "cap1" = the capability generation:
+ * files.purpose is stored at CI_FILE_PURPOSE_MAX instead of 160, so a store
+ * built by "rev1" holds purposes that were truncated mid-sentence. The bytes
+ * are still valid text, which is exactly why this needs a version bump rather
+ * than a lazy repair — a capability search ranks on that text, and a stale
+ * generation would rank on the cut version without any signal that it had. */
+#define CI_SCHEMA_VERSION "cap1"
 
 /* ── the public handle (defined here so every TU can reach the store) ── */
 typedef struct sqlite3 sqlite3;
@@ -179,7 +184,7 @@ typedef void (*ci_ref_cb)(const char *callee, const char *ref_file,
                           int ref_line, const char *enclosing, void *user);
 bool ci_scan_file(const char *root, const char *relpath,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
-                  uint8_t out_sha3[32], char purpose_out[160]);
+                  uint8_t out_sha3[32], char purpose_out[CI_FILE_PURPOSE_MAX]);
 
 /* Pure text scanner (no file I/O) — the testable core. `src`/`len` is the raw
  * file text; the group is stamped into every emitted symbol. `purpose_out`
@@ -187,7 +192,7 @@ bool ci_scan_file(const char *root, const char *relpath,
 void ci_scan_text(const char *src, size_t len, const char *relpath,
                   bool is_header, const char *group,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
-                  char purpose_out[160]);
+                  char purpose_out[CI_FILE_PURPOSE_MAX]);
 
 /* ── depfile parsing (codeindex_deps.c) ───────────────────────────────
  * Parse one make depfile: yields (source_relpath, dep_relpath) edges for

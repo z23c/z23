@@ -308,6 +308,13 @@ void zcl_native_handle_code_refs(
 void zcl_native_handle_code_find(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.have — "does this checkout ALREADY DO X?" Ranks capabilities by
+ * concept (stemmed terms over symbol names, doc comments, file purposes,
+ * paths and groups), reports how many files actually CALL each one, and
+ * returns a verdict derived from those same numbers. */
+void zcl_native_handle_code_have(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.map — the whole-tree map: the 9 root groups (aggregate file counts +
  * purposes) and the 8 app/ shapes (direct file counts), plus a total. */
 void zcl_native_handle_code_map(

@@ -11,6 +11,7 @@
 #include "json/json.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -365,6 +366,39 @@ const struct zcl_command_spec *zcl_command_registry_resolve_words(
 bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                                          const struct json_value *input,
                                          char *why, size_t why_size);
+/* Turn a rejection from the call above into a message that NAMES the keys the
+ * leaf accepts: "<why>; accepted input keys: <a,b,c>", or "…; this command
+ * accepts no input keys" for an empty-input leaf.
+ *
+ * This exists because "unknown input key 'name'" plus a pointer to a second
+ * command is a round trip the caller usually does not spend. An agent that
+ * guessed `name` for `code find` read the rejection, read "inspect the input
+ * schema", and went back to grep — the right key (`text`) was already sitting
+ * in the spec at the moment of the refusal. Every transport that rejects input
+ * should render THIS, so no caller has to learn the answer twice.
+ *
+ * Writes a NUL-terminated string into `out` and returns its length.
+ *
+ * Header-only, for the same reason base/text_fit.h is: it reads one field of a
+ * spec the caller already holds and formats a string, so it needs no link edge
+ * and cannot grow command_registry.c, a legacy file whose recorded size may
+ * only shrink. */
+static inline size_t zcl_command_registry_input_reject_detail(
+    const struct zcl_command_spec *spec, const char *why,
+    char *out, size_t cap)
+{
+    if (!out || cap == 0) return 0;
+    const char *keys = spec && spec->input_keys ? spec->input_keys : "";
+    int n;
+    if (keys[0])
+        n = snprintf(out, cap, "%s; accepted input keys: %s",
+                     why ? why : "invalid input", keys);
+    else
+        n = snprintf(out, cap, "%s; this command accepts no input keys",
+                     why ? why : "invalid input");
+    if (n < 0) { out[0] = '\0'; return 0; }
+    return (size_t)n < cap ? (size_t)n : cap - 1;
+}
 /* Maximum characters a STRING value for `key` may carry. This is the same
  * answer zcl_command_registry_input_validate() enforces — it calls this
  * function — so a caller sizing a buffer or a frame can never disagree with
