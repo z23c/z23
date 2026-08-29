@@ -1666,10 +1666,30 @@ presentation-portability: presentation-demo
 		printf '%s\n' 'presentation-portability: MinGW unavailable (Windows cross-link skipped)'; \
 	fi
 
+# Defined BEFORE the catalog include: the catalog assigns its per-program
+# variables with :=, so anything it references must already hold a value.
+ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
+ZCL_WINDOWS_ACCEPTANCE_AR ?= x86_64-w64-mingw32-ar
+ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
+
+# An acceptance program that reaches real sqlite3 needs a mingw archive, and
+# vendor/lib cannot supply one: that tree holds exactly one slot per archive
+# with no target segment, so a mingw libsqlite3.a there would overwrite the
+# host build the node itself links against. Build a private copy under the
+# acceptance dir from the same vendored amalgamation, so this gate depends on
+# nothing being installed on the host. Warnings are off for this translation
+# unit only -- it is vendored third-party source, and the strict flags below
+# still apply to every file we wrote.
+ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
+$(ZCL_WINDOWS_ACCEPTANCE_SQLITE): vendor/sqlite3.c
+	@mkdir -p $(@D)
+	$(ZCL_WINDOWS_ACCEPTANCE_CC) -std=c2x -O2 -w $(ZCL_WINDOWS_API_FLOOR) \
+		-DWIN32_LEAN_AND_MEAN -DSQLITE_OMIT_LOAD_EXTENSION \
+		-DSQLITE_THREADSAFE=1 -c vendor/sqlite3.c -o $(@D)/sqlite3.o
+	$(ZCL_WINDOWS_ACCEPTANCE_AR) rcs $@ $(@D)/sqlite3.o
+
 include lib/platform/tests/windows_acceptance.mk
 
-ZCL_WINDOWS_ACCEPTANCE_CC ?= x86_64-w64-mingw32-gcc
-ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
 	-pedantic -static -D_POSIX_C_SOURCE=200809L $(ZCL_WINDOWS_API_FLOOR) \
 	-DWIN32_LEAN_AND_MEAN -D__USE_MINGW_ANSI_STDIO=1 \
@@ -1681,7 +1701,7 @@ ZCL_WINDOWS_ACCEPTANCE_BINS := $(addprefix \
 
 define ZCL_WINDOWS_ACCEPTANCE_RULE
 $$(ZCL_WINDOWS_ACCEPTANCE_DIR)/$(1).exe: \
-	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES)
+	$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_SOURCES) $$(ZCL_WINDOWS_ACCEPTANCE_$(1)_LIBDEPS)
 	@mkdir -p $$(@D)
 	$$(ZCL_WINDOWS_ACCEPTANCE_CC) $$(ZCL_WINDOWS_ACCEPTANCE_FLAGS) \
 		$$(ZCL_WINDOWS_ACCEPTANCE_$(1)_FLAGS) \
