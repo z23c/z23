@@ -183,6 +183,24 @@ ZCL_PORTABLE_FRONTDOOR_GOALS := portable c23-portable-toolchain \
 ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 	$(filter-out $(ZCL_PORTABLE_FRONTDOOR_GOALS),$(MAKECMDGOALS))),,1),)
 
+# Refuse a compiler that cannot compile C23 before vendor bootstrap or any
+# object work. gcc 13 does not know -std=c23 and otherwise reports that once
+# per translation unit after minutes of vendor compile. Capability probe, not
+# a version parse: tools/dev/check-toolchain.sh compiles an empty TU.
+# Skip standalone clean so `make clean` still works on a box with no compiler.
+ifneq ($(ZCL_STANDALONE_CLEAN),1)
+ifneq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
+ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
+ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
+ZCL_TOOLCHAIN_RC := $(shell CC="$(CC)" tools/dev/check-toolchain.sh >/dev/null; printf '%s' $$?)
+ifneq ($(ZCL_TOOLCHAIN_RC),0)
+$(error C23 toolchain check failed — this project requires gcc 14 or newer)
+endif
+endif
+endif
+endif
+endif
+
 # Linked vendor archives are part of the exact source identity. On a fresh
 # clone they do not exist until the vendor builder runs, so Make must cross a
 # parse/restart boundary before BUILD_SOURCE_RECORD is captured. Otherwise the
@@ -9786,6 +9804,14 @@ check-c23-only:
 	@./tools/lint/check_c23_only.sh --selftest
 	@./tools/lint/check_c23_only.sh
 
+# The public node compiles every translation unit with -std=c23. gcc 13 does
+# not know that flag. Diagnose it by compiling an empty TU before the lint
+# umbrella (and, via the parse-time probe above, before vendor bootstrap).
+check-toolchain:
+	@echo "══ LINT: C23 compiler accepts -std=c23 ══"
+	@./tools/dev/check-toolchain.sh --selftest
+	@./tools/dev/check-toolchain.sh
+
 # No Python source, shebang, or runtime invocation in the executable tree.
 # Historical vector comments may name a Python origin; they must not call it.
 check-no-python:
@@ -10772,6 +10798,7 @@ ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_LINT_NPROC) * 3 / 4 )); \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \
     check-lint-gate-wiring \
+    check-toolchain \
     check-no-retired-agent-protocol \
     check-build-epoch-integrity \
     check-checkout-lock \
