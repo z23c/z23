@@ -36,3 +36,21 @@ Windows seam at the same `_WIN32_WINNT` floor as the product build.
 
 No production node, canonical data directory, wallet, or deployment was
 mutated by these checks.
+
+## Cross-platform profiler integration
+
+After the Darwin Mach sampler arrived from another main worker, review found
+that it had replaced rather than complemented the Windows sampler. The merged
+implementation now has three compile-time branches: retained Toolhelp handles
+and `GetThreadTimes` on Windows, owned Mach thread ports on Darwin, and
+`/proc/self/task` on other POSIX hosts. Every Mach send right and the returned
+array are released after each sample.
+
+- Strict MinGW C23 syntax compilation of `thread_profile.c` passed at
+  `_WIN32_WINNT=0x0A00` with `-Wall -Wextra -Werror -pedantic`.
+- `make t-fast ONLY=operator_ux` passed one group with zero failures and zero
+  skips, including a live thread-profile sample and verdict.
+- Darwin runtime behavior remains for the Mac worker to observe on macOS; the
+  Linux host does not claim that receipt.
+
+Recorded 2026-08-28T22:57:06-04:00 / 2026-08-29T02:57:06Z.
