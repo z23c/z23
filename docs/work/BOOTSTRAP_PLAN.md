@@ -95,8 +95,15 @@ serving the runtime, adding capacity — is the node's job.
    whose absence breaks the bootstrap silently and on a timer.
 2. **Three-place checksum agreement** in the installer, and the small front-door
    script the domain serves.
-3. **Windows and macOS**, once those builds land. The release packager is
-   x86_64-linux only today, so Linux ships first.
+3. **Windows and macOS**, once those builds land. Two things are in the
+   way, and the second is larger than it looks. The release packager is
+   x86_64-linux only, so there is nothing to package for those hosts yet.
+   And the installer does not merely name three Linux binaries -- it
+   writes a **systemd user service**, which has no equivalent on macOS
+   (launchd) or Windows (services / scheduled tasks). Starting the node
+   at login therefore needs a second and third implementation, not a
+   changed filename. `deploy_z23_release.sh` is Linux-only for the same
+   reason, built on `systemctl --user` and `/proc/<pid>/exe` throughout.
 4. **Node self-check against the swarm.**
 
 ## Working with coding agents
