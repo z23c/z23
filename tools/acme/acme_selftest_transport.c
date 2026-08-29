@@ -12,6 +12,13 @@
  * identical from the outside until something malicious is on the wire.
  */
 
+#if !defined(_WIN32)
+/* mkdtemp, INADDR_LOOPBACK, and other BSD extensions are hidden under
+ * strict POSIX feature-test macros on Darwin. */
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+
 #include "acme_selftest.h"
 
 #include <stdbool.h>
