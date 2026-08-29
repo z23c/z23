@@ -101,6 +101,13 @@ ATTEST_OK_COUNT=0
 ATTEST_DOWN=""
 ATTESTED_MANIFEST_SHA256=""
 
+# The one 64-lowercase-hex validator in this file; every hex check goes
+# through it (the pin halves above, and the --manifest-sha256 argument in
+# fetch_into below).
+# zcl-identity-parser-allow: this script ships ALONE — packaging/install/install.sh
+# fetches just this file into a mktemp dir and runs it there, so there is no
+# tools/scripts/source_identity_lib.sh beside it to source, and a second
+# shipped file would break the two-digest z23-pin-v1 release pin.
 attest_is_sha256() {
     [ "${#1}" -eq 64 ] || return 1
     case "$1" in *[!0-9a-f]*) return 1 ;; esac
@@ -312,12 +319,9 @@ fetch_into() {
     mkdir -p "$dest"
     case "$src" in
         http://*|https://*)
-            case "$expected_manifest_sha256" in
-                ''|*[!0-9a-f]*)
-                    die "remote source requires --manifest-sha256=<64 lowercase hex>, obtained independently of the mirror"
-                    ;;
-            esac
-            [ "${#expected_manifest_sha256}" -eq 64 ] \
+            # Same 64-lowercase-hex rule as the release pin, so there is one
+            # validator in this file and not two that can drift apart.
+            attest_is_sha256 "$expected_manifest_sha256" \
                 || die "remote source requires --manifest-sha256=<64 lowercase hex>, obtained independently of the mirror"
             command -v curl >/dev/null 2>&1 || die "curl is required to fetch $src"
             require_bounded_curl
