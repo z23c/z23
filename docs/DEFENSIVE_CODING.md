@@ -1091,6 +1091,7 @@ add/remove a gate.
 - `check-hotswap-dev-only`
 - `check-hotswap-eligible-scope`
 - `check-hotswap-denied-leaves`
+- `check-remote-command-classes`
 - `check-hotswap-static-state`
 - `check-hotswap-service-islands`
 - `check-hotswap-swappable-shape`
