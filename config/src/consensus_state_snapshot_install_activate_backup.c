@@ -122,6 +122,11 @@ bool activate_backup_prior_generation(sqlite3 *progress_db,
         !activate_progress_file_unmoved(progress_db))
         return false;
     out_path[0] = '\0';
+    int fd = -1;
+    bool reserved_identity = false;
+    bool created_output = false;
+    dev_t reserved_dev = 0;
+    ino_t reserved_ino = 0;
     struct stat dir_st;
     struct stat display_st;
     if (fstat(datadir_fd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) ||
@@ -153,37 +158,25 @@ bool activate_backup_prior_generation(sqlite3 *progress_db,
         return false;
     }
 
-    /* sqlite3_open_v2's SQLITE_OPEN_EXCLUSIVE flag is intentionally a no-op;
-     * reserve a zero-length output with openat(O_EXCL). VACUUM INTO accepts an
-     * existing empty file. Retaining the descriptor lets every later cleanup
-     * prove it still owns the published name. */
-    int fd = openat(datadir_fd, name,
-                    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                    0600);
-    bool reserved_identity = false;
-    dev_t reserved_dev = 0;
-    ino_t reserved_ino = 0;
-    struct stat st;
-    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_nlink != 1) {
+    /* macOS SQLite VACUUM INTO refuses any pre-existing output file, so we
+     * reserve the leaf by proving it (and its sidecars) do not exist, then
+     * write directly to the datadir path. The resulting file is reopened for
+     * identity/fsync verification after the VACUUM completes. */
+    struct stat absent_st;
+    if (fstatat(datadir_fd, name, &absent_st, AT_SYMLINK_NOFOLLOW) == 0 ||
+        errno != ENOENT) {
         LOG_WARN(ACTIVATE_SUBSYS,
-                 "prior-generation backup target reservation failed: %s",
-                 strerror(errno));
-        if (fd >= 0)
-            (void)close(fd);
-        fd = -1;
+                 "prior-generation backup target already exists: %s", name);
         goto cleanup;
     }
-    reserved_identity = true;
-    reserved_dev = st.st_dev;
-    reserved_ino = st.st_ino;
-    /* A rename cannot redirect either SQLite open to a replacement inode. */
-    if (!platform_fd_path(destination_name_path, sizeof(destination_name_path),
-                          fd, NULL)) {
-        (void)close(fd);
-        fd = -1;
+    if (!platform_dirfd_child_path(destination_name_path,
+                                   sizeof(destination_name_path),
+                                   datadir_fd, name)) {
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "prior-generation backup path construction failed");
         goto cleanup;
     }
+    struct stat st;
 
     sqlite3_int64 version_before = -1;
     sqlite3_int64 version_after = -1;
@@ -213,6 +206,7 @@ bool activate_backup_prior_generation(sqlite3 *progress_db,
         }
     }
     if (ok) {
+        created_output = true; /* VACUUM INTO may create/partially write name */
         rc = sqlite3_step(stmt); // raw-sql-ok:progress-kv-kernel-store
         if (rc != SQLITE_DONE) {
             ok = false;
@@ -258,6 +252,23 @@ bool activate_backup_prior_generation(sqlite3 *progress_db,
         fd = -1;
         goto cleanup;
     }
+
+    fd = openat(datadir_fd, name,
+                O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_nlink != 1) {
+        LOG_WARN(ACTIVATE_SUBSYS,
+                 "prior-generation backup output reopen failed: %s",
+                 strerror(errno));
+        if (fd >= 0)
+            (void)close(fd);
+        fd = -1;
+        ok = false;
+        goto cleanup;
+    }
+    reserved_identity = true;
+    reserved_dev = st.st_dev;
+    reserved_ino = st.st_ino;
 
     struct stat named_st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
@@ -343,6 +354,13 @@ cleanup:
         LOG_WARN(ACTIVATE_SUBSYS,
                  "prior-generation output name changed; refusing to unlink "
                  "an unowned replacement");
+    } else if (created_output) {
+        /* A failed/partial VACUUM left a file under the reserved random name.
+         * The name was unique when we checked, so clean it up. */
+        if (unlinkat(datadir_fd, name, 0) != 0 && errno != ENOENT)
+            LOG_WARN(ACTIVATE_SUBSYS,
+                     "prior-generation partial-output cleanup failed: %s",
+                     strerror(errno));
     }
     if (!activate_backup_sidecars_absent(datadir_fd, name))
         LOG_WARN(ACTIVATE_SUBSYS,
