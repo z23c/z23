@@ -51,21 +51,46 @@ CC_BIN="${CC:-cc}"
 # The recipe's own compile contract, read from the header the worker reads, so
 # this gate cannot drift from the profile it claims to mirror. The trailing
 # -c is already part of the macro.
+#
+# The concrete flags are now platform-specific (supplied by lib/platform at
+# runtime), so this script mirrors that choice for the standalone compile gate.
 read_quick_flags() {
-    awk '
-        /#define ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2/ { collecting = 1; next }
-        collecting {
-            line = $0
-            cont = (line ~ /\\$/)
-            gsub(/\\$/, "", line)
-            while (match(line, /"[^"]*"/)) {
-                s = substr(line, RSTART + 1, RLENGTH - 2)
-                printf "%s", s
-                line = substr(line, RSTART + RLENGTH)
-            }
-            if (!cont) { print ""; exit }
-        }
-    ' "$PROFILE"
+    case "$(uname -s)" in
+        Darwin)
+            case "$(uname -m)" in
+                arm64|aarch64)
+                    echo "-std=c23 -O1 -march=armv8-a -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -ffile-prefix-map=SOURCE=. -c"
+                    ;;
+                x86_64|amd64)
+                    echo "-std=c23 -O1 -march=x86-64 -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -ffile-prefix-map=SOURCE=. -c"
+                    ;;
+                *)
+                    echo "FAIL: unsupported Darwin machine $(uname -m)" >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
+        Linux)
+            awk '
+                /#define ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2/ { collecting = 1; next }
+                collecting {
+                    line = $0
+                    cont = (line ~ /\\$/)
+                    gsub(/\\$/, "", line)
+                    while (match(line, /"[^"]*"/)) {
+                        s = substr(line, RSTART + 1, RLENGTH - 2)
+                        printf "%s", s
+                        line = substr(line, RSTART + RLENGTH)
+                    }
+                    if (!cont) { print ""; exit }
+                }
+            ' "$PROFILE"
+            ;;
+        *)
+            echo "FAIL: unsupported host $(uname -s) for standalone package gate" >&2
+            exit 2
+            ;;
+    esac
 }
 
 # name<TAB>dir for every package in the registry, so a package added later is

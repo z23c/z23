@@ -298,7 +298,7 @@ struct zcl_result build_fabric_worker_execute(
     struct vcs_toolchain_capsule_v1 capsule;
     uint8_t capsule_root[32];
     char capsule_hex[65];
-    if (!vcs_toolchain_capsule_v1_capture_gcc(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
         !vcs_toolchain_capsule_v1_root(&capsule, capsule_root))
         return bfw_fail(ndb, action_id, lease_id, "toolchain-capture-failed");
     zcl_hex_encode(capsule_root, 32, capsule_hex);

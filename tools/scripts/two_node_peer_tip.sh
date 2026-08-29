@@ -78,8 +78,22 @@ tn_assert_not_live_port() {
 }
 tn_assert_port_free() {
     local p="$1"
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
-        tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+    # Linux iproute2 ss(8) is the preferred probe; macOS/BSD fall back to
+    # lsof(8) or netstat(8) so the harness runs on the first Mac dev host.
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+        fi
+    elif command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | grep -q .; then
+            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -anv 2>/dev/null | grep -E "[.:]$p[[:space:]].*LISTEN" | grep -q .; then
+            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+        fi
+    else
+        tn_die "no port probe available (need ss, lsof, or netstat)"
     fi
     return 0
 }
@@ -184,7 +198,9 @@ tn_wait_height() {
 }
 
 # ── Preflight + setup ──────────────────────────────────────────────
-command -v ss     >/dev/null 2>&1 || tn_die "ss(8) not found (need iproute2)"
+if ! command -v ss >/dev/null 2>&1 && ! command -v lsof >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
+    tn_die "ss(8), lsof(8), or netstat(8) not found (need one to probe listening ports)"
+fi
 command -v mktemp >/dev/null 2>&1 || tn_die "mktemp not found"
 [ -x "$NODE_BIN" ] || tn_die "$NODE_BIN not built — run make first"
 [ -x "$RPC_BIN" ]  || tn_die "$RPC_BIN not built — run make zcl-rpc"

@@ -823,8 +823,14 @@ static inline void zcl_test_print_char(long long v)
 /* The fallback arm, which every pointer type lands in. A scalar that is
  * neither an enumerated integer type nor a pointer also arrives here and
  * prints as its uintptr_t value in hex — not an address, but printing
- * something beats printing nothing. */
-static inline void zcl_test_print_opaque(const void *v) { printf("%p", v); }
+ * something beats printing nothing. glibc already prints NULL as (nil),
+ * but other C libraries (e.g. Darwin) emit 0x0; normalize so failure
+ * transcripts are platform-independent. */
+static inline void zcl_test_print_opaque(const void *v)
+{
+    if (v == NULL) printf("(nil)");
+    else           printf("%p", v);
+}
 
 /* `t` supplies the type (never evaluated), `v` supplies the value. */
 #define ZCL_TEST_PRINT_VALUE(t, v) \

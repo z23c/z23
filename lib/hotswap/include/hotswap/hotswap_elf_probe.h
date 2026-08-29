@@ -321,6 +321,18 @@ bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
                                uint32_t expected_abi,
                                char *err, size_t err_cap);
 
+/* Probe `fd` and immediately run the pre-map admission policy.  This is the
+ * shape check both resident activation and offline verify perform; wrapping it
+ * here keeps hotswap_activate.c from growing a second platform branch. */
+bool hotswap_elf_probe_and_admit_fd(int fd,
+                                    const char expected_core_seal_root[65],
+                                    uint32_t expected_abi,
+                                    char *err, size_t err_cap);
+
+/* The pinned path this platform uses to dlopen a descriptor we already hold.
+ * Linux uses /proc/self/fd; macOS uses /dev/fd. */
+void hotswap_elf_pinned_path(int fd, char buf[64]);
+
 #ifdef __cplusplus
 }
 #endif

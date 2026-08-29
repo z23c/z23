@@ -26,6 +26,8 @@ on the current tree rather than trusted.
 | Quality-job guard/retention selftest | `bash tools/scripts/test_quality_job_guard.sh` | PASS after bash 3.2 / BSD tool fixes |
 | Regtest node boots and shuts down cleanly | Isolated `/tmp/zcl-mesh-id` node | PASS; RPC ready in ~2 s, graceful shutdown in ~5 s |
 | `ops mesh identity` capsule on macOS | `z23 ops mesh identity` against running regtest node | PASS; reports `platform.os=macos`, `architecture=aarch64`, live observation fields populated |
+| Native kqueue directory watcher | `make -j t-fast ONLY=directory_watcher` | PASS; `lib/platform/src/directory_watcher.c` uses kqueue and recursively watches real subdirectories |
+| Embedded full Tor | `make tor-full` | PASS; builds `vendor/tor/libtor.a` from vendored OpenSSL/libevent/zlib, ~110 s, no source changes |
 
 ## What required fixes
 
@@ -66,10 +68,10 @@ height 0 has none.
 
 | Area | Current state | Next step |
 |---|---|---|
-| Dev watcher | Polling-only (`tools/dev/watch-dev-lane.sh` falls back to 500 ms manifest poll because `lib/platform/src/directory_watcher.c` returns `ERROR` on Darwin) | Either accept polling latency (~1 s detect + 500 ms debounce) or implement a kqueue/FSEvents backend |
-| Resident hot swap | `ops mesh identity` reports `status=refused`, `refusal_stage=macos`; `lib/hotswap/src/hotswap_activate.c` has `__APPLE__` dlopen paths but activation is disabled | Decide whether to validate Mach-O imports / immutable-image staging, or keep the docs/table as "Unavailable" |
-| `make test-two-node-peer-tip` | Blocked by `ss(8)` dependency | Port port-probe preflight to macOS |
-| Embedded Tor | Build path no longer pinned to stub, but no Mac has been observed completing `make tor-full` | Run `make tor-full` and report whether it completes |
+| Dev watcher | Native kqueue backend landed in `lib/platform/src/directory_watcher.c`; `tools/dev/devloop_watch.c` still hard-codes inotify | Move `devloop_watch.c` onto the platform directory watcher so the dev loop gets sub-50 ms detection on macOS |
+| Resident hot swap | Mach-O probe/validation landed, but `zcl_hotswap_hotfork_visit_so()` still fails closed on Darwin because descriptor-bound A/B execution is unavailable | Implement immutable executable-image staging with ad-hoc signed bundle loading, or keep activation "Unavailable" |
+| `make test-two-node-peer-tip` | Ported preflight from `ss(8)` to `lsof`/`netstat`; needs a clean run to claim PASS | Run `make test-two-node-peer-tip` on macOS and record result |
+| Embedded Tor | PASS on arm64 macOS; `vendor/tor/libtor.a` builds from vendored deps | Update capability docs and remove from open-gap list |
 
 ## Mesh identity detail
 
@@ -172,3 +174,27 @@ legacy block-file link gives the fast path. To let this z23 node accept
 inbound connections, ZclWallet must be moved to a non-default port (e.g.
 8034) or stopped; that is an operator-host configuration choice, not a code
 change.
+
+## 2026-08-29 — kqueue watcher, tor-full, test pointer normalization, v2 naming cleanup
+
+Second macOS slice:
+
+- `lib/platform/src/directory_watcher.c` got a native kqueue backend that
+  recursively watches real subdirectories, drains events, and passes the
+  focused `directory_watcher` test. The watcher is no longer fail-closed on
+  Darwin.
+- `make tor-full` completed on the first arm64 Mac host in ~110 s, producing
+  `vendor/tor/libtor.a` from the vendored OpenSSL/libevent/zlib trees.
+- `lib/test/include/test/test_core.h` normalizes the pointer fallback printer
+  so NULL renders as `(nil)` on Darwin as well as glibc; this fixes the
+  `test_test_group_selector` pointer-message assertion on macOS.
+- Stale "v2 transport" strings were canonicalized to "Noise transport" and the
+  LaunchAgent template now documents the real `-noisetransport` flag.
+
+Remaining before macOS agentic parity is complete:
+
+1. Move `tools/dev/devloop_watch.c` off raw inotify and onto the platform
+   `directory_watcher_*` abstraction.
+2. Run `make test-two-node-peer-tip` end-to-end on macOS.
+3. Decide whether to land immutable Mach-O executable-image staging for dev
+   hot-swap activation, or keep the capability table honest about "Unavailable".

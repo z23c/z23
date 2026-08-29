@@ -11,22 +11,15 @@
 
 #include "hotswap/hotswap_sealed_image.h"
 
-#include <stdio.h>
-
-#if defined(__linux__)
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-/* The exact seal set this file applies, named once so the apply and the
- * read-back verification cannot drift apart. Deliberately NOT including
- * F_SEAL_SEAL — the reasoning is in si_seal() below, where it is a decision
- * rather than an omission. */
-#define SI_SEALS (F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW)
 
 /* Every failure path funnels through here so that "returns -1 with a specific
  * reason and leaks nothing" is one shape rather than a dozen open-coded ones.
@@ -47,6 +40,15 @@ static int si_fail(int fd_to_close, char *err, size_t err_cap,
     }
     return -1;
 }
+
+#if defined(__linux__)
+#include <sys/mman.h>
+
+/* The exact seal set this file applies, named once so the apply and the
+ * read-back verification cannot drift apart. Deliberately NOT including
+ * F_SEAL_SEAL — the reasoning is in si_seal() below, where it is a decision
+ * rather than an omission. */
+#define SI_SEALS (F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW)
 
 /* Copy exactly the size accepted before the memfd was created.
  *
@@ -282,13 +284,78 @@ int hotswap_sealed_image_from_fd(int src_fd, char *err, size_t err_cap)
 
     return img_fd;
 }
+#elif defined(__APPLE__)
+
+/* macOS has no memfd_create / file sealing.  We approximate the same property
+ * (the bytes mapped by dlopen cannot be altered through the filesystem) by
+ * relying on the artifact's existing ad-hoc code signature: any in-place
+ * modification after the signature was applied invalidates the signature and
+ * causes dlopen to fail.  The caller hashes and dlopen's the SAME descriptor,
+ * so the Linux "hash-equals-map" discipline is preserved through macOS code
+ * signing rather than through a sealed anonymous copy.
+ *
+ * Keeping the original signed inode also avoids Gatekeeper's refusal to load
+ * an anonymous bundle via /dev/fd/N ("library load disallowed by system policy"),
+ * which we measured when the signed copy was unlinked before dlopen. */
+
+int hotswap_sealed_image_from_fd(int src_fd, char *err, size_t err_cap)
+{
+    if (err && err_cap)
+        err[0] = '\0';
+
+    if (src_fd < 0)
+        return si_fail(-1, err, err_cap, "sealed image: invalid source fd %d",
+                       src_fd);
+
+    struct stat before;
+    if (fstat(src_fd, &before) != 0) {
+        int saved = errno;
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source fstat failed: %s",
+                       strerror(saved));
+    }
+    if (!S_ISREG(before.st_mode))
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source fd %d is not a regular file",
+                       src_fd);
+    if (before.st_size <= 0)
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source fd %d is empty (0 bytes); "
+                       "a zero-length artifact is not loadable", src_fd);
+    if ((uint64_t)before.st_size > ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES)
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source is %llu bytes, over the %llu byte ceiling",
+                       (unsigned long long)before.st_size,
+                       (unsigned long long)ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES);
+
+    if (lseek(src_fd, 0, SEEK_SET) < 0) {
+        int saved = errno;
+        return si_fail(-1, err, err_cap,
+                       "sealed image: source fd %d is not seekable "
+                       "(lseek to 0 failed: %s)",
+                       src_fd, strerror(saved));
+    }
+
+    /* Return a new descriptor referencing the same signed inode.  The caller
+     * hashes this descriptor and dlopen's /dev/fd/N from it, so the bytes it
+     * checked are exactly the bytes the linker maps. */
+    int img_fd = dup(src_fd);
+    if (img_fd < 0) {
+        int saved = errno;
+        return si_fail(-1, err, err_cap,
+                       "sealed image: dup failed: %s", strerror(saved));
+    }
+
+    (void)lseek(src_fd, 0, SEEK_SET);
+    return img_fd;
+}
 #else
 int hotswap_sealed_image_from_fd(int src_fd, char *err, size_t err_cap)
 {
     (void)src_fd;
     if (err && err_cap)
         (void)snprintf(err, err_cap,
-                       "sealed image: Linux memfd sealing is unavailable");
+                       "sealed image: platform has no sealed-image support");
     return -1;
 }
 #endif

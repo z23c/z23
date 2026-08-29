@@ -2648,6 +2648,7 @@ $(BUILD_DIR)/hotswap/zcl_rollback_fixture_%.so: $(HOTSWAP_ROLLBACK_FIXTURE_SRC) 
 	  -c -o "$$tmp_o" $(HOTSWAP_ROLLBACK_FIXTURE_SRC); \
 	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o"; \
 	mv -f -- "$$tmp_so" "$@"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$@"; \
 	rm -f "$$tmp_o"; \
 	trap - EXIT HUP INT TERM
 
@@ -4124,8 +4125,19 @@ hotswap:
 # shared by this recipe and the fast path's cached flags.env. -Wl,-Bsymbolic
 # is LOAD-BEARING: without it a dlopen'd handler's internal calls interpose
 # back onto the resident (old) code and the swap silently does nothing.
+# Platform-appropriate link flags for a loadable hot-swap module.  -Bsymbolic
+# is load-bearing on Linux: without it a dlopen'd handler's internal calls
+# interpose back onto the resident (old) code and the swap silently does
+# nothing.  macOS uses -bundle for dlopen-able Mach-O images and omits the
+# GNU/Linux linker hardening flags.
+ifeq ($(ZCL_HOST_OS),Darwin)
+HOTSWAP_MODULE_LDFLAGS = -bundle -Wl,-undefined,dynamic_lookup -Wl,-dead_strip
+HOTSWAP_MODULE_CODESIGN = codesign --sign - --force
+else
 HOTSWAP_MODULE_LDFLAGS = -shared -nostartfiles -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now \
 	-Wl,-z,noexecstack -Wl,-Bsymbolic
+HOTSWAP_MODULE_CODESIGN = true
+endif
 
 # Intentionally NOT ordered on $(BUILD_IDENTITY_STAMP): that stamp exists to
 # gate $(BUILD_IDENTITY_CPPFLAGS) into clientversion.o for whole-program
@@ -4223,6 +4235,7 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	publish_exact "$$tmp_so" "$$so" || { \
 	  echo "hotswap-module-so: REFUSING mismatched existing candidate $$so" >&2; exit 3; }; \
 	chmod a-w "$$o" "$$so"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$$so"; \
 	cache_o="$(HOTSWAP_SO_DIR)/fast/$$safe.o"; \
 	cache_d="$(HOTSWAP_SO_DIR)/fast/$$safe.d"; \
 	cache_cmd="$(HOTSWAP_SO_DIR)/fast/$$safe.cmd"; \
@@ -4387,6 +4400,7 @@ hotswap-test-so: $(VIEW_GEN_HEADERS)
 	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o" >&2; \
 	so="$(HOTSWAP_TEST_SO_DIR)/$$safe.so"; \
 	mv -f -- "$$tmp_so" "$$so"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$$so"; \
 	rm -f "$$tmp_o"; \
 	trap - EXIT HUP INT TERM; \
 	{ \

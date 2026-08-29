@@ -229,20 +229,161 @@ void platform_directory_watcher_close(struct platform_directory_watcher *w)
     free(s->items); free(s); platform_directory_watcher_init(w);
 }
 #elif defined(__APPLE__)
-/* Darwin: no inotify. The watcher is fail-closed unavailable until a
- * kqueue(FSEvents) implementation is landed (separate lane). */
+#include <dirent.h>
 #include <errno.h>
-struct watcher_state { int unused; };
+#include <fcntl.h>
+#include <sys/event.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+struct watch_item { int fd; char *path; };
+struct watcher_state { int kq; struct watch_item *items; size_t count; };
+
+static bool watch_dir(struct watcher_state *s, const char *path)
+{
+    int fd = open(path, O_EVTONLY | O_CLOEXEC);
+    if (fd < 0 && errno == EINVAL) fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    struct kevent kev;
+    size_t idx = s->count;
+    EV_SET(&kev, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+           NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK |
+           NOTE_RENAME | NOTE_REVOKE, 0, (void *)idx);
+    if (kevent(s->kq, &kev, 1, NULL, 0, NULL) < 0) { close(fd); return false; }
+    struct watch_item *items = zcl_realloc(
+        s->items, (idx + 1) * sizeof(*items), "directory-watch-items");
+    if (!items) { close(fd); return false; }
+    s->items = items;
+    s->items[idx].fd = -1;
+    s->items[idx].path = zcl_strdup(path, "directory-watch-path");
+    if (!s->items[idx].path) { close(fd); return false; }
+    s->items[idx].fd = fd;
+    s->count = idx + 1;
+    return true;
+}
+
+static bool add_tree(struct watcher_state *s, const char *path)
+{
+    struct platform_directory_list list = {0};
+    if (!watch_dir(s, path) || !platform_directory_list_real_sorted(path, &list))
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < list.count; i++) {
+        size_t n = strlen(path) + strlen(list.entries[i].name) + 2;
+        char *child = zcl_malloc(n, "directory-watch-child");
+        if (!child) { ok = false; break; }
+        (void)snprintf(child, n, "%s/%s", path, list.entries[i].name);
+        ok = add_tree(s, child);
+        free(child);
+    }
+    platform_directory_list_free(&list);
+    return ok;
+}
+
+static void rescan_children(struct watcher_state *s, const char *path)
+{
+    struct platform_directory_list list = {0};
+    if (!platform_directory_list_real_sorted(path, &list)) return;
+    for (size_t i = 0; i < list.count; i++) {
+        size_t n = strlen(path) + strlen(list.entries[i].name) + 2;
+        char *child = zcl_malloc(n, "directory-watch-child");
+        if (!child) continue;
+        (void)snprintf(child, n, "%s/%s", path, list.entries[i].name);
+        bool found = false;
+        for (size_t j = 0; j < s->count; j++)
+            if (strcmp(s->items[j].path, child) == 0) { found = true; break; }
+        if (!found) add_tree(s, child);
+        free(child);
+    }
+    platform_directory_list_free(&list);
+}
+
+static bool drain_events(struct watcher_state *s, bool *changed)
+{
+    struct kevent evs[64];
+    for (;;) {
+        struct timespec ts = {0, 0};
+        int n;
+        do { n = kevent(s->kq, NULL, 0, evs, 64, &ts); }
+        while (n < 0 && errno == EINTR);
+        if (n < 0) return false;
+        if (n == 0) return true;
+        for (int i = 0; i < n; i++) {
+            if (evs[i].flags & EV_ERROR) return false;
+            *changed = true;
+            if (evs[i].fflags & NOTE_WRITE) {
+                size_t idx = (size_t)evs[i].udata;
+                if (idx < s->count) rescan_children(s, s->items[idx].path);
+            }
+        }
+    }
+}
+
 void platform_directory_watcher_init(struct platform_directory_watcher *w)
 { if (w) w->native = UINTPTR_MAX; }
+
 bool platform_directory_watcher_open(struct platform_directory_watcher *w,
                                      const char *root)
-{ (void)w; (void)root; return false; }
+{
+    char canonical[PATH_MAX];
+    if (!w || w->native != UINTPTR_MAX ||
+        !platform_directory_canonical_real(root, canonical, sizeof(canonical)))
+        return false;
+    struct watcher_state *s = zcl_calloc(1, sizeof(*s), "directory-watcher-state");
+    if (!s) return false;
+    s->kq = kqueue();
+    if (s->kq < 0 || !add_tree(s, canonical)) {
+        struct platform_directory_watcher temp = {.native = (uintptr_t)s};
+        platform_directory_watcher_close(&temp); return false;
+    }
+    w->native = (uintptr_t)s; return true;
+}
+
 enum platform_directory_watch_result platform_directory_watcher_wait(
     struct platform_directory_watcher *w, uint32_t timeout,
     platform_directory_watcher_stop stop, void *opaque)
-{ (void)w; (void)timeout; (void)stop; (void)opaque;
-  return PLATFORM_DIRECTORY_WATCH_ERROR; }
+{
+    if (!w || w->native == UINTPTR_MAX) return PLATFORM_DIRECTORY_WATCH_ERROR;
+    struct watcher_state *s = (struct watcher_state *)w->native;
+    uint32_t elapsed = 0;
+    bool changed = false;
+    for (;;) {
+        if (stop && stop(opaque)) return PLATFORM_DIRECTORY_WATCH_STOPPED;
+        uint32_t remain = timeout - elapsed;
+        uint32_t slice = remain < WATCH_SLICE_MS ? remain : WATCH_SLICE_MS;
+        struct timespec ts = { slice / 1000, (slice % 1000) * 1000000L };
+        struct kevent evs[64];
+        int n;
+        do { n = kevent(s->kq, NULL, 0, evs, 64, &ts); }
+        while (n < 0 && errno == EINTR);
+        if (n < 0) return PLATFORM_DIRECTORY_WATCH_ERROR;
+        if (n > 0) {
+            for (int i = 0; i < n; i++) {
+                if (evs[i].flags & EV_ERROR) return PLATFORM_DIRECTORY_WATCH_ERROR;
+                changed = true;
+                if (evs[i].fflags & NOTE_WRITE) {
+                    size_t idx = (size_t)evs[i].udata;
+                    if (idx < s->count) rescan_children(s, s->items[idx].path);
+                }
+            }
+            if (!drain_events(s, &changed)) return PLATFORM_DIRECTORY_WATCH_ERROR;
+            if (changed) return PLATFORM_DIRECTORY_WATCH_CHANGED;
+        }
+        elapsed += slice;
+        if (elapsed >= timeout) return PLATFORM_DIRECTORY_WATCH_TIMEOUT;
+    }
+}
+
 void platform_directory_watcher_close(struct platform_directory_watcher *w)
-{ platform_directory_watcher_init(w); }
+{
+    if (!w || w->native == UINTPTR_MAX) return;
+    struct watcher_state *s = (struct watcher_state *)w->native;
+    if (s->kq >= 0) close(s->kq);
+    for (size_t i = 0; i < s->count; i++) {
+        if (s->items[i].fd >= 0) close(s->items[i].fd);
+        free(s->items[i].path);
+    }
+    free(s->items); free(s); platform_directory_watcher_init(w);
+}
 #endif

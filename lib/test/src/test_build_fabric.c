@@ -940,7 +940,7 @@ static int test_bf_confined_worker(void)
                                         sizeof(input) - 1u));
         struct vcs_toolchain_capsule_v1 capsule;
         uint8_t capsule_root[32];
-        ASSERT(vcs_toolchain_capsule_v1_capture_gcc(&capsule));
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
         ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_root));
 
         struct db_build_job job;
@@ -1382,8 +1382,8 @@ static int test_bf_toolchain_capture_cache(void)
         char *saved_lc_all = old_lc_all ? strdup(old_lc_all) : NULL;
         ASSERT(!old_lc_all || saved_lc_all != NULL);
         vcs_toolchain_capsule_v1_cache_reset_for_test();
-        ASSERT(vcs_toolchain_capsule_v1_capture_gcc(&first));
-        ASSERT(vcs_toolchain_capsule_v1_capture_gcc(&second));
+        ASSERT(vcs_toolchain_capsule_v1_capture(&first));
+        ASSERT(vcs_toolchain_capsule_v1_capture(&second));
         ASSERT(vcs_toolchain_capsule_v1_root(&first, first_root));
         ASSERT(vcs_toolchain_capsule_v1_root(&second, second_root));
         ASSERT(memcmp(first_root, second_root, sizeof(first_root)) == 0);
@@ -1394,7 +1394,7 @@ static int test_bf_toolchain_capture_cache(void)
             "LC_ALL", old_lc_all && strcmp(old_lc_all, "C") == 0
                 ? "POSIX" : "C", 1) == 0;
         changed_ok = changed_ok &&
-            vcs_toolchain_capsule_v1_capture_gcc(&changed_environment) &&
+            vcs_toolchain_capsule_v1_capture(&changed_environment) &&
             vcs_toolchain_capsule_v1_root(&changed_environment,
                                            changed_root) &&
             memcmp(first_root, changed_root, sizeof(first_root)) == 0;
@@ -1423,7 +1423,7 @@ static int test_bf_assembler_identity_is_version(void)
         uint8_t file_sha3[32];
         FILE *f;
         vcs_toolchain_capsule_v1_cache_reset_for_test();
-        ASSERT(vcs_toolchain_capsule_v1_capture_gcc(&capsule));
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
         f = fopen("/usr/bin/as", "rb");
         ASSERT(f != NULL);
         {
@@ -1462,7 +1462,7 @@ static int test_bf_confined_test_worker(void)
 
         struct vcs_toolchain_capsule_v1 capsule;
         uint8_t capsule_root[32];
-        ASSERT(vcs_toolchain_capsule_v1_capture_gcc(&capsule));
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
         ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_root));
         struct db_build_job job;
         struct db_build_action action;
