@@ -72,7 +72,7 @@ set the command reports on Linux.
 
 Started a durable LaunchAgent against mainnet on 2026-08-28:
 
-- Service command: `z23 -datadir=/Users/rentamac/.zclassic-c23
+- Service command: `z23 -datadir=$HOME/.zclassic-c23
   -operator-lane=canonical -listen -txindex -allow-clearnet-snapshot-fetch
   -addnode=205.209.104.118:8033`
 - Proven tip (`hstar`) reached **~10,000** before the snapshot path engaged.
@@ -125,13 +125,13 @@ climbed quickly (`header_admit` cursor ~638k within minutes, network tip
   requesting bodies but only advancing ~5 blocks/sec.
 
 Root cause on this Mac: ZclWallet (`zclassicd`) keeps its block files in
-`~/Library/Application Support/Zclassic/blocks`, but the z23 auto-import path
-only looked at `~/.zclassic/blocks`. With no local legacy block files, the
+`$HOME/Library/Application Support/Zclassic/blocks`, but the z23 auto-import
+path only looked at `$HOME/.zclassic/blocks`. With no local legacy block files, the
 node was trying to pull ~3.1M bodies over a small P2P set.
 
 Fix: make `boot_legacy_default_blocks_dir()` platform-aware, checking (in
-order) `%APPDATA%\Zclassic\blocks`, `~/Library/Application Support/Zclassic/blocks`,
-and `~/.zclassic/blocks`. `config/src/boot.c` now uses the first existing
+order) `%APPDATA%\Zclassic\blocks`, `$HOME/Library/Application Support/Zclassic/blocks`,
+and `$HOME/.zclassic/blocks`. `config/src/boot.c` now uses the first existing
 candidate for both the initial `--importblockindex` copy pass and the
 warm-boot link pass. This is a read-only hardlink/copy; it does not touch the
 legacy node's LevelDB or wallet.
@@ -141,7 +141,7 @@ Verification plan:
 1. Build the patched binary (`make -j"$(getconf _NPROCESSORS_ONLN)" z23`).
 2. `make lint-fast` and focused boot-legacy tests must pass.
 3. Restart the durable LaunchAgent; boot log should report linked block files
-   from `~/Library/Application Support/Zclassic/blocks`.
+   from `$HOME/Library/Application Support/Zclassic/blocks`.
 4. `z23 dumpstate body_coverage` should show the held ranges expanding past
    the old 14k frontier, and `reducer_drive` should advance faster than the
    P2P-only ~5 bps.
