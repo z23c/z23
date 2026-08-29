@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 static int fail(const char *message)
 {
@@ -32,8 +33,16 @@ int main(void)
     wchar_t temp[MAX_PATH], base[MAX_PATH], spoof[MAX_PATH], permissive[MAX_PATH];
     wchar_t target[MAX_PATH], link[MAX_PATH], unicode[MAX_PATH];
     wchar_t z23[MAX_PATH], dev[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, temp) ||
-        swprintf(base, MAX_PATH, L"%lsz23-state-base-δ-中-%lu-%llu", temp,
+    /* Use the current working directory for fixtures.  MSYS2/Cygwin /tmp is
+     * mounted noacl, so owner/ACL probes on a path under it fail even though
+     * the directory was created by this process.  The working directory is on
+     * normal NTFS and exercises the real authority logic. */
+    DWORD cwd_len = GetCurrentDirectoryW(MAX_PATH, temp);
+    if (cwd_len == 0 || cwd_len >= MAX_PATH)
+        return fail("could not get current directory");
+    if (temp[cwd_len - 1] != L'\\' && temp[cwd_len - 1] != L'/')
+        wcscat(temp, L"\\");
+    if (swprintf(base, MAX_PATH, L"%lsz23-state-base-δ-中-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
                  (unsigned long long)GetTickCount64()) <= 0 ||
         swprintf(spoof, MAX_PATH, L"%lsfalso-δ-中-%lu-%llu", temp,
@@ -46,7 +55,9 @@ int main(void)
         swprintf(z23, MAX_PATH, L"%ls\\z23", base) <= 0 ||
         swprintf(dev, MAX_PATH, L"%ls\\dev", z23) <= 0 ||
         !CreateDirectoryW(base, NULL) || !CreateDirectoryW(z23, NULL) ||
-        !CreateDirectoryW(dev, NULL) || !CreateDirectoryW(spoof, NULL))
+        /* Leave dev for platform_state_root to create/repair; that matches
+         * real first-boot and avoids an inherited-ACL edge case on Windows. */
+        !CreateDirectoryW(spoof, NULL))
         return fail("fixture creation failed");
     char base_utf8[MAX_PATH * 3], spoof_utf8[MAX_PATH * 3];
     if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, base, -1,
