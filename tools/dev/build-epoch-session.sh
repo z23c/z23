@@ -223,26 +223,66 @@ verify_authority
 
 mkdir -p "$OBJECT_ROOT/epochs/$EPOCH/.leases"
 
-# Portable epoch-GC lock.  MSYS2/Git Bash environments often lack a working
-# `flock` (the util-linux binary uses a different Cygwin runtime than Git
-# Bash and fails on inherited file descriptors).  mkdir is atomic on the
-# local filesystem and is enough to serialize epoch GC across concurrent
-# builds.
-EPOCH_GC_LOCK="$OBJECT_ROOT/.epoch-gc.lock"
+# MSYS2/Git Bash cannot reliably share inherited descriptors with the MSYS2
+# util-linux flock binary. Keep the crash-safe descriptor lock on POSIX and
+# use an identity-bearing atomic directory only on MSYS hosts.
+EPOCH_GC_LOCK_FILE="$OBJECT_ROOT/.epoch-gc.lock"
+EPOCH_GC_LOCK_DIR="$OBJECT_ROOT/.epoch-gc.lock.d"
+EPOCH_GC_LOCK_OWNER="$EPOCH_GC_LOCK_DIR/owner"
+EPOCH_GC_LOCK_HELD=0
+epoch_gc_owner_live()
+{
+    local pid start actual
+    pid="$(sed -n 's/^pid=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    start="$(sed -n 's/^start=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9a-f]+$ ]] ||
+        return 1
+    actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null)" ||
+        return 1
+    [ "$actual" = "$start" ]
+}
 acquire_epoch_gc_lock()
 {
     local deadline
+    if [ "$HOST_IS_MSYS" = 0 ]; then
+        command -v flock >/dev/null 2>&1 ||
+            fail 'flock is required for epoch leases'
+        exec 9> "$EPOCH_GC_LOCK_FILE"
+        flock -x 9
+        return 0
+    fi
     deadline=$(($(date +%s) + 30))
-    while ! mkdir "$EPOCH_GC_LOCK" 2>/dev/null; do
+    while :; do
+        if mkdir "$EPOCH_GC_LOCK_DIR" 2>/dev/null; then
+            if (set -o noclobber
+                printf 'pid=%s\nstart=%s\n' "$OWNER_PID" "$OWNER_START" \
+                    > "$EPOCH_GC_LOCK_OWNER") 2>/dev/null; then
+                EPOCH_GC_LOCK_HELD=1
+                return 0
+            fi
+        fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            fail "could not acquire epoch GC lock $EPOCH_GC_LOCK (another build holding it?)"
+            if epoch_gc_owner_live; then
+                fail "could not acquire epoch GC lock $EPOCH_GC_LOCK_DIR (another build is live)"
+            fi
+            rm -f -- "$EPOCH_GC_LOCK_OWNER"
+            rmdir "$EPOCH_GC_LOCK_DIR" 2>/dev/null ||
+                fail "could not recover stale epoch GC lock $EPOCH_GC_LOCK_DIR"
         fi
         sleep 0.2
     done
 }
 release_epoch_gc_lock()
 {
-    rmdir "$EPOCH_GC_LOCK" 2>/dev/null || true
+    local pid start
+    [ "$EPOCH_GC_LOCK_HELD" = 1 ] || return 0
+    pid="$(sed -n 's/^pid=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    start="$(sed -n 's/^start=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    if [ "$pid" = "$OWNER_PID" ] && [ "$start" = "$OWNER_START" ]; then
+        rm -f -- "$EPOCH_GC_LOCK_OWNER"
+        rmdir "$EPOCH_GC_LOCK_DIR" 2>/dev/null || true
+    fi
+    EPOCH_GC_LOCK_HELD=0
 }
 trap 'release_epoch_gc_lock; cleanup' EXIT
 trap 'exit 2' HUP INT TERM
