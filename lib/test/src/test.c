@@ -1238,6 +1238,8 @@ int main(int argc, char **argv)
       failures += test_zses(); }
     { extern int test_mesh_pairing(void);
       failures += test_mesh_pairing(); }
+    { extern int test_mesh_route(void);
+      failures += test_mesh_route(); }
     { extern int test_mesh_capability_grant(void);
       failures += test_mesh_capability_grant(); }
     { extern int test_mesh_pairing_controller(void);

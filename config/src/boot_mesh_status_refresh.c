@@ -275,6 +275,8 @@ static void refresh_begin_one(struct boot_svc_ctx *svc, int64_t now)
         slot->used = true;
         memcpy(slot->pairing_id, choice->pairing_id,
                MESH_PAIRING_ID_HEX + 1u);
+    } else if (began == MESH_STATUS_BEGIN_ROUTE_PENDING) {
+        choice_cooldown->next_attempt = now + 1;
     } else {
         choice_cooldown->next_attempt = now + MESH_REFRESH_BACKOFF_S;
     }

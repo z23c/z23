@@ -109,9 +109,11 @@ A route failure may try another candidate, but an identity mismatch,
 delegation failure, plaintext downgrade, revocation, or capability refusal is
 terminal for that request. Relays and rendezvous peers forward opaque records
 only. They do not receive target credentials, plaintext, or machine authority.
-The currently implemented status requester is narrower: it uses an already
-connected authenticated peer and never dials. Automatic route selection,
-onion failover, and relay transport remain acceptance work.
+The status requester now accepts one active, signed direct ZENDP endpoint as an
+untrusted hint and submits at most three bounded dial requests. It sends no
+status frame until the resulting Noise static and unique active delegation
+match the local pairing. Multiple direct candidates, onion failover, relay
+transport, and independent-host route receipts remain acceptance work.
 
 ## Current truthful state
 
@@ -119,7 +121,7 @@ onion failover, and relay transport remain acceptance work.
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Implemented: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget); rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, fixed replay/cadence bounds protect both ends, and a supervised, sync-subordinate scheduler refreshes paired-machine status automatically (bounded in-flight, cooldown/backoff, admitted only at chain tip with clear disk, memory, and DB); every verified receipt persists through the one serialized db_service writer; never dials, offline machines stay listed | Independent-host receipts |
+| Fleet view | Implemented locally: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget); rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, fixed replay/cadence bounds protect both ends, and a supervised, sync-subordinate scheduler refreshes paired-machine status automatically (bounded in-flight, cooldown/backoff, admitted only at chain tip with clear disk, memory, and DB). A current signed direct endpoint can trigger a bounded Noise-only dial, but grants no authority and carries no private frame before identity proof. Every verified receipt persists through the one serialized db_service writer; offline machines stay listed | Independent-host direct-route receipts; multiple direct candidates and onion failover |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, and restart resume | Private dispatcher and queue, atomic no-clobber plaintext publication, cancellation wiring, signed receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
@@ -464,11 +466,13 @@ The phases below are delivered in this dependency order:
 5. completed: project responses into `ops mesh machines` with honest fresh,
    stale, and unknown state, then refresh connected active pairings without
    competing with chain synchronization;
-6. extract the mesh resource gate into shared subordinate-work admission, use
-   it before build-fabric lease claims, apply platform background QoS, and prove
-   deferral never consumes an attempt or competes with chain synchronization;
-7. record independent-host native service and signed status receipts, then add
-   identity-pinned direct and, where available, onion route selection without
+6. completed: extract the mesh resource gate into shared subordinate-work
+   admission, use it before build-fabric lease claims, apply platform background
+   QoS, and prove deferral never consumes an attempt or competes with chain
+   synchronization;
+7. in progress: identity-pinned single-direct-route acquisition is locally
+   implemented; record independent-host native service and signed status
+   receipts, then add bounded multiple-direct and onion route selection without
    changing authority when the path changes;
 8. complete the two-sided capability plan/commit, renewal, cancellation, and
    sticky-revocation lifecycle for the next typed operation;
@@ -942,6 +946,20 @@ peers, never production wallet state.
   path took upstream's db_service persist call. Gates: `make z23` passed;
   t-fast ONLY=mesh passed with zero skips; `make lint-fast` passed. What
   remains before the product claim: independent-host receipts.
+- 2026-08-29T17:18:49-04:00 / 2026-08-29T21:18:49Z: paired status acquisition
+  gained one bounded direct route from the exact master identity's active,
+  chain-bound ZENDP record. The endpoint remains an untrusted address: the
+  requester sends no `ZMSTAT` frame until an established Noise static and
+  unique current ZID delegation match the local pairing. Eight fixed slots,
+  three submissions, exponential backoff, a 15-second deadline, subordinate
+  work admission, abandoned-slot reclamation, and exact-endpoint downgrade
+  disconnection bound the lane. Wrong Noise identity and plaintext completion
+  are terminal for the current acquisition and recover only after a fixed
+  retention interval. The cold `mesh_route` group passed seven adversarial
+  cases and `mesh_status_wire` passed twelve cases, each with zero failures and
+  zero skips, using GCC 16.1.1 on an AMD Ryzen 7 PRO 8840U. This is local direct
+  route evidence only; onion selection and independent-host receipts remain
+  open.
 
 ## Completion rule
 

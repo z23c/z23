@@ -12,6 +12,13 @@
 
 struct boot_svc_ctx;
 struct json_value;
+struct net_address;
+
+enum boot_zcode_dht_direct_lookup {
+    BOOT_ZCODE_DHT_DIRECT_FOUND = 0,
+    BOOT_ZCODE_DHT_DIRECT_MISSING,
+    BOOT_ZCODE_DHT_DIRECT_AMBIGUOUS,
+};
 
 /* Rebuilds only when the endpoint projection, ZID status generation, or
  * validated header tip changes. All ZENDP/ancestry work occurs in this call,
@@ -25,6 +32,13 @@ bool boot_zcode_dht_reachability_refresh(
 bool boot_zcode_dht_reachability_request(void *ctx,
                                          const uint8_t node_id[32],
                                          uint64_t wall_unix);
+
+/* Resolve one chain-bound signed direct endpoint for an exact master key.
+ * Address records remain untrusted route hints: callers must authenticate the
+ * resulting Noise session and active delegation before sending private data. */
+enum boot_zcode_dht_direct_lookup
+boot_zcode_dht_reachability_direct_for_master(
+    const uint8_t master_pubkey[32], struct net_address *out);
 
 /* Clears cooldown for freshly authenticated peers, then resolves only IDs
  * requested by active lookups and submits them through the existing connman

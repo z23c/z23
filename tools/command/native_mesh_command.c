@@ -15,8 +15,12 @@
 #include <string.h>
 
 #define NATIVE_MESH_TAG "native.mesh"
-#define MESH_STATUS_CLIENT_BUDGET_MS 15000
+#define MESH_STATUS_ROUTE_BUDGET_MS 15000
+#define MESH_STATUS_RECEIPT_BUDGET_MS 15000
+#define MESH_STATUS_CLIENT_TOTAL_BUDGET_MS \
+    (MESH_STATUS_ROUTE_BUDGET_MS + MESH_STATUS_RECEIPT_BUDGET_MS)
 #define MESH_STATUS_CLIENT_POLL_MS 50
+static_assert(MESH_STATUS_CLIENT_TOTAL_BUDGET_MS == 30000);
 /* The fleet view collects receipts server-side for up to 12 s; the client
  * budget must outlive that plus serialization headroom. The server-side
  * watchdog extends mesh_machines to RPC_MESH_COLLECT_TIMEOUT_MS (20 s). */
@@ -138,6 +142,7 @@ static void mesh_status_apply_refusal(struct zcl_command_reply *reply,
     const char *code = json_get_str(json_get(body, "code"));
     const char *message = json_get_str(json_get(body, "message"));
     bool transient = code && (strcmp(code, "peer_not_connected") == 0 ||
+                              strcmp(code, "route_pending") == 0 ||
                               strcmp(code, "peer_identity_unavailable") == 0 ||
                               strcmp(code, "busy") == 0 ||
                               strcmp(code, "send_failed") == 0);
@@ -185,21 +190,33 @@ void zcl_native_handle_ops_mesh_status(
                          "pairing_id");
         return;
     }
+    int64_t route_deadline = platform_time_monotonic_ms() +
+                             MESH_STATUS_ROUTE_BUDGET_MS;
     struct json_value begin_input;
     json_init(&begin_input);
     json_set_object(&begin_input);
     json_push_kv_str(&begin_input, "pairing_id", pairing_id);
     struct json_value body;
-    if (!mesh_status_rpc(&begin_input, "mesh_status_request", &body, reply)) {
-        json_free(&begin_input);
-        return;
+    for (;;) {
+        if (!mesh_status_rpc(&begin_input, "mesh_status_request", &body,
+                             reply)) {
+            json_free(&begin_input);
+            return;
+        }
+        if (mesh_status_body_ok(&body))
+            break;
+        const char *code = json_get_str(json_get(&body, "code"));
+        if (!code || strcmp(code, "route_pending") != 0 ||
+            platform_time_monotonic_ms() >= route_deadline) {
+            mesh_status_apply_refusal(reply, &body, "mesh_status_request");
+            json_free(&body);
+            json_free(&begin_input);
+            return;
+        }
+        json_free(&body);
+        platform_sleep_ms(MESH_STATUS_CLIENT_POLL_MS);
     }
     json_free(&begin_input);
-    if (!mesh_status_body_ok(&body)) {
-        mesh_status_apply_refusal(reply, &body, "mesh_status_request");
-        json_free(&body);
-        return;
-    }
     const char *request_id = json_get_str(json_get(&body, "request_id"));
     char request_id_copy[65];
     if (!request_id || strlen(request_id) != 64) {
@@ -213,11 +230,11 @@ void zcl_native_handle_ops_mesh_status(
     }
     memcpy(request_id_copy, request_id, sizeof(request_id_copy));
     json_free(&body);
+    int64_t receipt_deadline = platform_time_monotonic_ms() +
+                               MESH_STATUS_RECEIPT_BUDGET_MS;
 
     /* Bounded client-side poll: the responder answers on the established
      * Noise session or the request expires; both are honest outcomes. */
-    int64_t deadline = platform_time_monotonic_ms() +
-                       MESH_STATUS_CLIENT_BUDGET_MS;
     for (;;) {
         struct json_value poll_input;
         json_init(&poll_input);
@@ -254,7 +271,7 @@ void zcl_native_handle_ops_mesh_status(
             return;
         }
         json_free(&body);
-        if (platform_time_monotonic_ms() >= deadline) {
+        if (platform_time_monotonic_ms() >= receipt_deadline) {
             mesh_status_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                              ZCL_COMMAND_EXIT_TRANSIENT, "STATUS_TIMEOUT",
                              "execute", true,
