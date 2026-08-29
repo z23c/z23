@@ -183,6 +183,24 @@ ZCL_PORTABLE_FRONTDOOR_GOALS := portable c23-portable-toolchain \
 ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 	$(filter-out $(ZCL_PORTABLE_FRONTDOOR_GOALS),$(MAKECMDGOALS))),,1),)
 
+# Refuse a compiler that cannot compile C23 before vendor bootstrap or any
+# object work. gcc 13 does not know -std=c23 and otherwise reports that once
+# per translation unit after minutes of vendor compile. Capability probe, not
+# a version parse: tools/dev/check-toolchain.sh compiles an empty TU.
+# Skip standalone clean so `make clean` still works on a box with no compiler.
+ifneq ($(ZCL_STANDALONE_CLEAN),1)
+ifneq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
+ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
+ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
+ZCL_TOOLCHAIN_RC := $(shell CC="$(CC)" tools/dev/check-toolchain.sh >/dev/null; printf '%s' $$?)
+ifneq ($(ZCL_TOOLCHAIN_RC),0)
+$(error C23 toolchain check failed — this project requires gcc 14 or newer)
+endif
+endif
+endif
+endif
+endif
+
 # Linked vendor archives are part of the exact source identity. On a fresh
 # clone they do not exist until the vendor builder runs, so Make must cross a
 # parse/restart boundary before BUILD_SOURCE_RECORD is captured. Otherwise the
@@ -622,7 +640,7 @@ DEVLOOP_INCLUDES = -Itools/dev
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
 DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
-	tools/dev/windows_headless_run.c
+	tools/dev/windows_headless_run.c tools/dev/grok_report.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
@@ -7859,7 +7877,9 @@ ZCL_DATADIR = $(or $(ZCL_NODE_DATADIR),$(HOME)/.zclassic-c23)
 ZCL_SERVICE_EXTRA_FLAGS ?=
 ZCL_SERVICE_FILESERVICE_PEER ?=
 ZCL_SERVICE_CONNECT_PEER ?=
-ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)
+ZCL_SERVICE_ADDNODE_PEER ?=
+ZCL_SERVICE_ENV_VARS ?=
+ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)$(if $(ZCL_SERVICE_ADDNODE_PEER),<string>-addnode=$(ZCL_SERVICE_ADDNODE_PEER)</string>)
 
 .PHONY: service-install
 service-install:
@@ -7877,9 +7897,19 @@ dev-service-install: | $(BIN_DIR)/z23
 .PHONY: __service-install
 __service-install:
 	@mkdir -p $(ZCL_LAUNCHD_DIR) "$(ZCL_DATADIR)"
-	@sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
-	     -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
-	     -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
+	@env_vars=''; \
+	if [ -n "$(ZCL_SERVICE_ENV_VARS)" ]; then \
+	    env_vars='<key>EnvironmentVariables</key>\n    <dict>'; \
+	    for kv in $(ZCL_SERVICE_ENV_VARS); do \
+	        key=$${kv%%=*}; val=$${kv#*=}; \
+	        env_vars="$$env_vars\n        <key>$$key</key>\n        <string>$$val</string>"; \
+	    done; \
+	    env_vars="$$env_vars\n    </dict>"; \
+	fi; \
+	sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
+	    -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
+	    -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
+	    -e "s|@ENV_VARS@|$$env_vars|g" \
 	    config/launchd/org.z23.zclassic.plist.template \
 	    > "$(ZCL_LAUNCHD_PLIST)"
 	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
@@ -9191,6 +9221,22 @@ $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 	    -Ilib/platform/include -Ilib/base/include \
 	    -o $@ $(FILE_SIZE_POLICY_SRCS)
 
+# grok_report reads the JSON report a dispatched unit prints at the end of its
+# transcript (tools/dev/grok-unit.sh). Written in C against the in-tree JSON
+# parser rather than shelling out to jq: a developer tool that only works on a
+# machine with jq installed is a tool a stranger cannot run, and this project
+# does not take a dependency it did not write.
+GROK_REPORT_BIN = $(BIN_DIR)/grok_report
+GROK_REPORT_SRCS = tools/dev/grok_report.c lib/json/src/json.c \
+    lib/base/src/safe_alloc.c
+.PHONY: tools/dev/grok_report
+tools/dev/grok_report: $(GROK_REPORT_BIN)
+$(GROK_REPORT_BIN): $(GROK_REPORT_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -Ilib/json/include -Ilib/base/include \
+	    -o $@ $(GROK_REPORT_SRCS)
+
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
 # tables). core_seal is a tiny build-time C tool (no external deps: it links the
@@ -9743,6 +9789,14 @@ check-c23-only:
 	@echo "══ LINT: C23-only build and runtime ══"
 	@./tools/lint/check_c23_only.sh --selftest
 	@./tools/lint/check_c23_only.sh
+
+# The public node compiles every translation unit with -std=c23. gcc 13 does
+# not know that flag. Diagnose it by compiling an empty TU before the lint
+# umbrella (and, via the parse-time probe above, before vendor bootstrap).
+check-toolchain:
+	@echo "══ LINT: C23 compiler accepts -std=c23 ══"
+	@./tools/dev/check-toolchain.sh --selftest
+	@./tools/dev/check-toolchain.sh
 
 # No Python source, shebang, or runtime invocation in the executable tree.
 # Historical vector comments may name a Python origin; they must not call it.
@@ -10730,6 +10784,7 @@ ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_LINT_NPROC) * 3 / 4 )); \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \
     check-lint-gate-wiring \
+    check-toolchain \
     check-no-retired-agent-protocol \
     check-build-epoch-integrity \
     check-checkout-lock \

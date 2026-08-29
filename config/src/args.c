@@ -286,7 +286,13 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
         else if (strncmp(argv[i], "-rpcuser=", 9) == 0) ctx->rpc_user = argv[i]+9;
         else if (strncmp(argv[i], "-rpcpassword=", 13) == 0) ctx->rpc_password = argv[i]+13;
         else if (strcmp(argv[i], "-listen") == 0) ctx->listen = true;
-        else if (strncmp(argv[i], "-addnode=", 9) == 0) { /* after init */ }
+        else if (strncmp(argv[i], "-addnode=", 9) == 0) {
+            /* P2P wiring happens after init. Preserve bounded argv-owned
+             * values here so the instant-on weld can reuse operator-named
+             * peers without changing normal discovery. */
+            if (ctx->n_addnode_peers < APP_CONNECT_PEERS_MAX)
+                ctx->addnode_peers[ctx->n_addnode_peers++] = argv[i] + 9;
+        }
         else if (strncmp(argv[i], "-connect=", 9) == 0) {
             ctx->connect_only = true; /* peer wiring happens after init */
             /* Record the peer host so the instant-on weld can use the ONLY
