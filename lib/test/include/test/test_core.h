@@ -195,6 +195,7 @@ int test_policy(void);
 int test_wallet_view(void);
 int test_fast_sync(void);
 int test_fast_sync_coins_export(void);
+int test_fast_sync_coins_artifact(void);
 int test_block_scan(void);
 int test_node_health_service(void);
 int test_chain_state_repo(void);

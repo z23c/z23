@@ -872,6 +872,13 @@ int main(int argc, char **argv)
                failures);
         return failures ? 1 : 0;
     }
+    if (only && strcmp(only, "fast_sync_coins_artifact") == 0) {
+        printf("[test] ZCL_TEST_ONLY=fast_sync_coins_artifact - running only\n");
+        failures += test_fast_sync_coins_artifact();
+        printf("\n=== fast_sync_coins_artifact subset complete: %d failure(s) ===\n",
+               failures);
+        return failures ? 1 : 0;
+    }
     if (only && strcmp(only, "boot_snapshot_failure_memory") == 0) {
         printf("[test] ZCL_TEST_ONLY=boot_snapshot_failure_memory - running only\n");
         { extern int test_boot_snapshot_failure_memory(void);
@@ -1317,6 +1324,7 @@ int main(int argc, char **argv)
     failures += test_wallet_view();
     failures += test_fast_sync();
     failures += test_fast_sync_coins_export();
+    failures += test_fast_sync_coins_artifact();
     failures += test_block_scan();
     failures += test_node_health_service();
     failures += test_syncdiag_rpc();
