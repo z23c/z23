@@ -283,6 +283,69 @@ int test_node_character(void)
                         "unknown") == 0);
     }
 
+    /* ── the exact values, pinned ────────────────────────────────────────
+     *
+     * Every check above constrains SHAPE — ordering, saturation, totality,
+     * determinism — and a mutation run proved that is not enough: the four
+     * weights and both byte offsets could each be changed and this file
+     * still passed. The header calls those weights "the whole editorial
+     * content of this file", so leaving them unpinned meant the one thing
+     * most worth defending was the one thing nothing defended.
+     *
+     * These are deliberately golden values, which the rest of this file
+     * avoids. That is the point: a rule cannot pin a constant. Changing a
+     * weight is a policy decision about what a node's work is worth, and it
+     * must break a test and be argued, not slip through as a typo. */
+    {
+        uint8_t root[32];
+        nc_root(root, 555);
+
+        /* One unit of each kind, weighed alone. A MiB served is the unit;
+         * the other three are worth 16, 256 and 64 of it. */
+        struct node_work one_mib   = { .bytes_served = 1024u * 1024u };
+        struct node_work one_block = { .blocks_validated = 1 };
+        struct node_work one_proof = { .proofs_produced = 1 };
+        struct node_work one_peer  = { .peers_bootstrapped = 1 };
+
+        NC_CHECK("a megabyte served weighs exactly one unit",
+                 node_work_weighted_total(&one_mib) == 1u);
+        NC_CHECK("a validated block weighs exactly 16",
+                 node_work_weighted_total(&one_block) == 16u);
+        NC_CHECK("a produced proof weighs exactly 256",
+                 node_work_weighted_total(&one_proof) == 256u);
+        NC_CHECK("a bootstrapped peer weighs exactly 64",
+                 node_work_weighted_total(&one_peer) == 64u);
+
+        /* Sub-unit traffic rounds DOWN to nothing rather than up to one:
+         * otherwise a node could earn standing by serving a single byte
+         * many times. */
+        struct node_work crumb = { .bytes_served = 1024u * 1024u - 1u };
+        NC_CHECK("less than a megabyte served weighs nothing",
+                 node_work_weighted_total(&crumb) == 0u);
+
+        /* Byte order and byte offsets. nc_be16 reads root[0..1] big-endian,
+         * silhouette comes from root[7], marking from root[19]. A mutation
+         * run showed all three could move undetected, in a file whose
+         * header claims byte-order independence. */
+        uint8_t probe[32];
+        memset(probe, 0, sizeof probe);
+        probe[0] = 0x01;   /* big-endian high byte -> 256 */
+        probe[1] = 0x00;
+        probe[7] = 5u;
+        probe[19] = 9u;
+        struct node_character pc;
+        NC_CHECK("the probe identity derives", node_character_derive(probe, NULL, &pc));
+        NC_CHECK("hue reads the first two bytes BIG-endian, not little",
+                 pc.hue_deg == (uint16_t)(256u % 360u));
+        NC_CHECK("silhouette comes from byte 7", pc.silhouette == 5u % NODE_SILHOUETTE_COUNT);
+        NC_CHECK("marking comes from byte 19", pc.marking == 9u % NODE_MARKING_COUNT);
+
+        /* If hue read the bytes the other way round it would be 1, not 256.
+         * Assert the wrong answer is actually different, so this test cannot
+         * pass by coincidence on a palindromic probe. */
+        NC_CHECK("the little-endian reading would differ, so the check bites",
+                 (uint16_t)(256u % 360u) != (uint16_t)(1u % 360u));
+    }
     printf("=== node_character: %d failure(s) ===\n", failures);
     return failures;
 }
