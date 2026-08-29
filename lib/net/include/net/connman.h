@@ -350,15 +350,38 @@ bool connman_remove_addnode(struct connman *cm,
  * the addrman selection without waiting for the adaptive timer. */
 void connman_kick_seed_discovery(struct connman *cm);
 
-/* Peer-of-last-resort: synchronously fetch /directory.json from every known
- * onion-directory seed (operator file ~/.config/zclassic23/onion-seeds, then
- * the chainparams onionSeeds) plus any known zcl23 .onion peers, harvesting
- * their advertised clearnet IPs into addrman. Used by the peer_floor_violated
- * remedy when outbound count has collapsed to zero: a recovering/partitioned
- * node MUST still find a supplier without a human. Blocking (per-seed 60s);
- * call only from a dedicated discovery/condition thread, never a hot path.
- * No-op in -connect mode or when Tor is not ready. Safe from any thread. */
+/* Peer-of-last-resort: fetch /directory.json from known onion-directory
+ * seeds (operator file ~/.config/zclassic23/onion-seeds, then the node's
+ * own directory, then chainparams onionSeeds) plus any known zcl23 .onion
+ * peers, harvesting advertised clearnet IPs into addrman. Used by the
+ * peer_floor_violated remedy when outbound count has collapsed to zero: a
+ * recovering/partitioned node MUST still find a supplier without a human.
+ * Depth-0 seeds are raced concurrently (capped; first usable 200-body
+ * wins) so a dead door cannot delay a live one. The blocking Tor fetch
+ * cannot be cancelled; losers finish into discarded results before the
+ * pass returns. Call only from a dedicated discovery/condition thread,
+ * never a hot path. No-op in -connect mode or when Tor is not ready.
+ * Safe from any thread. */
 void connman_kick_onion_seeds(struct connman *cm);
+
+/* ── lib/net-internal: the onion-directory seed walk itself ─────────────
+ * Both live in lib/net/src/connman_onion_seeds.c and are declared here,
+ * not in connman_internal.h, only because that internal header is scoped
+ * to the connman.c/connman_dialer.c pair. They are NOT part of the node's
+ * intended API surface — callers outside lib/net want
+ * connman_kick_onion_seeds() (which is this pass plus an addrman flush).
+ *
+ * connman_run_onion_seed_pass(): the full tiered pass — operator file,
+ * this node's own persisted directory, chainparams onionSeeds, on-chain
+ * .onion peers — with the depth-0 candidates raced concurrently. Called
+ * by the discovery thread's boot and below-floor branches in connman.c.
+ *
+ * connman_onion_seed_fetch_one(): one host, depth 0, no endpoint pinning.
+ * The above-floor graph-enrichment path for a .onion peer the on-chain
+ * projection named; it blocks for that host's whole fetch timeout, so it
+ * is never the path a node below the peer floor takes. */
+void connman_run_onion_seed_pass(struct connman *cm);
+void connman_onion_seed_fetch_one(struct connman *cm, const char *onion);
 
 /* Resolve one operator-selected v3 onion through /directory.json, add every
  * advertised numeric endpoint to the persistent addnode set, and schedule an

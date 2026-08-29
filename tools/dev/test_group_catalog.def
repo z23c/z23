@@ -964,6 +964,9 @@ ZCL_TEST_GROUP(make_lint_gates_heavy_02)
 /* lane: seed-doors + onion gossip — appended at the end of the
  * ZCL_TEST_GROUP block; keep both sides on conflict. */
 ZCL_TEST_GROUP(seed_bootstrap_doors)
+/* Concurrent first-usable onion-seed fetch: a dead door must not delay a
+ * live one. Injected fetch, no network. */
+ZCL_TEST_GROUP(onion_seed_race)
 /* params-sovereignty lane: compiled-in verifying keys, and the boundary
  * between validating shielded proofs and creating them. */
 ZCL_TEST_GROUP(params_vk_embedded)
