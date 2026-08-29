@@ -357,9 +357,10 @@ encrypted-transport counts, a domain-separated fingerprint of the public Noise
 static key, authenticated DHT node identity, confinement, and native hot-swap
 capability. Linux distinguishes WSL from native execution; Windows distinguishes
 Wine from native execution. The capsule redacts local paths and private
-material, names missing prerequisites, and reports pairing as unimplemented.
-This is local observation only; restart stability, four-host distinctness, and
-native macOS and Windows execution still require independent host receipts.
+material, names missing prerequisites, reports the durable local pairing
+authority, and separately refuses to claim a remote status protocol. This is
+local observation only; restart stability, four-host distinctness, and native
+macOS and Windows execution still require independent host receipts.
 
 Checkpoint measured 2026-08-28T17:24:08-04:00 / 2026-08-28T21:24:08Z:
 the strict C23 release build and the `v2_transport_parity`, `os_proc`,
@@ -519,6 +520,13 @@ peers, never production wallet state.
   `rpc`, `command_registry_catalog`, and `native_api_contract` passed cold with
   zero skips; `make lint-fast` passed 20/20 gates and `make lint` passed
   158/158 gates.
+- 2026-08-28T21:08:08-04:00 / 2026-08-29T01:08:08Z: the bounded
+  `mesh_status_proto.v1` request and signed-receipt codecs landed with a
+  4,505-byte maximum fuzz input. The exact `mesh_status_proto`, `mesh_pairing`,
+  and `crypto` groups passed 3/3 with zero skips. The ASan/UBSan fuzz target
+  completed 10,000 iterations across the full maximum bound without a finding.
+  The wire remains disconnected from Noise, DHT, and peer handlers; it grants
+  no remote status authority and does not advance queue item 4.
 
 ## Completion rule
 

@@ -1223,6 +1223,8 @@ int main(int argc, char **argv)
       failures += test_zses(); }
     { extern int test_mesh_pairing(void);
       failures += test_mesh_pairing(); }
+    { extern int test_mesh_status_proto(void);
+      failures += test_mesh_status_proto(); }
     { extern int test_wallet_metadata_encryption(void);
       failures += test_wallet_metadata_encryption(); }
     { extern int test_transaction_intent(void);
