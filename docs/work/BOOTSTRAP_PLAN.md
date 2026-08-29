@@ -33,9 +33,22 @@ mirror, checks the exact closed manifest, verifies every payload, and installs
 a systemd user unit. Its remote source is not hardcoded.
 
 `packaging/install/install.sh` and `install.ps1` are fail-closed front-door
-scaffolds. Their all-zero baked pin means no release is published. The POSIX
-front door recognizes only Linux-x86_64. The PowerShell front door publishes no
-Windows platform and exits before downloading anything.
+shims. Each is roughly thirty lines and makes exactly one decision: it names
+the machine, fetches the one C23 bootstrap binary published for it, checks its
+SHA-256 against a digest baked into the shim, and runs it with every argument
+forwarded. Their all-zero baked digest is the sentinel that means no bootstrap
+is published, and both refuse on it before touching a network. The PowerShell
+shim additionally has no Windows row at all.
+
+Every other front-door decision — the three pin channels, the agreement rule,
+the platform refusal, the second-stage installer verification and the handoff —
+lives in `tools/install/z23_bootstrap.c` over the pure `lib/install` library,
+written once for every platform and executed only after a digest check. This
+matters because a shim served at the domain is executing before anything has
+been verified, so logic inside it is logic a compromised origin replaces for
+free; the shim's remaining surface is one hash comparison. The judgement is
+proved by the `z23_front_door` test group and driven end to end against the
+real binary by `packaging/install/install_selftest.sh`.
 
 The three current pin channels are:
 

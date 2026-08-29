@@ -2688,3 +2688,11 @@ AGENT_IMPACT_RULE("app/services/include/services/network_telemetry.h|lib/util/in
 AGENT_IMPACT_RULE("lib/util/include/util/telemetry_ontology.def|lib/util/src/telemetry_ontology.c|lib/test/src/test_telemetry_ontology.c", "telemetry_ontology telemetry_network make_lint_gates")
 /* The ZENDP group's own test source. */
 AGENT_IMPACT_RULE("lib/test/src/test_zendp.c", "zendp zendp_records make_lint_gates")
+
+/* The install front door. lib/install is pure judgement with no in-tree
+ * dependencies, so the only things that can observe a change to it are its
+ * own group and check-z23-release-install, which drives the real
+ * build/bin/z23-bootstrap and the served shim end to end. The shim and the
+ * PowerShell twin ride the same rule because their contract with the
+ * bootstrap — the digest gate and the forwarded argv — is asserted there. */
+AGENT_IMPACT_RULE("lib/install/src/*|lib/install/include/install/*|tools/install/*|packaging/install/*|lib/test/src/test_z23_front_door.c", "z23_front_door make_lint_gates")

@@ -157,6 +157,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/health") == 0) return "single in-process heartbeat/watchdog ring (replaces the old per-subsystem watchdogs)";
     if (strcmp(group, "lib/hotswap") == 0) return "Tier-1 dev-only dlopen hot-swap loader for hotswap-eligible controller/handler TUs";
     if (strcmp(group, "lib/kernel") == 0) return "service lifecycle kernel (init/start/stop/status ordering) + the native command registry";
+    if (strcmp(group, "lib/install") == 0) return "install front door: release-pin parsing, three-channel agreement, platform triple, DNS TXT wire (pure, no I/O)";
     if (strcmp(group, "lib/json") == 0) return "minimal in-tree JSON value/parse/serialize library (no external deps)";
     if (strcmp(group, "lib/keys") == 0) return "EC key material: private/public keys, bech32/base58 address key encoding";
     if (strcmp(group, "lib/metrics") == 0) return "Prometheus-style in-process node metrics";

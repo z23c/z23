@@ -4649,6 +4649,44 @@ $(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
 	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
 		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
+# ── The install front door ────────────────────────────────────────────────
+# `z23-bootstrap` is the program packaging/install/install.sh downloads,
+# digest-checks and runs. It is the SECOND program in this tree that is a TLS
+# client (it fetches the release pin and the second-stage installer over
+# HTTPS), so it is built exactly the way zclassic23-acme is and for exactly
+# the same reason: STRAIGHT FROM SOURCE to an executable, with no intermediate
+# object files. lib/test/src/test_cold_join_sovereign.c P2 scans every Z23
+# object under build/*obj*/epochs for an undefined reference to a TLS-client
+# or trust-store entry point, and nothing compiled here can ever land in a
+# scanned epoch tree. That keeps P2 green honestly rather than by exemption.
+#
+# The pure judgement it makes — pin parsing, three-channel agreement, the
+# platform triple, the DNS TXT wire format — is lib/install, which links into
+# the node like any other module and is proven by the z23_front_door test
+# group. Only the transports are here.
+Z23_BOOTSTRAP_SRCS = \
+	tools/install/z23_bootstrap.c \
+	tools/acme/tls_client.c \
+	lib/install/src/front_door_pin.c \
+	lib/install/src/front_door_platform.c \
+	lib/install/src/front_door_dns_txt.c \
+	lib/crypto/src/sha256.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
+Z23_BOOTSTRAP_INCLUDES = -Ilib/base/include -Ilib/crypto/include \
+	-Ilib/install/include -Ilib/platform/include -Ilib/util/include \
+	-Itools/acme -Ivendor/include
+Z23_BOOTSTRAP_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
+	-D_POSIX_C_SOURCE=200809L $(Z23_BOOTSTRAP_INCLUDES)
+
+.PHONY: z23-bootstrap
+z23-bootstrap: $(BIN_DIR)/z23-bootstrap
+$(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) | $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(Z23_BOOTSTRAP_CFLAGS) -o $@ $(Z23_BOOTSTRAP_SRCS) \
+		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))
 $(eval $(call BUILD_NODE_TOOL,rebuild_recent,tools/rebuild_recent.c,-lm,-fopenmp))
@@ -10343,7 +10381,12 @@ check-ship-remote-transaction: jsonq
 
 # Fail-closed Z23 release packager + installer: checksum mismatch never
 # installs, and the packager never invokes docker.
-check-z23-release-install:
+# The front-door harness drives the REAL bootstrap binary end to end, so the
+# gate builds it first. A missing binary must be a hard failure and never a
+# quiet pass: the front door is the one program a stranger runs before
+# anything has been verified, and an unobserved gate over it is worse than no
+# gate at all.
+check-z23-release-install: $(BIN_DIR)/z23-bootstrap
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
 	@bash packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
