@@ -50,20 +50,37 @@ static const uint8_t RF_ROM_LIST_MAC_TAG[32] = { 'R', 'L', 'S' };
  * otherwise dominate) and each of the three reply reads — to the time
  * remaining against it. One stalled seed can therefore cost at most
  *
- *   RF_CONNECT_TIMEOUT_MS (10 s, rom_fetch_transport.c)
- * + RF_MANIFEST_IO_TIMEOUT_SEC (15 s, the whole post-connect budget)
- * = 25 s,
+ *   the connect budget      (RF_CONNECT_TIMEOUT_MS, 10 s clearnet;
+ *                            ONION_STREAM_CONNECT_TIMEOUT_MS on a circuit)
+ * + the post-connect budget (rf_probe_io_timeout_ms: 15 s clearnet,
+ *                            4x that over Tor)
  *
- * after which the call returns false and config/src/boot_bundle_fetch.c's
+ * so 25 s for a clearnet seed, and correspondingly more for an onion one.
+ * The two axes stay separate on purpose: how long a peer may take to ANSWER
+ * is a different question from how long it may take to REACH, and a Tor
+ * circuit is slower at both without being any less honest.
+ *
+ * After that the call returns false and config/src/boot_bundle_fetch.c's
  * bbf_discover_from_peers `continue`s to the NEXT seed AND leaves the stalled
  * one out of the download peer set (struct bbf_discovery.live), so it is never
  * retried this boot. The seed set is capped at ROM_FETCH_MAX_WORKERS (8), so
- * the entire sweep is bounded at 8 * 25 s even if every seed stalls.
+ * the whole sweep stays bounded even if every seed stalls.
  *
  * Held in a variable rather than used as a literal so a test can drive the
- * abandon-and-move-on path without spending the production wait. The setter is
- * ZCL_TESTING-only; production always uses the constant above. */
-static int g_rf_directory_io_timeout_ms = RF_MANIFEST_IO_TIMEOUT_SEC * 1000;
+ * abandon-and-move-on path without spending the production wait. The setter
+ * is ZCL_TESTING-only; production always uses the transport-scaled value. */
+static int g_rf_directory_io_timeout_ms; /* 0 = use the transport-scaled default */
+
+/* The post-connect budget for one discovery attempt. Unset (the production
+ * case) it is rf_probe_io_timeout_ms(), which is longer for a .onion address:
+ * a Tor circuit is slower than a socket, and reading that slowness as "this
+ * seeder does not speak RLS" would drop honest onion seeders. A test may pin
+ * an explicit short window instead. */
+static int rf_directory_budget_ms(const char *peer_addr)
+{
+    return g_rf_directory_io_timeout_ms > 0 ? g_rf_directory_io_timeout_ms
+                                            : rf_probe_io_timeout_ms(peer_addr);
+}
 
 /* Milliseconds left before `deadline_ms`, floored at 1 so a socket timeout is
  * never set to "block forever". */
@@ -77,15 +94,15 @@ static int rf_ms_left(int64_t deadline_ms)
 void rom_fetch_set_directory_io_timeout_ms_for_test(int ms)
 {
     g_rf_directory_io_timeout_ms =
-        (ms > 0) ? ms : RF_MANIFEST_IO_TIMEOUT_SEC * 1000;
+        (ms > 0) ? ms : 0;
 }
 int rom_fetch_directory_io_timeout_ms_for_test(void)
 {
-    return g_rf_directory_io_timeout_ms;
+    return rf_directory_budget_ms("");
 }
 int rom_fetch_directory_io_timeout_default_ms_for_test(void)
 {
-    return RF_MANIFEST_IO_TIMEOUT_SEC * 1000;
+    return rf_probe_io_timeout_ms("");
 }
 #endif
 
@@ -105,7 +122,7 @@ bool rom_fetch_get_directory(const char *peer_addr, uint16_t port,
      * silent seeder is abandoned within the budget instead of re-arming a
      * fresh window at each wire step. */
     const int64_t rls_deadline_ms =
-        platform_time_monotonic_ms() + g_rf_directory_io_timeout_ms;
+        platform_time_monotonic_ms() + rf_directory_budget_ms(peer_addr);
     (void)platform_socket_set_receive_timeout(fd, rf_ms_left(rls_deadline_ms));
 
     struct fs_session s;

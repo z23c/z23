@@ -866,7 +866,10 @@ bool rom_fetch_download_parallel(const struct rom_fetch_peer *peers,
 static const uint8_t RF_ROM_MANIFEST_MAC_TAG[32] = { 'R', 'M', 'F' };
 
 /* RF_MANIFEST_IO_TIMEOUT_SEC lives in rom_fetch_internal.h — the directory
- * fetch (rom_fetch_directory.c) uses the same budget. */
+ * fetch (rom_fetch_directory.c) uses the same budget. Both reach it through
+ * rf_probe_io_timeout_ms(), which scales the window for the transport the
+ * address implies: a stalled reply over a Tor circuit must not be read as a
+ * legacy seeder just because circuits are slower than sockets. */
 
 bool rom_fetch_verify_chunk(const uint8_t *data, uint32_t len,
                             const uint8_t expected_chunk_sha3[32])
@@ -939,7 +942,7 @@ bool rom_fetch_get_manifest(const char *peer_addr, uint16_t port,
     /* Shorten the recv window: a legacy (RMF-unaware) seeder never replies, so
      * a fast timeout is the fall-back signal rather than a 120 s stall. */
     (void)platform_socket_set_receive_timeout(
-        fd, RF_MANIFEST_IO_TIMEOUT_SEC * 1000);
+        fd, rf_probe_io_timeout_ms(peer_addr));
 
     struct fs_session s;
     fs_session_init(&s, fd);

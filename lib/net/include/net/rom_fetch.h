@@ -319,6 +319,41 @@ bool rom_fetch_download_verified_parallel(const struct rom_fetch_peer *peers,
 void rom_fetch_set_directory_io_timeout_ms_for_test(int ms);
 int  rom_fetch_directory_io_timeout_ms_for_test(void);
 int  rom_fetch_directory_io_timeout_default_ms_for_test(void);
+
+/* ── Transport seam (test-only) ──────────────────────────────────────────
+ *
+ * rom_fetch reaches a seeder over one of two routes, chosen by the address
+ * itself (lib/net/src/rom_fetch_transport.c): getaddrinfo + connect(2) for a
+ * clearnet peer, or a Tor circuit via net/onion_stream.h for a ".onion" peer.
+ * This tree has no SOCKS client -- dynhost replaces it -- so there is no
+ * proxy endpoint to configure or hardcode.
+ *
+ * These entry points let a test prove WHICH route an address took, and that
+ * the two budgets stay separate, without a live Tor network. They compile
+ * out of a release build. */
+#include "platform/socket_compat.h"
+
+struct onion_stream_backend;
+
+/* Bind the raw-stream backend the onion route dials through. A non-NULL
+ * backend makes the onion route use onion_stream_connect_backend_for_test
+ * (skipping the Tor-runtime gates); NULL restores production dialing. */
+void rom_fetch_set_onion_backend_for_test(const struct onion_stream_backend *be);
+
+/* The dial rom_fetch_chunk/_get_manifest/_get_directory all perform. */
+platform_socket_t rom_fetch_dial_for_test(const char *peer_addr, uint16_t port);
+
+/* Reachability (connect) and speed (per-recv silence) are separate axes on
+ * each transport; a test asserts the shape rather than an elapsed duration. */
+struct rom_fetch_dial_budgets {
+    int clearnet_connect_ms;
+    int clearnet_io_ms;
+    int clearnet_probe_io_ms;
+    int onion_connect_ms;
+    int onion_io_ms;
+    int onion_probe_io_ms;
+};
+void rom_fetch_dial_budgets_for_test(struct rom_fetch_dial_budgets *out);
 #endif
 
 #endif /* ZCL_NET_ROM_FETCH_H */
