@@ -68,6 +68,27 @@ The capsule works; actual private-mesh pairing is gated on enabling v2 transport
 and an authenticated DHT identity, which is the same cross-platform prerequisite
 set the command reports on Linux.
 
+## Mainnet sync observation
+
+Started a durable LaunchAgent against mainnet on 2026-08-28:
+
+- Service command: `z23 -datadir=/Users/rentamac/.zclassic-c23
+  -operator-lane=canonical -listen -txindex -allow-clearnet-snapshot-fetch
+  -addnode=205.209.104.118:8033`
+- Proven tip (`hstar`) reached **~10,000** before the snapshot path engaged.
+- Network tip: **~3,232,000** blocks.
+- With `-addnode=HOST:8033`, the node discovered a file-service snapshot at
+  height **3,056,758** on the peer, downloaded a 514 MB consensus-state bundle
+  and a 531 MB header seed, both content-verified.
+- The bundle install into the canonical datadir requires
+  `ZCL_DEPLOY_ALLOW_CANONICAL=1` (set via `ZCL_SERVICE_ENV_VARS`). Without it,
+  the install is deferred.
+- Once the validated header chain reaches the checkpoint height (3,056,758),
+  the bundle installs and `hstar` jumps to that height; the remaining sync is
+  only the ~176k-block tail to the network tip.
+- Once this node finishes syncing, its own file service on port 18034 will
+  advertise a manifest and can serve other z23 nodes.
+
 ## Slice landed
 
 Commit `dd432ea6a` (macOS: launchd service support and quality-job portability)
@@ -79,3 +100,12 @@ adds:
 - macOS service instructions in `docs/GETTING_STARTED.md`.
 - macOS portability fixes for the quality-job guard/retention scripts.
 - Impact-rule mapping for `config/launchd/*`.
+
+Subsequent fixes:
+
+- `394921b08` — fix LaunchAgent flag syntax (`-datadir=DIR`, `-operator-lane=NAME`).
+- `f6afd6ed5` — support `ZCL_SERVICE_EXTRA_FLAGS` and document fast-sync snapshot option.
+- `47cc9e78a` — add `ZCL_SERVICE_FILESERVICE_PEER` so Mac nodes can bootstrap from another z23 node's file service.
+- `ad42404bc` — treat `-addnode=HOST:8033` peers as file-service snapshot seeds without forcing connect-only mode, so z23 nodes help each other bootstrap while keeping normal peer discovery.
+- `9eb439fe4` — support `ZCL_SERVICE_ENV_VARS` in the LaunchAgent; required for `ZCL_DEPLOY_ALLOW_CANONICAL=1` so a fetched snapshot can install into the canonical datadir.
+- `2348ed9eb` — add `ZCL_SERVICE_ADDNODE_PEERS` for multiple snapshot-seed peers and keep `tools/dev/grok_report.c` out of the node binary. The proposed lag-condition suppression was not retained because it coupled condition evaluation to controller-owned filesystem discovery without acceptance evidence.

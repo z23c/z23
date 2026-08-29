@@ -26,6 +26,24 @@ static bool join_path(char *out, size_t capacity, const char *root,
   return true;
 }
 
+struct wait_lock_context {
+  const char *path;
+  bool acquired;
+  DWORD error;
+};
+
+static DWORD WINAPI wait_lock_thread(LPVOID opaque) {
+  struct wait_lock_context *context = opaque;
+  struct platform_private_file file;
+  platform_private_file_init(&file);
+  context->acquired = platform_private_file_open_locked_wait(context->path,
+                                                             &file);
+  if (!context->acquired)
+    context->error = GetLastError();
+  platform_private_file_close(&file);
+  return 0;
+}
+
 int main(void) {
   wchar_t temp[MAX_PATH], directory[MAX_PATH];
   if (!GetTempPathW(MAX_PATH, temp) ||
@@ -39,10 +57,11 @@ int main(void) {
     return fail("temporary path encoding");
   char stage[4 * MAX_PATH], destination[4 * MAX_PATH], resolved[4 * MAX_PATH],
       parent[4 * MAX_PATH], conflict[4 * MAX_PATH];
-  char invalid[4 * MAX_PATH];
+  char invalid[4 * MAX_PATH], wait_lock[4 * MAX_PATH];
   if (!join_path(stage, sizeof(stage), dir, "\\stage.part") ||
       !join_path(destination, sizeof(destination), dir, "\\result.bin") ||
       !join_path(conflict, sizeof(conflict), dir, "\\conflict.bin") ||
+      !join_path(wait_lock, sizeof(wait_lock), dir, "\\wait.lock") ||
       !join_path(invalid, sizeof(invalid), dir, "\\file:stream"))
     return fail("fixture path");
   if (platform_private_path_resolve("relative\\file", resolved,
@@ -87,6 +106,32 @@ int main(void) {
     return fail("locked open");
   if (platform_private_file_open_locked(stage, &second))
     return fail("lock admitted second writer");
+
+  /* Waiting locks must reach LockFileEx rather than fail in CreateFileW.
+   * The contender stays blocked while the first handle owns the range, then
+   * succeeds promptly after release. This specifically proves that every
+   * access requested by pf_open(), including DELETE, is shared. */
+  struct platform_private_file held;
+  platform_private_file_init(&held);
+  if (!platform_private_file_open_locked_create_wait(wait_lock, &held))
+    return fail("waiting lock create");
+  struct wait_lock_context wait_context = {.path = wait_lock};
+  HANDLE waiter = CreateThread(NULL, 0, wait_lock_thread, &wait_context, 0,
+                               NULL);
+  if (!waiter)
+    return fail("waiting lock thread");
+  if (WaitForSingleObject(waiter, 100) != WAIT_TIMEOUT) {
+    CloseHandle(waiter);
+    return fail("waiting lock did not block");
+  }
+  platform_private_file_close(&held);
+  if (WaitForSingleObject(waiter, 5000) != WAIT_OBJECT_0 ||
+      !wait_context.acquired) {
+    CloseHandle(waiter);
+    SetLastError(wait_context.error);
+    return fail("waiting lock did not acquire after release");
+  }
+  CloseHandle(waiter);
   static const char payload[] = "position-safe";
   if (!platform_private_file_write_at(&file, payload, sizeof(payload), 17) ||
       !platform_private_file_flush(&file))
@@ -158,6 +203,9 @@ int main(void) {
   MultiByteToWideChar(CP_UTF8, 0, conflict, -1, wconflict, 4 * MAX_PATH);
   DeleteFileW(wdestination);
   DeleteFileW(wconflict);
+  wchar_t wwait_lock[4 * MAX_PATH];
+  MultiByteToWideChar(CP_UTF8, 0, wait_lock, -1, wwait_lock, 4 * MAX_PATH);
+  DeleteFileW(wwait_lock);
   RemoveDirectoryW(directory);
   puts("PASS private_file_acceptance");
   return 0;

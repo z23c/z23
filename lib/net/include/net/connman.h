@@ -535,12 +535,9 @@ bool connman_outbound_rate_allowed_for_test(bool below_floor,
                                             bool interval_elapsed,
                                             bool dht_hint_pending);
 int connman_addrman_retry_cooldown_for_test(int attempts);
-/* Pure form of the dial scheduler's per-batch concurrency decision. A cold
- * node (no healthy outbound peers) must ask for a CONCURRENT FAN, not one
- * candidate at a time: at width 1 three blackholed clearnet seeds cost three
- * serial DEFAULT_CONNECT_TIMEOUT windows before anything else is tried. The
- * caps (free outbound slots, remaining max_connections capacity, buffer
- * bound) must all still bind. */
+/* Pure form of the dial scheduler's per-pass admission decision. Until the
+ * connection manager owns locked slot reservations, any positive decision is
+ * limited to one attempt. */
 size_t connman_dial_scheduler_want_for_test(bool rate_ok,
                                             size_t outbound_healthy,
                                             bool below_floor,
@@ -550,11 +547,6 @@ size_t connman_dial_scheduler_want_for_test(bool rate_ok,
  * NODE_NETWORK must not suppress cold-start discovery. */
 bool connman_seed_discovery_needed_for_test(size_t healthy_outbound);
 int connman_seed_discovery_interval_for_test(size_t healthy_outbound);
-/* Drive ONE dial batch directly (clamped to the internal batch bound), so a
- * test can measure that N candidates share a single connect window. */
-void connman_dial_batch_for_test(struct connman *cm,
-                                 struct connman_dial_candidate *batch,
-                                 size_t count);
 #endif
 
 /* Snapshot the currently healthy (handshaked, NODE_NETWORK, non-disconnecting,

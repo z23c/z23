@@ -183,6 +183,24 @@ ZCL_PORTABLE_FRONTDOOR_GOALS := portable c23-portable-toolchain \
 ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 	$(filter-out $(ZCL_PORTABLE_FRONTDOOR_GOALS),$(MAKECMDGOALS))),,1),)
 
+# Refuse a compiler that cannot compile C23 before vendor bootstrap or any
+# object work. gcc 13 does not know -std=c23 and otherwise reports that once
+# per translation unit after minutes of vendor compile. Capability probe, not
+# a version parse: tools/dev/check-toolchain.sh compiles an empty TU.
+# Skip standalone clean so `make clean` still works on a box with no compiler.
+ifneq ($(ZCL_STANDALONE_CLEAN),1)
+ifneq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
+ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
+ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
+ZCL_TOOLCHAIN_RC := $(shell CC="$(CC)" tools/dev/check-toolchain.sh >/dev/null; printf '%s' $$?)
+ifneq ($(ZCL_TOOLCHAIN_RC),0)
+$(error C23 toolchain check failed — this project requires gcc 14 or newer)
+endif
+endif
+endif
+endif
+endif
+
 # Linked vendor archives are part of the exact source identity. On a fresh
 # clone they do not exist until the vendor builder runs, so Make must cross a
 # parse/restart boundary before BUILD_SOURCE_RECORD is captured. Otherwise the
@@ -484,15 +502,11 @@ FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
 # POSIX-only operator tools: zcl-nodectl uses fork/signals/arpa/inet.h and
 # zclassic-cli uses poll.h. They are not in the native Windows node path, so
 # do not force the test harness or `all` to build them on Windows.
-# zclassic23-acme (the certificate worker) rides here too -- not because it is
-# POSIX-only, but because nothing has yet BUILT it on Windows. Move it out the
-# day someone proves it there; leaving it in `all` unproven would break the
-# native Windows build for everyone else.
 ifeq ($(ZCL_HOST_WINDOWS),1)
 ZCL_POSIX_ONLY_BINS =
 ZCL_NODECTL_DEP =
 else
-ZCL_POSIX_ONLY_BINS = zclassic-cli zcl-nodectl zclassic23-acme
+ZCL_POSIX_ONLY_BINS = zclassic-cli zcl-nodectl
 ZCL_NODECTL_DEP = $(ZCL_NODECTL_BIN)
 endif
 WAL_CHECKPOINT_BIN = $(BIN_DIR)/wal_checkpoint
@@ -625,7 +639,8 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary, or the test harness. They must leave the wildcard BEFORE the
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
-DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
+DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
+	tools/dev/hotswap_verify_so.c \
 	tools/dev/windows_headless_run.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
@@ -2090,7 +2105,7 @@ ifeq ($(ZCL_HOST_OS),Linux)
 TEST_REL_CFLAGS += -Wno-stringop-truncation -Wno-stringop-overread \
 	-Wno-restrict
 endif
-TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
+TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS))
 INTEGRATION_CFLAGS := $(TEST_REL_CFLAGS)
 INTEGRATION_LDFLAGS := $(TEST_REL_LDFLAGS)
 TEST_REL_EPOCH_COMPILE_FLAGS := $(strip $(TEST_REL_CFLAGS) deps=-MD,-MP)
@@ -2152,7 +2167,7 @@ TEST_ASAN_SRCS = $(TEST_PARALLEL_FAST_SRCS)
 TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
 	$(ASAN_COMMON_SAN_FLAGS) \
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
-TEST_ASAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(ASAN_COMMON_SAN_FLAGS)
+TEST_ASAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ASAN_COMMON_SAN_FLAGS)
 TEST_ASAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_ASAN_CFLAGS) \
 	adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS) \
 	deps=-MD,-MP)
@@ -2206,7 +2221,7 @@ TEST_TSAN_SRCS = $(TEST_PARALLEL_FAST_SRCS)
 TEST_TSAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
 	$(TSAN_COMMON_SAN_FLAGS) \
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
-TEST_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(TSAN_COMMON_SAN_FLAGS)
+TEST_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(TSAN_COMMON_SAN_FLAGS)
 TEST_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_TSAN_CFLAGS) deps=-MD,-MP)
 TEST_TSAN_EPOCH_LINK_FLAGS := $(strip $(TEST_TSAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-tsan,$(ZCL_EPOCH_PROFILES)),)
@@ -4529,48 +4544,6 @@ mock_rpc: $(BIN_DIR)/mock_rpc
 $(BIN_DIR)/mock_rpc: tools/mock_rpc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread -o $@ $<
-
-# ── The certificate worker ────────────────────────────────────────────────
-# `zclassic23-acme` is the ONLY program in this tree that is a TLS client and
-# the only one that carries a CA trust store. That is not incidental: the node
-# must never be able to be told who to trust by whoever ships a trust store,
-# and lib/test/src/test_cold_join_sovereign.c P2 asserts exactly that by
-# scanning every Z23 object under build/*obj*/epochs for an undefined
-# reference to a TLS-client or trust-store entry point.
-#
-# So this binary is compiled STRAIGHT FROM SOURCE to an executable, with no
-# intermediate object files at all. Nothing it compiles can ever appear in a
-# scanned epoch tree, which is what keeps P2 green honestly rather than by
-# exemption. It shares only four node files, all of them free of client and
-# trust-store symbols: the base64url codec, the node/worker handoff file, the
-# renewal decision, and the JSON reader. The platform clock joins them so the
-# worker keeps the tree's one-clock rule (no raw time() outside lib/platform).
-ACME_WORKER_SRCS = \
-	tools/acme/acme_main.c \
-	tools/acme/acme_client.c \
-	tools/acme/acme_jws.c \
-	tools/acme/acme_protocol.c \
-	tools/acme/tls_client.c \
-	tools/acme/acme_selftest_transport.c \
-	tools/acme/acme_selftest_protocol.c \
-	lib/net/src/acme_arm_file.c \
-	lib/net/src/acme_b64url.c \
-	lib/net/src/acme_renewal.c \
-	lib/json/src/json.c \
-	lib/base/src/log_level.c \
-	lib/base/src/safe_alloc.c \
-	lib/platform/src/clock.c
-ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
-	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
-ACME_WORKER_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
-
-.PHONY: zclassic23-acme
-zclassic23-acme: $(BIN_DIR)/zclassic23-acme
-$(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
-	@mkdir -p $(dir $@)
-	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))
@@ -7903,7 +7876,13 @@ ZCL_LAUNCHD_LABEL = org.z23.zclassic
 ZCL_LAUNCHD_PLIST = $(ZCL_LAUNCHD_DIR)/$(ZCL_LAUNCHD_LABEL).plist
 ZCL_DATADIR = $(or $(ZCL_NODE_DATADIR),$(HOME)/.zclassic-c23)
 ZCL_SERVICE_EXTRA_FLAGS ?=
-ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)
+ZCL_SERVICE_FILESERVICE_PEER ?=
+ZCL_SERVICE_CONNECT_PEER ?=
+ZCL_SERVICE_ADDNODE_PEER ?=
+# Space-separated list of additional -addnode peers for the LaunchAgent.
+ZCL_SERVICE_ADDNODE_PEERS ?=
+ZCL_SERVICE_ENV_VARS ?=
+ZCL_SERVICE_EXTRA_FLAGS_PLIST = $(foreach f,$(ZCL_SERVICE_EXTRA_FLAGS),<string>$(f)</string>)$(if $(ZCL_SERVICE_FILESERVICE_PEER),<string>-fileservice=$(ZCL_SERVICE_FILESERVICE_PEER)</string>)$(if $(ZCL_SERVICE_CONNECT_PEER),<string>-connect=$(ZCL_SERVICE_CONNECT_PEER)</string>)$(if $(ZCL_SERVICE_ADDNODE_PEER),<string>-addnode=$(ZCL_SERVICE_ADDNODE_PEER)</string>)$(foreach p,$(ZCL_SERVICE_ADDNODE_PEERS),<string>-addnode=$(p)</string>)
 
 .PHONY: service-install
 service-install:
@@ -7921,9 +7900,19 @@ dev-service-install: | $(BIN_DIR)/z23
 .PHONY: __service-install
 __service-install:
 	@mkdir -p $(ZCL_LAUNCHD_DIR) "$(ZCL_DATADIR)"
-	@sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
-	     -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
-	     -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
+	@env_vars=''; \
+	if [ -n "$(ZCL_SERVICE_ENV_VARS)" ]; then \
+	    env_vars='<key>EnvironmentVariables</key>\n    <dict>'; \
+	    for kv in $(ZCL_SERVICE_ENV_VARS); do \
+	        key=$${kv%%=*}; val=$${kv#*=}; \
+	        env_vars="$$env_vars\n        <key>$$key</key>\n        <string>$$val</string>"; \
+	    done; \
+	    env_vars="$$env_vars\n    </dict>"; \
+	fi; \
+	sed -e 's|@Z23_BIN@|$(ZCL_SERVICE_Z23_BIN)|g' \
+	    -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
+	    -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
+	    -e "s|@ENV_VARS@|$$env_vars|g" \
 	    config/launchd/org.z23.zclassic.plist.template \
 	    > "$(ZCL_LAUNCHD_PLIST)"
 	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
@@ -8839,7 +8828,7 @@ clean:
 COV_BUILD_ROOT = $(BUILD_DIR)/cov
 COV_CFLAGS = $(filter-out -flto -flto=% -O3 -march=native -Werror,$(CACHED_CFLAGS)) \
              --coverage -O1 -g -DCOVERAGE_BUILD -DZCL_TESTING
-COV_LDFLAGS = $(filter-out -flto -flto=%,$(LDFLAGS)) $(ZCL_DEV_LINKER) --coverage
+COV_LDFLAGS = $(filter-out -flto -flto=%,$(LDFLAGS)) --coverage
 COV_TEST_BIN = $(BIN_DIR)/test_zcl_cov
 COV_EPOCH_COMPILE_FLAGS := $(strip $(COV_CFLAGS) -Wno-deprecated-declarations deps=-MD,-MP coverage-staging=v1)
 COV_EPOCH_LINK_FLAGS := $(strip $(COV_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
@@ -9234,6 +9223,22 @@ $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 	    $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ilib/platform/include -Ilib/base/include \
 	    -o $@ $(FILE_SIZE_POLICY_SRCS)
+
+# grok_report reads the JSON report a dispatched unit prints at the end of its
+# transcript (tools/dev/grok-unit.sh). Written in C against the in-tree JSON
+# parser rather than shelling out to jq: a developer tool that only works on a
+# machine with jq installed is a tool a stranger cannot run, and this project
+# does not take a dependency it did not write.
+GROK_REPORT_BIN = $(BIN_DIR)/grok_report
+GROK_REPORT_SRCS = tools/dev/grok_report.c lib/json/src/json.c \
+    lib/base/src/safe_alloc.c
+.PHONY: tools/dev/grok_report
+tools/dev/grok_report: $(GROK_REPORT_BIN)
+$(GROK_REPORT_BIN): $(GROK_REPORT_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -Ilib/json/include -Ilib/base/include \
+	    -o $@ $(GROK_REPORT_SRCS)
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
@@ -9787,6 +9792,14 @@ check-c23-only:
 	@echo "══ LINT: C23-only build and runtime ══"
 	@./tools/lint/check_c23_only.sh --selftest
 	@./tools/lint/check_c23_only.sh
+
+# The public node compiles every translation unit with -std=c23. gcc 13 does
+# not know that flag. Diagnose it by compiling an empty TU before the lint
+# umbrella (and, via the parse-time probe above, before vendor bootstrap).
+check-toolchain:
+	@echo "══ LINT: C23 compiler accepts -std=c23 ══"
+	@./tools/dev/check-toolchain.sh --selftest
+	@./tools/dev/check-toolchain.sh
 
 # No Python source, shebang, or runtime invocation in the executable tree.
 # Historical vector comments may name a Python origin; they must not call it.
@@ -10774,6 +10787,7 @@ ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_LINT_NPROC) * 3 / 4 )); \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \
     check-lint-gate-wiring \
+    check-toolchain \
     check-no-retired-agent-protocol \
     check-build-epoch-integrity \
     check-checkout-lock \

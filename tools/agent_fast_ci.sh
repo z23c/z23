@@ -335,7 +335,14 @@ select_test_groups() {
     while IFS= read -r file; do
         [ -n "$file" ] || continue
         matched=0
-        if match_shared_impact_rules "$file"; then
+        # A removed source cannot retain its own impact rule.  The exact
+        # source-wide compile still proves that no live translation unit
+        # references it; route the deletion through the build/lint contract
+        # instead of demanding an impossible rule in an absent component.
+        if [ ! -e "$file" ]; then
+            add_group make_lint_gates
+            matched=1
+        elif match_shared_impact_rules "$file"; then
             matched=1
         fi
         if [ "$matched" -eq 0 ] && is_code_like_change "$file"; then
@@ -860,14 +867,17 @@ run_shell_checks() {
     make_fast watcher-safety-gates
     tools/agent_fast_ci.sh receipt-selftest
     tools/agent_fast_ci.sh changed-set-selftest
-    # Parse EVERY tracked shell script, not a hand-maintained allowlist. The
+    # Parse every tracked *.sh file plus the shell entrypoints whose public
+    # names intentionally have no suffix. The
     # allowlist that used to live here named 13 scripts out of 411, and
     # tools/scripts/anchor-snapshot-copy-prove.sh sat in the unchecked 398
     # failing `bash -n` at EOF -- a copy-prove harness that could never have
     # run once. The whole sweep costs ~0.5 s, so there is no reason to choose.
-    # githooks carry no .sh suffix, so they are named explicitly.
+    # extensionless entrypoints are named explicitly and pinned by the gate's
+    # self-test so adding one requires updating this list.
     local script
-    for script in $(git ls-files "*.sh") tools/githooks/pre-push; do
+    for script in $(git ls-files "*.sh") \
+        tools/githooks/pre-push tools/githooks/pre-commit tools/zcl; do
         [ -f "$script" ] || continue
         bash -n "$script"
     done

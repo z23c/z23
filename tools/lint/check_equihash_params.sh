@@ -123,9 +123,9 @@ status=0
 
 # ── 1. the generated page still matches the consensus tables ─────────────
 TOOL="build/bin/equihash-params-fact"
-if [ ! -x "$TOOL" ]; then
-    make --no-print-directory tools/equihash-params-fact >/dev/null 2>&1 || true
-fi
+# Ask make on every run.  An executable left by an older checkout is not
+# evidence that it was built from the current generator source.
+make --no-print-directory tools/equihash-params-fact >/dev/null 2>&1 || true
 if [ ! -x "$TOOL" ]; then
     echo "check_equihash_params: FAIL — could not build $TOOL" >&2
     exit 1
