@@ -675,14 +675,20 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary) — filtering there would only move the duplicate-`main` link error.
 DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
 	tools/dev/hotswap_verify_so.c \
+	tools/dev/mutation_campaign.c \
 	tools/dev/windows_headless_run.c
+# The mutation harness proper (operators + campaign core) has no main() and
+# is proved by the registered `mutation_harness` group, so it is linked into
+# the dev binary and the test harness but kept out of the release node — a
+# tool that edits nothing in production has no business shipping there.
+MUTATION_LIB_SRCS = tools/dev/mutation_ops.c tools/dev/mutation_run.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/devloop_baseline.c tools/dev/dev_failure_store.c \
-	tools/dev/dev_source_identity.c
+	tools/dev/dev_source_identity.c $(MUTATION_LIB_SRCS)
 DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 
 # The stable public Core -> App ABI is lib/framework/include/zclassic23/app.h,
@@ -2119,7 +2125,8 @@ TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard lib/test/src/*.c))
 TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
 	tools/dev/dev_source_identity.c tools/dev/devloop_process.c \
-	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c
+	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
+	$(MUTATION_LIB_SRCS)
 SPEC_SRCS = $(wildcard lib/test/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
 
@@ -9404,6 +9411,40 @@ $(GROK_REPORT_BIN): $(GROK_REPORT_SRCS)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Ilib/json/include -Ilib/base/include \
 	    -o $@ $(GROK_REPORT_SRCS)
+
+# mutation-campaign measures whether a test group would NOTICE if the code it
+# covers were wrong: it enumerates one-token defects in a source file,
+# compiles each, runs ONLY the named group, and reports what survived. It is
+# a REPORTING tool — deliberately not on the default test path and not in the
+# push gate, because a mutation-score threshold imposed before the tree has
+# any measured scores would block everyone.
+#
+# Linked standalone rather than into the node: it needs a compiler and a make
+# transcript, which a running node has no business carrying. The four in-tree
+# sources it borrows are the SHA3 used for its content cache, the checked
+# allocators, and the SUITE VERDICT parser that already exists for
+# dev.agent.mutate — the same rule for reading a runner transcript, in one
+# place, so the two can never disagree about what "the group ran" means.
+#
+#   make mutation-campaign
+#   build/bin/mutation-campaign --file=lib/metaverse/src/node_character.c \
+#                               --group=test_node_character
+#   build/bin/mutation-campaign --file=<any .c> --list   # builds nothing
+MUTATION_CAMPAIGN_BIN = $(BIN_DIR)/mutation-campaign
+MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
+    tools/command/native_devagent.c lib/sha3/src/sha3.c \
+    lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c \
+    lib/platform/src/clock.c lib/base/src/safe_alloc.c
+.PHONY: mutation-campaign
+mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
+$(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L \
+	    -Itools -Itools/dev -Ilib/base/include -Ilib/sha3/include \
+	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
+	    -Ilib/platform/include -Ilib/util/include \
+	    -o $@ $(MUTATION_CAMPAIGN_SRCS) -lpthread
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
