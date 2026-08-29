@@ -84,21 +84,67 @@ status capsules, and receipts. The data plane carries bounded immutable
 objects. Large file bytes, build inputs, artifacts, logs, and application
 bundles never ride inside control messages.
 
+### Control and data-plane route strategy
+
+Routes are transport choices, not authorities. Direct TCP, onion, and a future
+opaque relay must terminate in the same Noise static identity and active ZID
+delegation before a private control or data request is admitted. An endpoint
+record supplies only a candidate address. A successful connection supplies no
+capability by itself.
+
+The route procedure is:
+
+1. collect bounded candidates from operator configuration and available
+   signed discovery records;
+2. connect without attaching a private request;
+3. complete Noise and validate the peer's active delegation against the paired
+   identity and network genesis;
+4. select a route by locally configured policy and measured reachability, not
+   by a privilege difference between transports;
+5. send a small capability-bound control request; and
+6. transfer any referenced immutable bytes through the bounded data lane,
+   then bind the terminal receipt to both the control request and object root.
+
+A route failure may try another candidate, but an identity mismatch,
+delegation failure, plaintext downgrade, revocation, or capability refusal is
+terminal for that request. Relays and rendezvous peers forward opaque records
+only. They do not receive target credentials, plaintext, or machine authority.
+The currently implemented status requester is narrower: it uses an already
+connected authenticated peer and never dials. Automatic route selection,
+onion failover, and relay transport remain acceptance work.
+
 ## Current truthful state
 
 | Capability | Current state | What remains before a product claim |
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Implemented: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget) whose verified receipts persist through the same handoff as `ops mesh status`; rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, and fixed replay/cadence bounds protect both ends; never dials, offline machines stay listed | Automatic bounded refresh scheduling and independent-host receipts |
+| Fleet view | Implemented: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget); rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, fixed replay/cadence bounds protect both ends, and a supervised, sync-subordinate scheduler refreshes paired-machine status automatically (bounded in-flight, cooldown/backoff, admitted only at chain tip with clear disk, memory, and DB); every verified receipt persists through the one serialized db_service writer; never dials, offline machines stay listed | Independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
-| Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
+| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, and restart resume | Private dispatcher and queue, atomic no-clobber plaintext publication, cancellation wiring, signed receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
 | Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
-| macOS | Native C23 development/application path exists; node support must report embedded Tor unavailable | Native node/session receipts and truthful confinement/tunnel capability probes |
-| Windows | Native UCRT64 `z23.exe` builds; WSL2 runs the Linux node | Native runtime/service acceptance and Windows confinement/tunnel capability probes |
+| macOS | Native arm64 node build and isolated startup are measured; a launchd service template exists | Native service lifecycle, independent node/session receipts, embedded-Tor build and runtime proof, and truthful confinement/tunnel probes |
+| Windows | Native UCRT64 `z23.exe` builds and a Task Scheduler installer exists; WSL2 runs the Linux node | Native full-node and service acceptance, embedded Tor, and Windows confinement/tunnel probes |
+
+### Platform service and activation truth
+
+| Boundary | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Native node build/start | Measured | Measured on arm64; Intel remains unverified | Build path exists; full runtime acceptance remains open |
+| User service definition | systemd unit with restart and watchdog policy | launchd template with `RunAtLoad` and failure keepalive; lifecycle unproved | Task Scheduler installer with restricted file ACL and exact binary hash; lifecycle unproved |
+| Production binary rollback | Native A/B launcher and deployment checks exist | No equivalent accepted path | No equivalent accepted path |
+| Embedded onion service | Available only when the full Tor archives are built and linked; the stub is not Tor | Full-Tor build path exists but has not been measured on a Mac | Native path currently uses the Tor stub |
+| Live module activation | Development build only, isolated development datadir, allowlisted read-only leaves | Refuses native activation | Refuses native activation |
+| Live module rollback | Prior in-process development image can be restored after the same admission checks | Unavailable | Unavailable |
+| Confined build execution | Linux worker path exists with bounded action policy and host isolation | Required Linux toolchain/isolation identity is unavailable, so execution refuses | Worker execution refuses |
+
+Service installation does not prove native node operation, Tor availability,
+rollback, or confinement. A platform claim requires a native-host receipt for
+each row. Linux production A/B rollback and Linux development module rollback
+are distinct mechanisms and must not share one generic "hot swap" claim.
 
 No row may be promoted from partial to implemented because another operating
 system passed, because a simulator passed, or because one maintainer-owned
@@ -117,6 +163,30 @@ authority.
 The blockchain, wallet, canonical datadir, and production deployment remain
 outside the default machine-access capability set. Consensus and peer health
 retain resource priority over discovery, transfer, build, and control traffic.
+
+### Shared subordinate-work admission
+
+The host operating system remains the process scheduler. Z23 needs one shared,
+pure admission decision for work subordinate to the blockchain, not a second
+general-purpose scheduler. Mesh refresh currently implements the strongest
+version of this decision: the node must be running and at chain tip; disk and
+memory pressure must be clear; no long database operation, open transaction,
+turbo mode, or pending block application may exist.
+
+Transfer, build, test, private-object maintenance, discovery refresh, service
+activation, and terminal workers must consult the same named decision before
+claiming durable work and again before starting an expensive or irreversible
+stage. A resource refusal defers work without consuming an attempt, lease, or
+failure budget. Work already running obeys its fixed limits and cancellation
+contract, while new subordinate work remains closed until blockchain pressure
+clears. Background workers also apply the native platform QoS primitive where
+available. Shutdown stops admission before worker drain begins.
+
+This is not yet a system-wide guarantee. Automatic mesh status refresh and the
+build-fabric worker now share the same pre-claim decision; the worker also uses
+background-thread QoS and reports its current refusal reason. Transfer,
+private-object maintenance, discovery, activation, and terminal workers must
+adopt the same contract as those surfaces are implemented.
 
 ## Verified substrate
 
@@ -155,9 +225,12 @@ reimplemented:
   [`lib/vcs/include/vcs/zcode_dht_record.h`](../../lib/vcs/include/vcs/zcode_dht_record.h),
   [`lib/vcs/include/vcs/package_verify_policy.h`](../../lib/vcs/include/vcs/package_verify_policy.h),
   and [`app/services/include/services/package_lifecycle.h`](../../app/services/include/services/package_lifecycle.h).
-- Linux has an embedded Tor onion path. macOS currently builds the native node
-  without embedded Tor, and must report onion service unavailable rather than
-  claim fallback coverage. The measured platform boundary is recorded in
+- Linux has an embedded Tor onion path when the full Tor archives are built and
+  linked; a binary linked to the offline stub must not claim Tor. The native
+  macOS full-Tor build path exists but has not completed native-host acceptance.
+  The Windows native dependency lane currently uses the stub. Each runtime must
+  report its linked capability rather than infer it from the operating system.
+  The measured platform boundary is recorded in
   [`docs/GETTING_STARTED.md`](../GETTING_STARTED.md). Windows support is not a
   completed or measured production baseline yet.
 
@@ -216,6 +289,38 @@ subject under local policy, consumes or records its replay key, and returns a
 signed receipt for the exact accepted or refused operation. Revocation is a
 local, durable state transition and takes effect for new requests and renewed
 sessions. Expiry is mandatory even when revocation distribution is delayed.
+
+### Capability-grant lifecycle
+
+Each grant follows one target-local lifecycle:
+
+```text
+absent -> planned -> locally committed -> active -> expired or revoked
+                                   |          |
+                                   |          +-> renewed by a new explicit grant
+                                   +-> refused without authority change
+```
+
+Planning is read-only and names the exact target, subject, operation, limits,
+expiry, and deny mask. Commit re-derives those facts from the live authenticated
+session and requires an owner confirmation bound to the plan generation. The
+target stores the grant through its durable lifecycle before it can authorize a
+request. Request admission then verifies the active session, target and subject
+identities, operation kind, immutable input root, limits, time window, replay
+key, and current revocation state. Every outcome produces a bounded accepted or
+refused receipt without widening the grant.
+
+Renewal creates a new bounded grant; it does not mutate expiry in place or
+revive a revoked record. Revocation is sticky and prevents new requests and
+session renewal. Cancellation stops one admitted operation but does not revoke
+its grant. Disconnect preserves durable cancellation, result, and revocation
+state. Garbage collection may remove expired payloads only after the durable
+receipt and replay windows no longer require them.
+
+Today, pairing commit implements only the initial status-read authority and is
+performed independently on each machine. Two-sided wire grant negotiation,
+renewal, capability-specific plan/commit, and capability transport beyond
+status-read remain unimplemented.
 
 The transcript hash and transcript-derived connection generation are shared
 session evidence. The transport's process-local connection serial is never a
@@ -357,16 +462,119 @@ The phases below are delivered in this dependency order:
 4. completed: connect the wire only after Noise plus active ZID authentication
    and prove revocation races fail closed;
 5. completed: project responses into `ops mesh machines` with honest fresh,
-   stale, and unknown state;
-6. add the encrypted private-object envelope and resumable transfer before any
+   stale, and unknown state, then refresh connected active pairings without
+   competing with chain synchronization;
+6. extract the mesh resource gate into shared subordinate-work admission, use
+   it before build-fabric lease claims, apply platform background QoS, and prove
+   deferral never consumes an attempt or competes with chain synchronization;
+7. record independent-host native service and signed status receipts, then add
+   identity-pinned direct and, where available, onion route selection without
+   changing authority when the path changes;
+8. complete the two-sided capability plan/commit, renewal, cancellation, and
+   sticky-revocation lifecycle for the next typed operation;
+9. add the encrypted private-object envelope and resumable transfer before any
    remote execution surface;
-7. bind existing immutable build/test actions to paired capabilities;
-8. add local-service tunnels; and
-9. add service-island and app-cartridge activation last.
+10. bind existing immutable build/test actions to paired capabilities;
+11. add local-service tunnels and the separately granted terminal worker; and
+12. add service-island and app-cartridge activation last.
 
 Each item lands with a local adversarial test and then an independent-host
 receipt. Work does not skip forward because a later UI can be demonstrated
 against fixtures.
+
+### Parallel platform lanes
+
+Linux, macOS, and Windows work proceeds concurrently without creating a fleet
+controller or separate platform protocols. `origin/main` is the integration
+blackboard; each lane consumes the same portable C23 protocol and publishes
+native evidence for only the guarantees that host can prove.
+
+| Lane | Owns now | Acceptance before promotion |
+| --- | --- | --- |
+| Portable protocol | Pairing/capability wire, private-object frames and store, receipts, terminal framing, route identity | Strict C23 build, adversarial codec/fuzz gates, restart-safe fixtures, no socket/disk work on message threads |
+| Linux native | systemd lifecycle, full Tor, directory/descriptor confinement, PTY worker, A/B core restart | Signed native receipt for service restart, onion identity, confinement, terminal revocation, rollback, and chain-priority load |
+| macOS native | launchd lifecycle, full-Tor measurement, directory transaction semantics, PTY worker, service-island generation switch | arm64 native receipts first; Intel remains unclaimed until independently measured; unsupported confinement refuses by name |
+| Windows native | UCRT64 runtime, Task Scheduler lifecycle, ACL-safe private store, ConPTY worker, native Tor decision | Native—not Wine/WSL—receipts for start/restart, file publication, terminal teardown, and every advertised transport |
+| Cross-host acceptance | Pair each platform combination and remove initiating agents, GitHub, and one route | Exact signed receipts prove identity stability, transfer resume, revocation, alternate-route authority parity, and continued chain sync |
+
+Platform agents may improve their native lane before the shared protocol reaches
+it, but they record measurements and portable seams rather than inventing an
+alternate wire, identity, capability, scheduler, or update authority. Work is
+ready to compose only after its commit is on `main`, its exact source identity
+is named, and another host can independently reproduce the claimed behavior.
+
+The immediate acceptance for item 6 queues an action while each admission fact
+is independently unsafe: chain not at tip, low disk, high memory pressure, long
+database operation, database service unavailable, database closed, transaction
+open, turbo mode, pending block application, and shutdown. No case may acquire
+a lease, increment an attempt, or start a worker. Clearing all facts admits
+exactly one claim. Existing mesh-status gate tests must continue to pass from
+the same decision table. The predicate belongs in a shared C23 service rather
+than the boot layer: `boot_mesh_status_refresh.c` and
+`build_fabric_runtime.c` must consume the same result and reason vocabulary.
+
+Checkpoint measured 2026-08-29T07:50:42-04:00 /
+2026-08-29T11:50:42Z: `mesh_capability_grant`,
+`mesh_private_object_proto`, `build_fabric`, `mesh_status_wire`, `thread_qos`,
+and `db_migration_idempotent` each passed with `groups_failed=0` and
+`self_skips=0`; `make lint-fast` passed all 22 selected gates. This proves the
+local grant lifecycle, canonical signed-offer refusal surface, shared pure
+admission decision, and schema migration. Encrypted transfer and independent
+host receipts remain unproved.
+
+Checkpoint measured 2026-08-29T08:40:35-04:00 /
+2026-08-29T12:40:35Z: schema-v79 grant authority binds the receiving master
+and Noise identities, canonical 65,520-byte plaintext chunk geometry, both
+object roots, storage and transfer ceilings, and mandatory denial of wallet,
+consensus, canonical-datadir, deployment, secret, delegation, execution, and
+installation authority. Exact claims resume across database reopen; a
+different transfer and post-claim revocation are refused. The allocation-free
+chunk codec uses X25519-safe, HKDF-SHA3-256, and ChaCha20-Poly1305 with a
+per-offer key context and per-index nonce. Offer admission rechecks signature,
+session transcript and generation, chain-active delegated source, pairing,
+target, grant, time, limits, and the grant-nonce-derived request before claim.
+The encryption context and transfer identity exclude transient session,
+window, and online-key fields, so a newly authenticated re-offer resumes the
+same exact ciphertext while an old offer still fails the new session check.
+Canonical streaming root derivation now domain-separates plaintext from
+ciphertext and binds the exact object size, ciphertext size, chunk count,
+ordered chunk indices, and per-chunk lengths. It accepts only the fixed
+65,520-byte plaintext / 65,536-byte sealed geometry, including the exact short
+final chunk, and fails closed on incomplete, reordered, oversized, or reused
+streams. Checkpoint measured 2026-08-29T09:22:48-04:00 /
+2026-08-29T13:22:48Z. Focused
+`mesh_capability_grant`, `db_migration_idempotent`,
+`mesh_private_object_proto`, `mesh_private_object_crypto`, and
+`mesh_private_object_admission` groups passed with `groups_failed=0` and
+`self_skips=0`; the root-specific gate is recorded with the implementing
+change. No network dispatcher, private store, resume journal, or
+independent-host receipt exists yet; private file transfer remains incomplete.
+
+Checkpoint measured 2026-08-29T09:55:08-04:00 /
+2026-08-29T13:55:08Z: the allocation-free `ZMPO` v1 data-plane envelope
+defines exact OFFER, REQUEST, CHUNK, and CANCEL frames. Transfer id, transient
+offer request id, nonzero per-request replay id, chunk index, and sealed length
+are explicit little-endian fields. The 65,624-byte maximum is build-time
+asserted below the existing two-mebibyte carrier limit; unknown versions,
+flags, kinds, zero identifiers, invalid sealed lengths, truncation, and trailing
+bytes fail closed. This is a portable codec only. It performs no network,
+database, file, admission, decryption, execution, or deployment work; the
+bounded dispatcher and private staging store remain next.
+
+Item 7 records one native-host service receipt per claimed platform containing
+the OS and architecture, source identity, running-image digest, service-manager
+identity, readiness result, graceful-stop result, and automatic-restart result.
+Rollback is tested and recorded only on a platform that implements it. Route
+acceptance then authenticates the same paired identity over each available
+path, removes the selected path, and proves that fallback changes neither the
+capability nor receipt signer. An unavailable path is an explicit refusal, not
+a skipped success.
+
+Item 8 proves that planning writes nothing; a tampered, expired, or stale plan
+writes nothing; commit stores exactly the displayed grant; request replay has
+no second effect; renewal creates a distinct bounded grant; cancellation does
+not widen or revoke authority; and sticky revocation survives restart and
+rejects a racing reconnect.
 
 ### Phase 0: measure and close transport prerequisites
 
@@ -377,9 +585,10 @@ static key, authenticated DHT node identity, confinement, and native hot-swap
 capability. Linux distinguishes WSL from native execution; Windows distinguishes
 Wine from native execution. The capsule redacts local paths and private
 material, names missing prerequisites, reports the durable local pairing
-authority, and separately refuses to claim a remote status protocol. This is
-local observation only; restart stability, four-host distinctness, and native
-macOS and Windows execution still require independent host receipts.
+authority, and reports the implemented remote-status protocol separately from
+its live session count and stored receipts. The capsule itself is local
+observation only; restart stability, four-host distinctness, and native macOS
+and Windows execution still require independent host receipts.
 
 Checkpoint measured 2026-08-28T17:24:08-04:00 / 2026-08-28T21:24:08Z:
 the strict C23 release build and the `v2_transport_parity`, `os_proc`,
@@ -616,6 +825,7 @@ peers, never production wallet state.
   evidence. Older or same-time equivocal receipts cannot replace the durable
   row; exact replay is idempotent. Fixture acceptance proves restart retention,
   stale/unknown separation, redaction, migration idempotence, and strict MinGW
+<<<<<<< HEAD
   C23 syntax. Automatic refresh and independent-host evidence remain open.
 - 2026-08-29: queue item 5 landed the fleet view. `ops mesh machines` (RPC
   method `mesh_machines`) projects every durable pairing record — active,
@@ -672,6 +882,67 @@ peers, never production wallet state.
   impact-rule check, `make lint-fast`, and full `make lint` (163 gates) all
   passed. What remains before the product claim: automatic bounded refresh
   scheduling and independent-host receipts.
+- 2026-08-29: queue item 5 added a dedicated supervised refresh clock. It
+  polls at most two requests, admits at most one connected active pairing per
+  second, backs off unavailable peers, never dials, and admits no new work
+  unless the chain is at tip and disk, memory, and serialized database state
+  are clear. Verified terminal receipts enter the bounded asynchronous DB
+  writer; manual polling uses the same writer synchronously. The focused wire
+  group proves the resource gate matrix. Independent-host evidence remains
+  open; it requires an owner-approved deployment and restart on each host.
+- 2026-08-29T10:24:41-04:00 / 2026-08-29T14:24:41Z: the private-object
+  staging store added exclusive per-transfer locking and a bounded portable
+  journal under an already owner-private directory. Chunk acceptance performs
+  AEAD verification before ciphertext write and flush, then persists and
+  flushes the resume bit. Reopen checks exact file geometry and journal
+  identity and re-authenticates every set-bit chunk; corruption refuses the
+  staging state instead of silently repairing it. The focused
+  `mesh_private_object_stage` group passed cold with one group run, zero
+  failures, and zero skips, proving out-of-order resume, exact duplicate
+  idempotence, short-final-chunk handling, full ciphertext-root verification,
+  and corruption refusal. This does not publish plaintext, complete a grant,
+  connect a network dispatcher, or establish independent-host acceptance.
+- 2026-08-29T10:39:56-04:00 / 2026-08-29T14:39:56Z: an allocation-free
+  private-object request scheduler added an eight-chunk sliding window,
+  five-second monotonic deadlines, five-attempt exhaustion, out-of-order
+  completion, exact in-flight response correlation, resume seeding, nonzero
+  wrap-safe correlation ids, unsent-request rollback, and terminal
+  cancellation. Its one focused group ran cold with five cases,
+  zero failures, and zero skips. The scheduler performs no socket, disk,
+  authority, or publication operation; dispatcher integration remains open.
+- 2026-08-29T11:03:31-04:00 / 2026-08-29T15:03:31Z: exact Noise-static
+  delegation lookup moved into the bounded DHT view. It compares retained
+  contact keys before decoding and copies at most the caller's requested
+  matches, including a second match so ambiguity remains fail-closed. The mesh
+  status responder no longer allocates a maximum-chain delegation snapshot or
+  decodes unrelated entries per authenticated request. The cold
+  `zcode_dht_service` and `mesh_status_wire` groups passed with zero failures
+  and zero skips; `make lint-fast` passed 22/22 gates.
+- 2026-08-29T11:34:37-04:00 / 2026-08-29T15:34:37Z: a serialized private-object
+  receiver composed admission, durable ciphertext staging, and the bounded
+  request scheduler. An offer cannot allocate storage without a matching
+  successful target-local admission capsule. Drive and chunk calls require the
+  same current transfer and revocation generations; chunks require the exact
+  issued request id and route. Local send backpressure rolls back the reserved
+  attempt. Reopen re-authenticates durable chunks, a fully journaled object is
+  root-verified before reporting `staged`, and staged slots are released rather
+  than exhausting the four-transfer cap. All eight `mesh_private_object`
+  groups ran cold with zero failures and zero skips. This proves ciphertext
+  staging only; network dispatch, plaintext-root publication, grant completion,
+  signed receipt, and independent-host acceptance remain open.
+- 2026-08-29: merge reconciliation converged the fleet view with the new
+  refresh architecture. Upstream's supervised, sync-subordinate refresh clock
+  and its db_service writer lane are authoritative; the on-demand live-probe
+  fan-out in `ops mesh machines` now persists its verified terminal receipts
+  through `boot_mesh_status_receipt_persist` — the same serialized writer
+  the poll RPC and the background refresh use — so all three writers share
+  one lane and one store. The direct `boot_mesh_status_persist_observation`
+  variant remains only as the synchronous test handoff. Upstream's duplicate
+  render/method copy in boot_mesh_status_rpc.c was dropped again (the unified
+  render with the live rollup stays in boot_mesh_machines_rpc.c); the poll
+  path took upstream's db_service persist call. Gates: `make z23` passed;
+  t-fast ONLY=mesh passed with zero skips; `make lint-fast` passed. What
+  remains before the product claim: independent-host receipts.
 
 ## Completion rule
 

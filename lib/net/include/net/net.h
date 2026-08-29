@@ -503,7 +503,9 @@ struct p2p_node {
     int64_t swarm_chunk_req_time; /* when chunk was requested (for timeout) */
 
     /* Block swarm state (parallel block download) */
+    bool blk_manifest_advertise_armed; /* ZCL23 handshake completed */
     bool blk_manifest_sent;       /* true if we sent block manifest to this peer */
+    uint64_t blk_manifest_sent_version; /* cache generation sent to peer */
     bool blk_manifest_received;   /* true if we received block manifest from peer */
     struct {
         int32_t piece_index;      /* -1 = empty slot */

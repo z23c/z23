@@ -16,9 +16,10 @@
  *     (boot_mesh_status.h) — up to MESH_MACHINES_FLEET_MAX actives, one
  *     collective budget of MESH_MACHINES_COLLECT_BUDGET_MS, run inside the
  *     RPC worker thread. Terminal receipts enter the observation store
- *     through boot_mesh_status_persist_observation, the same handoff the
- *     single-machine `ops mesh status` poll uses, so the refresh IS the
- *     store's writer; there is no parallel verdict-only truth.
+ *     through boot_mesh_status_receipt_persist, the serialized db_service
+ *     writer the single-machine poll and the background refresh scheduler
+ *     also use, so every writer funnels into the same store handoff; there
+ *     is no parallel verdict-only truth.
  *
  * No dial is ever attempted; a peer without a live established v2 session is
  * UNREACHABLE, not reconnected. Offline machines stay listed. Public keys
@@ -47,6 +48,7 @@
 
 struct json_value;
 struct node_db;
+struct db_service;
 struct rpc_table;
 
 /* Probe fan-out cap and the collective wait budget. 8 machines at 50 ms
@@ -145,13 +147,15 @@ bool mesh_machines_fill_live_identity(
 
 /* Live refresh: list every durable pairing, probe up to
  * MESH_MACHINES_FLEET_MAX actives through the status lane, persist every
- * verified terminal receipt via boot_mesh_status_persist_observation, wait
- * collectively for at most MESH_MACHINES_COLLECT_BUDGET_MS, then derive and
- * tally. Runs in the caller's thread (the RPC worker) and touches no
+ * verified terminal receipt via boot_mesh_status_receipt_persist on the
+ * serialized db_service writer (dbsvc must be non-NULL for persistence;
+ * a NULL dbsvc logs once per receipt and the live verdict still stands),
+ * wait collectively for at most MESH_MACHINES_COLLECT_BUDGET_MS, then derive
+ * and tally. Runs in the caller's thread (the RPC worker) and touches no
  * network thread. Always returns true with a fully initialized report — an
  * unreadable pairing store yields records_observed=false and a named
  * blocker with zero counts. Returns false only on a NULL argument. */
-bool boot_mesh_machines_refresh(struct node_db *ndb,
+bool boot_mesh_machines_refresh(struct node_db *ndb, struct db_service *dbsvc,
                                 struct mesh_machines_report *out);
 
 /* Render the unified fleet document (zcl.mesh.machines.v1): every pairing

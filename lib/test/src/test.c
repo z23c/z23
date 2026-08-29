@@ -1224,10 +1224,28 @@ int main(int argc, char **argv)
       failures += test_zses(); }
     { extern int test_mesh_pairing(void);
       failures += test_mesh_pairing(); }
+    { extern int test_mesh_capability_grant(void);
+      failures += test_mesh_capability_grant(); }
     { extern int test_mesh_pairing_controller(void);
       failures += test_mesh_pairing_controller(); }
     { extern int test_mesh_status_proto(void);
       failures += test_mesh_status_proto(); }
+    { extern int test_mesh_private_object_proto(void);
+      failures += test_mesh_private_object_proto(); }
+    { extern int test_mesh_private_object_crypto(void);
+      failures += test_mesh_private_object_crypto(); }
+    { extern int test_mesh_private_object_root(void);
+      failures += test_mesh_private_object_root(); }
+    { extern int test_mesh_private_object_frame(void);
+      failures += test_mesh_private_object_frame(); }
+    { extern int test_mesh_private_object_stage(void);
+      failures += test_mesh_private_object_stage(); }
+    { extern int test_mesh_private_object_schedule(void);
+      failures += test_mesh_private_object_schedule(); }
+    { extern int test_mesh_private_object_receiver(void);
+      failures += test_mesh_private_object_receiver(); }
+    { extern int test_mesh_private_object_admission(void);
+      failures += test_mesh_private_object_admission(); }
     { extern int test_wallet_metadata_encryption(void);
       failures += test_wallet_metadata_encryption(); }
     { extern int test_transaction_intent(void);
@@ -1622,6 +1640,7 @@ int main(int argc, char **argv)
     failures += test_projection_adoption();
     failures += test_projection_consumer();
     failures += test_progress_store();
+    failures += test_coins_kv_read_snapshot();
     failures += test_event_log();
     failures += test_event_log_kill9();
     failures += test_event_log_benchmark();

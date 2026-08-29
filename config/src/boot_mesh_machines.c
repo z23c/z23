@@ -7,9 +7,10 @@
  * wire group test drives the exact production mapping without sockets; the
  * live half (boot_mesh_machines_refresh) is the only function that touches
  * the pairing store or the status lane, and it never dials. Receipt
- * persistence goes through boot_mesh_status_persist_observation — the same
- * handoff the single-machine status poll uses — so the fleet refresh is a
- * writer of the one observation store, not a parallel truth. */
+ * persistence goes through boot_mesh_status_receipt_persist — the
+ * serialized db_service writer the single-machine poll and the background
+ * refresh scheduler share — so the fleet refresh is a writer of the one
+ * observation store, not a parallel truth. */
 
 #include "config/boot_mesh_machines.h"
 
@@ -204,7 +205,7 @@ static void mesh_machines_block(struct mesh_machines_report *out,
     snprintf(out->blocker, sizeof(out->blocker), "%s", blocker);
 }
 
-bool boot_mesh_machines_refresh(struct node_db *ndb,
+bool boot_mesh_machines_refresh(struct node_db *ndb, struct db_service *dbsvc,
                                 struct mesh_machines_report *out)
 {
     if (!out)
@@ -304,11 +305,12 @@ bool boot_mesh_machines_refresh(struct node_db *ndb,
                 polled != MESH_STATUS_POLL_REFUSED)
                 continue;
             probe->receipt_status = receipt.status;
-            if (!boot_mesh_status_persist_observation(ndb, &receipt)) {
+            if (!boot_mesh_status_receipt_persist(dbsvc, &receipt)) {
                 LOG_ERROR(MESH_MACHINES_TAG,
                           "refresh: verified receipt for pairing %.8s could "
-                          "not be persisted; the live verdict stands but the "
-                          "durable evidence was not updated",
+                          "not be persisted on the db_service lane; the live "
+                          "verdict stands but the durable evidence was not "
+                          "updated",
                           receipt.pairing_id);
             }
             if (polled == MESH_STATUS_POLL_OK) {

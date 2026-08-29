@@ -518,6 +518,13 @@ void vcs_zcode_dht_service_storage_ack_validation(
 size_t vcs_zcode_dht_service_delegations(
     const struct vcs_zcode_dht_service *service,
     struct vcs_zcode_dht_delegation *out, size_t max);
+/* Copy only delegations whose Noise static key exactly matches `noise_static`.
+ * The scan is allocation-free and returns up to `max` entries, including
+ * duplicate/equivocal locations so callers can fail closed on ambiguity. */
+size_t vcs_zcode_dht_service_delegations_for_noise(
+    const struct vcs_zcode_dht_service *service,
+    const uint8_t noise_static[32],
+    struct vcs_zcode_dht_delegation *out, size_t max);
 void vcs_zcode_dht_service_set_chain_verify(
     struct vcs_zcode_dht_service *service,
     vcs_zcode_dht_chain_verify_fn chain_verify, void *chain_ctx);

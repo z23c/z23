@@ -29,9 +29,11 @@
 #include <stdint.h>
 
 struct boot_svc_ctx;
+struct db_service;
 struct json_value;
 struct msg_processor;
 struct node_db;
+struct node_db_status;
 struct p2p_node;
 struct rpc_table;
 struct v2_transport_snapshot;
@@ -64,7 +66,19 @@ bool boot_mesh_status_frame(struct msg_processor *mp, struct p2p_node *node,
 void boot_mesh_status_wire(struct boot_svc_ctx *svc);
 void boot_mesh_status_shutdown(void);
 void boot_mesh_status_register_rpc(struct rpc_table *table,
-                                   struct node_db *ndb);
+                                   struct node_db *ndb,
+                                   struct db_service *dbsvc);
+
+/* Advance the bounded owner-status refresh lane from the supervised network
+ * clock. Completed receipts enter the serialized writer before their slot is
+ * reused. New work is admitted only at chain tip; no connection is created. */
+void boot_mesh_status_refresh_start(struct boot_svc_ctx *svc);
+void boot_mesh_status_refresh_shutdown(void);
+
+/* Store one already-verified receipt through the serialized DB writer. */
+bool boot_mesh_status_receipt_persist(
+    struct db_service *dbsvc,
+    const struct mesh_status_receipt_v1 *receipt);
 
 enum boot_mesh_status_begin_result {
     MESH_STATUS_BEGIN_OK = 0,
@@ -137,11 +151,14 @@ bool boot_mesh_status_receipt_accept(
     const uint8_t expected_responder_master[32],
     const uint8_t expected_responder_online[32]);
 
-/* Durable-evidence handoff: persist one verified terminal receipt (OK or a
- * named refusal) as the pairing's latest machine observation. The store
- * refuses older or same-time equivocal evidence and treats an exact-root
- * replay as idempotent. Called by the single-status poll path and by the
- * fleet refresh in boot_mesh_machines.c — one path, one truth. */
+/* Durable-evidence handoff, synchronous: persist one verified terminal
+ * receipt (OK or a named refusal) as the pairing's latest machine
+ * observation, directly on the caller's node_db. The store refuses older or
+ * same-time equivocal evidence and treats an exact-root replay as
+ * idempotent. Production writers (status poll, fleet refresh, background
+ * refresh scheduler) instead go through boot_mesh_status_receipt_persist,
+ * which runs this same store write on the serialized db_service lane; this
+ * direct variant serves tests that own the only writer. */
 bool boot_mesh_status_persist_observation(
     struct node_db *ndb, const struct mesh_status_receipt_v1 *receipt);
 
@@ -160,6 +177,10 @@ void boot_mesh_status_machines_test_render(
 bool boot_mesh_status_test_responder_admit(
     const struct mesh_status_request_v1 *request,
     const struct v2_transport_snapshot *session, uint64_t now_mono_ms);
+bool boot_mesh_status_refresh_test_gate(
+    bool running, int sync_state, int disk_level, int memory_level,
+    bool long_db_operation, bool db_service_started,
+    const struct node_db_status *db_status);
 #endif
 
 #endif /* ZCL_CONFIG_BOOT_MESH_STATUS_H */

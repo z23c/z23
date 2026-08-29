@@ -14,7 +14,6 @@
 #include "config/runtime.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
-#include "base/safe_alloc.h"
 #include "controllers/diagnostics_controller.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
@@ -368,8 +367,6 @@ bool boot_mesh_status_receipt_accept(
 /* ── Responder lane ──────────────────────────────────────────────────── */
 
 struct mesh_delegation_collect {
-    struct vcs_zcode_dht_delegation *held; /* heap snapshot buffer */
-    size_t held_max;
     struct vcs_zcode_dht_delegation matched[2];
     size_t matched_count;
     uint8_t remote_static[32];
@@ -381,16 +378,11 @@ static void mesh_collect_delegation(struct vcs_zcode_dht_service *service,
                                     void *opaque)
 {
     struct mesh_delegation_collect *collect = opaque;
-    if (!service || !collect || !collect->held)
+    if (!service || !collect)
         return;
-    size_t count = vcs_zcode_dht_service_delegations(service, collect->held,
-                                                     collect->held_max);
-    for (size_t i = 0; i < count && collect->matched_count < 2; i++) {
-        if (memcmp(collect->held[i].noise_static_pubkey,
-                   collect->remote_static, 32) == 0) {
-            collect->matched[collect->matched_count++] = collect->held[i];
-        }
-    }
+    collect->matched_count = vcs_zcode_dht_service_delegations_for_noise(
+        service, collect->remote_static, collect->matched,
+        sizeof(collect->matched) / sizeof(collect->matched[0]));
 }
 
 /* The responder's own receipt identity: the filed local delegation names the
@@ -544,14 +536,6 @@ static void mesh_respond(struct msg_processor *mp, struct p2p_node *node,
 
     struct mesh_delegation_collect collect;
     memset(&collect, 0, sizeof(collect));
-    collect.held = zcl_malloc(VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS *
-                                  sizeof(*collect.held),
-                              "mesh_status.delegations");
-    if (!collect.held) {
-        LOG_ERROR("net.mesh_status", "delegation snapshot alloc failed");
-        return;
-    }
-    collect.held_max = VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS;
     memcpy(collect.remote_static, session.remote_static, 32);
     (void)boot_zcode_dht_service_apply(mesh_collect_delegation, &collect);
 
@@ -560,7 +544,6 @@ static void mesh_respond(struct msg_processor *mp, struct p2p_node *node,
     enum mesh_status_receipt_status status = boot_mesh_status_decide(
         ndb, &request, &session, collect.matched, collect.matched_count,
         genesis, now, &revocation_generation);
-    free(collect.held);
 
     uint8_t master[32], online_pub[32], online_seed[32];
     if (!mesh_local_identity(ndb, svc->datadir, master, online_pub,
@@ -796,10 +779,12 @@ void boot_mesh_status_wire(struct boot_svc_ctx *svc)
     memset(g_pending, 0, sizeof(g_pending));
     memset(g_seen_requests, 0, sizeof(g_seen_requests));
     zcl_mutex_unlock(&g_mesh_lock);
+    boot_mesh_status_refresh_start(svc);
 }
 
 void boot_mesh_status_shutdown(void)
 {
+    boot_mesh_status_refresh_shutdown();
     mesh_lock();
     g_mesh_svc = NULL;
     g_mesh_generation++;

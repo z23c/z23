@@ -318,6 +318,8 @@ void send_snapshot_offer_msg(struct p2p_node *node,
                              const unsigned char *msg_start);
 void push_manifest(struct msg_processor *mp, struct p2p_node *node);
 void push_block_manifest(struct msg_processor *mp, struct p2p_node *node);
+void push_block_manifest_if_ready(struct msg_processor *mp,
+                                  struct p2p_node *node);
 
 /* Block/tx dedup ring buffers. */
 bool block_already_seen(const struct uint256 *hash);

@@ -174,6 +174,41 @@ size_t vcs_zcode_dht_service_delegations(
   return count;
 }
 
+static void append_delegation_for_noise(
+    const struct vcs_zcode_dht_contact *contact,
+    const uint8_t noise_static[32], struct vcs_zcode_dht_delegation *out,
+    size_t max, size_t *count) {
+  if (!contact || *count >= max ||
+      memcmp(contact->noise_static_pubkey, noise_static, 32) != 0)
+    return;
+  struct vcs_zcode_dht_delegation decoded;
+  if (vcs_zcode_dht_delegation_decode(
+          &decoded, contact->delegation_wire,
+          VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) ==
+          VCS_ZCODE_DHT_DELEGATION_OK &&
+      memcmp(decoded.noise_static_pubkey, noise_static, 32) == 0)
+    out[(*count)++] = decoded;
+}
+
+size_t vcs_zcode_dht_service_delegations_for_noise(
+    const struct vcs_zcode_dht_service *s, const uint8_t noise_static[32],
+    struct vcs_zcode_dht_delegation *out, size_t max) {
+  if (!s || !s->enabled || !noise_static || !out || !max)
+    return 0;
+  size_t count = 0;
+  if (memcmp(s->delegation.noise_static_pubkey, noise_static, 32) == 0)
+    out[count++] = s->delegation;
+  for (size_t b = 0; b < VCS_ZCODE_DHT_BUCKET_COUNT && count < max; b++)
+    for (size_t i = 0; i < s->table->bucket_sizes[b] && count < max; i++)
+      append_delegation_for_noise(
+          &s->table->buckets[b][i], noise_static, out, max, &count);
+  for (size_t i = 0; i < VCS_ZCODE_DHT_MAX_PENDING && count < max; i++)
+    if (s->table->pending[i].active)
+      append_delegation_for_noise(
+          &s->table->pending[i].candidate, noise_static, out, max, &count);
+  return count;
+}
+
 void vcs_zcode_dht_service_set_chain_verify(
     struct vcs_zcode_dht_service *s,
     vcs_zcode_dht_chain_verify_fn chain_verify, void *chain_ctx) {

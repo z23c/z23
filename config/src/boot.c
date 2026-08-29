@@ -2860,8 +2860,6 @@ bool app_init(struct app_context *ctx)
                        cleared, tip_h);
         }
     }
-    /* Scan block files if HAVE_DATA is missing or has a lower-span gap
-     * (scan_contiguous_data_h) hidden by a high max-HAVE_DATA height. */
     {
         bool need_scan = (scan_max_have_data_h < 100 &&
                           g_state.map_block_index.size > 1000) ||
@@ -2882,7 +2880,9 @@ bool app_init(struct app_context *ctx)
                     have_block_files = true;
             }
             if (have_block_files) {
-                scan_block_files_mark_data(&g_state, ctx->datadir, params);
+                scan_block_files_mark_data(
+                    &g_state, ctx->datadir,
+                    g_state.map_block_index.size < 1000 ? params : NULL);
                 fflush(stdout);
                 if (g_state.map_block_index.size > 1000)
                     save_block_index_flat(ctx->datadir, &g_state);

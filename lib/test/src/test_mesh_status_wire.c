@@ -18,11 +18,15 @@
 #include "crypto/ed25519.h"
 #include "json/json.h"
 #include "models/mesh_pairing.h"
+#include "models/database.h"
 #include "models/zid_identity.h"
 #include "net/v2_identity.h"
 #include "net/v2_transport.h"
 #include "platform/private_directory.h"
 #include "services/mesh_pairing_service.h"
+#include "services/disk_monitor.h"
+#include "sync/sync_state.h"
+#include "util/mem_pressure.h"
 #include "validation/main_constants.h"
 #include "vcs/zcode_dht_delegation.h"
 
@@ -646,6 +650,40 @@ int test_mesh_status_wire(void)
         ASSERT(!rate_limited);
         ASSERT(next_window);
         ASSERT(after_replay_window);
+        PASS();
+    }
+
+    TEST("mesh status refresh yields to chain and resource pressure") {
+        struct node_db_status ready = {
+            .open = true,
+            .tx_open = false,
+            .turbo_mode = false,
+            .sync_pending_blocks = 0,
+        };
+        ASSERT(boot_mesh_status_refresh_test_gate(
+            true, SYNC_AT_TIP, DISK_MONITOR_OK, MEM_NOMINAL, false, true,
+            &ready));
+        ASSERT(!boot_mesh_status_refresh_test_gate(
+            true, SYNC_BLOCKS_DOWNLOAD, DISK_MONITOR_OK, MEM_NOMINAL, false,
+            true, &ready));
+        ASSERT(!boot_mesh_status_refresh_test_gate(
+            true, SYNC_AT_TIP, DISK_MONITOR_LOW, MEM_NOMINAL, false, true,
+            &ready));
+        ASSERT(!boot_mesh_status_refresh_test_gate(
+            true, SYNC_AT_TIP, DISK_MONITOR_OK, MEM_HIGH, false, true,
+            &ready));
+        ASSERT(!boot_mesh_status_refresh_test_gate(
+            true, SYNC_AT_TIP, DISK_MONITOR_OK, MEM_NOMINAL, true, true,
+            &ready));
+        ready.tx_open = true;
+        ASSERT(!boot_mesh_status_refresh_test_gate(
+            true, SYNC_AT_TIP, DISK_MONITOR_OK, MEM_NOMINAL, false, true,
+            &ready));
+        ready.tx_open = false;
+        ready.sync_pending_blocks = 1;
+        ASSERT(!boot_mesh_status_refresh_test_gate(
+            true, SYNC_AT_TIP, DISK_MONITOR_OK, MEM_NOMINAL, false, true,
+            &ready));
         PASS();
     }
 

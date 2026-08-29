@@ -1646,8 +1646,7 @@ void mp_snapshot_maybe_offer(struct msg_processor *mp,
     }
 }
 
-/* Per-peer send-side coordinator: serve the snapshot stream + drive
- * the swarm/block-swarm coordinators. */
+/* Serve the snapshot stream and drive both swarm coordinators. */
 void mp_snapshot_send_tick(struct msg_processor *mp,
                             struct p2p_node *node)
 {
@@ -1659,6 +1658,7 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
             return;
     }
 
+    push_block_manifest_if_ready(mp, node);
     /* ── Swarm parallel chunk sync coordinator ────────────── */
     /* For each connected ZCL23 peer with no inflight chunk, assign one
      * and send a zchunkreq. Also handle timeouts on stale requests. */

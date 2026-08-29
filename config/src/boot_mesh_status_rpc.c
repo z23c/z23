@@ -6,6 +6,7 @@
 
 #include "config/boot_mesh_machines.h"
 #include "config/boot_mesh_status.h"
+#include "config/db_service.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -20,6 +21,7 @@
 #include <string.h>
 
 static struct node_db *g_mesh_status_ndb;
+static struct db_service *g_mesh_status_dbsvc;
 
 static const struct json_value *rpc_input(const struct json_value *params)
 {
@@ -227,8 +229,7 @@ static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
         return true;
     case MESH_STATUS_POLL_OK:
     case MESH_STATUS_POLL_REFUSED:
-        if (!boot_mesh_status_persist_observation(g_mesh_status_ndb,
-                                                  &receipt)) {
+        if (!boot_mesh_status_receipt_persist(g_mesh_status_dbsvc, &receipt)) {
             rpc_error(result, "OBSERVATION_PERSIST_FAILED",
                       "the verified receipt could not be stored durably");
             return true;
@@ -241,13 +242,16 @@ static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
 }
 
 void boot_mesh_status_register_rpc(struct rpc_table *table,
-                                   struct node_db *ndb)
+                                   struct node_db *ndb,
+                                   struct db_service *dbsvc)
 {
-    if (!table || !ndb) {
-        LOG_ERROR("net.mesh_status", "RPC registration requires node_db");
+    if (!table || !ndb || !dbsvc) {
+        LOG_ERROR("net.mesh_status",
+                  "RPC registration requires node_db and db_service");
         return;
     }
     g_mesh_status_ndb = ndb;
+    g_mesh_status_dbsvc = dbsvc;
     const struct rpc_command commands[] = {
         {"mesh", "mesh_status_request", rpc_mesh_status_request, true},
         {"mesh", "mesh_status_poll", rpc_mesh_status_poll, true},

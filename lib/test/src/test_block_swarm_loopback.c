@@ -1163,6 +1163,50 @@ static int test_block_swarm_sovereignty_gate(void)
     return failures;
 }
 
+static int test_block_swarm_manifest_republish(void)
+{
+    int failures = 0;
+
+    TEST("block swarm loopback: a new manifest reaches connected peers "
+         "without reconnect") {
+        struct bs_seeder seed;
+        ASSERT(bs_seeder_build(&seed, 128, 10u, "manifest-refresh"));
+        struct p2p_node *node = bs_make_peer(&seed.nm, 1);
+        ASSERT(node);
+        node->blk_manifest_advertise_armed = true;
+        struct send_segment *sent = bs_install_sentinel(node);
+
+        mp_snapshot_send_tick(&seed.mp, node);
+        ASSERT(node->blk_manifest_sent);
+        uint64_t first_version = node->blk_manifest_sent_version;
+        ASSERT(first_version > 0);
+        ASSERT(bs_queue_depth(sent) == 1);
+        bs_drop_queue(node, sent);
+
+        mp_snapshot_send_tick(&seed.mp, node);
+        ASSERT(bs_queue_depth(sent) == 0);
+
+        struct block_piece_manifest refreshed;
+        ASSERT(block_piece_manifest_build_active_chain(
+            &seed.ms.chain_active, BS_START_HEIGHT, seed.end_height,
+            &refreshed));
+        ASSERT(msg_processor_publish_block_manifest(&refreshed,
+                                                    seed.end_height));
+        mp_snapshot_send_tick(&seed.mp, node);
+        ASSERT(node->blk_manifest_sent_version > first_version);
+        ASSERT(bs_queue_depth(sent) == 1);
+
+        bs_drop_queue(node, sent);
+        send_segment_free(sent);
+        node->send_head = node->send_tail = NULL;
+        p2p_node_free(node);
+        bs_seeder_free(&seed);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_block_swarm_loopback(void)
 {
     int failures = 0;
@@ -1183,6 +1227,7 @@ int test_block_swarm_loopback(void)
     failures += test_block_swarm_duplicate_delivery();
     failures += test_block_swarm_manifest_anchor();
     failures += test_block_swarm_sovereignty_gate();
+    failures += test_block_swarm_manifest_republish();
     boot_snapshot_offer_test_set_trust_override(-1);
     return failures;
 }

@@ -2484,6 +2484,10 @@ static int test_disabled_diagnostics(void) {
                 0);
       ASSERT(memcmp(delegations, delegations_before, sizeof(delegations)) ==
              0);
+      ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(
+                    disabled, params.local_noise_static, delegations, 2), 0);
+      ASSERT(memcmp(delegations, delegations_before, sizeof(delegations)) ==
+             0);
       vcs_zcode_dht_service_free(disabled, test_time(1000));
     }
 
@@ -2504,6 +2508,60 @@ static int test_disabled_diagnostics(void) {
     ASSERT(!boot_zcode_dht_dump_state_json(&dump, "private"));
     json_free(&dump);
     cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
+static int test_exact_noise_delegation_view(void) {
+  int failures = 0;
+  TEST("zcode dht service: exact Noise delegation view is bounded and allocation-free") {
+    char adir[] = "/tmp/zcl_dht_noise_view_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_noise_view_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL);
+    ASSERT(mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32], missing[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(anoise, 0x22, sizeof(anoise));
+    memset(bnoise, 0x33, sizeof(bnoise));
+    memset(missing, 0x44, sizeof(missing));
+    ASSERT(fixture_identity(adir, 0x61, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x62, genesis, bnoise));
+    struct vcs_zcode_dht_service *service =
+        fixture_service(adir, genesis, anoise);
+    ASSERT(service != NULL);
+    struct vcs_zcode_dht_delegation remote, found[2], before[2];
+    char error[160];
+    ASSERT(vcs_zcode_dht_delegation_load(
+        bdir, &remote, error, sizeof(error)));
+    ASSERT(vcs_zcode_dht_contact_from_delegation(
+        &service->table->buckets[0][0], &remote, 1000, 0));
+    service->table->bucket_sizes[0] = 1;
+    service->table->contact_count = 1;
+
+    ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(
+                  service, anoise, found, 2), 1);
+    ASSERT(memcmp(found[0].noise_static_pubkey, anoise, 32) == 0);
+    ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(
+                  service, bnoise, found, 2), 1);
+    ASSERT(memcmp(found[0].doc.master_pubkey,
+                  remote.doc.master_pubkey, 32) == 0);
+    memset(found, 0xa5, sizeof(found));
+    memcpy(before, found, sizeof(found));
+    ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(
+                  service, missing, found, 2), 0);
+    ASSERT(memcmp(found, before, sizeof(found)) == 0);
+
+    service->table->pending[0].active = true;
+    service->table->pending[0].candidate = service->table->buckets[0][0];
+    ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(
+                  service, bnoise, found, 2), 2);
+    ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(
+                  service, bnoise, found, 1), 1);
+    vcs_zcode_dht_service_free(service, test_time(1000));
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
     PASS();
   }
 _test_next:;
@@ -4966,6 +5024,7 @@ _test_next:;
 
 int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
+  failures += test_exact_noise_delegation_view();
   failures += test_pending_capacity_is_local_backpressure();
   failures += test_publish_reproduction_gate();
   failures += test_publication_monotonic_retry();

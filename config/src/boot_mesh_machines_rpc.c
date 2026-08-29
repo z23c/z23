@@ -9,8 +9,9 @@
  *     pairing_id, when the caller ran the refresh (the test hook passes a
  *     NULL live report and renders the durable evidence alone).
  * The refresh persists its verified terminal receipts through
- * boot_mesh_status_persist_observation before the render reads the store,
- * so the rendered evidence already reflects what this call proved.
+ * boot_mesh_status_receipt_persist (the serialized db_service writer)
+ * before the render reads the store, so the rendered evidence already
+ * reflects what this call proved.
  * Fingerprints only — no raw public key crosses the surface. */
 
 #include "config/boot_mesh_machines.h"
@@ -228,8 +229,10 @@ static bool rpc_mesh_machines(const struct json_value *params, bool help,
         return true;
     }
     struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
-        LOG_ERROR("net.mesh_machines", "mesh_machines: node_db unavailable");
+    struct db_service *dbsvc = app_runtime_db_service();
+    if (!ndb || !app_runtime_node_db_handle_open(ndb) || !dbsvc) {
+        LOG_ERROR("net.mesh_machines",
+                  "mesh_machines: node_db or db_service unavailable");
         rpc_error(result, "OBSERVATION_UNAVAILABLE",
                   "the durable machine projection is unavailable");
         return true;
@@ -243,7 +246,7 @@ static bool rpc_mesh_machines(const struct json_value *params, bool help,
     }
     /* Refresh first: probes run, verified receipts persist, THEN the render
      * reads the store so the document already carries this call's proofs. */
-    (void)boot_mesh_machines_refresh(ndb, live);
+    (void)boot_mesh_machines_refresh(ndb, dbsvc, live);
     boot_mesh_machines_render(ndb, (int64_t)platform_time_wall_time_t(),
                               live, result);
     free(live);

@@ -137,7 +137,7 @@ fi
         printf 'This unit was dispatched without a test group. Say plainly in your\n'
         printf 'report what is therefore unverified.\n\n'
     fi
-    printf 'Do NOT git commit and do NOT git push. Leave the work in the tree.\n\n'
+    printf 'Do not create commits or publish branches. Leave the work in the tree.\n\n'
     printf 'FINALLY, ONLY AFTER ALL WORK IS COMPLETE, print one JSON object\n'
     printf 'matching this shape and nothing after it:\n'
     printf '{"files_touched":["path"],"group":"name","groups_ran":0,'

@@ -282,7 +282,10 @@ int test_mesh_pairing(void)
         ASSERT_EQ(mesh_status_receipt_v1_decode(&receipt, stored.receipt_wire,
                                                 stored.receipt_len),
                   MESH_STATUS_PROTO_OK);
-        /* The production handoff the poll path and the fleet refresh share. */
+        /* The synchronous store handoff; production writers (poll path,
+         * fleet refresh, background refresh scheduler) run this same store
+         * write through boot_mesh_status_receipt_persist on the serialized
+         * db_service lane. */
         ASSERT(boot_mesh_status_persist_observation(&ndb, &receipt));
 
         struct mesh_machine_row live;

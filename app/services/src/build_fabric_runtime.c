@@ -6,6 +6,7 @@
 #include "base/hex.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker.h"
+#include "services/subordinate_work_admission.h"
 
 #include "config/runtime.h"
 #include "json/json.h"
@@ -16,6 +17,7 @@
 #include "supervisors/domains.h"
 #include "util/log_macros.h"
 #include "util/supervisor.h"
+#include "util/thread_qos.h"
 #include "util/thread_registry.h"
 
 #include <pthread.h>
@@ -44,6 +46,8 @@ static _Atomic uint64_t g_leases_recovered;
 static _Atomic uint64_t g_recovery_failures;
 static _Atomic uint64_t g_worker_dispatches;
 static _Atomic uint64_t g_worker_failures;
+static _Atomic uint64_t g_worker_resource_deferrals;
+static _Atomic int g_worker_admission_reason;
 static struct db_build_worker g_local_worker;
 static uint8_t g_local_secret[32];
 static uint8_t g_local_pubkey[32];
@@ -174,6 +178,7 @@ static void bf_worker_tick(struct liveness_contract *contract)
 static void *bf_worker_loop(void *arg)
 {
     (void)arg;
+    (void)zcl_thread_qos_background();
     /* The daemon's node.db has one mutable owner.  A second long-lived
      * sqlite connection in this thread used to look harmless, but its WAL
      * lifetime was independent of the boot connection: closing/restarting
@@ -193,6 +198,21 @@ static void *bf_worker_loop(void *arg)
     uint64_t completed = 0;
     while (!g_shutdown_requested) {
         supervisor_child_id id = atomic_load(&g_worker_id);
+        struct subordinate_work_facts facts;
+        struct zcl_result observation = subordinate_work_admission_observe(
+            !g_shutdown_requested, app_runtime_node_db_handle_open(ndb), ndb,
+            &facts);
+        enum subordinate_work_refusal admission = observation.ok
+            ? subordinate_work_admission_decide(&facts)
+            : SUBORDINATE_WORK_PERSISTENCE_UNAVAILABLE;
+        atomic_store(&g_worker_admission_reason, admission);
+        if (admission != SUBORDINATE_WORK_ADMIT) {
+            atomic_fetch_add(&g_worker_resource_deferrals, 1);
+            supervisor_progress_idle(id);
+            supervisor_tick(id);
+            platform_sleep_ms(250);
+            continue;
+        }
         uint8_t lease_raw[32];
         char lease_id[65];
         if (!zcl_random_secret_bytes(lease_raw, sizeof(lease_raw),
@@ -410,6 +430,13 @@ bool build_fabric_dump_state_json(struct json_value *out, const char *key)
     (void)json_push_kv_int(out, "recovery_failures", (int64_t)atomic_load(&g_recovery_failures));
     (void)json_push_kv_int(out, "worker_dispatches", (int64_t)atomic_load(&g_worker_dispatches));
     (void)json_push_kv_int(out, "worker_failures", (int64_t)atomic_load(&g_worker_failures));
+    enum subordinate_work_refusal admission =
+        atomic_load(&g_worker_admission_reason);
+    (void)json_push_kv_str(out, "worker_admission",
+                          subordinate_work_refusal_token(admission));
+    (void)json_push_kv_int(
+        out, "worker_resource_deferrals",
+        (int64_t)atomic_load(&g_worker_resource_deferrals));
     (void)json_push_kv_bool(out, "worker_thread_started", atomic_load(&g_worker_started));
     (void)json_push_kv_int(out, "requester_deadline_s", 10);
     (void)json_push_kv_int(out, "worker_deadline_s", 10);
