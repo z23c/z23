@@ -738,7 +738,14 @@ static int test_msg_block_intake_full_stays_retryable(void)
 
         bool saw_full = false;
         struct validation_state state;
-        for (int i = 0; i < 512 && !saw_full; i++) {
+        validation_state_init(&state);
+        ASSERT(msg_processor_enqueue_p2p_block(&mp, &blk, &hash,
+                                               89, &state));
+
+        struct msg_block_intake_stats stats;
+        msg_processor_get_block_intake_stats(&mp, &stats);
+        ASSERT(stats.capacity > 0);
+        for (uint64_t i = 0; i <= stats.capacity && !saw_full; i++) {
             validation_state_init(&state);
             ASSERT(msg_processor_enqueue_p2p_block(&mp, &blk, &hash,
                                                    89, &state));
@@ -749,7 +756,6 @@ static int test_msg_block_intake_full_stays_retryable(void)
         ASSERT(saw_full);
         ASSERT(msg_block_validation_is_retryable(&state));
 
-        struct msg_block_intake_stats stats;
         msg_processor_get_block_intake_stats(&mp, &stats);
         ASSERT(stats.capacity > 0);
         ASSERT(stats.current_depth <= stats.capacity);
