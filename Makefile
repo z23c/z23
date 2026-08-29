@@ -10425,11 +10425,15 @@ $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	    -Ilib/sapling/include -Ilib/keys/include -Ilib/event/include \
 	    -o $@ $(EQUIHASH_FACT_SRCS)
 
-.PHONY: tools/equihash-params-fact docs-equihash-params
+.PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
 docs-equihash-params: $(EQUIHASH_FACT_TOOL)
 	@$(EQUIHASH_FACT_TOOL) docs/EQUIHASH_PARAMS.md
 	@echo "docs-equihash-params: wrote docs/EQUIHASH_PARAMS.md from the consensus tables"
+
+equihash-facts: docs-equihash-params
+
+equihash-facts-check: check-equihash-params
 
 # Gate — the height-selected Equihash fact cannot drift, in either direction.
 # Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and
