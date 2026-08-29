@@ -1158,6 +1158,15 @@ int t_slow_disk_progress_verdicts_contract(void)
         ASSERT(strstr(verify, "unverified_progressing") != NULL);
         ASSERT(strstr(verify, "DEPLOY UNVERIFIED (still progressing)") != NULL);
         ASSERT(strstr(verify, "exit 3") != NULL);
+        /* An idle tip is the one innocent post-RPC silence: a synced node's
+         * height token freezes by design and its /proc counters go quiet —
+         * byte-for-byte the token shape of a wedge. The discriminator is
+         * getblockchaininfo's headers==blocks, and it must acquit with exit 3
+         * (candidate stays), never roll back. Seen live twice on 2026-08-29:
+         * healthy deploys convicted as wedged at an idle tip. */
+        ASSERT(strstr(verify, "chain_tip_from_text") != NULL);
+        ASSERT(strstr(verify, "DEPLOY UNVERIFIED (idle at tip)") != NULL);
+        ASSERT(strstr(verify, "rpc_call getblockchaininfo") != NULL);
         /* A crashed candidate is a fault with its OWN message, never folded
          * into the slowness verdict. */
         ASSERT(strstr(verify, "did not stay up") != NULL);
@@ -1181,6 +1190,24 @@ int t_slow_disk_progress_verdicts_contract(void)
         ASSERT(strstr(makefile,
                       "deploy: ROLLED_BACK (verification still in progress)")
                != NULL);
+        /* Both systemctl restarts in the deploy recipe are bounded by
+         * timeout(1). The unit is Type=notify, so a boot that never sends
+         * READY — the canonical case is a prior binary parked at
+         * node_db_unopened because the candidate migrated node.db forward —
+         * would hold this recipe, and the repo tree with it, open forever.
+         * Seen live 2026-08-29. */
+        ASSERT(strstr(makefile, "restart_timeout=180") != NULL);
+        ASSERT(strstr(makefile,
+                      "timeout $$restart_timeout systemctl --user restart zclassic23")
+               != NULL);
+        /* ...and the rollback's restart specifically captures rc, so a
+         * timeout lands in the CRITICAL branch instead of hanging. */
+        ASSERT(strstr(makefile,
+                      "restart zclassic23; rollback_restart_rc") != NULL);
+        /* No unbounded restart may remain anywhere in the recipe: a restart
+         * at the start of a recipe line is the hang again. */
+        ASSERT(strstr(makefile, "\tsystemctl --user restart zclassic23")
+               == NULL);
 
         /* ── deploy/zclassic23-cutover.sh ───────────────────────────────── */
         ASSERT(repo_path(path, sizeof(path),

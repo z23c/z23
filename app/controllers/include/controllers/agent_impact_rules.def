@@ -2598,3 +2598,12 @@ AGENT_IMPACT_RULE("lib/platform/tests/windows_acceptance.mk", "make_lint_gates")
  * that a change to the implementation still trips the fail-closed refusal and
  * earns its own reasoning. */
 AGENT_IMPACT_RULE("lib/test/src/test_zcode_sovereignty_policy.c", "zcode_sovereignty_policy make_lint_gates")
+/* The module-order declaration is the ONE place the lib module set and link
+ * rank are written: the Makefile derives LIB_MODULES from it and codeindex
+ * pastes it into k_lib_modules[], so its proofs are the lint-gate selftests
+ * (which pin check_lib_module_order's rank/set enforcement) and the codeindex
+ * group (whose case 6 compares the declaration to the lib/ tree). */
+AGENT_IMPACT_RULE("config/lib_module_order.def", "make_lint_gates codeindex")
+/* The script group's own test source: editing it is proven by running it,
+ * with the lint-gate selftests for the shared harness it touches. */
+AGENT_IMPACT_RULE("lib/test/src/test_script.c", "script make_lint_gates")
