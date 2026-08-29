@@ -8,6 +8,7 @@
  * boot on its unchanged path). Consumes net/rom_fetch.h; edits none of it. */
 #include "config/boot_bundle_fetch.h"
 #include "boot_bundle_fetch_seeds_internal.h"    /* bbf_assemble_seeds/_add_peer */
+#include "boot_bundle_fetch_probe_internal.h"
 #include "config/boot.h"                       /* struct app_context */
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h" /* boot_autodetect_consensus_bundle */
@@ -512,21 +513,23 @@ static bool bbf_discover_from_peers(const char *datadir,
                                     struct bbf_discovery *out)
 {
     memset(out, 0, sizeof(*out));
-    char *body = zcl_malloc(BBF_DIRECTORY_JSON_MAX + 1, "bbf_disc_body");
-    if (!body)
-        LOG_FAIL(BBF_SUBSYS, "discovery: OOM allocating listing buffer");
+    const size_t stride = BBF_DIRECTORY_JSON_MAX + 1;
+    char *bodies = zcl_calloc(np, stride, "bbf_disc_bodies");
+    bool responded_flags[ROM_FETCH_MAX_WORKERS] = { false };
+    if (!bodies)
+        LOG_FAIL(BBF_SUBSYS, "discovery: OOM allocating listing buffers");
     struct bbf_disc_cand bundle_cands[ROM_FETCH_MAX_WORKERS];
     struct bbf_disc_cand hs_cands[ROM_FETCH_MAX_WORKERS];
     memset(bundle_cands, 0, sizeof(bundle_cands));
     memset(hs_cands, 0, sizeof(hs_cands));
     size_t nbundle = 0, nhs = 0;
-    size_t responded = 0;
+    size_t responded = bbf_probe_directories(
+        peers, np, bodies, stride, responded_flags, rom_fetch_get_directory);
     const size_t ccap = sizeof(bundle_cands) / sizeof(bundle_cands[0]);
     for (size_t i = 0; i < np; i++) {
-        if (!rom_fetch_get_directory(peers[i].addr, peers[i].port, body,
-                                     BBF_DIRECTORY_JSON_MAX + 1))
+        if (!responded_flags[i])
             continue;
-        responded++;
+        const char *body = bodies + i * stride;
         bool is_explicit = explicit_first && i == 0;
         struct rom_fetch_manifest m;
         memset(&m, 0, sizeof(m));
@@ -549,7 +552,7 @@ static bool bbf_discover_from_peers(const char *datadir,
                          "— ignoring", peers[i].addr, (unsigned)peers[i].port);
         }
     }
-    free(body);
+    free(bodies);
     out->n_bundles = bbf_quorum_rank(bundle_cands, nbundle, out->bundles,
                                      ROM_FETCH_MAX_WORKERS);
     if (out->n_bundles == 0) {
