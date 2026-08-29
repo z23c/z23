@@ -65,30 +65,106 @@ They are **information for a human**, explicitly not a gate.
 
 At scale `s`, with `blocks` measured blocks and `M` spends per block:
 
-1. **Funding** (untimed) — mint `blocks * s * M` coinbase-only blocks, keeping
-   every coinbase txid. This is what pre-loads the UTXO map, so the map's live
-   entry count scales with the workload.
-2. **Maturity filler** (untimed) — `COINBASE_MATURITY` (100) more coinbase-only
-   blocks, so the funded coinbases clear the real maturity predicate. Measured
-   blocks consume funded coinbases in mint order from the front, so the tightest
-   case is the last measured block spending the newest funded coinbase, which
-   clears maturity by `COINBASE_MATURITY + blocks`.
-3. **Measured** — `blocks * s` blocks, each carrying its own coinbase plus `M`
-   transparent spends of distinct funded coinbases. CPU time splits into
-   `build` (this harness assembling transactions) and `fold` (merkle root plus
-   the real `connect_block`, i.e. the coins-view work).
+- **Phase 1a, ballast** (untimed) — mint
+  `blocks * s * M * (funding_multiple - 1)` coinbase-only blocks, txids
+  discarded. Never spent, never looked up by the measured phase — see "Why
+  `funding_multiple` exists" below for why this phase exists at all and why
+  it is minted **before** phase 1b, not after.
+- **Phase 1b, funding** (untimed) — mint `blocks * s * M` more coinbase-only
+  blocks, keeping every coinbase txid. These are the coins the measured phase
+  will spend; together with the ballast they are what pre-loads the UTXO map,
+  so the map's live entry count scales with the workload.
+- **Phase 2, maturity filler** (untimed) — `COINBASE_MATURITY` (100) more
+  coinbase-only blocks, so the funded coinbases clear the real maturity
+  predicate. Measured blocks consume funded coinbases in mint order from the
+  front, so the tightest case is the last measured block spending the newest
+  funded coinbase, which clears maturity by `COINBASE_MATURITY + blocks`.
+- **Phase 3, measured** — `blocks * s` blocks, each carrying its own coinbase
+  plus `M` transparent spends of distinct funded coinbases. CPU time splits
+  into `build` (this harness assembling transactions) and `fold` (merkle root
+  plus the real `connect_block`, i.e. the coins-view work).
 
-Only phase 3 is timed. Timing uses `clock_thread_cpu_ns()`
-(`lib/platform/include/platform/clock.h`, `CLOCK_THREAD_CPUTIME_ID`) — the
-existing per-thread CPU clock this tree already uses for work-ratio measurement
-in `lib/test/src/test_sapling.c`. Per-thread CPU time, not wall clock, so
-cross-process preemption does not land in the number. Every ladder point also
-runs one **discarded warm-up sample** (same discipline as `tools/simd_bench.c`),
-because without it the first point absorbs the process's page faults and cold
-caches, inflating the ratio's denominator and flattering every result.
+Only phase 3 is timed, and it is timed `reps` times per ladder point (default
+**3**), of which the **minimum** is reported. Timing uses
+`clock_thread_cpu_ns()` (`lib/platform/include/platform/clock.h`,
+`CLOCK_THREAD_CPUTIME_ID`) — the existing per-thread CPU clock this tree
+already uses for work-ratio measurement in `lib/test/src/test_sapling.c`.
+Per-thread CPU time removes plain scheduler preemption from the count, but not
+memory-bandwidth or cache/SMT interference from a co-resident process, which
+inflate CPU time too. Every ladder point also runs one further **discarded
+warm-up sample** before the `reps` measured ones (same discipline as
+`tools/simd_bench.c`), because without it the first point absorbs the
+process's page faults, malloc arena growth, and cold icache, inflating the
+ratio's denominator and flattering every result.
 
 The workload is deterministic: fixed values, fixed scriptSigs, fixed heights.
 Two runs at the same config fold byte-identical blocks; only the ns figures move.
+
+### Why the minimum, not the median or the mean
+
+Until 2026-08-28 each ladder point was a single sample. Timing noise on a
+shared host is **one-sided** — contention from a co-resident process, cache
+eviction, SMT sibling pressure, and page faults can only ever *add* time to a
+sample, never remove it. A single sample therefore reports whatever
+contamination that one window happened to carry, with no way to tell a clean
+reading from a contaminated one. Measured case: a solo run on a loaded box put
+clean scale-1 fold cost at 9556 and 9987 ns/tx against a ~4795 ns/tx
+uncontaminated floor — up to a 2.0x one-sided inflation from an ~8 ms
+measurement window alone, large enough on its own to erase the detector's
+discrimination margin (see the self-test below) regardless of workload size.
+
+The fix is the **minimum of several repetitions**, not a median. Under a
+one-sided error model the minimum is the maximum-likelihood estimate of the
+uncontaminated cost and the only estimator whose error goes to zero as `reps`
+grows; a median still reports whatever the middle sample's contamination
+happened to be. It is also the *stricter* choice for the self-test in
+`lib/test/src/test_simnet_perf.c`, which requires the armed arm to cost at
+least 4.0x the clean arm at every ladder point: additive one-sided noise `d`
+on both arms drags the observed ratio `(A+d)/(C+d)` toward 1.0, so noise is
+what could either mask a real regression or manufacture a false one. Taking
+the minimum on both arms strips `d` from both, so it can neither inflate the
+armed arm into passing nor inflate the clean arm into failing. Default
+`reps = 3` (`SIMNET_PERF_DEFAULT_REPS` in `lib/sim/include/sim/simnet_perf.h`)
+costs roughly 2x the wall time of `reps = 1`.
+
+### Why `funding_multiple` exists, and why the ballast order is load-bearing
+
+Before 2026-08-28 every funded coinbase was spent, so the UTXO map's size and
+the measured phase's work were welded together — the only way to deepen the
+map was to time more transactions. That coupling left the armed-vs-clean
+self-test with too thin a margin at the smallest ladder point: the smallest
+scale measured only 3.9-4.5x armed/clean, against the self-test's 4.0x floor —
+a coin flip, not a gate, and no repetition count can widen a margin the
+workload itself does not contain.
+
+`funding_multiple` (default **2**) decouples the two: it mints
+`funding_multiple - 1` untimed **ballast** coinbases per spendable one (phase
+1a above), so the map holds more live entries than the measured phase ever
+touches. `coins_map` (`lib/coins/src/coins_view.c`) is open addressing with
+linear probing, and the self-test's injected regression
+(`SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE`, see "Proving the detector has
+teeth" below) collapses every key to bucket 0, so live entries form one
+contiguous probe run and a coin's find/erase cost is its **position in that
+run**, not the map's entry count.
+
+**Order is the whole effect.** Ballast minted *before* the spendable coins
+(phase 1a, ahead of phase 1b) sits in front of every one of them in the probe
+run and lengthens every subsequent lookup. Ballast minted *after* them sits
+behind and is never probed by the measured phase at all — it changes almost
+nothing. Measured at scale 1: ballast-after moved the armed/clean ratio 4.4x
+→ 4.8x; ballast-before moved it 6.3-8.4x. This is the cheap axis for
+discrimination margin: it deepens every probe without timing one additional
+transaction. The clean arm is unaffected either way — a real hash scatters
+the same entries and stays O(1), so `fold_growth_permille` on the clean arm is
+unchanged by `funding_multiple`.
+
+The cost is untimed setup only, but the setup is itself O(n²) under the armed
+injection, and the armed arm's *measured* fold also grows (deeper probes cost
+more even mid-fold, as coins are inserted and erased). Raising
+`funding_multiple` further buys more discrimination at roughly linear
+additional wall time; 2 is the smallest value that clears the 4.0x floor with
+real margin — see the calibration in "The budget, and how it was calibrated"
+below.
 
 ### Why the ladder cannot be arbitrarily wide
 
@@ -102,8 +178,12 @@ top of algorithmic change. Measured on the calibration host, a
 8804-entry point not.
 
 The default ladder (`--blocks=192 --scales=1,2,4`) keeps every point's working
-set in the same regime and keeps the smallest point long enough (~1.7k
-transactions, ~8 ms of fold) that scheduler contention averages out. Widen the
+set in the same memory-hierarchy regime. It does **not**, on its own, make the
+smallest point immune to timing noise — the smallest point is an ~8 ms CPU
+window, short enough that a co-resident process can inflate a single sample by
+2x (see "Why the minimum, not the median or the mean" above). Noise is handled
+by repetition (`reps`, min-of-samples), and the armed/clean discrimination
+margin by ballast (`funding_multiple`) — not by widening the ladder. Widen the
 span only together with a re-calibration of both directions.
 
 ## The budget, and how it was calibrated
@@ -111,38 +191,40 @@ span only together with a re-calibration of both directions.
 `SIMNET_PERF_GROWTH_BUDGET_PERMILLE = 1800`
 (`lib/sim/include/sim/simnet_perf.h`).
 
-Measured on a 32-core host, default workload, both idle and with 32 concurrent
-runs to model worst-case CI contention:
+**2026-08-28 recalibration.** The workload changed that day (`reps` 1 → 3
+min-of-samples, `funding_multiple` 1 → 2 — see "The workload" above), which
+moves every absolute figure below it, so the growth-ratio numbers are quoted
+from `lib/sim/include/sim/simnet_perf.h`'s own calibration comment, not
+re-derived here: 17 observations on a 32-core 7950X3D spanning an idle box, a
+32-worker synthetic memory load, and four real 32-worker `test_parallel` suite
+runs, at the default workload:
 
-| Run | Idle | 32 concurrent |
-|-----|------|---------------|
-| Clean tree (`--blocks=192`) | 655 – 1254 (max **1254**) | 359 – 1111 (max **1111**) |
-| O(n²) armed (`--blocks=192 --inject=coins-hash-collapse`) | 3276 – 3399 | 2271 – 5019 (min **2271**) |
-| Clean tree, self-test size (`--blocks=96`) | 1002 | 524 – 1429 (max **1429**) |
-| O(n²) armed, self-test size | 3256 | 2174 – 4652 (min **2174**) |
+| Run | Range |
+|-----|-------|
+| Clean tree | 967 – 1339 |
+| O(n²) armed | 3347 – 3647 |
 
-1800 sits inside that gap at both sizes: 44% above the worst clean observation
-and 21% below the best armed one at the default size, 26% / 17% at self-test
-size (whose smaller workload is noisier in both directions). Every
-one of those 32 concurrent clean runs passed and every one of the 32 armed runs
-failed, in both sizes.
+1800 sits inside that gap: 34% above the worst clean observation (1339), 46%
+below the best armed one (3347).
 
-2026-08-28: the in-suite group stopped asserting the absolute budgets. A
-healthy tree failed the budget twice in one day, at both ladder sizes: first
-at the 96-block self-test size (clean growth 1905 vs the concurrent max 1429;
-solo rerun 1117, inside the idle band), then — after the group moved to the
-default workload on the compression argument above — again at 192 blocks
-(clean 2604, armed/clean discrimination compressed to 1.47x vs the 1.8x the
-idle regime shows; same binary, same tree, solo 1068). The suite's mixed
-worker mix is simply not the 32-concurrent-copies-of-this-test regime the
-calibration modeled, and at neither size does it compress growth. The
-absolute budgets (both directions, both metrics) are now asserted only by the
-dedicated lanes `make sim-perf` / `make sim-perf-teeth` on a quiet host;
-the in-suite group keeps the per-scale same-window A/B (armed per-tx fold
-cost >= 4x clean at every point; calibration margin ~13x), the count/UTXO/tip
-identity checks, and the expect()-surface self-tests, and prints the budget
-line informationally. The self-test-size rows stay as measured calibration
-history.
+**The 1800 threshold itself was not changed** by the 2026-08-28 recalibration
+— only the workload that measures against it. `test_simnet_perf.c` re-proves
+both directions (budget passes clean, fails armed) on every suite run, so a
+threshold that drifted into "always passes" territory would show up as a
+failing self-test, not as silence.
+
+Separately, and earlier the same day: the **in-suite** group stopped asserting
+these absolute budgets at all. A healthy tree failed the budget assertion
+inside a mixed 32-worker `test_parallel` suite even though the identical
+binary passed solo (clean growth 2604 in-suite vs. 1068 solo on the same
+tree) — the suite's worker mix is not the 32-concurrent-copies-of-this-test
+regime the table above models, and it inflates the clean arm's growth ratio
+past the budget. The absolute budgets (both directions, both metrics) are
+therefore asserted only by the dedicated lanes `make sim-perf` /
+`make sim-perf-teeth` on a quiet host; the in-suite group
+(`make t ONLY=simnet_perf`) keeps the per-scale same-window armed-vs-clean
+discrimination check instead (next section) and prints the budget line
+informationally.
 
 ## Proving the detector has teeth
 
@@ -182,25 +264,48 @@ calls it; the only callers are `lib/sim/src/simnet_perf.c` and
 
 ### The proof
 
-Same workload, same binary, one flag apart:
+Same workload, same binary, one flag apart. Regenerated 2026-08-29 by actually
+running the default workload (`build/bin/simperf` and
+`build/bin/simperf --inject=coins-hash-collapse`; `blocks=192
+txs_per_block=8 reps=3 funding_multiple=2`) on the machine this doc was
+written on. The exact ns/permille figures are a one-time snapshot on one host
+under whatever else was running on it that moment — expect them to move
+run to run within the range in "The budget, and how it was calibrated" above;
+what the assertion checks is the *shape* (clean growth near 1000 = flat,
+armed growth several thousand = superlinear):
 
 ```
-$ build/bin/simperf --blocks=96
+$ build/bin/simperf
+simperf: blocks=192 txs_per_block=8 reps=3 funding_multiple=2 inject=none
   scale  blocks  fund_blk  txs   coins   build_us   fold_us  fold_ns/tx  total_ns/blk
-      1      96       768   864    1732        205      5011        5800         54341
-      2     192      1536  1728    3364        447     10955        6339         59390
-      4     384      3072  3456    6628        819     20096        5814         54467
-    fold_growth_permille  = 1002
-expect fold_growth_permille <= 1800 (actual=1002) PASS
+      1     192      3072  1728    4900        403      9286        5374         50469
+      2     384      6144  3456    9700        843     20163        5834         54705
+      4     768     12288  6912   19300       1625     39321        5688         53315
+  growth over a 4x workload span (1000 = flat, per-tx cost unchanged):
+    fold_growth_permille  = 1058
+    total_growth_permille = 1056
+expect fold_growth_permille <= 1800 (actual=1058) PASS
+expect total_growth_permille <= 1800 (actual=1056) PASS
+expect measured_txs == 6912 (actual=6912) PASS
+expect coins_at_end >= 768 (actual=19300) PASS
+expect points >= 2 (actual=3) PASS
 SIMPERF ALL BUDGETS PASSED (5 assertions)
 
-$ build/bin/simperf --blocks=96 --inject=coins-hash-collapse
+$ build/bin/simperf --inject=coins-hash-collapse
+simperf: blocks=192 txs_per_block=8 reps=3 funding_multiple=2 inject=coins-hash-collapse
   scale  blocks  fund_blk  txs   coins   build_us   fold_us  fold_ns/tx  total_ns/blk
-      1      96       768   864    1732        196     12349       14293        130684
-      2     192      1536  1728    3364        431     45530       26348        239386
-      4     384      3072  3456    6628        849    160857       46544        421112
-    fold_growth_permille  = 3256
-expect fold_growth_permille <= 1800 (actual=3256) FAIL
+      1     192      3072  1728    4900        403     63754       36894        334153
+      2     384      6144  3456    9700        872    236884       68543        619158
+      4     768     12288  6912   19300       1701    908984      131508       1185788
+  growth over a 4x workload span (1000 = flat, per-tx cost unchanged):
+    fold_growth_permille  = 3564
+    total_growth_permille = 3548
+  INJECTED REGRESSION ARMED (inject=1) — this run is a detector self-test, not a measurement of the tree
+expect fold_growth_permille <= 1800 (actual=3564) FAIL
+expect total_growth_permille <= 1800 (actual=3548) FAIL
+expect measured_txs == 6912 (actual=6912) PASS
+expect coins_at_end >= 768 (actual=19300) PASS
+expect points >= 2 (actual=3) PASS
 SIMPERF BUDGET FAILED (2 of 5 assertions)
 ```
 
@@ -209,11 +314,52 @@ regression is completely invisible to every count-based check. That is the whole
 argument for owning a cost detector.
 
 `make sim-perf-teeth` runs exactly that pair and fails loudly if the armed run
-*passes*. `make t ONLY=simnet_perf` runs the same comparison in-process on every
-suite run, and additionally requires the armed growth to be at least **2× the
-clean growth measured on the same machine under the same load** — the
-load-normalized form of the check, which no amount of scheduler contention can
-squeeze.
+*passes*. `make t ONLY=simnet_perf` (`lib/test/src/test_simnet_perf.c`) runs
+the same comparison in-process on every suite run, but does **not** assert
+either absolute growth budget in-suite (see above) — instead it requires the
+armed arm's per-transaction fold cost to beat the clean arm's by **at least
+4.0x at every ladder point**, same-window (both arms fold byte-identical
+blocks seconds apart on the same cores, so ordinary scheduler load moves both
+arms together and mostly cancels out of the ratio). The smallest scale is the
+binding one: the collapsed map's probe run is shortest there, so the
+armed/clean ratio is weakest at scale 1 and grows with scale. Calibrated
+worst case at scale 1: idle 6.29–8.38x; under a 32-worker synthetic load
+across 10 runs, 5.48–6.58x — both comfortably clear of the 4.0x floor (see
+`lib/test/src/test_simnet_perf.c`'s own calibration comment above that
+assertion). It also re-checks that both arms folded the same transaction
+count and ended with the same UTXO count and tip height, i.e. that the
+injected regression is completely invisible to every count-based check.
+
+### The honest limit of this margin
+
+The 5.48–6.58x calibrated floor at scale 1 is a property of *this specific
+workload against this specific injected fault*, not a law. Two things can
+move it, and either one needs a re-measurement, not a guess, before it is
+trusted again:
+
+- **The injected fault changes.** `SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE` is
+  one specific regression shape (every key collapses to one bucket). A
+  different injected fault — a partial collapse, a different data structure
+  entirely — would very likely change the armed/clean ratio and could
+  legitimately need a different `funding_multiple` or a different threshold.
+- **`coins_map`'s implementation changes.** The whole `funding_multiple`
+  argument rests on `coins_map` being open addressing with linear probing, so
+  a coin's cost under the collapsed hash is its position in the insertion
+  run. If `coins_map` (`lib/coins/src/coins_view.c`) ever moves to a different
+  collision strategy (chaining, robin hood probing, a different bucket
+  layout), the ballast-ordering effect this section describes may shrink,
+  vanish, or invert, and the calibration above would no longer describe the
+  code.
+
+If either changes: re-run `make sim-perf-teeth` and `make t ONLY=simnet_perf`
+repeatedly (loaded and idle) and update the calibration comments in
+`lib/sim/include/sim/simnet_perf.h`, `lib/test/src/test_simnet_perf.c`, and
+this file together — they are three views of the same measurement and must
+not drift apart. Do not "simplify" the ballast-before-funding ordering in
+`lib/sim/src/simnet_perf.c` without re-measuring first; it is the entire
+source of the discrimination margin at the smallest ladder point (see "Why
+`funding_multiple` exists" above), and a change that looks like harmless
+cleanup there can quietly collapse the margin back to a coin flip.
 
 ## Assertions
 
@@ -263,9 +409,14 @@ consensus). It was rejected for three concrete reasons:
    can be run in a quiet context — the precedent `check-crypto-perf` already
    sets in this tree ("deliberately NOT in the default `make lint` aggregate").
 3. **Measurement methodology already has a home shape here.**
-   `tools/simd_bench.c` established it: warm-up discarded, median not mean,
-   reference verified before any speed number is reported. A standalone tool can
-   follow that; a scenario line cannot.
+   `tools/simd_bench.c` established the shape this tool follows: a discarded
+   warm-up, several repetitions rather than one sample, and a reference
+   verified before any speed number is reported. `simd_bench.c` itself reports
+   the *median* of its repetitions — appropriate there because its timing
+   noise is not known to be one-sided. `simnet_perf` departs from that one
+   detail deliberately: its noise IS one-sided (see "Why the minimum, not the
+   median or the mean" above), so it takes the *minimum* instead. A standalone
+   tool can make that call per-workload; a scenario line cannot.
 
 The DSL's *assertion* shape is reused verbatim, which is the part worth sharing.
 

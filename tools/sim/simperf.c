@@ -39,7 +39,8 @@
  *
  * Usage:
  *   build/bin/simperf [--blocks=N] [--txs-per-block=N] [--scales=1,2,4]
- *                     [--reps=N] [--inject=none|coins-hash-collapse]
+ *                     [--reps=N] [--funding-multiple=N]
+ *                     [--inject=none|coins-hash-collapse]
  *                     [--expect='METRIC OP VALUE']... [--quiet]
  *
  * `--expect` takes exactly the chaos scenario DSL's assertion text
@@ -78,7 +79,8 @@ static void usage(FILE *out)
 {
     fprintf(out,
         "usage: simperf [--blocks=N] [--txs-per-block=N] [--scales=1,2,4]\n"
-        "               [--reps=N] [--inject=none|coins-hash-collapse]\n"
+        "               [--reps=N] [--funding-multiple=N]\n"
+        "               [--inject=none|coins-hash-collapse]\n"
         "               [--expect='METRIC OP VALUE']... [--quiet]\n"
         "\n"
         "metrics: fold_growth_permille total_growth_permille (gated,\n"
@@ -181,6 +183,9 @@ int main(int argc, char **argv)
             continue;
         if (parse_int_flag(a, "--reps=", 1, 64, &cfg.reps))
             continue;
+        if (parse_int_flag(a, "--funding-multiple=", 1, 16,
+                           &cfg.funding_multiple))
+            continue;
         if (strncmp(a, "--scales=", 9) == 0) {
             if (!parse_scales(a + 9, &cfg)) {
                 fprintf(stderr, "simperf: --scales wants 2..%d strictly "
@@ -249,8 +254,9 @@ int main(int argc, char **argv)
     }
 
     if (!quiet) {
-        printf("simperf: blocks=%d txs_per_block=%d reps=%d inject=%s\n",
-               cfg.blocks, cfg.txs_per_block, cfg.reps,
+        printf("simperf: blocks=%d txs_per_block=%d reps=%d "
+               "funding_multiple=%d inject=%s\n",
+               cfg.blocks, cfg.txs_per_block, cfg.reps, cfg.funding_multiple,
                cfg.inject == SIMNET_PERF_INJECT_NONE
                    ? "none" : "coins-hash-collapse");
         simnet_perf_print(&result, stdout);
