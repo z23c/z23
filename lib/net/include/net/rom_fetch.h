@@ -354,6 +354,15 @@ struct rom_fetch_dial_budgets {
     int onion_probe_io_ms;
 };
 void rom_fetch_dial_budgets_for_test(struct rom_fetch_dial_budgets *out);
+
+/* Count of SUCCESSFUL dials (rf_connect returning a live fd) since the last
+ * reset. A dial is the expensive unit on a slow link — a TCP handshake plus
+ * the two-round-trip X25519/HKDF key confirmation, or a whole Tor circuit —
+ * so "how many dials does one download cost" is the boot-latency number this
+ * counter exists to pin. It counts CONNECTIONS, never milliseconds: it must
+ * not be read as a statement about how fast a peer is allowed to be. */
+void     rom_fetch_dial_count_reset_for_test(void);
+uint64_t rom_fetch_dial_count_for_test(void);
 #endif
 
 #endif /* ZCL_NET_ROM_FETCH_H */
