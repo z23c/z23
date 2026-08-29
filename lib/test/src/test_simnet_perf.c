@@ -13,7 +13,8 @@
  *   1. the armed arm's per-transaction fold cost exceeds the clean arm's by
  *      >= 4x at EVERY ladder point (per-scale same-window A/B: both arms fold
  *      byte-identical blocks seconds apart on the same cores, so scheduler
- *      load moves both arms together; the calibration margin is ~13x),
+ *      load moves both arms together). The binding point is the SMALLEST
+ *      scale, not the average one — see the calibration table above check 3,
  *   2. the two runs folded the SAME number of transactions and ended with the
  *      SAME UTXO count and tip height — i.e. the injected regression is
  *      completely invisible to every count-based check, which is exactly why a
@@ -33,8 +34,14 @@
  *
  * Runtime note: the group runs the DEFAULT calibrated workload. The
  * quarter-size (96-block) ladder it used before 2026-08-28 was retired after
- * the healthy-tree false positive above; the default points are long enough
- * that scheduler contention averages out within a point. */
+ * the healthy-tree false positive above. It does NOT rely on contention
+ * averaging out within a point — that claim was wrong, and check 1 fired on a
+ * healthy tree because of it. Each point is now sampled `reps` times and the
+ * MINIMUM is kept (timing noise is one-sided, so the minimum is the least
+ * contaminated sample), and the workload carries enough discrimination that
+ * residual noise cannot cross the threshold. That costs wall time: ~9 s, up
+ * from ~2.3 s. See sim/simnet_perf.h at SIMNET_PERF_DEFAULT_REPS and
+ * SIMNET_PERF_DEFAULT_FUNDING_MULTIPLE. */
 
 #include "test/test_core.h"
 
@@ -63,7 +70,12 @@ static void sp_config(struct simnet_perf_config *cfg,
  * per-transaction fold cost must beat the clean arm's by min_ratio/10 x
  * (fixed-point, so 40 means 4.0x). Both arms fold byte-identical blocks
  * seconds apart on the same cores, so scheduler load moves both; only an
- * injection-shaped collapse (or bimodal contention) crosses the ratio. */
+ * injection-shaped collapse (or bimodal contention) crosses the ratio.
+ *
+ * EVERY point, deliberately: the discrimination is WEAKEST at the smallest
+ * scale, because the collapsed map's probe run is shortest there, and the
+ * smallest scale is exactly where a real O(n^2) regression is hardest to see.
+ * Dropping it would leave the two easy points guarding nothing. */
 static bool sp_arms_discriminate(const struct simnet_perf_result *clean,
                                  const struct simnet_perf_result *armed,
                                  int64_t min_ratio_times_ten)
@@ -119,12 +131,8 @@ int test_simnet_perf(void)
      * discrimination (armed/clean 1.47x vs the 1.8x the idle regime shows),
      * so no growth assertion is honest inside a parallel run. What IS honest
      * is the per-scale same-window A/B below: both ladders fold
-     * byte-identical blocks seconds apart, and at calibration the armed
-     * arm's per-transaction fold cost sits ~13x above the clean arm's at
-     * every scale. 4x survives that much asymmetric scheduler noise; if it
-     * ever fires, either the injection arm broke or the box is pathologically
-     * bimodal — run the dedicated lane before concluding either. The budget
-     * line stays printed so drift stays visible to a reader of the log. */
+     * byte-identical blocks seconds apart. The budget line stays printed so
+     * drift stays visible to a reader of the log. */
     int64_t clean_growth = -1, armed_growth = -1;
     (void)simnet_perf_expect(&clean, "fold_growth_permille", "<=",
                              SIMNET_PERF_GROWTH_BUDGET_PERMILLE,
@@ -137,7 +145,33 @@ int test_simnet_perf(void)
            SIMNET_PERF_GROWTH_BUDGET_PERMILLE, (long long)clean_growth,
            (long long)armed_growth);
 
-    /* ── 3: per-scale same-window discrimination ───────────────────── */
+    /* ── 3: per-scale same-window discrimination ─────────────────────
+     *
+     * CALIBRATION, re-measured 2026-08-28 on a 32-core 7950X3D. The comment
+     * this replaces claimed the armed arm sits "~13x above the clean arm at
+     * every scale" and picked 4.0x as a wide margin on that. It was false:
+     * ~13x is the LARGEST scale. The armed/clean ratio is 1 + (probe depth
+     * term)/clean, and the probe depth is shortest at the smallest scale, so
+     * the ratio is monotonically increasing along the ladder and the scale-1
+     * point is the only one that ever binds. Measured armed/clean by scale:
+     *
+     *                              scale 1     scale 2     scale 4
+     *   before (multiple=1, reps=1)
+     *     idle                     4.98-5.29   6.9-7.9     13.7-16.8
+     *     32-worker suite          3.91  FAIL  7.26        14.13
+     *   after (multiple=2, reps=3)
+     *     idle                     6.29-8.38   11.2-12.9   20.9-22.6
+     *     32-worker load, 10 runs  5.48-6.58   9.6-11.0    19.4-20.5
+     *
+     * So the old configuration ran a 4.0x assertion against a 4.4x signal —
+     * 10% of headroom, less than the run-to-run spread, which is why it fired
+     * on a healthy tree. The threshold was never the problem and has NOT been
+     * touched; the workload now carries the margin the threshold always
+     * assumed (worst of 10 loaded runs: 5.48x, i.e. +37%). What bought it is
+     * documented at `funding_multiple` in sim/simnet_perf.h.
+     *
+     * If this ever fires again, the ratio to read is scale 1. Below ~4.5x on
+     * an idle box means the injection arm weakened — do NOT lower the 40. */
     SP_CHECK("armed per-tx fold cost exceeds clean at every ladder point",
              sp_arms_discriminate(&clean, &armed, 40));
 
