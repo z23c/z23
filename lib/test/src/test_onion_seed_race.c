@@ -115,7 +115,7 @@ static int check_slow_does_not_delay_live(const char *first, const char *second,
     struct onion_seed_race_join *join = NULL;
 
     int rc = onion_seed_race_first_usable(hosts, 2, race_stub_fetch, &stub,
-                                          60, NULL, &winner, &winner_index,
+                                          NULL, NULL, 60, NULL, &winner, &winner_index,
                                           &join);
 
     RACE_CHECK("race returned success", rc == 0);
@@ -149,7 +149,7 @@ static int check_reject_is_not_usable(void)
     struct onion_seed_race_join *join = NULL;
 
     int rc = onion_seed_race_first_usable(hosts, 2, race_stub_fetch, &stub,
-                                          60, NULL, &winner, &winner_index,
+                                          NULL, NULL, 60, NULL, &winner, &winner_index,
                                           &join);
 
     RACE_CHECK("a 404 is not a usable door", rc == 0 && winner_index == 1);
@@ -176,7 +176,7 @@ static int check_either_live_seed_is_acceptable(void)
     struct onion_seed_race_join *join = NULL;
 
     int rc = onion_seed_race_first_usable(hosts, 2, race_stub_fetch, &stub,
-                                          60, NULL, &winner, &winner_index,
+                                          NULL, NULL, 60, NULL, &winner, &winner_index,
                                           &join);
 
     bool known_winner = winner_index < 2 && winner.body &&
@@ -184,6 +184,36 @@ static int check_either_live_seed_is_acceptable(void)
     RACE_CHECK("either live seed's answer is accepted",
                rc == 0 && known_winner);
 
+    onion_seed_race_join_wait(join);
+    onion_seed_race_join_free(join);
+    free(winner.body);
+    return failures;
+}
+
+static bool race_accept_live_body(const uint8_t *body, size_t body_len,
+                                  void *ctx)
+{
+    const char *expected = ctx;
+    size_t n = expected ? strlen(expected) : 0;
+    return body && body_len == n && memcmp(body, expected, n) == 0;
+}
+
+static int check_http_200_still_needs_usable_content(void)
+{
+    int failures = 0;
+    struct race_stub stub;
+    race_stub_init(&stub, NULL, NULL, NULL);
+    const char *hosts[2] = { "empty.onion", "live.onion" };
+    struct onion_fetch_result winner;
+    size_t winner_index = (size_t)-1;
+    struct onion_seed_race_join *join = NULL;
+
+    int rc = onion_seed_race_first_usable(
+        hosts, 2, race_stub_fetch, &stub, race_accept_live_body,
+        (void *)"live.onion", 60, NULL, &winner, &winner_index, &join);
+    RACE_CHECK("an unusable HTTP 200 cannot suppress a useful directory",
+               rc == 0 && winner_index == 1 && winner.body &&
+               strcmp((const char *)winner.body, "live.onion") == 0);
     onion_seed_race_join_wait(join);
     onion_seed_race_join_free(join);
     free(winner.body);
@@ -203,7 +233,7 @@ static int check_all_dead(void)
     struct onion_seed_race_join *join = NULL;
 
     int rc = onion_seed_race_first_usable(hosts, 2, race_stub_fetch, &stub,
-                                          60, NULL, &winner, &winner_index,
+                                          NULL, NULL, 60, NULL, &winner, &winner_index,
                                           &join);
 
     RACE_CHECK("all-dead race fails", rc < 0);
@@ -226,7 +256,7 @@ static int check_empty_and_null(void)
     struct onion_seed_race_join *join = (struct onion_seed_race_join *)1;
 
     int rc = onion_seed_race_first_usable(NULL, 1, race_stub_fetch, NULL,
-                                          60, NULL, &winner, &winner_index,
+                                          NULL, NULL, 60, NULL, &winner, &winner_index,
                                           &join);
     RACE_CHECK("NULL hosts fails", rc < 0);
     RACE_CHECK("NULL hosts still assigns winner", winner.status == 0 &&
@@ -241,7 +271,7 @@ static int check_empty_and_null(void)
     winner_index = 3;
     join = (struct onion_seed_race_join *)1;
     rc = onion_seed_race_first_usable(hosts, 0, race_stub_fetch, NULL,
-                                      60, NULL, &winner, &winner_index,
+                                      NULL, NULL, 60, NULL, &winner, &winner_index,
                                       &join);
     RACE_CHECK("empty list fails", rc < 0);
     RACE_CHECK("empty list assigns winner_index",
@@ -261,6 +291,7 @@ int test_onion_seed_race(void)
                                                "slow.onion", "live.onion");
     failures += check_reject_is_not_usable();
     failures += check_either_live_seed_is_acceptable();
+    failures += check_http_200_still_needs_usable_content();
     failures += check_all_dead();
     failures += check_empty_and_null();
 

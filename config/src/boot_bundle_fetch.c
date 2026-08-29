@@ -489,30 +489,25 @@ struct bbf_discovery {
     size_t n_bundles;
     struct rom_fetch_manifest header_seed;
     bool have_header_seed;
-    /* THE STALL DROP. Only the seeds that actually ANSWERED the directory
-     * request are carried into the download. A seed that refused, stalled, or
-     * was unreachable during discovery has already demonstrated it does not
-     * serve, and its cost is bounded there: at most RF_CONNECT_TIMEOUT_MS
-     * (10 s) + the directory recv window (RF_MANIFEST_IO_TIMEOUT_SEC, 15 s) =
-     * <= 25 s, once, with the whole sweep capped at ROM_FETCH_MAX_WORKERS (8)
-     * seeds. Carrying it into the download instead would put it in the
-     * per-chunk round-robin, where each attempt may sit on the 120 s chunk-IO
-     * timeout and be retried every round — the "retried forever" shape this
-     * exists to prevent. Dropping it costs nothing: a seed that cannot answer
-     * a few hundred bytes of directory JSON is not going to serve gigabytes.
-     *
-     * This matters most for a peer-DISCOVERED seed (config/src/
-     * boot_bundle_fetch_peer_seeds.c): a peer may advertise NODE_FILESERVICE
-     * and then not serve, and that must cost a bounded amount of time exactly
-     * once. It applies identically to an operator-named seed — the two are
-     * treated the same everywhere.
-     *
-     * NOTE the one path this does not cover: when a LOCAL bundles/
-     * directory.json hint is present, discovery never runs, so nothing has
-     * been probed and the full assembled seed set is used, as before. */
-    struct rom_fetch_peer live[ROM_FETCH_MAX_WORKERS];
-    size_t n_live;
+    /* A responder is eligible only for the exact artifact it advertised.
+     * Merely answering RLS is insufficient: a fast `{}` reply must never buy
+     * entry into the 120-second per-chunk rotation. Local hints have no live
+     * discovery evidence and therefore retain the operator's full seed set. */
+    struct rom_fetch_peer
+        bundle_peers[ROM_FETCH_MAX_WORKERS][ROM_FETCH_MAX_WORKERS];
+    size_t bundle_peer_count[ROM_FETCH_MAX_WORKERS];
+    struct rom_fetch_peer header_peers[ROM_FETCH_MAX_WORKERS];
+    size_t header_peer_count;
 };
+
+static bool bbf_manifest_same_artifact(const struct rom_fetch_manifest *a,
+                                       const struct rom_fetch_manifest *b)
+{
+    return a && b && a->size_bytes == b->size_bytes &&
+           a->num_chunks == b->num_chunks &&
+           memcmp(a->chunk_root, b->chunk_root, 32) == 0 &&
+           memcmp(a->whole_sha3, b->whole_sha3, 32) == 0;
+}
 /* Query each seed for its directory listing over the FS "RLS" wire, pick both
  * the consensus-bundle and header-seed manifests each advertises, and require
  * >=2 independent seeds returning a byte-identical (chunk_root, whole_sha3,
@@ -561,8 +556,6 @@ static bool bbf_discover_from_peers(const char *datadir,
                      peers[i].addr, (unsigned)peers[i].port);
             continue;
         }
-        if (out->n_live < ROM_FETCH_MAX_WORKERS)
-            out->live[out->n_live++] = peers[i];
         const char *body = bodies + i * stride;
         bool is_explicit = explicit_first && i == 0;
         struct rom_fetch_manifest m;
@@ -586,10 +579,10 @@ static bool bbf_discover_from_peers(const char *datadir,
                          "— ignoring", peers[i].addr, (unsigned)peers[i].port);
         }
     }
-    free(bodies);
     out->n_bundles = bbf_quorum_rank(bundle_cands, nbundle, out->bundles,
                                      ROM_FETCH_MAX_WORKERS);
     if (out->n_bundles == 0) {
+        free(bodies);
         LOG_INFO(BBF_SUBSYS, "discovery: no reachable seed served a usable "
                  "bundle manifest — skipping instant-on fetch");
         bbf_record_discovery_outcome("no_quorum_fell_open_to_ibd", np,
@@ -597,6 +590,41 @@ static bool bbf_discover_from_peers(const char *datadir,
         return false;
     }
     out->have_header_seed = bbf_quorum_winner(hs_cands, nhs, &out->header_seed);
+    /* Bind each download rotation to the responders that advertised that
+     * exact committed artifact. This is a liveness boundary, not trust: byte
+     * and checkpoint verification remain unchanged downstream. */
+    for (size_t i = 0; i < np; i++) {
+        if (!responded_flags[i])
+            continue;
+        const char *body = bodies + i * stride;
+        struct rom_fetch_manifest advertised;
+        memset(&advertised, 0, sizeof(advertised));
+        if (boot_bundle_pick_manifest(body, &advertised) &&
+            bbf_manifest_facts_ok(&advertised)) {
+            for (size_t b = 0; b < out->n_bundles; b++) {
+                if (bbf_manifest_same_artifact(&advertised,
+                                               &out->bundles[b])) {
+                    size_t n = out->bundle_peer_count[b];
+                    if (n < ROM_FETCH_MAX_WORKERS) {
+                        out->bundle_peers[b][n] = peers[i];
+                        out->bundle_peer_count[b] = n + 1;
+                    }
+                }
+            }
+        }
+        memset(&advertised, 0, sizeof(advertised));
+        if (out->have_header_seed &&
+            boot_bundle_pick_header_seed_manifest(body, &advertised) &&
+            bbf_manifest_facts_ok(&advertised) &&
+            bbf_manifest_same_artifact(&advertised, &out->header_seed)) {
+            size_t n = out->header_peer_count;
+            if (n < ROM_FETCH_MAX_WORKERS) {
+                out->header_peers[n] = peers[i];
+                out->header_peer_count = n + 1;
+            }
+        }
+    }
+    free(bodies);
     LOG_INFO(BBF_SUBSYS, "discovery: %zu bundle candidate(s) ranked "
              "(newest height=%lld, size=%llu); header-seed manifest %s — "
              "proceeding", out->n_bundles, (long long)out->bundles[0].height,
@@ -706,6 +734,7 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
     if (brn < 0 || (size_t)brn >= sizeof(bundles_root)) return false;
     char *body = bbf_read_text_file(bundles_root, "directory.json",
                                     BBF_DIRECTORY_JSON_MAX);
+    bool discovered_live = false;
     if (body) {
         if (boot_bundle_pick_manifest(body, &disc.bundles[0]))
             disc.n_bundles = 1;
@@ -724,22 +753,7 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
                  "discovery over the file-service RLS wire", hint_path);
         if (!bbf_discover_from_peers(datadir, peers, np, explicit_first, &disc))
             return false; /* fail-open: normal P2P IBD is the path */
-    }
-    /* Drop the seeds that did not serve a directory listing — see struct
-     * bbf_discovery.live for the bound and why a non-serving seed must not
-     * reach the per-chunk download rotation. When discovery did not run (a
-     * local directory.json hint was used) n_live is 0 and the full assembled
-     * set is kept, exactly as before. */
-    const struct rom_fetch_peer *dl_peers = peers;
-    size_t dl_np = np;
-    if (disc.n_live > 0) {
-        dl_peers = disc.live;
-        dl_np = disc.n_live;
-        if (dl_np < np)
-            LOG_INFO(BBF_SUBSYS,
-                     "instant-on: downloading from the %zu of %zu seed(s) that "
-                     "answered discovery; the rest are dropped for this boot",
-                     dl_np, np);
+        discovered_live = true;
     }
     /* Headers FIRST: the bundle install DEFERS on the header chain reaching the
      * checkpoint (checkpoint_bundle_install_ready), so the header seed is on the
@@ -749,7 +763,13 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
      * chain still arrives via P2P, just slower). */
     bool any = false;
     if (header_needed && disc.have_header_seed) {
-        if (boot_bundle_fetch_download(datadir, dl_peers, dl_np,
+        const struct rom_fetch_peer *header_peers = peers;
+        size_t header_np = np;
+        if (discovered_live) {
+            header_peers = disc.header_peers;
+            header_np = disc.header_peer_count;
+        }
+        if (boot_bundle_fetch_download(datadir, header_peers, header_np,
                                        &disc.header_seed)) {
             any = true;
             LOG_INFO(BBF_SUBSYS, "instant-on: header-chain seed landed — the "
@@ -769,7 +789,13 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
      * boundary either way). */
     if (bundle_needed) {
         for (size_t bi = 0; bi < disc.n_bundles; bi++) {
-            if (boot_bundle_fetch_download(datadir, dl_peers, dl_np,
+            const struct rom_fetch_peer *bundle_peers = peers;
+            size_t bundle_np = np;
+            if (discovered_live) {
+                bundle_peers = disc.bundle_peers[bi];
+                bundle_np = disc.bundle_peer_count[bi];
+            }
+            if (boot_bundle_fetch_download(datadir, bundle_peers, bundle_np,
                                            &disc.bundles[bi])) {
                 any = true;
                 break;
