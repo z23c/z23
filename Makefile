@@ -4573,9 +4573,14 @@ $(BIN_DIR)/mock_rpc: tools/mock_rpc.c
 # So this binary is compiled STRAIGHT FROM SOURCE to an executable, with no
 # intermediate object files at all. Nothing it compiles can ever appear in a
 # scanned epoch tree, which is what keeps P2 green honestly rather than by
-# exemption. It shares only four node files, all of them free of client and
-# trust-store symbols: the base64url codec, the node/worker handoff file, the
-# renewal decision, and the JSON reader.
+# exemption. It shares only a handful of node files, all of them free of
+# client and trust-store symbols: the base64url codec, the node/worker handoff
+# file, the renewal decision, the JSON reader, the log level, the allocator,
+# and platform.clock. The clock is here because `check-no-raw-clock-outside-
+# platform` is a whole-tree rule and this program is not exempt from it: its
+# deadlines and its renewal reference both read time through platform.clock
+# like everything else. lib/platform/src/clock.c pulls in nothing but
+# base/log_macros.h, which is already on this link line.
 ACME_WORKER_SRCS = \
 	tools/acme/acme_main.c \
 	tools/acme/acme_client.c \
@@ -4589,9 +4594,10 @@ ACME_WORKER_SRCS = \
 	lib/net/src/acme_renewal.c \
 	lib/json/src/json.c \
 	lib/base/src/log_level.c \
-	lib/base/src/safe_alloc.c
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
 ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
-	-Ilib/platform/include -Itools/acme -Ivendor/include
+	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
 ACME_WORKER_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
 

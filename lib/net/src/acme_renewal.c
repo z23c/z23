@@ -20,6 +20,7 @@
 #include <time.h>
 
 #include "base/log_macros.h"
+#include "platform/time_compat.h"
 
 bool acme_renewal_due(int64_t not_after, int64_t now)
 {
@@ -64,8 +65,14 @@ static bool asn1_time_to_unix(const ASN1_TIME *t, int64_t *out)
 {
     if (!t || !out)
         return false;
-    const time_t reference = time(NULL);
-    if (reference == (time_t)-1)
+    /* Through platform.clock rather than the raw C library call, so the
+     * tree keeps one clock boundary. This must stay a WALL reading:
+     * ASN1_TIME_diff() with a NULL `from` measures from OpenSSL's own
+     * reading of the real wall clock, and the two are added together below.
+     * A zero comes back only when the port could not read the clock at all,
+     * which is not a time anything can be anchored to. */
+    const time_t reference = platform_time_wall_time_t();
+    if (reference <= 0)
         return false;
     int days = 0;
     int seconds = 0;

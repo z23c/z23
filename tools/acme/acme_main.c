@@ -46,10 +46,11 @@
 
 #include "net/acme_renewal.h"
 
+#include "platform/time_compat.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define ACME_EXIT_OK      0
 #define ACME_EXIT_FAILED  1
@@ -109,7 +110,7 @@ static bool take_int(int argc, char **argv, int *i, int *out)
 
 static int report_check(const char *cert_path)
 {
-    const int64_t now = (int64_t)time(NULL);
+    const int64_t now = platform_time_wall_unix();
     const enum acme_renewal_action action = acme_renewal_check(cert_path, now);
     int64_t not_before = 0;
     int64_t not_after = 0;
@@ -213,7 +214,7 @@ int main(int argc, char **argv)
         cfg.directory_url = ACME_DIRECTORY_LETSENCRYPT_STAGING;
 
     if (renew) {
-        const int64_t now = (int64_t)time(NULL);
+        const int64_t now = platform_time_wall_unix();
         const enum acme_renewal_action action = acme_renewal_check(cert_path, now);
         if (action == ACME_RENEWAL_CURRENT) {
             printf("verdict=current cert=%s seconds_until_due=%lld — nothing to do\n",

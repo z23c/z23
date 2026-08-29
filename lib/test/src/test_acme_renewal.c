@@ -18,7 +18,6 @@
 #include <openssl/x509.h>
 
 #include <stdio.h>
-#include <time.h>
 #include <string.h>
 
 #define AR_CHECK(name, expr) do {                        \
@@ -102,14 +101,15 @@ int test_acme_renewal(void)
         snprintf(garbage, sizeof(garbage), "%s/garbage.pem", dir);
         snprintf(real, sizeof(real), "%s/cert.pem", dir);
 
-        const int64_t real_now = (int64_t)time(NULL);
-
+        /* Still the fixed `now` from the top of this test: the file legs are
+         * about what is (or is not) on disk, and nothing below reads a clock.
+         * A verdict a busy box could flip would be grading the box. */
         AR_CHECK("no certificate on disk reports absent, not current",
-                 acme_renewal_check(missing, real_now) == ACME_RENEWAL_ABSENT);
+                 acme_renewal_check(missing, now) == ACME_RENEWAL_ABSENT);
         AR_CHECK("an empty path reports absent",
-                 acme_renewal_check("", real_now) == ACME_RENEWAL_ABSENT);
+                 acme_renewal_check("", now) == ACME_RENEWAL_ABSENT);
         AR_CHECK("a NULL path reports absent",
-                 acme_renewal_check(NULL, real_now) == ACME_RENEWAL_ABSENT);
+                 acme_renewal_check(NULL, now) == ACME_RENEWAL_ABSENT);
 
         FILE *f = fopen(garbage, "wb");
         if (f) {
@@ -117,7 +117,7 @@ int test_acme_renewal(void)
             fclose(f);
         }
         AR_CHECK("a file that is not a certificate reports unreadable, never current",
-                 acme_renewal_check(garbage, real_now) == ACME_RENEWAL_UNREADABLE);
+                 acme_renewal_check(garbage, now) == ACME_RENEWAL_UNREADABLE);
         {
             int64_t nb = 1;
             int64_t na = 1;
@@ -148,21 +148,37 @@ int test_acme_renewal(void)
             int64_t na = 0;
             AR_CHECK("its validity window reads back",
                      acme_certificate_validity(real, &nb, &na) && na > nb);
-            AR_CHECK("notBefore is backdated and notAfter is about a week out",
-                     nb <= real_now && na > real_now &&
-                     na - real_now > 6 * DAY && na - real_now < 8 * DAY);
+
+            /* The reference time for every leg below comes OUT of the
+             * certificate, never out of a clock. Reading the real clock
+             * here and asserting on the reading would grade the machine
+             * instead of the rule: the same binary would pass on an idle
+             * box and fail on a loaded one. Injecting notBefore makes each
+             * verdict a property of the rule and the file, identical on any
+             * box, and lets the span bound below be exact rather than a
+             * tolerance wide enough to absorb scheduling noise. */
+            const int64_t issued = nb;
+
+            /* The builder backdates notBefore by an hour and sets notAfter a
+             * week past its own reading, so the span is at LEAST 7d + 1h and
+             * can only be longer if the two stamps straddle a second. Both
+             * ends are certificate fields; no clock is involved. */
+            AR_CHECK("the challenge certificate spans about a week",
+                     na - nb >= 7 * DAY + 3600 && na - nb < 8 * DAY);
             AR_CHECK("a seven-day certificate is DUE, being inside the window",
-                     acme_renewal_check(real, real_now) == ACME_RENEWAL_DUE);
+                     acme_renewal_check(real, issued) == ACME_RENEWAL_DUE);
+            AR_CHECK("it is still DUE a day later, not merely at issuance",
+                     acme_renewal_check(real, issued + DAY) == ACME_RENEWAL_DUE);
             AR_CHECK("nothing to wait for when a certificate is already due",
-                     acme_renewal_seconds_until_due(real, real_now) == 0);
+                     acme_renewal_seconds_until_due(real, issued) == 0);
             AR_CHECK("a certificate read at a time past its notAfter is expired",
                      acme_renewal_check(real, na + 1) == ACME_RENEWAL_EXPIRED);
             AR_CHECK("a certificate read before its notBefore is not yet valid",
                      acme_renewal_check(real, nb - 1) == ACME_RENEWAL_NOT_YET_VALID);
             AR_CHECK("an absent certificate has nothing to wait for either",
-                     acme_renewal_seconds_until_due(missing, real_now) == 0);
+                     acme_renewal_seconds_until_due(missing, issued) == 0);
         } else {
-            failures += 8;
+            failures += 9;
         }
         X509_free(cert);
         EVP_PKEY_free(key);

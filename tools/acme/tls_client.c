@@ -17,6 +17,7 @@
 #include "tls_client.h"
 
 #include "platform/socket_compat.h"
+#include "platform/time_compat.h"
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -28,12 +29,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 
 #if !defined(_WIN32)
 #include <netdb.h>
 #endif
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 
@@ -238,12 +239,13 @@ static bool chunked_walk(const char *p, size_t len, bool *complete,
         size_t i = off;
         for (; i < line_end; i++) {
             const char c = p[i];
-            int d;
-            if (c >= '0' && c <= '9') d = c - '0';
-            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-            else if (c == ';') break; /* chunk extension */
-            else return false;
+            if (c == ';')
+                break; /* chunk extension */
+            /* RFC 9112 chunk sizes are hex; the one hex codec owns the
+             * character rule, upper case included. */
+            const int d = zcl_hex_nibble(c, true);
+            if (d < 0)
+                return false;
             if (size > (TLS_CLIENT_MAX_BODY + 1) / 16)
                 return false;
             size = size * 16 + (size_t)d;
@@ -493,11 +495,13 @@ const char *tls_client_trust_store(void)
 
 /* ── 3. The conversation ─────────────────────────────────────────────── */
 
+/* Deadlines are intervals, so this is the MONOTONIC clock, not the wall
+ * clock: an NTP step or a manual date change mid-handshake must not make a
+ * request give up early or hang past its budget. Routed through
+ * platform.clock so the tree has one clock boundary. */
 static int64_t now_ms(void)
 {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    return platform_time_monotonic_ms();
 }
 
 static platform_socket_t connect_host(const char *host, int port, int64_t deadline)
