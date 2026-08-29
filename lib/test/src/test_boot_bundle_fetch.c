@@ -926,7 +926,20 @@ static int case_seed_set(void)
         ctx.connect_peers[0] = "203.0.113.7:39099";
         ASSERT(boot_bundle_fetch_seed_count(&ctx) == 1);
 
-        /* (5) NULL ctx must not crash and must not silently disable the weld. */
+        /* (5) -addnode preserves normal discovery while contributing the
+         * operator-named host. The same port-safety and de-duplication rules
+         * as -connect apply. */
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.addnode_peers[0] = "203.0.113.7:8033";
+        ctx.n_addnode_peers = 1;
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == open_seeds + 1);
+        ctx.addnode_peers[1] = "203.0.113.7";
+        ctx.n_addnode_peers = 2;
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == open_seeds + 1);
+        ctx.addnode_peers[1] = "203.0.113.8:39099";
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == open_seeds + 1);
+
+        /* (6) NULL ctx must not crash and must not silently disable the weld. */
         ASSERT(boot_bundle_fetch_seed_count(NULL) == open_seeds);
     } _test_next:;
     return failures;

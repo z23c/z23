@@ -813,19 +813,34 @@ int test_blog(void)
         ok = ok && (found == 0);
         found = blog_discover_onion_peers(dir, peers, 0);
         ok = ok && (found == 0);
-        /* Non-existent dir — opens SQLite which may return 0.
+        /* A missing database is inert: discovery returns no peers and must
+         * not create node.db or run the boot/schema ceremony.
          * test-tmp/-namespaced + pid-tagged (test_make_tmpdir), not a
          * bare literal in the repo working tree: a raw mkdtemp() template
          * rooted at "." drops its directory directly into the checkout
          * root, where a crash mid-test (or any exit path that skips
          * test_cleanup_tmpdir) leaves debris that pollutes `git status`
          * and the source-identity inventory for every other concurrent
-         * consumer of this checkout. Passing "." as the datadir is the same
-         * defect one level up: the production path builds
-         * "<datadir>/node.db" and node_db_open() CREATES it, so a "."
-         * datadir mints a full-schema node.db in the checkout root. */
+         * consumer of this checkout. */
         found = blog_discover_onion_peers(dir, peers, 10);
         ok = ok && (found == 0);
+        char db_path[512];
+        int db_path_len = snprintf(db_path, sizeof(db_path), "%s/node.db",
+                                   dir);
+        ok = ok && db_path_len > 0 && (size_t)db_path_len < sizeof(db_path) &&
+             access(db_path, F_OK) != 0;
+        if (ok) {
+            int wal_len = snprintf(db_path, sizeof(db_path), "%s/node.db-wal",
+                                   dir);
+            ok = wal_len > 0 && (size_t)wal_len < sizeof(db_path) &&
+                 access(db_path, F_OK) != 0;
+        }
+        if (ok) {
+            int shm_len = snprintf(db_path, sizeof(db_path), "%s/node.db-shm",
+                                   dir);
+            ok = shm_len > 0 && (size_t)shm_len < sizeof(db_path) &&
+                 access(db_path, F_OK) != 0;
+        }
         test_cleanup_tmpdir(dir);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }

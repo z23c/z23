@@ -310,17 +310,6 @@ struct app_context {
                                  * cert the server presents that cert regardless of SNI,
                                  * so NULL is fine (HTTP→HTTPS redirect then falls back
                                  * to the request's Host header). */
-    /* `-httpsaltdomain=NAME`, repeatable (argv-owned pointers; never freed).
-     * ADDITIONAL names this host answers for on the SAME 443 listener, each
-     * served its own certificate by TLS SNI. The pair for NAME lives in its
-     * own directory beside the main one — <datadir>/ssl/NAME/fullchain.pem
-     * and <datadir>/ssl/NAME/privkey.pem — so `zclassic23-acme` writes a
-     * second name exactly the way it writes the first, one directory over.
-     * Empty by default: with none of these the listener behaves exactly as
-     * it did before, presenting the one certificate to everybody. */
-#define APP_HTTPS_ALT_DOMAINS_MAX 8
-    const char *https_alt_domains[APP_HTTPS_ALT_DOMAINS_MAX];
-    int n_https_alt_domains;
     bool allow_degraded;       /* -allow-degraded : continue past failed post-restore integrity check
                                  * (default false → boot FATALs on broken chain state). */
     int  par_workers;          /* -par=N : verification-engine worker count.

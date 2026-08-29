@@ -979,34 +979,28 @@ _test_next:
     return failures;
 }
 
-/* A datadir that cannot be a filesystem path is refused at the single place
- * every blk path is built, so a caller that retained a dead stack frame fails
- * closed and is NAMED instead of formatting an aliased pointer into a path and
- * reading as a merely-missing body. Backstop only — the fix is that long-lived
- * readers own their datadir bytes. */
-static int test_block_pos_filename_refuses_non_path_datadir(void)
+/* Missing datadirs fail closed. Other bytes are not a lifetime signal: POSIX
+ * permits control bytes in path components, and long-lived readers own their
+ * datadir storage instead of asking this formatter to detect dead pointers. */
+static int test_block_pos_filename_datadir_contract(void)
 {
     int failures = 0;
     char tmpdir[512];
     make_test_dir(tmpdir, sizeof(tmpdir));
 
-    printf("  refuse non-path datadir at the blk-path boundary... ");
+    printf("  block path refuses missing datadir without restricting bytes... ");
     {
         struct disk_block_pos pos = { .nFile = 49, .nPos = 8 };
-
-        /* The exact live shape: a little-endian x86-64 stack address aliased
-         * as a string (0x00007ffd945736c0 -> "\xc0\x36\x57\x94\xfd\x7f"). */
-        const char dangling[] = "\xc0\x36\x57\x94\xfd\x7f";
         char path[512];
         memset(path, 'x', sizeof(path));
-        get_block_pos_filename(path, sizeof(path), dangling, &pos, "blk");
+        get_block_pos_filename(path, sizeof(path), NULL, &pos, "blk");
         if (path[0] != '\0') {
-            printf("FAIL (aliased pointer formatted into a path: %s)\n", path);
+            printf("FAIL (NULL datadir produced a path: %s)\n", path);
             failures++;
             goto _test_next;
         }
 
-        /* Empty is refused on the same ground, and the reader stays false. */
+        /* Empty is refused on the same ground. */
         memset(path, 'x', sizeof(path));
         get_block_pos_filename(path, sizeof(path), "", &pos, "blk");
         if (path[0] != '\0') {
@@ -1014,15 +1008,8 @@ static int test_block_pos_filename_refuses_non_path_datadir(void)
             failures++;
             goto _test_next;
         }
-        struct block r;
-        if (read_block_from_disk_pread(&r, &pos, dangling)) {
-            printf("FAIL (reader answered from a non-path datadir)\n");
-            block_free(&r);
-            failures++;
-            goto _test_next;
-        }
-
-        /* A real path — UTF-8 included — is still built exactly as before. */
+        /* Real paths — including UTF-8 and legal control bytes — are built
+         * exactly as supplied. */
         get_block_pos_filename(path, sizeof(path), tmpdir, &pos, "blk");
         char want[512];
         snprintf(want, sizeof(want), "%s/blocks/blk00049.dat", tmpdir);
@@ -1035,6 +1022,13 @@ static int test_block_pos_filename_refuses_non_path_datadir(void)
                                "blk");
         if (strcmp(path, "/tmp/zcl\xc3\xa9/blocks/blk00049.dat") != 0) {
             printf("FAIL (UTF-8 datadir refused: %s)\n", path);
+            failures++;
+            goto _test_next;
+        }
+        get_block_pos_filename(path, sizeof(path), "/tmp/zcl\tdata", &pos,
+                               "blk");
+        if (strcmp(path, "/tmp/zcl\tdata/blocks/blk00049.dat") != 0) {
+            printf("FAIL (legal control byte changed: %s)\n", path);
             failures++;
             goto _test_next;
         }
@@ -1066,6 +1060,6 @@ int test_disk_block_io(void)
     failures += test_scoped_read_fd_cache();
     failures += test_scan_duplicate_keeps_earliest_copy();
     failures += test_position_repair_from_local_copy();
-    failures += test_block_pos_filename_refuses_non_path_datadir();
+    failures += test_block_pos_filename_datadir_contract();
     return failures;
 }

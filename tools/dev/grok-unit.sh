@@ -129,7 +129,7 @@ fi
     printf '\n\n# How this unit will be judged\n\n'
     if [ "$NO_GROUP" -eq 0 ]; then
         printf 'After you finish, this exact command is run and must pass:\n'
-        printf '    build/bin/test_parallel --only=%s\n' "$GROUP"
+        printf '    make t-fast ONLY=%s\n' "$GROUP"
         printf 'It must report a NON-ZERO groups_ran and the line ALL TESTS PASSED.\n'
         printf 'A groups_ran of 0 means your group is registered with nothing, and\n'
         printf 'counts as a failure no matter what the exit code says.\n\n'
@@ -210,15 +210,7 @@ fi
 verdict_log="$STATE_DIR/${stamp}-${unit}.verdict"
 ( cd "$WORK_DIR" \
   && ./tools/dev/checkout-lock.sh foreground build/.checkout.lock -- \
-       make test_parallel ) > "$verdict_log" 2>&1
-build_rc=$?
-if [ "$build_rc" -ne 0 ]; then
-    printf 'grok-unit: FAIL -- the tree does not build. See %s\n' "$verdict_log"
-    exit 1
-fi
-
-( cd "$WORK_DIR" && build/bin/test_parallel --only="$GROUP" ) \
-    >> "$verdict_log" 2>&1 || true
+       make t-fast "ONLY=$GROUP" ) > "$verdict_log" 2>&1 || true
 
 # Read the numbers, never the exit code.
 ran="$(grep -a -oE 'groups_ran=[0-9]+' "$verdict_log" | tail -1 | cut -d= -f2)"

@@ -10,9 +10,9 @@ verifiable by someone who does not trust the person who wrote it.
 
 ## The language
 
-- **C23 only**, and the flag is `-std=c2x`, never `-std=c23`. gcc 13 rejects
-  `-std=c23` and accepts `-std=c2x`; both understand the same language here.
-  Writing `c23` locks out every gcc-13 box, which is most stable Linux.
+- **C23 only**, and the canonical flag is `-std=c23`. Use a conforming
+  toolchain (GCC 14+, Clang 17+, or equivalent); do not weaken the language
+  mode to accommodate an older compiler.
 - **No external dependencies.** If you need a hash, a matcher, an allocator,
   a parser — it is already in this tree, or you write it. Never add a library.
 - **No Python, ever.** Not for the build, not for a test, not for a throwaway

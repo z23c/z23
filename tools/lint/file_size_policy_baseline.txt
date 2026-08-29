@@ -1,3 +1,4 @@
+# Copyright 2026 Rhett Creighton - Apache License 2.0
 # Legacy file-size baseline — lint gate E1 (tools/file_size_policy.c).
 #
 # The files that already exceeded the 1500-line hard limit when the

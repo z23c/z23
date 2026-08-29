@@ -423,6 +423,17 @@ int t_e1_file_size_baseline_and_hollow_scan(void)
                                     E1_SCAN_ROOTS_ENV, E1_EMPTY_SCAN_DIR_REL)
         : -1;
 
+    char partial_roots[PATH_MAX];
+    int partial_len = snprintf(partial_roots, sizeof(partial_roots), "%s:%s",
+                               E1_ISO_SCAN_DIR_REL,
+                               E1_MISSING_SCAN_DIR_REL);
+    int partial_rc = setup == 0 && partial_len > 0 &&
+                             (size_t)partial_len < sizeof(partial_roots)
+        ? run_gate_script_with_env2(E1_GATE_REL,
+                                    E1_BASELINE_ENV, baseline_abs,
+                                    E1_SCAN_ROOTS_ENV, partial_roots)
+        : -1;
+
     unlink_rel(E1_ISO_LEGACY_REL);
     unlink_rel(E1_ISO_BASELINE_REL);
     (void)rmdir(scan_dir);
@@ -448,6 +459,10 @@ int t_e1_file_size_baseline_and_hollow_scan(void)
             fprintf(stderr, "[lint-gate] E1: an empty scan set must exit 2 "
                             "(fail-loud), got %d\n", hollow_rc);
         ASSERT(hollow_rc == 2);
+        if (partial_rc != 2)
+            fprintf(stderr, "[lint-gate] E1: one populated root plus one "
+                            "missing root must exit 2, got %d\n", partial_rc);
+        ASSERT(partial_rc == 2);
         PASS();
     } _test_next:;
     free(grown_out);
