@@ -27,7 +27,7 @@ AGENT_IMPACT_RULE("app/controllers/src/store_controller.c|app/controllers/src/st
  * so it rides the store groups as well as its own. */
 AGENT_IMPACT_RULE("app/controllers/src/store_native_handlers.c|app/models/src/store_blob.c|app/models/include/models/store_blob.h|lib/test/src/test_store_listing.c", "store_listing store store_e2e_gate command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("docs/HANDOFF.md", "make_lint_gates")
-AGENT_IMPACT_RULE("app/controllers/src/explorer_*.c|app/controllers/include/controllers/explorer_*.h|app/views/src/explorer_*.c|app/views/src/explorer_*.css|app/views/include/views/explorer_*.h|lib/test/src/test_explorer*.c", "explorer")
+AGENT_IMPACT_RULE("app/controllers/src/explorer_*.c|app/controllers/src/explorer_*.h|app/controllers/include/controllers/explorer_*.h|app/views/src/explorer_*.c|app/views/src/explorer_*.css|app/views/include/views/explorer_*.h|lib/test/src/test_explorer*.c", "explorer")
 AGENT_IMPACT_RULE("lib/keys/src/key_io.c|lib/keys/include/keys/key_io.h|lib/test/src/test_test_key_io_codec.c", "test_key_io_codec keys key_hostile_wif make_lint_gates")
 AGENT_IMPACT_RULE("lib/keys/src/pubkey.c|lib/keys/include/keys/pubkey.h|lib/wallet/src/hd_keychain.c|domain/encoding/src/base58.c|domain/encoding/include/domain/encoding/base58.h|lib/crypto/src/equihash.c|lib/crypto/include/crypto/equihash.h|lib/mining/src/miner.c|lib/mining/src/gen.c|lib/test/src/test_keys_hostile_derive.c", "keys_hostile_derive keys key_hostile_wif encoding wallet merkle_tree crypto make_lint_gates")
 AGENT_IMPACT_RULE("app/models/src/shared_validators.c|app/models/include/models/shared_validators.h|lib/test/src/test_shared_validators_zcl_address.c", "shared_validators_zcl_address models make_lint_gates")
