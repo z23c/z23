@@ -2,7 +2,7 @@
  *
  * HKDF-SHA3-256 (RFC 5869 extract-then-expand over HMAC-SHA3-256). This is
  * the overlay KDF for FlyClient-adjacent file-service / swarm handshakes.
- * Noise v2 and consensus hashes stay on HKDF-SHA256 / SHA-256d. */
+ * Noise and consensus hashes stay on HKDF-SHA256 / SHA-256d. */
 
 #ifndef ZCL_CRYPTO_HKDF_SHA3_H
 #define ZCL_CRYPTO_HKDF_SHA3_H

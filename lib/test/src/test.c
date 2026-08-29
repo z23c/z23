@@ -1424,7 +1424,7 @@ int main(int argc, char **argv)
     failures += test_noise_nk_handshake();
     failures += test_noise_xx_handshake();
     failures += test_session_transport();
-    failures += test_v2_transport_parity();
+    failures += test_noise_transport_parity();
     failures += test_hmac_sha512_kat_rfc4231_jefe();
     failures += test_hmac_sha512_kat_oversized_key();
     failures += test_hmac_sha512_empty_message();

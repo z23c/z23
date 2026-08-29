@@ -21,7 +21,7 @@
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
 #include "net/net.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "platform/time_compat.h"
 #include "services/mesh_pairing_service.h"
 #include "util/log_macros.h"
@@ -107,7 +107,7 @@ static uint64_t mesh_now_mono(void)
  * each authenticated session receives a small bounded cadence. */
 static bool mesh_responder_request_admit(
     const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session, uint64_t now_mono_ms)
+    const struct noise_transport_snapshot *session, uint64_t now_mono_ms)
 {
     if (!request || !session || !session->established) {
         LOG_ERROR("net.mesh_status", "responder admit: invalid session input");
@@ -161,7 +161,7 @@ static bool mesh_responder_request_admit(
 #ifdef ZCL_TESTING
 bool boot_mesh_status_test_responder_admit(
     const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session, uint64_t now_mono_ms)
+    const struct noise_transport_snapshot *session, uint64_t now_mono_ms)
 {
     return mesh_responder_request_admit(request, session, now_mono_ms);
 }
@@ -206,7 +206,7 @@ static enum mesh_status_receipt_status mesh_status_from_pairing_reason(
 
 enum mesh_status_receipt_status boot_mesh_status_decide(
     struct node_db *ndb, const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session,
+    const struct noise_transport_snapshot *session,
     const struct vcs_zcode_dht_delegation *delegations,
     size_t delegation_count, const uint8_t network_genesis[32],
     uint64_t now_unix, uint64_t *revocation_generation_out)
@@ -268,7 +268,7 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
 
 bool boot_mesh_status_compose_receipt(
     const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session,
+    const struct noise_transport_snapshot *session,
     enum mesh_status_receipt_status status, const uint8_t network_genesis[32],
     const uint8_t responder_master_pubkey[32],
     const uint8_t responder_online_pubkey[32],
@@ -342,7 +342,7 @@ bool boot_mesh_status_compose_receipt(
 bool boot_mesh_status_receipt_accept(
     const struct mesh_status_receipt_v1 *receipt,
     const struct mesh_status_request_v1 *request,
-    const struct v2_transport_snapshot *session,
+    const struct noise_transport_snapshot *session,
     const uint8_t expected_responder_master[32],
     const uint8_t expected_responder_online[32])
 {
@@ -505,10 +505,10 @@ static void mesh_respond(struct msg_processor *mp, struct p2p_node *node,
                          const uint8_t *wire, size_t wire_len,
                          struct boot_svc_ctx *svc)
 {
-    struct v2_transport_snapshot session;
+    struct noise_transport_snapshot session;
     memset(&session, 0, sizeof(session));
     if (!node->transport ||
-        !v2_transport_snapshot(node->transport, &session) ||
+        !noise_transport_snapshot(node->transport, &session) ||
         !session.established) {
         /* Plaintext v1 or mid-handshake: drop with NO receipt — responder
          * keys and signatures never cross an unauthenticated channel. The
@@ -678,10 +678,10 @@ static void mesh_receive(struct p2p_node *node, const uint8_t *wire,
         atomic_fetch_add(&g_mesh_dropped_malformed, 1);
         return;
     }
-    struct v2_transport_snapshot session;
+    struct noise_transport_snapshot session;
     memset(&session, 0, sizeof(session));
     if (!node->transport ||
-        !v2_transport_snapshot(node->transport, &session) ||
+        !noise_transport_snapshot(node->transport, &session) ||
         !session.established) {
         atomic_fetch_add(&g_mesh_dropped_unauthenticated, 1);
         return;

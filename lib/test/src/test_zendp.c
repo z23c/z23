@@ -36,7 +36,7 @@
  *      dropped and counted.
  *
  * NOT covered because it is not true yet: that the party answering at
- * an advertised address holds the key. That needs the Noise v2
+ * an advertised address holds the key. That needs the Noise
  * transport, which is default OFF. A record is a hint. */
 
 #include "test/test_core.h"
@@ -744,7 +744,7 @@ int test_zendp(void)
     int failures = 0;
     printf("\n=== ZENDP: signed, chain-anchored endpoint records ===\n");
     printf("  (a verified record is a HINT about where to look — binding "
-           "the session to the key needs Noise v2, default OFF)\n");
+           "the session to the key needs Noise, default OFF)\n");
     failures += ze_case_body_codec();
     failures += ze_case_golden();
     failures += ze_case_chain_binding();

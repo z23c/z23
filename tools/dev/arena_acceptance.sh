@@ -353,7 +353,7 @@ aa_spawn() { # $1=datadir $2=p2p $3=rpc $4=fs $5=https $6=connect-target
         -datadir="$dd" -regtest \
         -port="$p2p" -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
         -connect="$conn" -nofilesync \
-        -v2transport \
+        -noisetransport \
         -nobgvalidation -nolegacyimport -showmetrics=0 \
         >"$dd/node.log" 2>&1 &
     echo "$!"   # PID == PGID (setsid leader)

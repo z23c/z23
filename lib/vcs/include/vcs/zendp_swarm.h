@@ -33,7 +33,7 @@
  * signed "you can reach me at these endpoints, and this document is
  * valid until this expiry". It does NOT prove that the party answering
  * at that address is that identity. Binding the SESSION to the key
- * needs the Noise v2 transport (-v2transport, net/connman.h), which is
+ * needs the Noise transport (-noisetransport, net/connman.h), which is
  * default OFF because every peer on the live network speaks v1 today.
  * Until that flips, an endpoint record must only ever ADD a place to
  * try; it must never narrow, rank down, or exclude any peer. A poisoned

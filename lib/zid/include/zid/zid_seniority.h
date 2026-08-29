@@ -78,7 +78,7 @@
  *    HONEST LIMIT, inherited whole from zendp_swarm.h: a verified record
  *    proves the identity SAID "reach me here". It does not prove that the
  *    party answering at that address IS that identity — binding the session
- *    to the key needs the Noise v2 transport, which is default OFF because
+ *    to the key needs the Noise transport, which is default OFF because
  *    the live network speaks v1. Until that flips, the worst a false
  *    address claim buys is up to 4x the dial preference on an address the
  *    claimant does not control, which cannot exclude anyone and cannot

@@ -290,7 +290,7 @@ int test_x25519_safe(void);
 int test_noise_nk_handshake(void);
 int test_noise_xx_handshake(void);
 int test_session_transport(void);
-int test_v2_transport_parity(void);
+int test_noise_transport_parity(void);
 int test_hmac_sha512_kat_rfc4231_jefe(void);
 int test_hmac_sha512_kat_oversized_key(void);
 int test_hmac_sha512_empty_message(void);

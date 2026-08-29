@@ -1,7 +1,7 @@
 # Secure P2P Transport for z23 — protocol reference
 
-This is the protocol contract for the Noise-encrypted v2 transport
-(`lib/net/src/v2_transport.c`, `lib/noise/src/noise_handshake.c`), which is
+This is the protocol contract for the Noise-encrypted transport
+(`lib/net/src/noise_transport.c`, `lib/noise/src/noise_handshake.c`), which is
 implemented and armed as INITIATOR in `lib/net/src/net.c` / torn down in
 `lib/net/src/connman.c`, default OFF pending rollout (see [`os/A4-noise-transport-p1.md`](./os/A4-noise-transport-p1.md)
 for rollout status). No consensus code is touched by this transport; the
@@ -13,13 +13,13 @@ z23 P2P links are today plaintext, unauthenticated TCP. The v1 message
 checksum (`nChecksum` in `struct msg_header`, first 4 bytes of double-SHA256 of
 the payload, `lib/net/include/net/protocol.h`) detects corruption, not tampering
 — it is unkeyed and forgeable by anyone on-path. This document specifies an
-opt-in, authenticated, forward-secret transport ("v2") that wraps the byte
+opt-in, authenticated, forward-secret transport ("Noise") that wraps the byte
 stream between two consenting z23 peers while leaving message semantics,
 the v1 wire format, and consensus behavior byte-for-byte unchanged.
 
 Goals:
 - Confidentiality + cryptographic integrity of the whole P2P byte stream between
-  two v2-capable peers (closes the documented plaintext gaps: ZMSG off-chain
+  two Noise-capable peers (closes the documented plaintext gaps: ZMSG off-chain
   channel, ZMarket `zfile*` messages, `inv`/`tx`/`block`/`addr` reconnaissance).
 - Forward secrecy: session keys derived from per-session ephemeral X25519 keys;
   compromise of long-term state does not expose past sessions.
@@ -31,7 +31,7 @@ Goals:
 Non-goal note up front: this is defense-in-depth for clearnet links. The
 embedded Tor onion service (`lib/net/src/onion_service.c`,
 `lib/net/src/tor_integration.c`) remains the stronger anti-fingerprinting /
-network-anonymity control; v2 does not replace it.
+network-anonymity control; Noise does not replace it.
 
 ## 2. Non-goals & the parity firewall
 
@@ -57,7 +57,7 @@ assembles. Message command strings, `nMessageSize`, checksum semantics, the
 `g_msg_dispatch` table (`lib/net/src/msgprocessor.c`), the eight reducer stages,
 script/Groth16/PHGR13/Equihash verification — none of them can observe whether a
 byte arrived plaintext or decrypted. Two honest nodes reaching different tips
-because one used v1 and one used v2 is therefore structurally impossible: no
+because one used v1 and one used Noise is therefore structurally impossible: no
 validity logic inspects transport mode.
 
 Things that WOULD break parity and are forbidden:
@@ -67,7 +67,7 @@ Things that WOULD break parity and are forbidden:
   `PROTOCOL_VERSION`/`MIN_PEER_PROTO_VERSION` for v1 connections.
 - Using the AEAD tag as a substitute for the v1 double-SHA256 checksum on the
   plaintext v1 path.
-- Treating "peer completed a v2 handshake" as a substitute for
+- Treating "peer completed a Noise handshake" as a substitute for
   `peer_scoring_record` / `PEER_OFFENCE_PROTOCOL_VIOLATION` checks
   (`lib/net/src/msg_version.c`).
 
@@ -199,7 +199,7 @@ constraint on frame size. With a 32-byte AAD the one-shot AEAD caps plaintext at
   frames with a 1-byte `CONT`/`FINAL` inner flag; the receiver reassembles the
   full `msg_header`+payload before handing it to `net_message_read_header`. Cost
   ~1.3% overhead + more AEAD calls.
-- **v2 streaming AEAD (recommended, one small refactor):** add
+- **Noise streaming AEAD (recommended, one small refactor):** add
   `poly1305_init/update/final` + a streaming `chacha20poly1305` (the block
   function `chacha20_block` and `poly1305_mac` already exist to build on) so a
   full ~2 MiB message is one frame and the chunking logic disappears.
@@ -234,8 +234,8 @@ READ seam — `lib/net/src/connman.c`:
   MSG_DONTWAIT)`) and handed to the framing accumulator
   `p2p_node_receive_bytes(node, buf, n, cm->manager.message_start)` at
   **`connman.c:1334`**.
-- **Decrypt between `connman.c:1332` and `:1334`.** For an established v2 peer,
-  feed `buf[0..n)` to `v2_transport_decrypt()`, which appends to a
+- **Decrypt between `connman.c:1332` and `:1334`.** For an established Noise peer,
+  feed `buf[0..n)` to `noise_transport_decrypt()`, which appends to a
   transport-owned ciphertext accumulator (needed because `recv` returns
   arbitrary counts — a packet may span recvs, exactly like the existing v1
   accumulator inside `p2p_node_receive_bytes`, `net.c:430`), peels complete AEAD
@@ -246,16 +246,16 @@ READ seam — `lib/net/src/connman.c`:
 Per-connection state — add exactly ONE field to `struct p2p_node`
 (`lib/net/include/net/net.h`, near the end of the struct):
 ```c
-struct v2_transport *transport;   /* NULL = plaintext v1 (zclassicd) peer */
+struct noise_transport *transport;   /* NULL = plaintext v1 (zclassicd) peer */
 ```
 `p2p_node_create` (`net.c:291`) uses `zcl_calloc`, so this zero-inits to NULL
 (v1) with no init edit. Add a teardown in `p2p_node_free`.
 
-Everything else lives in a NEW translation unit `lib/net/src/v2_transport.c` +
-`include/net/v2_transport.h`, holding:
+Everything else lives in a NEW translation unit `lib/net/src/noise_transport.c` +
+`include/net/noise_transport.h`, holding:
 ```c
-struct v2_transport {
-  enum v2_hs_state state;      // V2_DETECT/V2_KEY_SENT/V2_KEY_RECV/V2_ESTABLISHED/V2_FAILED
+struct noise_transport {
+  enum noise_hs_state state;      // NOISE_DETECT/NOISE_KEY_SENT/NOISE_KEY_RECV/NOISE_ESTABLISHED/NOISE_FAILED
   bool     is_initiator;
   uint8_t  eph_priv[32], eph_pub[32], peer_pub[32];
   uint8_t  send_key[32], recv_key[32];
@@ -276,7 +276,7 @@ Total edited call sites (all thin):
 2. `net.c:707` — encrypt-before-`send_segment_create` when established.
 3. `connman.c:1332-1334` — detect/handshake/decrypt before `p2p_node_receive_bytes`.
 4. `net.c` ~914 (after `p2p_node_create` in `connect_node`) + ~1521 (after create
-   in `accept_connection`) — `v2_transport_begin(node, nm)` setting
+   in `accept_connection`) — `noise_transport_begin(node, nm)` setting
    `is_initiator = !inbound`.
 5. `connman.c` ~1828-1831 — load/generate identity into `nm`.
 6. Outbound gating — read addrman `nServices` (already learned at
@@ -293,18 +293,18 @@ Capability signal: reuse the existing service-bit pattern. `NODE_ZCL23 =
 (1<<10)` (`fast_sync.h:27`) is the zcl23-vs-zclassicd discriminator, advertised
 in `msg_version_build` (`ver->services = NODE_NETWORK | NODE_ZCL23`,
 `msg_version.c:244`), learned into addrman at `msg_version.c:228`, set on the
-peer at `msg_version.c:393`. Add a dedicated v2 bit (mirroring `NODE_BOOTSTRAP =
-(1<<24)`, `protocol.h:25`), e.g. `NODE_V2TRANSPORT`, advertised the same way.
+peer at `msg_version.c:393`. Add a dedicated Noise bit (mirroring `NODE_BOOTSTRAP =
+(1<<24)`, `protocol.h:25`), e.g. `NODE_NOISE_TRANSPORT`, advertised the same way.
 
 Because the plaintext capability bit alone is downgrade-strippable, negotiation
 uses a BIP324-style pre-`version` handshake gated so zclassicd never sees it.
-Transport handshake state lives in `struct v2_transport`, NOT in
+Transport handshake state lives in `struct noise_transport`, NOT in
 `enum peer_state`, so the validated message-layer transitions are untouched.
 
 Initiator = outbound (`connect_node`, `net.c` ~886/914):
-1. If addrman `nServices(addr) & NODE_ZCL23` (or a pinned "v2-seen" flag) →
+1. If addrman `nServices(addr) & NODE_ZCL23` (or a pinned "Noise-seen" flag) →
    allocate `node->transport`, `is_initiator = true`; queue our 32-byte
-   ephemeral X25519 pubkey as the first raw segment; state `V2_KEY_SENT`.
+   ephemeral X25519 pubkey as the first raw segment; state `NOISE_KEY_SENT`.
    Else `transport = NULL` → existing plaintext path (any zclassicd or
    unknown-service peer stays v1 — zero interop risk).
 2. On first recv: read peer ephemeral pubkey → run the Noise XX handshake (§3).
@@ -313,17 +313,18 @@ Initiator = outbound (`connect_node`, `net.c` ~886/914):
    it now flows encrypted with no ordering change.
 
 Responder = inbound (`accept_connection`, `net.c` ~1462/1521): allocate
-`node->transport`, `is_initiator = false`, state `V2_DETECT`. On the first recv
+`node->transport`, `is_initiator = false`, state `NOISE_DETECT`. On the first recv
 peek 4 bytes:
 - `== message_start` (the fixed network magic on the manager,
   `MESSAGE_START_SIZE`, set `connman.c` ~1828) → a v1 zclassicd peer: free
   `node->transport`, feed bytes to the plaintext path. This is the ONLY drop to
   plaintext and it requires the peer to literally speak v1 magic.
-- else → a v2 initiator: consume its ephemeral pubkey, run XX, state
-  `V2_ESTABLISHED`.
+- else → a Noise initiator: consume its ephemeral pubkey, run XX, state
+  `NOISE_ESTABLISHED`.
 
-zclassicd interop is preserved by construction: zclassicd never gets the v2 bit,
-never sends the pre-magic ephemeral key, and always matches the 4-byte magic
+zclassicd interop is preserved by construction: zclassicd never gets the Noise
+bit, never sends the pre-magic ephemeral key, and always matches the 4-byte
+magic
 peek → it stays on the untouched v1 path. A zcl23↔zclassicd connection is
 bit-for-bit identical to today.
 
@@ -332,13 +333,14 @@ Downgrade resistance:
   over ALL handshake bytes (§3 prologue + MixHash chain). Any MITM tamper yields
   divergent keys → the first AEAD frame fails auth → disconnect. There is no
   unauthenticated negotiation field to strip.
-- Inbound v1/v2 fork is a fixed-constant compare against the 4-byte magic; a v2
-  ephemeral pubkey colliding with the magic is ~2⁻³² (initiator re-rolls).
-- Residual first-contact gap: outbound v2 is gated on addrman-advertised
+- Inbound plaintext/Noise fork is a fixed-constant compare against the 4-byte
+  magic; a Noise ephemeral pubkey colliding with the magic is ~2⁻³² (initiator
+  re-rolls).
+- Residual first-contact gap: outbound Noise is gated on addrman-advertised
   `NODE_ZCL23`, learned from unauthenticated gossip — a MITM controlling that
   gossip could clear the bit to force v1. Mitigate with (i) a persistent
-  "v2-seen" pin per address (HSTS-style: never downgrade a peer previously
-  reached on v2) and (ii) the static-identity TOFU pin. This is the same
+  "Noise-seen" pin per address (HSTS-style: never downgrade a peer previously
+  reached on Noise) and (ii) the static-identity TOFU pin. This is the same
   ephemeral-only first-contact limit BIP324 acknowledges; note it, don't
   over-engineer the MVP.
 
@@ -355,7 +357,7 @@ Downgrade resistance:
   ephemeral scalars, `ck`, `k`, and DH outputs at Split() and on handshake
   abort; cleanse transport keys in `p2p_node_free`.
 - Memory-locking: consider `mlock` on the static-key buffer and the
-  `struct v2_transport` key material to keep secrets out of swap (open
+  `struct noise_transport` key material to keep secrets out of swap (open
   question §13 — confirm the platform posture and existing `mlock` usage before
   adopting).
 - Rekey / forward ratchet: rekey a direction after 2²⁰ frames OR 1 GiB on that
@@ -372,7 +374,7 @@ the v1 checksum is unkeyed (forgeable on-path). Tor (opt-in `-tor`, requires the
 real `vendor/tor` build) already gives confidentiality + endpoint auth (the
 .onion IS the destination key) + network anonymity for links routed over it.
 
-What v2 adds for clearnet (non-Tor) links:
+What Noise adds for clearnet (non-Tor) links:
 - Defeats PASSIVE eavesdropping completely — every `inv`/`tx`/`block`/`addr`/
   `zmsg`/`zfile*` becomes ciphertext to an on-path observer.
 - Cryptographic (keyed) integrity — an on-path tamperer without the session key
@@ -385,12 +387,12 @@ What v2 adds for clearnet (non-Tor) links:
 - Removes a cheap passive eclipse-assist recon channel (peer graph / versions /
   heights readable in plaintext today).
 
-What v2 does NOT protect against (must not be oversold):
+What Noise does NOT protect against (must not be oversold):
 - Metadata to a global observer (packet timing/size/graph) — only Tor's circuit
   routing addresses this, and only for onion-routed links.
 - Malicious-but-authenticated peers (bad blocks/tips/spam) — consensus
   validation + `peer_scoring_record` still own this.
-- Consensus attacks (51%/selfish-mining/reorgs) — orthogonal; v2 lives below the
+- Consensus attacks (51%/selfish-mining/reorgs) — orthogonal; Noise lives below the
   dispatch/reducer boundary and has zero bearing on chain selection.
 - Endpoint compromise (keys/wallet/binary) — protects data in transit between
   two honest endpoints only.
@@ -430,8 +432,8 @@ wrapper around `curve25519_scalarmult` (the base function never checks —
    and `poly1305_mac`. If deferred, use v1 chunking (§4) which needs no new
    crypto.
 4. **Infrastructure** (not crypto): persistent static-key load/save at
-   `{datadir}/v2_identity.key` (0600); the `NODE_V2TRANSPORT` service bit;
-   `struct v2_transport` + `v2_transport.c`.
+   `{datadir}/v2_identity.key` (0600); the `NODE_NOISE_TRANSPORT` service bit;
+   `struct noise_transport` + `noise_transport.c`.
 
 Already present with verified signatures: X25519 ECDH, ChaCha20-Poly1305 AEAD,
 HMAC-SHA256, hardened CSPRNG, constant-time compare, `memory_cleanse`.
@@ -457,12 +459,12 @@ Split. Copy-prove: N/A (no datadir touched). `test_parallel` green with the new
 TU compiled in. This is the small, first, independently-landable slice.
 
 **Phase 1 — Transport session over the byte-stream seam, capability-gated OFF by
-default.** Add `struct v2_transport`, `v2_transport.c`, the one `p2p_node` field,
+default.** Add `struct noise_transport`, `noise_transport.c`, the one `p2p_node` field,
 the identity fields on `net_manager`, the encrypt-at-`net.c:707` and
-decrypt-at-`connman.c:1332` seams, `v2_transport_begin` at the two create sites.
+decrypt-at-`connman.c:1332` seams, `noise_transport_begin` at the two create sites.
 Framing = Phase-1 whole-header+payload wrap with v1 chunking (`FRAME_MAX=1536`)
 — no new AEAD crypto. Negotiation bit defined but DEFAULT-DISABLED.
-Gate: test matrix cases 1 (v2↔v2 byte-identity round-trip — the actual proof of
+Gate: test matrix cases 1 (Noise↔Noise byte-identity round-trip — the actual proof of
 correctness), 4 (tamper/AEAD reject → disconnect + score), 5 (handshake-DoS
 bound). Copy-prove: run two nodes on datadir COPIES with the bit forced on;
 assert both reach the same H* and identical tip hash vs a v1-only control run.
@@ -470,13 +472,13 @@ assert both reach the same H* and identical tip hash vs a v1-only control run.
 
 **Phase 2 — Enable negotiation + zclassicd interop + downgrade handling.** Wire
 the addrman `nServices`/`NODE_ZCL23` outbound gate + the inbound 4-byte-magic
-v1/v2 peek + the persistent "v2-seen" HSTS pin. Bit still opt-in via flag.
-Gate: matrix cases 2 (v2 zcl23 ↔ v1 zclassicd plaintext fallback, diff vs golden
+plaintext/Noise peek + the persistent "Noise-seen" HSTS pin. Bit still opt-in via flag.
+Gate: matrix cases 2 (Noise zcl23 ↔ v1 zclassicd plaintext fallback, diff vs golden
 v1 capture for byte-identity), 3 (downgrade-attack rejection — both sub-cases:
-graceful fallback to a real v1 peer vs hard-fail-closed on a stripped-bit real v2
-peer). Copy-prove: a zcl23 COPY syncing from the live local `zclassicd` oracle
-(`~/.zclassic`, RPC 8232) with v2 enabled — proves interop is untouched and H*
-still climbs. `test_parallel` green.
+graceful fallback to a real v1 peer vs hard-fail-closed on a stripped-bit real
+Noise peer). Copy-prove: a zcl23 COPY syncing from the live local `zclassicd`
+oracle (`~/.zclassic`, RPC 8232) with Noise enabled — proves interop is untouched
+and H* still climbs. `test_parallel` green.
 
 **Phase 3 — Streaming AEAD (remove the 2 KiB cap) + TOFU static-key pin.** Add
 primitive #3 (streaming ChaCha20-Poly1305) → one frame per message, delete the
@@ -502,12 +504,12 @@ timestamps, no wall-clock reads); flood/DoS sibling =
 
 | # | Case | Proven | Fixture | Phase gate |
 |---|------|--------|---------|-----------|
-| 1 | v2↔v2 full encrypted round-trip | handshake completes, keys match, `version`/`verack`/`inv`/`tx`/`block`/`zmsg` round-trip byte-identical to the v1 plaintext path | two `p2p_node` over `socketpair()` both advertising the v2 bit; assert decrypted payload == parallel v1 control | P1 |
-| 2 | v2 zcl23 ↔ v1 zclassicd plaintext fallback | a peer without the v2 bit stays pure v1, header/checksum/dispatch identical | fixture peer omitting the bit (like `msg_version_classify_peer` at `msg_version.c:389-393`); diff vs a golden v1 capture | P2 |
-| 3 | Downgrade-attack rejection | stripped/flipped bit on a real v2 peer either detected+disconnected (bound negotiation) or hard-fail-closed when v2 is required; graceful v1 fallback is NOT a regression | two sub-cases: forced bit-strip vs no-prior-expectation fallback | P2 |
+| 1 | Noise↔Noise full encrypted round-trip | handshake completes, keys match, `version`/`verack`/`inv`/`tx`/`block`/`zmsg` round-trip byte-identical to the v1 plaintext path | two `p2p_node` over `socketpair()` both advertising the Noise bit; assert decrypted payload == parallel v1 control | P1 |
+| 2 | Noise zcl23 ↔ v1 zclassicd plaintext fallback | a peer without the Noise bit stays pure v1, header/checksum/dispatch identical | fixture peer omitting the bit (like `msg_version_classify_peer` at `msg_version.c:389-393`); diff vs a golden v1 capture | P2 |
+| 3 | Downgrade-attack rejection | stripped/flipped bit on a real Noise peer either detected+disconnected (bound negotiation) or hard-fail-closed when Noise is required; graceful v1 fallback is NOT a regression | two sub-cases: forced bit-strip vs no-prior-expectation fallback | P2 |
 | 4 | MITM / tamper detection | one flipped bit (header/ciphertext/tag) → AEAD reject, connection torn down + scored, no half-decrypted state | reuse `chacha20poly1305_decrypt` tag-mismatch path; assert `peer_scoring_record` like `msg_version.c:309-314` | P1 |
 | 5 | Handshake-DoS bound | garbage/partial/slow-loris handshakes cannot exhaust memory/CPU beyond a v1 flood; incomplete sockets reaped on a byte/time budget | extend `test_net_msg_dos.c`; assert bounded allocation + concurrent legit service + reaping | P1 |
-| 6 | Parity/regression floor | `test_parallel` green with v2 compiled in but the bit default-off | full `test_parallel` on a build with the bit disabled (additive, like `NODE_ZCL23` fast-sync today) — necessary not sufficient; case 1 is the real correctness proof | every phase |
+| 6 | Parity/regression floor | `test_parallel` green with Noise compiled in but the bit default-off | full `test_parallel` on a build with the bit disabled (additive, like `NODE_ZCL23` fast-sync today) — necessary not sufficient; case 1 is the real correctness proof | every phase |
 
 ## 13. Open questions for the owner
 
@@ -518,12 +520,12 @@ timestamps, no wall-clock reads); flood/DoS sibling =
    switch — accept SHA-256 permanently?
 3. Streaming AEAD now (Phase 3) vs shipping v1 chunking first — is the ~1.3%
    overhead + extra AEAD calls acceptable for an interim release?
-4. Interaction with Tor: should v2 be auto-disabled for onion-routed peers
+4. Interaction with Tor: should Noise be auto-disabled for onion-routed peers
    (Tor already authenticates the endpoint) or layered anyway as defense-in-depth?
 5. Memory-locking posture: adopt `mlock` on static-key + session-key buffers?
    Confirm existing platform `mlock` usage/limits first.
-6. Service-bit allocation: confirm a free bit for `NODE_V2TRANSPORT` (mirror
+6. Service-bit allocation: confirm a free bit for `NODE_NOISE_TRANSPORT` (mirror
    `NODE_BOOTSTRAP = 1<<24`) that does not collide with any zclassicd-observed
    bit.
-7. Downgrade policy default: HSTS-style "never downgrade a v2-seen peer" — opt-in
+7. Downgrade policy default: HSTS-style "never downgrade a Noise-seen peer" — opt-in
    or default-on once Phase 2 lands?

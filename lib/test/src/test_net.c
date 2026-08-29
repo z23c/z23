@@ -5846,32 +5846,32 @@ skip_parallel_tests:
     }
 
     /* ================================================================
-     * connman: v2 (Noise) transport ADVERTISEMENT census
+     * connman: Noise transport ADVERTISEMENT census
      *
-     * Observation only — nothing in the node branches on it. The v2
+     * Observation only — nothing in the node branches on it. The Noise
      * default stays OFF because every peer on the live network speaks
      * unencrypted v1; this census is the evidence a future flip would
      * need, so what has to hold is that it accumulates honestly across
      * peer churn: a live count that tracks the last sample, a high-water
      * that never regresses, and a running total that only grows.
      * ================================================================ */
-    printf("connman: v2transport census accumulates across churn... ");
+    printf("connman: noisetransport census accumulates across churn... ");
     {
-        struct connman_v2transport_stats before, s1, s2, s3;
-        connman_get_v2transport_stats(&before);
+        struct connman_noisetransport_stats before, s1, s2, s3;
+        connman_get_noisetransport_stats(&before);
 
         /* Two peers advertising out of five handshaked. */
-        connman_note_v2transport_sample_for_test(2, 5);
-        connman_get_v2transport_stats(&s1);
+        connman_note_noisetransport_sample_for_test(2, 5);
+        connman_get_noisetransport_stats(&s1);
 
         /* Churn: they leave. The live count drops to zero, but the
          * high-water and the running total must NOT. */
-        connman_note_v2transport_sample_for_test(0, 4);
-        connman_get_v2transport_stats(&s2);
+        connman_note_noisetransport_sample_for_test(0, 4);
+        connman_get_noisetransport_stats(&s2);
 
         /* A bigger population arrives → high-water advances. */
-        connman_note_v2transport_sample_for_test(3, 6);
-        connman_get_v2transport_stats(&s3);
+        connman_note_noisetransport_sample_for_test(3, 6);
+        connman_get_noisetransport_stats(&s3);
 
         bool live_tracks   = s1.advertising_now == 2 &&
                              s1.handshaked_now == 5 &&

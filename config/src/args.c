@@ -69,7 +69,7 @@ void print_usage(const char *prog)
     printf("  -nolegacyimport     Do not auto-read/link ~/.zclassic during boot\n");
     printf("  -packagehost=0|1    Host ZCODE package content from <datadir>/zcode\n");
     printf("                      (default 0, hosting off; local store only)\n");
-    printf("  -v2transport        Enable authenticated Noise XX peer transport\n");
+    printf("  -noisetransport        Enable authenticated Noise XX peer transport\n");
     printf("                      (required for the ZCODE DHT; default off)\n");
     printf("  -packagequota=<n>   Package store quota in bytes (default 10737418240;\n");
     printf("                      20%% pins / 40%% hot / 30%% rare / 10%% staging)\n");
@@ -179,7 +179,7 @@ static const char *const k_extra_getarg_flags[] = {
     "-txindex", "-notxindex", /* also GetBoolArg'd in txindex_projection.c */
     "-packagehost", "-nopackagehost", "-packagequota",
     "-buildworker", "-nobuildworker",
-    "-v2transport", "-nov2transport",
+    "-noisetransport", "-nonoisetransport",
 };
 
 static bool main_flag_is_known_extra(const char *arg)

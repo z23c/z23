@@ -6,7 +6,7 @@
 #include "base/serialize_le.h"
 #include "core/hash.h"
 #include "crypto/ed25519.h"
-#include "net/v2_transport.h"
+#include "net/noise_transport.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "vcs/zcode_dht_identity.h"
@@ -32,7 +32,7 @@
 #define P2P_HEADER 24u
 #define NODE_NETWORK UINT64_C(1)
 #define NODE_ZCL23 UINT64_C(1 << 10)
-#define NODE_V2 UINT64_C(1 << 25)
+#define NODE_NOISE UINT64_C(1 << 25)
 #define PROTOCOL_VERSION 170011
 
 static const uint8_t regtest_magic[4] = {0xaa, 0xe8, 0x3f, 0x5f};
@@ -112,14 +112,14 @@ static bool p2p_message(const char *command, const uint8_t *payload,
     return true;
 }
 
-static bool send_p2p(int fd, struct v2_transport *transport,
+static bool send_p2p(int fd, struct noise_transport *transport,
                      const char *command, const uint8_t *payload,
                      size_t payload_len)
 {
     uint8_t *plain = NULL, *sealed = NULL;
     size_t plain_len = 0, sealed_len = 0;
     bool ok = p2p_message(command, payload, payload_len, &plain, &plain_len) &&
-              v2_transport_write(transport, plain, plain_len, &sealed,
+              noise_transport_write(transport, plain, plain_len, &sealed,
                                  &sealed_len) &&
               sealed_len > 0 && write_all_fd(fd, sealed, sealed_len);
     free(plain);
@@ -127,7 +127,7 @@ static bool send_p2p(int fd, struct v2_transport *transport,
     return ok;
 }
 
-static bool feed_once(int fd, struct v2_transport *transport,
+static bool feed_once(int fd, struct noise_transport *transport,
                       struct app_buffer *app, int timeout_ms)
 {
     struct pollfd pfd = {.fd = fd, .events = POLLIN};
@@ -143,7 +143,7 @@ static bool feed_once(int fd, struct v2_transport *transport,
         return false;
     uint8_t *reply = NULL, *plain = NULL;
     size_t reply_len = 0, plain_len = 0;
-    bool ok = v2_transport_feed(transport, input, (size_t)n, &reply,
+    bool ok = noise_transport_feed(transport, input, (size_t)n, &reply,
                                 &reply_len, &plain, &plain_len);
     if (ok && reply_len)
         ok = write_all_fd(fd, reply, reply_len);
@@ -188,10 +188,10 @@ static size_t build_version(uint8_t out[128])
 {
     size_t off = 0;
     zcl_write_u32_le(out + off, PROTOCOL_VERSION); off += 4;
-    zcl_write_u64_le(out + off, NODE_NETWORK | NODE_ZCL23 | NODE_V2); off += 8;
+    zcl_write_u64_le(out + off, NODE_NETWORK | NODE_ZCL23 | NODE_NOISE); off += 8;
     zcl_write_u64_le(out + off, (uint64_t)platform_time_wall_time_t()); off += 8;
     for (int address = 0; address < 2; address++) {
-        zcl_write_u64_le(out + off, NODE_NETWORK | NODE_ZCL23 | NODE_V2);
+        zcl_write_u64_le(out + off, NODE_NETWORK | NODE_ZCL23 | NODE_NOISE);
         off += 8;
         memset(out + off, 0, 16); off += 16;
         out[off++] = 0; out[off++] = 0;
@@ -312,16 +312,16 @@ static int attack_peer(const char *host, uint16_t port, const char *datadir)
     }
     uint8_t *msg1 = NULL;
     size_t msg1_len = 0;
-    struct v2_transport *transport = v2_transport_begin(
+    struct noise_transport *transport = noise_transport_begin(
         true, noise_priv, regtest_magic, &msg1, &msg1_len);
     memory_cleanse(noise_priv, sizeof(noise_priv));
     struct app_buffer app = {0};
     bool ok = transport && msg1_len == 32 && write_all_fd(fd, msg1, msg1_len);
     free(msg1);
-    for (int i = 0; ok && transport->state != V2_ESTABLISHED && i < 20; i++)
+    for (int i = 0; ok && transport->state != NOISE_ESTABLISHED && i < 20; i++)
         ok = feed_once(fd, transport, &app, 1000);
-    struct v2_transport_snapshot snapshot;
-    ok = ok && v2_transport_snapshot(transport, &snapshot) &&
+    struct noise_transport_snapshot snapshot;
+    ok = ok && noise_transport_snapshot(transport, &snapshot) &&
          snapshot.established;
     uint8_t version[128];
     size_t version_len = build_version(version);
@@ -418,7 +418,7 @@ static int attack_peer(const char *host, uint16_t port, const char *datadir)
 
     memory_cleanse(online_seed, sizeof(online_seed));
     memory_cleanse(version, sizeof(version));
-    v2_transport_free(transport);
+    noise_transport_free(transport);
     close(fd);
     if (!ok) {
         fprintf(stderr, "acceptance Noise attack sequence failed\n");

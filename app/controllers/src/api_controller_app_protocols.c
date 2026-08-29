@@ -177,7 +177,7 @@ static const struct api_app_protocol_contract k_api_app_protocols[] = {
         .transport_model =
             "p2p_active_shielded_memo_active_tor_reachability_available",
         .privacy_model =
-            "p2p_plaintext_until_v2_negotiates_onchain_content_sapling_encrypted",
+            "p2p_plaintext_until_noise_negotiates_onchain_content_sapling_encrypted",
         .diagnostics_surface =
             "zclassic23_appprotocols_dumpstate_message_projection",
     },

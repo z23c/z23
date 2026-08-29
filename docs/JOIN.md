@@ -126,7 +126,7 @@ exactly like any other.
 The distributed hash table is a second, stronger discovery layer. It
 additionally needs:
 
-- `-v2transport`, the authenticated peer transport; and
+- `-noisetransport`, the authenticated peer transport; and
 - an **active on-chain ZID anchor**. Registering one is a transaction, and it
   **spends a fee**.
 

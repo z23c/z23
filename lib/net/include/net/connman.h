@@ -55,12 +55,12 @@ struct connman_reactor_stats {
 
 void connman_get_reactor_stats(struct connman_reactor_stats *out);
 
-/* v2 (Noise) transport ADVERTISEMENT census — observation only.
+/* Noise transport ADVERTISEMENT census — observation only.
  *
- * Nothing reads these to make a decision. The v2 transport default stays OFF
- * (`-v2transport`, connman.c) because every peer on the live network today
+ * Nothing reads these to make a decision. The Noise transport default stays OFF
+ * (`-noisetransport`, connman.c) because every peer on the live network today
  * speaks the unencrypted v1 wire: flipping the default before a measured
- * population of peers advertises NODE_V2TRANSPORT would partition this node
+ * population of peers advertises NODE_NOISE_TRANSPORT would partition this node
  * off the network. This census is the evidence that decision needs — it
  * counts peers whose version message advertised the bit, nothing more.
  *
@@ -70,7 +70,7 @@ void connman_get_reactor_stats(struct connman_reactor_stats *out);
  * across peer churn without needing to remember individual peers. A
  * nonzero high-water over a measured window is the precondition for even
  * discussing the default flip; the flip itself stays an owner decision. */
-struct connman_v2transport_stats {
+struct connman_noisetransport_stats {
     size_t   advertising_now;      /* peers currently advertising the bit  */
     size_t   handshaked_now;       /* handshake-complete peers, same walk  */
     size_t   advertising_high_water;         /* max advertising_now seen   */
@@ -78,12 +78,12 @@ struct connman_v2transport_stats {
     uint64_t samples_total;                  /* poll iterations sampled    */
 };
 
-void connman_get_v2transport_stats(struct connman_v2transport_stats *out);
+void connman_get_noisetransport_stats(struct connman_noisetransport_stats *out);
 
 #ifdef ZCL_TESTING
 /* The census recorder the reactor poll loop calls, exposed so the
  * accumulation rule is testable without spinning up real sockets. */
-void connman_note_v2transport_sample_for_test(size_t advertising,
+void connman_note_noisetransport_sample_for_test(size_t advertising,
                                               size_t handshaked);
 #endif
 
@@ -312,11 +312,11 @@ struct connman {
     struct thread_bounded_wait dial_bounded_wait;
 };
 
-/* Persist a newly learned NODE_V2TRANSPORT capability in the existing
+/* Persist a newly learned NODE_NOISE_TRANSPORT capability in the existing
  * addrman/addnode dial sources and mark the outbound plaintext connection for
  * one controlled reconnect.  Returns true only for the first upgrade request
  * (the dial target did not already carry the capability). */
-bool connman_request_v2_upgrade(struct connman *cm, struct p2p_node *node);
+bool connman_request_noise_upgrade(struct connman *cm, struct p2p_node *node);
 
 bool connman_init(struct connman *cm, const struct chain_params *params,
                    struct node_signals *signals);

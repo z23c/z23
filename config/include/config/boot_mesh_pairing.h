@@ -4,7 +4,7 @@
  * This is the local half of machine pairing: it exposes the existing
  * mesh_pairing_service accept authority to the operator without
  * creating a way to bypass it. plan and commit re-derive EVERYTHING live —
- * the established v2 Noise session, the held ZID delegation, the current
+ * the established Noise session, the held ZID delegation, the current
  * time — and commit additionally requires the peer's Noise fingerprint
  * compared out of band (read from `ops mesh pair plan` here and `ops mesh
  * identity` on the other machine). The granted capability is status-read
@@ -56,7 +56,7 @@ enum boot_mesh_pairing_plan_result {
     MESH_PAIR_PLAN_OK = 0,
     MESH_PAIR_PLAN_BAD_ARGUMENT,
     MESH_PAIR_PLAN_UNAVAILABLE, /* composition not wired */
-    MESH_PAIR_PLAN_V2_DISABLED,
+    MESH_PAIR_PLAN_NOISE_DISABLED,
     MESH_PAIR_PLAN_PEER_NOT_CONNECTED,
     MESH_PAIR_PLAN_AMBIGUOUS_PEER,
     MESH_PAIR_PLAN_DELEGATION_UNAVAILABLE,
@@ -69,7 +69,7 @@ enum boot_mesh_pairing_commit_result {
     MESH_PAIR_COMMIT_OK = 0,
     MESH_PAIR_COMMIT_BAD_ARGUMENT, /* includes out-of-range days */
     MESH_PAIR_COMMIT_UNAVAILABLE,
-    MESH_PAIR_COMMIT_V2_DISABLED,
+    MESH_PAIR_COMMIT_NOISE_DISABLED,
     MESH_PAIR_COMMIT_PEER_NOT_CONNECTED,
     MESH_PAIR_COMMIT_AMBIGUOUS_PEER,
     MESH_PAIR_COMMIT_DELEGATION_UNAVAILABLE,

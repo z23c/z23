@@ -4724,7 +4724,7 @@ ZCL_COMMAND_READY_COMMAND(
     "the reply names the restart the operator must run. Two named tiers are "
     "reported: SWARM (needs only -packagehost=1, works over ordinary P2P "
     "peers, no coins and no on-chain identity) and DHT (an OPTIONAL upgrade "
-    "that additionally needs -v2transport and an active on-chain ZID anchor "
+    "that additionally needs -noisetransport and an active on-chain ZID anchor "
     "whose registration spends a fee). DHT is never a blocker for joining. "
     "The `verdict` is a TUPLE — reachable/responsive/fresh/serving reported "
     "independently, with latency beside them as telemetry and never folded "

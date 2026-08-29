@@ -1765,7 +1765,7 @@ int test_connman_addnode_fallback(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("connman_addnode_fallback: one-shot v2 capability upgrade... ");
+    printf("connman_addnode_fallback: one-shot Noise capability upgrade... ");
     {
         chain_params_select(CHAIN_MAIN);
         const struct chain_params *params = chain_params_get();
@@ -1773,7 +1773,7 @@ int test_connman_addnode_fallback(void)
         struct node_signals sigs;
         memset(&sigs, 0, sizeof(sigs));
         bool ok = connman_init(&cm, params, &sigs);
-        cm.manager.v2_enabled = true;
+        cm.manager.noise_enabled = true;
 
         struct net_address pinned;
         test_set_ipv4(&pinned, 127, 0, 0, 1, 18444);
@@ -1785,20 +1785,20 @@ int test_connman_addnode_fallback(void)
         ok = ok && node != NULL;
         if (node) {
             node->addr.svc.port = pinned.svc.port;
-            node->services |= NODE_V2TRANSPORT;
-            ok = ok && connman_request_v2_upgrade(&cm, node);
+            node->services |= NODE_NOISE_TRANSPORT;
+            ok = ok && connman_request_noise_upgrade(&cm, node);
             ok = ok && node->disconnect;
             ok = ok &&
-                (node->addr.nServices & NODE_V2TRANSPORT) != 0;
+                (node->addr.nServices & NODE_NOISE_TRANSPORT) != 0;
             ok = ok &&
-                (cm.addnodes[0].nServices & NODE_V2TRANSPORT) != 0;
+                (cm.addnodes[0].nServices & NODE_NOISE_TRANSPORT) != 0;
             ok = ok && cm.addnode_last_attempt[0] == 0 &&
                  cm.addnode_backoff_sec[0] == 0;
 
             /* The learned bit makes this the only reconnect request.  The
              * next dial snapshot enters Noise in net.c immediately. */
             node->disconnect = false;
-            ok = ok && !connman_request_v2_upgrade(&cm, node);
+            ok = ok && !connman_request_noise_upgrade(&cm, node);
 
             /* A non-addnode learned hop must retain the exact endpoint for
              * its one controlled Noise reconnect.  In -connect mode addrman
@@ -1806,21 +1806,21 @@ int test_connman_addnode_fallback(void)
              * lookup would leave the candidate permanently unverified. */
             cm.num_addnodes = 0;
             node->addr.svc.port = 18445;
-            node->addr.nServices &= ~NODE_V2TRANSPORT;
+            node->addr.nServices &= ~NODE_NOISE_TRANSPORT;
             node->disconnect = false;
             struct net_address learned_reconnect;
             memset(&learned_reconnect, 0, sizeof(learned_reconnect));
-            ok = ok && connman_request_v2_upgrade(&cm, node);
+            ok = ok && connman_request_noise_upgrade(&cm, node);
             ok = ok && connman_dht_hint_pending(&cm);
             ok = ok && connman_take_dht_hint(&cm, &learned_reconnect);
             ok = ok && net_service_eq(&learned_reconnect.svc,
                                       &node->addr.svc);
             ok = ok &&
-                (learned_reconnect.nServices & NODE_V2TRANSPORT) != 0;
+                (learned_reconnect.nServices & NODE_NOISE_TRANSPORT) != 0;
 
             node->inbound = true;
-            node->addr.nServices &= ~NODE_V2TRANSPORT;
-            ok = ok && !connman_request_v2_upgrade(&cm, node);
+            node->addr.nServices &= ~NODE_NOISE_TRANSPORT;
+            ok = ok && !connman_request_noise_upgrade(&cm, node);
         }
 
         connman_free(&cm);
