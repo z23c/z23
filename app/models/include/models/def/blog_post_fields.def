@@ -42,6 +42,19 @@
     ZCL_MODEL_U64 (sequence,         sequence),     \
     ZCL_MODEL_I64 (event_created_at, event_created_at)
 
+/* Read-only JOIN projection over op_returns -> transactions -> connected
+ * blocks. Its column names are table-qualified and two of its members are
+ * NULL-presence flags, so the row body stays hand-written; only the column
+ * list and the column indices are derived. That is enough to remove the
+ * drift — the SELECT and the indices now come from one place. Index names
+ * key on the MEMBER, because a qualified SQL name is not an identifier. */
+#define BLOG_CHAIN_ANCHOR_FIELDS \
+    ZCL_MODEL_BLOB(o.txid,         txid, 32),                 \
+    ZCL_MODEL_I64 (o.block_height, op_return_height),         \
+    ZCL_MODEL_BLOB(t.block_hash,   transaction_block_hash, 32), \
+    ZCL_MODEL_I64 (t.block_height, transaction_block_height), \
+    ZCL_MODEL_BLOB(b.hash,         canonical_block_hash, 32)
+
 /* blog_publication_receipts — a reorg-aware observation that an exact ZBLG
  * OP_RETURN anchor appeared in the node's projections. `block_hash` is stored
  * NULL while unresolved, which is why it is the nullable-blob kind. */

@@ -44,6 +44,10 @@ ZCL_MODEL_BIND_FN(blog_post_bind, struct db_blog_post, BLOG_POST_FIELDS)
 ZCL_MODEL_READ_ROW_FN(blog_summary_read_row, struct db_blog_post_summary,
                       BLOG_POST_SUMMARY_FIELDS)
 
+#define BLOG_CHAIN_ANCHOR_COLUMNS ZCL_MODEL_COLUMNS(BLOG_CHAIN_ANCHOR_FIELDS)
+#define BCA_IX(kind, col, member, extra) BCA_IX_##member,
+enum { ZCL_MODEL_EXPAND(BCA_IX, BLOG_CHAIN_ANCHOR_FIELDS) BCA_IX_COUNT };
+
 ZCL_MODEL_READ_ROW_FN(blog_receipt_read_row,
                       struct db_blog_publication_receipt,
                       BLOG_PUBLICATION_RECEIPT_FIELDS)
@@ -530,23 +534,30 @@ bool db_blog_chain_anchor_find(struct node_db *ndb,
     if (!ndb || !ndb->open || !script || script_len == 0 || !out)
         LOG_FAIL("blog_anchor", "find requires valid arguments");
     AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT o.txid,o.block_height,t.block_hash,t.block_height,b.hash "
+        "SELECT " BLOG_CHAIN_ANCHOR_COLUMNS " "
         "FROM op_returns o "
         "LEFT JOIN transactions t ON t.txid=o.txid "
         "LEFT JOIN blocks b ON b.height=t.block_height AND b.status>=3 "
         "WHERE o.script=? ORDER BY o.block_height DESC,o.txid LIMIT 1",
         AR_BIND_BLOB(s, 1, script, script_len),
         memset(out, 0, sizeof(*out));
-        AR_READ_BLOB(s, 0, out->txid, 32);
-        out->op_return_height = AR_COL_INT(s, 1);
-        out->has_transaction = sqlite3_column_type(s, 2) != SQLITE_NULL;
+        AR_READ_BLOB(s, BCA_IX_txid, out->txid, 32);
+        out->op_return_height = AR_COL_INT(s, BCA_IX_op_return_height);
+        out->has_transaction =
+            sqlite3_column_type(s, BCA_IX_transaction_block_hash)
+                != SQLITE_NULL;
         if (out->has_transaction) {
-            AR_READ_BLOB(s, 2, out->transaction_block_hash, 32);
-            out->transaction_block_height = AR_COL_INT(s, 3);
+            AR_READ_BLOB(s, BCA_IX_transaction_block_hash,
+                         out->transaction_block_hash, 32);
+            out->transaction_block_height =
+                AR_COL_INT(s, BCA_IX_transaction_block_height);
         } else {
             out->transaction_block_height = -1;
         }
-        out->has_canonical_block = sqlite3_column_type(s, 4) != SQLITE_NULL;
+        out->has_canonical_block =
+            sqlite3_column_type(s, BCA_IX_canonical_block_hash)
+                != SQLITE_NULL;
         if (out->has_canonical_block)
-            AR_READ_BLOB(s, 4, out->canonical_block_hash, 32));
+            AR_READ_BLOB(s, BCA_IX_canonical_block_hash,
+                         out->canonical_block_hash, 32));
 }

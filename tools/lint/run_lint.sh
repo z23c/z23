@@ -184,6 +184,7 @@ gate_command() {
         check-peer-floor-single-source)    echo './tools/lint/check_peer_floor_single_source.sh' ;;
         check-proc-self-shim)              echo './tools/lint/check_proc_self_shim.sh' ;;
         check-no-raw-sqlite-in-controllers) echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_raw_sqlite_in_controllers.sh' ;;
+        check-model-column-drift)          echo './tools/lint/check_model_column_drift.sh --selftest && ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh' ;;
         check-supervisor-domain)           echo './tools/lint/check_supervisor_domain.sh' ;;
         check-thread-supervision)          echo './tools/lint/check_thread_supervision.sh' ;;
         check-file-purpose)                echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh' ;;

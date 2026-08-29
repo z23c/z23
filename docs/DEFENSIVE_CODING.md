@@ -735,6 +735,21 @@ assert green).
   move reads behind projections/models, writes through the AR lifecycle.
   Override `// raw-controller-sql-ok`.
 
+- **`check-model-column-drift`** (RATCHET) —
+  `tools/lint/check_model_column_drift.sh`. A model in `app/models/src/` must
+  not hand-maintain the column indices of a multi-column row read: two or more
+  distinct literal indices in `AR_READ_*` / `AR_COL_*` is the shape where
+  inserting a column in the middle of the SQL column list silently shifts
+  every index below it, with no compiler error and no test failure unless a
+  test covers that exact field. Fix: declare the fields once in
+  `app/models/include/models/def/<model>_fields.def` and derive the column
+  string, read index and bind position through
+  `app/models/include/models/model_fields.h` (worked examples: `blog_post.c`,
+  `market_download.c`, `tx_index.c`). Baseline
+  `tools/lint/model_column_drift_baseline.txt` (may only shrink; a baselined
+  file that stops violating must lose its line). Per-line override
+  `// model-columns-ok: <reason>`.
+
 - **Gate #21: `check-supervisor-domain`** (FAIL) —
   `tools/lint/check_supervisor_domain.sh`. Production `supervisor_register(`
   calls under `app/`, `config/`, `lib/` must use
@@ -1010,6 +1025,7 @@ add/remove a gate.
 - `check-sysinit-ordering`
 - `check-sandbox-wired`
 - `check-no-raw-sqlite-in-controllers`
+- `check-model-column-drift`
 - `check-no-shellouts`
 - `check-no-writer-below-sealed-frontier`
 - `check-peer-floor-single-source`

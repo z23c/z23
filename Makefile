@@ -10039,6 +10039,17 @@ check-no-raw-sqlite-in-controllers:
 	@echo "→ Gate #20: no_raw_sqlite_in_controllers"
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_raw_sqlite_in_controllers.sh
 
+# A model must not hand-maintain the column indices of a multi-column row
+# read: that is the shape where inserting a column in the middle of the SQL
+# column list silently shifts every index below it with no compiler error.
+# The fix is a field list in app/models/include/models/def/ derived through
+# models/model_fields.h. Baseline of pre-existing models lives in
+# tools/lint/model_column_drift_baseline.txt (may only shrink).
+check-model-column-drift:
+	@echo "→ model_column_drift"
+	@./tools/lint/check_model_column_drift.sh --selftest
+	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh
+
 check-supervisor-domain:
 	@echo "→ Gate #21: supervisor_domain"
 	@./tools/lint/check_supervisor_domain.sh
@@ -10978,6 +10989,7 @@ LINT_GATES := \
     check-peer-floor-single-source \
     check-proc-self-shim \
     check-no-raw-sqlite-in-controllers \
+    check-model-column-drift \
     check-supervisor-domain \
     check-thread-supervision \
     check-file-purpose \
