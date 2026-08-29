@@ -217,7 +217,7 @@ oni_onion_address() {
     printf '%s\n' "$addr"
 }
 oni_bootstrap_tail() {
-    grep "Bootstrapped" "$1/tor.log" 2>/dev/null | tail -1
+    grep -a "Bootstrapped" "$1/tor.log" 2>/dev/null | tail -1
 }
 oni_wait_onion_address() {
     local dd="$1" rpc="$2" label="$3" deadline addr
@@ -1037,10 +1037,10 @@ DELIVERED_ROOT="$("$FIXTURE_GEN" root "$DESTINATION")"
 # (peer_port=0, asserted above) and B never dialling A's file service,
 # this is the proof the bytes crossed the Tor network.
 mkt_note "verifying the /market/chunk traffic crossed both Tor instances"
-A_CHUNK_GETS="$(grep -c "HTTP GET /market/chunk/" "$MKT_DD_A/tor.log" 2>/dev/null || true)"
+A_CHUNK_GETS="$(grep -ac "HTTP GET /market/chunk/" "$MKT_DD_A/tor.log" 2>/dev/null || true)"
 [ "${A_CHUNK_GETS:-0}" -ge "$EXPECTED_SLICES" ] ||
     mkt_die "seller tor.log shows only ${A_CHUNK_GETS:-0} /market/chunk GETs (need $EXPECTED_SLICES)"
-B_CHUNK_FETCHES="$(grep -c "initiated fetch to .*\.onion/market/chunk/" "$MKT_DD_B/tor.log" 2>/dev/null || true)"
+B_CHUNK_FETCHES="$(grep -ac "initiated fetch to .*\.onion/market/chunk/" "$MKT_DD_B/tor.log" 2>/dev/null || true)"
 [ "${B_CHUNK_FETCHES:-0}" -ge "$EXPECTED_SLICES" ] ||
     mkt_die "buyer tor.log shows only ${B_CHUNK_FETCHES:-0} onion chunk fetches (need $EXPECTED_SLICES)"
 mkt_note "onion witness: seller served $A_CHUNK_GETS chunk GETs, buyer initiated $B_CHUNK_FETCHES"

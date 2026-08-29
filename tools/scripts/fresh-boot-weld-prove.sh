@@ -343,7 +343,7 @@ run_negative() {
 
     marker=0
     [ -f "$NEG_DD/consensus-bundle-installed.marker" ] && marker=1
-    refusal_line=$(grep -m1 'did not install (marked .failed' "$NEG_LOG" 2>/dev/null || true)
+    refusal_line=$(grep -am1 'did not install (marked .failed' "$NEG_LOG" 2>/dev/null || true)
     fj=$(rpc_frontier "$NEG_DD" "$RPCPORT")
     hs=$(jget "$fj" hstar); [ -z "$hs" ] && hs="-1"
 
@@ -373,7 +373,7 @@ run_negative() {
         echo "  (failed_marker=$failed_marker marker=$marker hstar=$hs — the node reached an"
         echo "   admission decision and it was the wrong one; this is a code verdict,"
         echo "   not a timing one.)"
-        grep -E 'REFUSED|admission/validation failed|mismatch|chain binding' "$NEG_LOG" 2>/dev/null | \
+        grep -aE 'REFUSED|admission/validation failed|mismatch|chain binding' "$NEG_LOG" 2>/dev/null | \
             tail -5 | sed 's/^/    /'
         NEG_VERDICT=FAIL
     fi
@@ -461,7 +461,7 @@ run_positive() {
                 break
             fi
         fi
-        if grep -q 'selected-chain binding failed' "$NODE_LOG" 2>/dev/null; then
+        if grep -aq 'selected-chain binding failed' "$NODE_LOG" 2>/dev/null; then
             chain_binding_blocked=1
         fi
         sleep "$SAMPLE_SECS"
@@ -493,11 +493,11 @@ run_positive() {
         echo "  regression. Re-run with --src=<pre-checkpoint synced copy> for an interim"
         echo "  proof against today's predicates, or point ZCL_NODE_BIN at the integrated"
         echo "  build once the relaxation lands."
-        grep -m1 'selected-chain binding failed' "$NODE_LOG" | sed 's/^/    log: /'
+        grep -am1 'selected-chain binding failed' "$NODE_LOG" | sed 's/^/    log: /'
         POS_VERDICT=BLOCKED_CHAIN_BINDING
     elif [ "$seen_checkpoint" != "1" ]; then
         echo "  POSITIVE FAIL — never observed H*==$CHECKPOINT (the weld did not install)."
-        grep -E 'REFUSED|did not install|admission/validation failed' "$NODE_LOG" 2>/dev/null | \
+        grep -aE 'REFUSED|did not install|admission/validation failed' "$NODE_LOG" 2>/dev/null | \
             tail -5 | sed 's/^/    /'
         POS_VERDICT=FAIL
     elif [ "$POS_MAX" -gt "$CHECKPOINT" ] 2>/dev/null; then

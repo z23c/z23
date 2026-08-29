@@ -133,7 +133,7 @@ zap_wait_named_busy() {
     log="${DDS[$node]}/node.log"
     deadline=$(( $(date +%s) + 30 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        grep -F "action=$action stage=worker_admission" "$log" 2>/dev/null |
+        grep -aF "action=$action stage=worker_admission" "$log" 2>/dev/null |
             grep -q 'disposition=BUSY .*reroute=1' && return 0
         sleep 0.1
     done
@@ -331,7 +331,7 @@ zap_assert_db_lifetime_clean() {
     zap_assert_db_identity "$node" "$phase"
     [ "$(zap_sql_count "$node" 'SELECT 1')" -eq 1 ] ||
         dht_die "requester $node could not read its live database after $phase"
-    ! grep -Eq 'unauthorized=1|DATABASE_OWNERSHIP_CONFLICT|disk I/O error' \
+    ! grep -aEq 'unauthorized=1|DATABASE_OWNERSHIP_CONFLICT|disk I/O error' \
         "$log" ||
         dht_die "requester $node recorded an unauthorized database lifecycle event during $phase"
 }

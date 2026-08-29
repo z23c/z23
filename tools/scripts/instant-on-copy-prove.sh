@@ -271,8 +271,8 @@ run_negative() {
         -install-consensus-bundle="$FLIP" > "$NEG_LOG" 2>&1 || neg_rc=$?
 
     refused=0; installed=0
-    grep -q '^REFUSED: -install-consensus-bundle:' "$NEG_LOG" && refused=1
-    grep -q '^INSTALLED: -install-consensus-bundle:' "$NEG_LOG" && installed=1
+    grep -aq '^REFUSED: -install-consensus-bundle:' "$NEG_LOG" && refused=1
+    grep -aq '^INSTALLED: -install-consensus-bundle:' "$NEG_LOG" && installed=1
     # No sovereign state may have been committed by a refused install.
     marker=0
     ls "$NEG_DD"/*consensus-bundle-installed* >/dev/null 2>&1 && marker=1
@@ -280,7 +280,7 @@ run_negative() {
     preinstall=$(ls "$NEG_DD"/consensus.db.preinstall.* 2>/dev/null | head -1 || true)
 
     echo "  rc=$neg_rc refused=$refused installed=$installed marker=$marker preinstall=${preinstall:-none}"
-    grep -E '^REFUSED:|validation failed|mismatch|not immutable' "$NEG_LOG" | tail -3 | sed 's/^/    /'
+    grep -aE '^REFUSED:|validation failed|mismatch|not immutable' "$NEG_LOG" | tail -3 | sed 's/^/    /'
 
     # Fail-closed contract: refused, NOT installed, and no committed sovereign
     # state. A preinstall image is acceptable ONLY paired with a restore (the
@@ -290,7 +290,7 @@ run_negative() {
         if [ -z "$preinstall" ]; then
             echo "  NEGATIVE PASS — tamper REFUSED at admission; no state committed, no marker."
             NEG_VERDICT=PASS
-        elif grep -qi 'restore' "$NEG_LOG"; then
+        elif grep -aqi 'restore' "$NEG_LOG"; then
             echo "  NEGATIVE PASS — tamper reached cutover then ROLLED BACK to $preinstall."
             NEG_VERDICT=PASS
         else
@@ -357,9 +357,9 @@ run_positive() {
         -operator-lane="$OPERATOR_LANE" \
         -nolegacyimport -nofilesync -nobgvalidation \
         -install-consensus-bundle="$BUNDLE_STAGED" > "$INSTALL_LOG" 2>&1 || ins_rc=$?
-    if [ "$ins_rc" != "0" ] || ! grep -q '^INSTALLED: -install-consensus-bundle:' "$INSTALL_LOG"; then
+    if [ "$ins_rc" != "0" ] || ! grep -aq '^INSTALLED: -install-consensus-bundle:' "$INSTALL_LOG"; then
         echo "  POSITIVE FAIL — phase-1 install did not report INSTALLED (rc=$ins_rc)."
-        grep -E '^REFUSED:|chain binding|selected frontier|durable' "$INSTALL_LOG" | tail -3 | sed 's/^/    /'
+        grep -aE '^REFUSED:|chain binding|selected frontier|durable' "$INSTALL_LOG" | tail -3 | sed 's/^/    /'
         POS_VERDICT=FAIL; return
     fi
     echo "  phase-1 INSTALLED; booting normally to fold the tail and prove H* CLIMB"
