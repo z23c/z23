@@ -4800,6 +4800,16 @@ $(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) | $(NODE_VENDOR_LIBS)
 	$(CC) $(Z23_BOOTSTRAP_CFLAGS) -o $@ $(Z23_BOOTSTRAP_SRCS) \
 		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
+# The front-door half of a release cut: package that bootstrap under
+# bootstrap/<triple>/ and write its SHA-256 into COPIES of the two shims, into
+# build/release/front-door. It never writes into packaging/install/ — the
+# checked-in shims keep the all-zero sentinel that makes them refuse, and
+# check-published-platforms holds them to it. Serve the resulting directory at
+# the project domain root; nothing in this repository does that step yet.
+.PHONY: z23-front-door
+z23-front-door: $(BIN_DIR)/z23-bootstrap
+	@bash packaging/release/build_release.sh --front-door
+
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))
 $(eval $(call BUILD_NODE_TOOL,rebuild_recent,tools/rebuild_recent.c,-lm,-fopenmp))

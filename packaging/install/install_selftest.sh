@@ -96,6 +96,10 @@ STUB
 printf '%s\n' "$@" >"$Z23_FD_TEST_ARGV_LOG"
 BOOTSTUB
     BOOT_SHA="$(sha256sum "$ROOT/http/boot/z23-bootstrap" | cut -d' ' -f1)"
+    # case_cut_shim_installs replaces the served bootstrap with the one a real
+    # release cut produced; this is the copy it puts back afterwards, so the
+    # cases that follow it see the same fixture the cases before it saw.
+    cp -f -- "$ROOT/http/boot/z23-bootstrap" "$ROOT/http/boot/z23-bootstrap.orig"
     printf '#!/usr/bin/env bash\ntouch "$Z23_FD_TEST_ARGV_LOG"\n' \
         >"$ROOT/http/boot/tampered"
 
@@ -200,6 +204,59 @@ case_shim_digest() {
     grep -q 'z23-bootstrap max-bytes=33554432' "$CURL" \
         || die "the bootstrap fetch was not bounded"
     say "PASS the fetched bootstrap is digest-verified before it runs, and gets our argv"
+}
+
+# ── The release cut and the shim have to agree about the digest ───────────
+# Every case above hands the shim its digest through
+# Z23_INSTALL_TEST_BOOT_SHA256, which proves the comparison but says nothing
+# about where a real digest comes from. It comes from
+# `build_release.sh --front-door`, which packages the bootstrap and stamps its
+# SHA-256 into a COPY of this shim. If the stamp and the packaged bytes ever
+# disagreed, every install would refuse with "digest mismatch" and the pair
+# would still each look correct on their own. So run the real cut and then run
+# the shim it produced, with no override at all.
+case_cut_shim_installs() {
+    local cut="$ROOT/cut" cutbin="$ROOT/cutbin" saved="$FRONT_DOOR" truebin=""
+    mkdir -p "$cutbin"
+    # A real ELF, because the cutter reads the object format to decide what it
+    # is packaging and refuses anything it cannot classify — a shell script
+    # would be rejected for its format and this case would stop grading what
+    # it says it grades. true(1) also ignores argv and exits 0, which is all
+    # the handoff needs here; argv forwarding is proved by case_shim_digest
+    # above. `command -v true` is the SHELL BUILTIN and is not a path, so the
+    # real file is looked for by name.
+    local candidate
+    for candidate in /usr/bin/true /bin/true; do
+        [ -x "$candidate" ] && { truebin="$candidate"; break; }
+    done
+    [ -n "$truebin" ] || die "no true(1) binary to stand in for a bootstrap"
+    cp -f -- "$truebin" "$cutbin/z23-bootstrap"
+    chmod 755 "$cutbin/z23-bootstrap"
+    bash "$REPO_ROOT/packaging/release/build_release.sh" --front-door \
+        --bin "$cutbin" --out "$cut" >/dev/null 2>"$ROOT/cut.err" \
+        || die "the front-door cut refused a complete input: $(cat "$ROOT/cut.err")"
+
+    if grep -q '^BOOT_LINUX_X86_64="\$BOOT_ZERO"$' "$cut/install.sh"; then
+        die "the cut shim still carries the sentinel"
+    fi
+    cp -f -- "$cut/bootstrap/linux-x86_64/z23-bootstrap" "$ROOT/http/boot/z23-bootstrap"
+
+    FRONT_DOOR="$cut/install.sh"
+    run_shim cut-handoff ""
+    [ "$RC" -eq 0 ] \
+        || die "the cut shim refused the bytes the same cut packaged (rc=$RC): $(cat "$ERR")"
+
+    # ...and the stamp is a real check, not a formality: one changed byte in
+    # the served bootstrap and the same cut shim refuses.
+    cp -f -- "$ROOT/http/boot/tampered" "$ROOT/http/boot/z23-bootstrap"
+    run_shim cut-tampered ""
+    [ "$RC" -eq 1 ] || die "the cut shim accepted bytes it did not name (rc=$RC)"
+    grep -q 'bootstrap digest mismatch' "$ERR" \
+        || die "the cut shim must name the digest mismatch"
+
+    FRONT_DOOR="$saved"
+    cp -f -- "$ROOT/http/boot/z23-bootstrap.orig" "$ROOT/http/boot/z23-bootstrap"
+    say "PASS a real release cut stamps a digest the shim then accepts, and only that one"
 }
 
 # ══ Part 2: the C23 bootstrap, end to end ════════════════════════════════
@@ -427,6 +484,7 @@ prepare
 case_shim_sentinel
 case_shim_platform
 case_shim_digest
+case_cut_shim_installs
 case_boot_all_agree
 case_boot_print_pin
 case_boot_disagreement

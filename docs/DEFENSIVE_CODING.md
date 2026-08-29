@@ -1085,6 +1085,7 @@ add/remove a gate.
 - `check-stable-publish-contained`
 - `check-zclassicd-reach-allowlist`
 - `check-z23-release-install`
+- `check-published-platforms`
 - `check-no-csr-lock-on-finalize-drive`
 - `check-mint-skip-crypto-offline-only`
 - `check-wire-harness-security-gate`
