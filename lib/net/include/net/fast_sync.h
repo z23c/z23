@@ -282,11 +282,14 @@ size_t fast_sync_serialize_chunk_for_hash(const struct utxo_chunk *chunk,
 bool fast_sync_verify_chunk(const struct utxo_chunk *chunk,
                              const uint8_t expected_hash[32]);
 
-/* Serve a specific chunk by index from the UTXO database. */
+/* Serve a specific chunk by index only from the already-published immutable
+ * snapshot cache. `datadir` is retained for API compatibility and is not
+ * opened: a live node.db read could diverge from the published manifest. */
 bool fast_sync_serve_chunk(const char *datadir, uint32_t chunk_index,
                             struct utxo_chunk *out);
 
-/* Serve a chunk from an open database handle. */
+/* Explicit legacy/test helper for an open node.db `utxos` mirror. Production
+ * request serving must use fast_sync_serve_chunk() and may not fall back here. */
 bool fast_sync_serve_chunk_db(struct sqlite3 *db, uint32_t chunk_index,
                                uint32_t chunk_size,
                                struct utxo_chunk *out);

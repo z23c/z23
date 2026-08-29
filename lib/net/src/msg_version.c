@@ -625,6 +625,7 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
         push_manifest(mp, node);
 
         /* Exchange block piece manifests for parallel block sync. */
+        node->blk_manifest_advertise_armed = true;
         push_block_manifest(mp, node);
 
         /* Advertise file service port. The peer knows our IP from the

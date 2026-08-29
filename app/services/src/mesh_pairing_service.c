@@ -351,10 +351,11 @@ enum mesh_pairing_reason mesh_pairing_service_revoke_commit(
     return MESH_PAIRING_OK;
 }
 
-enum mesh_pairing_reason mesh_pairing_service_authorize_status(
+static enum mesh_pairing_reason mesh_pairing_authorize(
     struct node_db *ndb, const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
-    const uint8_t session_noise_static[32], int64_t now)
+    const uint8_t session_noise_static[32], uint64_t required_capability,
+    int64_t now)
 {
     if (!ndb || !ndb->open || !pairing_id || !live_delegation ||
         !session_noise_static || now <= 0)
@@ -362,9 +363,13 @@ enum mesh_pairing_reason mesh_pairing_service_authorize_status(
     struct db_mesh_pairing before;
     if (!db_mesh_pairing_find(ndb, pairing_id, &before))
         return MESH_PAIRING_NOT_FOUND;
-    if (!mesh_pairing_allows(&before, MESH_PAIRING_CAP_STATUS_READ, now))
-        return before.revoked_at != 0
-            ? MESH_PAIRING_ALREADY_REVOKED : MESH_PAIRING_EXPIRED;
+    if (before.revoked_at != 0)
+        return MESH_PAIRING_ALREADY_REVOKED;
+    if (now >= before.expires_at)
+        return MESH_PAIRING_EXPIRED;
+    if (required_capability != 0 &&
+        (before.capability_mask & required_capability) != required_capability)
+        return MESH_PAIRING_CAPABILITY_UNAVAILABLE;
     if (memcmp(before.peer_master_pubkey,
                live_delegation->doc.master_pubkey, 32) != 0 ||
         memcmp(before.peer_noise_pubkey,
@@ -383,7 +388,28 @@ enum mesh_pairing_reason mesh_pairing_service_authorize_status(
     if (zid_generation != zid_identity_status_generation() ||
         !db_mesh_pairing_find(ndb, pairing_id, &after) ||
         before.revocation_generation != after.revocation_generation ||
-        !mesh_pairing_allows(&after, MESH_PAIRING_CAP_STATUS_READ, now))
+        after.revoked_at != 0 || now >= after.expires_at ||
+        (required_capability != 0 &&
+         (after.capability_mask & required_capability) != required_capability))
         return MESH_PAIRING_AUTHORITY_CHANGED;
     return MESH_PAIRING_OK;
+}
+
+enum mesh_pairing_reason mesh_pairing_service_authorize_status(
+    struct node_db *ndb, const char *pairing_id,
+    const struct vcs_zcode_dht_delegation *live_delegation,
+    const uint8_t session_noise_static[32], int64_t now)
+{
+    return mesh_pairing_authorize(
+        ndb, pairing_id, live_delegation, session_noise_static,
+        MESH_PAIRING_CAP_STATUS_READ, now);
+}
+
+enum mesh_pairing_reason mesh_pairing_service_authorize_delegation(
+    struct node_db *ndb, const char *pairing_id,
+    const struct vcs_zcode_dht_delegation *live_delegation,
+    const uint8_t session_noise_static[32], int64_t now)
+{
+    return mesh_pairing_authorize(
+        ndb, pairing_id, live_delegation, session_noise_static, 0, now);
 }

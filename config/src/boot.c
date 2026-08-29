@@ -2202,12 +2202,15 @@ bool app_init(struct app_context *ctx)
                 /* Copy block files from zclassicd if we don't have them */
                 if (g_state.map_block_index.size > 1000) {
                     char zcd_blk_dir[1024];
-                    if (home)
-                        snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
-                                 "%s/.zclassic/blocks", home);
-                    else
-                        snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
-                                 ".zclassic/blocks");
+                    if (!boot_legacy_default_blocks_dir(zcd_blk_dir,
+                                                        sizeof(zcd_blk_dir))) {
+                        if (home)
+                            snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
+                                     "%s/.zclassic/blocks", home);
+                        else
+                            snprintf(zcd_blk_dir, sizeof(zcd_blk_dir),
+                                     ".zclassic/blocks");
+                    }
                     struct boot_legacy_block_file_import_result import_files =
                         boot_legacy_import_block_files(zcd_blk_dir,
                                                        ctx->datadir, 256);
@@ -2236,10 +2239,14 @@ bool app_init(struct app_context *ctx)
             g_state.map_block_index.size > 1000) {
             const char *home = getenv("HOME");
             char zcd_blk[1024];
-            if (home)
-                snprintf(zcd_blk, sizeof(zcd_blk), "%s/.zclassic/blocks", home);
-            else
-                snprintf(zcd_blk, sizeof(zcd_blk), ".zclassic/blocks");
+            if (!boot_legacy_default_blocks_dir(zcd_blk,
+                                                sizeof(zcd_blk))) {
+                if (home)
+                    snprintf(zcd_blk, sizeof(zcd_blk),
+                             "%s/.zclassic/blocks", home);
+                else
+                    snprintf(zcd_blk, sizeof(zcd_blk), ".zclassic/blocks");
+            }
             struct boot_legacy_block_file_link_result link_files =
                 boot_legacy_link_missing_block_files(zcd_blk,
                                                      ctx->datadir, 256);
@@ -2500,6 +2507,7 @@ bool app_init(struct app_context *ctx)
                 scan_missing_header_data++;
         }
     }
+    int scan_contiguous_data_h = scan_compute_contiguous_data_height(scan_best_header, g_state.map_block_index.size);
     if (scan_cleared_failed > 0)
         printf("Cleared BLOCK_FAILED from %d block index entries\n",
                scan_cleared_failed);
@@ -2852,24 +2860,15 @@ bool app_init(struct app_context *ctx)
                        cleared, tip_h);
         }
     }
-    /* Scan block files on disk if HAVE_DATA is missing or if entries claim
-     * HAVE_DATA but still have placeholder header fields. The latter blocks
-     * activation because the validator must reject nBits=0 placeholders.
-     * Uses scan_max_have_data_h from the single-pass scan above
-     * instead of another partial iteration. */
     {
-        /* FIXME(option-ii, follow-up): scan_max_have_data_h is the MAX HAVE_DATA
-         * height, NOT span COVERAGE. A header-only import whose projection rung
-         * marked an UPPER sub-span (e.g. h>=3,155,843) leaves this gate reading a
-         * high max while the LOWER fold span has no bodies — need_scan stays
-         * false and this broad scan is skipped. The from-anchor fold-span rebind
-         * (boot_refold_body_span_contiguous → scan_block_files_mark_data) now
-         * covers that case on a real gap; this gate could ADDITIONALLY fire on a
-         * coins-tip-ancestry body gap here rather than trusting the max. */
         bool need_scan = (scan_max_have_data_h < 100 &&
                           g_state.map_block_index.size > 1000) ||
                          g_state.map_block_index.size < 100 ||
-                         scan_missing_header_data > 0;
+                         scan_missing_header_data > 0 ||
+                         (scan_best_header &&
+                          scan_best_header->nHeight > 1000 &&
+                          scan_contiguous_data_h + 1000 <
+                              scan_best_header->nHeight);
         if (need_scan) {
             bool have_block_files = false;
             for (int ci = 0; ci < 3 && !have_block_files; ci++) {
@@ -2881,7 +2880,9 @@ bool app_init(struct app_context *ctx)
                     have_block_files = true;
             }
             if (have_block_files) {
-                scan_block_files_mark_data(&g_state, ctx->datadir, params);
+                scan_block_files_mark_data(
+                    &g_state, ctx->datadir,
+                    g_state.map_block_index.size < 1000 ? params : NULL);
                 fflush(stdout);
                 if (g_state.map_block_index.size > 1000)
                     save_block_index_flat(ctx->datadir, &g_state);

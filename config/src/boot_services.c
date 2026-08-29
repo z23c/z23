@@ -14,6 +14,8 @@
 #include "config/boot_snapshot_offer.h"
 #include "config/boot_msg_callbacks.h"
 #include "config/boot_zcode_dht.h"
+#include "config/boot_mesh_pairing.h"
+#include "config/boot_mesh_status.h"
 #include "services/binary_ab_fallback.h"
 #include "services/chain_activation_service.h"
 #include "services/block_index_integrity.h"
@@ -24,11 +26,10 @@
 #include "services/catchup_lifecycle_service.h"
 #include "services/hodl_history_service.h"
 #include "services/quorum_oracle_service.h"
-/* The eight staged-sync stage Job headers are no longer included here: the
- * stage teardown that used them relocated to the staged-sync supervisor unit
- * (staged_sync_supervisor_shutdown_stages), which owns the stages' init +
- * registration too. boot_services.c reaches the pipeline only through
- * supervisors/staged_sync_supervisor.h now. */
+/* The eight staged-sync stage Job headers are no longer included here: stage
+ * teardown relocated to the staged-sync supervisor unit, which owns the
+ * stages' init + registration too. boot_services.c reaches the pipeline only
+ * through supervisors/staged_sync_supervisor.h now. */
 #include "jobs/refold_progress.h"      /* refold_from_anchor_active (-load-verify-boot skip) */
 #include "config/boot_fast_restart.h"  /* boot_fast_restart_capture_shutdown_facts (P2) */
 #include "services/chain_tip_watchdog.h"
@@ -189,9 +190,8 @@ struct db_service *boot_db_service(struct boot_svc_ctx *svc)
     return runtime->db_service;
 }
 /* Runtime-profile gate accessors. Non-static (prototypes in boot_internal.h)
- * because several staying app_init call sites read them AND the frontend
- * service starts in boot_frontend_services.c gate on them across the TU
- * boundary; they remain co-located here beside boot_profile_has_file_service. */
+ * because app_init call sites AND boot_frontend_services.c read them across
+ * the TU boundary; they stay beside boot_profile_has_file_service. */
 bool boot_profile_has_explorer(const struct app_context *ctx)
 {
     if (!ctx)
@@ -225,9 +225,8 @@ bool boot_profile_has_file_service(const struct app_context *ctx)
     return app_runtime_profile_has_file_service(ctx->runtime_profile);
 }
 
-/* Boot timing helper — mirrors boot.c:boot_clock_ms() so the
- * app_init_services sub-stage markers use the same monotonic-ms basis as
- * the top-level [boot] <phase> Nms markers. Timing only. */
+/* Boot timing helper — mirrors boot.c:boot_clock_ms() so sub-stage markers
+ * share the top-level [boot] <phase> Nms monotonic-ms basis. Timing only. */
 static int64_t svc_clock_ms(void)
 {
     struct timespec ts;
@@ -426,9 +425,8 @@ static void boot_register_core_liveness_and_reducer(
      * thread has fresh targets to try. */
     net_supervisor_register(svc->connman);
     chain_supervisor_register(svc->state);
-    /* Tip-stuck watchdog. Single-purpose: watches active_chain_height
-     * advance, emits a named stall event, and lets the operator-needed /
-     * condition loop handle recovery. */
+    /* Tip-stuck watchdog: watches active_chain_height advance, emits a
+     * named stall event, and lets the condition loop handle recovery. */
     chain_tip_watchdog_register(svc->state);
     /* Always-terminating remedy escalator (sticky-node #1): register AFTER the watchdog, BEFORE self_heal. */
     sticky_escalator_set_datadir(svc->datadir);
@@ -1233,6 +1231,9 @@ bool app_init_services(struct app_context *ctx,
     register_diagnostics_rpc_commands(svc->rpc_table);
     register_mesh_pairing_rpc_commands(svc->rpc_table, boot_node_db(svc));
     boot_zcode_dht_register_rpc(svc->rpc_table);
+    boot_mesh_status_register_rpc(svc->rpc_table, boot_node_db(svc),
+                                  boot_db_service(svc));
+    boot_mesh_pairing_register_rpc(svc->rpc_table);
     boot_zcode_async_proof_register_rpc(svc->rpc_table);
     /* File transfer service — SHA3-verified chunk serving */
     if (boot_profile_has_file_service(ctx)) {

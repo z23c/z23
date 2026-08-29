@@ -41,7 +41,19 @@ Steps 1–4 (frontier reader, Invariant B, Invariant A, restore tip-selection) a
 killing the two-name drift) is **landed**
 (`reducer_frontier_derive_coins_best` + `coins_kv_is_proven_authority`).
 
-5. **Re-point SHA3 / fast-sync serve readers to coins_kv** (parity-gated, utxos still present).
+5. **Re-point SHA3 / fast-sync serve readers to coins_kv** (IN PROGRESS;
+   parity-gated, `utxos` still present). The first authority primitive landed on
+   2026-08-29: an independent read-only connection pins one proven `coins_kv`
+   WAL generation, exposes its applied frontier and authority generation, and
+   strictly validates the canonical `(txid,vout)` traversal. A concurrent
+   writer fixture proves the scan cannot mix generations. Network chunk serving
+   now refuses a live `node.db` fallback after an immutable snapshot cache miss.
+   A sequential adapter now emits deterministic 500-entry wire chunks from that
+   reader while deriving the full-set SHA3 and each chunk hash; boundary tests
+   cover 499/500/501 rows and refuse oversize scripts without truncation.
+   Remaining: persist and publish the immutable chunk artifact from this adapter,
+   bind it to the exact `coins_applied_height - 1` active hash, and route receipt
+   through the verified staging installer before enabling publication.
 7. **Delete the dead heal ladder** (grep-proven zero callers): chain_restore_integrity,
    chain_restore rebuild ladder, stage_repair_reducer_frontier_{tipfin,refill,purge} +
    tear branch, reducer_frontier_reconcile_light, utxo_recovery_torn_anchor (M2),

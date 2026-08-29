@@ -24,6 +24,15 @@ struct rpc_table;
 struct main_state;
 struct json_value;
 
+/* diagnostics_machine_identity.c — one redacted, read-only projection of the
+ * running machine's build, transport, authenticated-DHT and platform facts
+ * (schema zcl.machine_mesh_identity.v1). Declared publicly so the mesh
+ * status responder (config/boot_mesh_status.c) can serve the exact capsule
+ * the operator sees locally; it creates no identity and grants no pairing or
+ * remote-control authority. */
+bool machine_identity_dump_state_json(struct json_value *out,
+                                      const char *key);
+
 /* Wire main_state for subsystems that look up chain state (block_index
  * dumps, lastboot, etc). Call once after main_state is initialized. */
 void diagnostics_controller_set_state(struct main_state *ms,

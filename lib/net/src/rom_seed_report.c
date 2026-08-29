@@ -71,9 +71,13 @@ bool rom_seed_build_offer(const struct rom_artifact *a,
 
 /* Parse the height out of a canonical bundle name
  * "consensus-state-bundle-<N>.sqlite" (matched on the bare basename, so the
- * "bundles/<name>" shape resolves the same). Returns 0 for the header seed, an
- * unknown kind, or any non-canonical name — the download-cosmetic default that
- * a legacy directory (no "height" field) also parses to. Pure, no I/O. */
+ * "bundles/<name>" shape resolves the same). Returns 0 for an unknown kind
+ * or any non-canonical name — the download-cosmetic default that a legacy
+ * directory (no "height" field) also parses to. Pure, no I/O.
+ *
+ * Header-chain seeds report their tip height from the artifact itself (see
+ * rom_seed_register), not from the filename, so a consumer can compare the
+ * advertised height against its own header frontier. */
 static int64_t rom_bundle_height_from_name(const char *filename)
 {
     if (!filename || !filename[0])
@@ -96,6 +100,17 @@ static int64_t rom_bundle_height_from_name(const char *filename)
         h = h * 10 + (d[i] - '0');
     }
     return h;
+}
+
+/* Height advertised for a directory entry: artifact-captured height wins,
+ * then the canonical bundle-name height, then 0 (legacy / unknown). */
+static int64_t rom_artifact_advertised_height(const struct rom_artifact *a)
+{
+    if (!a)
+        return 0;
+    if (a->height > 0)
+        return a->height;
+    return rom_bundle_height_from_name(a->filename);
 }
 
 size_t rom_seed_directory_json(char *buf, size_t max)
@@ -126,7 +141,7 @@ size_t rom_seed_directory_json(char *buf, size_t max)
                      digest_hex, whole_hex,
                      (unsigned long long)arts[i].size_bytes,
                      arts[i].chunk_size, arts[i].num_chunks,
-                     (long long)rom_bundle_height_from_name(arts[i].filename));
+                     (long long)rom_artifact_advertised_height(&arts[i]));
         if (w < 0 || (size_t)w >= max - off) {
             /* Overflow — close the array at what we have so the JSON stays
              * well-formed rather than truncating mid-object. */

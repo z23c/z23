@@ -4060,11 +4060,12 @@ int test_net(void)
         sync_manifest_free(&m);
     }
 
-    printf("parallel_sync: serve_chunk from file path... ");
+    printf("parallel_sync: serve_chunk refuses live database fallback... ");
     {
         struct utxo_chunk *c = zcl_calloc(1, sizeof(struct utxo_chunk), "test_chunk");
-        bool ok = fast_sync_serve_chunk(test_sync_dir, 0, c);
-        ok = ok && (c->num_entries == 100);
+        fast_sync_reset_snapshot_cache();
+        bool ok = !fast_sync_serve_chunk(test_sync_dir, 0, c);
+        ok = ok && (c->num_entries == 0);
 
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }

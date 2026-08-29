@@ -221,7 +221,7 @@ static bool push_pairing(struct json_value *out, bool identity_ready)
     json_push_kv_int(&pairing, "active", observed ? counts.active : -1);
     json_push_kv_int(&pairing, "expired", observed ? counts.expired : -1);
     json_push_kv_int(&pairing, "revoked", observed ? counts.revoked : -1);
-    json_push_kv_bool(&pairing, "remote_status_protocol_implemented", false);
+    json_push_kv_bool(&pairing, "remote_status_protocol_implemented", true);
     json_push_kv_bool(&pairing, "private_mesh_ready", false);
     json_push_kv(out, "pairing", &pairing);
     json_free(&pairing);
@@ -262,13 +262,12 @@ bool machine_identity_dump_state_json(struct json_value *out, const char *key)
         push_string_item(&blockers, "AUTHENTICATED_DHT_INACTIVE");
     if (!pairing_store_ready)
         push_string_item(&blockers, "PAIRING_STORE_UNAVAILABLE");
-    push_string_item(&blockers, "REMOTE_STATUS_PROTOCOL_UNAVAILABLE");
     json_push_kv(out, "blockers", &blockers);
     json_free(&blockers);
     json_push_kv_str(
         out, "next_action",
         identity_ready
-            ? "complete owner-confirmed pairing, then add the paired status request and receipt"
+            ? "complete owner-confirmed pairing, then request the paired machine's status with ops mesh status"
             : "enable v2 and authenticated DHT identity before pairing");
     return true;
 }

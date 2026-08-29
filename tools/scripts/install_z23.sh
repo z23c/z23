@@ -129,7 +129,13 @@ attest_valid_pin() {
     [ "$manifest" != "$rest" ] || return 1
     installer="${rest#*:}"
     case "$installer" in *:*) return 1 ;; esac
-    attest_is_sha256 "$manifest" && attest_is_sha256 "$installer"
+    # Both pins are exactly 64 lowercase hex chars. Checked inline rather than
+    # through a shared helper: this script is fetched and run standalone, so
+    # it cannot source tools/scripts/source_identity_lib.sh (zcl_is_sha256).
+    [ "${#manifest}" -eq 64 ] && [ "${#installer}" -eq 64 ] || return 1
+    case "$manifest" in *[!0-9a-f]*) return 1 ;; esac
+    case "$installer" in *[!0-9a-f]*) return 1 ;; esac
+    return 0
 }
 
 attest_claim_origin() {

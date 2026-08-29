@@ -46,6 +46,71 @@
  * could never arm. See rom_seed_exact_names in
  * rom_seed_classify.c. */
 
+/* ── Header-seed height reader ──────────────────────────────────────── */
+/* Read the tip height advertised by a block_index.bin flat file without a
+ * full scan. The format is owned by app/services/src/block_index_flat_*.c;
+ * this local parser only touches the count and the last row, so a 500 MB
+ * header seed costs two small reads, not a sequential pass. */
+static int64_t rom_seed_header_seed_height(const char *datadir,
+                                           const char *filename,
+                                           uint64_t size_bytes)
+{
+    static const uint8_t k_bii_magic[4] = { 'B', 'I', 'I', 'E' };
+    static const uint32_t k_zcli_magic = 0x5A434C49;
+    static const size_t k_bii_size = 48;
+    static const size_t k_row_size = 172;     /* packed struct block_index_flat */
+    static const size_t k_height_offset = 64; /* after hash + prev_hash */
+
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(&file, datadir, filename))
+        return 0;
+
+    uint8_t head[56];
+    int64_t r = platform_positioned_file_read(&file, head, sizeof(head), 0);
+    if (r < (int64_t)sizeof(head)) {
+        platform_positioned_file_close(&file);
+        return 0;
+    }
+
+    size_t payload_off = 0;
+    if (size_bytes >= k_bii_size && memcmp(head, k_bii_magic, 4) == 0)
+        payload_off = k_bii_size;
+
+    if (size_bytes < payload_off + 8 + k_row_size) {
+        platform_positioned_file_close(&file);
+        return 0;
+    }
+
+    uint32_t magic, count;
+    memcpy(&magic, head + payload_off, 4);
+    memcpy(&count, head + payload_off + 4, 4);
+    if (magic != k_zcli_magic || count == 0 || count > 10000000) {
+        platform_positioned_file_close(&file);
+        return 0;
+    }
+
+    uint64_t expected = payload_off + 8 + (uint64_t)count * k_row_size;
+    if (size_bytes < expected) {
+        platform_positioned_file_close(&file);
+        return 0;
+    }
+
+    uint64_t last_row_height_off = payload_off + 8 +
+                                   (uint64_t)(count - 1) * k_row_size +
+                                   k_height_offset;
+    uint8_t hbuf[4];
+    r = platform_positioned_file_read(&file, hbuf, sizeof(hbuf),
+                                      last_row_height_off);
+    platform_positioned_file_close(&file);
+    if (r < (int64_t)sizeof(hbuf))
+        return 0;
+
+    int32_t h;
+    memcpy(&h, hbuf, 4);
+    return h > 0 ? h : 0;
+}
+
 /* ── Registry ───────────────────────────────────────────────────────── */
 static struct rom_artifact g_artifacts[ROM_SEED_MAX_ARTIFACTS];
 static pthread_mutex_t g_reg_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -150,6 +215,8 @@ enum rom_register_result rom_seed_register(const char *datadir,
     art.size_bytes = size_bytes;
     art.chunk_size = ROM_SEED_CHUNK_SIZE;
     art.num_chunks = num_chunks;
+    if (kind == ROM_ARTIFACT_HEADER_SEED)
+        art.height = rom_seed_header_seed_height(datadir, filename, size_bytes);
 
     struct sha3_256_ctx whole_ctx;
     sha3_256_init(&whole_ctx);

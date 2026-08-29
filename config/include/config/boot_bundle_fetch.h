@@ -114,6 +114,9 @@ void boot_bundle_fetch_disarm_peer_seeds(void);
 /* How many peer-discovered seeds are currently armed. Introspection + tests. */
 size_t boot_bundle_fetch_armed_peer_seed_count(void);
 
+typedef bool (*bbf_directory_fetch_fn)(const char *peer_addr, uint16_t port,
+                                       char *buf, size_t cap);
+
 /* Gate: true iff the instant-on bundle fetch should run for `datadir` under
  * `ctx`. False when: datadir is empty; the caller opted out (-nofilesync via
  * ctx->no_file_sync, or ZCL_NO_BUNDLE_FETCH set in the environment); the
@@ -205,6 +208,9 @@ void boot_bundle_fetch_arm_peer_seed_for_test(const char *host, uint16_t port);
 bool boot_bundle_manifest_facts_ok_for_test(const struct rom_fetch_manifest *m);
 int  boot_bundle_quorum_pick_for_test(const int64_t *heights, const int *counts,
                                       const bool *has_explicit, size_t ncand);
+size_t boot_bundle_probe_directories_for_test(
+    const struct rom_fetch_peer *peers, size_t np, char *bodies,
+    size_t stride, bool *responded, bbf_directory_fetch_fn fetch);
 #endif
 
 #endif /* ZCL_CONFIG_BOOT_BUNDLE_FETCH_H */

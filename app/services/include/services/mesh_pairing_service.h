@@ -110,4 +110,12 @@ enum mesh_pairing_reason mesh_pairing_service_authorize_status(
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], int64_t now);
 
+/* Prove that an active local pairing, exact Noise peer, and current delegated
+ * identity converge on this node's active chain. This grants no operation;
+ * the caller must separately require one exact local capability. */
+enum mesh_pairing_reason mesh_pairing_service_authorize_delegation(
+    struct node_db *ndb, const char *pairing_id,
+    const struct vcs_zcode_dht_delegation *live_delegation,
+    const uint8_t session_noise_static[32], int64_t now);
+
 #endif /* ZCL_SERVICES_MESH_PAIRING_SERVICE_H */

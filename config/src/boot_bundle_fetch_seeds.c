@@ -102,6 +102,19 @@ static bool bbf_names_a_port(const char *host_port)
     return end && *end == '\0' && p >= 1 && p <= 65535;
 }
 
+/* True if `host` is already in the seed set under ANY port. An explicit
+ * `-fileservice=HOST:PORT` names the exact file-service address the operator
+ * wants; an auto-derived `-connect`/`-addnode` seed for the same host must not
+ * shadow it with a different (often wrong) port. */
+static bool bbf_host_already_seeded(const struct rom_fetch_peer *peers,
+                                    size_t np, const char *host)
+{
+    for (size_t i = 0; i < np; i++)
+        if (strcmp(peers[i].addr, host) == 0)
+            return true;
+    return false;
+}
+
 /* Derive a file-service seed from ONE `-connect=` value.
  *
  * `-connect` means the peer the operator named. This used to strip ANY port
@@ -124,25 +137,43 @@ static bool bbf_add_connect_seed(struct rom_fetch_peer *peers, size_t *np,
 {
     if (!host_port || !host_port[0])
         return false;
+
+    /* Extract the host once so we can check for an explicit -fileservice seed
+     * on the same host before adding an auto-derived port. */
+    char host[128];
+    snprintf(host, sizeof(host), "%s", host_port);
+    char *host_colon = strrchr(host, ':');
+    if (host_colon) {
+        char *end = NULL;
+        long p = strtol(host_colon + 1, &end, 10);
+        if (end && *end == '\0' && p >= 1 && p <= 65535)
+            *host_colon = '\0';
+    }
+    if (!host[0] || strlen(host) >= sizeof(peers[0].addr))
+        return false;
+
+    if (bbf_host_already_seeded(peers, *np, host)) {
+        LOG_INFO(BBFS_SUBSYS,
+                 "-connect/-addnode=%s skipped as file-service seed: host %s "
+                 "already named explicitly via -fileservice",
+                 host_port, host);
+        return false;
+    }
+
     if (!bbf_names_a_port(host_port)) {
         bbf_add_peer(peers, np, cap, host_port);
         return true;
     }
 
-    char host[128];
-    snprintf(host, sizeof(host), "%s", host_port);
-    char *colon = strrchr(host, ':');
-    if (!colon || !colon[1])
+    const char *port_colon = strrchr(host_port, ':');
+    if (!port_colon || !port_colon[1])
         return false;
     char *end = NULL;
-    long p = strtol(colon + 1, &end, 10);
+    long p = strtol(port_colon + 1, &end, 10);
     if (!end || *end != '\0' || p < 1 || p > 65535)
         return false;
 
     if (p == BBF_MAINNET_P2P_PORT) {
-        *colon = '\0';
-        if (!host[0])
-            return false;
         LOG_INFO(BBFS_SUBSYS,
                  "-connect=%s names the default mainnet P2P port — seeding "
                  "file-service at %s:%u (pass -fileservice=HOST[:PORT] to "
