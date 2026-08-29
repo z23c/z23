@@ -13,6 +13,7 @@
         <string>-operator-lane=canonical</string>
         <string>-listen</string>
         <string>-txindex</string>
+        @EXTRA_FLAGS@
     </array>
 
     <key>RunAtLoad</key>
