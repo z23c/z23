@@ -38,7 +38,15 @@ cd "$(dirname "$0")/../.." || { echo "FAIL: cannot reach repo root" >&2; exit 2;
 # sample application is package ten and rides the same row shape.
 REGISTRY_DEFS=(config/zcode_package_registry.def config/zcode_c23_commons_app.def)
 PROFILE="config/include/config/c23_commons_build_profile.h"
-CC_BIN="${CC:-gcc}"
+# Default to `cc`, NOT `gcc`. make's own built-in default for CC is `cc`, and
+# make does not export makefile-set variables, so this script receives CC only
+# when the environment already had it — which is to say, usually not. Falling
+# back to bare `gcc` therefore graded packages with a DIFFERENT compiler than
+# the one the project builds with. On a host where `cc` is gcc 14 and `gcc` is
+# still gcc 13, that reported every package unbuildable for want of C23 support
+# the real build has, and read as "this machine cannot build the project" when
+# the machine builds it fine.
+CC_BIN="${CC:-cc}"
 
 # The recipe's own compile contract, read from the header the worker reads, so
 # this gate cannot drift from the profile it claims to mirror. The trailing
