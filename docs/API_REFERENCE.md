@@ -819,7 +819,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops mesh identity` (aliases: `ops.machine.status`, `machine.status`) | ready | read / read / operator · fast/low | none | `zcl.machine_mesh_identity.v1` | `z23 ops mesh identity` | Report this machine's mesh identity readiness |
 | `ops mesh status` | ready | read / read / operator · foreground/low | **`pairing_id`** | `zcl.mesh_status_receipt_view.v1` | `z23 ops mesh status --pairing_id=<64hex>` | Request one paired machine's signed status receipt |
-| `ops mesh machines` | ready | read / read / operator · foreground/low | none | `zcl.mesh_machines.v1` | `z23 ops mesh machines` | List every paired machine with live reachability |
+| `ops mesh machines` | ready | read / read / operator · foreground/low | none | `zcl.mesh.machines.v1` | `z23 ops mesh machines` | List paired machines: durable verified evidence plus a live probe |
 | `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
 | `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
 

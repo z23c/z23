@@ -588,6 +588,30 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_status)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.machines", "ops.mesh", "",
+    "List paired machines: durable verified evidence plus a live probe",
+    "Every durable pairing record — active, expired, and revoked — rendered "
+    "from the observation store with redacted identity fingerprints, pairing "
+    "authority state, and the latest independently verified signed status "
+    "receipt, marked fresh, stale, or never-seen from the current time (a "
+    "stale receipt is evidence of the past, never current reachability). The "
+    "call also runs a bounded live refresh: up to 8 active records are "
+    "probed over the established Noise v2 status lane with a collective "
+    "12-second budget, each verified terminal receipt is persisted before "
+    "rendering, and each probed row additionally reports its live verdict "
+    "(online / refused:<status> / unreachable / timeout / unknown). Offline "
+    "machines stay listed; no dial is ever attempted. "
+    "total/returned/truncated make the bounds explicit.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machines,fleet,observations,online,offline,stale,reachability",
+    "zcl.command.empty_input.v1", "zcl.mesh.machines.v1", "", "",
+    "z23 ops mesh machines",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_machines)
 ZCL_COMMAND_BRANCH("ops.mesh.pair", "ops.mesh", "Pairing",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_READ(
@@ -671,28 +695,6 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_ops_mesh_pair_revoke)
-ZCL_COMMAND_READY_READ(
-    "ops.mesh.machines", "ops.mesh", "",
-    "List every paired machine with live reachability",
-    "Projects every durable pairing record — active, expired, and revoked — "
-    "and probes up to 8 active records over the existing Noise v2 status "
-    "lane with a collective 12-second budget. Each row carries the redacted "
-    "pairing view plus an honest reachability verdict: online (signed receipt "
-    "with a redacted status capsule summary), refused:<status> (the peer "
-    "answered with a named refusal), unreachable (no live v2 session or the "
-    "v2 transport is disabled), timeout (no receipt inside the budget), "
-    "unknown (the probe could not be honestly classified), expired, or "
-    "revoked. Offline machines stay in the list; no dial is ever attempted "
-    "and nothing is written.",
-    ZCL_COMMAND_RESULT_BUDGET,
-    "mesh,machines,fleet,reachability,status,pairing",
-    "zcl.command.empty_input.v1", "zcl.mesh_machines.v1",
-    "", "", "z23 ops mesh machines",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_machines)
 ZCL_COMMAND_READY_COMMAND(
     "ops.mesh.join", "ops.mesh", "",
     "Join a peer from a verified session invite",

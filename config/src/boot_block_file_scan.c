@@ -306,6 +306,21 @@ static bool scan_regular_nonempty(const char *path)
     platform_positioned_file_close(&file);
     return ok;
 }
+int scan_compute_contiguous_data_height(struct block_index *best_header,
+                                        size_t map_size)
+{
+    if (!best_header) return -1;
+    struct block_index *walk = best_header;
+    int guard = 0;
+    int limit = (int)map_size;
+    if (limit < 1) limit = 1;
+    while (walk && (walk->nStatus & BLOCK_HAVE_DATA) && guard++ < limit)
+        walk = walk->pprev;
+    if (walk && walk->pprev && (walk->pprev->nStatus & BLOCK_HAVE_DATA))
+        return walk->pprev->nHeight;
+    if (!walk) return 0; /* genesis has data and walk fell off the chain */
+    return -1;
+}
 /* Scan block files on disk, parse proper ZClassic headers (with
  * equihash solution), create block_index entries if missing, set
  * nTx, mark BLOCK_HAVE_DATA, and propagate nChainTx so

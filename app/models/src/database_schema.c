@@ -58,6 +58,19 @@ static const char *SCHEMA[] = {
     "CREATE INDEX IF NOT EXISTS idx_mesh_pairings_active"
     " ON mesh_pairings(revoked_at,expires_at)",
 
+    /* Latest exact signed status evidence. This rebuildable projection never
+     * grants pairing or capability authority; stale evidence remains stored
+     * so readers can distinguish it from a machine never observed. */
+    "CREATE TABLE IF NOT EXISTS mesh_machine_observations("
+    "pairing_id TEXT PRIMARY KEY REFERENCES mesh_pairings(pairing_id) "
+    "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
+    "receipt_wire BLOB NOT NULL CHECK(length(receipt_wire) BETWEEN 400 AND 4496),"
+    "receipt_root BLOB NOT NULL CHECK(length(receipt_root)=32),"
+    "status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 9),"
+    "observed_unix INTEGER NOT NULL CHECK(observed_unix>0),"
+    "expires_unix INTEGER NOT NULL CHECK(expires_unix>observed_unix),"
+    "received_unix INTEGER NOT NULL CHECK(received_unix>0))",
+
     /* Transaction index */
     "CREATE TABLE IF NOT EXISTS transactions ("
     "txid BLOB PRIMARY KEY,block_hash BLOB NOT NULL,"

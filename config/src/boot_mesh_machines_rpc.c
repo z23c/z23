@@ -1,24 +1,40 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Fleet view RPC adapter. Renders boot_mesh_machines_collect's
- * report as zcl.mesh_machines.v1: every durable pairing row exactly once,
- * an honest reachability verdict per row, and a redacted capsule summary
- * for ONLINE rows. Mirrors the boot_mesh_status_rpc.c precedent: the
- * adapter is a pure projection — every refusal the lane can produce is
- * already a per-row verdict, so the method itself only fails on bad input
- * or an out-of-memory report allocation. */
+ * purpose: Unified fleet view RPC adapter. One `mesh_machines` document
+ * (zcl.mesh.machines.v1) pairs, per pairing row:
+ *   - durable evidence: the latest VERIFIED signed receipt from the
+ *     schema-v77 observation store, with honest fresh/stale/never-seen
+ *     staleness derived from `now` (a stale receipt is evidence of the
+ *     past, never a claim of current reachability); and
+ *   - live verdict: this call's bounded probe fan-out, merged by
+ *     pairing_id, when the caller ran the refresh (the test hook passes a
+ *     NULL live report and renders the durable evidence alone).
+ * The refresh persists its verified terminal receipts through
+ * boot_mesh_status_persist_observation before the render reads the store,
+ * so the rendered evidence already reflects what this call proved.
+ * Fingerprints only — no raw public key crosses the surface. */
 
 #include "config/boot_mesh_machines.h"
 
+#include "config/runtime.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "models/mesh_machine_observation.h"
+#include "models/mesh_pairing.h"
+#include "platform/time_compat.h"
 #include "rpc/server.h"
-#include "util/clientversion.h"
 #include "util/log_macros.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const struct json_value *rpc_input(const struct json_value *params)
+{
+    const struct json_value *first =
+        params && json_size(params) ? json_at(params, 0) : NULL;
+    return first && first->type == JSON_OBJ ? first : NULL;
+}
 
 static void rpc_error(struct json_value *result, const char *code,
                       const char *message)
@@ -29,210 +45,208 @@ static void rpc_error(struct json_value *result, const char *code,
     json_push_kv_str(result, "message", message);
 }
 
-/* Redacted durable-record projection, same keys as `ops mesh pair list`
- * rows: fingerprints and local policy only, never raw public keys. */
-static void machine_record_json(struct json_value *value,
-                                const struct mesh_pairing_public_view *view)
+static const char *mesh_pairing_state(const struct db_mesh_pairing *pairing,
+                                      int64_t now)
 {
-    json_set_object(value);
-    json_push_kv_str(value, "pairing_id", view->pairing_id);
-    json_push_kv_str(value, "peer_master_fingerprint",
-                     view->peer_master_fingerprint);
-    json_push_kv_str(value, "peer_noise_fingerprint",
-                     view->peer_noise_fingerprint);
-    json_push_kv_int(value, "capability_mask", (int64_t)view->capability_mask);
-    json_push_kv_str(value, "capability", "status_read");
-    json_push_kv_int(value, "paired_at", view->paired_at);
-    json_push_kv_int(value, "expires_at", view->expires_at);
-    json_push_kv_int(value, "revoked_at", view->revoked_at);
-    json_push_kv_int(value, "revocation_generation",
-                     (int64_t)view->revocation_generation);
-    json_push_kv_str(value, "record_state", view->state);
+    if (pairing->revoked_at != 0)
+        return "revoked";
+    return now < pairing->expires_at ? "active" : "expired";
 }
 
-static void capsule_summary_str(struct json_value *out,
-                                const struct json_value *capsule,
-                                const char *section, const char *key)
+static const struct mesh_machine_row *live_row_for(
+    const struct mesh_machines_report *live, const char *pairing_id)
 {
-    const struct json_value *object = json_get(capsule, section);
-    const char *text =
-        object ? json_get_str(json_get(object, key)) : NULL;
-    if (text)
-        json_push_kv_str(out, key, text);
+    if (!live || !live->records_observed || !pairing_id)
+        return NULL;
+    for (size_t i = 0; i < live->row_count; i++) {
+        if (strcmp(live->rows[i].pairing_id, pairing_id) == 0)
+            return &live->rows[i];
+    }
+    return NULL;
 }
 
-/* Lift the small, flat summary out of a verified OK capsule. A capsule
- * that does not parse is a responder defect: the row keeps its verdict and
- * carries capsule_json_valid=false instead of a silent omission. */
-static void capsule_summary_json(struct json_value *value,
-                                 const uint8_t *capsule, size_t capsule_len)
+static void mesh_machine_json(struct json_value *array,
+                              const struct db_mesh_machine_view *view,
+                              int64_t now,
+                              const struct mesh_machines_report *live,
+                              bool *fresh_out)
 {
-    struct json_value parsed;
-    json_init(&parsed);
-    if (!json_read(&parsed, (const char *)capsule, capsule_len) ||
-        parsed.type != JSON_OBJ) {
-        json_free(&parsed);
-        json_push_kv_bool(value, "capsule_json_valid", false);
-        return;
-    }
-    struct json_value summary;
-    json_init(&summary);
-    json_set_object(&summary);
-
-    struct json_value platform;
-    json_init(&platform);
-    json_set_object(&platform);
-    capsule_summary_str(&platform, &parsed, "platform", "os");
-    capsule_summary_str(&platform, &parsed, "platform", "architecture");
-    capsule_summary_str(&platform, &parsed, "platform", "environment");
-    json_push_kv(&summary, "platform", &platform);
-    json_free(&platform);
-
-    struct json_value build;
-    json_init(&build);
-    json_set_object(&build);
-    const struct json_value *capsule_build = json_get(&parsed, "build");
-    const char *source_id =
-        capsule_build ? json_get_str(json_get(capsule_build, "source_id_sha256"))
-                      : NULL;
-    const char *commit =
-        capsule_build ? json_get_str(json_get(capsule_build, "commit")) : NULL;
-    if (source_id) {
-        json_push_kv_str(&build, "source_id_sha256", source_id);
-        json_push_kv_bool(&build, "same_source_as_this_node",
-                          strcmp(source_id, zcl_build_source_id_sha256()) == 0);
-    }
-    if (commit)
-        json_push_kv_str(&build, "commit", commit);
-    json_push_kv(&summary, "build", &build);
-    json_free(&build);
-
-    const struct json_value *confinement = json_get(&parsed, "confinement");
-    if (confinement && confinement->type == JSON_OBJ) {
-        struct json_value view;
-        json_init(&view);
-        json_set_object(&view);
-        const struct json_value *active = json_get(confinement, "active");
-        const struct json_value *seccomp =
-            json_get(confinement, "seccomp_supported");
-        if (active && active->type == JSON_BOOL)
-            json_push_kv_bool(&view, "active", json_get_bool(active));
-        if (seccomp && seccomp->type == JSON_BOOL)
-            json_push_kv_bool(&view, "seccomp_supported",
-                              json_get_bool(seccomp));
-        json_push_kv(&summary, "confinement", &view);
-        json_free(&view);
-    }
-    const struct json_value *hotswap = json_get(&parsed, "hotswap");
-    if (hotswap && hotswap->type == JSON_OBJ) {
-        struct json_value view;
-        json_init(&view);
-        json_set_object(&view);
-        const struct json_value *available =
-            json_get(hotswap, "native_activation_available");
-        const char *status = json_get_str(json_get(hotswap, "status"));
-        if (available && available->type == JSON_BOOL)
-            json_push_kv_bool(&view, "native_activation_available",
-                              json_get_bool(available));
-        if (status)
-            json_push_kv_str(&view, "status", status);
-        json_push_kv(&summary, "hotswap", &view);
-        json_free(&view);
-    }
-
-    json_push_kv(value, "capsule_summary", &summary);
-    json_free(&summary);
-    json_free(&parsed);
-}
-
-static void machine_row_json(struct json_value *value,
-                             const struct mesh_machines_report *report,
-                             const struct mesh_machine_row *row)
-{
-    machine_record_json(value, &row->view);
-    char reachability[MESH_MACHINE_DETAIL_LEN + 16];
-    if (row->state == MESH_MACHINE_REFUSED) {
-        snprintf(reachability, sizeof(reachability), "refused:%s",
-                 row->detail);
-        json_push_kv_str(value, "reachability", reachability);
-        json_push_kv_str(value, "refusal_status", row->detail);
-    } else {
-        json_push_kv_str(value, "reachability",
-                         mesh_machine_state_string(row->state));
-        if (row->detail[0])
-            json_push_kv_str(value, "detail", row->detail);
-    }
-    if (row->state != MESH_MACHINE_ONLINE)
-        return;
+    struct json_value item;
+    json_init(&item);
+    json_set_object(&item);
+    const char *pairing_state = mesh_pairing_state(&view->pairing, now);
+    bool fresh = view->has_observation &&
+                 strcmp(pairing_state, "active") == 0 &&
+                 now < view->observation.expires_unix;
     char hex[65];
-    json_push_kv_int(value, "observed_unix", (int64_t)row->observed_unix);
-    zcl_hex_encode(row->responder_noise_fingerprint, 32, hex);
-    json_push_kv_str(value, "responder_noise_fingerprint_sha3", hex);
-    if (row->capsule_slot >= 0 &&
-        (size_t)row->capsule_slot < report->capsule_count) {
-        capsule_summary_json(value, report->capsules[row->capsule_slot],
-                             report->capsule_lens[row->capsule_slot]);
+    json_push_kv_str(&item, "pairing_id", view->pairing.pairing_id);
+    json_push_kv_str(&item, "pairing_state", pairing_state);
+    boot_mesh_status_key_fingerprint("zcl.mesh.master.fingerprint.v1",
+                                     view->pairing.peer_master_pubkey, hex);
+    json_push_kv_str(&item, "peer_master_fingerprint", hex);
+    boot_mesh_status_key_fingerprint("zcl.mesh.noise.fingerprint.v1",
+                                     view->pairing.peer_noise_pubkey, hex);
+    json_push_kv_str(&item, "peer_noise_fingerprint", hex);
+    json_push_kv_str(&item, "observation_state",
+                     !view->has_observation ? "unknown"
+                                            : fresh ? "fresh" : "stale");
+    if (view->has_observation) {
+        json_push_kv_str(
+            &item, "receipt_status",
+            mesh_status_receipt_status_string(view->observation.status));
+        json_push_kv_int(&item, "observed_unix",
+                         view->observation.observed_unix);
+        json_push_kv_int(&item, "expires_unix",
+                         view->observation.expires_unix);
+        json_push_kv_int(&item, "received_unix",
+                         view->observation.received_unix);
+        zcl_hex_encode(view->observation.receipt_root, 32, hex);
+        json_push_kv_str(&item, "receipt_root", hex);
     }
+    /* Live verdict from this call's probe, when one ran. Distinct from the
+     * durable evidence above: a live timeout does not erase a fresh stored
+     * receipt, and a stored fresh receipt never claims current online. */
+    const struct mesh_machine_row *live_row =
+        live_row_for(live, view->pairing.pairing_id);
+    if (live_row && live_row->probed) {
+        if (live_row->state == MESH_MACHINE_REFUSED) {
+            char reachability[MESH_MACHINE_DETAIL_LEN + 16];
+            snprintf(reachability, sizeof(reachability), "refused:%s",
+                     live_row->detail);
+            json_push_kv_str(&item, "live_reachability", reachability);
+            json_push_kv_str(&item, "live_refusal_status", live_row->detail);
+        } else {
+            json_push_kv_str(&item, "live_reachability",
+                             mesh_machine_state_string(live_row->state));
+            if (live_row->detail[0])
+                json_push_kv_str(&item, "live_detail", live_row->detail);
+        }
+        if (live_row->state == MESH_MACHINE_ONLINE) {
+            json_push_kv_int(&item, "live_observed_unix",
+                             (int64_t)live_row->observed_unix);
+            zcl_hex_encode(live_row->responder_noise_fingerprint, 32, hex);
+            json_push_kv_str(&item,
+                             "live_responder_noise_fingerprint_sha3", hex);
+        }
+    }
+    (void)json_push_back(array, &item);
+    json_free(&item);
+    *fresh_out = fresh;
+}
+
+void boot_mesh_machines_render(struct node_db *ndb, int64_t now,
+                               const struct mesh_machines_report *live,
+                               struct json_value *result)
+{
+    size_t capacity = MESH_MACHINES_VIEW_MAX;
+    struct db_mesh_machine_view *views = zcl_calloc(
+        capacity, sizeof(*views), "mesh_machines.views");
+    if (!views || !ndb || now <= 0) {
+        free(views);
+        rpc_error(result, "OBSERVATION_UNAVAILABLE",
+                  "the durable machine projection is unavailable");
+        return;
+    }
+    struct db_mesh_pairing_counts pairing_counts;
+    int count = db_mesh_machine_observation_list(ndb, views, capacity, now);
+    if (count < 0 ||
+        !db_mesh_pairing_count_states(ndb, now, &pairing_counts)) {
+        free(views);
+        rpc_error(result, "OBSERVATION_UNAVAILABLE",
+                  "the durable pairing count is unavailable");
+        return;
+    }
+    size_t shown = (size_t)count;
+    bool truncated = pairing_counts.total > (int64_t)shown ||
+                     (live && live->truncated);
+    struct json_value machines;
+    json_init(&machines);
+    json_set_array(&machines);
+    int64_t fresh = 0, stale = 0, unknown = 0;
+    for (size_t i = 0; i < shown; i++) {
+        bool is_fresh = false;
+        mesh_machine_json(&machines, &views[i], now, live, &is_fresh);
+        if (!views[i].has_observation)
+            unknown++;
+        else if (is_fresh)
+            fresh++;
+        else
+            stale++;
+    }
+    free(views);
+    json_set_object(result);
+    json_push_kv_bool(result, "ok", true);
+    json_push_kv_str(result, "schema", "zcl.mesh.machines.v1");
+    json_push_kv_int(result, "observed_at", now);
+    json_push_kv_int(result, "total", pairing_counts.total);
+    json_push_kv_int(result, "active", pairing_counts.active);
+    json_push_kv_int(result, "returned", (int64_t)shown);
+    json_push_kv_int(result, "returned_fresh", fresh);
+    json_push_kv_int(result, "returned_stale", stale);
+    json_push_kv_int(result, "returned_unknown", unknown);
+    json_push_kv_bool(result, "truncated", truncated);
+    if (live) {
+        /* The live fan-out rollup; the pairing list itself was unreadable
+         * iff records_observed is false, and the blocker says why. */
+        json_push_kv_bool(result, "live_records_observed",
+                          live->records_observed);
+        if (!live->records_observed)
+            json_push_kv_str(result, "live_blocker", live->blocker);
+        int64_t probed = 0;
+        for (size_t i = 0; i < live->row_count; i++)
+            if (live->rows[i].probed)
+                probed++;
+        json_push_kv_int(result, "live_probed", probed);
+        json_push_kv_int(result, "live_online", live->counts.online);
+        json_push_kv_int(result, "live_refused", live->counts.refused);
+        json_push_kv_int(result, "live_unreachable", live->counts.unreachable);
+        json_push_kv_int(result, "live_timeout", live->counts.timeout);
+        json_push_kv_int(result, "live_unknown",
+                         live->counts.total - live->counts.online -
+                             live->counts.refused - live->counts.unreachable -
+                             live->counts.timeout - live->counts.expired -
+                             live->counts.revoked);
+    }
+    json_push_kv(result, "machines", &machines);
+    json_free(&machines);
 }
 
 static bool rpc_mesh_machines(const struct json_value *params, bool help,
                               struct json_value *result)
 {
-    (void)params;
     if (help) {
         json_set_str(result,
-                     "mesh_machines — every durable pairing with live "
-                     "reachability (online/refused:<status>/unreachable/"
-                     "timeout/unknown/expired/revoked); probes up to 8 "
+                     "mesh_machines — every durable pairing with verified "
+                     "evidence (fresh/stale/never-seen) plus this call's "
+                     "bounded live probe verdict per row; probes up to 8 "
                      "actives with a collective 12 s budget; never dials");
         return true;
     }
-    struct mesh_machines_report *report =
-        zcl_malloc(sizeof(*report), "mesh_machines_report");
-    if (!report) {
+    if (rpc_input(params)) {
+        rpc_error(result, "INVALID_ARGUMENT",
+                  "mesh_machines accepts no input");
+        return true;
+    }
+    struct node_db *ndb = app_runtime_node_db();
+    if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
+        LOG_ERROR("net.mesh_machines", "mesh_machines: node_db unavailable");
+        rpc_error(result, "OBSERVATION_UNAVAILABLE",
+                  "the durable machine projection is unavailable");
+        return true;
+    }
+    struct mesh_machines_report *live =
+        zcl_malloc(sizeof(*live), "mesh_machines.live");
+    if (!live) {
         rpc_error(result, "UNAVAILABLE",
                   "could not allocate the fleet report");
         return true;
     }
-    if (!boot_mesh_machines_collect(report)) {
-        free(report);
-        rpc_error(result, "UNAVAILABLE", "fleet collection failed");
-        return true;
-    }
-    json_set_object(result);
-    json_push_kv_bool(result, "ok", true);
-    json_push_kv_str(result, "schema", "zcl.mesh_machines.v1");
-    json_push_kv_int(result, "generated_unix", report->generated_unix);
-    json_push_kv_bool(result, "pairing_records_observed",
-                      report->records_observed);
-    if (!report->records_observed)
-        json_push_kv_str(result, "blocker", report->blocker);
-    json_push_kv_bool(result, "truncated", report->truncated);
-    struct json_value counts;
-    json_init(&counts);
-    json_set_object(&counts);
-    json_push_kv_int(&counts, "total", report->counts.total);
-    json_push_kv_int(&counts, "online", report->counts.online);
-    json_push_kv_int(&counts, "refused", report->counts.refused);
-    json_push_kv_int(&counts, "unreachable", report->counts.unreachable);
-    json_push_kv_int(&counts, "timeout", report->counts.timeout);
-    json_push_kv_int(&counts, "expired", report->counts.expired);
-    json_push_kv_int(&counts, "revoked", report->counts.revoked);
-    json_push_kv(result, "counts", &counts);
-    json_free(&counts);
-    struct json_value machines;
-    json_init(&machines);
-    json_set_array(&machines);
-    for (size_t i = 0; i < report->row_count; i++) {
-        struct json_value row;
-        json_init(&row);
-        machine_row_json(&row, report, &report->rows[i]);
-        json_push_back(&machines, &row);
-        json_free(&row);
-    }
-    json_push_kv(result, "machines", &machines);
-    json_free(&machines);
-    free(report);
+    /* Refresh first: probes run, verified receipts persist, THEN the render
+     * reads the store so the document already carries this call's proofs. */
+    (void)boot_mesh_machines_refresh(ndb, live);
+    boot_mesh_machines_render(ndb, (int64_t)platform_time_wall_time_t(),
+                              live, result);
+    free(live);
     return true;
 }
 

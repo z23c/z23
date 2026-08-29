@@ -169,6 +169,12 @@ void *backfill_addresses_thread(void *arg);
 int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
                                 const struct chain_params *params);
 
+/* Highest height h with an unbroken genesis-to-h BLOCK_HAVE_DATA chain,
+ * walking down from best_header. Returns -1 when no body coverage exists.
+ * Used to detect lower-span body gaps hidden by a high max-HAVE_DATA height. */
+int scan_compute_contiguous_data_height(struct block_index *best_header,
+                                        size_t map_size);
+
 /* Propagate nChainTx and nChainWork for all blocks in the index.
  * Call after scan_block_files_mark_data or any operation that sets
  * BLOCK_HAVE_DATA. Returns count of blocks updated. */

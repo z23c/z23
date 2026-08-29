@@ -110,3 +110,45 @@ Subsequent fixes:
 - `9eb439fe4` — support `ZCL_SERVICE_ENV_VARS` in the LaunchAgent; required for `ZCL_DEPLOY_ALLOW_CANONICAL=1` so a fetched snapshot can install into the canonical datadir.
 - `2348ed9eb` — add `ZCL_SERVICE_ADDNODE_PEERS` for multiple snapshot-seed peers and keep `tools/dev/grok_report.c` out of the node binary. The proposed lag-condition suppression was not retained because it coupled condition evaluation to controller-owned filesystem discovery without acceptance evidence.
 - *(this slice)* — protect `-addnode` peers from being torn down mid-handshake by `peer_floor_violated`, so operator-configured snapshot seeds have time to complete their handshake.
+
+## 2026-08-29 — body-fetch stall and macOS legacy-datadir fix
+
+After the addnode-protection fix, the node handshaked ZCL23 peers and headers
+climbed quickly (`header_admit` cursor ~638k within minutes, network tip
+~3,232,890). The bottleneck moved to body fetch:
+
+- `body_fetch` cursor stalled around **h=14,309** while `validate_headers`
+  advanced to ~650k.
+- `body_coverage` showed a single held range `0..14309` and a huge hole
+  `14310..226732`.
+- `body_fetch` idle reason was `body.missing`; the P2P download queue was
+  requesting bodies but only advancing ~5 blocks/sec.
+
+Root cause on this Mac: ZclWallet (`zclassicd`) keeps its block files in
+`~/Library/Application Support/Zclassic/blocks`, but the z23 auto-import path
+only looked at `~/.zclassic/blocks`. With no local legacy block files, the
+node was trying to pull ~3.1M bodies over a small P2P set.
+
+Fix: make `boot_legacy_default_blocks_dir()` platform-aware, checking (in
+order) `%APPDATA%\Zclassic\blocks`, `~/Library/Application Support/Zclassic/blocks`,
+and `~/.zclassic/blocks`. `config/src/boot.c` now uses the first existing
+candidate for both the initial `--importblockindex` copy pass and the
+warm-boot link pass. This is a read-only hardlink/copy; it does not touch the
+legacy node's LevelDB or wallet.
+
+Verification plan:
+
+1. Build the patched binary (`make -j"$(getconf _NPROCESSORS_ONLN)" z23`).
+2. `make lint-fast` and focused boot-legacy tests must pass.
+3. Restart the durable LaunchAgent; boot log should report linked block files
+   from `~/Library/Application Support/Zclassic/blocks`.
+4. `z23 dumpstate body_coverage` should show the held ranges expanding past
+   the old 14k frontier, and `reducer_drive` should advance faster than the
+   P2P-only ~5 bps.
+
+Port conflict note: ZclWallet already binds mainnet P2P port 8033 on this
+host, so z23's `-listen` bind fails. For now outbound P2P works and the
+legacy block-file link gives the fast path. To let this z23 node accept
+inbound connections, ZclWallet must be moved to a non-default port (e.g.
+8034) or stopped; that is an operator-host configuration choice, not a code
+change.

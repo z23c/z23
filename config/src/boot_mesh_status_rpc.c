@@ -4,16 +4,22 @@
  * bounded pending request and returns its request id; poll reports the
  * honest state machine and, once terminal, the verified receipt view. */
 
+#include "config/boot_mesh_machines.h"
 #include "config/boot_mesh_status.h"
 
 #include "base/hex.h"
-#include "crypto/sha3.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "net/v2_identity.h"
+#include "platform/time_compat.h"
 #include "rpc/server.h"
 #include "session/mesh_status_proto.h"
+#include "util/log_macros.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+static struct node_db *g_mesh_status_ndb;
 
 static const struct json_value *rpc_input(const struct json_value *params)
 {
@@ -118,19 +124,8 @@ static bool rpc_mesh_status_request(const struct json_value *params, bool help,
 /* Terminal receipt view: status token, responder identity fingerprints,
  * times, and the decoded capsule JSON. The receipt reached this point only
  * after signature, request-binding, session-binding, and responder-identity
- * verification. */
-static void receipt_fingerprint(const char *domain, const uint8_t key[32],
-                                char out[65])
-{
-    struct sha3_256_ctx hash;
-    uint8_t digest[32];
-    sha3_256_init(&hash);
-    sha3_256_write(&hash, (const uint8_t *)domain, strlen(domain));
-    sha3_256_write(&hash, key, 32);
-    sha3_256_finalize(&hash, digest);
-    zcl_hex_encode(digest, sizeof(digest), out);
-}
-
+ * verification. Fingerprints come from the lane's one shared implementation
+ * so they match the fleet view exactly. */
 static void receipt_view_json(struct json_value *result,
                               const struct mesh_status_receipt_v1 *receipt)
 {
@@ -146,11 +141,11 @@ static void receipt_view_json(struct json_value *result,
     json_push_kv_str(result, "request_id", hex);
     zcl_hex_encode(receipt->pairing_id, 32, hex);
     json_push_kv_str(result, "pairing_id", hex);
-    receipt_fingerprint("zcl.mesh.master.fingerprint.v1",
-                        receipt->responder_master_pubkey, hex);
+    boot_mesh_status_key_fingerprint("zcl.mesh.master.fingerprint.v1",
+                                     receipt->responder_master_pubkey, hex);
     json_push_kv_str(result, "responder_master_fingerprint", hex);
-    receipt_fingerprint("zcl.mesh.online.fingerprint.v1",
-                        receipt->responder_online_pubkey, hex);
+    boot_mesh_status_key_fingerprint("zcl.mesh.online.fingerprint.v1",
+                                     receipt->responder_online_pubkey, hex);
     json_push_kv_str(result, "responder_online_fingerprint", hex);
     uint8_t fingerprint[32];
     if (v2_identity_public_fingerprint(receipt->responder_noise_static,
@@ -188,6 +183,15 @@ void boot_mesh_status_receipt_test_render(
 {
     receipt_view_json(result, receipt);
 }
+
+/* The fleet render moved to boot_mesh_machines_rpc.c with the unified
+ * surface; this hook forwards with no live-probe sidecar, so tests observe
+ * exactly the durable-evidence document. */
+void boot_mesh_status_machines_test_render(
+    struct node_db *ndb, int64_t now, struct json_value *result)
+{
+    boot_mesh_machines_render(ndb, now, NULL, result);
+}
 #endif
 
 static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
@@ -223,6 +227,12 @@ static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
         return true;
     case MESH_STATUS_POLL_OK:
     case MESH_STATUS_POLL_REFUSED:
+        if (!boot_mesh_status_persist_observation(g_mesh_status_ndb,
+                                                  &receipt)) {
+            rpc_error(result, "OBSERVATION_PERSIST_FAILED",
+                      "the verified receipt could not be stored durably");
+            return true;
+        }
         receipt_view_json(result, &receipt);
         return true;
     }
@@ -230,8 +240,14 @@ static bool rpc_mesh_status_poll(const struct json_value *params, bool help,
     return true;
 }
 
-void boot_mesh_status_register_rpc(struct rpc_table *table)
+void boot_mesh_status_register_rpc(struct rpc_table *table,
+                                   struct node_db *ndb)
 {
+    if (!table || !ndb) {
+        LOG_ERROR("net.mesh_status", "RPC registration requires node_db");
+        return;
+    }
+    g_mesh_status_ndb = ndb;
     const struct rpc_command commands[] = {
         {"mesh", "mesh_status_request", rpc_mesh_status_request, true},
         {"mesh", "mesh_status_poll", rpc_mesh_status_poll, true},

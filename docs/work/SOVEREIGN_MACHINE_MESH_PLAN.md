@@ -90,7 +90,7 @@ bundles never ride inside control messages.
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Implemented: `ops mesh machines` projects every durable pairing — active, expired, and revoked — with an honest live reachability verdict (online with a redacted capsule summary / refused:<status> / unreachable / timeout / unknown / expired / revoked) from signed-receipt probes over the status lane; requester acceptance pins the responder's unique active delegated online signing key, and fixed replay/cadence bounds protect both ends; bounded at 8 probed machines and a collective 12-second budget, never dials, offline machines stay listed | Durable exact receipt evidence and independent-host receipts |
+| Fleet view | Implemented: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget) whose verified receipts persist through the same handoff as `ops mesh status`; rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, and fixed replay/cadence bounds protect both ends; never dials, offline machines stay listed | Automatic bounded refresh scheduling and independent-host receipts |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
 | Private file transfer | Not implemented | Recipient-encrypted private object store, authenticated transfer, resume, quotas, atomic destination commit |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
@@ -352,11 +352,12 @@ The phases below are delivered in this dependency order:
    exists without claiming a remote protocol;
 2. completed: pairing list/revoke is owner-visible locally without creating a
    way to bypass the authenticated-session acceptance service;
-3. define and fuzz the bounded status request/response wire, transcript binding,
-   nonce, expiry, and signed receipt;
-4. connect the wire only after Noise plus active ZID authentication and prove
-   revocation races fail closed;
-5. project responses into `ops mesh machines` with honest offline/unknown state;
+3. completed: define and fuzz the bounded status request/response wire,
+   transcript binding, nonce, expiry, and signed receipt;
+4. completed: connect the wire only after Noise plus active ZID authentication
+   and prove revocation races fail closed;
+5. completed: project responses into `ops mesh machines` with honest fresh,
+   stale, and unknown state;
 6. add the encrypted private-object envelope and resumable transfer before any
    remote execution surface;
 7. bind existing immutable build/test actions to paired capabilities;
@@ -607,7 +608,15 @@ peers, never production wallet state.
   fingerprint decode, distinct reason→code mapping); `mesh`,
   `command_registry`, `native_api_contract`, and `rpc` groups all passed
   with zero skips, and `make lint-fast` and `make lint` both passed.
-
+- 2026-08-29: queue item 5 added schema-v77 latest-observation storage and
+  `ops mesh machines`. Terminal status polling persists the exact verified
+  signed receipt wire and root only after delegated identity and current Noise
+  session acceptance. The local read performs no dial, exposes fingerprints
+  rather than raw public keys, and distinguishes fresh, stale, and never-seen
+  evidence. Older or same-time equivocal receipts cannot replace the durable
+  row; exact replay is idempotent. Fixture acceptance proves restart retention,
+  stale/unknown separation, redaction, migration idempotence, and strict MinGW
+  C23 syntax. Automatic refresh and independent-host evidence remain open.
 - 2026-08-29: queue item 5 landed the fleet view. `ops mesh machines` (RPC
   method `mesh_machines`) projects every durable pairing record — active,
   expired, and revoked — exactly once, and probes up to
@@ -639,6 +648,30 @@ peers, never production wallet state.
   string in tools/dev/grok-unit.sh, operator paths in
   docs/experiments/2026-08-28-mac-agentic-baseline.md). What remains before
   the product claim: independent-host receipts.
+- 2026-08-29: merge reconciliation unified the two `ops mesh machines`
+  implementations into one surface. Upstream's schema-v77 observation store
+  and its read/render path are authoritative for durable evidence
+  (fresh/stale/never-seen, fingerprints only); the live-probe fan-out became
+  the bounded refresh that populates that store. Persistence moved into the
+  status lane as `boot_mesh_status_persist_observation`
+  (config/src/boot_mesh_status.c), called by both the single-machine poll
+  RPC and the fleet refresh, so both writers share one handoff and one
+  truth. The unified document keeps every upstream field and adds the live
+  rollup (`live_probed`/`live_online`/… plus per-row `live_reachability`)
+  only when a probe ran; the test hook renders the durable document alone.
+  The row no longer embeds a capsule summary — `ops mesh status` already
+  renders the full verified capsule for one machine, so the fleet row
+  carries identity fingerprints and verdicts only. Duplicates removed: the
+  second command-catalog leaf, the second native handler and declaration,
+  and the upstream render/method copy in boot_mesh_status_rpc.c. The
+  `mesh_pairing` group gained the agreement pin: one verified receipt feeds
+  the live row, the store, and the rendered document, and all three agree
+  on pairing identity and responder Noise fingerprint. Gates: `make z23`
+  passed; t-fast ONLY=mesh 7/7, ONLY=command_registry 2/2,
+  ONLY=native_api_contract 1/1, ONLY=rpc 9/9 groups with zero skips; the
+  impact-rule check, `make lint-fast`, and full `make lint` (163 gates) all
+  passed. What remains before the product claim: automatic bounded refresh
+  scheduling and independent-host receipts.
 
 ## Completion rule
 

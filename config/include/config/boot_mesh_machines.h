@@ -1,28 +1,39 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Fleet view — project every durable pairing with live reachability.
+ * purpose: Fleet view — one surface pairing durable verified evidence with a
+ * bounded live probe.
  *
- * `ops mesh machines` answers "what machines are paired with this node, and
- * what is each one doing right now" without dropping a single record: every
- * durable pairing row (active, expired, revoked) appears exactly once, and
- * each active record is probed over the existing mesh status lane
- * (boot_mesh_status.h) with a bounded collective budget. No dial is ever
- * attempted; a peer without a live established v2 session is UNREACHABLE,
- * not reconnected. Nothing is written — the command is a pure read.
+ * `ops mesh machines` answers "what machines are paired with this node, what
+ * did each last prove, and what is each doing right now". Two evidence
+ * classes, kept distinct in every row:
  *
- * Reachability is derived, never stored: there is no persistent
- * reachability history to drift from reality. The state enum below is the
- * complete honest vocabulary; `mesh_machine_derive_state` is the single
- * pure function that maps (record state, begin verdict, poll outcome,
- * receipt status) to one of them, so the wire group test drives the exact
+ *   - Durable: the pairing record plus the latest VERIFIED signed status
+ *     receipt persisted in the schema-v77 observation store
+ *     (models/mesh_machine_observation.h). Fresh/stale/never-seen is derived
+ *     from `now`; a stale receipt is evidence of the past, never a claim of
+ *     current reachability. Older or equivocal receipts cannot replace a
+ *     row; an exact replay is idempotent.
+ *   - Live: a bounded probe fan-out over the existing mesh status lane
+ *     (boot_mesh_status.h) — up to MESH_MACHINES_FLEET_MAX actives, one
+ *     collective budget of MESH_MACHINES_COLLECT_BUDGET_MS, run inside the
+ *     RPC worker thread. Terminal receipts enter the observation store
+ *     through boot_mesh_status_persist_observation, the same handoff the
+ *     single-machine `ops mesh status` poll uses, so the refresh IS the
+ *     store's writer; there is no parallel verdict-only truth.
+ *
+ * No dial is ever attempted; a peer without a live established v2 session is
+ * UNREACHABLE, not reconnected. Offline machines stay listed. Public keys
+ * never leave the surface — fingerprints only. The pure mapping from
+ * (record state, begin verdict, poll outcome, receipt status) to a verdict
+ * is mesh_machine_derive_state, so the wire group test drives the exact
  * production mapping without sockets.
  *
- * Bounded everywhere: at most MESH_MACHINES_FLEET_MAX actives are probed
- * (further actives report UNKNOWN with detail "fleet_cap_not_probed" and
- * raise `truncated`), the collective wait never exceeds
- * MESH_MACHINES_COLLECT_BUDGET_MS inside the RPC worker, and the status
- * lane's own 30 s request lifetime bounds each individual probe. The RPC
- * watchdog extends only this method's deadline (RPC_MESH_COLLECT_TIMEOUT_MS)
- * so the collective wait is never killed mid-reply. */
+ * Bounds: at most MESH_MACHINES_FLEET_MAX actives are probed (further
+ * actives report UNKNOWN "fleet_cap_not_probed" and raise `truncated`), and
+ * MESH_MACHINES_FLEET_MAX <= MESH_STATUS_PENDING_MAX is pinned at compile
+ * time so a fleet burst can never self-congest the pending table. The
+ * rendered row list is bounded at MESH_MACHINES_VIEW_MAX. The RPC watchdog
+ * extends only this method's deadline (RPC_MESH_COLLECT_TIMEOUT_MS) so the
+ * collective wait is never killed mid-reply. */
 
 #ifndef ZCL_CONFIG_BOOT_MESH_MACHINES_H
 #define ZCL_CONFIG_BOOT_MESH_MACHINES_H
@@ -34,6 +45,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct json_value;
+struct node_db;
 struct rpc_table;
 
 /* Probe fan-out cap and the collective wait budget. 8 machines at 50 ms
@@ -43,6 +56,9 @@ struct rpc_table;
 #define MESH_MACHINES_FLEET_MAX 8u
 #define MESH_MACHINES_COLLECT_BUDGET_MS 12000
 #define MESH_MACHINES_COLLECT_POLL_MS 50
+
+/* Rendered row cap for the durable projection. */
+#define MESH_MACHINES_VIEW_MAX 16u
 
 #define MESH_MACHINE_DETAIL_LEN 96
 #define MESH_MACHINE_BLOCKER_LEN 192
@@ -71,28 +87,26 @@ struct mesh_machines_counts {
      * honest verdict, not a verdict. */
 };
 
+/* One live-probe sidecar row: the verdict from THIS call's probe, matched
+ * to the durable row by pairing_id. Identity fields beyond the id are set
+ * only for ONLINE rows. */
 struct mesh_machine_row {
-    struct mesh_pairing_public_view view; /* redacted durable record */
+    char pairing_id[MESH_PAIRING_ID_HEX + 1];
+    bool probed; /* a probe was attempted this call (false for cap overflow) */
     enum mesh_machine_state state;
     char detail[MESH_MACHINE_DETAIL_LEN]; /* "" or the named cause */
-    int capsule_slot; /* ONLINE only: index into the report's capsules, -1 else */
-    uint64_t observed_unix;               /* ONLINE only */
+    uint64_t observed_unix;                  /* ONLINE only */
     uint8_t responder_noise_fingerprint[32]; /* ONLINE only (zeroed on error) */
 };
 
 struct mesh_machines_report {
     bool records_observed; /* false: pairing store unreadable — honest empty */
     char blocker[MESH_MACHINE_BLOCKER_LEN]; /* set iff !records_observed */
-    bool truncated;        /* list cap or probe cap left rows out/unprobed */
+    bool truncated;        /* more actives exist than the probe cap allows */
     int64_t generated_unix;
     struct mesh_machines_counts counts;
     size_t row_count;
     struct mesh_machine_row rows[MESH_PAIRING_LIST_MAX];
-    /* Capsule bytes are large (up to 4 KiB each), so only the probed rows
-     * can carry one, and only ONLINE rows do. */
-    size_t capsule_count;
-    size_t capsule_lens[MESH_MACHINES_FLEET_MAX];
-    uint8_t capsules[MESH_MACHINES_FLEET_MAX][MESH_STATUS_CAPSULE_MAX];
 };
 
 /* Pure state derivation: the single mapping from observations to verdicts.
@@ -120,15 +134,34 @@ size_t mesh_machines_plan_probes(const char *const *record_states,
 void mesh_machines_tally(const struct mesh_machine_row *rows, size_t count,
                          struct mesh_machines_counts *out);
 
-/* Live collection: list every durable pairing, probe up to
- * MESH_MACHINES_FLEET_MAX actives through the status lane, wait
- * collectively for at most MESH_MACHINES_COLLECT_BUDGET_MS, then derive
- * and tally. Runs in the caller's thread (the RPC worker) and touches no
- * network thread. Always returns true with a fully initialized report —
- * an unreadable pairing store yields records_observed=false and a named
- * blocker with zero counts rather than an RPC failure. Returns false only
- * on a NULL out pointer. */
-bool boot_mesh_machines_collect(struct mesh_machines_report *out);
+/* Fill a live row's ONLINE identity fields from a verified terminal
+ * receipt: observed time and the responder Noise fingerprint. Exported so
+ * the wire group test proves the live row and the persisted observation
+ * derive from the same verified receipt. Returns false (with a logged
+ * cause) when the fingerprint cannot be derived; the row then carries a
+ * zeroed fingerprint, never an invented one. */
+bool mesh_machines_fill_live_identity(
+    struct mesh_machine_row *row, const struct mesh_status_receipt_v1 *receipt);
+
+/* Live refresh: list every durable pairing, probe up to
+ * MESH_MACHINES_FLEET_MAX actives through the status lane, persist every
+ * verified terminal receipt via boot_mesh_status_persist_observation, wait
+ * collectively for at most MESH_MACHINES_COLLECT_BUDGET_MS, then derive and
+ * tally. Runs in the caller's thread (the RPC worker) and touches no
+ * network thread. Always returns true with a fully initialized report — an
+ * unreadable pairing store yields records_observed=false and a named
+ * blocker with zero counts. Returns false only on a NULL argument. */
+bool boot_mesh_machines_refresh(struct node_db *ndb,
+                                struct mesh_machines_report *out);
+
+/* Render the unified fleet document (zcl.mesh.machines.v1): every pairing
+ * row from the durable observation projection (fresh/stale/never-seen
+ * evidence), with the live sidecar merged by pairing_id when `live` is
+ * non-NULL. A NULL live report renders the durable evidence alone — the
+ * shape the test hook drives without a network. */
+void boot_mesh_machines_render(struct node_db *ndb, int64_t now,
+                               const struct mesh_machines_report *live,
+                               struct json_value *result);
 
 /* Registers the mesh_machines RPC method (category "mesh"). */
 void boot_mesh_machines_register_rpc(struct rpc_table *table);

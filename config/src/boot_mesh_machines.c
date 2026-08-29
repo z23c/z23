@@ -1,11 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Fleet collection — list durable pairings, probe actives over the
- * mesh status lane, derive honest per-machine reachability.
+ * purpose: Fleet refresh — list durable pairings, probe actives over the
+ * mesh status lane, persist every verified terminal receipt into the
+ * observation store, derive honest per-machine live verdicts.
  *
- * The pure half (derive/plan/tally) is exported from the header so the wire
- * group test drives the exact production mapping without sockets; the live
- * half (boot_mesh_machines_collect) is the only function that touches the
- * pairing store or the status lane, and it never dials and never writes. */
+ * The pure half (derive/plan/tally/fill) is exported from the header so the
+ * wire group test drives the exact production mapping without sockets; the
+ * live half (boot_mesh_machines_refresh) is the only function that touches
+ * the pairing store or the status lane, and it never dials. Receipt
+ * persistence goes through boot_mesh_status_persist_observation — the same
+ * handoff the single-machine status poll uses — so the fleet refresh is a
+ * writer of the one observation store, not a parallel truth. */
 
 #include "config/boot_mesh_machines.h"
 
@@ -161,6 +165,22 @@ void mesh_machines_tally(const struct mesh_machine_row *rows, size_t count,
     }
 }
 
+bool mesh_machines_fill_live_identity(
+    struct mesh_machine_row *row, const struct mesh_status_receipt_v1 *receipt)
+{
+    if (!row || !receipt)
+        return false;
+    row->observed_unix = receipt->observed_unix;
+    if (!v2_identity_public_fingerprint(receipt->responder_noise_static,
+                                        row->responder_noise_fingerprint)) {
+        LOG_ERROR(MESH_MACHINES_TAG,
+                  "refresh: responder fingerprint derivation failed");
+        memset(row->responder_noise_fingerprint, 0, 32);
+        return false;
+    }
+    return true;
+}
+
 /* Per-probe bookkeeping for the collective wait. Only probed rows get one. */
 struct mesh_machine_probe {
     uint8_t request_id[32];
@@ -171,9 +191,9 @@ struct mesh_machine_probe {
 };
 
 /* A fleet burst must fit the status lane's pending table on an empty table:
- * upstream admission now refuses a still-full table instead of evicting the
- * oldest live request, so a cap above PENDING_MAX would make a machines
- * call self-congest its own probes into BUSY. The wire test pins the same
+ * admission refuses a still-full table instead of evicting the oldest live
+ * request, so a cap above PENDING_MAX would make a machines call
+ * self-congest its own probes into BUSY. The wire test pins the same
  * relationship at run time. */
 _Static_assert(MESH_MACHINES_FLEET_MAX <= MESH_STATUS_PENDING_MAX,
                "fleet probe burst must fit the mesh status pending table");
@@ -184,23 +204,21 @@ static void mesh_machines_block(struct mesh_machines_report *out,
     snprintf(out->blocker, sizeof(out->blocker), "%s", blocker);
 }
 
-bool boot_mesh_machines_collect(struct mesh_machines_report *out)
+bool boot_mesh_machines_refresh(struct node_db *ndb,
+                                struct mesh_machines_report *out)
 {
     if (!out)
         return false;
     memset(out, 0, sizeof(*out));
-    for (size_t i = 0; i < MESH_PAIRING_LIST_MAX; i++)
-        out->rows[i].capsule_slot = -1;
     out->generated_unix = (int64_t)platform_time_wall_time_t();
 
-    struct node_db *ndb = app_runtime_node_db();
     if (!ndb || !app_runtime_node_db_handle_open(ndb)) {
-        LOG_ERROR(MESH_MACHINES_TAG, "collect: node_db unavailable");
+        LOG_ERROR(MESH_MACHINES_TAG, "refresh: node_db unavailable");
         mesh_machines_block(out, "node_db unavailable");
         return true;
     }
     if (out->generated_unix <= 0) {
-        LOG_ERROR(MESH_MACHINES_TAG, "collect: wall clock unavailable");
+        LOG_ERROR(MESH_MACHINES_TAG, "refresh: wall clock unavailable");
         mesh_machines_block(out, "wall clock unavailable");
         return true;
     }
@@ -212,19 +230,20 @@ bool boot_mesh_machines_collect(struct mesh_machines_report *out)
     if (!mesh_pairing_service_list(ndb, out->generated_unix, views,
                                    MESH_PAIRING_LIST_MAX, &view_count,
                                    &store_counts)) {
-        LOG_ERROR(MESH_MACHINES_TAG, "collect: pairing list failed");
+        LOG_ERROR(MESH_MACHINES_TAG, "refresh: pairing list failed");
         mesh_machines_block(out, "pairing records unreadable");
         return true;
     }
     out->records_observed = true;
     out->row_count = view_count;
     /* The list view is bounded at MESH_PAIRING_LIST_MAX rows; more records
-     * in the store means the document is honestly truncated. */
+     * in the store means the probe plan is honestly truncated. */
     if ((int64_t)view_count < store_counts.total)
         out->truncated = true;
 
     for (size_t i = 0; i < view_count; i++)
-        out->rows[i].view = views[i];
+        snprintf(out->rows[i].pairing_id, sizeof(out->rows[i].pairing_id),
+                 "%s", views[i].pairing_id);
 
     const char *record_states[MESH_PAIRING_LIST_MAX];
     bool probe_plan[MESH_PAIRING_LIST_MAX];
@@ -243,7 +262,6 @@ bool boot_mesh_machines_collect(struct mesh_machines_report *out)
     struct mesh_machine_probe probes[MESH_MACHINES_FLEET_MAX];
     memset(probes, 0, sizeof(probes));
     int probe_of_row[MESH_PAIRING_LIST_MAX];
-    int row_of_probe[MESH_MACHINES_FLEET_MAX];
     size_t probe_count = 0;
     for (size_t i = 0; i < view_count; i++) {
         probe_of_row[i] = -1;
@@ -256,12 +274,15 @@ bool boot_mesh_machines_collect(struct mesh_machines_report *out)
                                               probe->request_id);
         probe->outstanding = (probe->begin == MESH_STATUS_BEGIN_OK);
         probe_of_row[i] = (int)probe_count;
-        row_of_probe[probe_count] = (int)i;
+        out->rows[i].probed = true;
         probe_count++;
     }
 
     /* Collective wait in the RPC worker thread: one stack receipt per poll
-     * call, terminal outcomes recorded, capsules copied only for OK rows. */
+     * call; terminal outcomes are recorded AND persisted into the durable
+     * observation store through the lane's single handoff. A persist
+     * failure never changes the live verdict — the signed receipt was
+     * observed either way — but it is logged loud. */
     int64_t deadline =
         platform_time_monotonic_ms() + MESH_MACHINES_COLLECT_BUDGET_MS;
     for (;;) {
@@ -279,31 +300,27 @@ bool boot_mesh_machines_collect(struct mesh_machines_report *out)
             }
             probe->outstanding = false;
             probe->poll = polled;
-            if (polled == MESH_STATUS_POLL_OK ||
-                polled == MESH_STATUS_POLL_REFUSED) {
-                probe->receipt_status = receipt.status;
-            }
-            if (polled != MESH_STATUS_POLL_OK)
+            if (polled != MESH_STATUS_POLL_OK &&
+                polled != MESH_STATUS_POLL_REFUSED)
                 continue;
-            size_t slot = out->capsule_count;
-            struct mesh_machine_row *row = &out->rows[row_of_probe[p]];
-            if (slot >= MESH_MACHINES_FLEET_MAX ||
-                receipt.capsule_len > MESH_STATUS_CAPSULE_MAX) {
+            probe->receipt_status = receipt.status;
+            if (!boot_mesh_status_persist_observation(ndb, &receipt)) {
                 LOG_ERROR(MESH_MACHINES_TAG,
-                          "collect: capsule slot/length overflow refused");
-                continue;
+                          "refresh: verified receipt for pairing %.8s could "
+                          "not be persisted; the live verdict stands but the "
+                          "durable evidence was not updated",
+                          receipt.pairing_id);
             }
-            memcpy(out->capsules[slot], receipt.capsule, receipt.capsule_len);
-            out->capsule_lens[slot] = receipt.capsule_len;
-            out->capsule_count++;
-            row->capsule_slot = (int)slot;
-            row->observed_unix = receipt.observed_unix;
-            if (!v2_identity_public_fingerprint(
-                    receipt.responder_noise_static,
-                    row->responder_noise_fingerprint)) {
-                LOG_ERROR(MESH_MACHINES_TAG,
-                          "collect: responder fingerprint derivation failed");
-                memset(row->responder_noise_fingerprint, 0, 32);
+            if (polled == MESH_STATUS_POLL_OK) {
+                size_t row = 0;
+                for (size_t i = 0; i < view_count; i++) {
+                    if (probe_of_row[i] == (int)p) {
+                        row = i;
+                        break;
+                    }
+                }
+                (void)mesh_machines_fill_live_identity(&out->rows[row],
+                                                       &receipt);
             }
         }
         if (outstanding == 0)
@@ -334,8 +351,6 @@ bool boot_mesh_machines_collect(struct mesh_machines_report *out)
                 &detail);
         }
         snprintf(row->detail, sizeof(row->detail), "%s", detail);
-        if (row->state != MESH_MACHINE_ONLINE)
-            row->capsule_slot = -1;
     }
 
     mesh_machines_tally(out->rows, out->row_count, &out->counts);
