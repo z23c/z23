@@ -28,17 +28,33 @@ Our own installer already refuses a remote source unless it is handed the
 expected checksum *obtained independently of the mirror*. That instinct is
 right and the plan keeps it. It is made real in two steps.
 
-### Step one — the checksum comes from three places at once
+### Step one — the pin comes from three places at once
 
-The installer learns the expected `SHA256SUMS` digest from:
+The installer learns the expected release **pin** from three independent
+systems: a value baked into the front-door script, a `TXT` record on the
+domain, and the source repository.
 
-1. a value baked into the install script,
-2. a `TXT` record on the domain,
-3. the source repository.
+The pin names two digests, not one: the `SHA256SUMS` manifest **and the
+installer script itself**. Pinning the second is what stops the domain
+substituting its own installer code -- without it, whoever serves the script
+could simply serve a script that checks nothing.
 
-All three must agree or the install refuses. These are three different systems
-with three different operators. Taking over the web server is no longer enough
-to change what a stranger installs.
+The rule when they disagree is refusal, never a majority vote. Two answers
+that differ mean a rollback, a half-finished publish, or a compromise, and
+installing the more popular one hides the exact event the mechanism exists to
+surface. Two agreeing answers proceed, and say out loud which source was
+missing and why. Fewer than two refuse.
+
+Two rather than all three, deliberately: `TXT` lookups are dropped by plenty
+of corporate resolvers, and a minimal container often has no DNS tool at all.
+Requiring all three would handed any such resolver a veto, and an installer
+that fails for honest strangers is not safer -- it pushes them to a worse
+install path. Two independent systems still means taking over the web server
+alone cannot change what a stranger installs.
+
+A source that answers with something that is not a pin -- a captive portal, an
+error page, the unset sentinel -- counts as unreachable, never as
+disagreement. The two are different events and are reported differently.
 
 ### Step two — the node checks itself against the swarm
 
@@ -67,6 +83,31 @@ which is an external dependency we do not take. `TLS-ALPN-01` runs entirely
 over 443 — the one port already forwarded — and is answered by the TLS server
 we already own. It needs no new port, no new dependency, and no new operator
 step.
+
+## The node must not become a TLS client
+
+`lib/test/src/test_cold_join_sovereign.c` asserts that no object file this
+project authors carries an undefined reference to a TLS-client or
+CA-trust-store entry point. Its own words: *if a Z23 object ever carries one,
+the node has become a TLS client and can be told who to trust by whoever
+ships the trust store.* The CA machinery is present in the linked OpenSSL and
+deliberately unreachable -- present and unreachable, not absent.
+
+Talking to a certificate authority means being a TLS client, so those two
+facts collide, and the test is the one that wins. The certificate work
+therefore lives in a **separate executable**, the way the confined package
+verifier already does. That program owns the conversation with the authority;
+the node keeps doing what it does today, which is read a certificate and a
+key from two files.
+
+This is better than putting it in the node, not a concession. The trust
+boundary ends up exactly where it belongs: on the optional clearnet
+convenience surface. The paths that carry consensus -- onion and
+peer-to-peer -- never touch a public authority at all.
+
+Answering the challenge is different and stays in the node: it happens on our
+own listener, uses no client or trust-store entry point, and does not touch
+the property above.
 
 ## What is served, and by whom
 
@@ -118,3 +159,19 @@ After installing, the node answers in typed output with stable exit codes,
 which is already what an agent needs. What is missing is discovery: the release
 should carry a short description of what the node offers, so an assistant that
 installs it also knows what it can now do.
+
+## Before a stranger can install anything
+
+The mechanism is built and tested; the values it checks against do not exist
+yet. Until they are published the front door refuses at the pin quorum, which
+is the correct state to be in — it is not broken, it is unpinned.
+
+Cutting the first release means publishing, together:
+
+1. the `TXT` record `_z23-pin.z23.sh`, carrying the pin,
+2. `packaging/install/RELEASE_PIN`, carrying the same pin,
+3. the pin baked into the served front-door script.
+
+All three name the same two digests: the manifest, and the installer script.
+Publish them in one motion — a partial publish is precisely the disagreement
+the installer is built to refuse, and it will refuse it.
