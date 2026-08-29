@@ -353,6 +353,29 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         current_ver = 76;
         applied++;
     }
+    if (current_ver < 77) {
+        /* v77: latest exact signed status evidence for each private local
+         * pairing. This is an observational projection, never authority. */
+        if (!node_db_exec(ndb,
+                "CREATE TABLE IF NOT EXISTS mesh_machine_observations("
+                "pairing_id TEXT PRIMARY KEY REFERENCES mesh_pairings(pairing_id) "
+                "ON DELETE CASCADE CHECK(length(pairing_id)=64),"
+                "receipt_wire BLOB NOT NULL "
+                "CHECK(length(receipt_wire) BETWEEN 400 AND 4496),"
+                "receipt_root BLOB NOT NULL CHECK(length(receipt_root)=32),"
+                "status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 9),"
+                "observed_unix INTEGER NOT NULL CHECK(observed_unix>0),"
+                "expires_unix INTEGER NOT NULL CHECK(expires_unix>observed_unix),"
+                "received_unix INTEGER NOT NULL CHECK(received_unix>0))"))
+            LOG_ERR("db", "migrate v77: mesh machine observations failed");
+        if (!node_db_exec(ndb,
+                "INSERT OR IGNORE INTO schema_migrations(version) "
+                "VALUES('077')"))
+            LOG_ERR("db", "migrate v77: migration stamp failed");
+        DB_MIGRATE_PERSIST_VERSION(ndb, 77);
+        current_ver = 77;
+        applied++;
+    }
     *version = current_ver;
     return applied;
 }

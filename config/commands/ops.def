@@ -588,6 +588,24 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_status)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.machines", "ops.mesh", "",
+    "List paired machines from durable verified observations",
+    "Returns up to 16 local pairings with redacted identity fingerprints, "
+    "pairing authority state, and its latest independently verified signed "
+    "status observation. This is a fast local projection: it performs no "
+    "network request and reports unknown or stale honestly instead of treating "
+    "an old receipt as current reachability; total/returned/truncated make "
+    "the bound explicit.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "mesh,machines,fleet,observations,online,offline,stale",
+    "zcl.command.empty_input.v1", "zcl.mesh.machines.v1", "", "",
+    "z23 ops mesh machines",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_machines)
 ZCL_COMMAND_BRANCH("ops.mesh.pair", "ops.mesh", "Pairing",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_READ(

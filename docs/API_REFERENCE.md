@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 749 |
+| Registry entries (branches + leaves) | 750 |
 | Top-level roots | 12 |
 | Branches | 174 |
-| Leaves (dispatchable command paths) | 575 |
-| … `ready` (live handler in this build) | 519 |
+| Leaves (dispatchable command paths) | 576 |
+| … `ready` (live handler in this build) | 520 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
@@ -95,7 +95,7 @@ Per source file:
 | `config/commands/apps.def` | 16 | 3 | 13 |
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 55 | 10 | 45 |
+| `config/commands/ops.def` | 56 | 10 | 46 |
 | `config/commands/dev.def` | 55 | 13 | 42 |
 | `config/commands/code.def` | 17 | 2 | 15 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
@@ -819,6 +819,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops mesh identity` (aliases: `ops.machine.status`, `machine.status`) | ready | read / read / operator · fast/low | none | `zcl.machine_mesh_identity.v1` | `z23 ops mesh identity` | Report this machine's mesh identity readiness |
 | `ops mesh status` | ready | read / read / operator · foreground/low | **`pairing_id`** | `zcl.mesh_status_receipt_view.v1` | `z23 ops mesh status --pairing_id=<64hex>` | Request one paired machine's signed status receipt |
+| `ops mesh machines` | ready | read / read / operator · fast/low | none | `zcl.mesh.machines.v1` | `z23 ops mesh machines` | List paired machines from durable verified observations |
 | `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
 | `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
 

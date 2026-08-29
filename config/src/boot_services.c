@@ -1231,7 +1231,7 @@ bool app_init_services(struct app_context *ctx,
     register_diagnostics_rpc_commands(svc->rpc_table);
     register_mesh_pairing_rpc_commands(svc->rpc_table, boot_node_db(svc));
     boot_zcode_dht_register_rpc(svc->rpc_table);
-    boot_mesh_status_register_rpc(svc->rpc_table);
+    boot_mesh_status_register_rpc(svc->rpc_table, boot_node_db(svc));
     boot_mesh_pairing_register_rpc(svc->rpc_table);
     boot_zcode_async_proof_register_rpc(svc->rpc_table);
     /* File transfer service — SHA3-verified chunk serving */

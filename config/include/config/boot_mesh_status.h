@@ -63,7 +63,8 @@ bool boot_mesh_status_frame(struct msg_processor *mp, struct p2p_node *node,
  * pending request. */
 void boot_mesh_status_wire(struct boot_svc_ctx *svc);
 void boot_mesh_status_shutdown(void);
-void boot_mesh_status_register_rpc(struct rpc_table *table);
+void boot_mesh_status_register_rpc(struct rpc_table *table,
+                                   struct node_db *ndb);
 
 enum boot_mesh_status_begin_result {
     MESH_STATUS_BEGIN_OK = 0,
@@ -140,6 +141,8 @@ bool boot_mesh_status_receipt_accept(
 void boot_mesh_status_receipt_test_render(
     struct json_value *result,
     const struct mesh_status_receipt_v1 *receipt);
+void boot_mesh_status_machines_test_render(
+    struct node_db *ndb, int64_t now, struct json_value *result);
 bool boot_mesh_status_test_responder_admit(
     const struct mesh_status_request_v1 *request,
     const struct v2_transport_snapshot *session, uint64_t now_mono_ms);

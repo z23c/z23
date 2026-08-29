@@ -299,6 +299,27 @@ void zcl_native_handle_ops_mesh_identity(
     json_free(&body);
 }
 
+void zcl_native_handle_ops_mesh_machines(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply) {
+        LOG_ERROR(NATIVE_MESH_TAG, "INVALID_REQUEST: null request or reply");
+        return;
+    }
+    struct json_value body = {0};
+    if (!mesh_rpc_object("mesh_machines", "[]", &body, reply))
+        return;
+    static const char *const fields[] = {
+        "schema", "observed_at", "total", "active", "returned",
+        "returned_fresh", "returned_stale", "returned_unknown",
+        "truncated", "machines",
+    };
+    mesh_copy_fields(&reply->data, &body, fields,
+                     sizeof(fields) / sizeof(fields[0]));
+    json_free(&body);
+}
+
 /* ── Local pairing ceremony (accept side) ────────────────────────────── */
 
 /* days arrives as JSON_INT or a decimal string depending on the transport;

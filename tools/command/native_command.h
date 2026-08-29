@@ -241,6 +241,9 @@ void zcl_native_handle_ops_mesh_identity(
 void zcl_native_handle_ops_mesh_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_ops_mesh_machines(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_ops_mesh_pair_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
