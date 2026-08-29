@@ -1921,6 +1921,13 @@ new-app-selftest:
 # `git rev-parse --git-common-dir`, which every `git worktree add` lane shares
 # with its origin checkout); override with SRC=<path-to-a-primed-checkout>
 # for wt2/wt3-style siblings that are not the primary checkout.
+# Two kinds of vendored artefact are untracked and must both be carried into a
+# new worktree: the built archives under vendor/lib, and the amalgamated C
+# sources beside them. Copying only the archives left vendor/sqlite3.c absent,
+# which no native build notices — only the Windows cross-build compiles that
+# file — so a primed worktree looked healthy right up until `make lint` failed
+# with "No rule to make target 'vendor/sqlite3.c'", a message that names a
+# missing file rather than a missing priming step.
 worktree-prime:
 	@set -eu; \
 	src="$(SRC)"; \
@@ -1946,7 +1953,13 @@ worktree-prime:
 	mkdir -p vendor/lib; \
 	cp -a "$$src/vendor/lib/." vendor/lib/; \
 	n=$$(ls vendor/lib | wc -l); \
-	echo "worktree-prime: copied $$n vendor archive(s) from $$src/vendor/lib"
+	echo "worktree-prime: copied $$n vendor archive(s) from $$src/vendor/lib"; \
+	for amalgam in sqlite3.c; do \
+	  if [ ! -f "vendor/$$amalgam" ] && [ -f "$$src/vendor/$$amalgam" ]; then \
+	    cp -a "$$src/vendor/$$amalgam" "vendor/$$amalgam"; \
+	    echo "worktree-prime: copied vendor/$$amalgam from $$src"; \
+	  fi; \
+	done
 
 # Auto-vendor: if any required archive is absent, build it.  The per-archive
 # rule lets `make zclassic23` pull in `make vendor` transparently on a fresh
