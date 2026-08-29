@@ -2009,14 +2009,11 @@ bool ban_db_write(struct net_manager *nm, const char *datadir)
 {
     if (!nm || !datadir) return false;
 
-    /* Single-flight: taken before cs_banned (see cs_ban_db_write in net.h),
-     * so only one flush serializes/installs at a time and a slower older
-     * snapshot can never land after a newer one. */
+    /* Lock before cs_banned so an older snapshot cannot land after a newer
+     * one; see cs_ban_db_write in net.h. */
     zcl_mutex_lock(&nm->cs_ban_db_write);
-
-    /* Two-pass: serialize entries first (count unknown up front since
-     * expired rows are skipped), then prepend the count. Avoids patching
-     * raw bytes into an already-written buffer (endian-fragile). */
+    /* Serialize entries before prepending their count; patching raw stream
+     * bytes would be endian-fragile. */
     struct byte_stream entries;
     stream_init(&entries, 4096);
 
@@ -2043,7 +2040,6 @@ bool ban_db_write(struct net_manager *nm, const char *datadir)
     if (nm->ban_db_after_snapshot_test_hook)
         nm->ban_db_after_snapshot_test_hook(nm->ban_db_after_snapshot_test_ctx);
 #endif
-
     struct byte_stream s;
     stream_init(&s, entries.size + 8);
     stream_write_u32_le(&s, live);
