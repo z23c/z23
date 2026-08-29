@@ -230,8 +230,8 @@ void msgprocessor_test_tx_mark_seen(const struct uint256 *hash) {
  * the synchronous path so peer scoring, relay, and tip transition semantics
  * remain unchanged; only historical catch-up block bodies are deep-cloned into
  * this bounded worker queue. */
-#define MSG_BLOCK_INTAKE_CAP 128
-#define MSG_BLOCK_INTAKE_DRAIN_BATCH 128
+#define MSG_BLOCK_INTAKE_CAP 1024
+#define MSG_BLOCK_INTAKE_DRAIN_BATCH 256
 #define MSG_BLOCK_INTAKE_LOG_KEEPALIVE_SECS 15
 #define MSG_BLOCK_INTAKE_DROP_BLOCKER_ID "net.block_intake_body_dropped"
 
