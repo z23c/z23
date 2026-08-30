@@ -31,6 +31,7 @@
  * addr_info_is_terrible() with a fixed "now" anchor. */
 
 #include "test/test_core.h"
+#include "platform/socket_compat.h"
 
 #include "chain/chainparams.h"
 #include "core/hash.h"
@@ -79,6 +80,14 @@ static bool hs_fixture_setup(struct hs_fixture *f, bool inbound)
     int fds[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
         return false;
+    /* Production P2P sockets are nonblocking.  Keep the fixture faithful so
+     * a large eager addr response queues on EAGAIN instead of deadlocking
+     * the test on Darwin's smaller AF_UNIX socket buffer. */
+    if (!platform_socket_set_nonblocking((platform_socket_t)fds[0], true)) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
 
     f->node.socket = fds[0];
     f->peer_fd = fds[1];

@@ -34,6 +34,7 @@
  */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
 #include "support/pagelocker.h"
 #include "keys/key_io.h"
 
@@ -238,7 +239,7 @@ static void ib_ensure_rpc_warmup_finished(void)
         set_rpc_warmup_finished();
 }
 
-static int part1_import_rescan_spend(void)
+static __attribute__((noinline)) int part1_import_rescan_spend(void)
 {
     int failures = 0;
     printf("\n-- Part 1: dumpprivkey / importprivkey / rescan / spend --\n");
@@ -257,12 +258,21 @@ static int part1_import_rescan_spend(void)
     memset(&ndb1, 0, sizeof(ndb1));
     IB_CHECK("wallet1: node_db_open", node_db_open(&ndb1, dbpath1));
 
-    struct wallet w1;
-    wallet_init(&w1);
+    struct wallet *w1 = zcl_malloc(sizeof(*w1), "wallet import source");
+    struct wallet *w2 = zcl_malloc(sizeof(*w2), "wallet import target");
+    IB_CHECK("wallet fixtures allocated", w1 != NULL && w2 != NULL);
+    if (!w1 || !w2) {
+        free(w1);
+        free(w2);
+        node_db_close(&ndb1);
+        test_cleanup_tmpdir(datadir1);
+        return failures;
+    }
+    wallet_init(w1);
     struct wallet_sqlite ws1;
     IB_CHECK("wallet1: wallet_sqlite_open", wallet_sqlite_open(&ws1, ndb1.db));
 
-    rpc_wallet_set_state(&w1, NULL, datadir1, &ws1, NULL, NULL);
+    rpc_wallet_set_state(w1, NULL, datadir1, &ws1, NULL, NULL);
     rpc_wallet_set_node_db(NULL);
     rpc_wallet_set_coins_tip(NULL);
 
@@ -320,22 +330,36 @@ static int part1_import_rescan_spend(void)
     }
 
     /* ── simnet: REAL connect_block-validated transfer to address A ── */
-    struct simnet s;
-    IB_CHECK("simnet_init", simnet_init(&s));
+    /* The canonical runner executes groups on bounded worker stacks.  A
+     * simnet owns large chain/coins fixtures and must not be an automatic
+     * object (Darwin faults before the first test line otherwise). */
+    struct simnet *s = zcl_malloc(sizeof(*s), "wallet import simnet");
+    bool simnet_ready = s && simnet_init(s);
+    IB_CHECK("simnet_init", simnet_ready);
+    if (!simnet_ready) {
+        free(s);
+        wallet_free(w1);
+        free(w1);
+        free(w2);
+        wallet_sqlite_close(&ws1);
+        node_db_close(&ndb1);
+        test_cleanup_tmpdir(datadir1);
+        return failures;
+    }
 
     struct ib_key faucet;
     ib_make_key(&faucet);
 
     struct uint256 cb_txid;
-    int cb_height = simnet_tip_height(&s) + 1;
+    int cb_height = simnet_tip_height(s) + 1;
     IB_CHECK("mint faucet coinbase",
-             simnet_mint_coinbase_to(&s, &faucet.spk, FAUCET_AMOUNT, &cb_txid));
+             simnet_mint_coinbase_to(s, &faucet.spk, FAUCET_AMOUNT, &cb_txid));
     IB_CHECK("mature faucet coinbase",
-             simnet_mint_to_height(&s, cb_height + COINBASE_MATURITY));
+             simnet_mint_to_height(s, cb_height + COINBASE_MATURITY));
 
     struct uint256 txid_A;
     uint256_set_null(&txid_A);
-    int fund_height = simnet_tip_height(&s) + 1;
+    int fund_height = simnet_tip_height(s) + 1;
     struct transaction fund_for_mint;
     bool built_mint = decoded_a &&
         ib_build_fund_tx(&fund_for_mint, &cb_txid, 0, &scriptA, FUND_VALUE);
@@ -343,7 +367,7 @@ static int part1_import_rescan_spend(void)
         txid_A = fund_for_mint.hash;
     IB_CHECK("build fund tx (A's transfer, for real mint)", built_mint);
     IB_CHECK("mint fund tx (REAL connect_block validation)",
-             built_mint && simnet_mint_txs(&s, &fund_for_mint, 1));
+             built_mint && simnet_mint_txs(s, &fund_for_mint, 1));
 
     /* A byte-identical second copy for the synthetic on-disk block below —
      * deterministic construction, same final txid both times. */
@@ -415,8 +439,7 @@ static int part1_import_rescan_spend(void)
     bi.nStatus = BLOCK_HAVE_DATA;
     bi.phashBlock = NULL;
 
-    struct wallet w2;
-    wallet_init(&w2);
+    wallet_init(w2);
     struct wallet_sqlite ws2;
     IB_CHECK("wallet2: wallet_sqlite_open", wallet_sqlite_open(&ws2, ndb2.db));
 
@@ -456,7 +479,7 @@ static int part1_import_rescan_spend(void)
         eA->coins.is_coinbase = false;
     }
 
-    rpc_wallet_set_state(&w2, &ms2, datadir2, &ws2, &mempool2, NULL);
+    rpc_wallet_set_state(w2, &ms2, datadir2, &ws2, &mempool2, NULL);
     rpc_wallet_set_node_db(&ndb2);
     rpc_wallet_set_coins_tip(&coins2);
 
@@ -480,7 +503,7 @@ static int part1_import_rescan_spend(void)
      * into wallet2's in-memory transaction map. Without this step the
      * coin is visible in getbalance but NOT selectable by
      * wallet_create_transaction (which reads only w->map_wallet). ── */
-    int found = wallet_rescan(&w2, &ms2.chain_active, fund_height,
+    int found = wallet_rescan(w2, &ms2.chain_active, fund_height,
                               fund_height, datadir2);
     IB_CHECK("wallet2: wallet_rescan finds A's funding output", found >= 1);
 
@@ -589,12 +612,15 @@ static int part1_import_rescan_spend(void)
     tx_mempool_free(&mempool2);
     free(ms2.chain_active.chain);
     wallet_sqlite_close(&ws2);
-    wallet_free(&w2);
+    wallet_free(w2);
+    free(w2);
     node_db_close(&ndb2);
     wallet_sqlite_close(&ws1);
-    wallet_free(&w1);
+    wallet_free(w1);
+    free(w1);
     node_db_close(&ndb1);
-    simnet_free(&s);
+    simnet_free(s);
+    free(s);
 
     test_cleanup_tmpdir(datadir1);
     test_cleanup_tmpdir(datadir2);
@@ -603,7 +629,7 @@ static int part1_import_rescan_spend(void)
 
 /* ── Part 2 ──────────────────────────────────────────────────────── */
 
-static int part2_backup_restore(void)
+static __attribute__((noinline)) int part2_backup_restore(void)
 {
     int failures = 0;
     printf("\n-- Part 2: wallet_backup_service backup / restore "
