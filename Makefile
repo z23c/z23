@@ -6247,7 +6247,15 @@ $(FPSCAN_BIN): $(FP_SRCS) \
 fingerprint-scan: $(FPSCAN_BIN) build-only
 	@mkdir -p $(FP_WORK)
 	@rm -f $(FP_TREE_ARCHIVE)
-	@find $(OBJ_DIR) -name '*.o' -print0 | xargs -0 ar rcs $(FP_TREE_ARCHIVE)
+# `P` (full path member names) is load-bearing, not tidiness. An archive
+# member is named by its BASENAME by default, and this tree has 18 basenames
+# that occur in more than one module (block.o, protocol.o, zanc.o, …), so
+# plain `ar rcs` silently REPLACED one object with another: 2010 objects in,
+# 2002 members out. Every symbol in a lost object then came back undefined,
+# got "stubbed" as a zeroed data byte array, and the LTO link died comparing
+# that array against the real function's header declaration — the whole scan
+# exited 2 having measured nothing.
+	@find $(OBJ_DIR) -name '*.o' -print0 | xargs -0 ar rcsP $(FP_TREE_ARCHIVE)
 	@git ls-files '*.c' '*.h' | grep -v '^vendor/' > $(FP_WORK)/sources.txt
 	$(FPSCAN_BIN) --root=. --work=$(FP_WORK) --cc='$(CC)' \
 	    --files-from=$(FP_WORK)/sources.txt \

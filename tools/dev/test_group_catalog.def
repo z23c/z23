@@ -661,6 +661,12 @@ ZCL_TEST_GROUP(vcs_devloop)
 ZCL_TEST_GROUP(codeindex)
 ZCL_TEST_GROUP(fingerprint)
 ZCL_TEST_GROUP(territory)
+/* A proof receipt: one node's claim that a named group reached a named
+ * verdict over an exactly identified tree, and the rule a receiver applies.
+ * The group exists for the refusals: only a PASS carrying a measured vector
+ * publishes as a pass, an ineligible group produces no receipt at all rather
+ * than an empty one, and belief is never read off the wire. */
+ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)
 ZCL_TEST_GROUP(metaverse_catalog)
@@ -911,6 +917,7 @@ ZCL_TEST_GROUP(rpc_safety)
 ZCL_TEST_GROUP(rpc_service_restart)
 ZCL_TEST_GROUP(app_context)
 ZCL_TEST_GROUP(service_kernel)
+ZCL_TEST_GROUP(payment_shutdown_owner)
 ZCL_TEST_GROUP(service_manifest)
 ZCL_TEST_GROUP(service_binding)
 ZCL_TEST_GROUP(app_checkpoint_manifest)

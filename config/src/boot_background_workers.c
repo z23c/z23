@@ -733,17 +733,6 @@ static void *payment_processor_thread(void *arg)
      * (lane/os-armor). */
     zcl_thread_qos_background();
 
-    /* The frontend kernel spawns this thread BEFORE boot flips
-     * svc->running true (boot_services.c starts the kernel ahead of the
-     * atomic_store), so entering the while(boot_running) loop immediately
-     * made the thread exit at birth on every boot: store payments never
-     * ran and the orphaned supervisor contract fired the one-per-boot
-     * op.payment_processor time_deadline stall. Wait (bounded) for boot
-     * to finish; if it never flips, this was a real shutdown-during-boot
-     * and exiting is correct. */
-    for (int i = 0; i < 60 && !boot_running(svc); i++)
-        sleep(1);
-
     while (boot_running(svc)) {
         supervisor_child_id sup_id = atomic_load(&g_payment_sup_id);
         if (sup_id != SUPERVISOR_INVALID_ID) {

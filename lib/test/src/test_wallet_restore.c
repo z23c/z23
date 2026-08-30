@@ -30,17 +30,8 @@
  *   - an encrypted backup with no password available
  */
 
-/* realpath() reaches this TU only through the glibc fortify inline that
- * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
- * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
- * compiles by accident of optimisation and breaks at -O0, under
- * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
- * include: after them it does nothing. See lib/util/src/hw_profile.c. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
 #include "test/test_core.h"
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
@@ -62,6 +53,15 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+
+static int wr_environment_unset(const char *name)
+{
+#if defined(_WIN32)
+    return platform_environment_set(name, "", 1);
+#else
+    return unsetenv(name);
+#endif
+}
 
 /* Fixture scratch root, as an ABSOLUTE path.
  *
@@ -657,7 +657,7 @@ int test_wallet_restore(void)
         ereq.backup_path = enc;
         ereq.dry_run = true;
         ereq.password = NULL;
-        (void)unsetenv("WALLET_BACKUP_PASSWORD");
+        (void)wr_environment_unset("WALLET_BACKUP_PASSWORD");
         struct zcl_result nr = wallet_restore_run(&ereq, &rep);
         WR_CHECK("refuses an encrypted backup with no password", !nr.ok);
         WR_CHECK("the refusal says the file is encrypted",

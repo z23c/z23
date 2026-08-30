@@ -21,6 +21,14 @@
  * The ones that pass the static purity analysis and then disagree are the
  * MEASURED false-purity rate, printed rather than assumed.
  *
+ * Two kinds of probe translation unit reach this far. One includes a header
+ * and calls an externally linkable function; the other includes a whole
+ * DEFINING .c so that a file-local function is callable at all. The second
+ * kind is where this driver earns its keep: it inherits a real unit's
+ * includes, its file-scope state and its link-time appetite, so a unit that
+ * will not compile or will not link costs every candidate in it. Every one of
+ * those is counted, attributed and printed by route, never dropped quietly.
+ *
  * Every reported fingerprint MATCH is then re-tested on a second, disjoint,
  * 16x larger corpus. A pair that matched on the first corpus and diverges on
  * the second is a measured FALSE POSITIVE of the technique, and that number
@@ -50,6 +58,18 @@
 #define FP_MAX_ARGS       8192
 #define FP_PRUNE_ROUNDS     16
 #define FP_CFG_COUNT         5
+
+/* The generated stub unit is the ONE translation unit built without LTO, and
+ * that is a correctness requirement rather than a speed one. A stub defines a
+ * symbol the object tree did not supply, as a zeroed byte array — but some of
+ * those symbols are FUNCTIONS that a probe TU's header also declares. Under
+ * LTO the linker plugin compares the two declarations across translation
+ * units and rejects the whole link ("variable redeclared as function"), so
+ * the run dies at the finish line having measured nothing. Compiled without
+ * LTO the stub is a plain ELF symbol with no type for the plugin to argue
+ * with. Nothing is weakened by this: a stub is unreachable from any probe by
+ * construction (see fp_write_stubs), so its type was never load-bearing. */
+#define FP_STUB_CFLAG "-fno-lto"
 
 enum fp_state { FP_S_ABSENT = 0, FP_S_OK, FP_S_CRASH, FP_S_TIMEOUT, FP_S_SKIP };
 
@@ -198,6 +218,16 @@ static pid_t fp_compile_group(const struct fp_env *e, size_t g, const char *opt,
     snprintf(obj, sizeof obj, "%s/fp_probes_%zu%s.o", e->work, g, suffix);
     snprintf(err, sizeof err, "%s/fp_probes_%zu%s.err", e->work, g, suffix);
     snprintf(incwork, sizeof incwork, "-I%s", e->work);
+    /* Remove the object BEFORE compiling. Whether a group compiled is decided
+     * downstream by whether its object exists, and the work directory
+     * survives between runs — so an object left by an EARLIER run satisfies
+     * that test even when this run's compile failed. The stale object then
+     * goes into the link, carrying whatever unrelated unit that group held
+     * last time: measured here as two probe TUs both defining
+     * `register_download_queue_starved`, a "multiple definition" that named
+     * a file which does not contain the symbol, and a run that died at the
+     * link having measured nothing. */
+    (void)unlink(obj);
     flags = zcl_strdup(e->cflags, "fp.cflags");
     if (flags == NULL)
         return -1;
@@ -339,7 +369,8 @@ static int fp_link(const struct fp_env *e, size_t ngroups, const char *opt,
 /* Compile one generated support unit (the driver main, the stub unit) from
  * the work directory into <stem><suffix>.o. */
 static int fp_compile_support(const struct fp_env *e, const char *stem,
-                              const char *opt, const char *suffix)
+                              const char *opt, const char *suffix,
+                              const char *extra)
 {
     static char *argv[FP_MAX_ARGS];
     char src[FP_MAX_PATH * 2];
@@ -364,6 +395,8 @@ static int fp_compile_support(const struct fp_env *e, const char *stem,
     at = fp_split(flags, argv, at, FP_MAX_ARGS);
     argv[at++] = (char *)opt;
     argv[at++] = (char *)"-w";
+    if (extra != NULL)
+        argv[at++] = (char *)extra;
     argv[at++] = incwork;
     argv[at++] = (char *)"-c";
     argv[at++] = (char *)"-o";
@@ -446,7 +479,23 @@ static size_t fp_collect_undefined(const char *errpath,
  * candidate exists in source but not in the object tree this build produced
  * (a `packages/` unit outside the node's own build). Disable exactly those
  * candidates rather than losing the whole run. Returns how many were newly
- * disabled. */
+ * disabled.
+ *
+ * Two attributions, in order, and the order is what keeps the accounting
+ * honest:
+ *
+ *  - BY NAME, but only against a candidate the harness calls through a
+ *    HEADER. A source-included candidate is compiled into the probe's own
+ *    translation unit, so it can never be the undefined symbol; matching it
+ *    by name would blame an innocent probe for somebody else's missing
+ *    object — and, because `static` helpers share short names across the
+ *    tree, would blame several at once and drag the whole-run refusal below
+ *    with it.
+ *  - BY PROBE, from the `in function 'fp_p_<N>'` line the linker prints
+ *    above the reference. That is exact, survives LTO renaming the object
+ *    file to an ltrans temporary, and is the only attribution available when
+ *    the missing symbol is something a source-included unit calls rather
+ *    than the candidate itself. */
 static long fp_prune_link(const char *errpath, const struct fp_candidate *cands,
                           size_t n_cands, unsigned char *disabled,
                           const size_t *gof, unsigned char *dirty)
@@ -454,13 +503,52 @@ static long fp_prune_link(const char *errpath, const struct fp_candidate *cands,
     FILE *fh = fopen(errpath, "r");
     char line[4096];
     long newly = 0;
+    long in_probe = -1;
+    long in_group = -1;
     if (fh == NULL)
         return 0;
     while (fgets(line, sizeof line, fh) != NULL) {
-        const char *p = strstr(line, "undefined reference to ");
+        const char *p;
         char name[FP_MAX_NAME];
         size_t k = 0;
         size_t c;
+        bool hit = false;
+
+        /* A symbol this translation unit defines twice over. The only way a
+         * probe TU can do that is by including a defining unit whose exports
+         * some other linked object also provides, so the whole GROUP goes:
+         * one probe of it cannot be singled out, and leaving it in fails the
+         * entire link rather than one candidate. Attributed from the
+         * `in function` line above it, because the "first defined here" name
+         * on the diagnostic itself is the OTHER object. */
+        if (strstr(line, "multiple definition of ") != NULL && in_group >= 0) {
+            for (c = 0; c < n_cands; c++)
+                if (!disabled[c] && cands[c].via_source &&
+                    gof[c] == (size_t)in_group) {
+                    disabled[c] = 1u;
+                    dirty[gof[c]] = 1u;
+                    newly++;
+                }
+            continue;
+        }
+
+        p = strstr(line, "in function `");
+        if (p != NULL) {
+            const char *o = strstr(line, "fp_probes_");
+            in_group = (o != NULL) ? strtol(o + strlen("fp_probes_"), NULL, 10)
+                                   : -1;
+            /* A new referencing function. When it is not a probe, the
+             * attribution is CLEARED rather than left pointing at the last
+             * probe seen — a reference from inside a source-included unit
+             * belongs to nobody in particular, and silently charging it to an
+             * unrelated probe would delete a good candidate and misreport
+             * why. */
+            p += strlen("in function `");
+            in_probe = (strncmp(p, "fp_p_", 5) == 0)
+                           ? strtol(p + 5, NULL, 10) : -1;
+            continue;
+        }
+        p = strstr(line, "undefined reference to ");
         if (p == NULL)
             continue;
         p += strlen("undefined reference to ");
@@ -474,11 +562,21 @@ static long fp_prune_link(const char *errpath, const struct fp_candidate *cands,
         if (k == 0)
             continue;
         for (c = 0; c < n_cands; c++)
-            if (!disabled[c] && strcmp(cands[c].name, name) == 0) {
+            if (!disabled[c] && !cands[c].via_source &&
+                strcmp(cands[c].name, name) == 0) {
                 disabled[c] = 1u;
                 dirty[gof[c]] = 1u;
                 newly++;
+                hit = true;
             }
+        if (hit)
+            continue;
+        if (in_probe >= 0 && (size_t)in_probe < n_cands &&
+            !disabled[(size_t)in_probe]) {
+            disabled[(size_t)in_probe] = 1u;
+            dirty[gof[(size_t)in_probe]] = 1u;
+            newly++;
+        }
     }
     fclose(fh);
     return newly;
@@ -517,9 +615,13 @@ static void fp_parse_results(const char *path, struct fp_obs *obs, size_t cap)
             obs[i].state = FP_S_CRASH;
         } else if (strcmp(verb, "TIMEOUT") == 0) {
             obs[i].state = FP_S_TIMEOUT;
-        } else {
+        } else if (strcmp(verb, "SKIP") == 0 || strcmp(verb, "ERR") == 0) {
             obs[i].state = FP_S_SKIP;
         }
+        /* Anything else is not a result row and is IGNORED rather than
+         * recorded. Treating an unrecognised line as a verdict is how a
+         * stray diagnostic overwrites a real probe's observation with
+         * "skipped" and quietly shrinks the coverage number. */
     }
     fclose(fh);
 }
@@ -574,8 +676,10 @@ int main(int argc, char **argv)
     struct fp_obs *obs;
     struct fp_obs *confirm;
     unsigned char *disabled;
+    unsigned char *need_confirm;
     size_t tally[FP_V_COUNT];
     char **files;
+    char jobsarg[32];
     char *store = NULL;
     size_t nfiles;
     size_t ngroups = 0;
@@ -583,6 +687,12 @@ int main(int argc, char **argv)
     long i;
     int c;
     bool select_only = false;
+    /* --no-source-include: reach only what a header prototype reaches, the
+     * way this tool worked before file-local functions were reachable at
+     * all. It is a MEASUREMENT switch — run the tree both ways and the
+     * difference is what including defining units bought and cost, with the
+     * compiler, the object tree and the corpus all held fixed. */
+    bool no_source = false;
     const char *list = "-";
     size_t total_defs;
 
@@ -619,6 +729,8 @@ int main(int argc, char **argv)
             env.jobs = atoi(a + 7);
         else if (strcmp(a, "--select-only") == 0)
             select_only = true;
+        else if (strcmp(a, "--no-source-include") == 0)
+            no_source = true;
         else {
             fprintf(stderr, "fpscan: unknown argument '%s'\n", a);
             return 2;
@@ -639,6 +751,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "fpscan: index build failed\n");
         return 2;
     }
+    fp_index_allow_source_route(ix, !no_source);
     cands = (struct fp_candidate *)zcl_calloc(FP_MAX_CANDS, sizeof *cands,
                                               "fp.cands");
     if (cands == NULL) { fp_index_free(ix); return 2; }
@@ -659,9 +772,17 @@ int main(int argc, char **argv)
                total_defs ? 100.0 * (double)tally[i] / (double)total_defs : 0.0);
     printf("candidates emitted            %ld\n", ncands);
     {
+        long via_src = 0;
+        for (i = 0; i < ncands; i++)
+            if (cands[i].via_source)
+                via_src++;
+        printf("  through a header prototype  %8ld\n", ncands - via_src);
+        printf("  by including the defining unit (file-local) %8ld\n", via_src);
+    }
+    {
         static const enum fp_verdict interesting[] = {
             FP_V_UNRESOLVED_CALL, FP_V_IMPURE_GLOBAL, FP_V_FUNCTION_POINTER,
-            FP_V_FUNCTION_STATIC
+            FP_V_FUNCTION_STATIC, FP_V_STATIC_LINKAGE, FP_V_NO_PROTOTYPE
         };
         size_t w;
         for (w = 0; w < sizeof interesting / sizeof interesting[0]; w++) {
@@ -786,8 +907,9 @@ int main(int argc, char **argv)
                 }
                 for (k = 0; k < inflight; k++) fp_wait(pool[k]);
 
-                if (fp_compile_support(&env, "fp_main", opt, sfx) != 0 ||
-                    fp_compile_support(&env, "fp_stubs", opt, sfx) != 0) {
+                if (fp_compile_support(&env, "fp_main", opt, sfx, NULL) != 0 ||
+                    fp_compile_support(&env, "fp_stubs", opt, sfx,
+                                       FP_STUB_CFLAG) != 0) {
                     fprintf(stderr, "fpscan: a generated support unit did not "
                                     "compile at %s\n", opt);
                     fp_index_free(ix);
@@ -886,8 +1008,10 @@ int main(int argc, char **argv)
                     printf("link round %d: %zu symbol(s) owned by the node's "
                            "own main() stubbed\n", round, nstubs - before);
                     fflush(stdout);
-                    if (fp_compile_support(&env, "fp_stubs", "-O2", "") != 0 ||
-                        fp_compile_support(&env, "fp_stubs", "-O0", ".o0") != 0) {
+                    if (fp_compile_support(&env, "fp_stubs", "-O2", "",
+                                           FP_STUB_CFLAG) != 0 ||
+                        fp_compile_support(&env, "fp_stubs", "-O0", ".o0",
+                                           FP_STUB_CFLAG) != 0) {
                         fprintf(stderr, "fpscan: the generated stub unit did "
                                         "not compile\n");
                         fp_index_free(ix);
@@ -918,19 +1042,31 @@ int main(int argc, char **argv)
                                           "fp.confirm");
     final = (struct fp_final *)zcl_calloc((size_t)ncands + 1u, sizeof *final,
                                           "fp.final");
-    if (obs == NULL || confirm == NULL || final == NULL)
+    need_confirm = (unsigned char *)zcl_calloc((size_t)ncands + 1u, 1u,
+                                               "fp.needconfirm");
+    if (obs == NULL || confirm == NULL || final == NULL ||
+        need_confirm == NULL)
         return 2;
+
+    snprintf(jobsarg, sizeof jobsarg, "--jobs=%d", env.jobs);
 
     for (i = 0; i < FP_CFG_COUNT; i++) {
         char *rargv[16];
         char drv[FP_MAX_PATH * 2];
         char res[FP_MAX_PATH * 2];
+        char log[FP_MAX_PATH * 2];
+        char outarg[FP_MAX_PATH * 2 + 8];
         char fill[32];
         char iters[32];
         int at = 0;
         snprintf(drv, sizeof drv, "%s/fp_driver_%s", env.work,
                  k_cfg[i].driver == 0 ? "O2" : "O0");
-        snprintf(res, sizeof res, "%s/run_%s.txt", env.work, k_cfg[i].name);
+        /* Results and NOISE go to two different files. See the driver's
+         * main(): a probe compiled against a whole tree unit can print, and a
+         * printed line sharing the result stream is parsed as a result. */
+        snprintf(res, sizeof res, "%s/res_%s.txt", env.work, k_cfg[i].name);
+        snprintf(log, sizeof log, "%s/run_%s.txt", env.work, k_cfg[i].name);
+        snprintf(outarg, sizeof outarg, "--out=%s", res);
         snprintf(fill, sizeof fill, "--fill=%u", k_cfg[i].fill);
         snprintf(iters, sizeof iters, "--iters=%u", (unsigned)FP_ITERATIONS);
         rargv[at++] = drv;
@@ -938,36 +1074,13 @@ int main(int argc, char **argv)
         rargv[at++] = iters;
         rargv[at++] = (char *)"--salt=0";
         rargv[at++] = (char *)"--timeout=5";
+        rargv[at++] = jobsarg;
+        rargv[at++] = outarg;
         rargv[at] = NULL;
-        if (fp_run(rargv, res, k_cfg[i].big_env) != 0)
+        if (fp_run(rargv, log, k_cfg[i].big_env) != 0)
             fprintf(stderr, "fpscan: driver run %s exited non-zero\n",
                     k_cfg[i].name);
         fp_parse_results(res, obs + (size_t)i * (size_t)ncands, (size_t)ncands);
-    }
-
-    /* Corpus B: a disjoint, 16x larger input set used only to re-test the
-     * matches the first corpus produced. */
-    {
-        char *rargv[16];
-        char drv[FP_MAX_PATH * 2];
-        char res[FP_MAX_PATH * 2];
-        char salt[64];
-        char iters[32];
-        int at = 0;
-        snprintf(drv, sizeof drv, "%s/fp_driver_O2", env.work);
-        snprintf(res, sizeof res, "%s/run_confirm.txt", env.work);
-        snprintf(salt, sizeof salt, "--salt=%llu",
-                 (unsigned long long)FP_CONFIRM_SALT);
-        snprintf(iters, sizeof iters, "--iters=%u",
-                 (unsigned)FP_CONFIRM_ITERATIONS);
-        rargv[at++] = drv;
-        rargv[at++] = (char *)"--fill=0";
-        rargv[at++] = iters;
-        rargv[at++] = salt;
-        rargv[at++] = (char *)"--timeout=30";
-        rargv[at] = NULL;
-        (void)fp_run(rargv, res, false);
-        fp_parse_results(res, confirm, (size_t)ncands);
     }
 
     /* Fold the configurations into one verdict per candidate. */
@@ -1023,6 +1136,29 @@ int main(int argc, char **argv)
                    : (i == FP_F_FLAT) ? flat : good;
             printf("  %-48s %8ld\n", k_final_name[i], v);
         }
+        /* The same partition split by HOW the probe reached its function.
+         * Including a whole translation unit is the risky route and it has
+         * to be possible to see, run by run, what it actually costs: a
+         * source-included unit that will not compile or will not link takes
+         * every candidate in it, and that has to show up as a number rather
+         * than as a quietly smaller coverage figure. */
+        {
+            long by_route[2][FP_F_COUNT];
+            long total[2] = { 0, 0 };
+            int r;
+            memset(by_route, 0, sizeof by_route);
+            for (i = 0; i < ncands; i++) {
+                int r2 = cands[i].via_source ? 1 : 0;
+                by_route[r2][final[i].status]++;
+                total[r2]++;
+            }
+            printf("  by route (header-reached / file-local, unit included):\n");
+            for (r = 0; r < FP_F_COUNT; r++)
+                printf("      %-46s %8ld %8ld\n", k_final_name[r],
+                       by_route[0][r], by_route[1][r]);
+            printf("      %-46s %8ld %8ld\n", "candidates on this route",
+                   total[0], total[1]);
+        }
         printf("fingerprintable functions     %ld  (%.3f%% of %zu definitions)\n",
                good, total_defs ? 100.0 * (double)good / (double)total_defs : 0.0,
                total_defs);
@@ -1032,6 +1168,99 @@ int main(int argc, char **argv)
                    unstable, judged,
                    judged ? 100.0 * (double)unstable / (double)judged : 0.0);
         }
+    }
+
+    /* Which candidates corpus B actually has to re-test: exactly those that
+     * share a (shape, fingerprint) with another candidate. A lone
+     * fingerprint is not a claim about anything, so re-testing it on a
+     * corpus 32x larger answers a question nobody asked. */
+    {
+        size_t *order = (size_t *)zcl_calloc((size_t)ncands + 1u, sizeof *order,
+                                             "fp.preorder");
+        size_t n = 0;
+        size_t s;
+        if (order == NULL) { fp_index_free(ix); return 2; }
+        for (i = 0; i < ncands; i++)
+            if (final[i].status == FP_F_GOOD)
+                order[n++] = (size_t)i;
+        g_cands = cands;
+        g_final = final;
+        if (n > 1)
+            qsort(order, n, sizeof *order, fp_cmp_idx);
+        for (s = 0; s < n; ) {
+            size_t e2 = s + 1u;
+            while (e2 < n &&
+                   cands[order[e2]].shape == cands[order[s]].shape &&
+                   final[order[e2]].h1 == final[order[s]].h1 &&
+                   final[order[e2]].h2 == final[order[s]].h2)
+                e2++;
+            if (e2 - s >= 2u) {
+                size_t k;
+                for (k = s; k < e2; k++)
+                    need_confirm[order[k]] = 1u;
+            }
+            s = e2;
+        }
+        free(order);
+    }
+
+    /* Corpus B: a disjoint, 32x larger input set used only to re-test the
+     * matches the first corpus produced. It runs LAST and it runs NARROW.
+     * Last, because which candidates it must re-test is not knowable until
+     * the five configurations have been folded into a verdict; narrow,
+     * because at 32x the iterations it costs HOURS over the whole candidate
+     * set — measured, once file-local functions made that set three times
+     * bigger — and its answer is only ever read for a candidate that landed
+     * in a match group. Narrowing changes no verdict: every index the
+     * reporting pass consults is in the list handed to the driver. */
+    {
+        char *rargv[16];
+        char drv[FP_MAX_PATH * 2];
+        char res[FP_MAX_PATH * 2];
+        char log[FP_MAX_PATH * 2];
+        char sel[FP_MAX_PATH * 2];
+        char outarg[FP_MAX_PATH * 2 + 8];
+        char onlyarg[FP_MAX_PATH * 2 + 8];
+        char salt[64];
+        char iters[32];
+        int at = 0;
+        long nsel = 0;
+        FILE *fh;
+
+        snprintf(sel, sizeof sel, "%s/confirm_only.txt", env.work);
+        fh = fopen(sel, "w");
+        if (fh == NULL) {
+            fprintf(stderr, "fpscan: cannot write the confirm selection\n");
+            fp_index_free(ix);
+            return 2;
+        }
+        for (i = 0; i < ncands; i++)
+            if (need_confirm[i]) { fprintf(fh, "%ld\n", i); nsel++; }
+        if (fclose(fh) != 0) { fp_index_free(ix); return 2; }
+        printf("corpus B re-tests               %ld of %ld candidates\n",
+               nsel, ncands);
+        fflush(stdout);
+
+        snprintf(drv, sizeof drv, "%s/fp_driver_O2", env.work);
+        snprintf(res, sizeof res, "%s/res_confirm.txt", env.work);
+        snprintf(log, sizeof log, "%s/run_confirm.txt", env.work);
+        snprintf(outarg, sizeof outarg, "--out=%s", res);
+        snprintf(onlyarg, sizeof onlyarg, "--only=%s", sel);
+        snprintf(salt, sizeof salt, "--salt=%llu",
+                 (unsigned long long)FP_CONFIRM_SALT);
+        snprintf(iters, sizeof iters, "--iters=%u",
+                 (unsigned)FP_CONFIRM_ITERATIONS);
+        rargv[at++] = drv;
+        rargv[at++] = (char *)"--fill=0";
+        rargv[at++] = iters;
+        rargv[at++] = salt;
+        rargv[at++] = (char *)"--timeout=30";
+        rargv[at++] = jobsarg;
+        rargv[at++] = onlyarg;
+        rargv[at++] = outarg;
+        rargv[at] = NULL;
+        (void)fp_run(rargv, log, false);
+        fp_parse_results(res, confirm, (size_t)ncands);
     }
 
     /* Group by (shape, fingerprint) and confirm every group on corpus B. */

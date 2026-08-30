@@ -172,9 +172,10 @@ COMPILE_FLAGS=(-std=c2x -fsyntax-only -DZCL_TESTING
                "${API_FLOOR_DEFINES[@]}" "${PLATFORM_DEFINES[@]}")
 
 # ── Include search path ───────────────────────────────────────────────────
-# Proven recipe: every directory named include, excluding build/, .claude/,
-# and vendor/tor/, each as -I<dir>, plus -I. A hand-picked subset misses
-# headers such as core/hash.h, sqlite3.h, config/runtime.h.
+# Proven recipe: every source-tree directory named include, excluding build,
+# test output, agent scratch, and vendor/tor, each as -I<dir>, plus -I. A
+# hand-picked subset misses headers such as core/hash.h, sqlite3.h, and
+# config/runtime.h.
 INC_NUL="$WORK/inc.nul"
 : > "$INC_NUL"
 printf '%s\0' -I. >> "$INC_NUL"
@@ -183,6 +184,7 @@ printf '%s\0' -I. >> "$INC_NUL"
 printf '%s\0' -Itools -Itools/dev >> "$INC_NUL"
 find . \( -path './.git' -o -path './.git/*' \
           -o -path './build' -o -path './build/*' \
+          -o -path './test-tmp' -o -path './test-tmp/*' \
           -o -path './.claude' -o -path './.claude/*' \
           -o -path './vendor/tor' -o -path './vendor/tor/*' \) -prune \
      -o -type d -name include -print0 2>/dev/null |
