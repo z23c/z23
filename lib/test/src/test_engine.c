@@ -1151,6 +1151,188 @@ static int case_prompt_shape(void)
     return failures;
 }
 
+
+/* ── the CLI argument vector ──────────────────────────────────────────────
+ * A CLI vendor's arguments used to be a fixed array inside the dispatch tool,
+ * shaped around the one CLI this tree happened to use. The cost of that was
+ * measured on 2026-08-30: the owner's machine had a working subscription to a
+ * second CLI the whole time, every HTTPS row in the table was answering 429
+ * for want of credit, and the only thing between the tree and a working
+ * engine was seven hard-coded strings in a program no test links.
+ *
+ * The registry invariant below is the one that would have caught it. */
+
+static int case_cli_argv(void)
+{
+    int failures = 0;
+
+    /* Every CLI row is complete, and no other row pretends to be one. This is
+     * the check that fails the day someone adds a CLI vendor and stops at the
+     * program name. */
+    bool cli_rows_complete = true;
+    bool non_cli_rows_clean = true;
+    size_t cli_rows = 0;
+    for (size_t i = 0; i < engine_count(); i++) {
+        const struct engine_vendor *v = engine_at(i);
+        if (v->wire == ENGINE_WIRE_LOCAL_CLI) {
+            cli_rows++;
+            if (!v->program || !v->program[0] || !v->cli_argv)
+                cli_rows_complete = false;
+        } else if (v->program || v->cli_argv) {
+            non_cli_rows_clean = false;
+        }
+    }
+    EN_CHECK("every CLI row names a program and an argument template",
+             cli_rows_complete);
+    EN_CHECK("and no non-CLI row carries either", non_cli_rows_clean);
+    EN_CHECK("more than one CLI vendor is registered", cli_rows >= 2);
+
+    const struct engine_cli_inputs in = {
+        .prompt  = "/tmp/p.txt",
+        .workdir = "/w",
+        .turns   = "3",
+        .model   = "m-1",
+    };
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+
+    /* A file-mode vendor. The exact vector matters: this is what gets exec'd,
+     * and a test that only counted the entries would pass while the flags
+     * were wrong. */
+    const struct engine_vendor *fileq = NULL;
+    const struct engine_vendor *argq = NULL;
+    for (size_t i = 0; i < engine_count(); i++) {
+        const struct engine_vendor *v = engine_at(i);
+        if (v->wire != ENGINE_WIRE_LOCAL_CLI) continue;
+        if (v->cli_prompt == ENGINE_CLI_PROMPT_FILE && !fileq) fileq = v;
+        if (v->cli_prompt == ENGINE_CLI_PROMPT_ARG && !argq) argq = v;
+    }
+    EN_CHECK("a file-prompt CLI vendor is registered", fileq != NULL);
+    EN_CHECK("an argument-prompt CLI vendor is registered", argq != NULL);
+
+    if (fileq) {
+        size_t n = engine_cli_argv_build(fileq, &in, argv, ENGINE_CLI_ARGV_MAX);
+        EN_CHECK("a file-prompt vendor builds a vector", n > 0);
+        EN_CHECK("whose argv[0] is the program",
+                 n > 0 && strcmp(argv[0], fileq->program) == 0);
+        EN_CHECK("which is NULL-terminated", n > 0 && argv[n] == NULL);
+        bool carries_prompt = false, carries_workdir = false;
+        bool carries_no_placeholders = true;
+        for (size_t i = 1; i < n; i++) {
+            if (strcmp(argv[i], in.prompt) == 0)  carries_prompt = true;
+            if (strcmp(argv[i], in.workdir) == 0) carries_workdir = true;
+            if (argv[i][0] == '{') carries_no_placeholders = false;
+        }
+        EN_CHECK("and carries the prompt path", carries_prompt);
+        EN_CHECK("and the working directory", carries_workdir);
+        EN_CHECK("and no placeholder survived substitution",
+                 carries_no_placeholders);
+    }
+
+    if (argq) {
+        const struct engine_cli_inputs argin = {
+            .prompt  = "THE WHOLE PROMPT TEXT",
+            .workdir = "/w",
+            .turns   = "3",
+            .model   = "m-1",
+        };
+        size_t n = engine_cli_argv_build(argq, &argin, argv,
+                                         ENGINE_CLI_ARGV_MAX);
+        bool carries_text = false;
+        for (size_t i = 1; i < n; i++)
+            if (strcmp(argv[i], argin.prompt) == 0) carries_text = true;
+        EN_CHECK("an argument-prompt vendor receives the prompt TEXT, not a "
+                 "path", n > 0 && carries_text);
+
+        /* The kernel caps a single argv string far below the prompt ceiling.
+         * Refusing here names the real reason; letting it through would
+         * surface as "could not launch", pointing at the CLI. */
+        size_t over = ENGINE_CLI_ARG_PROMPT_MAX + 1u;
+        char *huge = zcl_malloc(over + 1, "test_engine_cli_huge");
+        if (huge) {
+            memset(huge, 'x', over);
+            huge[over] = '\0';
+            struct engine_cli_inputs bigin = argin;
+            bigin.prompt = huge;
+            EN_CHECK("an argument-mode prompt over the limit is refused",
+                     engine_cli_argv_build(argq, &bigin, argv,
+                                           ENGINE_CLI_ARGV_MAX) == 0);
+            free(huge);
+        } else {
+            EN_CHECK("the over-length CLI fixture allocates", false);
+        }
+    }
+
+    /* A placeholder the caller left empty is a refusal, not an empty slot: an
+     * argv entry silently filled with nothing is a different command. */
+    if (fileq) {
+        struct engine_cli_inputs missing = in;
+        missing.workdir = NULL;
+        EN_CHECK("a placeholder with no value is refused",
+                 engine_cli_argv_build(fileq, &missing, argv,
+                                       ENGINE_CLI_ARGV_MAX) == 0);
+        missing = in;
+        missing.workdir = "";
+        EN_CHECK("and an empty string counts as no value",
+                 engine_cli_argv_build(fileq, &missing, argv,
+                                       ENGINE_CLI_ARGV_MAX) == 0);
+        EN_CHECK("a cap too small to hold the vector is refused",
+                 engine_cli_argv_build(fileq, &in, argv, 2) == 0);
+    }
+
+    /* An unknown brace-shaped slot is refused rather than passed through as a
+     * literal, which is what a CLI would receive as a confident wrong value. */
+    static const char *const bogus_argv[] = { "--flag", "{mdoel}", NULL };
+    struct engine_vendor bogus = {
+        .id = "bogus", .program = "true",
+        .cli_argv = bogus_argv, .cli_prompt = ENGINE_CLI_PROMPT_FILE,
+        .wire = ENGINE_WIRE_LOCAL_CLI,
+    };
+    EN_CHECK("an unknown placeholder is refused, not passed through",
+             engine_cli_argv_build(&bogus, &in, argv, ENGINE_CLI_ARGV_MAX) == 0);
+
+    struct engine_vendor no_template = bogus;
+    no_template.cli_argv = NULL;
+    EN_CHECK("a CLI row with no template is refused",
+             engine_cli_argv_build(&no_template, &in, argv,
+                                   ENGINE_CLI_ARGV_MAX) == 0);
+    EN_CHECK("and NULL arguments are refused",
+             engine_cli_argv_build(NULL, &in, argv, ENGINE_CLI_ARGV_MAX) == 0
+             && engine_cli_argv_build(fileq, NULL, argv,
+                                      ENGINE_CLI_ARGV_MAX) == 0);
+    return failures;
+}
+
+
+/* ── the default engine ───────────────────────────────────────────────────
+ * A caller who names no engine gets one. Which one is a row in the table, not
+ * a string somewhere else that could name a row that is gone. */
+static int case_default_engine(void)
+{
+    int failures = 0;
+
+    size_t defaults = 0;
+    for (size_t i = 0; i < engine_count(); i++)
+        if (engine_at(i)->is_default) defaults++;
+    EN_CHECK("exactly one row is the default", defaults == 1);
+
+    const struct engine_vendor *d = engine_default();
+    EN_CHECK("and engine_default() returns it", d != NULL && d->is_default);
+    EN_CHECK("and it is a row the registry can look up by id",
+             d && engine_by_id(d->id) == d);
+
+    /* The property that makes a default safe to have at all: it must work on
+     * a host that has never been given a credential. A default needing an API
+     * key would fail on a fresh machine with a message about keys, which
+     * reads as a broken tool rather than an unmade choice. */
+    EN_CHECK("the default needs no API key", d && !engine_needs_key(d));
+
+    /* And it must not be the fixture: a default that quietly sends nothing
+     * would make every unattended run look like it worked. */
+    EN_CHECK("the default is not the fixture engine",
+             d && !engine_is_fixture(d));
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
@@ -1165,6 +1347,8 @@ int test_engine(void)
     failures += case_key_gate();
     failures += case_prompt();
     failures += case_prompt_shape();
+    failures += case_cli_argv();
+    failures += case_default_engine();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }

@@ -9870,6 +9870,7 @@ ENGINE_UNIT_BIN = $(BIN_DIR)/zclassic23-engine-unit
 ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	tools/acme/tls_client.c \
 	lib/engine/src/engine_registry.c \
+	lib/engine/src/engine_cli.c \
 	lib/engine/src/engine_err.c \
 	lib/engine/src/engine_patch.c \
 	lib/engine/src/engine_prompt.c \
