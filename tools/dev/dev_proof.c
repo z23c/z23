@@ -703,7 +703,8 @@ static bool run_dimension(const struct proof_paths *paths,
     }
     if (rc != 0) {
         dim->failed = 1;
-        proof_why(why, why_len, "child_proof_failed");
+        if (why && why_len)
+            (void)snprintf(why, why_len, "child_proof_failed_exit_%d", rc);
         return false;
     }
     if (parse_test) {
@@ -1077,7 +1078,13 @@ static void proof_worker_run(const struct proof_paths *paths,
                              const char *local, const char *base)
 {
     char why[256] = {0};
-    bool ok = proof_worker(paths, local, base, why, sizeof(why));
+    struct sigaction child_action = {0};
+    child_action.sa_handler = SIG_DFL;
+    sigemptyset(&child_action.sa_mask);
+    bool ok = sigaction(SIGCHLD, &child_action, NULL) == 0 &&
+              proof_worker(paths, local, base, why, sizeof(why));
+    if (!ok && !why[0])
+        proof_why(why, sizeof(why), "proof_child_reaping_unavailable");
     if (!ok) {
         const char *message = why[0] ? why : "background_verification_failed";
         (void)write_atomic(paths->failure, message, strlen(message), 0600);

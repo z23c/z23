@@ -67,6 +67,12 @@ forbids. The broker now hard-links regular dependency files and recursively
 materializes real include directories; it does not weaken source capture or
 follow mutable dependency symlinks.
 
+The first resulting cold `build-only` completed its object epoch after 515
+seconds, but the detached broker inherited process-wide child-reaping state and
+lost Make's successful exit status. Proof workers now establish the default
+`SIGCHLD` disposition before launching children and retain exact nonzero exit
+codes in failure evidence.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
