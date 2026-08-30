@@ -155,6 +155,8 @@ lint_cache_never_reason() {
             echo "compiles and links the real command registry with cc, twice (once against a padded catalog for its selftest)" ;;
         check-lib-module-order)
             echo "reads the link graph out of build/obj via nm" ;;
+        check-capability-closure)
+            echo "picks the newest build/dev-obj epoch by mtime and reads its undefined-symbol closure via nm — depends on build/ state no tree hash covers" ;;
         check-release-no-dev-symbols)
             echo "runs 'nm -D' over build/bin/zclassic23" ;;
         check-doc-no-false-deleted)

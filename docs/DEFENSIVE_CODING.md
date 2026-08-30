@@ -1166,6 +1166,7 @@ add/remove a gate.
 - `check-zcode-package-registry`
 - `check-zcode-package-standalone`
 - `check-package-anatomy`
+- `check-capability-closure`
 - `check-api-reference-generated`
 - `check-capability-inventory-generated`
 - `check-generated-artifact-contradictions`

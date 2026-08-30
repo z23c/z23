@@ -3208,6 +3208,10 @@ check-zcode-package-standalone:
 check-package-anatomy:
 	@./tools/lint/check_package_anatomy.sh --selftest
 	@./tools/lint/check_package_anatomy.sh
+.PHONY: check-capability-closure
+check-capability-closure:
+	@./tools/lint/check_capability_closure.sh --selftest
+	@./tools/lint/check_capability_closure.sh
 print-zcode-monolith-lib-sources:
 	@printf '%s\n' $(LIB_SRCS)
 $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
@@ -11638,6 +11642,7 @@ LINT_GATES := \
     check-zcode-package-registry \
     check-zcode-package-standalone \
     check-package-anatomy \
+    check-capability-closure \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
     check-hotswap-denied-leaves \

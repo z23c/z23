@@ -126,6 +126,7 @@ gate_command() {
         check-cookbook)                    echo './tools/lint/check_cookbook.sh --selftest && ./tools/lint/check_cookbook.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-zcode-package-standalone)    echo './tools/lint/check_zcode_package_standalone.sh' ;;
+        check-capability-closure)          echo './tools/lint/check_capability_closure.sh --selftest && ./tools/lint/check_capability_closure.sh' ;;
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;
         check-coins-lookup-nullcheck)      echo 'tools/scripts/check_coins_lookup_nullcheck.sh' ;;
         check-observability-pairing)       echo '"$ZCL_LINT_BIN_DIR/check_observability_pairing"' ;;
