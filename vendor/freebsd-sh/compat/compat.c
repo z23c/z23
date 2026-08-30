@@ -16,6 +16,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+
+int
+fbsh_eaccess(const char *path, int mode)
+{
+	return faccessat(AT_FDCWD, path, mode, AT_EACCESS);
+}
+
+#elif defined(__linux__)
+
 size_t
 fbsh_strlcpy(char *dst, const char *src, size_t siz)
 {
@@ -36,9 +46,6 @@ fbsh_strlcpy(char *dst, const char *src, size_t siz)
  * designated-initialized by macro so the numbering is correct by
  * construction; the real-time range is positional because glibc's
  * SIGRTMIN/SIGRTMAX are runtime function calls, not constants. */
-#ifndef __linux__
-#error "fbsh compat signal table is written for Linux (NSIG == 65)"
-#endif
 _Static_assert(NSIG == 65, "fbsh compat signal table assumes Linux NSIG 65");
 
 const char *const fbsh_sys_signame[NSIG] = {
@@ -331,3 +338,7 @@ getmode(const void *setp, mode_t mode)
 	}
 	return mode;
 }
+
+#elif !defined(__APPLE__)
+#error "fbsh compat requires either Linux shims or Darwin BSD libc"
+#endif

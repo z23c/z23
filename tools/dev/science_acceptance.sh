@@ -152,7 +152,7 @@ sa_assert_not_live_port() {
 }
 sa_assert_port_free() {
     local p="$1"
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+    if [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]; then
         sa_die "port $p is already LISTENING — refusing (operator port math is wrong)"
     fi
     return 0

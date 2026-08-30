@@ -428,7 +428,7 @@ static const char *fcw_find(const uint8_t *hay, size_t len,
     return NULL;
 }
 
-int test_fastobj_carrier(void)
+static int test_fastobj_carrier_platform_arm(void)
 {
     int failures = 0;
     printf("fastobj_carrier: object-set carrier, offline proof\n");
@@ -1124,7 +1124,7 @@ done:
  * --require-full-isolation, which refuses off Linux (no Landlock/seccomp;
  * the Windows sandbox is unqualified). The fork+pipe drain plumbing has no
  * Windows analogue either, so no case in this group can run. */
-int test_fastobj_carrier(void)
+static int test_fastobj_carrier_platform_arm(void)
 {
     printf("test_fastobj_carrier: SKIP (Windows): confined package builds "
            "require Linux full isolation\n");
@@ -1132,3 +1132,8 @@ int test_fastobj_carrier(void)
 }
 
 #endif /* !_WIN32 */
+
+int test_fastobj_carrier(void)
+{
+    return test_fastobj_carrier_platform_arm();
+}

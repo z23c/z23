@@ -13,6 +13,7 @@
 #endif
 
 #include "platform/private_file.h"
+#include "platform/file_sync.h"
 #include "base/safe_alloc.h"
 
 #include <errno.h>
@@ -858,3 +859,14 @@ bool platform_private_parent_flush(const char *p) {
   return ok;
 }
 #endif
+
+/* One external definition across both platform arms keeps the public symbol
+ * unambiguous to the C23 inventory.  The arm-local descriptor accessors above
+ * remain private implementation details. */
+bool platform_private_file_authority_flush(struct platform_private_file *f) {
+#if defined(_WIN32)
+  return f && FlushFileBuffers(pf_handle(f)) != 0;
+#else
+  return f && platform_authority_sync(pf_fd(f)) == 0;
+#endif
+}

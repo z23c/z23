@@ -176,8 +176,8 @@ static bool flip_build_source(const char *dir)
     return ok;
 }
 
-int test_consensus_db_flip(void);
-int test_consensus_db_flip(void)
+static int test_consensus_db_flip_platform_arm(void);
+static int test_consensus_db_flip_platform_arm(void)
 {
     int failures = 0;
     char err[256];
@@ -520,9 +520,14 @@ int test_consensus_db_flip(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork crash-window flip-proof lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_consensus_db_flip(void)
+static int test_consensus_db_flip_platform_arm(void)
 {
     printf("consensus_db_flip: SKIP (Windows): fork crash-window flip-proof lane\n");
     return 0;
 }
 #endif
+
+int test_consensus_db_flip(void)
+{
+    return test_consensus_db_flip_platform_arm();
+}

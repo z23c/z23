@@ -104,8 +104,8 @@ static int ckr_run_verify_rom_child(const char *dir,
     return WEXITSTATUS(st);
 }
 
-int test_ckpt_recheck(void);
-int test_ckpt_recheck(void)
+static int test_ckpt_recheck_platform_arm(void);
+static int test_ckpt_recheck_platform_arm(void)
 {
     printf("\n=== checkpoint content re-check (verify-rom) tests ===\n");
     int failures = 0;
@@ -228,9 +228,14 @@ int test_ckpt_recheck(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked verify-rom child dispatch lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_ckpt_recheck(void)
+static int test_ckpt_recheck_platform_arm(void)
 {
     printf("ckpt_recheck: SKIP (Windows): forked verify-rom child dispatch lane\n");
     return 0;
 }
 #endif
+
+int test_ckpt_recheck(void)
+{
+    return test_ckpt_recheck_platform_arm();
+}

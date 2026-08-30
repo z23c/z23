@@ -5369,6 +5369,10 @@ FBSH_CPPFLAGS := -DSHELL -DNO_HISTORY -I$(FBSH_GEN_DIR) -I$(FBSH_SH_DIR) \
 	-I$(FBSH_SRC_DIR)/compat \
 	-include $(CURDIR)/$(FBSH_SRC_DIR)/compat/compat.h
 FBSH_VENDOR_CFLAGS := -std=c23 -O2 -w $(FBSH_CPPFLAGS)
+FBSH_LINK_MODE := -static
+ifeq ($(ZCL_HOST_OS),Darwin)
+FBSH_LINK_MODE :=
+endif
 
 FBSH_OBJS := $(addprefix $(FBSH_OBJ_DIR)/,$(addsuffix .o, \
 	$(basename $(notdir $(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) \
@@ -5432,7 +5436,7 @@ $(FBSH_OBJ_DIR)/compat.o: $(FBSH_SRC_DIR)/compat/compat.c \
 
 $(BIN_DIR)/fbsh: $(FBSH_OBJS)
 	@mkdir -p $(@D)
-	$(CC) -std=c23 -O2 -static -o $@ $(FBSH_OBJS)
+	$(CC) -std=c23 -O2 $(FBSH_LINK_MODE) -o $@ $(FBSH_OBJS)
 
 # gen_sha3_windows: one-shot tool that queries a fully-synced reference
 # node and overwrites lib/chain/{include/chain,src}/sha3_windows.{h,c}

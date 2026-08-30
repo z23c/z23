@@ -431,8 +431,8 @@ static int raa_run_child(void (*body)(const char *, const struct sha3_utxo_check
     return -1;  /* killed by a signal — treated as failure */
 }
 
-int test_refold_auto_arm(void);
-int test_refold_auto_arm(void)
+static int test_refold_auto_arm_platform_arm(void);
+static int test_refold_auto_arm_platform_arm(void)
 {
     test_reset_shared_globals();
     printf("\n=== refold_auto_arm tests ===\n");
@@ -554,9 +554,14 @@ int test_refold_auto_arm(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork crash-window refold lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_refold_auto_arm(void)
+static int test_refold_auto_arm_platform_arm(void)
 {
     printf("refold_auto_arm: SKIP (Windows): fork crash-window refold lane\n");
     return 0;
 }
 #endif
+
+int test_refold_auto_arm(void)
+{
+    return test_refold_auto_arm_platform_arm();
+}

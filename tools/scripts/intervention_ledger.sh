@@ -558,15 +558,15 @@ cmd_selftest() {
     local out
     out="$(env "${ENVV[@]}" bash "$SELF" collect 2>&1)" || st_fail "case=baseline collect must exit 0"
     grep -q '"change":"baseline"' "$L" || { cat "$L" >&2; st_fail "case=baseline no baseline line"; }
-    grep '"change":"baseline"' "$L" | grep -q '"attribution":"n/a"' \
+    grep -q '"attribution":"n/a"' <<<"$(grep '"change":"baseline"' "$L")" \
         || { cat "$L" >&2; st_fail "case=baseline first sight must be attribution n/a, never unattributed"; }
     printf '%s' "$out" | grep -q 'events=1 unattributed=0' \
         || { printf '%s\n' "$out" >&2; st_fail "case=baseline must not count the baseline as unattributed"; }
     printf '%s' "$out" | grep -q 'UNATTRIBUTED' \
         && { printf '%s\n' "$out" >&2; st_fail "case=baseline must not shout UNATTRIBUTED on a first observation"; }
-    grep '"change":"baseline"' "$L" | grep -q '"binary_sha256":"[0-9a-f]\{64\}"' \
+    grep -q '"binary_sha256":"[0-9a-f]\{64\}"' <<<"$(grep '"change":"baseline"' "$L")" \
         || { cat "$L" >&2; st_fail "case=baseline must record a real binary digest"; }
-    grep '"change":"baseline"' "$L" | grep -q '"unit_config_sha256":"[0-9a-f]\{64\}"' \
+    grep -q '"unit_config_sha256":"[0-9a-f]\{64\}"' <<<"$(grep '"change":"baseline"' "$L")" \
         || { cat "$L" >&2; st_fail "case=baseline must record the merged unit+drop-in digest"; }
     echo "selftest: ok case=baseline"
 
@@ -592,9 +592,9 @@ cmd_selftest() {
     grep -q '"change":"binary_swap"' "$L" || { cat "$L" >&2; st_fail "case=binary-swap not detected"; }
     grep -q '"change":"binary_running_divergence"' "$L" \
         || { cat "$L" >&2; st_fail "case=binary-swap divergence from the running image not detected"; }
-    grep '"change":"binary_swap"' "$L" | grep -q '"attribution":"unattributed"' \
+    grep -q '"attribution":"unattributed"' <<<"$(grep '"change":"binary_swap"' "$L")" \
         || { cat "$L" >&2; st_fail "case=binary-swap an undeclared swap MUST be unattributed"; }
-    grep '"change":"binary_swap"' "$L" | grep -q '"invocation_id":"INV-AAA"' \
+    grep -q '"invocation_id":"INV-AAA"' <<<"$(grep '"change":"binary_swap"' "$L")" \
         || { cat "$L" >&2; st_fail "case=binary-swap must record the invocation it happened under"; }
     printf '%s' "$out" | grep -q 'UNATTRIBUTED unit=fake.service change=binary_swap' \
         || { printf '%s\n' "$out" >&2; st_fail "case=binary-swap must say so on stderr"; }
@@ -606,7 +606,7 @@ cmd_selftest() {
     printf '# /etc/systemd/user/zclassic23.service\n[Service]\nExecStart=%s\n# /etc/systemd/user/zclassic23.service.d/90-x.conf\n[Service]\nWatchdogSec=0\n' "$BIN" > "$CATF"
     out="$(env "${ENVV[@]}" bash "$SELF" collect 2>&1)" || st_fail "case=config-drift collect must exit 0"
     grep -q '"change":"unit_config"' "$L" || { cat "$L" >&2; st_fail "case=config-drift not detected"; }
-    grep '"change":"unit_config"' "$L" | grep -q '"attribution":"unattributed"' \
+    grep -q '"attribution":"unattributed"' <<<"$(grep '"change":"unit_config"' "$L")" \
         || { cat "$L" >&2; st_fail "case=config-drift an undeclared drop-in edit MUST be unattributed"; }
     echo "selftest: ok case=config-drift-without-restart"
 
@@ -618,7 +618,7 @@ cmd_selftest() {
         || { cat "$L" >&2; st_fail "case=restart ActiveState transition not recorded"; }
     grep -q '"change":"invocation","from":"INV-AAA","to":"INV-BBB"' "$L" \
         || { cat "$L" >&2; st_fail "case=restart InvocationID change not recorded"; }
-    grep '"change":"invocation"' "$L" | grep -q '"service_result":"success"' \
+    grep -q '"service_result":"success"' <<<"$(grep '"change":"invocation"' "$L")" \
         || { cat "$L" >&2; st_fail "case=restart must carry the systemd Result"; }
     echo "selftest: ok case=restart-records-invocation-and-result"
 

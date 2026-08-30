@@ -1135,7 +1135,7 @@ done:
     return failures;
 }
 
-int test_event_log(void)
+static int test_event_log_platform_arm(void)
 {
     printf("\n=== event_log tests ===\n");
     int failures = 0;
@@ -1155,7 +1155,7 @@ int test_event_log(void)
     return failures;
 }
 
-int test_event_log_kill9(void)
+static int test_event_log_kill9_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== event_log kill9 integration proof ===\n");
@@ -1163,7 +1163,7 @@ int test_event_log_kill9(void)
     return failures;
 }
 
-int test_event_log_benchmark(void)
+static int test_event_log_benchmark_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== event_log benchmark integration proof ===\n");
@@ -1173,23 +1173,38 @@ int test_event_log_benchmark(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork+SIGKILL event-log kill9-trial lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_event_log(void)
+static int test_event_log_platform_arm(void)
 {
     printf("event_log: SKIP (Windows): fork+SIGKILL event-log kill9-trial lane\n");
     return 0;
 }
 
-int test_event_log_kill9(void)
+static int test_event_log_kill9_platform_arm(void)
 {
     printf("event_log_kill9: SKIP (Windows): fork+SIGKILL event-log "
            "kill9-trial lane\n");
     return 0;
 }
 
-int test_event_log_benchmark(void)
+static int test_event_log_benchmark_platform_arm(void)
 {
     printf("event_log_benchmark: SKIP (Windows): fork+SIGKILL event-log "
            "kill9-trial lane\n");
     return 0;
 }
 #endif
+
+int test_event_log(void)
+{
+    return test_event_log_platform_arm();
+}
+
+int test_event_log_benchmark(void)
+{
+    return test_event_log_benchmark_platform_arm();
+}
+
+int test_event_log_kill9(void)
+{
+    return test_event_log_kill9_platform_arm();
+}

@@ -1997,7 +1997,7 @@ static int rom_keystone_binding_tests(const char *dir)
     return failures;
 }
 
-int test_consensus_state_snapshot_install(void)
+static int test_consensus_state_snapshot_install_platform_arm(void)
 {
     printf("\n=== consensus_state_snapshot_install ===\n");
     int failures=0; char dir[256];
@@ -2246,6 +2246,32 @@ int test_consensus_state_snapshot_install(void)
     CSI_CHECK("candidate source admission receipt is available",
               consensus_state_artifact_evidence_receipt_digest(
                   artifact,candidate_admission));
+#if defined(__APPLE__)
+    (void)digest_nonzero;
+    (void)candidate_file_digest;
+    (void)candidate_create_sidecar;
+    (void)candidate_retain_staging_writer;
+    (void)candidate_build_thread;
+    (void)candidate_progress_parity;
+    struct consensus_state_candidate_result unavailable_candidate;
+    CSI_CHECK("Darwin candidate staging refuses without O_TMPFILE authority",
+              !candidate_build(artifact,candidate_dirfd,
+                               "candidate.progress.kv",
+                               CONSENSUS_CANDIDATE_FAIL_NONE,
+                               &unavailable_candidate)&&
+              unavailable_candidate.status==
+                  CONSENSUS_CANDIDATE_OUTPUT_ERROR&&
+              strstr(unavailable_candidate.reason,
+                     "staging open failed")!=NULL&&
+              candidate_output_absent(candidate_dirfd,
+                                      "candidate.progress.kv")&&
+              candidate_staging_count(dir)==0);
+    CSI_CHECK("Darwin candidate refusal preserves active generation",
+              active_is(db,&a));
+    consensus_state_artifact_evidence_free(artifact);
+    artifact=NULL;
+    if(candidate_dirfd>=0) close(candidate_dirfd);
+#else
     struct consensus_state_candidate_result reserved;
     CSI_CHECK("candidate API cannot name the active progress store",
               !candidate_build(artifact,candidate_dirfd,"progress.kv",
@@ -2426,6 +2452,7 @@ int test_consensus_state_snapshot_install(void)
     artifact=NULL;
     unlink(candidate_path);
     if(candidate_dirfd>=0) close(candidate_dirfd);
+#endif
 
     b.anchors[0].height = b.height - 1;
     b.anchors[1].height = b.height - 1;
@@ -3825,9 +3852,14 @@ int test_consensus_state_snapshot_install(void)
 }
 #else  /* _WIN32 */
 /* Install-proof fixture is written on the POSIX fstatat/openat/renameat surface; no Windows analogue for the fixture. Skipped loudly rather than faked. */
-int test_consensus_state_snapshot_install(void)
+static int test_consensus_state_snapshot_install_platform_arm(void)
 {
     printf("consensus_state_snapshot_install: SKIP (Windows): install-proof fixture is written on the posix fstatat/openat/renameat surface; no windows analogue for the fixture.\n");
     return 0;
 }
 #endif
+
+int test_consensus_state_snapshot_install(void)
+{
+    return test_consensus_state_snapshot_install_platform_arm();
+}

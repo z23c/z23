@@ -262,9 +262,9 @@ static int test_spawn_capture_real_exit_code(void)
         sigaction(SIGCHLD, &dfl, NULL);
 
         char buf[64] = {0};
-        const char *false_argv[] = { "/bin/false", NULL };
+        const char *false_argv[] = { "/usr/bin/false", NULL };
         int rc_false = zcl_spawn_capture(false_argv, buf, sizeof(buf), 3000);
-        const char *true_argv[] = { "/bin/true", NULL };
+        const char *true_argv[] = { "/usr/bin/true", NULL };
         int rc_true = zcl_spawn_capture(true_argv, buf, sizeof(buf), 3000);
 
         sigaction(SIGCHLD, &old, NULL);   /* restore BEFORE asserting */
@@ -276,9 +276,9 @@ static int test_spawn_capture_real_exit_code(void)
     return failures;
 }
 
-int test_spawn(void);
+static int test_spawn_platform_arm(void);
 
-int test_spawn(void)
+static int test_spawn_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== Spawn Tests ===\n");
@@ -298,9 +298,14 @@ int test_spawn(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's zcl_spawn_detached POSIX process-model fixture (/bin/echo, waitpid ECHILD)
  * cannot run here. Skipped loudly rather than faked. */
-int test_spawn(void)
+static int test_spawn_platform_arm(void)
 {
     printf("spawn: SKIP (Windows): zcl_spawn_detached POSIX process-model fixture (/bin/echo, waitpid ECHILD)\n");
     return 0;
 }
 #endif
+
+int test_spawn(void)
+{
+    return test_spawn_platform_arm();
+}

@@ -149,7 +149,7 @@ iso_assert_port_free() {
     local p="$1"
     # ss -tlnH: TCP, listening, numeric, no header. Match the exact
     # local port so we don't false-positive on a substring.
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+    if [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]; then
         iso_die "port $p is already LISTENING — refusing (operator port math is wrong)"
     fi
     return 0
@@ -417,7 +417,7 @@ iso_wait_peer_listen() {
             echo "isolated_node_env: peer node exited (see $ISO_PEER_DD/node.log)" >&2
             return 1
         fi
-        ss -tlnH "sport = :$ISO_PEER_PORT" 2>/dev/null | grep -q . && return 0
+        [ -n "$(ss -tlnH "sport = :$ISO_PEER_PORT" 2>/dev/null)" ] && return 0
         sleep 0.5
     done
     return 1

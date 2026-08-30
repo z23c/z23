@@ -186,7 +186,7 @@ static bool wbs_write_file_atomic(const char *path,
 
     bool written = (len == 0 || platform_private_file_write_at(
                                   &staging, buf, len, 0)) &&
-                   platform_private_file_flush(&staging);
+                   platform_private_file_authority_flush(&staging);
     if (!written) {
         (void)platform_private_file_retire(&staging, tmp);
         platform_private_file_close(&staging);

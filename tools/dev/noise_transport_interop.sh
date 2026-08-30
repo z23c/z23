@@ -138,7 +138,7 @@ nt_wait_port_free() {
     local p="$1" deadline
     deadline=$(( $(date +%s) + 30 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        ss -tlnH "sport = :$p" 2>/dev/null | grep -q . || return 0
+        [ -z "$(ss -tlnH "sport = :$p" 2>/dev/null)" ] && return 0
         sleep 0.2
     done
     return 1

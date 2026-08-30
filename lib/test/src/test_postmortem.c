@@ -131,8 +131,14 @@ static int test_signal_handler_capsule(void)
             char proc_path[576];
             snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt",
                      entries[0].path);
+#if defined(__linux__)
             PM_CHECK("signal capsule captures proc status",
                      file_contains(proc_path, "Name:"));
+#else
+            PM_CHECK("signal capsule records proc status limitation",
+                     file_contains(proc_path,
+                                   "/proc/self/status is Linux-only"));
+#endif
             char manifest_path[576];
             snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json",
                      entries[0].path);
@@ -212,8 +218,14 @@ static int test_boot_postmortem_install(void)
             char proc_path[576];
             snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt",
                      entries[0].path);
+#if defined(__linux__)
             PM_CHECK("boot postmortem proc status captured",
                      file_contains(proc_path, "Name:"));
+#else
+            PM_CHECK("boot postmortem proc status limitation recorded",
+                     file_contains(proc_path,
+                                   "/proc/self/status is Linux-only"));
+#endif
             char log_path[576];
             snprintf(log_path, sizeof(log_path), "%s/log.txt",
                      entries[0].path);
@@ -303,8 +315,14 @@ static int test_boot_postmortem_restart_compresses_prior_sigsegv(void)
         char proc_path[576];
         snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt",
                  entries[0].path);
+#if defined(__linux__)
         PM_CHECK("boot restart proc status captured",
                  file_contains(proc_path, "Name:"));
+#else
+        PM_CHECK("boot restart proc status limitation recorded",
+                 file_contains(proc_path,
+                               "/proc/self/status is Linux-only"));
+#endif
         char log_path[576];
         snprintf(log_path, sizeof(log_path), "%s/log.txt",
                  entries[0].path);
@@ -497,7 +515,7 @@ static int test_capsule_compress(void)
     return failures;
 }
 
-int test_postmortem(void)
+static int test_postmortem_platform_arm(void)
 {
     /* monolith isolation: a prior group leaves the node fatal-signal handlers
      * installed, which makes postmortem_install() refuse (it requires SIG_DFL)
@@ -653,10 +671,15 @@ int test_postmortem(void)
 /* The postmortem capsule machinery is POSIX fatal-signal based (sigaction
  * handlers, fork-and-raise children, core dumps). AGENTS.md records
  * signal-context self-backtraces as unavailable on the Windows lane. */
-int test_postmortem(void)
+static int test_postmortem_platform_arm(void)
 {
     printf("postmortem: SKIP (Windows): POSIX fatal-signal capsule lane "
            "(sigaction + fork-and-raise) has no Windows analogue\n");
     return 0;
 }
 #endif
+
+int test_postmortem(void)
+{
+    return test_postmortem_platform_arm();
+}

@@ -3781,7 +3781,7 @@ static int test_shadow_protocol_contract(void)
     return failures;
 }
 
-int test_zcode_score_receipt(void)
+static int test_zcode_score_receipt_platform_arm(void)
 {
     int failures = test_score_happy_path();
     printf("=== zcode_score_receipt: %d failures ===\n", failures);
@@ -3820,7 +3820,7 @@ int test_zcode_score_receipt_shadow(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked score-receipt child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_zcode_score_receipt(void)
+static int test_zcode_score_receipt_platform_arm(void)
 {
     printf("zcode_score_receipt: SKIP (Windows): forked score-receipt child lane\n");
     return 0;
@@ -3842,3 +3842,8 @@ ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_shadow)
 
 #undef ZCL_SCORE_RECEIPT_WIN_SKIP
 #endif
+
+int test_zcode_score_receipt(void)
+{
+    return test_zcode_score_receipt_platform_arm();
+}

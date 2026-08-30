@@ -310,8 +310,8 @@ static void bf_teardown(const char *dir, struct main_state *ms,
     test_cleanup_tmpdir(dir);
 }
 
-int test_body_fetch_stage(void);
-int test_body_fetch_stage(void)
+static int test_body_fetch_stage_platform_arm(void);
+static int test_body_fetch_stage_platform_arm(void)
 {
     printf("\n=== body_fetch_stage tests ===\n");
     int failures = 0;
@@ -908,9 +908,14 @@ int test_body_fetch_stage(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork+SIGKILL body-fetch crash-window lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_body_fetch_stage(void)
+static int test_body_fetch_stage_platform_arm(void)
 {
     printf("body_fetch_stage: SKIP (Windows): fork+SIGKILL body-fetch crash-window lane\n");
     return 0;
 }
 #endif
+
+int test_body_fetch_stage(void)
+{
+    return test_body_fetch_stage_platform_arm();
+}

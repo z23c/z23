@@ -328,7 +328,7 @@ cmd_selftest() {
         export ZCL_PUBLIC_SMOKE_FETCH_CMD="case \"\$URL\" in *api*) cp '$ST_TMP/good.json' \"\$OUT\";; *) cp '$ST_TMP/good.html' \"\$OUT\";; esac; echo 200"
         bash "$SELF" >/dev/null 2>&1
     ) || st_fail "case=streak-survives-rotation recovery must exit 0"
-    tail -n1 "$f" | grep -q '"unreachable_streak":0' \
+    grep -q '"unreachable_streak":0' <<<"$(tail -n1 "$f")" \
         || { tail -n1 "$f" >&2; st_fail "case=streak-survives-rotation recovery must reset the streak"; }
     echo "selftest: ok case=streak-survives-rotation"
 
@@ -336,7 +336,7 @@ cmd_selftest() {
     #    at staging must not launder a production outage.
     env "ZCL_PUBLIC_SMOKE_LEDGER_DIR=$ST_TMP/d" "ZCL_PUBLIC_BASE=https://other.invalid" \
         ZCL_PUBLIC_SMOKE_FETCH_CMD="exit 7" bash "$SELF" >/dev/null 2>&1 || true
-    tail -n1 "$f" | grep -q '"base":"https://other.invalid","reachable":false,"unreachable_streak":1' \
+    grep -q '"base":"https://other.invalid","reachable":false,"unreachable_streak":1' <<<"$(tail -n1 "$f")" \
         || { tail -n1 "$f" >&2; st_fail "case=per-base-streak a second endpoint must not inherit the first's streak"; }
     echo "selftest: ok case=per-base-streak"
 

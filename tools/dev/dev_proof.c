@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,22 @@ static void proof_why(char *why, size_t why_len, const char *message)
 {
     if (why && why_len)
         (void)snprintf(why, why_len, "%s", message ? message : "unknown");
+}
+
+/* Same contract as proof_why, for a refusal that can name the exact thing it
+ * refused over. A bare code makes the reader open this file and hand-check a
+ * twenty-entry list; the missing path plus the command that produces it is the
+ * whole diagnosis. */
+static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
+{
+    if (!why || !why_len)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(why, why_len, fmt, ap);
+    va_end(ap);
 }
 
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
@@ -789,7 +806,12 @@ static bool generation_prepare(const struct proof_paths *paths,
             (int)sizeof(bin_dir) ||
         !platform_private_directory_ensure(build_dir) ||
         !platform_private_directory_ensure(bin_dir)) {
-        proof_why(why, why_len, "proof_generation_dependency_unavailable");
+        /* Distinct from the dependency loop below: nothing is missing from
+         * the checkout here, the generation's own build tree could not be
+         * created. Conflating the two sent a reader hunting a vendored
+         * archive that was present all along. */
+        proof_whyf(why, why_len, "proof_generation_build_dir_unwritable:%s",
+                   build_dir);
         return false;
     }
     for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++) {
@@ -800,7 +822,15 @@ static bool generation_prepare(const struct proof_paths *paths,
                      dependencies[i]) >= (int)sizeof(target) ||
             !dependency_parent_ensure(target) ||
             !dependency_materialize(source, target)) {
-            proof_why(why, why_len, "proof_generation_dependency_unavailable");
+            /* vendor/ entries come from the vendored-archive build; the
+             * git-hook pair comes from arming the clone. Naming the target
+             * turns a class into one command the reader can run. */
+            const char *fix = strncmp(dependencies[i], "vendor/", 7) == 0
+                                  ? "make vendor"
+                                  : "make install-hooks";
+            proof_whyf(why, why_len,
+                       "proof_generation_dependency_unavailable:%s (%s)",
+                       dependencies[i], fix);
             return false;
         }
     }
@@ -1187,8 +1217,7 @@ static bool test_depfiles_prepare(const struct proof_paths *paths,
         !test_epoch_pointer_prepare(paths, generation, relative, pointer_root))
         return false;
     uint8_t count_le[8];
-    for (size_t i = 0; i < sizeof(count_le); i++)
-        count_le[i] = (uint8_t)(((uint64_t)count) >> (i * 8));
+    zcl_write_u64_le(count_le, (uint64_t)count);
     sha3_256_write(&root, count_le, sizeof(count_le));
     sha3_256_write(&root, pointer_root, sizeof(pointer_root));
     sha3_256_finalize(&root, depfile_root);

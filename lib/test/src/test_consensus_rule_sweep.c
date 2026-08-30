@@ -252,7 +252,7 @@ static bool tool_digest(uint8_t out[32], bool *present)
 
 /* ── the group ────────────────────────────────────────────────────────────*/
 
-int test_consensus_rule_sweep(void)
+static int test_consensus_rule_sweep_platform_arm(void)
 {
     int failures = 0;
     printf("consensus_rule_sweep (forward-facing consensus schedule digest)\n");
@@ -638,9 +638,14 @@ int test_consensus_rule_sweep(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork/exec rule-sweep child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_consensus_rule_sweep(void)
+static int test_consensus_rule_sweep_platform_arm(void)
 {
     printf("consensus_rule_sweep: SKIP (Windows): fork/exec rule-sweep child lane\n");
     return 0;
 }
 #endif
+
+int test_consensus_rule_sweep(void)
+{
+    return test_consensus_rule_sweep_platform_arm();
+}

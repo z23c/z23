@@ -12,6 +12,7 @@
 #include "rpc/rpc_timeout.h"
 #include "event/event.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
@@ -299,7 +300,7 @@ static int test_sweep_no_expiries(void)
 
 /* ── Sweep: single expiry kills + emits event ──────────────── */
 
-static int g_tmo_observed = 0;
+static _Atomic int g_tmo_observed = 0;
 static char g_tmo_payload[256];
 
 static void timeout_observer(enum event_type type, uint32_t peer_id,
@@ -307,11 +308,13 @@ static void timeout_observer(enum event_type type, uint32_t peer_id,
                               void *ctx)
 {
     (void)type; (void)peer_id; (void)ctx;
-    g_tmo_observed++;
     if (payload && payload_len > 0 && payload_len < sizeof(g_tmo_payload)) {
         memcpy(g_tmo_payload, payload, payload_len);
         g_tmo_payload[payload_len] = '\0';
     }
+    /* Publish the payload bytes to the watchdog test's polling thread. */
+    (void)atomic_fetch_add_explicit(&g_tmo_observed, 1,
+                                    memory_order_release);
 }
 
 static int test_sweep_expiry_kills_and_emits(void)
@@ -534,16 +537,21 @@ static int test_watchdog_thread_kills(void)
         ASSERT(s >= 0);
         rpc_timeout_set_method(&mgr, s, "slowmethod");
 
-        /* Wait ~200ms for the watchdog to fire at least once past
-         * the 50ms deadline.  We poll the "killed" flag so the test
-         * exits as soon as the kill lands. */
+        /* Wait up to 500ms for both sides of the watchdog action: the slot
+         * transition and the event publication. The killed bit is set just
+         * before event_emit(), so observing only that bit is not sufficient
+         * synchronization with the observer payload. */
         for (int i = 0; i < 50; i++) {
-            if (rpc_timeout_was_killed(&mgr, s)) break;
+            if (rpc_timeout_was_killed(&mgr, s) &&
+                atomic_load_explicit(&g_tmo_observed,
+                                     memory_order_acquire) >= 1)
+                break;
             struct timespec req = { .tv_sec = 0, .tv_nsec = 10 * 1000000L };
             nanosleep(&req, NULL);
         }
         ASSERT(rpc_timeout_was_killed(&mgr, s));
-        ASSERT(g_tmo_observed >= 1);
+        ASSERT(atomic_load_explicit(&g_tmo_observed,
+                                   memory_order_acquire) >= 1);
         ASSERT(strstr(g_tmo_payload, "method=slowmethod") != NULL);
 
         rpc_timeout_stop_watchdog(&mgr);

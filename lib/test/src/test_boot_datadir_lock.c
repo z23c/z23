@@ -68,7 +68,7 @@ static bool bdl_write_file(const char *path, const char *text)
     return fclose(f) == 0;
 }
 
-int test_boot_datadir_lock(void)
+static int test_boot_datadir_lock_platform_arm(void)
 {
     int failures = 0;
 
@@ -436,9 +436,14 @@ int test_boot_datadir_lock(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked datadir-lock contention child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_boot_datadir_lock(void)
+static int test_boot_datadir_lock_platform_arm(void)
 {
     printf("boot_datadir_lock: SKIP (Windows): forked datadir-lock contention child lane\n");
     return 0;
 }
 #endif
+
+int test_boot_datadir_lock(void)
+{
+    return test_boot_datadir_lock_platform_arm();
+}

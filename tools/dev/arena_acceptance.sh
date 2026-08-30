@@ -237,7 +237,7 @@ aa_assert_not_live_port() {
 }
 aa_assert_port_free() {
     local p="$1"
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+    if [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]; then
         aa_die "port $p is already LISTENING — refusing (operator port math is wrong)"
     fi
     return 0

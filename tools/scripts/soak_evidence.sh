@@ -515,8 +515,9 @@ cmd_selftest() {
         fi
     done
     st_judge "$f" 168 "$fresh" MET "" 0 full-green-window
-    ZCL_SOAK_EVIDENCE_DIR="$f" ZCL_SOAK_NOW="$fresh" bash "$SELF" judge --window-hours 168 2>&1 \
-        | grep -q 'restarts_in_window=1 ambiguous_restarts=1 operator_interventions=0' \
+    soak_judge_out="$(ZCL_SOAK_EVIDENCE_DIR="$f" ZCL_SOAK_NOW="$fresh" bash "$SELF" judge --window-hours 168 2>&1)" \
+        || st_fail "case=full-green-window judge itself exited non-zero"
+    grep -q 'restarts_in_window=1 ambiguous_restarts=1 operator_interventions=0' <<<"$soak_judge_out" \
         || st_fail "case=full-green-window expected restarts_in_window=1 ambiguous_restarts=1 operator_interventions=0"
 
     # A2) Timer-jitter boundary: the first selected sample is 2 minutes
@@ -529,8 +530,9 @@ cmd_selftest() {
         st_line "$f/evidence.jsonl" $((base + i * 3600)) 0 1 "$aet" 1500000
     done
     st_judge "$f" 168 "$fresh" MET "" 0 window-slack-ok
-    ZCL_SOAK_EVIDENCE_DIR="$f" ZCL_SOAK_NOW="$fresh" bash "$SELF" judge --window-hours 168 2>&1 \
-        | grep -q 'window_covered_sec=604680' \
+    soak_judge_out="$(ZCL_SOAK_EVIDENCE_DIR="$f" ZCL_SOAK_NOW="$fresh" bash "$SELF" judge --window-hours 168 2>&1)" \
+        || st_fail "case=window-slack-ok judge itself exited non-zero"
+    grep -q 'window_covered_sec=604680' <<<"$soak_judge_out" \
         || st_fail "case=window-slack-ok expected exact covered seconds"
 
     # A3) Same boundary, but one second beyond the explicit 15-minute
@@ -691,8 +693,9 @@ cmd_selftest() {
         fi
     done
     st_judge "$f" 168 "$fresh" MET "" 0 ambiguous-reset-climb
-    ZCL_SOAK_EVIDENCE_DIR="$f" ZCL_SOAK_NOW="$fresh" bash "$SELF" judge --window-hours 168 2>&1 \
-        | grep -q 'restarts_in_window=2 ambiguous_restarts=2 operator_interventions=0' \
+    soak_judge_out="$(ZCL_SOAK_EVIDENCE_DIR="$f" ZCL_SOAK_NOW="$fresh" bash "$SELF" judge --window-hours 168 2>&1)" \
+        || st_fail "case=ambiguous-reset-climb judge itself exited non-zero"
+    grep -q 'restarts_in_window=2 ambiguous_restarts=2 operator_interventions=0' <<<"$soak_judge_out" \
         || st_fail "case=ambiguous-reset-climb expected restarts_in_window=2 ambiguous_restarts=2 operator_interventions=0"
 
     # G) collect with INJECTED commands (no live nodes): both fake RPCs
