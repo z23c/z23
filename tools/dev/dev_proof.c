@@ -458,6 +458,28 @@ static bool worktree_exact(const char *root, const char *local,
     return true;
 }
 
+static bool dependency_parent_ensure(const char *path)
+{
+    char parent[PATH_MAX];
+    if (!path || snprintf(parent, sizeof(parent), "%s", path) >=
+                     (int)sizeof(parent))
+        return false;
+    char *leaf = strrchr(parent, '/');
+    if (!leaf || leaf == parent) return false;
+    *leaf = 0;
+    for (char *p = parent + 1;; p++) {
+        if (*p != '/' && *p != 0) continue;
+        char saved = *p;
+        *p = 0;
+        struct stat st;
+        bool ok = lstat(parent, &st) == 0
+            ? S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)
+            : errno == ENOENT && mkdir(parent, 0700) == 0;
+        *p = saved;
+        if (!ok || saved == 0) return ok;
+    }
+}
+
 static bool dependency_materialize(const char *source, const char *target)
 {
     struct stat source_st, target_st;
@@ -586,6 +608,7 @@ static bool generation_prepare(const struct proof_paths *paths,
                      dependencies[i]) >= (int)sizeof(source) ||
             snprintf(target, sizeof(target), "%s/%s", generation,
                      dependencies[i]) >= (int)sizeof(target) ||
+            !dependency_parent_ensure(target) ||
             !dependency_materialize(source, target)) {
             proof_why(why, why_len, "proof_generation_dependency_unavailable");
             return false;
