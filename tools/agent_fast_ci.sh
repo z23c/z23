@@ -129,9 +129,11 @@ resolve_fast_jobs() {
 # so logical CPU count alone is not a safe admission limit on a unified-memory
 # Mac.  Keep compile and test concurrency independently overridable.  Darwin's
 # default lends at most half of physical memory to test children at a
-# conservative 2 GiB per worker; consensus/node work and the OS retain the
-# other half. Unknown memory falls back to four workers, never an optimistic
-# CPU-only guess.
+# conservative 8 GiB per worker. Some registered lint groups launch nested
+# compiler/linker work and measurably exceed the footprint of an ordinary unit
+# group; on a 16 GiB unified-memory Mac they require an exclusive lane.
+# Consensus/node work and the OS retain the other half. Unknown memory falls
+# back to one worker, never an optimistic CPU-only guess.
 resolve_fast_test_jobs() {
     local mem_bytes memory_jobs
     resolve_fast_jobs
@@ -140,10 +142,10 @@ resolve_fast_test_jobs() {
         if [ "$(uname -s)" = Darwin ]; then
             mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
             case "$mem_bytes" in
-                ''|*[!0-9]*) memory_jobs=4 ;;
-                *) memory_jobs=$((mem_bytes / 2 / 2147483648)) ;;
+                ''|*[!0-9]*) memory_jobs=1 ;;
+                *) memory_jobs=$((mem_bytes / 2 / 8589934592)) ;;
             esac
-            [ "$memory_jobs" -ge 2 ] || memory_jobs=2
+            [ "$memory_jobs" -ge 1 ] || memory_jobs=1
             [ "$FAST_TEST_JOBS" -le "$memory_jobs" ] ||
                 FAST_TEST_JOBS="$memory_jobs"
         fi
