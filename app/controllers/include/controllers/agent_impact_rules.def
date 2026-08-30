@@ -2837,3 +2837,10 @@ AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib
  * change to that seam's locking, truncation or fsync behaviour changes what
  * this module's recovery rule actually does. */
 AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")
+/* Test-group determinism: the classifier, the perturbation vocabulary, the
+ * per-group verdict, and the scan that drives them. The lint gate rides along
+ * because the ratchet it guards is the whole point — the recorded set of
+ * groups that do not reproduce may only shrink, and a change to the classifier
+ * that quietly reclassifies a group would move that record without anyone
+ * measuring anything. */
+AGENT_IMPACT_RULE("lib/determinism/src/*.c|lib/determinism/include/determinism/*.h|lib/test/src/test_determinism.c|tools/determinism_scan.c|tools/lint/check_determinism_ratchet.sh|tools/lint/determinism_baseline.txt", "determinism make_lint_gates")
