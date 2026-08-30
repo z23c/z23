@@ -2818,8 +2818,9 @@ void zcl_native_handle_dev_begin(
     (void)json_push_kv_str(&reply->data, "next_command", next);
 }
 
-void zcl_native_handle_dev_loop_ensure(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static void dev_loop_ensure(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    bool wait_ready)
 {
     enum zcl_devloop_publish_mode requested_mode;
     const char *requested_mode_name = NULL;
@@ -2861,12 +2862,12 @@ void zcl_native_handle_dev_loop_ensure(
                 evidence);
             return;
         }
-        for (int i = 0; i < 250 && !existing.ready; i++) {
+        for (int i = 0; wait_ready && i < 250 && !existing.ready; i++) {
             platform_sleep_ms(20);
             if (!dev_watcher_active(root, &existing))
                 break;
         }
-        if (existing.pid > 1 && existing.ready) {
+        if (existing.pid > 1 && (existing.ready || !wait_ready)) {
             dev_emit_loop_status(root, reply);
             (void)json_push_kv_bool(&reply->data, "created", false);
             return;
@@ -2951,6 +2952,16 @@ void zcl_native_handle_dev_loop_ensure(
         _exit(rc == 0 ? 0 : 1);
     }
 #endif
+    if (!wait_ready) {
+#if defined(_WIN32)
+        platform_process_close(&child);
+#endif
+        (void)json_push_kv_str(&reply->data, "schema",
+                               "zcl.dev_loop_start.v1");
+        (void)json_push_kv_bool(&reply->data, "created", true);
+        (void)json_push_kv_str(&reply->data, "root", root);
+        return;
+    }
     struct dev_watcher_info started = {0};
     for (int i = 0; i < 250 &&
          (!dev_watcher_active(root, &started) || !started.ready); i++)
@@ -2974,6 +2985,18 @@ void zcl_native_handle_dev_loop_ensure(
     dev_emit_loop_status(root, reply);
     (void)json_push_kv_bool(&reply->data, "created", true);
     (void)json_push_kv_str(&reply->data, "root", root);
+}
+
+void zcl_native_handle_dev_loop_ensure(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    dev_loop_ensure(request, reply, true);
+}
+
+void zcl_native_handle_dev_loop_start_async(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    dev_loop_ensure(request, reply, false);
 }
 
 void zcl_native_handle_dev_loop_status(
