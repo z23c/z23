@@ -168,6 +168,10 @@ static bool spt_poll_blocker(const char *id, int timeout_ms)
 }
 #endif /* !__APPLE__ */
 
+/* Used only by the Darwin arm of the restart contract below. Defining it
+ * unconditionally makes it an unused static on every other host, which is
+ * -Werror=unused-function. */
+#if defined(__APPLE__)
 static bool spt_poll_worker_state(const char *child_name, int state,
                                   int timeout_ms)
 {
@@ -182,6 +186,7 @@ static bool spt_poll_worker_state(const char *child_name, int state,
     }
     return false;
 }
+#endif /* __APPLE__ */
 
 static const char *const k_staged_children[] = {
     "staged.header_admit",
