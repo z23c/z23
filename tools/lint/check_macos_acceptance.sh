@@ -127,6 +127,12 @@ check_root() {
         echo "  person would type. Restore the 'macos-acceptance:' target." >&2
         return 1
     fi
+    if ! grep -Fq 'ONLY="$groups" EXACT_ONLY_MATCHED="$groups"' "$ACCEPT"; then
+        echo "  $GATE: FAIL — $ACCEPT does not bind its derived union equally" >&2
+        echo "  to t-fast-exact's parse guard and exact selector; the native" >&2
+        echo "  target could validate 37 groups while executing an empty set." >&2
+        return 1
+    fi
 
     printf '%s\n' "$out" | sed 's/^/  /'
     echo "  $GATE: OK — capability matrix validates; ${group_n} evidence group(s), every one registered."

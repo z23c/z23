@@ -124,7 +124,10 @@ case "${1:---check}" in
         printf 'macos-acceptance: running %s exact groups derived from %s\n' "$count" "${MATRIX#"$REPO_ROOT/"}"
         log="$(mktemp "${TMPDIR:-/tmp}/z23-macos-acceptance.XXXXXX")"
         trap 'rm -f "$log"' EXIT
-        if make --no-print-directory t-fast-exact ONLY="$groups" T_FAST_EXACT_ARGS=--no-cache >"$log" 2>&1; then
+        if make --no-print-directory t-fast-exact \
+            ONLY="$groups" EXACT_ONLY_MATCHED="$groups" \
+            T_FAST_EXACT_ARGS=--no-cache \
+            >"$log" 2>&1; then
             sed -n '1,$p' "$log"
         else
             rc=$?
