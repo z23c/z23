@@ -18,11 +18,13 @@ if [ -z "$CAP" ]; then
         git grep -l '"artifact_id":"zcl.code_capability_inventory.v1"' -- \
             2>/dev/null | while IFS= read -r candidate; do
             first="$(sed -n '1p' "$candidate")"
-            printf '%s\n' "$first" | grep -Fq \
-                '"generated_artifact_schema":"zcl.generated_artifact.v1"' ||
+            grep -Fq \
+                '"generated_artifact_schema":"zcl.generated_artifact.v1"' \
+                <<<"$first" ||
                 continue
-            printf '%s\n' "$first" | grep -Fq \
-                '"artifact_id":"zcl.code_capability_inventory.v1"' ||
+            grep -Fq \
+                '"artifact_id":"zcl.code_capability_inventory.v1"' \
+                <<<"$first" ||
                 continue
             printf '%s\n' "$candidate"
         done
@@ -89,7 +91,7 @@ check_artifacts()
         '"path":"tools/lint/arm_symbol_single_baseline.txt"' \
         '"artifact_id":"zcl.arm_symbol_single_baseline.v1"' \
         '"asserts":"multi_arm_definition(path,symbol)"'; do
-        printf '%s\n' "$meta" | grep -Fq "$claim" ||
+        grep -Fq "$claim" <<<"$meta" ||
             unproven "$CAP lacks declared generated-artifact edge: $claim"
     done
 
@@ -156,10 +158,11 @@ check_artifacts()
         symbol="$(printf '%s\n' "$line" |
             sed -n 's/.*"symbol":"\([^"]*\)".*/\1/p')"
         grep -Fqx "$path"$'\t'"$symbol" "$WORK/baseline.tsv" || continue
-        printf '%s\n' "$line" |
-            grep -Fq '"multi_arm_definition":true,"definition_scope":"preprocessor_arm_UNPROVEN"' ||
+        grep -Fq \
+            '"multi_arm_definition":true,"definition_scope":"preprocessor_arm_UNPROVEN"' \
+            <<<"$line" ||
             contradiction "$path:$symbol is reported as a constant stub without per-arm scope"
-        printf '%s\n' "$line" | grep -Fq '"verdict":"UNPROVEN"' ||
+        grep -Fq '"verdict":"UNPROVEN"' <<<"$line" ||
             contradiction "$path:$symbol constant arm lacks an UNPROVEN verdict"
     done < <(grep '^{"record":"untested_invariant".*"constant_return_body":true' \
                    "$CAP" || true)

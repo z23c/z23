@@ -93,6 +93,31 @@ is_the_rail() {
     esac
 }
 
+# Preserve string literals while removing C comments. Documentation may show
+# the old statement shape so long as no compiled token carries that literal.
+strip_c_comments() {
+    awk '
+    BEGIN { inc = 0; inq = 0 }
+    {
+        out = ""; n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1); d = substr($0, i, 2)
+            if (inc) { if (d == "*/") { inc = 0; i++ } ; continue }
+            if (inq) {
+                out = out c
+                if (c == "\\") { out = out substr($0, i + 1, 1); i++; continue }
+                if (c == "\"") { inq = 0 }
+                continue
+            }
+            if (d == "/*") { inc = 1; i++; continue }
+            if (d == "//") { break }
+            if (c == "\"") { inq = 1; out = out c; continue }
+            out = out c
+        }
+        print out
+    }' "$@"
+}
+
 # ── --selftest ───────────────────────────────────────────────────────────
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
@@ -191,6 +216,9 @@ if [ "${1:-}" = "--selftest" ]; then
     plant innocent.c 'static const char *k = " FROM peers WHERE ip=?";'
     expect pass "a continuation fragment with no opening keyword" ""
 
+    plant innocent.c '/* static const char *k = "SELECT id FROM peers"; */'
+    expect pass "a SQL example inside a C comment" ""
+
     plant innocent.c 'void f(struct qb *q) { qb_select(q, QB_T_peers); }'
     expect pass "a file that uses the query builder" ""
 
@@ -213,7 +241,7 @@ if [ "${1:-}" = "--selftest" ]; then
     fi
     echo "  selftest ok: an empty scan set fails LOUD (exit 2), never clean"
 
-    echo "[$GATE] SELFTEST PASS (SELECT/INSERT/UPDATE/DELETE/split literals fail; baselined tolerated; stale row and regression fail; lowercase token, continuation fragment, builder caller and the builder itself pass; hollow scan exits 2)"
+    echo "[$GATE] SELFTEST PASS (SELECT/INSERT/UPDATE/DELETE/split literals fail; baselined tolerated; stale row and regression fail; lowercase token, continuation fragment, commented SQL, builder caller and the builder itself pass; hollow scan exits 2)"
     exit 0
 fi
 
@@ -241,9 +269,11 @@ gate_require_scanned "${#scan_files[@]}" "$FILE_FLOOR" "$GATE" \
     "every scanned file was the builder itself — impossible"
 
 # ── Detect ───────────────────────────────────────────────────────────────
-mapfile -t FOUND < <(
-    gate_grep -lE "$RE_SQL_LITERAL" -- "${scan_files[@]}" | sed '/^$/d' | sort -u
-)
+FOUND=()
+for f in "${scan_files[@]}"; do
+    hits="$(strip_c_comments "$f" | grep -E "$RE_SQL_LITERAL" || true)"
+    [ -n "$hits" ] && FOUND+=("$f")
+done
 
 declare -A BASELINED=()
 gate_load_list_file "$BASELINE" BASELINED baseline_count
