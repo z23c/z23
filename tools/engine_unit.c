@@ -494,6 +494,22 @@ static const char *delivery_text(const struct engine_vendor *v)
 "what you wrote to disk, and that is what the gate is run against.\n";
 }
 
+/* The authored stance for a territory, or NULL when nobody has written one.
+ * lib/engine/include/engine/personas.def is the only place one exists, and
+ * check-persona-resolves keeps every row pointing at things that still do.
+ * A stance is pasted into a prompt and read nowhere else: nothing branches
+ * on it and no verdict, gate or receipt is affected by whether one exists. */
+static const char *persona_stance(const char *territory)
+{
+    if (!territory || !territory[0])
+        return NULL;
+#define PERSONA(t, stance, evidence) \
+    if (strcmp(territory, (t)) == 0) return (stance);
+#include "engine/personas.def"
+#undef PERSONA
+    return NULL;
+}
+
 static char *compose_prompt(const struct unit_opts *o,
                             const struct engine_vendor *v, const char *task,
                             const char *brief, const char *repair_note)
@@ -532,6 +548,29 @@ static char *compose_prompt(const struct unit_opts *o,
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
     }
+
+    /* The authored half. The brief above is measured and regenerates itself;
+     * this does not, and is the only thing in the prompt that somebody wrote
+     * down about the territory rather than derived from it. It is kept apart
+     * from the brief and labelled as authored so the model can tell which
+     * claims a re-run would re-check and which are a standing decision. */
+    const char *stance = persona_stance(o->territory);
+    if (stance) {
+        int sn = snprintf(p + n, cap - (size_t)n,
+            "# What %s refuses\n\n"
+            "This one is authored, not measured. It is a standing decision\n"
+            "about what this territory must never become — the kind of thing\n"
+            "no call graph can derive — and it holds whether or not the gate\n"
+            "would catch a violation. Treat it as a constraint on the change.\n"
+            "\n%s\n\n",
+            o->territory, stance);
+        if (sn < 0 || (size_t)sn >= cap - (size_t)n) {
+            free(p);
+            LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
+        }
+        n += sn;
+    }
+
     int m;
     if (o->no_group) {
         m = snprintf(p + n, cap - (size_t)n,

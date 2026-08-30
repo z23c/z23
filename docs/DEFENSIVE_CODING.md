@@ -396,6 +396,31 @@ assert green).
   baseline from 67 rows to 62: five of them were headers whose only SQL was
   in prose.
 
+- **Gate #11d: `check-persona-resolves`** (HARD, no baseline) — every row in
+  `lib/engine/include/engine/personas.def` must still point at things that
+  exist. A persona is the one piece of prose this project keeps about a
+  territory, and it is allowed to exist only because it carries what no index
+  can derive: an authored refusal. Everything else a territory brief reports
+  is regenerated from the code index on every call, exactly so a written copy
+  cannot go stale while still reading as true — see the long comment in
+  `lib/territory/include/territory/territory.h`. Writing a stance down buys
+  that staleness problem back, and this gate is the price. Each row's
+  TERRITORY must be a directory holding at least one tracked `.c` or `.h`
+  (the tree itself is the witness, the same independent one
+  `config/lib_module_order.def` uses for its set — comparing two `.def` files
+  would only prove they agree with each other), and each row's EVIDENCE must
+  be a tracked file: a stance whose reasoning was deleted is one nobody is
+  holding to any more. A duplicate territory, an empty or one-word stance,
+  and a stance long enough to be a summary rather than a refusal all fail.
+  There is deliberately **no baseline** — a row that stopped being true is
+  not a debt to ratchet down, it is a false statement, and the fix is to
+  correct or delete it in the same change. A persona grants no authority: it
+  is pasted into a dispatched unit's prompt and read by nothing else. Impl:
+  `tools/lint/check_persona_resolves.sh`, with a mandatory `--selftest` that
+  plants an unknown territory, a directory holding no C, deleted evidence, a
+  duplicate row and an unusably short stance, and requires a rejection on
+  every one, plus an empty `.def` that must exit 2 rather than read as clean.
+
 - **Gate #12: `check-long-functions`** — flags any top-level function whose
   body spans >500 lines. Two tiers (a split Gate E1 no longer uses — E1 is
   one policy for all production C now): ENFORCED (HARD, fails the build) covers
@@ -1105,6 +1130,7 @@ add/remove a gate.
 - `check-model-ar-lifecycle`
 - `check-model-sql-literals`
 - `check-model-validation`
+- `check-persona-resolves`
 - `check-no-raw-clock-outside-platform`
 - `check-sysinit-ordering`
 - `check-sandbox-wired`
