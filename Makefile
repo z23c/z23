@@ -767,6 +767,7 @@ DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
 	tools/dev/hotswap_verify_so.c \
 	tools/dev/mutation_campaign.c \
 	tools/dev/windows_headless_run.c \
+	tools/dev/z23_git_hook.c \
 	tools/dev/z23_doctor.c
 # The mutation harness proper (operators + campaign core) has no main() and
 # is proved by the registered `mutation_harness` group, so it is linked into
@@ -779,7 +780,8 @@ DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/devloop_baseline.c tools/dev/dev_failure_store.c \
-	tools/dev/dev_source_identity.c $(MUTATION_LIB_SRCS)
+	tools/dev/dev_source_identity.c tools/dev/dev_proof.c \
+	tools/dev/dev_proof_receipt.c $(MUTATION_LIB_SRCS)
 DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 
 # The stable public Core -> App ABI is lib/framework/include/zclassic23/app.h,
@@ -2190,7 +2192,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         install-replay-canary replay-canary-linger-status \
         coverage coverage-clean ci audit release \
         bench bench-crypto-verify bench-regress \
-	lint check-build-epoch-integrity check-checkout-lock check-malloc check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol \
+	lint check-build-epoch-integrity check-checkout-lock check-malloc check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol check-dev-proof-native-fast-path \
         check-coins-lookup-nullcheck check-observability-pairing \
         check-silent-errors-services check-silent-errors-controllers \
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
@@ -2266,6 +2268,7 @@ TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
 	tools/dev/dev_source_identity.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
+	tools/dev/dev_proof.c tools/dev/dev_proof_receipt.c \
 	$(MUTATION_LIB_SRCS)
 SPEC_SRCS = $(wildcard lib/test/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
@@ -4516,6 +4519,13 @@ syntax-check: $(VIEW_GEN_HEADERS)
 # the stray-source guard (~5 s) dominates, so the set stays ~6-8 s wall under
 # the parallel driver. Same ZCL_LINT_SERIAL=1 fallback as lint.
 # Run full `make lint` at sub-wave boundaries / before commit.
+EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
+EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
+    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
+    core/params/src/upgrades.c core/consensus/src/upgrades.c \
+    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
+    lib/base/src/log_level.c lib/base/src/result.c
+
 LINT_FAST_GATES := \
     check-no-stray-untracked-source \
     check-no-stray-root-files \
@@ -4533,6 +4543,7 @@ LINT_FAST_GATES := \
     check-log-macro-return-type \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-dev-proof-native-fast-path \
     check-equihash-params \
     check-framework-shape \
     check-supervisor-registration \
@@ -4545,7 +4556,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast:
+lint-fast: $(EQUIHASH_FACT_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
@@ -9504,21 +9515,43 @@ replay-canary-linger-status:
 release:
 	@./tools/release.sh
 
-# Install the tracked git hooks (shared across all worktrees via core.hooksPath).
-# pre-push runs the bounded LOCAL CI gate (`make pre-push-ci`): strict
-# compile, lint-fast, and mapped focused tests for the files being pushed.
-# Unmapped code fails closed. Full-suite/fuzz/coverage proof work runs
-# through the linger timers installed by `make install-quality-linger`.
-.PHONY: install-hooks
-install-hooks:
-	@git config core.hooksPath tools/githooks
-	@chmod +x tools/githooks/* 2>/dev/null || true
-	@echo "Installed git hooks: core.hooksPath=tools/githooks"
-	@echo "  pre-push -> runs 'make pre-push-ci' before every push to origin"
+# The installed hook directory is checkout-local. Each worktree therefore
+# admits receipts produced by its own exact source and build state while the
+# repository-common config continues to share objects and refs safely.
+GIT_HOOK_BIN = $(BIN_DIR)/z23-git-hook
+GIT_HOOK_DIR = $(abspath $(BUILD_DIR)/githooks)
+GIT_HOOK_SRCS = tools/dev/z23_git_hook.c tools/dev/dev_proof_receipt.c \
+	lib/sha3/src/sha3.c
+GIT_HOOK_CFLAGS = -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
+	$(ZCL_WARN_EXTRA_GATES) $(HARDEN_CFLAGS) -D_POSIX_C_SOURCE=200809L \
+	-Itools/dev -Ilib/base/include -Ilib/sha3/include
+
+.PHONY: git-hook git-hook-selftest install-hooks
+git-hook: $(GIT_HOOK_BIN)
+
+$(GIT_HOOK_BIN): $(GIT_HOOK_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) $(HARDEN_LDFLAGS)
+
+git-hook-selftest: $(GIT_HOOK_BIN)
+	@$(GIT_HOOK_BIN) --selftest
+
+install-hooks: $(GIT_HOOK_BIN)
+	@mkdir -p $(GIT_HOOK_DIR)
+	@install -m 0755 tools/githooks/pre-commit $(GIT_HOOK_DIR)/pre-commit
+	@install -m 0755 $(GIT_HOOK_BIN) $(GIT_HOOK_DIR)/z23-git-hook
+	@for hook in pre-push post-commit post-merge post-checkout; do \
+		ln -sfn z23-git-hook $(GIT_HOOK_DIR)/$$hook; \
+	done
+	@git config extensions.worktreeConfig true
+	@git config --unset-all core.hooksPath 2>/dev/null || true
+	@git config --worktree core.hooksPath $(GIT_HOOK_DIR)
+	@echo "Installed native git hooks: core.hooksPath=$(GIT_HOOK_DIR)"
+	@echo "  pre-push -> admits one immutable exact commit/base receipt"
+	@echo "  post-commit/post-merge/post-checkout -> schedule proof and return"
 	@echo "  pre-commit -> refuses non-main-branch commits in the MAIN checkout"
 	@echo "                (lane work goes in a worktree; ZCL_LANE_COMMIT_OK=1 overrides)"
 	@echo "  full-suite/fuzz/coverage -> make install-quality-linger"
-	@echo "  bypass one push: git push --no-verify   (or ZCL_SKIP_PREPUSH=1)"
 
 .PHONY: check-git-hooks-installed
 check-git-hooks-installed:
@@ -11482,13 +11515,6 @@ check-generated-artifact-contradictions:
 # height-selected 192,7 since Bubbles, and a reader who believes the flat
 # claim sizes a solution buffer wrongly. Fix a failure with
 # `make docs-equihash-params`, never by editing the generated page.
-EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
-EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
-    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
-    core/params/src/upgrades.c core/consensus/src/upgrades.c \
-    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
-    lib/base/src/log_level.c lib/base/src/result.c
-
 $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
@@ -11515,7 +11541,7 @@ equihash-facts-check: check-equihash-params
 # Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and
 # diffs; the other half scans prose for a flat "Equihash 200,9" claim about
 # what the chain IS, which is what was wrong across nine files.
-check-equihash-params:
+check-equihash-params: $(EQUIHASH_FACT_TOOL)
 	@echo "══ LINT: Equihash parameters are height-selected, and said so ══"
 	@./tools/lint/check_equihash_params.sh --selftest
 	@./tools/lint/check_equihash_params.sh
@@ -11771,6 +11797,10 @@ check-zcc-cache:
 	@echo "══ LINT: compile cache serves correct bytes ══"
 	@./tools/lint/check_zcc_cache.sh
 
+check-dev-proof-native-fast-path:
+	@echo "══ LINT: native push admission has no shell or build authority ══"
+	@./tools/lint/check_dev_proof_native_fast_path.sh
+
 # A build whose objects do not repeat cannot be shown to anyone. GCC seeds
 # itself from the object's output name, and every object here is written into
 # a fresh mktemp staging directory, so the shipped profile's -flto objects did
@@ -11889,6 +11919,7 @@ LINT_GATES := \
     check-no-runtime-abort \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-dev-proof-native-fast-path \
     check-tu-random-seed \
     check-outparam-init-before-return \
     check-equihash-params \
@@ -12038,7 +12069,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif

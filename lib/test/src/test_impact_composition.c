@@ -36,6 +36,7 @@
 #include "codeindex/codeindex.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
+#include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -196,9 +197,8 @@ static int test_ic_truncated_closure_preserves_groups(void)
     return failures;
 }
 
-/* The second discard site: the plan's own group array filling up. Enough
- * distinct impacted files to exceed ZCL_DEVLOOP_MAX_PLAN_GROUPS; the old code
- * reset closure_groups_len to 0 on the way out of the loop. */
+/* A representative high-fanout graph plan must retain substantially more
+ * groups than the direct path floor without becoming incomplete. */
 static const char *const ic_many_group_files[] = {
     "lib/test/src/test_simnet_wire_ibd.c",
     "lib/test/src/test_importblockindex_roundtrip.c",
@@ -224,12 +224,77 @@ static const char *const ic_many_group_files[] = {
     "lib/test/src/test_simnet_fuzz.c",
     "lib/test/src/test_command_handler_snapshot.c",
     "lib/test/src/test_pow_diffadj_precedence.c",
+    "lib/test/src/test_always_sync_lifecycle.c",
+    "lib/test/src/test_read_leaf_no_datadir_write.c",
+    "lib/test/src/test_crypto_registry.c",
+    "lib/test/src/test_sprout_groth16_kat.c",
+    "lib/test/src/test_transaction_wire_evidence.c",
+    "lib/test/src/test_net.c",
+    "lib/test/src/test_api_query_filters.c",
+    "lib/test/src/test_bip34_coinbase_height_parity.c",
+    "lib/test/src/test_canary_sentinel_watch.c",
+    "lib/test/src/test_block_locator_bounds.c",
+    "lib/test/src/test_mint_anchor_preflight.c",
+    "lib/test/src/test_contaminated_coin_above_anchor.c",
+    "lib/test/src/test_reducer_frontier_reconcile_light.c",
+    "lib/test/src/test_reducer_reconcile_witness.c",
+    "lib/test/src/test_refold_progress_floor.c",
+    "lib/test/src/test_refold_retro_validate.c",
+    "lib/test/src/test_reorg_residue_tipfin_replace.c",
+    "lib/test/src/test_kill9_recovery.c",
+    "lib/test/src/test_block_swarm_loopback.c",
+    "lib/test/src/test_test_zmsg_memo_codec.c",
+    "lib/test/src/test_mesh_private_object_grant_pipeline.c",
+    "lib/test/src/test_json.c",
+    "lib/test/src/test_rpc.c",
+    "lib/test/src/test_coinbase_subsidy_adversarial.c",
+    "lib/test/src/test_accept_to_mempool.c",
+    "lib/test/src/test_mempool.c",
+    "lib/test/src/test_merkle_tree.c",
+    "lib/test/src/test_parity_lockin_anchor_membership.c",
+    "lib/test/src/test_sync_service.c",
+    "lib/test/src/test_principal_authz.c",
+    "lib/test/src/test_auth_login.c",
+    "lib/test/src/test_command_authority.c",
+    "lib/test/src/test_importblockindex_roundtrip.c",
+    "lib/test/src/test_cli_auth_robust.c",
+    "lib/test/src/test_chain.c",
+    "lib/test/src/test_chain_evidence_controller.c",
+    "lib/test/src/test_fast_sync.c",
+    "lib/test/src/test_keystone_utxo_binding.c",
+    "lib/test/src/test_loader_owns_seed_gate.c",
+    "lib/test/src/test_mmb.c",
+    "lib/test/src/test_utxo_snapshot_loader.c",
+    "lib/test/src/test_code_capsule.c",
+    "lib/test/src/test_zcode_commons_projection.c",
+    "lib/test/src/test_zcode_family_admission.c",
+    "lib/test/src/test_zcode_swarm_net.c",
+    "lib/test/src/test_sprout_phgr13_kat.c",
+    "lib/test/src/test_store_buyer.c",
+    "lib/test/src/test_directory_watcher.c",
+    "lib/test/src/test_watcher_record.c",
+    "lib/test/src/test_read_mapping_positioned.c",
+    "lib/test/src/test_running_image_positioned.c",
+    "lib/test/src/test_socket_resolve.c",
+    "lib/test/src/test_private_link_no_clobber.c",
+    "lib/test/src/test_replay_receipt_root.c",
+    "lib/test/src/test_file_ops_copy.c",
+    "lib/test/src/test_boot_refusal_identity.c",
+    "lib/test/src/test_boot_shutdown_marker_persistence.c",
+    "lib/test/src/test_rom_fetch_onion.c",
+    "lib/test/src/test_zcode_sovereignty_policy.c",
+    "lib/test/src/test_script.c",
+    "lib/test/src/test_zendp.c",
+    "lib/test/src/test_node_character.c",
+    "lib/test/src/test_metaverse_vocabulary_bits.c",
+    "lib/test/src/test_code_have.c",
+    "lib/test/src/test_mutation_harness.c",
 };
 
-static int test_ic_group_cap_preserves_groups(void)
+static int test_ic_large_plan_preserves_groups(void)
 {
     int failures = 0;
-    TEST("impact composition: a FULL plan group set keeps its groups too") {
+    TEST("impact composition: a large graph plan keeps complete groups") {
         system("rm -rf " IC_FIX_GROUP);
         ASSERT(ic_write_call_pair(IC_FIX_GROUP));
         ASSERT(ic_write_depfiles(IC_FIX_GROUP));
@@ -250,12 +315,16 @@ static int test_ic_group_cap_preserves_groups(void)
         ASSERT(zcl_devloop_plan_files(files, 1, &plan));
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_GROUP, files, 1, &plan));
 
-        /* The array really filled. */
-        ASSERT(plan.closure_groups_len == ZCL_DEVLOOP_MAX_PLAN_GROUPS);
+        ASSERT(plan.closure_groups_len > ZCL_AGENT_IMPACT_MAX_GROUPS);
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
-               ZCL_DEVLOOP_DIM_INCOMPLETE);
-        /* Kept, not discarded. */
+               ZCL_DEVLOOP_DIM_COMPLETE);
         ASSERT(ic_planned(&plan, "download"));
+
+        struct zcl_devloop_plan direct;
+        ASSERT(zcl_devloop_plan_files(ic_many_group_files, n, &direct));
+        ASSERT(direct.path_groups_len > ZCL_AGENT_IMPACT_MAX_GROUPS);
+        ASSERT(direct.dims[ZCL_DEVLOOP_DIM_OPAQUE].status ==
+               ZCL_DEVLOOP_DIM_COMPLETE);
 
         /* Regression: the exact execution list is droppable presentation,
          * while the closure and completeness verdict are mandatory evidence.
@@ -892,6 +961,147 @@ static int test_ic_code_capsule_stays_with_code_owner(void)
     return failures;
 }
 
+static int test_ic_dev_proof_contract_is_direct(void)
+{
+    int failures = 0;
+    TEST("impact composition: dev proof contract stops at its exact owner") {
+        const char *files[] = {
+            "app/controllers/include/controllers/agent_impact_rules.def",
+            "config/commands/dev.def",
+            "lib/test/src/lint_gate_selftests.h",
+            "tools/dev/dev_proof.c",
+            "tools/dev/dev_proof_receipt.h",
+            "tools/dev/devloop.h",
+            "tools/command/native_dev_proof_command.c",
+            "tools/command/native_dev_verify_change_command.c",
+        };
+        struct zcl_devloop_plan plan;
+        ASSERT(zcl_devloop_plan_files(files,
+            sizeof(files) / sizeof(files[0]), &plan));
+        ASSERT(zcl_devloop_plan_add_closure(
+            "test-tmp/no-dev-proof-index", files,
+            sizeof(files) / sizeof(files[0]), &plan));
+        ASSERT(plan.closure_groups_len == 0);
+        ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
+               ZCL_DEVLOOP_DIM_NOT_APPLICABLE);
+        ASSERT(plan.dims[ZCL_DEVLOOP_DIM_INCLUDE].status ==
+               ZCL_DEVLOOP_DIM_NOT_APPLICABLE);
+        ASSERT(ic_planned(&plan, "dev_platform"));
+        ASSERT(zcl_devloop_plan_proof_admissible(&plan, NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_lint_helpers_exclude_onion_stress(void)
+{
+    int failures = 0;
+    TEST("impact composition: hermetic lint helpers exclude onion stress") {
+        struct agent_impact_acc lint = {0};
+        (void)agent_impact_apply_shared_rules(
+            "lib/test/src/lint_gate_hygiene_selftests.c", &lint);
+        ASSERT(ic_acc_has_group(&lint, "make_lint_gates"));
+        ASSERT(ic_acc_has_group(&lint, "binary_ab_fallback"));
+        ASSERT(ic_acc_has_group(&lint, "self_backtrace"));
+        ASSERT(!ic_acc_has_group(&lint, "onion_bootstrap"));
+
+        struct agent_impact_acc onion = {0};
+        (void)agent_impact_apply_shared_rules(
+            "lib/test/src/test_onion_bootstrap.c", &onion);
+        ASSERT(ic_acc_has_group(&onion, "make_lint_gates"));
+        ASSERT(ic_acc_has_group(&onion, "onion_bootstrap"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static struct zcl_dev_acceptance_receipt_v1 ic_valid_dev_proof_receipt(void)
+{
+    static const char local[] =
+        "1111111111111111111111111111111111111111";
+    static const char base[] =
+        "2222222222222222222222222222222222222222";
+    struct zcl_dev_acceptance_receipt_v1 receipt = {0};
+    (void)zcl_dev_proof_oid_decode(local, receipt.local_commit,
+                                   &receipt.local_commit_len);
+    (void)zcl_dev_proof_oid_decode(base, receipt.remote_base,
+                                   &receipt.remote_base_len);
+    uint8_t *roots[] = {
+        receipt.source_root, receipt.source_cas_root, receipt.mutation_root,
+        receipt.changed_set_root, receipt.impact_policy_root,
+        receipt.compiler_root, receipt.flags_root, receipt.environment_root,
+        receipt.build_graph_root, receipt.child_set_root,
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        memset(roots[i], (int)i + 1, ZCL_DEV_PROOF_ROOT_BYTES);
+    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
+        memset(receipt.dimensions[i].receipt_root, (int)i + 1,
+               ZCL_DEV_PROOF_ROOT_BYTES);
+        receipt.dimensions[i].selected = 1;
+        receipt.dimensions[i].reused = 1;
+    }
+    receipt.policy_version = 1;
+    receipt.complete = 1;
+    (void)zcl_dev_proof_receipt_child_set_root(
+        &receipt, receipt.child_set_root);
+    (void)zcl_dev_proof_receipt_seal(&receipt);
+    return receipt;
+}
+
+static int test_ic_dev_proof_receipt_admission(void)
+{
+    int failures = 0;
+    static const char local[] =
+        "1111111111111111111111111111111111111111";
+    static const char base[] =
+        "2222222222222222222222222222222222222222";
+    struct zcl_dev_acceptance_receipt_v1 receipt =
+        ic_valid_dev_proof_receipt();
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    struct zcl_dev_acceptance_receipt_v1 parsed;
+    char why[128];
+    TEST("impact composition: exact proof rejects inadmissible receipts") {
+        ASSERT(zcl_dev_proof_receipt_serialize(&receipt, wire));
+        ASSERT(zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed));
+        ASSERT(zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                              why, sizeof(why)));
+        struct zcl_dev_proof_dimension child_dimension =
+            parsed.dimensions[ZCL_DEV_PROOF_TEST];
+        ASSERT(zcl_dev_proof_child_receipt_create(
+            ZCL_DEV_PROOF_TEST, &child_dimension, child));
+        ASSERT(zcl_dev_proof_child_receipt_validate(
+            child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension));
+        child[40] ^= 1u;
+        ASSERT(!zcl_dev_proof_child_receipt_validate(
+            child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension));
+        ASSERT(!zcl_dev_proof_receipt_validate(
+            &parsed, local,
+            "3333333333333333333333333333333333333333",
+            why, sizeof(why)));
+        parsed = receipt;
+        parsed.dimensions[ZCL_DEV_PROOF_TEST].skipped = 1;
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        parsed = receipt;
+        parsed.child_set_root[0] ^= 1u;
+        ASSERT(zcl_dev_proof_receipt_seal(&parsed));
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        parsed = receipt;
+        memset(parsed.compiler_root, 0, sizeof(parsed.compiler_root));
+        ASSERT(zcl_dev_proof_receipt_seal(&parsed));
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        wire[100] ^= 1u;
+        ASSERT(zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed));
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_native_compositor_selects_physical_proof(void)
 {
     int failures = 0;
@@ -955,7 +1165,7 @@ int test_impact_composition(void)
 {
     int failures = 0;
     failures += test_ic_truncated_closure_preserves_groups();
-    failures += test_ic_group_cap_preserves_groups();
+    failures += test_ic_large_plan_preserves_groups();
     failures += test_ic_command_latency_scope_is_precise();
     failures += test_ic_registry_def_has_dependents();
     failures += test_ic_macro_only_header_has_dependents();
@@ -965,6 +1175,9 @@ int test_impact_composition(void)
     failures += test_ic_dimension_applicability_and_exact_execution();
     failures += test_ic_snapshot_overlays_current_symbols();
     failures += test_ic_code_capsule_stays_with_code_owner();
+    failures += test_ic_dev_proof_contract_is_direct();
+    failures += test_ic_lint_helpers_exclude_onion_stress();
+    failures += test_ic_dev_proof_receipt_admission();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();

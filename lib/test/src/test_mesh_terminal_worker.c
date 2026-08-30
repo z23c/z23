@@ -188,7 +188,7 @@ int test_mesh_terminal_worker(void)
                          !r.ok && r.code == MESH_TERMINAL_WORKER_ERR_CONFIG,
                          "relative shell_path -> config");
         live_config(&cfg);
-        static char relative_dir[8] = "test-tmp";
+        static char relative_dir[] = "test-tmp";
         cfg.workdir = relative_dir;
         r = mesh_terminal_worker_spawn(&cfg, 0, &w);
         failures = check(failures,
