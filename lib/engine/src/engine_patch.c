@@ -88,7 +88,8 @@ static bool line_starts(const struct line_view *l, const char *lit)
 
 /* Copy the path argument of a marker line into `out`, refusing anything the
  * containment rule rejects. */
-static bool take_path(const struct line_view *l, const char *marker, char *out)
+static bool take_path(const struct line_view *l, const char *marker,
+                      const char *name, char *out)
 {
     const size_t skip = strlen(marker);
     size_t n = l->len - skip;
@@ -96,12 +97,12 @@ static bool take_path(const struct line_view *l, const char *marker, char *out)
     while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r'))
         n--;
     if (n == 0 || n >= ENGINE_PATCH_MAX_PATH)
-        LOG_FAIL("engine", "refusing a %s marker with no usable path", marker);
+        LOG_FAIL("engine", "refusing a %s marker with no usable path", name);
     memcpy(out, s, n);
     out[n] = '\0';
     if (!engine_patch_path_ok(out))
         LOG_FAIL("engine", "refusing the path a %s marker named: it is not a "
-                           "contained relative source path", marker);
+                           "contained relative source path", name);
     return true;
 }
 
@@ -171,10 +172,9 @@ static bool scan_line(struct engine_patch *p, struct patch_scan *st,
 {
     if (line_starts(l, ENGINE_PATCH_BEGIN)) {
         if (st->open)
-            LOG_FAIL("engine", "refusing a nested %s marker: the envelope for "
-                               "%s was never closed", ENGINE_PATCH_BEGIN,
-                     st->path);
-        if (!take_path(l, ENGINE_PATCH_BEGIN, st->path))
+            LOG_FAIL("engine", "refusing a nested Z23-BEGIN-FILE marker: the "
+                               "envelope for %s was never closed", st->path);
+        if (!take_path(l, ENGINE_PATCH_BEGIN, "Z23-BEGIN-FILE", st->path))
             return false;
         st->open = true;
         st->body = NULL;         /* set by the caller once the line is consumed */
@@ -191,7 +191,7 @@ static bool scan_line(struct engine_patch *p, struct patch_scan *st,
     }
     if (!st->open && line_starts(l, ENGINE_PATCH_DELETE)) {
         char path[ENGINE_PATCH_MAX_PATH];
-        if (!take_path(l, ENGINE_PATCH_DELETE, path))
+        if (!take_path(l, ENGINE_PATCH_DELETE, "Z23-DELETE-FILE", path))
             return false;
         return commit_delete(p, path);
     }

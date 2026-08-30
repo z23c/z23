@@ -60,6 +60,24 @@ enum engine_err engine_err_of_status(int http_status);
  * how a harness spends an hour proving that a key is still wrong. */
 bool engine_err_should_retry(enum engine_err e);
 
+/* Refine a class using the vendor's own error text.
+ *
+ * MEASURED 2026-08-30, against two unrelated vendors on the same afternoon.
+ * Z.ai answered `429` with "Insufficient balance or no resource package";
+ * OpenAI answered `429` with "You have no credits remaining". A status-only
+ * classifier calls both of those RATE_LIMIT, which is retryable, so the
+ * harness backed off and tried again three times each — for a condition that
+ * no amount of waiting fixes. The prior art this lane inherited its retry rule
+ * from (RhettCreighton/VibePoint, src/llm/llm.c:410) has the same hole, and it
+ * costs real wall clock on every dispatch against an empty account.
+ *
+ * So a 429 whose body says the account is out of money is reclassified as
+ * BAD_REQUEST, which is not retried. This reads the body only to make a
+ * failure MORE terminal, never less: nothing a vendor writes can turn a
+ * non-retryable class into a retryable one, and nothing it writes can turn a
+ * failure into a success. `text` may be NULL. */
+enum engine_err engine_err_refine(enum engine_err e, const char *text);
+
 /* Exponential backoff with a hard ceiling, in milliseconds. attempt is
  * 0-based. Deterministic, so the test can assert on it. */
 int engine_err_backoff_ms(int attempt);

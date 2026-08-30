@@ -49,7 +49,7 @@
  * <32 hex>.<16 alnum> shape the scrubber knows, which is exactly the point:
  * the test must exercise the same path a real key would take. */
 static const char k_planted_key[] =
-    "0123456789abcdef0123456789abcdef.AbCdEfGhIjKlMnOp";
+    "0123456789abcdef0123456789abcdef.AbCdEfGhIjKlMnOp"; /* api-key-example-ok */
 
 /* ── 1. the registry ─────────────────────────────────────────────────── */
 
@@ -537,8 +537,8 @@ static int case_secret(void)
     {
         char line[512];
         (void)snprintf(line, sizeof(line),
-                       "here is my key sk-abcdefghijklmnopqrstuvwxyz012345 and "
-                       "a header Bearer xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 ok");
+                       "here is my key sk-abcdefghijklmnopqrstuvwxyz012345 and " /* api-key-example-ok */
+                       "a header Bearer xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 ok"); /* api-key-example-ok */
         engine_redact_inplace(line);
         EN_CHECK("an sk- token this process never loaded is scrubbed",
                  strstr(line, "sk-abcdefghij") == NULL);
@@ -773,6 +773,47 @@ static int case_err(void)
     EN_CHECK("backoff grows and is capped",
              engine_err_backoff_ms(0) < engine_err_backoff_ms(2)
              && engine_err_backoff_ms(99) <= 60000);
+
+    /* MEASURED 2026-08-30. Two unrelated vendors answered 429 — a retryable
+     * status — for an empty account, a condition no amount of waiting fixes.
+     * A status-only classifier retries a billing failure on every dispatch
+     * forever. These are the two bodies they actually sent. */
+    {
+        static const char zai[] =
+            "1113: Insufficient balance or no resource package. Please recharge.";
+        static const char oai[] =
+            "credit_balance_exhausted: You have no credits remaining. Add "
+            "credits to continue using the API at https://platform.openai.com/";
+        EN_CHECK("Z.ai's 429 for an empty account becomes non-retryable",
+                 !engine_err_should_retry(
+                     engine_err_refine(ENGINE_ERR_RATE_LIMIT, zai)));
+        EN_CHECK("OpenAI's 429 for an empty account becomes non-retryable",
+                 !engine_err_should_retry(
+                     engine_err_refine(ENGINE_ERR_RATE_LIMIT, oai)));
+        EN_CHECK("a genuine rate limit is still retried",
+                 engine_err_should_retry(engine_err_refine(
+                     ENGINE_ERR_RATE_LIMIT,
+                     "Too many requests, please slow down")));
+        /* The refinement only ever makes a failure MORE terminal. A vendor
+         * must not be able to talk its way back into being retried, and must
+         * never be able to talk its way into a success. */
+        EN_CHECK("refinement never makes a terminal class retryable",
+                 engine_err_refine(ENGINE_ERR_AUTH, "please retry later")
+                     == ENGINE_ERR_AUTH
+                 && engine_err_refine(ENGINE_ERR_BAD_REQUEST, "transient")
+                     == ENGINE_ERR_BAD_REQUEST);
+        EN_CHECK("refinement never turns a failure into a success",
+                 engine_err_refine(ENGINE_ERR_SERVER, "everything is fine")
+                     != ENGINE_OK);
+        EN_CHECK("no body leaves the class alone",
+                 engine_err_refine(ENGINE_ERR_OVERLOADED, NULL)
+                     == ENGINE_ERR_OVERLOADED
+                 && engine_err_refine(ENGINE_ERR_OVERLOADED, "")
+                     == ENGINE_ERR_OVERLOADED);
+        EN_CHECK("the match is case-insensitive across vendors",
+                 !engine_err_should_retry(engine_err_refine(
+                     ENGINE_ERR_RATE_LIMIT, "INSUFFICIENT BALANCE")));
+    }
 
     /* The breaker: retries alone turn one outage into a bill. */
     {

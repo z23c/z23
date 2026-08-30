@@ -35,6 +35,31 @@
  * files, for the same reason zclassic23-acme is: nothing that references a
  * TLS-client or trust-store symbol may appear in a Z23 object file, and
  * lib/test/src/test_cold_join_sovereign.c P2 asserts exactly that.
+ *
+ * ── A CLI ENGINE IS AN ENGINE, AND check-no-shellouts STILL HOLDS ────────
+ * One of the registered engines is an installed agent CLI rather than an HTTP
+ * API. Putting it behind the same interface is deliberate: the caller should
+ * not have to know which of its engines happens to speak HTTP, and the
+ * verdict must be computed the same way for all of them, or "the gate
+ * decides" quietly becomes "the gate decides, except for that one".
+ *
+ * That does mean this program launches another program, so the tension with
+ * tools/lint/check_no_shellouts.sh was checked rather than assumed, and it is
+ * not a tension:
+ *   - that gate protects the ALWAYS-RUNNING NODE binary. It scans app/, lib/,
+ *     src/ and config/ for system(), popen() and execlp(), because a shell-out
+ *     inside the resident process is what blocks the seccomp execve deny-list.
+ *     Standalone tools under tools/ are out of its scope by design, and this
+ *     is one: a human invokes it, the node never wraps it.
+ *   - lib/engine, which IS linked into the node, launches nothing at all. It
+ *     has no spawn, no socket, and no file-system side effect. Every process
+ *     this harness starts is started from this file.
+ *   - and it is not a shell-out in the first place. It goes through
+ *     lib/util zcl_spawn_capture, which execvp()s an argv directly. No
+ *     /bin/sh, so no metacharacter ever expands, and nothing a model wrote
+ *     can become a word in a command line.
+ * If those three stop being true, the right answer is to fix this file, not
+ * to widen the gate.
  */
 
 #include "engine/engine.h"
@@ -75,6 +100,13 @@ struct unit_opts {
     const char *state_dir;
     int    turns;
     int    timeout_s;
+    /* The gate gets its own clock. A cold worktree compiles the whole tree
+     * before it runs one assertion, and on a loaded box that is minutes of
+     * honest work with nothing to do with how long the model was given. Share
+     * one budget between them and a slow build is reported as a TIMEOUT, which
+     * points an operator at the model when the answer was the compiler. 0
+     * means "same as --timeout". */
+    int    gate_timeout_s;
     double max_cost_usd;
     bool   no_group;
     bool   yes_dispatch;
@@ -102,7 +134,11 @@ static void usage(void)
 "  --worktree DIR    isolated worktree to work in (created if absent)\n"
 "  --model ID        override the engine's default model\n"
 "  --turns N         repair turns when a reply does not apply (default %d)\n"
-"  --timeout N       whole-unit wall clock in seconds (default %d, max %d)\n"
+"  --timeout N       dispatch wall clock in seconds (default %d, max %d)\n"
+"  --gate-timeout N  wall clock for the gate run; defaults to --timeout. A\n"
+"                    cold worktree builds the tree first, which is minutes\n"
+"                    of honest work that says nothing about the model\n"
+"  --state-dir DIR   0700 directory for the prompt, gate log, and receipt\n"
 "  --max-cost-usd X  refuse to continue past this reported spend\n"
 "  --key-file PATH   a 0600 key file outside the repo\n"
 "  --fixture-reply F for --engine fixture: a canned response body\n"
@@ -157,6 +193,7 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         TAKE("--state-dir", state_dir)
 #undef TAKE
         if (strcmp(a, "--turns") == 0 || strcmp(a, "--timeout") == 0
+            || strcmp(a, "--gate-timeout") == 0
             || strcmp(a, "--max-cost-usd") == 0) {
             if (!need_value(argc, i, a))
                 return false;
@@ -165,6 +202,8 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
                 o->turns = atoi(v);
             else if (strcmp(a, "--timeout") == 0)
                 o->timeout_s = atoi(v);
+            else if (strcmp(a, "--gate-timeout") == 0)
+                o->gate_timeout_s = atoi(v);
             else
                 o->max_cost_usd = atof(v);
             continue;
@@ -229,6 +268,27 @@ static bool worktree_exists(const char *dir)
     return dir && stat(dir, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+/* Create --state-dir if it is not there yet. Every artifact written into it
+ * has passed through the redacting writer, but the directory itself is where
+ * a transcript lands, so it is created 0700 and never 0755. A caller who
+ * names a directory that cannot be created is told now, not once per write. */
+static bool state_dir_prepare(const struct unit_opts *o)
+{
+    if (!o->state_dir || !o->state_dir[0])
+        return true;
+    if (o->state_dir[0] != '/')
+        LOG_FAIL("engine_unit",
+                 "refusing a relative --state-dir; pass an absolute path");
+    if (mkdir(o->state_dir, 0700) != 0 && errno != EEXIST)
+        LOG_FAIL("engine_unit", "cannot create the state directory %s",
+                 o->state_dir);
+    struct stat st;
+    if (stat(o->state_dir, &st) != 0 || !S_ISDIR(st.st_mode))
+        LOG_FAIL("engine_unit", "--state-dir %s is not a directory",
+                 o->state_dir);
+    return true;
+}
+
 static bool worktree_prepare(const struct unit_opts *o, char *out, size_t out_len)
 {
     if (!o->worktree || !o->worktree[0])
@@ -251,7 +311,20 @@ static bool worktree_prepare(const struct unit_opts *o, char *out, size_t out_le
     char log[8192];
     if (run(add, log, sizeof(log), 120000) != 0)
         LOG_FAIL("engine_unit", "could not create the worktree at %s", out);
-    engine_emit(stdout, "  worktree:   %s (created on %s)\n", out, branch);
+
+    /* A git worktree does NOT inherit vendor archives or submodules. Skip this
+     * and the gate still builds — against the Tor STUB — and the failure
+     * surfaces about twenty-five minutes later, at ship time, long after the
+     * verdict was written. A gate that measured the wrong binary is exactly
+     * the hollow green this program exists to refuse, so priming is part of
+     * creating the worktree and its failure is the run's failure. */
+    const char *const prime[] = { "make", "-C", out, "worktree-prime", NULL };
+    if (run(prime, log, sizeof(log), 600000) != 0)
+        LOG_FAIL("engine_unit",
+                 "could not prime %s: without vendor archives the gate would "
+                 "measure a stub build", out);
+    engine_emit(stdout, "  worktree:   %s (created on %s, primed)\n", out,
+                branch);
     return true;
 }
 
@@ -289,8 +362,15 @@ static const char *system_rules(void)
 "\n"
 "  - C23 only. No Python, no external dependencies, no new vendored library.\n"
 "  - Every allocation is checked. Use zcl_malloc(size, \"label\").\n"
-"  - Every error return logs context: LOG_FAIL (bool), LOG_ERR (int),\n"
-"    LOG_NULL (pointer). They RETURN; they are not print statements.\n"
+/* The macro names below are deliberately written without a following
+ * parenthesis. check-log-macro-return-type scans the RAW line, string
+ * literals included — it cannot tell prompt text from a call site, and it is
+ * right not to try, because the day a lint gate starts parsing intent is the
+ * day something walks past it. */
+"  - Every error return logs context. In a bool function use LOG_FAIL, which\n"
+"    returns false; in an int function LOG_ERR, which returns -1; in a\n"
+"    pointer function LOG_NULL, which returns NULL. They RETURN from the\n"
+"    enclosing function; they are not print statements.\n"
 "  - Never weaken an assertion, a threshold, a baseline, or a fail-closed\n"
 "    refusal to get a green result. An honest red is the correct answer, and\n"
 "    saying so is worth more than a change made to look busy.\n"
@@ -300,7 +380,24 @@ static const char *system_rules(void)
 "    to any remote. A person reads this work before either happens.\n";
 }
 
-static char *compose_prompt(const struct unit_opts *o, const char *task,
+/* How the reply reaches the tree depends on the vendor's delivery, and only
+ * on that. An API engine returns text, so it is told the file envelope. A CLI
+ * engine already has the worktree open and edits it in place, so telling it
+ * the envelope invites it to PRINT files instead of writing them — the one
+ * output this harness would then apply twice, or not at all. */
+static const char *delivery_text(const struct engine_vendor *v)
+{
+    if (v->delivery == ENGINE_DELIVERS_ENVELOPE)
+        return engine_patch_protocol_text();
+    return
+"OUTPUT PROTOCOL — you are running inside the worktree this unit was given,\n"
+"so edit its files directly with your own tools. Do NOT print file contents\n"
+"as a reply: nothing you print is applied. What lands in the tree is exactly\n"
+"what you wrote to disk, and that is what the gate is run against.\n";
+}
+
+static char *compose_prompt(const struct unit_opts *o,
+                            const struct engine_vendor *v, const char *task,
                             const char *repair_note)
 {
     const size_t cap = ENGINE_MAX_PROMPT_BYTES;
@@ -313,7 +410,7 @@ static char *compose_prompt(const struct unit_opts *o, const char *task,
         "# %s\n\n"
         "# How this unit will be judged\n\n",
         task, o->territory ? o->territory : "(none declared)",
-        engine_patch_protocol_text());
+        delivery_text(v));
     if (n < 0 || (size_t)n >= cap) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
@@ -327,7 +424,7 @@ static char *compose_prompt(const struct unit_opts *o, const char *task,
     } else {
         m = snprintf(p + n, cap - (size_t)n,
             "After your reply is applied, this exact command is run:\n"
-            "    make t-fast ONLY=%s\n"
+            "    make t-fast-exact ONLY=%s\n"
             "Its machine-readable SUITE VERDICT line must report a NON-ZERO\n"
             "groups_ran, zero groups_failed, and a cold (not cached) run. A\n"
             "groups_ran of 0 means the group is registered with nothing in it,\n"
@@ -406,8 +503,14 @@ static bool dispatch_https(const struct engine_vendor *v, const char *body,
     bool ok = false;
     if (dr->err != ENGINE_OK) {
         char why[512];
-        if (engine_response_error_text(resp.body, resp.body_len, why, sizeof(why)))
+        if (engine_response_error_text(resp.body, resp.body_len, why, sizeof(why))) {
             engine_emit(stderr, "engine_unit: %s said: %s\n", v->id, why);
+            /* Both vendors measured on 2026-08-30 answer 429 for an empty
+             * account. The status alone says "retry"; the body says "never".
+             * Believe the body — but only when it makes the failure more
+             * terminal. See engine_err_refine(). */
+            dr->err = engine_err_refine(dr->err, why);
+        }
     } else if (!engine_response_parse(v, resp.body, resp.body_len, &dr->reply)) {
         dr->err = ENGINE_ERR_PARSE;
     } else {
@@ -451,12 +554,20 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
  * reported as a timeout. No shell is invoked — zcl_spawn_capture execs argv
  * directly, so the prompt path never passes through metacharacter expansion. */
 static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
-                         const char *workdir, int timeout_ms,
+                         const char *workdir, int turns, int timeout_ms,
                          struct dispatch_result *dr)
 {
+    if (!prompt_path || !prompt_path[0]) {
+        dr->err = ENGINE_ERR_REFUSED;
+        LOG_FAIL("engine_unit",
+                 "a CLI engine reads its prompt from a file: pass --state-dir "
+                 "so one can be written");
+    }
+    char turn_cap[32];
+    (void)snprintf(turn_cap, sizeof(turn_cap), "%d", turns > 0 ? turns : 1);
     const char *const argv[] = {
         v->program, "--prompt-file", prompt_path, "--cwd", workdir,
-        "--always-approve", NULL
+        "--max-turns", turn_cap, "--always-approve", NULL
     };
     char *log = zcl_malloc(UNIT_GATE_LOG_BYTES, "engine_unit_cli_log");
     if (!log) {
@@ -540,16 +651,25 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
 {
     memset(reading, 0, sizeof(*reading));
     *timed_out = false;
+    /* `t-fast-exact`, not `t-fast`. The convenience target's ONLY= is a
+     * SUBSTRING selector, and a substring quietly widens the gate: the first
+     * live run of this harness asked for `engine` and ran two groups, because
+     * `condition_engine` contains it. Widening is the harmless direction here,
+     * but the reverse — a name that matches a sibling and never the group the
+     * unit was judged on — is the hollow green this whole module exists to
+     * catch. The exact selector cannot do either. */
     char only[256];
     (void)snprintf(only, sizeof(only), "ONLY=%s", o->group);
-    const char *const argv[] = { "make", "-C", workdir, "t-fast", only, NULL };
+    const char *const argv[] = { "make", "-C", workdir, "t-fast-exact", only,
+                                 NULL };
 
     char *log = zcl_malloc(UNIT_GATE_LOG_BYTES, "engine_unit_gate_log");
     if (!log)
         LOG_FAIL("engine_unit", "cannot allocate the gate log buffer");
     (void)setenv("ZCL_TEST_CACHE", "0", 1);
+    const int gate_s = o->gate_timeout_s > 0 ? o->gate_timeout_s : o->timeout_s;
     const int64_t started = clock_now_monotonic_ns();
-    const int rc = run(argv, log, UNIT_GATE_LOG_BYTES, o->timeout_s * 1000);
+    const int rc = run(argv, log, UNIT_GATE_LOG_BYTES, gate_s * 1000);
     const int64_t elapsed_ms = (clock_now_monotonic_ns() - started) / 1000000;
 
     if (log_path)
@@ -562,7 +682,7 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
      * sees TIMEOUT raises the clock. zcl_spawn_capture SIGKILLs at the
      * deadline, so a run that consumed the whole budget and produced no
      * verdict line is that case. */
-    if (elapsed_ms >= (int64_t)o->timeout_s * 1000 && !reading->saw_verdict_line)
+    if (elapsed_ms >= (int64_t)gate_s * 1000 && !reading->saw_verdict_line)
         *timed_out = true;
     (void)rc;   /* never a verdict input; see engine/engine_verdict.h */
     return read_ok;
@@ -629,7 +749,8 @@ static bool dispatch_with_retries(const struct engine_vendor *v,
             ok = dispatch_https(v, body, body_len, o->timeout_s * 1000, dr);
             break;
         case ENGINE_WIRE_LOCAL_CLI:
-            ok = dispatch_cli(v, prompt_path, workdir, o->timeout_s * 1000, dr);
+            ok = dispatch_cli(v, prompt_path, workdir, o->turns,
+                              o->timeout_s * 1000, dr);
             break;
         case ENGINE_WIRE_LOCAL_FIXTURE:
             ok = dispatch_fixture(v, o->fixture_reply, dr);
@@ -682,13 +803,16 @@ int main(int argc, char **argv)
         return fail_setup("--turns must be between 1 and 10");
     if (o.timeout_s < 1 || o.timeout_s > UNIT_MAX_TIMEOUT)
         return fail_setup("--timeout is outside its permitted range");
+    if (o.gate_timeout_s != 0
+        && (o.gate_timeout_s < 1 || o.gate_timeout_s > UNIT_MAX_TIMEOUT))
+        return fail_setup("--gate-timeout is outside its permitted range");
 
     size_t task_len = 0;
     char *task = read_file(o.task_path, UNIT_MAX_TASK_BYTES, &task_len);
     if (!task)
         return 2;
 
-    char *prompt = compose_prompt(&o, task, NULL);
+    char *prompt = compose_prompt(&o, v, task, NULL);
     free(task);
     if (!prompt)
         return 2;
@@ -716,6 +840,11 @@ int main(int argc, char **argv)
     engine_emit(stdout, "  credential: %s\n", where);
 
     char workdir[1024];
+    if (!state_dir_prepare(&o)) {
+        free(prompt);
+        engine_secret_clear();
+        return 2;
+    }
     if (!worktree_prepare(&o, workdir, sizeof(workdir))) {
         free(prompt);
         engine_secret_clear();
@@ -728,20 +857,29 @@ int main(int argc, char **argv)
                             o.state_dir) < sizeof(prompt_path))
         (void)engine_emit_file(prompt_path, prompt, strlen(prompt));
 
-    struct engine_call call = {
-        .vendor            = v,
-        .model             = o.model,
-        .system_prompt     = system_rules(),
-        .user_prompt       = prompt,
-        .max_output_tokens = 32768,
-    };
+    /* Only an HTTP dialect has a request document. A CLI engine reads the
+     * prompt from the file written above and a fixture reads a canned reply,
+     * so building a body for either would produce a document nothing sends —
+     * and, for a vendor row with no default model, a body with a null model
+     * field in it. Build it where it is used and nowhere else. */
     size_t body_len = 0;
-    char *body = engine_request_alloc(&call, &body_len);
-    free(prompt);
-    if (!body && v->wire == ENGINE_WIRE_OPENAI_CHAT) {
-        engine_secret_clear();
-        return fail_setup("could not build the request body");
+    char *body = NULL;
+    if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
+        const struct engine_call call = {
+            .vendor            = v,
+            .model             = o.model,
+            .system_prompt     = system_rules(),
+            .user_prompt       = prompt,
+            .max_output_tokens = 32768,
+        };
+        body = engine_request_alloc(&call, &body_len);
+        if (!body) {
+            free(prompt);
+            engine_secret_clear();
+            return fail_setup("could not build the request body");
+        }
     }
+    free(prompt);
 
     struct dispatch_result dr = {0};
     const bool got = dispatch_with_retries(v, &o, body, body_len, prompt_path,
