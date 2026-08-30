@@ -153,11 +153,11 @@
 #define CJ_ROM_KEYSTONE_HEIGHT 3056758
 #define CJ_CHECKPOINT_FLOOR    3000000
 
-/* A production object tree with fewer than this many .o files is a stale or
- * half-finished build epoch, and scanning it would report "zero offenders"
- * while examining almost nothing. Measured: a complete tree here carries over
- * 1800 production objects, so this floor refuses a partial build without being
- * anywhere near the real count (which churns with every file added). */
+/* A public-node production object tree with fewer than this many .o files is
+ * a stale or half-finished build epoch, and scanning it would report "zero
+ * offenders" while examining almost nothing. Measured: a complete tree here
+ * carries over 1800 public-node production objects, so this floor refuses a
+ * partial build without being anywhere near the real count. */
 #define CJ_MIN_OBJECTS_SCANNED 500
 
 /* The number of compiled-in onion doors below which a Tor-only stranger is
@@ -336,7 +336,8 @@ static long cj_count_trust_store_refs(char *where, size_t where_n,
     {
         char ccmd[768];
         snprintf(ccmd, sizeof(ccmd),
-                 "find '%s' -name '*.o' -not -path '*/lib/test/*' 2>/dev/null"
+                 "find '%s' -name '*.o' ! -name 'restart-base.o'"
+                 " -not -path '*/lib/test/*' 2>/dev/null"
                  " | wc -l", root);
         FILE *cf = popen(ccmd, "r");
         if (!cf) {
@@ -349,7 +350,8 @@ static long cj_count_trust_store_refs(char *where, size_t where_n,
         *scanned = n_obj;
         if (n_obj < CJ_MIN_OBJECTS_SCANNED) {
             snprintf(where, where_n,
-                     "%s holds only %ld production objects (floor %d) — a "
+                     "%s holds only %ld public-node production objects "
+                     "(floor %d) — a "
                      "stale or partial build epoch, not a clean scan",
                      root, n_obj, CJ_MIN_OBJECTS_SCANNED);
             return -1;
@@ -363,7 +365,8 @@ static long cj_count_trust_store_refs(char *where, size_t where_n,
      * is not shipped. */
     char cmd[4096];
     int n = snprintf(cmd, sizeof(cmd),
-                     "find '%s' -name '*.o' -not -path '*/lib/test/*' -print0"
+                     "find '%s' -name '*.o' ! -name 'restart-base.o'"
+                     " -not -path '*/lib/test/*' -print0"
                      " | xargs -0 nm -u --print-file-name 2>/dev/null"
                      " | grep -cwE 'U (", root);
     if (n < 0 || (size_t)n >= sizeof(cmd))
@@ -519,7 +522,8 @@ int test_cold_join_sovereign(void)
             CJ_UNPROVEN("P2 no Z23 object references a TLS-client/trust-store "
                         "entry point", where);
         } else {
-            printf("cold_join:   scanned %ld production object file(s) in %s\n",
+            printf("cold_join:   scanned %ld public-node production object "
+                   "file(s) in %s\n",
                    scanned, where);
             CJ_CHECK("P2 zero Z23 objects reference a TLS-client or "
                      "trust-store entry point", refs == 0);

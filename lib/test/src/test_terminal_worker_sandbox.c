@@ -67,21 +67,25 @@ static const char *tw_fbsh_path(void)
 static bool fbsh_available(void)
 {
     struct stat st;
-    return stat(FBSH_BIN, &st) == 0 && (st.st_mode & S_IXUSR) != 0;
+    return stat(tw_fbsh_path(), &st) == 0 && (st.st_mode & S_IXUSR) != 0;
 }
 
-/* The exact grant the real worker hands the shell: the per-terminal
- * tmpdir (read/write/create/execute) plus the one granted shell binary
- * (read/execute). Nothing else. */
-static void tw_rules(struct os_sandbox_path_rule *rules)
+/* Generic attacks need only the per-terminal tmpdir grant.  The executable
+ * grant is part of the real worker profile only when the standalone fbsh
+ * artifact actually exists. */
+static size_t tw_rules(struct os_sandbox_path_rule *rules)
 {
     rules[0] = (struct os_sandbox_path_rule){
         .path = g_tw_dir, .allow_read = true, .allow_write = true,
         .allow_execute = true, .allow_create = true,
     };
-    rules[1] = (struct os_sandbox_path_rule){
-        .path = tw_fbsh_path(), .allow_read = true, .allow_execute = true,
-    };
+    if (fbsh_available()) {
+        rules[1] = (struct os_sandbox_path_rule){
+            .path = tw_fbsh_path(), .allow_read = true, .allow_execute = true,
+        };
+        return 2;
+    }
+    return 1;
 }
 
 /* Run fn() in a forked child. Returns the child's exit code (>= 0) or the
@@ -101,9 +105,9 @@ static int tw_run_child(int (*fn)(void))
 static int tw_enter(void)
 {
     struct os_sandbox_path_rule rules[2];
-    tw_rules(rules);
+    size_t rule_count = tw_rules(rules);
     struct os_sandbox_profile p =
-        os_sandbox_terminal_worker_profile(rules, 2);
+        os_sandbox_terminal_worker_profile(rules, rule_count);
     return os_sandbox_enter(&p).ok ? 0 : 70;
 }
 
@@ -348,9 +352,9 @@ static int test_terminal_worker_sandbox_platform_arm(void)
     /* ── profile construction (no fork needed) ─────────────────────── */
     {
         struct os_sandbox_path_rule rules[2];
-        tw_rules(rules);
+        size_t rule_count = tw_rules(rules);
         struct os_sandbox_profile p =
-            os_sandbox_terminal_worker_profile(rules, 2);
+            os_sandbox_terminal_worker_profile(rules, rule_count);
 
         printf("terminal_worker_sandbox: profile shape... ");
         bool shape_ok = p.name && strcmp(p.name, "terminal_worker") == 0 &&

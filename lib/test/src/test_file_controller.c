@@ -9,6 +9,7 @@
 #include "net/file_service.h"
 #include "../../net/src/file_service_worker_internal.h"
 #include "services/consensus_snapshot_export_service.h"
+#include <errno.h>
 #include <sqlite3.h>
 #if !defined(_WIN32)
 #include <arpa/inet.h>
@@ -431,6 +432,37 @@ static int64_t file_service_lifetime_wall_unix(void *opaque)
     return clock->wall_unix;
 }
 
+#if !defined(_WIN32)
+static bool file_service_wait_for_eof(int fd, int timeout_ms)
+{
+    const int64_t deadline_us = clock_now_monotonic_raw_us() +
+        (int64_t)timeout_ms * 1000;
+
+    for (;;) {
+        int64_t remaining_us = deadline_us - clock_now_monotonic_raw_us();
+        if (remaining_us <= 0)
+            return false;
+        int remaining_ms = (int)((remaining_us + 999) / 1000);
+        struct pollfd pfd = {.fd = fd, .events = POLLIN | POLLHUP};
+        int ready = poll(&pfd, 1, remaining_ms);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready <= 0)
+            return false;
+
+        uint8_t closed_probe;
+        ssize_t n = recv(fd, &closed_probe, 1, MSG_DONTWAIT);
+        if (n == 0)
+            return true;
+        if (n > 0)
+            continue;
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            continue;
+        return false;
+    }
+}
+#endif
+
 static int test_file_service_start_stop_and_lifetime(void)
 {
     int failures = 0;
@@ -496,12 +528,7 @@ static int test_file_service_start_stop_and_lifetime(void)
             ok = fs_send_frame(&client, FS_PADDING, NULL, 0);
         }
 
-        struct pollfd pfd = {.fd = fd, .events = POLLIN | POLLHUP};
-        int ready = ok ? poll(&pfd, 1, 250) : -1;
-        uint8_t closed_probe = 0;
-        ssize_t closed_read = ready > 0
-            ? recv(fd, &closed_probe, 1, MSG_DONTWAIT) : -1;
-        ok = ok && ready > 0 && closed_read == 0;
+        ok = ok && file_service_wait_for_eof(fd, 2000);
 
         if (clock_installed)
             platform_clock_clear_source();
