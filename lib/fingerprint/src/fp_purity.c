@@ -112,13 +112,26 @@ static bool fp_in_list(const char *const *list, const char *s, size_t n)
 /* A call target that is an in-tree function definition. Prefers a definition
  * in the SAME file, because a `static` helper is file-local: resolving
  * `parse` to some other translation unit's `parse` would judge the wrong
- * body and is exactly the kind of silent mistake that poisons an index. */
+ * body and is exactly the kind of silent mistake that poisons an index.
+ *
+ * When the only candidates are in OTHER files and there is more than one of
+ * them, the call is refused rather than resolved to whichever the hash chain
+ * happened to yield first. That is not a tidiness rule, it is the fix for a
+ * measured unsoundness: five units in this tree define `zcl_log_emit_at`,
+ * four of them being windows-acceptance harnesses whose version is an empty
+ * `(void)fmt;` body. Picking one of those made LOG_WARN() look pure, and
+ * every logging function in the tree was accepted as a fingerprint candidate
+ * — the probes then wrote thousands of log lines while claiming to be pure.
+ * The scanner does not run the preprocessor and so cannot know which
+ * definition a real build links; "cannot tell" is therefore the only honest
+ * answer, and this analysis exists to say that rather than to guess. */
 static int fp_lookup_func(const struct fp_index *ix, const char *name,
                           size_t len, int prefer_file)
 {
     uint64_t h;
     int i;
     int fallback = -1;
+    int nfallback = 0;
     char buf[FP_MAX_NAME];
     if (len >= FP_MAX_NAME)
         return -1;
@@ -133,10 +146,13 @@ static int fp_lookup_func(const struct fp_index *ix, const char *name,
             continue;
         if (s->file == prefer_file)
             return i;
-        if (!s->is_static && fallback < 0)
-            fallback = i;
+        if (!s->is_static) {
+            if (fallback < 0)
+                fallback = i;
+            nfallback++;
+        }
     }
-    return fallback;
+    return nfallback > 1 ? -1 : fallback;
 }
 
 /* A file-scope object this translation unit can actually SEE: one declared in
@@ -170,6 +186,51 @@ static int fp_lookup_visible_object(const struct fp_index *ix,
             hdr = i;
     }
     return hdr;
+}
+
+/* A `#define` this scanner can act on. The preprocessor is not run, so a
+ * name with two DIFFERENT replacement texts under two `#if` arms has no
+ * single meaning here, and picking whichever the hash chain yields first is
+ * a coin flip that decides a purity verdict.
+ *
+ * That is not hypothetical. `ZCL_LOG_DO_EMIT` is defined twice in
+ * base/log_macros.h: once as `zcl_log_emit_at(...)` and once, under
+ * ZCL_FUZZ_QUIET_LOG_MACROS, as a `static inline` no-op. Whichever arm won
+ * decided whether every LOG_WARN() call site in the tree was pure.
+ *
+ * Returns the symbol index, -1 when there is no such macro, and -2 when
+ * there is more than one with differing text — which the caller must turn
+ * into a refusal, not a guess. Identical redefinitions are unambiguous and
+ * are accepted. */
+static int fp_macro_unambiguous(const struct fp_index *ix, const char *name,
+                                size_t len)
+{
+    uint64_t h;
+    int i;
+    int first = -1;
+    char buf[FP_MAX_NAME];
+    if (len >= FP_MAX_NAME)
+        return -1;
+    memcpy(buf, name, len);
+    buf[len] = '\0';
+    h = fp_hash_str(buf);
+    for (i = ix->bucket[h % ix->nbuckets]; i >= 0; i = ix->syms[i].next) {
+        const struct fp_sym *s = &ix->syms[i];
+        if (s->kind != (unsigned char)FP_SYM_MACRO)
+            continue;
+        if (strcmp(s->name, buf) != 0)
+            continue;
+        if (first < 0) { first = i; continue; }
+        {
+            const struct fp_sym *f = &ix->syms[first];
+            if (s->body_len != f->body_len ||
+                memcmp(ix->files[s->file].text + s->body_off,
+                       ix->files[f->file].text + f->body_off,
+                       s->body_len) != 0)
+                return -2;
+        }
+    }
+    return first;
 }
 
 static void fp_note_cause(struct fp_index *ix, const char *s, size_t n)
@@ -314,7 +375,11 @@ static enum fp_verdict fp_scan_text(struct fp_index *ix, int file, size_t off,
         is_call = (k < e && t[k] == '(');
 
         /* The preprocessor runs first, so a macro shadows everything. */
-        idx = fp_sym_lookup(ix, t + i, j - i, FP_SYM_MACRO);
+        idx = fp_macro_unambiguous(ix, t + i, j - i);
+        if (idx == -2) {
+            fp_note_cause(ix, t + i, j - i);
+            return FP_V_UNRESOLVED_CALL;
+        }
         if (idx >= 0) {
             enum fp_verdict v;
             if (macro_depth >= FP_MACRO_DEPTH_MAX)

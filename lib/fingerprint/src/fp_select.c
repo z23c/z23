@@ -10,15 +10,32 @@
  * function that fails several tests is attributed to the first one:
  *
  *   1. the fingerprint tool's own code, which must never fingerprint itself;
- *   2. linkage — a `static` function cannot be called from a generated
- *      harness at all, so nothing else about it matters;
- *   3. PURITY, before shape. Asking "is it pure?" first means the breakdown
- *      answers the more interesting question — how much of this tree is
- *      reproducible at all — rather than hiding impure functions inside a
- *      "bad parameter type" bucket;
- *   4. a header prototype to #include, without which the harness cannot
- *      declare the call;
- *   5. shape — can its inputs be synthesised and its outputs observed.
+ *   2. PURITY, before everything else that is not free. Asking "is it pure?"
+ *      first means the breakdown answers the more interesting question — how
+ *      much of this tree is reproducible at all — rather than hiding impure
+ *      functions inside a "bad parameter type" bucket;
+ *   3. REACHABILITY. A probe has to be able to CALL the function, and there
+ *      are exactly two ways:
+ *        - external linkage plus a prototype in a header the probe can
+ *          include. This stays the preferred route whenever it exists,
+ *          because it keeps the probe translation unit's include set at one
+ *          header and cannot collide with anything;
+ *        - otherwise, `#include` the DEFINING UNIT itself, which is the only
+ *          way a `static` function can be called at all. It costs the
+ *          probe's TU that unit's whole file-scope state and include set, so
+ *          it is used only when the header route is unavailable, and a unit
+ *          that owns main() is refused outright rather than taking the whole
+ *          link down.
+ *      A function defined in a HEADER is reached by including that header,
+ *      whether or not it is static — a `static inline` in a header is
+ *      already visible to every unit that includes it.
+ *   4. shape — can its inputs be synthesised and its outputs observed.
+ *
+ * Purity is judged the SAME way on both routes. Widening reach is not an
+ * excuse to widen what counts as pure: a file-local function that touches its
+ * unit's file-scope state is refused with IMPURE_GLOBAL exactly as an extern
+ * one is, and fp_purity.c already resolves a same-file object correctly
+ * because it looks the name up in the defining file first.
  */
 
 #include "fp_priv.h"
@@ -149,7 +166,6 @@ long fp_index_select(struct fp_index *ix, struct fp_candidate *out, size_t cap,
         f = &ix->files[s->file];
 
         if (fp_is_self(f->path)) { tally[FP_V_SELF_EXCLUDED]++; continue; }
-        if (s->is_static)        { tally[FP_V_STATIC_LINKAGE]++; continue; }
 
         ix->cause[0] = '\0';
         v = fp_purity_of(ix, (int)i);
@@ -159,14 +175,55 @@ long fp_index_select(struct fp_index *ix, struct fp_candidate *out, size_t cap,
             continue;
         }
 
-        proto = fp_header_proto(ix, s->name);
-        if (proto < 0) { tally[FP_V_NO_PROTOTYPE]++; continue; }
+        /* The measurement mode reproduces the rule this tool shipped with:
+         * external linkage or nothing. Kept exact, including for a `static`
+         * defined in a header, so that a before/after comparison is a
+         * comparison and not an approximation. */
+        if (!ix->allow_source_route && s->is_static) {
+            tally[FP_V_STATIC_LINKAGE]++;
+            fp_tally_cause(ix, FP_V_STATIC_LINKAGE, f->path);
+            continue;
+        }
+
+        /* Reachability. A definition that already lives in a header is
+         * reached by including that header — a `static inline` there is
+         * visible to every unit that includes it, so file-local linkage is
+         * not an obstacle at all. Otherwise prefer a header prototype, and
+         * fall back to including the defining unit. */
+        proto = f->is_header ? -1 : fp_header_proto(ix, s->name);
+        if (proto < 0 && !f->is_header &&
+            (!ix->allow_source_route || f->defines_main || f->dup_export)) {
+            /* The only remaining route would be to include this unit, and it
+             * cannot be included: either it defines main(), or it exports a
+             * symbol another unit also exports. Both fail the WHOLE link
+             * rather than one probe, so they are refused here. Split by why
+             * the header route was unavailable, so neither bucket is a
+             * catch-all. */
+            enum fp_verdict why = s->is_static ? FP_V_STATIC_LINKAGE
+                                               : FP_V_NO_PROTOTYPE;
+            tally[why]++;
+            fp_tally_cause(ix, why, f->path);
+            continue;
+        }
 
         v = fp_signature_of(ix, (int)i, &cand);
         if (v != FP_V_CANDIDATE) { tally[v]++; continue; }
 
-        snprintf(cand.include, sizeof cand.include, "%s",
-                 ix->files[ix->syms[proto].file].include);
+        if (proto >= 0) {
+            snprintf(cand.include, sizeof cand.include, "%s",
+                     ix->files[ix->syms[proto].file].include);
+            cand.via_source = false;
+        } else if (f->is_header) {
+            snprintf(cand.include, sizeof cand.include, "%s", f->include);
+            cand.via_source = false;
+        } else {
+            /* The repo-relative path of the defining .c. The probe compile
+             * carries -I. so `#include "lib/util/src/x.c"` resolves, and the
+             * grouping key being the path is what puts every candidate of
+             * one unit into exactly one translation unit. */
+            snprintf(cand.include, sizeof cand.include, "%s", f->path);
+            cand.via_source = true;
+        }
         tally[FP_V_CANDIDATE]++;
         if (n < cap)
             out[n++] = cand;

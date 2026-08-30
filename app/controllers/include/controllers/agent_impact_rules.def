@@ -2821,3 +2821,8 @@ AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src
  * engine group comes along because tools/engine_unit.c includes the .def as
  * an X-macro and would stop compiling if a row lost its shape. */
 AGENT_IMPACT_RULE("lib/engine/include/engine/personas.def|tools/lint/check_persona_resolves.sh", "engine make_lint_gates")
+/* The proof receipt: the canonical form a claim travels in, its id, and the
+ * rule a receiver applies to it. Rides its own group and nothing else — the
+ * module depends only on base and sha3, deliberately, so that a receipt can
+ * be recomputed and compared by code holding no keys and no index. */
+AGENT_IMPACT_RULE("lib/receipt/src/*.c|lib/receipt/include/receipt/*.h|lib/test/src/test_receipt.c", "receipt make_lint_gates")
