@@ -48,6 +48,7 @@
 #include "base/safe_alloc.h"
 #include "platform/clock.h"
 #include "tls_client.h"
+#include "json/json.h"
 #include "util/spawn.h"
 
 #include <errno.h>
@@ -96,7 +97,10 @@ static void usage(void)
 "  --group NAME      the test group that must run and pass afterwards\n"
 "  --no-group        for a unit that genuinely cannot have one; the verdict\n"
 "                    is then UNVERIFIED, which is not a pass\n"
-"  --territory NAME  an opaque label recorded in the receipt\n"
+"  --territory NAME  a territory the tree declares (see `z23 code territory`).\n"
+"                    Its generated brief — owns, routes, reaches, the gates\n"
+"                    that bind it, where its evidence is weakest — is put in\n"
+"                    the prompt. A name the tree does not declare is refused.\n"
 "  --yes-dispatch    REQUIRED. Dispatching costs money and writes code, so\n"
 "                    it is opted into per run and can never be defaulted on\n"
 "  --worktree DIR    isolated worktree to work in (created if absent)\n"
@@ -300,20 +304,125 @@ static const char *system_rules(void)
 "    to any remote. A person reads this work before either happens.\n";
 }
 
+
+/* ── the territory brief ──────────────────────────────────────────────────
+ *
+ * --territory used to be an opaque label: a string the operator typed, copied
+ * into the prompt and into the receipt, meaning whatever the operator hoped
+ * it meant. A model told "Territory: lib/net" learns nothing it could not
+ * have guessed from the task text.
+ *
+ * It now has to name a real territory, and the unit carries that territory's
+ * generated brief — what it owns, which registered groups its files route to,
+ * how many of its public functions a registered test entry point actually
+ * reaches, which lint gates bind it, and where its evidence is weakest. Every
+ * number is regenerated from the code index by `code territory NAME` on this
+ * run. This harness computes none of it and stores none of it, so the brief
+ * cannot go stale the way a written one does.
+ *
+ * It is fetched by RUNNING that command rather than by linking lib/territory,
+ * and that is not laziness. lib/territory reaches the code index and
+ * therefore SQLite, while this program is compiled straight to an executable
+ * alongside a TLS client precisely so that none of its objects can ever
+ * appear in a scanned epoch tree (see ENGINE_UNIT_SRCS in the Makefile, and
+ * the P2 assertion in lib/test/src/test_cold_join_sovereign.c that it keeps
+ * honest). A subprocess leaves that property untouched.
+ *
+ * The exit status is checked but is not the evidence: zcl_spawn_capture
+ * documents that it returns 0 when waitpid() fails ECHILD, so "0" can mean
+ * "unknown". The evidence is the reply itself — it must parse, report ok, and
+ * report found — which a lost or empty capture cannot fake.
+ *
+ * Fail-closed. If --territory is given and the brief cannot be obtained — no
+ * binary, a command error, or a name the tree does not declare — the unit is
+ * refused rather than dispatched with the old opaque label. Dispatching with
+ * a label that means nothing is the thing being replaced.
+ */
+
+#define UNIT_BRIEF_BYTES   (64u * 1024u)
+#define UNIT_BRIEF_TIMEOUT 180000   /* ms; a cold reach walk is seconds */
+
+static const char *brief_binary(void)
+{
+    const char *e = getenv("ZCL_Z23_BIN");
+    return (e && e[0]) ? e : "build/bin/z23-dev";
+}
+
+/* On success returns the canonical JSON reply on the heap. On failure returns
+ * NULL and writes a reason a person can act on into `why`. */
+static char *territory_brief_fetch(const char *name, char *why, size_t why_cap)
+{
+    const char *bin = brief_binary();
+    char *buf = zcl_malloc(UNIT_BRIEF_BYTES, "engine_unit_brief");
+    if (!buf) {
+        (void)snprintf(why, why_cap, "cannot allocate the brief buffer");
+        return NULL;
+    }
+    const char *const argv[] = { bin, "code", "territory", name, NULL };
+    int rc = run(argv, buf, UNIT_BRIEF_BYTES, UNIT_BRIEF_TIMEOUT);
+    if (rc != 0) {
+        (void)snprintf(why, why_cap,
+                       "`%s code territory %s` exited %d; build the binary "
+                       "(make z23-dev) or point ZCL_Z23_BIN at one",
+                       bin, name, rc);
+        free(buf);
+        return NULL;
+    }
+    struct json_value v;
+    json_init(&v);
+    if (!json_read(&v, buf, strlen(buf))) {
+        (void)snprintf(why, why_cap, "%s did not answer with JSON", bin);
+        json_free(&v);
+        free(buf);
+        return NULL;
+    }
+    const struct json_value *ok    = json_get(&v, "ok");
+    const struct json_value *data  = json_get(&v, "data");
+    const struct json_value *found = data ? json_get(data, "found") : NULL;
+    bool usable = ok && json_get_bool(ok) && found && json_get_bool(found);
+    json_free(&v);
+    if (!usable) {
+        (void)snprintf(why, why_cap,
+                       "the tree declares no territory named %s; run "
+                       "`%s code territory` for the list", name, bin);
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
 static char *compose_prompt(const struct unit_opts *o, const char *task,
-                            const char *repair_note)
+                            const char *brief, const char *repair_note)
 {
     const size_t cap = ENGINE_MAX_PROMPT_BYTES;
     char *p = zcl_malloc(cap, "engine_unit_prompt");
     if (!p)
         LOG_NULL("engine_unit", "cannot allocate the prompt buffer");
-    int n = snprintf(p, cap,
-        "# Your unit of work\n\n%s\n\n"
-        "Territory: %s\n\n"
-        "# %s\n\n"
-        "# How this unit will be judged\n\n",
-        task, o->territory ? o->territory : "(none declared)",
-        engine_patch_protocol_text());
+    int n;
+    if (brief)
+        n = snprintf(p, cap,
+            "# Your unit of work\n\n%s\n\n"
+            "# Territory %s\n\n"
+            "What follows is the tree's own answer about this territory,\n"
+            "regenerated from the code index on this run. It is not a written\n"
+            "description and nobody maintains it by hand.\n"
+            "\n"
+            "Read `routed` and `reached` as the different facts they are.\n"
+            "Routed says which registered group runs when a file here\n"
+            "changes. Reached says a registered test entry point actually\n"
+            "calls that public function. They are never added together, and\n"
+            "`unknown` is the call graph refusing to answer — not a quiet\n"
+            "vote for either neighbour.\n"
+            "\n%s\n\n"
+            "# %s\n\n"
+            "# How this unit will be judged\n\n",
+            task, o->territory, brief, engine_patch_protocol_text());
+    else
+        n = snprintf(p, cap,
+            "# Your unit of work\n\n%s\n\n"
+            "Territory: none declared.\n\n"
+            "# %s\n\n"
+            "# How this unit will be judged\n\n",
+            task, engine_patch_protocol_text());
     if (n < 0 || (size_t)n >= cap) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
@@ -688,8 +797,23 @@ int main(int argc, char **argv)
     if (!task)
         return 2;
 
-    char *prompt = compose_prompt(&o, task, NULL);
+    /* Fail-closed: a named territory must resolve, or the unit does not go
+     * out. Dispatching with an unresolvable label is what this replaces. */
+    char *brief = NULL;
+    if (o.territory && o.territory[0]) {
+        char why[512] = { 0 };
+        brief = territory_brief_fetch(o.territory, why, sizeof(why));
+        if (!brief) {
+            free(task);
+            return fail_setup(why);
+        }
+        engine_emit(stdout, "  territory:  %s (brief: %zu bytes)\n",
+                    o.territory, strlen(brief));
+    }
+
+    char *prompt = compose_prompt(&o, task, brief, NULL);
     free(task);
+    free(brief);
     if (!prompt)
         return 2;
 
