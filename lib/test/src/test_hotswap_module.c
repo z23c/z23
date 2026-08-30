@@ -35,9 +35,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#if !defined(_WIN32)
 #include <sys/mman.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 /* ── Fabricated-module fixtures for hotswap_module_admit ──────────────── */
 
@@ -873,3 +876,11 @@ int test_hotswap_module(void)
     printf("=== hotswap_module: %d failures ===\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* mmap/mprotect/munmap module-image fixture; Windows has no mmap(2). Skipped loudly rather than faked. */
+int test_hotswap_module(void)
+{
+    printf("hotswap_module: SKIP (Windows): mmap/mprotect/munmap module-image fixture; windows has no mmap(2).\n");
+    return 0;
+}
+#endif

@@ -47,20 +47,20 @@
 
 #include "test/test_core.h"
 #include "kernel/command_registry.h"
+#include "platform/socket_compat.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
+#if !defined(_WIN32)
+#include <poll.h>
+#include <sys/wait.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -125,20 +125,23 @@ static bool cas_contains(const char *hay, const char *needle)
  * test_cli_auth_robust.c's car_reserve_port() / test_cookie_rotation.c. */
 static uint16_t cas_reserve_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return 0;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(0);
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     /* Never the live serve/soak/test lane ports (39070-39073) even if the
      * OS ephemeral range somehow handed one back. */
     if (port >= 39070 && port <= 39073)
@@ -171,6 +174,13 @@ static char *const *cas_build_envp(const char *home)
 static int cas_run(char *const argv[], const char *home, char *out,
                    size_t cap)
 {
+#if defined(_WIN32)
+    /* No fork on this lane: the CreateProcess+pipe analogue returns the
+     * child's exit code directly. */
+    return test_spawn_capture_env((const char *const *)argv,
+                                  (const char *const *)cas_build_envp(home),
+                                  out, cap);
+#else
     int pipefd[2];
     if (pipe(pipefd) != 0) return -1;
 
@@ -206,6 +216,7 @@ static int cas_run(char *const argv[], const char *home, char *out,
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return -100 - WTERMSIG(status);
     return -1;
+#endif
 }
 
 /* Return the monotonic clock in milliseconds. Used only to bound how long the
@@ -245,6 +256,13 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
                                     const char *const *needles, int max_ms,
                                     char *out, size_t cap)
 {
+#if defined(_WIN32)
+    /* PeekNamedPipe-drained spawn + TerminateProcess analogue (no fork, no
+     * poll-on-pipe, no SIGKILL on this lane). */
+    return test_spawn_capture_kill((const char *const *)argv,
+                                   (const char *const *)cas_build_envp(home),
+                                   needles, max_ms, out, cap);
+#else
     int pipefd[2];
     if (pipe(pipefd) != 0) return false;
 
@@ -310,6 +328,7 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
     for (size_t i = 0; needles[i]; i++)
         if (!strstr(out, needles[i])) return false;
     return true;
+#endif
 }
 
 /* ── test cases ───────────────────────────────────────────────────── */

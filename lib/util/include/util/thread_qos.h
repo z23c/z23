@@ -11,6 +11,7 @@
 #ifndef ZCL_THREAD_QOS_H
 #define ZCL_THREAD_QOS_H
 
+#include <pthread.h>
 #include <stdbool.h>
 
 /* Apply background QoS to the CALLING thread. On Linux:
@@ -29,7 +30,20 @@
  * running at its inherited priority — this is best-effort armor, not a
  * precondition. The return value reports whether BOTH knobs were applied;
  * callers are not required to check it. Idempotent — safe to call more
- * than once from the same thread. */
+ * than once from the same thread. The first successful application per
+ * process is logged; later successes are intentionally quiet so short-burst
+ * worker pools cannot flood the node log. */
 bool zcl_thread_qos_background(void);
+
+/* Mark an already-initialized pthread attribute for background work. Darwin
+ * applies QOS_CLASS_BACKGROUND at creation time, before the new thread can run
+ * any user code; other hosts leave the attribute unchanged because their
+ * background CPU/I/O controls are calling-thread operations. The worker must
+ * still call zcl_thread_qos_background() on entry: that supplies Linux I/O
+ * priority and is an idempotent confirmation of the Darwin class.
+ *
+ * Returns false (logged) for NULL or when Darwin refuses the attribute. The
+ * caller retains ownership and must pthread_attr_destroy() the attribute. */
+bool zcl_thread_qos_background_attr(pthread_attr_t *attr);
 
 #endif /* ZCL_THREAD_QOS_H */

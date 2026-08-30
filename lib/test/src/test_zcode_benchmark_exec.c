@@ -62,11 +62,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
+#endif
+#include <sys/stat.h>
 #include <unistd.h>
 
+#if !defined(_WIN32)
 #define ZBEX_DIR_CAP 512
 #define ZBEX_NOW 1400
 
@@ -1409,3 +1412,17 @@ int test_zcode_benchmark_exec(void)
     failures += test_zbex_reproduction();
     return failures;
 }
+
+#else /* _WIN32 */
+
+/* The benchmark executor is fail-closed on Windows (its refusal is the
+ * acceptance in zcode_benchmark_executor_windows_refusal_acceptance.c), and
+ * the fixtures here need fork + Landlock sandbox canaries. */
+int test_zcode_benchmark_exec(void)
+{
+    printf("test_zcode_benchmark_exec: SKIP (Windows): executor refuses on "
+           "Windows by design (see the refusal acceptance)\n");
+    return 0;
+}
+
+#endif /* !_WIN32 */

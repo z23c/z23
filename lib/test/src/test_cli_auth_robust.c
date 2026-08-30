@@ -34,19 +34,20 @@
 #include "rpc/httpserver.h"
 #include "kernel/command_registry.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+
+#include "platform/socket_compat.h"
 
 #define CAR_BIN "build/bin/zclassic23"
 
@@ -88,20 +89,23 @@ static bool car_bin_is_fresh(const char **stale_path_out)
  * as test_cookie_rotation.c's reserve_test_port(). */
 static uint16_t car_reserve_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return 0;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(0);
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 
@@ -147,6 +151,12 @@ static void car_rm_shallow_dir(const char *dir)
 static int car_run(char *const argv[], char *const envp[], char *out,
                    size_t cap)
 {
+#if defined(_WIN32)
+    /* No fork/execve: CreateProcess with a custom environment block and a
+     * captured pipe (test_spawn_capture_env). */
+    return test_spawn_capture_env(
+        (const char *const *)argv, (const char *const *)envp, out, cap);
+#else
     int pipefd[2];
     if (pipe(pipefd) != 0) return -1;
 
@@ -187,6 +197,7 @@ static int car_run(char *const argv[], char *const envp[], char *out,
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return -100 - WTERMSIG(status);
     return -1;
+#endif
 }
 
 /* Build a minimal envp: HOME=<home>, PATH inherited from the real
@@ -466,8 +477,9 @@ static int car_test_response_timeout_taxonomy(const char *home)
          * the kernel accept queue even with no accept() call — exactly
          * "TCP up, nobody home to answer" (see file header + src/main.c
          * cli_rpc_call_internal_ex's RESPONSE_TIMEOUT branch). */
-        int blackhole = socket(AF_INET, SOCK_STREAM, 0);
-        ASSERT(blackhole >= 0);
+        platform_socket_t blackhole = platform_socket_open(
+            AF_INET, SOCK_STREAM, 0, true, false);
+        ASSERT(blackhole != PLATFORM_SOCKET_INVALID);
         uint16_t port = car_reserve_port();
         ASSERT(port != 0);
         struct sockaddr_in addr;
@@ -475,11 +487,10 @@ static int car_test_response_timeout_taxonomy(const char *home)
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons(port);
-        int reuse = 1;
-        setsockopt(blackhole, SOL_SOCKET, SO_REUSEADDR, &reuse,
-                  sizeof(reuse));
-        ASSERT(bind(blackhole, (struct sockaddr *)&addr, sizeof(addr)) == 0);
-        ASSERT(listen(blackhole, 1) == 0);
+        (void)platform_socket_set_reuse_address(blackhole, true);
+        ASSERT(platform_socket_bind(blackhole, (struct sockaddr *)&addr,
+                                    sizeof(addr)) == 0);
+        ASSERT(platform_socket_listen(blackhole, 1) == 0);
 
         char dummy_dir[700];
         snprintf(dummy_dir, sizeof(dummy_dir), "%s/.zclassic-c23-cartimeout",
@@ -498,7 +509,7 @@ static int car_test_response_timeout_taxonomy(const char *home)
         int rc = car_run(argv,
                          car_build_envp(home, "ZCL_CLI_RPC_TIMEOUT_SEC=1"),
                          out, sizeof(out));
-        close(blackhole);
+        platform_socket_close(blackhole);
 
         ASSERT(car_contains(out, "error=RESPONSE_TIMEOUT"));
         ASSERT_EQ(rc, ZCL_COMMAND_EXIT_TRANSIENT);

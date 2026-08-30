@@ -33,13 +33,13 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include "platform/socket_compat.h"
+
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #define CR_CHECK(name, expr) do {                          \
@@ -55,8 +55,9 @@ static _Atomic int g_port = 0;
 
 static uint16_t free_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return 0;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -64,18 +65,20 @@ static uint16_t free_port(void)
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(0);
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 
 /* One TLS connection, left open. The caller closes it. */
 struct conn {
-    int fd;
+    platform_socket_t fd;
     SSL_CTX *ctx;
     SSL *ssl;
     char cn[256];
@@ -89,11 +92,11 @@ static void conn_close(struct conn *c)
     }
     if (c->ctx)
         SSL_CTX_free(c->ctx);
-    if (c->fd >= 0)
-        close(c->fd);
+    if (c->fd != PLATFORM_SOCKET_INVALID)
+        platform_socket_close(c->fd);
     c->ssl = NULL;
     c->ctx = NULL;
-    c->fd = -1;
+    c->fd = PLATFORM_SOCKET_INVALID;
 }
 
 /* Connect, handshake, record the leaf's subject CN. Returns false when the
@@ -102,28 +105,29 @@ static void conn_close(struct conn *c)
 static bool conn_open(struct conn *c)
 {
     memset(c, 0, sizeof(*c));
-    c->fd = -1;
+    c->fd = PLATFORM_SOCKET_INVALID;
 
     const int port = atomic_load(&g_port);
     if (port <= 0)
         return false;
 
-    c->fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (c->fd < 0)
+    c->fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (c->fd == PLATFORM_SOCKET_INVALID)
         return false;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons((uint16_t)port);
-    if (connect(c->fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    if (platform_socket_connect(c->fd, (struct sockaddr *)&addr,
+                                sizeof(addr)) != 0) {
         conn_close(c);
         return false;
     }
 
     c->ctx = SSL_CTX_new(TLS_client_method());
     c->ssl = c->ctx ? SSL_new(c->ctx) : NULL;
-    if (!c->ssl || SSL_set_fd(c->ssl, c->fd) != 1) {
+    if (!c->ssl || SSL_set_fd(c->ssl, (int)(intptr_t)c->fd) != 1) {
         conn_close(c);
         return false;
     }

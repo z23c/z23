@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -303,3 +304,14 @@ int test_util_signal_handler(void)
         printf("util/signal_handler: failures=%d\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Every case in this group installs or exercises a POSIX fatal-signal
+ * disposition (sigaction, signal alt stacks, SIGCHLD/SA_NOCLDWAIT semantics)
+ * in a forked child — none of which has a Windows analogue. */
+int test_util_signal_handler(void)
+{
+    printf("util_signal_handler: SKIP (Windows): POSIX signal-disposition "
+           "+ fork lane (sigaction/altstack/SIGCHLD) does not exist here\n");
+    return 0;
+}
+#endif

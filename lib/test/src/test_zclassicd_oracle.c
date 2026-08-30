@@ -28,19 +28,17 @@
 #include "util/clientversion.h"
 #include "util/supervisor.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #define _GNU_SOURCE 1
 #define _DEFAULT_SOURCE 1
 
+#include "platform/socket_compat.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -60,7 +58,7 @@
  * hex string for the .result field. */
 
 struct mock_server {
-    int listen_fd;
+    platform_socket_t listen_fd;
     int port;
     const char *canned_hex;       /* NULL → respond with JSON error */
     const char *chain_tip_hex;    /* optional distinct hash at chain_blocks */
@@ -80,9 +78,11 @@ static void *mock_server_loop(void *arg)  /* raw-pthread-ok: test-local */
     struct mock_server *m = arg;
     while (!atomic_load(&m->stop)) {
         struct sockaddr_in cli;
-        socklen_t cl = sizeof(cli);
-        int cfd = accept(m->listen_fd, (struct sockaddr *)&cli, &cl);
-        if (cfd < 0) break;
+        size_t cl = sizeof(cli);
+        platform_socket_t cfd = platform_socket_accept(m->listen_fd,
+                                                       (struct sockaddr *)&cli,
+                                                       &cl);
+        if (cfd == PLATFORM_SOCKET_INVALID) break;
 
         /* Read until we see end-of-headers marker (\r\n\r\n), then
          * consume up to Content-Length more bytes. Time-bounded by
@@ -98,10 +98,10 @@ static void *mock_server_loop(void *arg)  /* raw-pthread-ok: test-local */
         /* 5s to match LRC_TIMEOUT_SECS in lib/rpc/src/legacy_rpc_client.c;
          * a tighter ceiling only makes the mock give up before the client
          * does when the box is contended. */
-        struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        (void)platform_socket_set_receive_timeout(cfd, 5000);
         for (;;) {
-            ssize_t n = recv(cfd, buf + got, sizeof(buf) - 1 - got, 0);
+            int n = platform_socket_receive(cfd, buf + got,
+                                            sizeof(buf) - 1 - got);
             if (n <= 0) break;
             got += (size_t)n;
             buf[got] = '\0';
@@ -110,7 +110,7 @@ static void *mock_server_loop(void *arg)  /* raw-pthread-ok: test-local */
         }
         if (got == 0) {
             /* Nothing arrived — do not answer noise. */
-            close(cfd);
+            platform_socket_close(cfd);
             continue;
         }
 
@@ -171,8 +171,8 @@ static void *mock_server_loop(void *arg)  /* raw-pthread-ok: test-local */
             "Content-Length: %d\r\n"
             "Connection: close\r\n"
             "\r\n%s", bl, body);
-        (void)send(cfd, resp, (size_t)rl, 0);
-        close(cfd);
+        (void)platform_socket_send_all(cfd, resp, (size_t)rl);
+        platform_socket_close(cfd);
         atomic_fetch_add(&m->requests_served, 1);
     }
 
@@ -184,33 +184,34 @@ static bool mock_server_start(struct mock_server *m, const char *canned_hex)
     memset(m, 0, sizeof(*m));
     m->canned_hex = canned_hex;
     m->chain_blocks = -1;
-    m->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (m->listen_fd < 0) return false;
+    m->listen_fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (m->listen_fd == PLATFORM_SOCKET_INVALID) return false;
 
-    int one = 1;
-    setsockopt(m->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    (void)platform_socket_set_reuse_address(m->listen_fd, true);
 
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = 0;  /* OS-chosen */
-    if (bind(m->listen_fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        close(m->listen_fd);
+    if (platform_socket_bind(m->listen_fd, (struct sockaddr *)&sa,
+                             sizeof(sa)) != 0) {
+        platform_socket_close(m->listen_fd);
         return false;
     }
-    socklen_t sl = sizeof(sa);
-    if (getsockname(m->listen_fd, (struct sockaddr *)&sa, &sl) < 0) {
-        close(m->listen_fd);
+    size_t sl = sizeof(sa);
+    if (platform_socket_local_address(m->listen_fd, (struct sockaddr *)&sa,
+                                      &sl) != 0) {
+        platform_socket_close(m->listen_fd);
         return false;
     }
     m->port = ntohs(sa.sin_port);
-    if (listen(m->listen_fd, 4) < 0) {
-        close(m->listen_fd);
+    if (platform_socket_listen(m->listen_fd, 4) != 0) {
+        platform_socket_close(m->listen_fd);
         return false;
     }
     /* raw-pthread-ok: short-burst-joined-immediately */
     if (pthread_create(&m->thread, NULL, mock_server_loop, m) != 0) {
-        close(m->listen_fd);
+        platform_socket_close(m->listen_fd);
         return false;
     }
     return true;
@@ -286,11 +287,12 @@ static bool mock_server_start_blockhash_warmup(struct mock_server *m)
 static void mock_server_stop(struct mock_server *m)
 {
     atomic_store(&m->stop, true);
-    /* Closing the listen fd interrupts accept() so the thread exits. */
-    if (m->listen_fd >= 0) {
-        shutdown(m->listen_fd, SHUT_RDWR);
-        close(m->listen_fd);
-        m->listen_fd = -1;
+    /* Closing the listen socket interrupts the blocking accept() so the
+     * thread exits (closesocket from another thread fails the in-flight
+     * accept on Windows). */
+    if (m->listen_fd != PLATFORM_SOCKET_INVALID) {
+        platform_socket_close(m->listen_fd);
+        m->listen_fd = PLATFORM_SOCKET_INVALID;
     }
     pthread_join(m->thread, NULL);
 }

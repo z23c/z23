@@ -123,7 +123,7 @@
 #include "util/safe_alloc.h"
 #include "validation/check_block.h"
 
-#include <arpa/inet.h>
+#include "platform/socket_compat.h"
 #include <dirent.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -219,9 +219,9 @@ static bool cj_host_is_numeric_literal(const char *host)
     struct in6_addr v6;
     if (!host || host[0] == '\0')
         return false;
-    if (inet_pton(AF_INET, host, &v4) == 1)
+    if (platform_socket_parse_address(AF_INET, host, &v4) == 1)
         return true;
-    if (inet_pton(AF_INET6, host, &v6) == 1)
+    if (platform_socket_parse_address(AF_INET6, host, &v6) == 1)
         return true;
     return false;
 }

@@ -34,6 +34,7 @@
 #endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -3529,3 +3530,12 @@ int test_dev_platform(void)
     printf("=== dev_platform: %d failures ===\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked dev-platform child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_dev_platform(void)
+{
+    printf("dev_platform: SKIP (Windows): forked dev-platform child lane\n");
+    return 0;
+}
+#endif

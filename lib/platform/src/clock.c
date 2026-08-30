@@ -120,8 +120,15 @@ int64_t clock_now_monotonic_raw_us(void)
 
 int64_t clock_thread_cpu_ns(void)
 {
+    /* MinGW implements CLOCK_THREAD_CPUTIME_ID over GetThreadTimes, whose
+     * 15.625 ms scheduler-tick quantization makes sub-quantum work samples
+     * pure noise (observed: a constant-time ratio test read lo=31.25 ms,
+     * hi=15.62 ms — exact tick multiples — and failed on quantization, not
+     * on any real timing divergence). The monotonic wall clock (QPC-backed)
+     * is the only fine-grained time source on Windows, and the paired-median
+     * callers absorb preemption jitter by design. */
+#if defined(CLOCK_THREAD_CPUTIME_ID) && !defined(_WIN32)
     struct timespec ts;
-#if defined(CLOCK_THREAD_CPUTIME_ID)
     if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0)
         return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 #endif

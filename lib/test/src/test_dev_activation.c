@@ -20,13 +20,18 @@
 #include "dev_activation.h"
 #include "dev_activation_internal.h"
 #include "json/json.h"
+#if defined(_WIN32)
+#include "platform/process_lock.h"
+#endif
 
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -657,9 +662,18 @@ static int test_lock_busy(void)
             if (*p == '/') { *p = 0; mkdir(part, 0755); *p = '/'; }
         mkdir(part, 0755);
         snprintf(lockp, sizeof(lockp), "%s/activation.lock", sb.gen_root);
+#if defined(_WIN32)
+        /* Hold the lock through the same platform API the runner contends
+         * on — Windows has no flock(), and a LockFileEx-style hold is only
+         * real contention if both sides take it the same way. */
+        struct platform_process_lock held;
+        platform_process_lock_init(&held);
+        ASSERT(platform_process_lock_try_acquire(&held, lockp, true));
+#else
         int fd = open(lockp, O_RDWR | O_CREAT, 0644);
         ASSERT(fd >= 0);
         ASSERT(flock(fd, LOCK_EX | LOCK_NB) == 0);
+#endif
 
         struct fake_ctx c = {0};
         snprintf(c.gen_root, sizeof(c.gen_root), "%s", sb.gen_root);
@@ -672,8 +686,12 @@ static int test_lock_busy(void)
         ASSERT_EQ(rc, DEV_ACTIVATION_E_LOCK_BUSY);
         ASSERT_EQ(c.stop_calls, 0);   /* never touched the service */
 
+#if defined(_WIN32)
+        platform_process_lock_release(&held);
+#else
         flock(fd, LOCK_UN);
         close(fd);
+#endif
         sandbox_exit(&sb);
         PASS();
     } _test_next:;

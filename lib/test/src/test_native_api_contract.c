@@ -46,20 +46,90 @@
 #include "wallet/sapling_keys.h"
 #include "zanc/zanc.h"
 
+#if !defined(_WIN32)
 #include <arpa/inet.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#if !defined(_WIN32)
 #include <netinet/in.h>
 #include <poll.h>
+#endif
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include "platform/socket_compat.h"
+
+#include <stdint.h>
+
+typedef int socklen_t;
+
+/* Loopback listener fixtures held as int fds; every socket()/bind()/listen()/
+ * getsockname()/accept()/setsockopt()/recv()/write() call in this TU targets
+ * one of them. close() does too except the pwrite probe's file fd, which is
+ * armed explicitly at its call site. */
+static int nac_socket(int domain, int type, int protocol)
+{
+    platform_socket_t s = platform_socket_open(domain, type, protocol,
+                                               true, false);
+    return s == PLATFORM_SOCKET_INVALID ? -1 : (int)(intptr_t)s;
+}
+
+static int nac_getsockname(int fd, struct sockaddr *addr, socklen_t *len)
+{
+    size_t out = (size_t)*len;
+    int rc = platform_socket_local_address((platform_socket_t)(intptr_t)fd,
+                                           addr, &out);
+    *len = (socklen_t)out;
+    return rc;
+}
+
+static int nac_setsockopt(int fd, int level, int opt, const void *val,
+                          socklen_t len)
+{
+    platform_socket_t sock = (platform_socket_t)(intptr_t)fd;
+    if (level == SOL_SOCKET && opt == SO_REUSEADDR) {
+        (void)val; (void)len;
+        return platform_socket_set_reuse_address(sock, true);
+    }
+    return setsockopt(sock, level, opt, val, (int)len);
+}
+
+static int nac_accept(int fd)
+{
+    platform_socket_t s = platform_socket_accept(
+        (platform_socket_t)(intptr_t)fd, NULL, NULL);
+    return s == PLATFORM_SOCKET_INVALID ? -1 : (int)(intptr_t)s;
+}
+
+#define socket(domain, type, protocol) nac_socket(domain, type, protocol)
+#define bind(fd, addr, len) \
+    platform_socket_bind((platform_socket_t)(intptr_t)(fd), addr, len)
+#define listen(fd, backlog) \
+    platform_socket_listen((platform_socket_t)(intptr_t)(fd), backlog)
+#define getsockname(fd, addr, len) nac_getsockname(fd, addr, len)
+#define setsockopt(fd, level, opt, val, len) \
+    nac_setsockopt(fd, level, opt, val, len)
+#define accept(fd, addr, len) nac_accept(fd)
+#define close(fd) \
+    (platform_socket_close((platform_socket_t)(intptr_t)(fd)) == 0 ? 0 : -1)
+#define recv(fd, buf, len, flags) \
+    ((ssize_t)platform_socket_receive((platform_socket_t)(intptr_t)(fd), \
+                                      buf, len))
+#define write(fd, buf, len) \
+    ((ssize_t)platform_socket_send((platform_socket_t)(intptr_t)(fd), \
+                                   buf, len))
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -505,7 +575,12 @@ static bool run_dev_failure_api_fixture(void)
         "%s/.local/state/zclassic23-dev/workspaces/%s/latest-failure.json",
         home, record.workspace_id) > 0);
     int fd = open(latest_path, O_WRONLY | O_CLOEXEC);
+#if defined(_WIN32)
+    /* A real file fd: the TU-wide close macro targets sockets. */
+    API_REQUIRE(fd >= 0 && pwrite(fd, "X", 1, 0) == 1 && _close(fd) == 0);
+#else
     API_REQUIRE(fd >= 0 && pwrite(fd, "X", 1, 0) == 1 && close(fd) == 0);
+#endif
     len = exec_dev_handler(
         "dev.diagnose.latest", zcl_native_handle_dev_diagnose_latest, repo,
         &empty, "normal", out, sizeof(out), &exit_code);
@@ -2524,11 +2599,19 @@ static bool partial_reply_consume_request(int fd)
 static void *delayed_vault_plan_serve(void *arg)
 {
     struct partial_reply_server *s = arg;
+#if defined(_WIN32)
+    platform_socket_pollfd pfd = {
+        .fd = (platform_socket_t)(intptr_t)s->listen_fd,
+        .events = PLATFORM_SOCKET_POLL_READ,
+    };
+    int ready = platform_socket_poll(&pfd, 1, 2000);
+#else
     struct pollfd pfd = { .fd = s->listen_fd, .events = POLLIN };
     int ready;
     do {
         ready = poll(&pfd, 1, 2000);
     } while (ready < 0 && errno == EINTR);
+#endif
     if (ready <= 0)
         return NULL;
     int fd = accept(s->listen_fd, NULL, NULL);

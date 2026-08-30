@@ -31,6 +31,8 @@
 #include "util/thread_qos.h"
 #include "util/log_macros.h"
 
+#include <stdatomic.h>
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -59,6 +61,30 @@
 #define ZCL_IOPRIO_PRIO_VALUE(class_, data_) \
     (((class_) << ZCL_IOPRIO_CLASS_SHIFT) | (data_))
 
+/* Short-burst background pools may create a thread per bounded batch. QoS is
+ * still applied to every thread, but a success line per worker would let
+ * ordinary chain verification become a log-volume attack on the node itself.
+ * Keep failures visible and publish one representative success per process. */
+static _Atomic bool g_background_success_logged = false;
+
+bool zcl_thread_qos_background_attr(pthread_attr_t *attr)
+{
+    if (!attr)
+        LOG_FAIL("thread_qos", "background pthread attribute is NULL");
+#if defined(__APPLE__)
+    int rc = pthread_attr_set_qos_class_np(attr, QOS_CLASS_BACKGROUND, 0);
+    if (rc != 0)
+        LOG_FAIL("thread_qos", "background pthread attribute denied: %s",
+                 strerror(rc));
+#else
+    /* Linux I/O priority and Windows thread priority can only be applied by
+     * the new thread itself. Preserve the caller's initialized attributes;
+     * zcl_thread_qos_background() on worker entry applies those controls. */
+    (void)attr;
+#endif
+    return true;
+}
+
 bool zcl_thread_qos_background(void)
 {
 #if defined(_WIN32)
@@ -72,9 +98,12 @@ bool zcl_thread_qos_background(void)
                  "CPU priority)", (unsigned long)GetLastError());
         return false;
     }
-    LOG_INFO("thread_qos",
-             "background QoS applied tid=%lu priority=below-normal",
-             (unsigned long)GetCurrentThreadId());
+    if (!atomic_exchange_explicit(&g_background_success_logged, true,
+                                  memory_order_relaxed))
+        LOG_INFO("thread_qos",
+                 "background QoS applied tid=%lu priority=below-normal "
+                 "(later successes suppressed)",
+                 (unsigned long)GetCurrentThreadId());
     return true;
 #elif defined(__APPLE__)
     int rc = pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
@@ -84,8 +113,12 @@ bool zcl_thread_qos_background(void)
     }
     uint64_t tid = 0;
     (void)pthread_threadid_np(NULL, &tid);
-    LOG_INFO("thread_qos", "background QoS applied tid=%llu class=background",
-             (unsigned long long)tid);
+    if (!atomic_exchange_explicit(&g_background_success_logged, true,
+                                  memory_order_relaxed))
+        LOG_INFO("thread_qos",
+                 "background QoS applied tid=%llu class=background "
+                 "(later successes suppressed)",
+                 (unsigned long long)tid);
     return true;
 #else
     bool cpu_ok = true;
@@ -115,11 +148,14 @@ bool zcl_thread_qos_background(void)
         io_ok = false;
     }
 
-    LOG_INFO("thread_qos",
-             "background QoS applied tid=%ld sched=%s io=%s",
-             (long)syscall(SYS_gettid),
-             cpu_ok ? "SCHED_BATCH" : "unchanged",
-             io_ok ? "IOPRIO_CLASS_IDLE" : "unchanged");
+    if (!atomic_exchange_explicit(&g_background_success_logged, true,
+                                  memory_order_relaxed))
+        LOG_INFO("thread_qos",
+                 "background QoS applied tid=%ld sched=%s io=%s "
+                 "(later successes suppressed)",
+                 (long)syscall(SYS_gettid),
+                 cpu_ok ? "SCHED_BATCH" : "unchanged",
+                 io_ok ? "IOPRIO_CLASS_IDLE" : "unchanged");
 
     return cpu_ok && io_ok;
 #endif

@@ -42,9 +42,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define CI_CHECK(name, expr) do {                                     \
     if (expr) { printf("  codeindex: %s... OK\n", (name)); }          \
@@ -1401,3 +1404,12 @@ int test_codeindex(void)
 
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked crash-rebuild and multi-child concurrency lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_codeindex(void)
+{
+    printf("codeindex: SKIP (Windows): forked crash-rebuild and multi-child concurrency lane\n");
+    return 0;
+}
+#endif
