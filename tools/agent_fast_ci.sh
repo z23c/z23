@@ -32,6 +32,7 @@ COMPILE_PLAN_FALLBACK_REASON=""
 NODE_BIN="${ZCL_FAST_NODE_BIN:-build/bin/z23}"
 DEV_NODE_BIN="${ZCL_FAST_DEV_NODE_BIN:-build/bin/z23-dev}"
 FAST_JOBS="${ZCL_FAST_JOBS:-}"
+FAST_TEST_JOBS="${ZCL_FAST_TEST_JOBS:-}"
 IMPACT_RULES_FILE="${ZCL_FAST_IMPACT_RULES_FILE:-app/controllers/include/controllers/agent_impact_rules.def}"
 FROZEN_SOURCE_RECORD="${ZCL_FAST_BUILD_SOURCE_RECORD:-}"
 FOCUSED_RECEIPT_RAN=0
@@ -119,6 +120,37 @@ resolve_fast_jobs() {
     case "$FAST_JOBS" in
         ''|*[!0-9]*|0)
             fail "ZCL_FAST_JOBS must be a positive integer (got ${FAST_JOBS:-empty})"
+            ;;
+    esac
+}
+
+# The test runner's workers are processes, not compiler tasks.  A broad proof
+# can put several SQLite, wallet, simnet, and lint fixtures resident at once,
+# so logical CPU count alone is not a safe admission limit on a unified-memory
+# Mac.  Keep compile and test concurrency independently overridable.  Darwin's
+# default lends at most half of physical memory to test children at a
+# conservative 2 GiB per worker; consensus/node work and the OS retain the
+# other half. Unknown memory falls back to four workers, never an optimistic
+# CPU-only guess.
+resolve_fast_test_jobs() {
+    local mem_bytes memory_jobs
+    resolve_fast_jobs
+    if [ -z "$FAST_TEST_JOBS" ]; then
+        FAST_TEST_JOBS="$FAST_JOBS"
+        if [ "$(uname -s)" = Darwin ]; then
+            mem_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+            case "$mem_bytes" in
+                ''|*[!0-9]*) memory_jobs=4 ;;
+                *) memory_jobs=$((mem_bytes / 2 / 2147483648)) ;;
+            esac
+            [ "$memory_jobs" -ge 2 ] || memory_jobs=2
+            [ "$FAST_TEST_JOBS" -le "$memory_jobs" ] ||
+                FAST_TEST_JOBS="$memory_jobs"
+        fi
+    fi
+    case "$FAST_TEST_JOBS" in
+        ''|*[!0-9]*|0)
+            fail "ZCL_FAST_TEST_JOBS must be a positive integer (got ${FAST_TEST_JOBS:-empty})"
             ;;
     esac
 }
@@ -1496,10 +1528,11 @@ run_mapped_focused_tests() {
         fail "focused proof plan contains a non-exact registered group: $TEST_GROUPS"
     count="$(printf '%s\n' "$exact_groups" | sed '/^$/d' | wc -l | tr -d ' ')"
     exact_csv="$(printf '%s\n' "$exact_groups" | sed '/^$/d' | paste -sd, -)"
-    log "focused test exact_groups=$exact_csv count=$count"
+    resolve_fast_test_jobs
+    log "focused test exact_groups=$exact_csv count=$count workers=$FAST_TEST_JOBS"
     set +e
     output="$(make_fast t-fast-exact "ONLY=$exact_csv" \
-        "T_FAST_EXACT_ARGS=--cache --activate-proof-contracts" 2>&1)"
+        "T_FAST_EXACT_ARGS=--cache --activate-proof-contracts --jobs=$FAST_TEST_JOBS" 2>&1)"
     rc=$?
     set -e
     printf '%s\n' "$output"
@@ -1572,7 +1605,8 @@ main() {
     fi
     log "schema=$SCHEMA"
     resolve_fast_jobs
-    log "compiler=$FAST_CC cache=$CACHE_TOOL jobs=$FAST_JOBS compile=$FAST_COMPILE"
+    resolve_fast_test_jobs
+    log "compiler=$FAST_CC cache=$CACHE_TOOL jobs=$FAST_JOBS test_jobs=$FAST_TEST_JOBS compile=$FAST_COMPILE"
     validate_changed_files_only
 
     case "$mode" in
