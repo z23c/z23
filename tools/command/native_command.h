@@ -2304,15 +2304,6 @@ void zcl_native_handle_dev_agent_test(
 void zcl_native_handle_dev_agent_mutate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
-void zcl_native_handle_dev_proof_ensure(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply);
-void zcl_native_handle_dev_proof_status(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply);
-void zcl_native_handle_dev_proof_wait(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply);
 
 /* Dev-build-only executors.  The catalog binds these only when
  * ZCL_DEV_BUILD is set; release objects neither reference nor link them. */

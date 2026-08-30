@@ -36,6 +36,7 @@
 #include "codeindex/codeindex.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
+#include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -318,6 +319,12 @@ static int test_ic_large_plan_preserves_groups(void)
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
                ZCL_DEVLOOP_DIM_COMPLETE);
         ASSERT(ic_planned(&plan, "download"));
+
+        struct zcl_devloop_plan direct;
+        ASSERT(zcl_devloop_plan_files(ic_many_group_files, n, &direct));
+        ASSERT(direct.path_groups_len > ZCL_AGENT_IMPACT_MAX_GROUPS);
+        ASSERT(direct.dims[ZCL_DEVLOOP_DIM_OPAQUE].status ==
+               ZCL_DEVLOOP_DIM_COMPLETE);
 
         /* Regression: the exact execution list is droppable presentation,
          * while the closure and completeness verdict are mandatory evidence.
@@ -954,6 +961,125 @@ static int test_ic_code_capsule_stays_with_code_owner(void)
     return failures;
 }
 
+static int test_ic_dev_proof_contract_is_direct(void)
+{
+    int failures = 0;
+    TEST("impact composition: dev proof contract stops at its exact owner") {
+        const char *files[] = {
+            "app/controllers/include/controllers/agent_impact_rules.def",
+            "config/commands/dev.def",
+            "lib/test/src/lint_gate_selftests.h",
+            "tools/dev/dev_proof.c",
+            "tools/dev/dev_proof_receipt.h",
+            "tools/dev/devloop.h",
+            "tools/command/native_dev_proof_command.c",
+            "tools/command/native_dev_verify_change_command.c",
+        };
+        struct zcl_devloop_plan plan;
+        ASSERT(zcl_devloop_plan_files(files,
+            sizeof(files) / sizeof(files[0]), &plan));
+        ASSERT(zcl_devloop_plan_add_closure(
+            "test-tmp/no-dev-proof-index", files,
+            sizeof(files) / sizeof(files[0]), &plan));
+        ASSERT(plan.closure_groups_len == 0);
+        ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
+               ZCL_DEVLOOP_DIM_NOT_APPLICABLE);
+        ASSERT(plan.dims[ZCL_DEVLOOP_DIM_INCLUDE].status ==
+               ZCL_DEVLOOP_DIM_NOT_APPLICABLE);
+        ASSERT(ic_planned(&plan, "dev_platform"));
+        ASSERT(zcl_devloop_plan_proof_admissible(&plan, NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static struct zcl_dev_acceptance_receipt_v1 ic_valid_dev_proof_receipt(void)
+{
+    static const char local[] =
+        "1111111111111111111111111111111111111111";
+    static const char base[] =
+        "2222222222222222222222222222222222222222";
+    struct zcl_dev_acceptance_receipt_v1 receipt = {0};
+    (void)zcl_dev_proof_oid_decode(local, receipt.local_commit,
+                                   &receipt.local_commit_len);
+    (void)zcl_dev_proof_oid_decode(base, receipt.remote_base,
+                                   &receipt.remote_base_len);
+    uint8_t *roots[] = {
+        receipt.source_root, receipt.source_cas_root, receipt.mutation_root,
+        receipt.changed_set_root, receipt.impact_policy_root,
+        receipt.compiler_root, receipt.flags_root, receipt.environment_root,
+        receipt.build_graph_root, receipt.child_set_root,
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        memset(roots[i], (int)i + 1, ZCL_DEV_PROOF_ROOT_BYTES);
+    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
+        memset(receipt.dimensions[i].receipt_root, (int)i + 1,
+               ZCL_DEV_PROOF_ROOT_BYTES);
+        receipt.dimensions[i].selected = 1;
+        receipt.dimensions[i].reused = 1;
+    }
+    receipt.policy_version = 1;
+    receipt.complete = 1;
+    (void)zcl_dev_proof_receipt_child_set_root(
+        &receipt, receipt.child_set_root);
+    (void)zcl_dev_proof_receipt_seal(&receipt);
+    return receipt;
+}
+
+static int test_ic_dev_proof_receipt_admission(void)
+{
+    int failures = 0;
+    static const char local[] =
+        "1111111111111111111111111111111111111111";
+    static const char base[] =
+        "2222222222222222222222222222222222222222";
+    struct zcl_dev_acceptance_receipt_v1 receipt =
+        ic_valid_dev_proof_receipt();
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    struct zcl_dev_acceptance_receipt_v1 parsed;
+    char why[128];
+    TEST("impact composition: exact proof rejects inadmissible receipts") {
+        ASSERT(zcl_dev_proof_receipt_serialize(&receipt, wire));
+        ASSERT(zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed));
+        ASSERT(zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                              why, sizeof(why)));
+        struct zcl_dev_proof_dimension child_dimension =
+            parsed.dimensions[ZCL_DEV_PROOF_TEST];
+        ASSERT(zcl_dev_proof_child_receipt_create(
+            ZCL_DEV_PROOF_TEST, &child_dimension, child));
+        ASSERT(zcl_dev_proof_child_receipt_validate(
+            child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension));
+        child[40] ^= 1u;
+        ASSERT(!zcl_dev_proof_child_receipt_validate(
+            child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension));
+        ASSERT(!zcl_dev_proof_receipt_validate(
+            &parsed, local,
+            "3333333333333333333333333333333333333333",
+            why, sizeof(why)));
+        parsed = receipt;
+        parsed.dimensions[ZCL_DEV_PROOF_TEST].skipped = 1;
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        parsed = receipt;
+        parsed.child_set_root[0] ^= 1u;
+        ASSERT(zcl_dev_proof_receipt_seal(&parsed));
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        parsed = receipt;
+        memset(parsed.compiler_root, 0, sizeof(parsed.compiler_root));
+        ASSERT(zcl_dev_proof_receipt_seal(&parsed));
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        wire[100] ^= 1u;
+        ASSERT(zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed));
+        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                               why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_native_compositor_selects_physical_proof(void)
 {
     int failures = 0;
@@ -1027,6 +1153,8 @@ int test_impact_composition(void)
     failures += test_ic_dimension_applicability_and_exact_execution();
     failures += test_ic_snapshot_overlays_current_symbols();
     failures += test_ic_code_capsule_stays_with_code_owner();
+    failures += test_ic_dev_proof_contract_is_direct();
+    failures += test_ic_dev_proof_receipt_admission();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();

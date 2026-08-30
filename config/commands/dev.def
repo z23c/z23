@@ -604,7 +604,7 @@ ZCL_COMMAND_DEV_COMMAND(
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    zcl_native_handle_dev_proof_ensure,
+    zcl_native_handle_dev_verify_change,
     "background proof scheduling requires the dev binary",
     "z23-dev dev proof status")
 
@@ -622,7 +622,7 @@ ZCL_COMMAND_DEV_READ(
     ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_TINY,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
-    zcl_native_handle_dev_proof_status,
+    zcl_native_handle_dev_verify_change,
     "proof receipt status requires the dev binary",
     "z23-dev dev proof status")
 
@@ -642,7 +642,7 @@ ZCL_COMMAND_DEV_COMMAND(
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
-    zcl_native_handle_dev_proof_wait,
+    zcl_native_handle_dev_verify_change,
     "proof receipt waiting requires the dev binary",
     "z23-dev dev proof status")
 

@@ -4,7 +4,6 @@
 
 #include "dev_activation.h"
 #include "dev_failure_store.h"
-#include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "hotswap/hotfork_capsule.h"
 #include "framework/app_definition.h"
@@ -3212,92 +3211,6 @@ static int test_cycle_proof_reuse_contract(void)
     return failures;
 }
 
-static struct zcl_dev_acceptance_receipt_v1 valid_dev_proof_receipt(void)
-{
-    static const char local[] =
-        "1111111111111111111111111111111111111111";
-    static const char base[] =
-        "2222222222222222222222222222222222222222";
-    struct zcl_dev_acceptance_receipt_v1 receipt = {0};
-    (void)zcl_dev_proof_oid_decode(local, receipt.local_commit,
-                                   &receipt.local_commit_len);
-    (void)zcl_dev_proof_oid_decode(base, receipt.remote_base,
-                                   &receipt.remote_base_len);
-    uint8_t *roots[] = {
-        receipt.source_root, receipt.source_cas_root, receipt.mutation_root,
-        receipt.changed_set_root, receipt.impact_policy_root,
-        receipt.compiler_root, receipt.flags_root, receipt.environment_root,
-        receipt.build_graph_root, receipt.child_set_root,
-    };
-    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        memset(roots[i], (int)i + 1, ZCL_DEV_PROOF_ROOT_BYTES);
-    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
-        memset(receipt.dimensions[i].receipt_root, (int)i + 1,
-               ZCL_DEV_PROOF_ROOT_BYTES);
-        receipt.dimensions[i].selected = 1;
-        receipt.dimensions[i].reused = 1;
-    }
-    receipt.policy_version = 1;
-    receipt.complete = 1;
-    (void)zcl_dev_proof_receipt_child_set_root(
-        &receipt, receipt.child_set_root);
-    (void)zcl_dev_proof_receipt_seal(&receipt);
-    return receipt;
-}
-
-static int test_dev_proof_receipt_admission(void)
-{
-    int failures = 0;
-    static const char local[] =
-        "1111111111111111111111111111111111111111";
-    static const char base[] =
-        "2222222222222222222222222222222222222222";
-    struct zcl_dev_acceptance_receipt_v1 receipt = valid_dev_proof_receipt();
-    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
-    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
-    struct zcl_dev_acceptance_receipt_v1 parsed;
-    char why[128];
-    TEST("[dev] exact proof receipt rejects stale, hollow, skipped and tampered evidence") {
-        ASSERT(zcl_dev_proof_receipt_serialize(&receipt, wire));
-        ASSERT(zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed));
-        ASSERT(zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                              why, sizeof(why)));
-        struct zcl_dev_proof_dimension child_dimension =
-            parsed.dimensions[ZCL_DEV_PROOF_TEST];
-        ASSERT(zcl_dev_proof_child_receipt_create(
-            ZCL_DEV_PROOF_TEST, &child_dimension, child));
-        ASSERT(zcl_dev_proof_child_receipt_validate(
-            child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension));
-        child[40] ^= 1u;
-        ASSERT(!zcl_dev_proof_child_receipt_validate(
-            child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension));
-        ASSERT(!zcl_dev_proof_receipt_validate(
-            &parsed, local,
-            "3333333333333333333333333333333333333333",
-            why, sizeof(why)));
-        parsed = receipt;
-        parsed.dimensions[ZCL_DEV_PROOF_TEST].skipped = 1;
-        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                               why, sizeof(why)));
-        parsed = receipt;
-        parsed.child_set_root[0] ^= 1u;
-        ASSERT(zcl_dev_proof_receipt_seal(&parsed));
-        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                               why, sizeof(why)));
-        parsed = receipt;
-        memset(parsed.compiler_root, 0, sizeof(parsed.compiler_root));
-        ASSERT(zcl_dev_proof_receipt_seal(&parsed));
-        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                               why, sizeof(why)));
-        wire[100] ^= 1u;
-        ASSERT(zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed));
-        ASSERT(!zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                               why, sizeof(why)));
-        PASS();
-    } _test_next:;
-    return failures;
-}
-
 static int test_progressive_event_vocabulary(void)
 {
     int failures = 0;
@@ -3591,7 +3504,6 @@ int test_dev_platform(void)
     failures += test_resident_process_supersession();
     failures += test_native_source_cas_shadow();
     failures += test_cycle_proof_reuse_contract();
-    failures += test_dev_proof_receipt_admission();
     failures += test_progressive_event_vocabulary();
     failures += test_reflex_policy_boundary();
     failures += test_hotfork_descriptor_boundary();

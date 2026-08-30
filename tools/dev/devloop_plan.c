@@ -239,6 +239,35 @@ static bool path_is_opaque_class(const char *path)
     return false;
 }
 
+/* These development-policy components have explicit behavioral owners in
+ * agent_impact_rules.def. Their direct compile/lint/test set is the boundary;
+ * walking through generic registries and test harnesses selects unrelated
+ * product families without observing additional behavior. */
+static bool path_is_direct_development_contract(const char *path)
+{
+    static const char *const paths[] = {
+        "app/controllers/include/controllers/agent_impact_rules.def",
+        "config/commands/dev.def",
+        "lib/test/src/lint_gate_hygiene_selftests.c",
+        "lib/test/src/lint_gate_selftests.h",
+        "tools/command/native_dev_proof_command.c",
+        "tools/command/native_dev_proof_command.h",
+        "tools/command/native_dev_verify_change_command.c",
+        "tools/dev/dev_proof.c",
+        "tools/dev/dev_proof.h",
+        "tools/dev/dev_proof_receipt.c",
+        "tools/dev/dev_proof_receipt.h",
+        "tools/dev/devloop.h",
+        "tools/dev/devloop_cycle.c",
+        "tools/dev/devloop_plan.c",
+        "tools/dev/z23_git_hook.c",
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
+        if (path && strcmp(path, paths[i]) == 0)
+            return true;
+    return false;
+}
+
 /* Graph dimensions are properties of a source shape, not mandatory rituals.
  * A .c file cannot be reverse-included; a .def registry has no callable
  * symbols; opaque assets enter neither compiler graph. Dedicated registered
@@ -250,7 +279,8 @@ static bool path_is_opaque_class(const char *path)
  * historic test_parallel fanout false alarm without hiding helper impacts. */
 static bool path_semantic_applies(const char *path)
 {
-    if (!path || path_is_opaque_class(path) || has_suffix(path, ".def"))
+    if (!path || path_is_direct_development_contract(path) ||
+        path_is_opaque_class(path) || has_suffix(path, ".def"))
         return false;
     if (has_suffix(path, ".h"))
         return true;
@@ -261,7 +291,8 @@ static bool path_semantic_applies(const char *path)
 
 static bool path_include_applies(const char *path)
 {
-    return path && !path_is_opaque_class(path) &&
+    return path && !path_is_direct_development_contract(path) &&
+           !path_is_opaque_class(path) &&
            (has_suffix(path, ".h") || has_suffix(path, ".def"));
 }
 
@@ -399,6 +430,20 @@ static bool path_is_consensus_risk(const char *path)
     return false;
 }
 
+static bool plan_add_path_group(struct zcl_devloop_plan *plan,
+                                const char *group)
+{
+    for (size_t i = 0; i < plan->path_groups_len; i++)
+        if (strcmp(plan->path_groups[i], group) == 0)
+            return true;
+    if (plan->path_groups_len >= ZCL_DEVLOOP_MAX_PLAN_GROUPS)
+        return false;
+    snprintf(plan->path_groups[plan->path_groups_len],
+             sizeof(plan->path_groups[0]), "%s", group);
+    plan->path_groups_len++;
+    return true;
+}
+
 bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
                             struct zcl_devloop_plan *out)
 {
@@ -430,7 +475,6 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
     const struct hotswap_eligible_entry *batch_hotswap = NULL;
     bool one_hotswap_owner = true;
     const char *consensus_via = NULL;
-    struct agent_impact_acc impact = {0};
     for (size_t i = 0; i < file_count; i++) {
         if (!path_is_safe(files[i]))
             return false;
@@ -449,10 +493,9 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
         if (crisk && !consensus_via)
             consensus_via = files[i];
         out->consensus_risk = out->consensus_risk || crisk;
-        /* Per-file accumulation so the union can say WHICH file's rule named
-         * each group, and whether the rule that named it was one no graph
-         * could have derived. Merged into `impact` immediately after, so the
-         * floor itself is byte-identical to the single-accumulator version. */
+        /* Each rule is evaluated in its original bounded accumulator, then
+         * unioned directly into the graph-plan envelope. A multi-file plan is
+         * not constrained by the smaller per-path result shape. */
         struct agent_impact_acc per_file = {0};
         (void)agent_impact_apply_shared_rules(files[i], &per_file);
         enum zcl_devloop_dim dim =
@@ -463,35 +506,12 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
                 : ZCL_DEVLOOP_DIM_SEMANTIC;
         for (size_t g = 0; g < per_file.groups_len; g++) {
             plan_note_selection(out, per_file.groups[g], dim, files[i]);
-            agent_impact_add_group(&impact, per_file.groups[g]);
-            /* agent_impact_add_group silently drops past its own bound. A
-             * dropped floor group is a MISSING test, so say so rather than
-             * ship a short floor that looks whole. */
-            bool kept = false;
-            for (size_t k = 0; k < impact.groups_len; k++)
-                if (strcmp(impact.groups[k], per_file.groups[g]) == 0)
-                    kept = true;
-            if (!kept)
+            if (!plan_add_path_group(out, per_file.groups[g]))
                 plan_dim_set(out, ZCL_DEVLOOP_DIM_OPAQUE,
                              ZCL_DEVLOOP_DIM_INCOMPLETE, "path-group-cap");
         }
-        impact.shared_rule_hits += per_file.shared_rule_hits;
     }
     out->docs_only = all_docs;
-
-    /* Record the path-glob FLOOR: every shared-impact-rule group the changed
-     * files matched, in deterministic insertion order. proof_group stays the
-     * primary route (path_groups[0] or the consensus override); this set is
-     * additive reporting the closure step later unions onto. */
-    for (size_t i = 0; i < impact.groups_len &&
-                       out->path_groups_len < ZCL_DEVLOOP_MAX_PLAN_GROUPS; i++) {
-        snprintf(out->path_groups[out->path_groups_len],
-                 sizeof(out->path_groups[0]), "%s", impact.groups[i]);
-        out->path_groups_len++;
-    }
-    if (impact.groups_len > out->path_groups_len)
-        plan_dim_set(out, ZCL_DEVLOOP_DIM_OPAQUE, ZCL_DEVLOOP_DIM_INCOMPLETE,
-                     "path-group-cap");
 
     /* The consensus-surface route is a hardcoded prefix list — an explicit,
      * hand-authored, non-derivable mapping, exactly like the .def rules. It
@@ -500,20 +520,9 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
     if (out->consensus_risk) {
         plan_note_selection(out, "consensus_parity", ZCL_DEVLOOP_DIM_OPAQUE,
                             consensus_via ? consensus_via : files[0]);
-        bool present = false;
-        for (size_t i = 0; i < out->path_groups_len; i++)
-            if (strcmp(out->path_groups[i], "consensus_parity") == 0)
-                present = true;
-        if (!present) {
-            if (out->path_groups_len < ZCL_DEVLOOP_MAX_PLAN_GROUPS) {
-                snprintf(out->path_groups[out->path_groups_len],
-                         sizeof(out->path_groups[0]), "consensus_parity");
-                out->path_groups_len++;
-            } else {
-                plan_dim_set(out, ZCL_DEVLOOP_DIM_OPAQUE,
-                             ZCL_DEVLOOP_DIM_INCOMPLETE, "path-group-cap");
-            }
-        }
+        if (!plan_add_path_group(out, "consensus_parity"))
+            plan_dim_set(out, ZCL_DEVLOOP_DIM_OPAQUE,
+                         ZCL_DEVLOOP_DIM_INCOMPLETE, "path-group-cap");
     }
 
     if (all_docs) {
@@ -542,8 +551,8 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
     snprintf(out->proof_group_storage, sizeof(out->proof_group_storage), "%s",
              out->consensus_risk
                 ? "consensus_parity"
-                : (impact.groups_len > 0
-                    ? impact.groups[0]
+                : (out->path_groups_len > 0
+                    ? out->path_groups[0]
                     : "make_lint_gates"));
     out->proof_group = out->proof_group_storage;
     out->reason = out->consensus_risk
@@ -828,21 +837,43 @@ static bool append_json_string(char *out, size_t out_sz, size_t *pos,
  * verdict is what a proof consumer reads; it must never be the thing that
  * falls off the end. */
 #define PLAN_TAIL_RESERVE 1536
+#define PLAN_GROUPS_LIST_MAX 48
+#define PLAN_FILES_LIST_MAX 16
 
-/* Emit `"name":["g0","g1",...]` from a fixed-stride group array. */
+/* Emit a bounded view plus a root over the complete fixed-stride group set. */
 static bool append_group_array(char *out, size_t out_sz, size_t *pos,
                                const char *name,
                                const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
                                size_t len)
 {
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)name, strlen(name));
+    const unsigned char separator = '\0';
+    sha3_256_write(&ctx, &separator, 1);
+    for (size_t i = 0; i < len; i++) {
+        sha3_256_write(&ctx, (const unsigned char *)groups[i],
+                       strlen(groups[i]));
+        const unsigned char newline = '\n';
+        sha3_256_write(&ctx, &newline, 1);
+    }
+    unsigned char digest[32];
+    char digest_string[65];
+    sha3_256_finalize(&ctx, digest);
+    zcl_hex_encode(digest, sizeof(digest), digest_string);
     if (!appendf(out, out_sz, pos, ",\"%s\":[", name))
         return false;
-    for (size_t i = 0; i < len; i++) {
+    size_t listed = len < PLAN_GROUPS_LIST_MAX ? len : PLAN_GROUPS_LIST_MAX;
+    for (size_t i = 0; i < listed; i++) {
         if ((i && !appendf(out, out_sz, pos, ",")) ||
             !append_json_string(out, out_sz, pos, groups[i]))
             return false;
     }
-    return appendf(out, out_sz, pos, "]");
+    return appendf(out, out_sz, pos,
+                   "],\"%s_listed\":%zu,\"%s_total\":%zu,"
+                   "\"%s_abridged\":%s,\"%s_sha3\":\"%s\"",
+                   name, listed, name, len, name,
+                   listed < len ? "true" : "false", name, digest_string);
 }
 
 /* Materialize the C-owned proof plan as canonical full IDs. The catalog is
@@ -963,12 +994,18 @@ static size_t plan_json_body(const struct zcl_devloop_plan *plan,
                  plan->docs_only ? "true" : "false"))
         return 0;
 
-    for (size_t i = 0; i < file_count; i++) {
+    size_t files_listed = file_count < PLAN_FILES_LIST_MAX
+        ? file_count : PLAN_FILES_LIST_MAX;
+    for (size_t i = 0; i < files_listed; i++) {
         if ((i && !appendf(out, out_sz, &pos, ",")) ||
             !append_json_string(out, out_sz, &pos, files[i]))
             return 0;
     }
-    if (!appendf(out, out_sz, &pos, "],\"foreground_proof\":") ||
+    if (!appendf(out, out_sz, &pos,
+                 "],\"files_listed\":%zu,\"files_total\":%zu,"
+                 "\"files_abridged\":%s,\"foreground_proof\":",
+                 files_listed, file_count,
+                 files_listed < file_count ? "true" : "false") ||
         !append_json_string(out, out_sz, &pos, plan->proof_group) ||
         !appendf(out, out_sz, &pos, ",\"probe\":") ||
         !append_json_string(out, out_sz, &pos, plan->probe_tool) ||

@@ -2,6 +2,7 @@
  * purpose: Native command adapter for exact local push-proof receipts. */
 
 #include "command/native_command.h"
+#include "command/native_dev_proof_command.h"
 
 #include "dev_proof.h"
 #include "json/json.h"
@@ -85,7 +86,7 @@ static void proof_fail(struct zcl_command_reply *reply,
 }
 #endif
 
-void zcl_native_handle_dev_proof_status(
+static void proof_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
 #ifndef ZCL_DEV_BUILD
@@ -112,7 +113,7 @@ void zcl_native_handle_dev_proof_status(
 #endif
 }
 
-void zcl_native_handle_dev_proof_ensure(
+static void proof_ensure(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
 #ifndef ZCL_DEV_BUILD
@@ -142,7 +143,7 @@ void zcl_native_handle_dev_proof_ensure(
 #endif
 }
 
-void zcl_native_handle_dev_proof_wait(
+static void proof_wait(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
 #ifndef ZCL_DEV_BUILD
@@ -157,7 +158,7 @@ void zcl_native_handle_dev_proof_wait(
     if (timeout && timeout->type == JSON_INT)
         timeout_ms = json_get_int(timeout);
     struct zcl_dev_proof_status status;
-    if (timeout_ms < 1 || timeout_ms > 900000 ||
+    if (timeout_ms < 1 || timeout_ms > 300000 ||
         !zcl_dev_proof_wait(
             proof_source_root(request),
             proof_optional_text(request->input, "local_commit"),
@@ -166,7 +167,7 @@ void zcl_native_handle_dev_proof_wait(
         memset(&status, 0, sizeof(status));
         status.state = ZCL_DEV_PROOF_STATE_INVALID;
         (void)snprintf(status.detail, sizeof(status.detail), "%s",
-                       "timeout_ms_must_be_1_through_900000");
+                       "timeout_ms_must_be_1_through_300000");
         proof_emit_status(reply, &status, false);
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -183,4 +184,21 @@ void zcl_native_handle_dev_proof_wait(
     }
     proof_emit_status(reply, &status, false);
 #endif
+}
+
+void zcl_native_dev_proof_dispatch(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    const char *path = request && request->spec ? request->spec->path : NULL;
+    if (path && strcmp(path, "dev.proof.ensure") == 0)
+        proof_ensure(request, reply);
+    else if (path && strcmp(path, "dev.proof.status") == 0)
+        proof_status(request, reply);
+    else if (path && strcmp(path, "dev.proof.wait") == 0)
+        proof_wait(request, reply);
+    else
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "PROOF_COMMAND_INVALID", "dispatch", false, false,
+            "proof dispatch requires an exact proof command path", "");
 }

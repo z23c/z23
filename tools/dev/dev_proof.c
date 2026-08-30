@@ -472,6 +472,17 @@ static bool dependency_materialize(const char *source, const char *target)
         if (target_exists && unlink(target) != 0) return false;
         return link(source, target) == 0;
     }
+    if (S_ISLNK(source_st.st_mode)) {
+        char link_target[PATH_MAX];
+        ssize_t len = readlink(source, link_target, sizeof(link_target) - 1);
+        if (len <= 0 || (size_t)len >= sizeof(link_target) - 1)
+            return false;
+        link_target[len] = 0;
+        if (link_target[0] == '/' || strstr(link_target, ".."))
+            return false;
+        if (target_exists && unlink(target) != 0) return false;
+        return symlink(link_target, target) == 0;
+    }
     if (!S_ISDIR(source_st.st_mode) ||
         (target_exists && !S_ISDIR(target_st.st_mode)) ||
         (!target_exists && mkdir(target, 0700) != 0))
@@ -544,7 +555,18 @@ static bool generation_prepare(const struct proof_paths *paths,
         "vendor/lib/libz.a", "vendor/lib/libtor_stub.a",
         "vendor/include/openssl", "vendor/include/event2",
         "vendor/include/zlib.h", "vendor/include/zconf.h",
+        "build/githooks", "build/bin/z23-git-hook",
     };
+    char build_dir[PATH_MAX], bin_dir[PATH_MAX];
+    if (snprintf(build_dir, sizeof(build_dir), "%s/build", generation) >=
+            (int)sizeof(build_dir) ||
+        snprintf(bin_dir, sizeof(bin_dir), "%s/build/bin", generation) >=
+            (int)sizeof(bin_dir) ||
+        !platform_private_directory_ensure(build_dir) ||
+        !platform_private_directory_ensure(bin_dir)) {
+        proof_why(why, why_len, "proof_generation_dependency_unavailable");
+        return false;
+    }
     for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++) {
         char source[PATH_MAX], target[PATH_MAX];
         if (snprintf(source, sizeof(source), "%s/%s", paths->root,
