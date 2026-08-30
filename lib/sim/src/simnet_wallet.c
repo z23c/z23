@@ -5,6 +5,7 @@
 
 #include "sim/simnet_wallet.h"
 
+#include "base/hex.h"
 #include "consensus/consensus.h"
 #include "core/amount.h"
 #include "platform/rng.h"
@@ -73,13 +74,8 @@ static void rng_bytes(uint8_t *out, size_t len)
 
 static void wallet_make_address(struct simnet_wallet *w)
 {
-    static const char hex[] = "0123456789abcdef";
     memcpy(w->address, "sim1", 4);
-    for (size_t i = 0; i < 20; i++) {
-        w->address[4 + i * 2] = hex[w->key.id.data[i] >> 4];
-        w->address[5 + i * 2] = hex[w->key.id.data[i] & 0x0f];
-    }
-    w->address[44] = '\0';
+    zcl_hex_encode(w->key.id.data, 20, w->address + 4);
 }
 
 struct simnet_wallet *simnet_wallet_create(struct simnet *s)

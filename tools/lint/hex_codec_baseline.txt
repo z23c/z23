@@ -9,41 +9,6 @@
 #   zcl_hex_decode_n(hex, out, cap, &n)   1..cap bytes
 # then delete the line here. Adding a row is not a fix.
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_hex_codec_single.sh
-app/controllers/src/chain_segment_controller.c
-app/controllers/src/dbquery_controller.c
-app/controllers/src/diagnostics_registry_rom.c
-app/controllers/src/name_site_controller.c
-app/controllers/src/store_controller.c
-app/controllers/src/store_controller_pow.c
-app/controllers/src/wallet_shielded_keys.c
-app/jobs/src/psc_audit.c
-app/models/src/op_return_index.c
-app/models/src/zid_domain.c
-app/services/src/agent_session_service.c
-app/services/src/canary_sentinel_watch.c
-app/services/src/consensus_state_publication_cas.c
-app/services/src/mirror_divergence_locator.c
-app/services/src/network_monitor.c
-app/services/src/seed_integrity_gate.c
-app/views/src/blog_post_view.c
 app/views/src/explorer_factoids_difficulty.c
-config/src/boot_shutdown_marker.c
-config/src/consensus_state_producer_receipt.c
 config/src/consensus_state_producer_status.c
-lib/codeindex/src/codeindex_merkle.c
 lib/encoding/src/utilstrencodings.c
-lib/hotswap/src/hotswap_activate.c
-lib/hotswap/src/hotswap_loader.c
-lib/net/src/onion_ratelimit.c
-lib/policy/src/anchor_finality.c
-lib/sim/src/simnet_wallet.c
-lib/storage/src/consensus_db.c
-lib/storage/src/topology_store.c
-tools/checkpoint_rung_export.c
-tools/command/native_dev_command.c
-tools/core_seal.c
-tools/dev/dev_activation.c
-tools/dev/dev_workspace.c
-tools/gen_sha3_windows.c
-tools/gen_utxo_root_ladder.c
-tools/snapshot_from_coinskv.c

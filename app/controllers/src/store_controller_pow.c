@@ -48,6 +48,7 @@
  * caps in store_controller.c) plus the tiered onion budgets in
  * lib/net/src/onion_ratelimit.c, which classify /store/orders EXPENSIVE. */
 
+#include "base/hex.h"
 #include "controllers/store_controller_internal.h"
 #include "net/puzzle.h"
 
@@ -98,16 +99,6 @@ static void store_pow_bind_product(int64_t product_id, uint8_t out[32])
     sha3_256((const unsigned char *)ctx, strlen(ctx), out);
 }
 
-static void store_pow_hex32(const uint8_t in[32], char out[65])
-{
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; i++) {
-        out[i * 2]     = hex[(in[i] >> 4) & 0x0f];
-        out[i * 2 + 1] = hex[in[i] & 0x0f];
-    }
-    out[64] = '\0';
-}
-
 /* Public: the live challenge for one product, for the view layer to embed
  * in the order form. The client hashes SHA3-256(seed || token || ts ||
  * nonce) itself — see the JS solver in app/views/src/store_view.c — so it
@@ -133,8 +124,8 @@ void store_pow_challenge(int64_t product_id, struct store_pow_challenge *out)
     puzzle_gate_challenge(&g_store_pow_gate, seed, &bits, &server_time);
     store_pow_bind_product(product_id, token);
 
-    store_pow_hex32(seed, out->seed_hex);
-    store_pow_hex32(token, out->token_hex);
+    zcl_hex_encode(seed, 32, out->seed_hex);
+    zcl_hex_encode(token, 32, out->token_hex);
     out->bits = bits;
     out->server_time = server_time;
 }

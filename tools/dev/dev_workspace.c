@@ -6,6 +6,7 @@
 #endif
 #include "devloop.h"
 
+#include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
@@ -368,14 +369,9 @@ static void hash_field(struct sha3_256_ctx *ctx, const char *name,
 
 static void digest_hex(struct sha3_256_ctx *ctx, char out[65])
 {
-    static const char digits[] = "0123456789abcdef";
     unsigned char digest[32];
     sha3_256_finalize(ctx, digest);
-    for (size_t i = 0; i < sizeof(digest); i++) {
-        out[2 * i] = digits[digest[i] >> 4];
-        out[2 * i + 1] = digits[digest[i] & 15];
-    }
-    out[64] = 0;
+    zcl_hex_encode(digest, sizeof(digest), out);
 }
 
 static bool valid_hex64(const char *value)
