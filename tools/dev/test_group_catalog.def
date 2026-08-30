@@ -10,6 +10,7 @@ ZCL_TEST_GROUP(base_foundation)
 ZCL_TEST_GROUP(script_tail_poison)
 ZCL_TEST_GROUP(byte_order_codec)
 ZCL_TEST_GROUP(codec_cursor)
+ZCL_TEST_GROUP(determinism)
 ZCL_TEST_GROUP(zcode_creation_attribution)
 ZCL_TEST_GROUP(zcode_shadow_policy)
 ZCL_TEST_GROUP(zcode_score_receipt)
@@ -672,6 +673,12 @@ ZCL_TEST_GROUP(retrieval)
  * The group exists for the refusals: only a PASS carrying a measured vector
  * publishes as a pass, an ineligible group produces no receipt at all rather
  * than an empty one, and belief is never read off the wire. */
+/* A durable hash-chained log. The group exists for the distinction the
+ * module is built around: an interrupted append leaves an uncommitted tail
+ * that recovery may discard, and an altered frame is refused and left
+ * exactly where it is. Confusing the two would either lose history or
+ * destroy the evidence that history was changed. */
+ZCL_TEST_GROUP(chainlog)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)

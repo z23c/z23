@@ -98,6 +98,7 @@ gate_command() {
         check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;
         check-tu-random-seed)              echo './tools/lint/check_tu_random_seed.sh' ;;
         check-equihash-params)             echo './tools/lint/check_equihash_params.sh --selftest && ./tools/lint/check_equihash_params.sh' ;;
+        check-determinism-ratchet)         echo './tools/lint/check_determinism_ratchet.sh --selftest && ./tools/lint/check_determinism_ratchet.sh' ;;
         check-git-hooks-installed)         echo './tools/scripts/check_git_hooks_installed.sh' ;;
         check-malloc)                      echo './tools/lint/check_malloc.sh' ;;
         check-hotswap-dev-only)            echo './tools/lint/check_hotswap_dev_only.sh' ;;
