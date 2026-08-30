@@ -9749,6 +9749,50 @@ $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
 	    -Ilib/platform/include -Ilib/util/include \
 	    -o $@ $(MUTATION_CAMPAIGN_SRCS) -lpthread
+# ── The engine unit dispatcher ──────────────────────────────────────────────
+# `engine_unit` sends ONE scoped unit of work to a model, applies the result in
+# an isolated worktree, and judges it by running the gate. The law it is built
+# on is in lib/engine/include/engine/engine.h: the model proposes, the gate
+# decides. It is the C23 successor to tools/dev/grok-unit.sh.
+#
+# Like $(BIN_DIR)/zclassic23-acme above, this is compiled STRAIGHT FROM SOURCE
+# to an executable with no intermediate object files, and for the same reason:
+# it links tools/acme/tls_client.c, and lib/test/src/test_cold_join_sovereign.c
+# P2 asserts that no Z23 object under build/*obj*/epochs carries an undefined
+# reference to a TLS-client or trust-store entry point. Nothing compiled here
+# can ever appear in a scanned epoch tree, which keeps P2 green honestly rather
+# than by exemption.
+#
+# lib/engine itself carries no transport at all — it is pure logic, is a normal
+# lib module, and is linked into the node like any other. That split is the
+# whole reason this program can exist without weakening the node's claim that
+# it consults no certificate authority.
+ENGINE_UNIT_BIN = $(BIN_DIR)/zclassic23-engine-unit
+ENGINE_UNIT_SRCS = tools/engine_unit.c \
+	tools/acme/tls_client.c \
+	lib/engine/src/engine_registry.c \
+	lib/engine/src/engine_err.c \
+	lib/engine/src/engine_patch.c \
+	lib/engine/src/engine_secret.c \
+	lib/engine/src/engine_verdict.c \
+	lib/engine/src/engine_wire_request.c \
+	lib/engine/src/engine_wire_response.c \
+	lib/json/src/json.c \
+	lib/util/src/spawn.c \
+	lib/base/src/log_level.c \
+	lib/base/src/result.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
+ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
+	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+.PHONY: engine-unit
+engine-unit: $(ENGINE_UNIT_BIN)
+$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ENGINE_UNIT_INCLUDES) \
+	    -o $@ $(ENGINE_UNIT_SRCS) \
+	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
@@ -10244,6 +10288,15 @@ check-peer-floor-single-source:
 check-no-shellouts:
 	@echo "→ Gate: no_shellouts (os-substrate Rung 0)"
 	@./tools/lint/check_no_shellouts.sh
+
+# No API credential is committed. tools/engine_unit.c dispatches work to a paid
+# API, so this tree now has a reason to hold a key near it; a key in a tracked
+# file is spent the moment it lands. HARD (FAIL), no baseline — a committed
+# credential is not something to ratchet down over time. Proven to actually
+# fail by lib/test/src/test_engine.c, which plants one in a fixture tree.
+check-no-api-keys:
+	@echo "→ Gate: no_api_keys (no committed credential)"
+	@./tools/lint/check_no_api_keys.sh
 
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
 # every saved finding under lib/test/fuzz_seeds/ has a live fuzz binary behind
@@ -11494,6 +11547,7 @@ LINT_GATES := \
     check-sysinit-ordering \
     check-sandbox-wired \
     check-no-shellouts \
+    check-no-api-keys \
     check-no-writer-below-sealed-frontier \
     check-peer-floor-single-source \
     check-proc-self-shim \

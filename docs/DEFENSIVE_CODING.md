@@ -752,6 +752,25 @@ assert green).
   and the `lib/test/` fixtures are out of scope. Override `// shellout-ok` for
   a documented, reviewed exception.
 
+- **Gate: `check-no-api-keys`** (FAIL) —
+  `tools/lint/check_no_api_keys.sh`. No API credential is committed to this
+  tree. `tools/engine_unit.c` dispatches work to a paid API, so this tree now
+  has a reason to hold a key near it, and a key that lands in a tracked file is
+  spent: it is in the history, on every clone, and on every mirror. The rule
+  that a key lives in the environment or in a 0600 file **outside** the
+  repository is enforced in code (`lib/engine/include/engine/engine_secret.h`);
+  this gate is the half that notices when somebody pastes one in anyway. It
+  matches credential *shapes* — vendor-prefixed tokens, a `Bearer` header with
+  a long opaque value, and the two-part `<32+ hex>.<16+ alnum>` form — not a
+  list of known keys. A bare long hex run is deliberately **not** matched,
+  because digests, seeds, and consensus constants are all long hex and a gate
+  that cries wolf gets switched off. Binary fixtures and fuzz corpora are out
+  of scope for the same reason. No baseline and no WARN tier: a committed
+  credential is not something to ratchet down over time. Override with the
+  marker `api-key-example-ok` on the line for a documented non-credential.
+  `lib/test/src/test_engine.c` plants a key in a fixture tree and requires this
+  gate to fail on it, so it is a gate that has been seen to fail.
+
 - **Gate: `check-no-writer-below-sealed-frontier`** (FAIL) —
   `tools/lint/check_no_writer_below_sealed_frontier.sh`. The North Star's
   single-writer-per-frontier invariant
@@ -1089,6 +1108,7 @@ add/remove a gate.
 - `check-sandbox-wired`
 - `check-no-raw-sqlite-in-controllers`
 - `check-model-column-drift`
+- `check-no-api-keys`
 - `check-no-shellouts`
 - `check-no-writer-below-sealed-frontier`
 - `check-peer-floor-single-source`

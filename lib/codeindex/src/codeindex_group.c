@@ -153,6 +153,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/crypto") == 0) return "hash/cipher/PoW primitives and batched SHA3 acceleration: SHA-2, Blake2, ChaCha20-Poly1305, Ed25519, Equihash";
     if (strcmp(group, "lib/crypto_registry") == 0) return "singleton catalog of pluggable cryptographic verifier implementations";
     if (strcmp(group, "lib/encoding") == 0) return "string encoding helpers: money strings, hex/bin string encodings";
+    if (strcmp(group, "lib/engine") == 0) return "engine-dispatch harness (pure half): vendor registry, request document, hardened response decoder, file envelope, key holder + redactor, and the gate-derived verdict";
     if (strcmp(group, "lib/event") == 0) return "the in-process publish/subscribe event bus that decouples subsystems";
     if (strcmp(group, "lib/fingerprint") == 0) return "behavioral fingerprints: fail-closed purity judgement, signature-derived call harnesses, shape-seeded input corpora";
     if (strcmp(group, "lib/framework") == 0) return "app-shape platform glue: app_platform bootstrap + the typed-blocker condition contract";

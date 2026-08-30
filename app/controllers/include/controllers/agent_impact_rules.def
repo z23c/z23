@@ -2806,3 +2806,11 @@ AGENT_IMPACT_RULE("tools/lint/strip_c_comments.awk|tools/lint/check_model_sql_li
  * two cannot be proven apart, and they ride codeindex because a change to
  * the index changes both. */
 AGENT_IMPACT_RULE("lib/territory/include/territory/territory.h|lib/territory/src/territory_reach.c|lib/territory/src/territory_scorecard.c|lib/territory/src/territory_general.c|lib/test/src/test_territory.c", "territory codeindex command_registry_catalog make_lint_gates")
+/* The engine-dispatch harness. lib/engine is the pure half (registry, request
+ * document, hardened response decoder, file envelope, key holder, verdict);
+ * tools/engine_unit.c is the program that carries the transport and is already
+ * covered by the broad tools rule above. The key gate rides along because its
+ * self-test lives inside the engine group, and cold_join_sovereign rides along
+ * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
+ * which is the exact reason this module has no transport in it. */
+AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine cold_join_sovereign make_lint_gates")
