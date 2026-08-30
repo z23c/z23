@@ -111,8 +111,14 @@ if [ -z "$MASKED" ]; then
     echo "check-fortify-masked-decls: PASSED — this toolchain masks no candidate"
     echo "  declaration behind optimisation (control probe compiled, so the"
     echo "  measurement ran). CC=\"${CC_ARGV[*]}\""
-    [ $SELFTEST -eq 1 ] && { echo "check-fortify-masked-decls: selftest cannot run without a masked function" >&2; exit 2; }
-    exit 0
+    if [ $SELFTEST -eq 0 ]; then
+        exit 0
+    fi
+    # Darwin and other non-glibc hosts can truthfully measure an empty set.
+    # The lexical scanner still needs a discriminating self-test there, so
+    # feed it a synthetic call name; scan_file never compiles the fixtures.
+    MASKED="zcl_synthetic_masked_decl"
+    echo "check-fortify-masked-decls: selftest uses a synthetic masked name"
 fi
 
 # --- comment/string stripper ------------------------------------------------

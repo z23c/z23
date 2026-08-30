@@ -115,17 +115,10 @@ static int t_registry_reports_straggler(void)
         ASSERT_EQ(thread_registry_spawn("tr-stuck",
                                         tr_stuck_worker, NULL, NULL),
                   0);
-#if defined(__APPLE__)
-        /* Darwin lacks pthread_timedjoin_np; platform_thread_join_until()
-         * falls back to a blocking pthread_join(). The worker still finishes
-         * and is reaped — we just cannot observe a timeout. */
-        ASSERT_EQ(thread_registry_join_all(1), 0);
-#else
         /* 1-second timeout on a 3-second sleep → exactly one straggler. */
         ASSERT_EQ(thread_registry_join_all(1), 1);
         /* The straggler eventually exits; final sweep drains it. */
         ASSERT_EQ(thread_registry_join_all(5), 0);
-#endif
         PASS();
     } _test_next:;
     return failures;
@@ -140,9 +133,7 @@ static int t_registry_owned_join_waits_for_straggler(void)
         ASSERT_EQ(thread_registry_spawn("tr-owned",
                                         tr_stuck_worker, NULL, NULL),
                   0);
-#if !defined(__APPLE__)
         ASSERT_EQ(thread_registry_join_all(0), 1);
-#endif
         thread_registry_join_all_owned();
         ASSERT_EQ(thread_registry_live_count(), 0);
         ASSERT_EQ(thread_registry_unreaped_count(), 0);
