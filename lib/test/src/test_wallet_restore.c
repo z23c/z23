@@ -56,7 +56,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -431,7 +433,12 @@ int test_wallet_restore(void)
         WR_CHECK("refuses a database holding no wallet tables", !r.ok);
         wr_rm(empty);
     }
-    {   /* a datadir another writer is holding */
+    {   /* a datadir another writer is holding
+         *
+         * flock(2) and O_CLOEXEC have no Windows equivalent in this shape;
+         * this sub-test is not exercised on Windows, only kept
+         * syntactically valid there. */
+#if !defined(_WIN32)
         platform_directory_create(target, 0700);
         char pidfile[400];
         snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", target);
@@ -454,6 +461,7 @@ int test_wallet_restore(void)
         unlink(pidfile);
         WR_CHECK("datadir_free is ok once the lock is released",
                  wallet_restore_datadir_free(target).ok);
+#endif /* !defined(_WIN32) */
     }
 
     /* ---- (A) dry run: exact counts, nothing written ---- */
