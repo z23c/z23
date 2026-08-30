@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 759 |
+| Registry entries (branches + leaves) | 761 |
 | Top-level roots | 12 |
 | Branches | 175 |
-| Leaves (dispatchable command paths) | 584 |
-| … `ready` (live handler in this build) | 528 |
+| Leaves (dispatchable command paths) | 586 |
+| … `ready` (live handler in this build) | 530 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 206 |
+| Leaves with `effect=mutate` | 207 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 117 |
 
@@ -97,7 +97,7 @@ Per source file:
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
 | `config/commands/dev.def` | 59 | 14 | 45 |
-| `config/commands/code.def` | 20 | 2 | 18 |
+| `config/commands/code.def` | 22 | 2 | 20 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
 | `config/commands/zcode.def` | 245 | 58 | 187 |
@@ -968,6 +968,8 @@ represented by its children's sections.
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank N symbols by name, with a one-line context per hit |
 | `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Ask whether this checkout already does X, before building it |
 | `code territory` | ready | read / read / public · background/moderate | **`name`** | `zcl.code_territory.v1` | `z23 code territory lib/net` | One module's generated scorecard: owns, proves, depends, weak |
+| `code kpi` | ready | mutate / dev-mutation / public · background/moderate | none | `zcl.code_kpi.v1` | `z23 code kpi` | Record and compare the build's own numbers over time |
+| `code corpus` | ready | read / read / public · background/moderate | none | `zcl.code_corpus.v1` | `z23 code corpus` | Honest distance to 100M lines of proven, non-duplicated C23 |
 | `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general lib/net` | A territory's dispatch brief, or the roll-up ranked by weakest evidence |
 
 #### `code.provenance` — Attribute output back to the code that produced it

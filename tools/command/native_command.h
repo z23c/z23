@@ -359,6 +359,26 @@ void zcl_native_handle_code_merkle(
 void zcl_native_handle_code_territory(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.corpus — honest distance to 100M lines of proven, non-duplicated C23.
+ * Two readings kept apart: a live walk of the maintained C23 roots for lines,
+ * and the generated capability inventory for what a registered test actually
+ * reaches, plus a scope check saying whether those two walks saw the same
+ * tree. Backed by lib/science/science_corpus.c; opens no code index. The
+ * reply leads with the UNPROVEN count, which is the point of the leaf. */
+void zcl_native_handle_code_corpus(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* code.kpi — the build's own numbers, recorded rather than remembered. Reads
+ * artifacts the build already writes plus the code index's territory rows,
+ * appends one canonical frame to <root>/.codeindex/kpi.chainlog, and reports
+ * each metric against the most recent PRIOR frame with its direction, verdict
+ * and the exact drill-down command. The only code.* leaf that writes, which is
+ * why it is classed MUTATE. A metric whose artifact could not be read is
+ * UNAVAILABLE and is never rendered as 0. Backed by lib/kpi. */
+void zcl_native_handle_code_kpi(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* general — the dispatch brief for one territory (owns / proves / trusts /
  * weak at / refuses), or with no argument the roll-up across every territory
