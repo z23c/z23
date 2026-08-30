@@ -223,18 +223,6 @@ struct os_sandbox_rlimits os_sandbox_terminal_worker_rlimits(void)
     };
 }
 
-struct os_sandbox_rlimits os_sandbox_terminal_worker_rlimits(void)
-{
-    return (struct os_sandbox_rlimits){
-        .as_bytes = 256u * 1024u * 1024u,
-        .cpu_seconds = 300,
-        .nproc = 32,
-        .fsize_bytes = 1024u * 1024u,
-        .nofile = 64,
-        .core_bytes = 0,
-    };
-}
-
 #if defined(__APPLE__)
 /* Mirror of the Linux census: one entry per live thread of every process
  * owned by this uid. Linux walks /proc/<pid>/task; Darwin answers the same
