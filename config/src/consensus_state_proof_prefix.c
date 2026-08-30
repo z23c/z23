@@ -4,6 +4,7 @@
 
 #include "consensus_state_proof_prefix.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
@@ -55,14 +56,6 @@ static void proof_u64(struct sha3_256_ctx *ctx, uint64_t value)
     uint8_t le[8];
     zcl_write_u64_le(le, value);
     sha3_256_write(ctx, le, sizeof(le));
-}
-
-static bool digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= digest[i];
-    return any != 0;
 }
 
 static bool copy_blob32(sqlite3_stmt *st, int column, uint8_t out[32])
@@ -136,7 +129,7 @@ static bool read_components(
             (i == 6u && (uint64_t)cursor != rows) ||
             (i == 7u && (uint64_t)cursor > minimum + 1u) ||
             !copy_blob32(st, 7, out[i].component_digest) ||
-            !digest_nonzero(out[i].component_digest)) {
+            !zcl_bytes_any_set(out[i].component_digest, 32)) {
             ok = false;
             break;
         }
@@ -195,9 +188,9 @@ bool consensus_state_proof_prefix_install_in_tx(
         (manifest->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
          manifest->validation_profile !=
              CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !digest_nonzero(manifest->proof_manifest_digest) ||
-        !digest_nonzero(manifest->source_digest) ||
-        !digest_nonzero(manifest->artifact_digest))
+        !zcl_bytes_any_set(manifest->proof_manifest_digest, 32) ||
+        !zcl_bytes_any_set(manifest->source_digest, 32) ||
+        !zcl_bytes_any_set(manifest->artifact_digest, 32))
         return prefix_fail("prefix install: manifest is not a complete proof base");
 
     struct consensus_state_bundle_proof_summary
@@ -314,9 +307,9 @@ bool consensus_state_proof_prefix_load(
          copy_blob32(st, 3, out->proof_manifest_digest) &&
          copy_blob32(st, 4, out->source_digest) &&
          copy_blob32(st, 5, out->artifact_digest) &&
-         digest_nonzero(out->proof_manifest_digest) &&
-         digest_nonzero(out->source_digest) &&
-         digest_nonzero(out->artifact_digest);
+         zcl_bytes_any_set(out->proof_manifest_digest, 32) &&
+         zcl_bytes_any_set(out->source_digest, 32) &&
+         zcl_bytes_any_set(out->artifact_digest, 32);
     if (ok)
         ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
     sqlite3_finalize(st);

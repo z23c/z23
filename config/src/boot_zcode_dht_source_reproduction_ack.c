@@ -3,6 +3,7 @@
 
 #include "config/boot_zcode_dht.h"
 
+#include "base/bytes.h"
 #include "config/boot_zcode_dht_access.h"
 #include "vcs/package_store.h"
 #include "vcs/source_package_checkout.h"
@@ -19,13 +20,6 @@ struct source_reproduction_context {
     bool planned;
     enum vcs_zcode_dht_record_store_result result;
 };
-
-static bool source_reproduction_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static void source_reproduction_locked(
     struct vcs_zcode_dht_service *service, void *opaque)
@@ -70,7 +64,7 @@ static bool source_reproduction_prepare(
             store, spec->transport_root, source_root, accepted_work_root,
             &metrics) != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
         return false;
-    if (source_reproduction_nonzero(spec->semantic_root) &&
+    if (zcl_bytes_any_set(spec->semantic_root, 32) &&
         memcmp(spec->semantic_root, source_root, 32) != 0)
         return false;
     *normalized = *spec;

@@ -4,6 +4,7 @@
 
 #include "vcs/zcode_benchmark_receipt.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "vcs/signed_evidence.h"
 
@@ -16,17 +17,9 @@ static const uint8_t evidence_magic[8] = {'Z','C','B','E','V','1','\r','\n'};
 static const uint8_t env_policy_magic[8] =
     {'Z','C','E','N','P','1','\r','\n'};
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool root_nonzero(const uint8_t root[32])
 {
-    return bytes_nonzero(root, 32);
+    return zcl_bytes_any_set(root, 32);
 }
 
 /* The zcode_science.c fixed-width string rule: content bytes, one NUL,
@@ -333,7 +326,7 @@ enum vcs_zcode_receipt_error vcs_zcode_benchmark_evidence_v1_validate(
     if (evidence->min_ns > evidence->median_ns ||
         evidence->median_ns > evidence->max_ns)
         return VCS_ZCODE_RECEIPT_ERR_ORDER;
-    if (bytes_nonzero(evidence->reserved, sizeof(evidence->reserved)))
+    if (zcl_bytes_any_set(evidence->reserved, sizeof(evidence->reserved)))
         return VCS_ZCODE_RECEIPT_ERR_RESERVED;
     return VCS_ZCODE_RECEIPT_OK;
 }
@@ -416,7 +409,7 @@ enum vcs_zcode_receipt_error vcs_zcode_environment_policy_v1_validate(
     if (!padded_field_sane(policy->required_timer_source,
                            sizeof(policy->required_timer_source)))
         return VCS_ZCODE_RECEIPT_ERR_PADDING;
-    if (bytes_nonzero(policy->reserved, sizeof(policy->reserved)))
+    if (zcl_bytes_any_set(policy->reserved, sizeof(policy->reserved)))
         return VCS_ZCODE_RECEIPT_ERR_RESERVED;
     return VCS_ZCODE_RECEIPT_OK;
 }
@@ -499,7 +492,7 @@ bool vcs_zcode_environment_policy_v1_accepts(
         return false;
     if (profile->ram_mib < policy->min_ram_mib)
         return false;
-    if (bytes_nonzero(policy->required_timer_source,
+    if (zcl_bytes_any_set(policy->required_timer_source,
                       sizeof(policy->required_timer_source)) &&
         memcmp(policy->required_timer_source, profile->timer_source,
                sizeof(policy->required_timer_source)) != 0)

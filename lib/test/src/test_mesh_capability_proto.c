@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "session/mesh_capability_proto.h"
@@ -13,15 +14,6 @@ static void capability_fill(uint8_t out[32], uint8_t first)
 {
     for (size_t i = 0; i < 32; i++)
         out[i] = (uint8_t)(first + i * 13u);
-}
-
-static bool capability_all_zero(const void *bytes, size_t count)
-{
-    const uint8_t *p = bytes;
-    uint8_t any = 0;
-    for (size_t i = 0; i < count; i++)
-        any |= p[i];
-    return any == 0;
 }
 
 static void make_proposal(struct mesh_capability_proposal_v1 *frame)
@@ -307,12 +299,12 @@ static int exact_length_refusal(void)
             ASSERT_EQ(mesh_capability_frame_v1_decode(
                           &decoded, wire, wire_len - 1u),
                       MESH_CAPABILITY_PROTO_SIZE);
-            ASSERT(capability_all_zero(&decoded, sizeof(decoded)));
+            ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
             wire[wire_len] = 0;
             ASSERT_EQ(mesh_capability_frame_v1_decode(
                           &decoded, wire, wire_len + 1u),
                       MESH_CAPABILITY_PROTO_SIZE);
-            ASSERT(capability_all_zero(&decoded, sizeof(decoded)));
+            ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
         }
     } TEST_END
     return failures;
@@ -340,7 +332,7 @@ static int envelope_refusal(void)
         wire[7] = 0; wire[6] = 0;
         ASSERT_EQ(mesh_capability_frame_v1_decode(&decoded, wire, wire_len),
                   MESH_CAPABILITY_PROTO_KIND_INVALID);
-        ASSERT(capability_all_zero(&decoded, sizeof(decoded)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
     } TEST_END
     return failures;
 }
@@ -484,7 +476,7 @@ static int reserved_bytes_refusal(void)
         wire[106] = 1;
         ASSERT_EQ(mesh_capability_frame_v1_decode(&decoded, wire, wire_len),
                   MESH_CAPABILITY_PROTO_FLAGS);
-        ASSERT(capability_all_zero(&decoded, sizeof(decoded)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
 
         ASSERT(make_view(&view, MESH_CAPABILITY_FRAME_ACK));
         ASSERT_EQ(encode_view(&view, wire, sizeof(wire), &wire_len),
@@ -492,7 +484,7 @@ static int reserved_bytes_refusal(void)
         wire[170] = 1;
         ASSERT_EQ(mesh_capability_frame_v1_decode(&decoded, wire, wire_len),
                   MESH_CAPABILITY_PROTO_FLAGS);
-        ASSERT(capability_all_zero(&decoded, sizeof(decoded)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
     } TEST_END
     return failures;
 }
@@ -516,7 +508,7 @@ static int signature_and_root_refusal(void)
                       MESH_CAPABILITY_PROTO_OK);
             ASSERT_EQ(mesh_capability_frame_v1_root(&view, roots[raw - 1]),
                       MESH_CAPABILITY_PROTO_OK);
-            ASSERT(!capability_all_zero(roots[raw - 1], 32));
+            ASSERT(!zcl_bytes_all_zero((const uint8_t *)roots[raw - 1], 32));
 
             trial = view;
             test_view_signature(&trial)[0] ^= 1;
@@ -540,7 +532,7 @@ static int signature_and_root_refusal(void)
             trial = view;
             ASSERT_EQ(mesh_capability_frame_v1_sign(&trial, wrong_seed),
                       MESH_CAPABILITY_PROTO_KEY_MISMATCH);
-            ASSERT(capability_all_zero(test_view_signature(&trial), 64));
+            ASSERT(zcl_bytes_all_zero((const uint8_t *)test_view_signature(&trial), 64));
 
             ASSERT_EQ(encode_view(&view, wire, sizeof(wire), &wire_len),
                       MESH_CAPABILITY_PROTO_OK);
@@ -548,7 +540,7 @@ static int signature_and_root_refusal(void)
             ASSERT_EQ(mesh_capability_frame_v1_decode(
                           &decoded, wire, wire_len),
                       MESH_CAPABILITY_PROTO_SIGNATURE);
-            ASSERT(capability_all_zero(&decoded, sizeof(decoded)));
+            ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
         }
         for (size_t i = 0; i < MESH_CAPABILITY_FRAME_ACK; i++)
             for (size_t j = i + 1; j < MESH_CAPABILITY_FRAME_ACK; j++)

@@ -32,6 +32,10 @@
 #define PATH_MAX 4096
 #endif
 
+#if defined(__APPLE__) && !defined(ZCL_MACOS_DEPLOYMENT_TARGET)
+#define ZCL_MACOS_DEPLOYMENT_TARGET "14.0"
+#endif
+
 static bool tc_copy_string(char *dst, size_t dst_cap, const char *src)
 {
     if (!dst || dst_cap == 0 || !src)
@@ -193,10 +197,11 @@ const char *platform_toolchain_commons_flags_quick(void)
                    "-ffile-prefix-map=SOURCE=. -c");
 #elif defined(__APPLE__)
     (void)snprintf(buf, sizeof(buf),
-                   "-std=c23 -O1 %s -fno-omit-frame-pointer "
+                   "-std=c23 -O1 %s -mmacosx-version-min=%s "
+                   "-fno-omit-frame-pointer "
                    "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
                    "-ffile-prefix-map=SOURCE=. -c",
-                   arch[0] ? arch : "");
+                   arch[0] ? arch : "", ZCL_MACOS_DEPLOYMENT_TARGET);
 #else
     buf[0] = '\0';
 #endif
@@ -216,10 +221,11 @@ const char *platform_toolchain_commons_flags_standard_base(void)
                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror");
 #elif defined(__APPLE__)
     (void)snprintf(buf, sizeof(buf),
-                   "-std=c23 -O1 %s -fno-omit-frame-pointer "
+                   "-std=c23 -O1 %s -mmacosx-version-min=%s "
+                   "-fno-omit-frame-pointer "
                    "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror",
-                   arch[0] ? arch : "");
+                   arch[0] ? arch : "", ZCL_MACOS_DEPLOYMENT_TARGET);
 #else
     buf[0] = '\0';
 #endif
@@ -439,6 +445,10 @@ bool platform_toolchain_capture_descriptor(
 
 #elif defined(__APPLE__)
     const char *compiler = "/usr/bin/cc";
+    if (!tc_copy_string(out->platform_contract,
+                        sizeof(out->platform_contract),
+                        "macos-min=" ZCL_MACOS_DEPLOYMENT_TARGET))
+        return false;
     if (!tc_resolve_tool(compiler, out->compiler_driver,
                          sizeof(out->compiler_driver)))
         return false;

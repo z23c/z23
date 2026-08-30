@@ -3,7 +3,9 @@
 
 #include "codeindex_inventory_internal.h"
 
+#include "base/checked.h"
 #include "sha3/sha3.h"
+#include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <ctype.h>
@@ -19,13 +21,6 @@ static bool inv_ident_start(unsigned char c)
 static bool inv_ident_char(unsigned char c)
 {
     return isalnum(c) || c == '_';
-}
-
-static int inv_line_of(const char *src, size_t off)
-{
-    int line = 1;
-    for (size_t i = 0; i < off; i++) if (src[i] == '\n') line++;
-    return line;
 }
 
 static bool inv_include_push(struct inv_scan *s, int file_index, int line,
@@ -349,9 +344,113 @@ static bool inv_macro_invocation_segment(const char *clean, size_t start,
     return has_upper && p < end && clean[p] == '(';
 }
 
+/* Sorted index over ONE file's symbol occurrences, keyed by (name,
+ * def_path), so inv_body_push can recover a function body's preprocessor
+ * guard in O(log n + matches) instead of rescanning the whole corpus-so-far
+ * `s->occurrences` array for every body found -- that scan was the single
+ * dominant cost of the generator (98.6% of runtime by gprof), because it is
+ * O(bodies x occurrences).
+ *
+ * A per-file index is sufficient, not a global or incrementally-maintained
+ * one: the very first test in the original linear scan is
+ * `occ->file_index != file_index`, so an occurrence from any other file can
+ * never match. `inv_scan_all` (codeindex_inventory_scan.c) runs
+ * `ci_scan_text` for a file -- which appends that file's occurrences to the
+ * tail of `s->occurrences` -- and then immediately calls
+ * `inv_scan_includes_and_bodies` for the same file, before any other file's
+ * occurrences are appended. So by the time this file's bodies are scanned,
+ * exactly that file's occurrences are present, as one contiguous run at the
+ * tail of `s->occurrences`, and nothing is appended to that run afterward.
+ * Building the index once per file, right before scanning that file's
+ * bodies, is therefore both correct and sufficient. */
+struct inv_guard_key {
+    const char *name;
+    const char *def_path;
+    const char *guard;
+    int def_line;
+    int order; /* Position among this file's occurrences in the original
+                * (ci_scan_text emission) order.  The original loop keeps
+                * overwriting the guard on `def_line >= best_line`, so on a
+                * def_line tie the LAST-emitted occurrence wins; sorting with
+                * `order` as the final tie-break, and reading the last
+                * matching entry in sorted order, reproduces that exactly. */
+};
+
+static int inv_guard_key_cmp(const void *a, const void *b)
+{
+    const struct inv_guard_key *x = a, *y = b;
+    int c = strcmp(x->name, y->name);
+    if (c) return c;
+    c = strcmp(x->def_path, y->def_path);
+    if (c) return c;
+    return (x->order > y->order) - (x->order < y->order);
+}
+
+/* Lower-bound: first index whose (name, def_path) is not less than the
+ * given pair. */
+static int inv_guard_key_lower(const struct inv_guard_key *keys, int count,
+                               const char *name, const char *def_path)
+{
+    int lo = 0, hi = count;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = strcmp(keys[mid].name, name);
+        if (!c) c = strcmp(keys[mid].def_path, def_path);
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* Builds the guard-lookup index for the file whose occurrences form the
+ * (already-appended) tail of `s->occurrences`. `*out_keys`/`*out_count` are
+ * always set (possibly to NULL/0 for a file with no occurrences); the
+ * caller owns `*out_keys` and must free() it. Returns false only on
+ * allocation/overflow failure. */
+static bool inv_guard_index_build(struct inv_scan *s, int file_index,
+                                  struct inv_guard_key **out_keys,
+                                  int *out_count)
+{
+    *out_keys = NULL;
+    *out_count = 0;
+    int end = s->occurrence_count;
+    int start = end;
+    while (start > 0 && s->occurrences[start - 1].file_index == file_index)
+        start--;
+    int n = end - start;
+    if (n == 0) return true;
+    size_t bytes;
+    if (!zcl_size_mul((size_t)n, sizeof(struct inv_guard_key), &bytes))
+        LOG_FAIL("codeindex.inventory",
+                 "body guard index byte-size overflow");
+    struct inv_guard_key *keys =
+        zcl_malloc(bytes, "ci_inventory_body_guard_index");
+    if (!keys) return false;
+    int k = 0;
+    for (int i = start; i < end; i++) {
+        const struct inv_symbol_occurrence *occ = &s->occurrences[i];
+        /* def_line <= 0 can never satisfy the original loop's guard, so
+         * dropping it here changes nothing but the index size. */
+        if (occ->symbol.def_line <= 0) continue;
+        keys[k].name = occ->symbol.name;
+        keys[k].def_path = occ->symbol.def_path;
+        keys[k].guard = occ->symbol.guard;
+        keys[k].def_line = occ->symbol.def_line;
+        keys[k].order = k;
+        k++;
+    }
+    qsort(keys, (size_t)k, sizeof(*keys), inv_guard_key_cmp);
+    *out_keys = keys;
+    *out_count = k;
+    return true;
+}
+
 static bool inv_body_push(struct inv_scan *s, int file_index, const char *src,
                           const char *clean, const char *name,
-                          size_t open, size_t close)
+                          size_t open, size_t close,
+                          int open_line, int close_line,
+                          const struct inv_guard_key *guard_keys,
+                          int guard_key_count)
 {
     if (s->body_count == s->body_cap) {
         int cap = s->body_cap ? s->body_cap * 2 : 2048;
@@ -366,20 +465,19 @@ static bool inv_body_push(struct inv_scan *s, int file_index, const char *src,
     inv_cpy(body->name, sizeof(body->name), name);
     inv_cpy(body->path, sizeof(body->path), s->paths[file_index].path);
     body->file_index = file_index;
-    body->line = inv_line_of(src, open);
-    body->end_line = inv_line_of(src, close);
+    body->line = open_line;
+    body->end_line = close_line;
     int best_line = 0;
-    for (int i = 0; i < s->occurrence_count; i++) {
-        const struct inv_symbol_occurrence *occ = &s->occurrences[i];
-        if (occ->file_index != file_index ||
-            strcmp(occ->symbol.name, name) != 0 ||
-            strcmp(occ->symbol.def_path, body->path) != 0 ||
-            occ->symbol.def_line <= 0 || occ->symbol.def_line > body->line ||
-            occ->symbol.def_line < best_line)
+    int at = inv_guard_key_lower(guard_keys, guard_key_count, name,
+                                 body->path);
+    for (; at < guard_key_count && strcmp(guard_keys[at].name, name) == 0 &&
+           strcmp(guard_keys[at].def_path, body->path) == 0; at++) {
+        const struct inv_guard_key *k = &guard_keys[at];
+        if (k->def_line > body->line || k->def_line < best_line)
             continue;
-        best_line = occ->symbol.def_line;
-        inv_cpy(body->preprocessor_guard,
-                sizeof(body->preprocessor_guard), occ->symbol.guard);
+        best_line = k->def_line;
+        inv_cpy(body->preprocessor_guard, sizeof(body->preprocessor_guard),
+                k->guard);
     }
     inv_body_fingerprints(src, clean, open + 1, close, body);
     return true;
@@ -388,8 +486,14 @@ static bool inv_body_push(struct inv_scan *s, int file_index, const char *src,
 static void inv_scan_bodies(struct inv_scan *s, int file_index,
                             const char *src, size_t len)
 {
+    struct inv_guard_key *guard_keys = NULL;
+    int guard_key_count = 0;
+    if (!inv_guard_index_build(s, file_index, &guard_keys, &guard_key_count)) {
+        s->failed = true;
+        return;
+    }
     char *clean = inv_clean_source(src, len);
-    if (!clean) { s->failed = true; return; }
+    if (!clean) { free(guard_keys); s->failed = true; return; }
     /* Preprocessor rows are declaration data, never function bodies. */
     size_t line_start = 0;
     bool directive_continues = false;
@@ -410,9 +514,23 @@ static void inv_scan_bodies(struct inv_scan *s, int file_index,
     }
     size_t segment = 0, open = 0;
     int brace = 0, paren = 0;
+    /* Tracks the 1-based line of `clean[i]` (== `src[i]`'s line -- every
+     * position, including every '\n', is carried through 1:1 by both
+     * inv_clean_source and the directive-blanking pass above) without
+     * rescanning from the start of the file for every body: `cur_line` is
+     * correct for index i at the top of each iteration, and gets bumped
+     * once per newline as the scan crosses it.  Recomputing this per body
+     * via a full O(0..offset) rescan (the previous `inv_line_of` helper)
+     * made body-line attribution O(bodies_in_file x file_size); this makes
+     * the whole file's line attribution O(file_size) once. */
+    int cur_line = 1;
+    char prev_char = '\0';
+    int open_line = 0;
     char active[128] = "";
     for (size_t i = 0; i < len; i++) {
+        if (prev_char == '\n') cur_line++;
         char c = clean[i];
+        prev_char = c;
         if (c == '\n' && brace == 0 && paren == 0 &&
             inv_macro_invocation_segment(clean, segment, i)) {
             segment = i + 1;
@@ -425,6 +543,7 @@ static void inv_scan_bodies(struct inv_scan *s, int file_index,
                 active[0] = '\0';
                 (void)inv_function_name(clean, segment, i, active);
                 open = i;
+                open_line = cur_line;
                 brace = 1;
                 continue;
             }
@@ -435,7 +554,10 @@ static void inv_scan_bodies(struct inv_scan *s, int file_index,
                 brace--;
                 if (brace == 0) {
                     if (active[0] && !inv_body_push(s, file_index, src, clean,
-                                                    active, open, i)) {
+                                                    active, open, i,
+                                                    open_line, cur_line,
+                                                    guard_keys,
+                                                    guard_key_count)) {
                         s->failed = true;
                         break;
                     }
@@ -446,6 +568,7 @@ static void inv_scan_bodies(struct inv_scan *s, int file_index,
         }
     }
     free(clean);
+    free(guard_keys);
 }
 
 void inv_scan_includes_and_bodies(struct inv_scan *s, int file_index,

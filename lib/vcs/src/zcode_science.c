@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_science.h"
 
+#include "base/bytes.h"
 #include "zcode_science_platform.h"
 
 #include "base/serialize_le.h"
@@ -23,17 +24,9 @@ static const uint8_t hw_profile_magic[8] = {'Z','C','H','W','P','F','\r','\n'};
 static const uint8_t method_magic[8] = {'Z','C','B','M','T','H','\r','\n'};
 static const uint8_t result_v2_magic[8] = {'Z','C','B','E','N','2','\r','\n'};
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool root_nonzero(const uint8_t root[32])
 {
-    return bytes_nonzero(root, 32);
+    return zcl_bytes_any_set(root, 32);
 }
 
 static void put_bytes(uint8_t *wire, size_t *off, const void *src, size_t len)
@@ -566,7 +559,7 @@ static enum vcs_zcode_science_error curation_vote_fields(
     if (vote->sequence == 0) return VCS_ZCODE_SCIENCE_ERR_LIMIT;
     if (vote->expires_unix <= 0) return VCS_ZCODE_SCIENCE_ERR_TIME_ORDER;
     if (require_signature &&
-        !bytes_nonzero(vote->signature, sizeof(vote->signature)))
+        !zcl_bytes_any_set(vote->signature, sizeof(vote->signature)))
         return VCS_ZCODE_SCIENCE_ERR_SIGNATURE;
     return VCS_ZCODE_SCIENCE_OK;
 }

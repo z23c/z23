@@ -330,6 +330,11 @@ static bool build_toolchain_capture_uncached(
     build_hash_text(&probes, desc.full_version);
     build_hash_text(&probes, desc.short_version);
     build_hash_text(&probes, desc.target);
+    if (desc.platform_contract[0] != '\0') {
+        static const char contract_label[] = "platform-contract";
+        build_hash_text(&probes, contract_label);
+        build_hash_text(&probes, desc.platform_contract);
+    }
     sha3_256_finalize(&probes, out->target_probes_sha3);
 
     static const char *const abi_labels[ZCL_TOOLCHAIN_ABI_COUNT] = {

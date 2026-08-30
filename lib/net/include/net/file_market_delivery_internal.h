@@ -5,6 +5,7 @@
 #ifndef ZCL_NET_FILE_MARKET_DELIVERY_INTERNAL_H
 #define ZCL_NET_FILE_MARKET_DELIVERY_INTERNAL_H
 
+#include "base/bytes.h"
 #include "net/file_market_delivery.h"
 
 #include <stdbool.h>
@@ -12,15 +13,6 @@
 #include <stdint.h>
 
 /* Zero-length or all-zero byte ranges mean "field absent" throughout the
- * delivery protocol. */
-static inline bool delivery_bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
+ * delivery protocol: zcl_bytes_any_set is the test for "field present". */
 
 #endif /* ZCL_NET_FILE_MARKET_DELIVERY_INTERNAL_H */

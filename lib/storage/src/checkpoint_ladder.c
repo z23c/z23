@@ -8,6 +8,7 @@
 
 #include "storage/checkpoint_ladder.h"
 
+#include "base/bytes.h"
 #include "chain/checkpoints.h"
 #include "json/json.h"
 #include "util/blocker.h"
@@ -33,26 +34,18 @@ const char *checkpoint_rung_verdict_name(enum checkpoint_rung_verdict v)
     return "unknown";
 }
 
-static bool digest_nonzero(const uint8_t d[32])
-{
-    uint8_t any = 0;
-    for (int i = 0; i < 32; i++)
-        any |= d[i];
-    return any != 0;
-}
-
 /* A compiled keystone with any all-zero shielded field is unbaked (a dev
  * placeholder) — no baked binding is available. Mirrors
  * consensus_state_bundle_validate.c:rom_keystone_is_placeholder. */
 static bool keystone_is_placeholder(const struct rom_state_checkpoint *cp)
 {
     return !cp ||
-           !digest_nonzero(cp->anchor_digest) ||
-           !digest_nonzero(cp->nullifier_digest) ||
-           !digest_nonzero(cp->sprout_frontier_root) ||
-           !digest_nonzero(cp->sapling_frontier_root) ||
-           !digest_nonzero(cp->utxo_root) ||
-           !digest_nonzero(cp->rom_state_root);
+           !zcl_bytes_any_set(cp->anchor_digest, 32) ||
+           !zcl_bytes_any_set(cp->nullifier_digest, 32) ||
+           !zcl_bytes_any_set(cp->sprout_frontier_root, 32) ||
+           !zcl_bytes_any_set(cp->sapling_frontier_root, 32) ||
+           !zcl_bytes_any_set(cp->utxo_root, 32) ||
+           !zcl_bytes_any_set(cp->rom_state_root, 32);
 }
 
 size_t checkpoint_ladder_verify(const struct checkpoint_rung *rungs, size_t n,

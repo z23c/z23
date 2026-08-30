@@ -2,6 +2,7 @@
  * Purpose: canonical simulation-only package continuity policies. */
 #include "vcs/zcode_continuity_policy.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
@@ -12,13 +13,6 @@
 
 static const uint8_t continuity_magic[8] =
     {'Z','C','C','O','N','T','\r','\n'};
-
-static bool continuity_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= value[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_continuity_error_string(
     enum vcs_zcode_continuity_error error)
@@ -72,7 +66,7 @@ static enum vcs_zcode_continuity_error continuity_fields(
         policy->proof_policy_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!continuity_nonzero(roots[i]))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_CONTINUITY_ROOT;
     if (memcmp(policy->from_capsule_root, policy->to_capsule_root, 32) == 0)
         return VCS_ZCODE_CONTINUITY_TRANSITION;
@@ -87,7 +81,7 @@ static enum vcs_zcode_continuity_error continuity_fields(
         policy->expires_unix <= policy->created_unix)
         return VCS_ZCODE_CONTINUITY_TIME;
     if (policy->sequence == 0) return VCS_ZCODE_CONTINUITY_SEQUENCE;
-    if (signed_wire && !continuity_nonzero(policy->signature))
+    if (signed_wire && !zcl_bytes_any_set(policy->signature, 32))
         return VCS_ZCODE_CONTINUITY_SIGNATURE;
     return VCS_ZCODE_CONTINUITY_OK;
 }
@@ -359,7 +353,7 @@ enum vcs_zcode_continuity_error vcs_zcode_continuity_event_key(
     default: return VCS_ZCODE_CONTINUITY_EVENT_MASK;
     }
     if ((score->awarded_mask & (UINT8_C(1) << score_unit)) == 0 ||
-        !continuity_nonzero(score->evidence_roots[score_unit]))
+        !zcl_bytes_any_set(score->evidence_roots[score_unit], 32))
         return VCS_ZCODE_CONTINUITY_CAS;
 
     struct sha3_256_ctx sha;
@@ -418,7 +412,7 @@ enum vcs_zcode_continuity_error vcs_zcode_creation_event_key(
         return VCS_ZCODE_CONTINUITY_EVENT_MASK;
     }
     if ((score->awarded_mask & (UINT8_C(1) << score_unit)) == 0 ||
-        !continuity_nonzero(score->evidence_roots[score_unit]))
+        !zcl_bytes_any_set(score->evidence_roots[score_unit], 32))
         return VCS_ZCODE_CONTINUITY_CAS;
 
     struct sha3_256_ctx sha;

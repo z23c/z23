@@ -142,13 +142,18 @@ struct ci_inventory_report {
     int symbol_count;
     struct ci_inventory_duplicate *duplicates;
     int duplicate_count;
+    int duplicate_cap;        /* allocated capacity of `duplicates`, doubled
+                               * on growth; NOT part of the report content */
     struct ci_inventory_invariant *invariants;
     int invariant_count;
+    int invariant_cap;        /* allocated capacity of `invariants` */
     struct ci_inventory_definition_arm *definition_arms;
     int definition_arm_count;
+    int definition_arm_cap;   /* allocated capacity of `definition_arms` */
     int multi_arm_symbol_count;
     struct ci_inventory_test_root_gap *test_root_gaps;
     int test_root_gap_count;
+    int test_root_gap_cap;    /* allocated capacity of `test_root_gaps` */
 };
 
 /* Analyze the maintained C23 source roots plus packages/ and examples/.

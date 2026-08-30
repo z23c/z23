@@ -126,7 +126,6 @@ void consensus_export_output_close(struct consensus_export_output_binding *outpu
  * that crosses. Never registered on Windows. */
 bool output_vfs_register(struct consensus_export_output_binding *output);
 void consensus_export_run_after_bind_hook(void);
-bool consensus_export_digest_nonzero(const uint8_t digest[32]);
 
 /* Shared derive+write core used by BOTH exporter entries. Runs the proof,
  * opens the anonymous staging inode, writes the bundle, and strictly closes

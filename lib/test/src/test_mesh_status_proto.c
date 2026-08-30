@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "crypto/ed25519.h"
 #include "models/mesh_pairing.h"
 #include "session/mesh_status_proto.h"
@@ -16,15 +17,6 @@ static void fill_bytes(uint8_t out[32], uint8_t first)
 {
     for (size_t i = 0; i < 32; i++)
         out[i] = (uint8_t)(first + i);
-}
-
-static bool bytes_are_zero(const void *bytes, size_t count)
-{
-    const uint8_t *p = bytes;
-    uint8_t any = 0;
-    for (size_t i = 0; i < count; i++)
-        any |= p[i];
-    return any == 0;
 }
 
 static void make_request(struct mesh_status_request_v1 *request)
@@ -111,7 +103,7 @@ static int request_roundtrip(void)
                   MESH_STATUS_PROTO_OK);
         ASSERT_EQ(mesh_status_request_v1_root(&decoded, decoded_root),
                   MESH_STATUS_PROTO_OK);
-        ASSERT(!bytes_are_zero(root, sizeof(root)));
+        ASSERT(!zcl_bytes_all_zero((const uint8_t *)root, sizeof(root)));
         ASSERT(memcmp(root, decoded_root, sizeof(root)) == 0);
 
         memcpy(&changed, &decoded, sizeof(changed));
@@ -138,7 +130,7 @@ static int request_strictness(void)
         ASSERT_EQ(mesh_status_request_v1_decode(&decoded, wire,
                                                 sizeof(wire) - 2),
                   MESH_STATUS_PROTO_SIZE);
-        ASSERT(bytes_are_zero(&decoded, sizeof(decoded)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
         ASSERT_EQ(mesh_status_request_v1_decode(&decoded, wire, sizeof(wire)),
                   MESH_STATUS_PROTO_SIZE);
 
@@ -316,11 +308,11 @@ static int receipt_tamper_and_bounds(void)
         memcpy(&trial, &receipt, sizeof(trial));
         ASSERT_EQ(mesh_status_receipt_v1_sign(&trial, wrong_seed),
                   MESH_STATUS_PROTO_KEY_MISMATCH);
-        ASSERT(bytes_are_zero(trial.signature, sizeof(trial.signature)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)trial.signature, sizeof(trial.signature)));
 
         ASSERT_EQ(mesh_status_receipt_v1_decode(&decoded, wire, wire_len - 1),
                   MESH_STATUS_PROTO_SIZE);
-        ASSERT(bytes_are_zero(&decoded, sizeof(decoded)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
         memcpy(tampered, wire, wire_len);
         tampered[wire_len] = 0;
         ASSERT_EQ(mesh_status_receipt_v1_decode(&decoded, tampered,

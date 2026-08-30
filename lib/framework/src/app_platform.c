@@ -2,6 +2,7 @@
 
 #include "framework/app_platform.h"
 
+#include "base/bytes.h"
 #include "core/uint256.h"
 #include "crypto/sha3.h"
 #include "keys/key.h"
@@ -105,14 +106,6 @@ static bool event_token_len(const char *value, size_t max_len,
     return true;
 }
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
-
 static bool event_content_validate(const struct zcl_app_signed_event_v1 *event,
                                    size_t *app_len, size_t *topic_len,
                                    char *why, size_t why_sz)
@@ -128,9 +121,9 @@ static bool event_content_validate(const struct zcl_app_signed_event_v1 *event,
         return reject(why, why_sz, "invalid signed event app or topic");
     if (event->kind == 0 || event->sequence == 0 || event->created_at == 0)
         return reject(why, why_sz, "invalid event kind, sequence, or time");
-    if (!bytes_nonzero(event->chain_id, sizeof(event->chain_id)))
+    if (!zcl_bytes_any_set(event->chain_id, sizeof(event->chain_id)))
         return reject(why, why_sz, "event chain id is empty");
-    bool has_previous = bytes_nonzero(event->previous_event_id,
+    bool has_previous = zcl_bytes_any_set(event->previous_event_id,
                                       sizeof(event->previous_event_id));
     if ((event->sequence == 1 && has_previous) ||
         (event->sequence > 1 && !has_previous))
@@ -153,7 +146,7 @@ static bool event_base_validate(const struct zcl_app_signed_event_v1 *event,
         return false;
     if ((event->author_pubkey[0] != 0x02 &&
          event->author_pubkey[0] != 0x03) ||
-        !bytes_nonzero(event->author_key_id,
+        !zcl_bytes_any_set(event->author_key_id,
                        sizeof(event->author_key_id)))
         return reject(why, why_sz, "event author is not a compressed key");
     return true;
@@ -181,7 +174,7 @@ static bool event_scope_validate(const struct zcl_app_signed_event_v1 *event,
         framed_signature_len > ZCL_APP_EVENT_SIGNATURE_MAX ||
         !event_token_len(scope->app_id, ZCL_APP_ID_MAX, &scope_app_len) ||
         !event_token_len(scope->topic, ZCL_APP_TOPIC_MAX, &scope_topic_len) ||
-        !bytes_nonzero(scope->chain_id, sizeof(scope->chain_id)) ||
+        !zcl_bytes_any_set(scope->chain_id, sizeof(scope->chain_id)) ||
         !event_token_len(event->app_id, ZCL_APP_ID_MAX, &event_app_len) ||
         !event_token_len(event->topic, ZCL_APP_TOPIC_MAX, &event_topic_len))
         return reject(why, why_sz, "event scope is invalid");
@@ -208,16 +201,16 @@ static bool event_binding_validate(
         binding->magic != ZCL_APP_EVENT_BINDING_MAGIC ||
         binding->operation != ZCL_APP_WALLET_OP_SIGN_EVENT_V1 ||
         binding->app_generation == 0 || binding->grant_revision == 0 ||
-        !bytes_nonzero(binding->grant_id, sizeof(binding->grant_id)) ||
-        !bytes_nonzero(binding->manifest_digest,
+        !zcl_bytes_any_set(binding->grant_id, sizeof(binding->grant_id)) ||
+        !zcl_bytes_any_set(binding->manifest_digest,
                        sizeof(binding->manifest_digest)) ||
-        !bytes_nonzero(binding->author_key_id,
+        !zcl_bytes_any_set(binding->author_key_id,
                        sizeof(binding->author_key_id)) ||
         binding->scope.struct_size < sizeof(binding->scope) ||
         binding->scope.max_event_bytes == 0 ||
         !event_token_len(binding->scope.app_id, ZCL_APP_ID_MAX, &app_len) ||
         !event_token_len(binding->scope.topic, ZCL_APP_TOPIC_MAX, &topic_len) ||
-        !bytes_nonzero(binding->scope.chain_id,
+        !zcl_bytes_any_set(binding->scope.chain_id,
                        sizeof(binding->scope.chain_id)))
         return reject(why, why_sz,
                       "event signing binding is absent, stale, or invalid");

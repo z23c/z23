@@ -2,6 +2,7 @@
  * Contained, immutable full-history consensus-state exporter. */
 #define _GNU_SOURCE
 #include "config/consensus_state_snapshot_export.h"
+#include "base/bytes.h"
 #include "config/consensus_state_bundle_validate.h"
 #include "platform/fd_path.h"
 #include "consensus_state_snapshot_export_internal.h"
@@ -470,14 +471,6 @@ bool consensus_export_finalize_temp(
     return true;
 }
 
-bool consensus_export_digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= digest[i];
-    return any != 0;
-}
-
 /* Shared derive+write core used by BOTH exporter entries. Runs the proof, opens
  * the anonymous staging inode, writes the bundle, and strictly closes the dest.
  * The CALLER owns the SOURCE read transaction (a held lock+BEGIN on the owned
@@ -556,12 +549,12 @@ bool consensus_state_snapshot_export(
                                      "source is not the owned progress.kv handle");
     if (request->expected_height < 0 ||
         request->expected_height >= INT32_MAX ||
-        !consensus_export_digest_nonzero(request->expected_block_hash))
+        !zcl_bytes_any_set(request->expected_block_hash, 32))
         return consensus_export_fail(
             result, CONSENSUS_EXPORT_REFUSED,
             "invalid expected source height/hash (height=%d hash_nonzero=%d)",
             request->expected_height,
-            consensus_export_digest_nonzero(request->expected_block_hash)
+            zcl_bytes_any_set(request->expected_block_hash, 32)
                 ? 1 : 0);
 
     struct consensus_export_output_binding *output = zcl_calloc(

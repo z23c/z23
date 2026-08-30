@@ -2,6 +2,7 @@
  * Frozen-source proof gate for zcl.consensus_state_bundle.v1 export. */
 
 #include "consensus_state_snapshot_export_internal.h"
+#include "base/bytes.h"
 #include "consensus_state_sqlite_text.h"
 
 #include "chain/checkpoints.h"
@@ -24,14 +25,6 @@
 #include <string.h>
 
 #define EXPORT_PROOF_SUBSYS "consensus_bundle_export"
-
-static bool digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= digest[i];
-    return any != 0;
-}
 
 static bool running_binary_digest(uint8_t out[32])
 {
@@ -167,10 +160,10 @@ static bool prove_source_receipt(sqlite3 *db, int64_t fold_cursor,
     uint8_t recomputed[32];
     uint8_t source_epoch[32];
     if (ok)
-        ok = digest_nonzero(receipt->source_epoch_digest) &&
-             digest_nonzero(receipt->source_tree_root) &&
-             digest_nonzero(receipt->toolchain_digest) &&
-             digest_nonzero(receipt->build_inputs_digest) &&
+        ok = zcl_bytes_any_set(receipt->source_epoch_digest, 32) &&
+             zcl_bytes_any_set(receipt->source_tree_root, 32) &&
+             zcl_bytes_any_set(receipt->toolchain_digest, 32) &&
+             zcl_bytes_any_set(receipt->build_inputs_digest, 32) &&
              consensus_state_source_receipt_commit_valid(
                  receipt->schema_version, receipt->producer_commit,
                  strnlen(receipt->producer_commit,
@@ -186,7 +179,7 @@ static bool prove_source_receipt(sqlite3 *db, int64_t fold_cursor,
               * re-running the exact fold binary. No downstream gate re-checks
               * this digest, so the emitted bundle is byte-identical in shape. */
              (checkpoint_content_export
-                  ? digest_nonzero(receipt->running_binary_digest)
+                  ? zcl_bytes_any_set(receipt->running_binary_digest, 32)
                   : (running_binary_digest(executable) &&
                      memcmp(receipt->running_binary_digest, executable, 32) ==
                          0));
@@ -195,7 +188,7 @@ static bool prove_source_receipt(sqlite3 *db, int64_t fold_cursor,
         consensus_state_source_receipt_digest(receipt, recomputed);
         ok = memcmp(receipt->source_epoch_digest, source_epoch, 32) == 0 &&
              memcmp(receipt->receipt_digest, recomputed, 32) == 0 &&
-             digest_nonzero(recomputed);
+             zcl_bytes_any_set(recomputed, 32);
     }
     if (!ok) {
         LOG_WARN(EXPORT_PROOF_SUBSYS,

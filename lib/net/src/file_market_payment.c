@@ -5,6 +5,7 @@
 
 #include "net/file_market.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "core/amount.h"
 #include "core/serialize.h"
@@ -21,16 +22,6 @@ static const uint8_t k_payment_memo_magic[8] =
     {'Z','F','M','P','A','Y','M','1'};
 static const char k_payment_body_domain[] = "zcl.file.market.payment.v1";
 static const char k_payment_id_domain[] = "zcl.file.market.payment.id.v1";
-
-static bool payment_bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static void payment_put_bytes(uint8_t *wire, size_t *off,
                               const void *src, size_t len)
@@ -128,21 +119,21 @@ static enum file_payment_auth_error payment_fields(
         return FILE_PAYMENT_AUTH_ERR_NULL;
     if (payment->version != FILE_MARKET_PAYMENT_VERSION)
         return FILE_PAYMENT_AUTH_ERR_VERSION;
-    if (!payment_bytes_nonzero(payment->network_genesis, 32))
+    if (!zcl_bytes_any_set(payment->network_genesis, 32))
         return FILE_PAYMENT_AUTH_ERR_NETWORK;
-    if (!payment_bytes_nonzero(payment->offer_id, 32))
+    if (!zcl_bytes_any_set(payment->offer_id, 32))
         return FILE_PAYMENT_AUTH_ERR_OFFER_ID;
-    if (!payment_bytes_nonzero(payment->txid, 32))
+    if (!zcl_bytes_any_set(payment->txid, 32))
         return FILE_PAYMENT_AUTH_ERR_TXID;
     if (payment->chunks_paid == 0 ||
         payment->chunks_paid > UINT32_MAX - payment->chunk_start)
         return FILE_PAYMENT_AUTH_ERR_RANGE;
     if (payment->amount_zat <= 0 || payment->amount_zat > MAX_MONEY)
         return FILE_PAYMENT_AUTH_ERR_AMOUNT;
-    if (!payment_bytes_nonzero(payment->buyer_pubkey, 32))
+    if (!zcl_bytes_any_set(payment->buyer_pubkey, 32))
         return FILE_PAYMENT_AUTH_ERR_BUYER_KEY;
     if (require_signature &&
-        !payment_bytes_nonzero(payment->buyer_signature, 64))
+        !zcl_bytes_any_set(payment->buyer_signature, 64))
         return FILE_PAYMENT_AUTH_ERR_SIGNATURE;
     return FILE_PAYMENT_AUTH_OK;
 }
@@ -296,7 +287,7 @@ enum file_payment_auth_error file_payment_auth_verify(
     error = file_payment_auth_claim_id(payment, expected_id);
     if (error != FILE_PAYMENT_AUTH_OK)
         return error;
-    return payment_bytes_nonzero(payment->claim_id, 32) &&
+    return zcl_bytes_any_set(payment->claim_id, 32) &&
            memcmp(expected_id, payment->claim_id, 32) == 0
         ? FILE_PAYMENT_AUTH_OK : FILE_PAYMENT_AUTH_ERR_CLAIM_ID;
 }

@@ -3,6 +3,7 @@
 
 #include "models/market_content.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "net/file_market.h"
@@ -15,14 +16,6 @@
 
 DEFINE_MODEL_CALLBACKS(market_content)
 
-static bool market_content_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= value[i];
-    return any != 0;
-}
-
 bool db_market_content_validate(const struct market_content_record *record,
                                 struct ar_errors *errors)
 {
@@ -32,9 +25,9 @@ bool db_market_content_validate(const struct market_content_record *record,
         return false;
     }
     uint32_t expected_chunks = 0;
-    validates_custom(errors, market_content_nonzero(record->offer_id),
+    validates_custom(errors, zcl_bytes_any_set(record->offer_id, 32),
                      "offer_id", "can't be all zero");
-    validates_custom(errors, market_content_nonzero(record->root_hash),
+    validates_custom(errors, zcl_bytes_any_set(record->root_hash, 32),
                      "root_hash", "can't be all zero");
     validates_custom(errors, record->private_path[0] == '/' &&
         strnlen(record->private_path, MARKET_CONTENT_PATH_MAX) <
