@@ -2771,3 +2771,9 @@ AGENT_IMPACT_RULE("config/remote_command_classes.def", "command_registry_catalog
  * own group. */
 AGENT_IMPACT_RULE("lib/test/src/test_code_have.c", "code_have make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_mutation_harness.c", "mutation_harness make_lint_gates")
+
+/* A character on the wire. The frame is a pure function of the identity
+ * root and the birthday, so it rides node_character (which derives form
+ * and standing) and character_sheet (which renders them) as well as its
+ * own group: a change to either derivation changes these bytes. */
+AGENT_IMPACT_RULE("lib/metaverse/src/node_character_wire.c|lib/metaverse/include/metaverse/node_character_wire.h|lib/test/src/test_node_character_wire.c", "node_character_wire node_character character_sheet astro make_lint_gates")
