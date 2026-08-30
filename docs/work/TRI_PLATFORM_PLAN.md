@@ -56,32 +56,37 @@ correct behaviour for an unpublished platform — but it means the answer to
 "can my friend with a Mac run this" is still no, and the missing piece is
 packaging, not portability.
 
-## 1. Close the darwin naming split before it costs a cycle
+## 1. The darwin naming split — CLOSED
 
-**This blocks item 2 and is a few lines.** Two vocabularies disagree about
-the name of the same machine:
+Two vocabularies disagreed about the name of the same machine. The front door
+normalised `arm64` to `aarch64`, so a Mac named itself `darwin-aarch64`, while
+`packaging/release/build_release.sh`, `lib/platform/src/toolchain.c`,
+`config/platform/macos_capabilities.def` and
+[`BOOTSTRAP_PLAN.md`](./BOOTSTRAP_PLAN.md) all name the Mac artifact
+`darwin-arm64`. `tools/lint/check_published_platforms.sh` compares the two by
+exact string.
 
-- `fd_platform_triple` in `lib/install/src/front_door_platform.c` normalises
-  `arm64` to `aarch64`, so a Mac names itself **`darwin-aarch64`**.
-  `packaging/install/install.sh` normalises identically.
-- `packaging/release/build_release.sh` names the produced artifact
-  **`darwin-arm64`**.
-- `tools/lint/check_published_platforms.sh` compares the two by exact string
-  (`in_set`), with no normalisation.
+Nothing was red, because the front door claimed only `linux-x86_64` and the
+two sets never met. They would have met the moment anyone published the Mac,
+and every Mac alive would then have been told *"no runtime is published for
+darwin-aarch64; published: darwin-arm64"* — a refusal naming a machine that
+does not exist, for a machine we do ship.
 
-Today nothing is red, because the front door claims only `linux-x86_64` and
-the sets do not meet. They meet the moment anyone publishes the Mac. Then the
-gate forces `FD_PUBLISHED "darwin-arm64"` — to stay a subset of what the
-cutter produces — and `fd_platform_published("darwin-aarch64")` returns false
-on every Mac alive, producing the refusal *"no Z23 runtime is published for
-darwin-aarch64; published: darwin-arm64"* on a machine for which a runtime
-demonstrably exists.
+Resolved toward the machine's own name, which is what four of the five
+authorities already used: the shims and the C front door no longer rewrite
+`arm64`, so a Mac names itself `darwin-arm64` and a Linux arm box keeps
+`linux-aarch64`. Only the `amd64`/`x86_64` alias is still folded, because
+every publisher spells that one `x86_64`.
 
-Pick one spelling, apply it in all four authorities, and give
-`check_published_platforms.sh` a case that fails if the detected triple of a
-supported host is absent from the published set. That last part is the actual
-rail: the current gate proves the claim does not *exceed* what is produced,
-and nothing proves the claim is *reachable* by a real machine.
+The rail that makes it stay closed is check 7 in
+`tools/lint/check_published_platforms.sh`. Checks 1-6 all ask whether a claim
+EXCEEDS what is produced; check 7 asks the other direction — whether what is
+produced is REACHABLE by the machine it is for. It reads the fold table out of
+`packaging/install/install.sh` rather than restating it, so the gate cannot
+hold a second copy that drifts, and it refuses any produced platform whose cpu
+is a fold source. Its selftest case restores the old `arm64` fold and asserts
+the gate goes red, so the bug is frozen as a regression rather than written
+down as a caution.
 
 ## 2. Publish a bootstrap for the two runtimes that already exist
 
@@ -156,7 +161,7 @@ tracked script, ratcheted against a baseline of the existing sites the way
 `getconf _NPROCESSORS_ONLN` over `nproc`, which is what
 `docs/GETTING_STARTED.md` already tells a reader to type.
 
-## 5. Finish the pipefail inversion class
+## 5. The pipefail inversion class — CLOSED, and now ratcheted
 
 `check_pipefail_status_pipe.sh` explains the bug precisely: under
 `set -o pipefail`, `producer | grep -q needle` reports 141 when the needle IS
@@ -164,42 +169,53 @@ present, because `grep -q` exits at the first match and the producer takes
 SIGPIPE. A match and a miss become indistinguishable. In a lint gate — which
 greps *for* a violation — the inverted read is a hollow PASS.
 
-That gate deliberately ratchets only the `printf|echo` producer shape and
-says in its own header that an arbitrary producer is "a different, larger
-job". Twenty-seven sites of that larger job are done. Measured after them:
+The gate used to ratchet only the `printf`/`echo` producer shape, and said in
+its own header that an arbitrary producer was "a different, larger job". That
+job is done in two halves: 27 sites converted by hand, then the gate widened
+to count a `-q` grep behind ANY producer (`grep`, `egrep`, `fgrep`,
+`gate_grep`) and the remainder ratcheted.
 
-```
-183 status-carrying `| grep -q` sites across 87 pipefail scripts
-```
+The measured reconciliation is worth recording, because a hand grep gets it
+badly wrong. A naive `git grep '| grep -q'` over pipefail scripts reports
+~183 sites; the gate's quote-aware tokeniser — which strips comments, joins
+continuation lines, and refuses to count value pipelines or scripts without
+pipefail — reports that widening the producer set added exactly **7 files and
+9 sites**, because the 27 hand conversions had already cleared nearly the
+whole class. Total after widening: 137 sites in 51 files, and
+`RATCHET_CEILING` is now that exact total rather than a number with slack in
+it. **Do not reconcile this against a hand grep**; the tokeniser is the
+authority and the header says so.
 
-Widen the gate's producer set to cover them and ratchet the remainder, so the
-converted sites cannot regress and the rest burn down instead of drifting.
-The conversion itself is mechanical — capture, then test — and every
-conversion should keep the assertion it replaced, not merely its shape:
-`arch_score.sh` and `soak_evidence.sh` each gained a real "the command itself
-failed" arm that the pipeline had been swallowing.
+What remains is burn-down, not design. Each of the 137 is converted the same
+way — capture, then test — and every conversion should keep the assertion it
+replaced rather than merely its shape: `arch_score.sh` and `soak_evidence.sh`
+each gained a real "the command itself failed" arm that the pipeline had been
+swallowing. The ratchet is shrink-only and there is deliberately no
+allow-comment escape hatch, so the counts can only go down.
 
-## 6. Make a refusal name the thing that is missing
+## 6. Make a refusal name the thing that is missing — CLOSED
 
 An agent's cost is measured in cycles lost to a diagnosis, and this
 repository's refusals are usually excellent at naming their cause. One on the
-critical path is not. On a checkout with no installed hooks and no staged
-`event2/` headers, the push-proof gate refuses with:
+critical path was not. On a checkout with no installed hooks and no staged
+`event2/` headers, the push-proof gate refused with:
 
 ```
 "status":"failed","detail":"proof_generation_dependency_unavailable"
 ```
 
-and writes no log. The gate is correct to refuse — it materialises a fixed
-dependency list into the proof generation worktree and one entry was absent —
-but recovering *which* entry requires reading `tools/dev/dev_proof.c` and
-hand-checking twenty paths. The list is right there in the code; the refusal
-should name the first missing path and the command that produces it
-(`make vendor`, `make install-hooks`). Same for the sibling
-`proof_generation_*` refusals.
+and wrote no log. The gate was right to refuse — it materialises a fixed
+twenty-entry dependency list into the proof generation worktree and three
+entries were absent — but recovering *which* meant reading
+`tools/dev/dev_proof.c` and hand-checking twenty paths.
 
-This is the smallest item here and probably the highest ratio of cycles saved
-to lines changed, on the surface an agent hits most often.
+The refusal now names the first missing path and the target that produces it
+(`make vendor` for a `vendor/` entry, `make install-hooks` for the git-hook
+pair). The sibling refusal above it is split out too: it fired on the same
+code while nothing was missing from the checkout at all — it means the
+generation's own build tree could not be created — and now says
+`proof_generation_build_dir_unwritable` and names the directory. Conflating
+the two sent a reader hunting a vendored archive that was present all along.
 
 ## What this is not
 
@@ -214,8 +230,8 @@ to lines changed, on the surface an agent hits most often.
 
 ## Continuation
 
-Items 1, 5, and 6 are Linux-side and need no other hardware. Item 4 is
-Linux-side and unblocks honest measurement everywhere else. Items 2 and 3
-need the Mac and the Windows box, and item 1 should land before item 2 is
-attempted. Follow the integration cadence in
+Items 1, 5 and 6 are closed. Item 4 is the remaining Linux-side work, needs no
+other hardware, and unblocks honest measurement everywhere else — take it
+next. Items 2 and 3 need the Mac and the Windows box; item 2 was blocked on
+item 1 and is now unblocked. Follow the integration cadence in
 [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) §"Integration cadence" for each slice.
