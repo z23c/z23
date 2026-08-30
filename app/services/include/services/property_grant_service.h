@@ -112,6 +112,17 @@ enum property_grant_reason {
     PROPERTY_GRANT_RECEIPT_SEAL_FAILED,
     PROPERTY_GRANT_SIGNING_KEY_UNAVAILABLE,
 
+    /* The (grant, idempotency_key) pair already names a receipt, but for a
+     * DIFFERENT request. An idempotency key identifies one attempt at one
+     * operation; matching on the key alone would hand back an unrelated
+     * receipt with status OK and `replayed` set, so the caller's actual
+     * request would never run and nothing would say so. Neither answer is
+     * available here — replaying the stored receipt would answer a question
+     * nobody asked, and executing the new request under a key that already
+     * has a receipt would break the one guarantee the key exists to give — so
+     * the reuse itself is the refusal. */
+    PROPERTY_GRANT_IDEMPOTENCY_KEY_REUSED,
+
     /* The store moved WHILE a decision was being computed over a snapshot of
      * it, and the one permitted retry saw it move again. Neither a grant nor a
      * denial: the service declines to return a verdict it cannot show was made
@@ -372,6 +383,11 @@ struct property_grant_commit_result {
      * (grant, idempotency_key). Nothing was charged and nothing was appended:
      * an idempotent retry is a lookup, not a second execution. */
     bool replayed;
+    /* What this grant can still actually move: its own remaining cumulative
+     * ceiling capped by every ancestor's, because a commit charges the whole
+     * lineage. For a root grant the two are the same number; for a child,
+     * reporting its own ceiling alone would quote a budget its parent will
+     * refuse to fund. */
     int64_t budget_remaining_zat;
 };
 
@@ -379,14 +395,23 @@ struct property_grant_commit_result {
  *
  * `idempotency_key` may be NULL/"" — then the commit is NOT replay-protected
  * and a second call fails with PLAN_ALREADY_COMMITTED. When it is non-empty and
- * a receipt already exists for (this plan's grant, this key), that receipt is
- * returned verbatim with `replayed` set: same seq, same hashes, no budget
- * debit, no chain append.
+ * a receipt already exists for (this plan's grant, this key) RECORDING THE SAME
+ * REQUEST, that receipt is returned verbatim with `replayed` set: same seq,
+ * same hashes, no budget debit, no chain append.
+ *
+ * A key that already names a receipt for a DIFFERENT request (a different
+ * action, property, value, counterparty or actor) is IDEMPOTENCY_KEY_REUSED
+ * and nothing runs. Matching the key alone would return the earlier,
+ * unrelated receipt with status OK, so the caller's actual request would never
+ * execute and the answer would not say so.
  *
  * Every re-check listed at the top of this file runs before anything is
- * recorded, and the first one to fail names itself. On success the grant's
- * cumulative spend and rate window are updated and one sealed receipt is
- * appended to that grant's chain. */
+ * recorded, and the first one to fail names itself. On success the rate window
+ * of the acting grant is updated, the cumulative spend of the acting grant AND
+ * OF EVERY ANCESTOR rises by the value that moved, and one sealed receipt is
+ * appended to that grant's chain. The lineage charge is all-or-none: an
+ * ancestor that cannot pay makes the whole commit BUDGET_EXCEEDED with no
+ * record moved and no receipt minted. */
 enum property_grant_reason property_grant_service_commit(
     const char *plan_id, const char *idempotency_key,
     struct property_grant_commit_result *out);

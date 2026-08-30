@@ -71,6 +71,7 @@ static const char *const k_reason_tokens[PROPERTY_GRANT_REASON_COUNT] = {
     "STALE_REVISION",
     "RECEIPT_SEAL_FAILED",
     "SIGNING_KEY_UNAVAILABLE",
+    "IDEMPOTENCY_KEY_REUSED",
     "AUTHORITY_CHANGED",
 };
 
