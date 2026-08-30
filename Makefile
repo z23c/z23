@@ -2177,6 +2177,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-wallet-raw-prepare-log check-blob-read-bounds \
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
+        check-model-sql-literals \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
@@ -9986,6 +9987,24 @@ check-model-ar-lifecycle:
 	@echo "══ LINT: model ActiveRecord lifecycle saves ══"
 	@./tools/scripts/check_model_ar_lifecycle.sh
 
+# A model file must not carry a hand-written SQL statement: reads and writes
+# build one with app/models/include/models/query_builder.h, whose identifiers
+# come from the closed set in query_schema.def and whose values can only
+# arrive as bound parameters. 70 of 87 model files carried literal SQL when
+# this gate landed, with no injection hole but also no rail — safety resting
+# on 70 files' worth of authors remembering forever. The two defects the
+# first conversion pass surfaced are exactly what hand-written SQL produces:
+# peer.c's strftime('%%s','now') evaluated to the TEXT "%s" (SQLite reads %%
+# as an escaped percent, and nothing printf-formats a model SQL string), so
+# db_peer_mark_tried had been writing two characters into peers.last_try
+# instead of an epoch; and op_return_index.c built its prune DELETE with
+# snprintf. The baseline is shrink-only and a stale row fails, so the count
+# can only go down.
+check-model-sql-literals:
+	@echo "══ LINT: literal SQL in the models layer (shrink-only) ══"
+	@./tools/lint/check_model_sql_literals.sh --selftest
+	@./tools/lint/check_model_sql_literals.sh
+
 # Keep top-level functions in app/controllers + app/services under 500
 # lines. Single state-machines that truly belong as one function can carry
 # a `// long-function-ok:<tag>` override marker explaining WHY.
@@ -11420,6 +11439,7 @@ LINT_GATES := \
     check-pthread-create \
     check-model-validation \
     check-model-ar-lifecycle \
+    check-model-sql-literals \
     check-long-functions \
     check-rpc-registrar \
     check-lag-slo-observable \

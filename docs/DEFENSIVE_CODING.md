@@ -362,6 +362,29 @@ assert green).
   after_save` stays one mechanically enforced lifecycle. Impl:
   `tools/scripts/check_model_ar_lifecycle.sh`.
 
+- **Gate #11c: `check-model-sql-literals`** (RATCHET, shrink-only) — a model
+  file must not carry a hand-written SQL statement. Reads and writes build
+  one with `app/models/include/models/query_builder.h`: table and column
+  names come from the closed set in
+  `app/models/include/models/query_schema.def` and are passed as generated
+  enums, so there is no entry point that accepts an identifier as a string;
+  values arrive through `qb_value_*` / `qb_set_*` / `qb_where_*` / `qb_limit`,
+  each of which emits a `?` and pushes the value onto a bind list. An
+  out-of-range enum or a column belonging to another table fails the
+  statement CLOSED. Measured per FILE: a file is flagged when a string
+  literal's first non-space token is an uppercase `SELECT` / `INSERT` /
+  `UPDATE` / `DELETE` / `REPLACE` / `WITH` / DDL keyword. Files still holding
+  one are listed in `tools/lint/model_sql_literal_baseline.txt`; **the list
+  may only shrink**, and a stale row (its file no longer carries literal SQL)
+  is a FAILURE, so converting a model forces its row out and the row cannot
+  return without failing the gate. Migration and schema files are ordinary
+  rows — a query builder cannot express `CREATE TABLE` — so those are
+  expected to stay. The builder's own three files are excluded; flagging the
+  rail for the keywords it emits would make the gate unfixable. Impl:
+  `tools/lint/check_model_sql_literals.sh`, with a mandatory `--selftest`
+  that plants each statement shape, a stale row, and a converted-file
+  regression and requires a rejection on every one.
+
 - **Gate #12: `check-long-functions`** — flags any top-level function whose
   body spans >500 lines. Two tiers (a split Gate E1 no longer uses — E1 is
   one policy for all production C now): ENFORCED (HARD, fails the build) covers
@@ -1046,6 +1069,7 @@ add/remove a gate.
 - `check-markdown-links`
 - `check-malloc`
 - `check-model-ar-lifecycle`
+- `check-model-sql-literals`
 - `check-model-validation`
 - `check-no-raw-clock-outside-platform`
 - `check-sysinit-ordering`
