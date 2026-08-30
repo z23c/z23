@@ -21,6 +21,7 @@ struct agent_impact_acc {
 };
 
 void agent_impact_add_group(struct agent_impact_acc *acc, const char *group);
+bool agent_impact_path_is_direct_development_contract(const char *path);
 bool agent_impact_apply_shared_rules(const char *path,
                                      struct agent_impact_acc *acc);
 size_t agent_impact_rule_count(void);

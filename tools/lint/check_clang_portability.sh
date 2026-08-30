@@ -229,7 +229,8 @@ fi
 # Both front ends must be told "one line per diagnostic, no caret art, no
 # colour" or the parsed log stops being stable, but they spell it
 # differently — and an unknown -f/-W is itself fatal under -Werror.
-if "$CC_BIN" --version 2>/dev/null | head -1 | grep -qi clang; then
+cc_version_first="$("$CC_BIN" --version 2>/dev/null | head -1)"
+if grep -qi clang <<<"$cc_version_first"; then
     FAMILY=clang
     WARN_FLAGS+=(
         # The one real suppression — see the header block.

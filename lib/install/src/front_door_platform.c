@@ -51,10 +51,20 @@ void fd_platform_triple(const char *sysname, const char *machine,
     else if (strcmp(os, "Darwin") == 0)
         os = "darwin";
 
+    /* amd64 and x86_64 are the same machine under two kernels' spelling, and
+     * every publisher names it x86_64, so that one alias is folded.
+     *
+     * arm64 is NOT folded into aarch64, and that is the whole point. The
+     * artifact vocabulary is the machine's own: `uname -m` says arm64 on
+     * Apple silicon and aarch64 on Linux, and build_release.sh, toolchain.c,
+     * config/platform/macos_capabilities.def and docs/work/BOOTSTRAP_PLAN.md
+     * all name the Mac artifact darwin-arm64. Rewriting arm64 to aarch64 here
+     * made this function emit a triple no publisher produces, so the day a
+     * Mac runtime is published, every Mac would be told "no runtime is
+     * published for darwin-aarch64; published: darwin-arm64" — a refusal
+     * naming a machine that does not exist, for a machine we DO ship. */
     if (strcmp(cpu, "x86_64") == 0 || strcmp(cpu, "amd64") == 0)
         cpu = "x86_64";
-    else if (strcmp(cpu, "aarch64") == 0 || strcmp(cpu, "arm64") == 0)
-        cpu = "aarch64";
 
     const int want = snprintf(out, FD_TRIPLE_MAX, "%s-%s", os, cpu);
     if (want < 0 || want >= FD_TRIPLE_MAX) {

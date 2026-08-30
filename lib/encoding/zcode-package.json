@@ -7,7 +7,7 @@
   "include_dir": "include",
   "source_dir": "src",
   "dependencies": [],
-  "capabilities": [],
+  "capabilities": ["CAP_FS_WRITE"],
   "files": [
     "LICENSE",
     "include/encoding/utilstrencodings.h",

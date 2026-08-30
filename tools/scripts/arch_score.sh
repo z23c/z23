@@ -36,7 +36,9 @@ kpi() { # weight got slug note
 # by the real proof … never inflate an existing one."
 judge_pass() { # <make-target>
   command -v make >/dev/null || return 1
-  make -s "$1" 2>/dev/null | grep -q 'VERDICT=PASS'
+  local out rc=0
+  out="$(make -s "$1" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && grep -q 'VERDICT=PASS' <<<"$out"
 }
 c3pass=0; judge_pass c3-stopwatch-report && c3pass=1
 

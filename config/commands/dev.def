@@ -616,7 +616,7 @@ ZCL_COMMAND_DEV_READ(
     "tampered receipts remain explicit non-passing states.", 0,
     "dev,proof,status,receipt,push",
     "zcl.dev_proof_input.v1", "zcl.dev_proof_status.v1",
-    "root,local_commit,remote_base", "",
+    "root,local_commit,remote_base,mode", "",
     "z23-dev dev proof status",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_TINY,

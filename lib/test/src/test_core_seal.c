@@ -775,7 +775,7 @@ cleanup:
     (void)rmdir(dir);
 }
 
-int test_core_seal(void)
+static int test_core_seal_platform_arm(void)
 {
     printf("\n=== core_seal manifest-encoding tests ===\n");
     cs_failures = 0;
@@ -798,9 +798,14 @@ int test_core_seal(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked seal-violation child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_core_seal(void)
+static int test_core_seal_platform_arm(void)
 {
     printf("core_seal: SKIP (Windows): forked seal-violation child lane\n");
     return 0;
 }
 #endif
+
+int test_core_seal(void)
+{
+    return test_core_seal_platform_arm();
+}

@@ -3313,7 +3313,7 @@ agent-velocity:
 # Checkout-locked around BOTH prerequisite construction and execution. Locking
 # only this target's final recipe allowed a concurrent public invocation to
 # rewrite build depfiles while codeindex was sealing its physical input graph.
-.PHONY: t-locked t-fast-locked t-fast-exact-locked
+.PHONY: t-locked t-fast-locked t-fast-exact-locked dev-proof-bundle
 t:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
@@ -3346,6 +3346,13 @@ t-fast-exact:
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 	$(ZCL_TEST_STACK_SETUP) && \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
+
+# Build every mutable prerequisite of the native proof runner without running
+# a test. dev_proof.c admits these exact artifacts into its private generation
+# and invokes that admitted runner once; no fallback target may both build and
+# execute a suite.
+dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
+	dev-bin zcl-nodectl zclassic23-acme fbsh
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also
@@ -5369,6 +5376,10 @@ FBSH_CPPFLAGS := -DSHELL -DNO_HISTORY -I$(FBSH_GEN_DIR) -I$(FBSH_SH_DIR) \
 	-I$(FBSH_SRC_DIR)/compat \
 	-include $(CURDIR)/$(FBSH_SRC_DIR)/compat/compat.h
 FBSH_VENDOR_CFLAGS := -std=c23 -O2 -w $(FBSH_CPPFLAGS)
+FBSH_LINK_MODE := -static
+ifeq ($(ZCL_HOST_OS),Darwin)
+FBSH_LINK_MODE :=
+endif
 
 FBSH_OBJS := $(addprefix $(FBSH_OBJ_DIR)/,$(addsuffix .o, \
 	$(basename $(notdir $(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) \
@@ -5432,7 +5443,7 @@ $(FBSH_OBJ_DIR)/compat.o: $(FBSH_SRC_DIR)/compat/compat.c \
 
 $(BIN_DIR)/fbsh: $(FBSH_OBJS)
 	@mkdir -p $(@D)
-	$(CC) -std=c23 -O2 -static -o $@ $(FBSH_OBJS)
+	$(CC) -std=c23 -O2 $(FBSH_LINK_MODE) -o $@ $(FBSH_OBJS)
 
 # gen_sha3_windows: one-shot tool that queries a fully-synced reference
 # node and overwrites lib/chain/{include/chain,src}/sha3_windows.{h,c}

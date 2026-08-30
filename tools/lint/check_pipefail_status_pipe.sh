@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# check_pipefail_status_pipe.sh — refuse NEW status-carrying `printf | grep -q`
-# / `echo | grep -q` pipelines in a script that sets pipefail. Mode: shrink-only
-# ratchet (ZCL_LINT_MODE: FAIL default | WARN | UPDATE — same shape as
-# check_status_reason_single.sh).
+# check_pipefail_status_pipe.sh — refuse NEW status-carrying `… | grep -q`
+# pipelines in a script that sets pipefail. Any producer counts: a
+# `cmd | grep -q` inverts the same way `printf | grep -q` does. Mode:
+# shrink-only ratchet (ZCL_LINT_MODE: FAIL default | WARN | UPDATE — same
+# shape as check_status_reason_single.sh).
 #
 # ── WHY THIS EXISTS ────────────────────────────────────────────────────────
 # Under `set -o pipefail`,
@@ -28,7 +29,7 @@
 #
 # ── WHAT IS COUNTED, AND WHY IT CANNOT BE DODGED BY REINDENTING ────────────
 # `grep -q` writes NOTHING to stdout. Its only product is its exit status.
-# So every `printf|…|grep -q…` pipeline is status-carrying BY CONSTRUCTION,
+# So every `…|grep -q…` pipeline is status-carrying BY CONSTRUCTION,
 # and this gate does not have to recognise `if`, `!`, `&&`, `while` or any
 # other syntactic context to know the status is a decision. That matters,
 # because every one of those recognisers is a whitespace/line-shape
@@ -49,11 +50,13 @@
 #     not a violation.
 #   * A VALUE pipeline is not counted: `printf … | head -n1`, `… | sed …`,
 #     `… | grep -o …` all deliver their value regardless of EPIPE, and only a
-#     status-carrying pipeline can invert. Only a `-q` grep counts.
-#   * A `grep -q` NOT fed by printf/echo is not counted here. A `cmd | grep -q`
-#     can SIGPIPE too, but `cmd` is usually a short single-line producer and
-#     rewriting arbitrary producers is a different, larger job; this gate
-#     ratchets the measured shape rather than pretending to cover the class.
+#     status-carrying pipeline can invert. Only a `-q` grep counts
+#     (`grep -q`, `egrep -q`, `fgrep -q`, `gate_grep -q`).
+#   * ANY producer feeding a `-q` grep is counted. A `cmd | grep -q` inverts
+#     the same way `printf | grep -q` does: grep -q exits at the first match,
+#     the producer takes SIGPIPE, pipefail surfaces that status. This gate
+#     used to ignore non-printf/echo producers; that remainder is now in the
+#     ratchet so converted sites cannot regress and the rest burn down.
 #   * A script with no pipefail is not counted: without pipefail the pipeline
 #     reports grep's status and the inversion cannot happen.
 #
@@ -63,24 +66,28 @@
 # needs a human to look. The baseline file is the only route, it is
 # shrink-only, and every change to it is a visible diff in review.
 #
-# RATCHET_CEILING below is the total measured across the baseline: 133 sites in
-# 45 files (see tools/lint/pipefail_status_pipe_baseline.txt for exactly
-# which). It may only go DOWN. Fixing a site means converting it
-# (str_contains/str_lacks from tools/scripts/sh_str.sh, or extract the match
-# into a variable and test the STRING) and then lowering the number — never
-# raising it. Note the tokeniser counts MORE than a naive
-# `git grep 'printf.*| grep -q'`: it joins continuation lines, so the
-# trailing-pipe form
-#     printf '%s\n' "$json" |
+# RATCHET_CEILING below is the total measured across the baseline after
+# widening to any producer: 137 sites in 51 files (see
+# tools/lint/pipefail_status_pipe_baseline.txt for exactly which). It may
+# only go DOWN. Fixing a site means converting it (str_contains/str_lacks
+# from tools/scripts/sh_str.sh, or extract the match into a variable and
+# test the STRING) and then lowering the number — never raising it. Note
+# the tokeniser counts MORE than a naive `git grep '| grep -q'`: it joins
+# continuation lines, so the trailing-pipe form
+#     cmd |
 #         grep -qE '"schema"…'
-# (nine of them in tools/agent_fast_ci.sh alone) is counted, and a hand grep
-# misses every one. Do not reconcile this number against a hand grep.
+# is counted, and a hand grep of a single line misses those. A hand grep
+# also counts comments describing the bug; the tokeniser does not. Do not
+# reconcile this number against a hand grep.
 #
 # --selftest plants a violation in a sandboxed shell tree, proves the gate
-# FAILS; reindents the identical violation and proves it STILL fails; removes
-# it and proves PASS; and asserts each fixture really carries the shape it
-# claims, so a fixture that silently stopped containing the violation cannot
-# make this self-test hollow.
+# FAILS; reindents the identical violation and proves it STILL fails; plants
+# the same shape with an arbitrary producer (not printf/echo) and proves it
+# FAILS, including reindented; proves a value pipeline (`cmd | grep -o`)
+# and a no-pipefail script do NOT count; removes a planted site and proves
+# PASS; and asserts each fixture really carries the shape it claims, so a
+# fixture that silently stopped containing the violation cannot make this
+# self-test hollow.
 set -euo pipefail
 # Source trees are ASCII; the caller's UTF-8 locale makes BSD awk abort on
 # any high-byte it meets mid-scan. Pin the scan locale for both awks.
@@ -97,27 +104,19 @@ source tools/lint/gate_lib.sh
 . tools/scripts/sh_str.sh || { echo "check_pipefail_status_pipe: cannot source tools/scripts/sh_str.sh" >&2; exit 2; }
 
 GATE=check_pipefail_status_pipe
-RATCHET_CEILING=133
+RATCHET_CEILING=137
 
 # ── the detector ─────────────────────────────────────────────────────────
 # Emits: path<TAB>count<TAB>first-line-number. See the header for why this is
 # a shell-grammar tokeniser and not a line-shape matcher.
 scan_counts() {
     awk -v SEP_PIPE=$'\001' -v QCH=$'\047"' '
-        function flush_stmt(   nst, si, stage, head, w, k, isgrep, hasq) {
+        function flush_stmt(   nst, si, stage, w, k, isgrep, hasq) {
             if (stmt == "") { stmt_line = 0; return }
             nst = split(stmt, stage, SEP_PIPE)
             if (nst < 2) { stmt = ""; stmt_line = 0; return }
-            # Head of the pipeline: first word, after discarding the shell
-            # keywords and the negation that may precede a command. These are
-            # WORDS, not positions, so indentation is irrelevant.
-            head = stage[1]
-            gsub(/^[ \t]+|[ \t]+$/, "", head)
-            while (match(head, /^(if|elif|while|until|!|then|do|else|local|declare|export|time)[ \t]+/)) {
-                head = substr(head, RLENGTH + 1)
-                gsub(/^[ \t]+/, "", head)
-            }
-            if (head !~ /^(printf|echo)([ \t]|$)/) { stmt = ""; stmt_line = 0; return }
+            # Producer identity is irrelevant: grep -q exits at the first
+            # match against ANY stdin, so ANY earlier stage can take SIGPIPE.
             # Any later stage that is a grep carrying -q in its flag words.
             for (si = 2; si <= nst; si++) {
                 s = stage[si]
@@ -313,7 +312,7 @@ probe() { out="$(some_producer)"; printf '%s' "$out" | grep -qE 'need|le' && ret
 FIXTURE
 )"
     # Clean: the value-extraction form, the converted form, a commented-out
-    # violation, and a grep -q with no printf/echo head. NONE may count, or
+    # violation, and a `cmd | grep -o` value pipeline. NONE may count, or
     # the gate is noise that will be turned off.
     clean="$(cat <<'FIXTURE'
 #!/usr/bin/env bash
@@ -326,11 +325,12 @@ out="$(some_producer)"
 first="$(printf '%s\n' "$out" | head -n1)"
 name="$(printf '%s\n' "$out" | sed -n 's/^name=//p')"
 hit="$(printf '%s\n' "$out" | grep '^FATAL' || true)"
+extracted="$(arbitrary_cmd | grep -o 'needle' || true)"
 if [ -n "$hit" ]; then echo "found"; fi
+if [ -n "$extracted" ]; then echo "found"; fi
 if str_contains "$out" 'needle'; then echo "found"; fi
 # if printf '%s\n' "$out" | grep -q 'needle'; then echo "commented out"; fi
 echo "a # b" | wc -c   # a '#' inside quotes is not a comment
-if some_producer | grep -q 'needle'; then echo "not the shape this gate counts"; fi
 FIXTURE
 )"
     # The identical plain violation in a script WITHOUT pipefail. Must not
@@ -344,6 +344,51 @@ if printf '%s\n' "$out" | grep -q 'needle'; then
 fi
 FIXTURE
 )"
+    # Arbitrary producer, not printf/echo. The remainder this gate now
+    # ratchets: a `cmd | grep -q` under pipefail inverts the same way.
+    cmd_quiet="$(cat <<'FIXTURE'
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+if arbitrary_cmd | grep -q 'needle'; then
+    echo "found"
+fi
+FIXTURE
+)"
+    # SAME arbitrary-producer violation, pipe moved onto its own line and
+    # the body reindented. A line-anchored matcher misses this; the
+    # tokeniser must not.
+    cmd_quiet_reindented="$(cat <<'FIXTURE'
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+      if      arbitrary_cmd    |
+                    grep     -q    'needle'
+      then
+                    echo "found"
+      fi
+FIXTURE
+)"
+    # Value pipeline with an arbitrary producer: `grep -o` delivers its
+    # match regardless of EPIPE. Must NOT count, even under pipefail.
+    cmd_value="$(cat <<'FIXTURE'
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+hit="$(arbitrary_cmd | grep -o 'needle' || true)"
+if [ -n "$hit" ]; then echo "found"; fi
+FIXTURE
+)"
+    # The identical `arbitrary_cmd | grep -q` in a script that never sets
+    # pipefail. Must not count: without pipefail the pipeline reports grep.
+    cmd_no_pipefail="$(cat <<'FIXTURE'
+#!/usr/bin/env bash
+set -eu
+if arbitrary_cmd | grep -q 'needle'; then
+    echo "found"
+fi
+FIXTURE
+)"
 
     # ── HOLLOWNESS GUARDS on the fixtures themselves ─────────────────────
     # A fixture that silently stopped carrying the shape it claims turns every
@@ -352,7 +397,11 @@ FIXTURE
         echo "$GATE: SELFTEST FAILED — the reindented fixture is byte-identical to the plain one; the reindent-dodge assertion is hollow" >&2
         exit 2
     fi
-    for pair in "plain:$plain" "reindented:$reindented" "oneline:$oneline" "no_pipefail:$no_pipefail"; do
+    if [ "$cmd_quiet_reindented" = "$cmd_quiet" ]; then
+        echo "$GATE: SELFTEST FAILED — the reindented cmd|grep -q fixture is byte-identical to the plain one; the reindent-dodge assertion is hollow" >&2
+        exit 2
+    fi
+    for pair in "plain:$plain" "reindented:$reindented" "oneline:$oneline" "no_pipefail:$no_pipefail" "cmd_quiet:$cmd_quiet" "cmd_quiet_reindented:$cmd_quiet_reindented" "cmd_no_pipefail:$cmd_no_pipefail"; do
         nm="${pair%%:*}"; body="${pair#*:}"
         if str_lacks "$body" 'grep'; then
             echo "$GATE: SELFTEST FAILED — the $nm fixture no longer contains a grep at all; it cannot prove anything" >&2
@@ -370,6 +419,43 @@ FIXTURE
         echo "$GATE: SELFTEST FAILED — the reindented fixture no longer ends a line on the pipe; it is not testing the reindent dodge" >&2
         exit 2
     fi
+    if str_lacks "$cmd_quiet_reindented" 'arbitrary_cmd    |'; then
+        echo "$GATE: SELFTEST FAILED — the reindented cmd|grep -q fixture no longer ends a line on the pipe; it is not testing the reindent dodge" >&2
+        exit 2
+    fi
+    if str_lacks "$cmd_quiet" 'arbitrary_cmd | grep -q'; then
+        echo "$GATE: SELFTEST FAILED — the cmd_quiet fixture no longer carries 'arbitrary_cmd | grep -q'; it cannot prove the widened producer class" >&2
+        exit 2
+    fi
+    if str_lacks "$cmd_no_pipefail" 'arbitrary_cmd | grep -q'; then
+        echo "$GATE: SELFTEST FAILED — the cmd_no_pipefail fixture no longer carries the same 'arbitrary_cmd | grep -q' as cmd_quiet" >&2
+        exit 2
+    fi
+    # Value pipeline: must really be grep -o (not -q) under pipefail, or the
+    # exemption assertion is hollow.
+    if str_lacks "$cmd_value" 'grep -o'; then
+        echo "$GATE: SELFTEST FAILED — the cmd_value fixture no longer contains 'grep -o'; the value-pipeline exemption assertion is hollow" >&2
+        exit 2
+    fi
+    if str_lacks "$cmd_value" 'arbitrary_cmd'; then
+        echo "$GATE: SELFTEST FAILED — the cmd_value fixture no longer uses an arbitrary producer" >&2
+        exit 2
+    fi
+    case "$cmd_value" in
+        *-q*)
+            echo "$GATE: SELFTEST FAILED — the cmd_value fixture contains a -q flag; it cannot prove that a value pipeline is exempt" >&2
+            exit 2 ;;
+    esac
+    case "$cmd_value" in
+        *pipefail*) : ;;
+        *)
+            echo "$GATE: SELFTEST FAILED — the cmd_value fixture does not set pipefail; a pass would not prove the value-pipeline exemption" >&2
+            exit 2 ;;
+    esac
+    if str_lacks "$clean" 'grep -o'; then
+        echo "$GATE: SELFTEST FAILED — the clean fixture no longer carries a grep -o value pipeline; that exemption is untested there" >&2
+        exit 2
+    fi
     # The commented-out violation in the clean fixture must really be there,
     # or the "comments are not violations" assertion proves nothing.
     if str_lacks "$clean" "# if printf '%s\\n' \"\$out\" | grep -q 'needle'"; then
@@ -383,6 +469,15 @@ FIXTURE
     case "$no_pipefail" in
         *pipefail*)
             echo "$GATE: SELFTEST FAILED — the no_pipefail fixture mentions pipefail; it cannot test the no-pipefail exemption" >&2
+            exit 2 ;;
+    esac
+    if str_lacks "$cmd_no_pipefail" 'set -eu'; then
+        echo "$GATE: SELFTEST FAILED — the cmd_no_pipefail fixture's set line changed; it may now set pipefail and the assertion would invert" >&2
+        exit 2
+    fi
+    case "$cmd_no_pipefail" in
+        *pipefail*)
+            echo "$GATE: SELFTEST FAILED — the cmd_no_pipefail fixture mentions pipefail; it cannot test the no-pipefail exemption" >&2
             exit 2 ;;
     esac
 
@@ -440,10 +535,22 @@ FIXTURE
         "$clean"
     expect pass "the identical violation in a script that never sets pipefail was counted; without pipefail the inversion cannot happen" \
         "$no_pipefail"
+    expect fail "a plain 'cmd | grep -q' status pipeline did not fail the gate" \
+        "$cmd_quiet"
+    expect pass "removing the planted cmd | grep -q violation did not clear it" \
+        "$clean"
+    expect fail "the SAME cmd | grep -q violation reindented (pipe at end of line, body reindented, 'then' on its own line) did not fail the gate; the reindent dodge is not closed" \
+        "$cmd_quiet_reindented"
+    expect pass "removing the reindented cmd | grep -q violation did not clear it" \
+        "$clean"
+    expect pass "a value pipeline 'cmd | grep -o' was counted; value pipelines deliver their value regardless of EPIPE" \
+        "$cmd_value"
+    expect pass "the identical cmd | grep -q in a script that never sets pipefail was counted; without pipefail the inversion cannot happen" \
+        "$cmd_no_pipefail"
 
     # This gate must not contain the bug it detects.
     if [ -n "$(scan_counts "$self")" ]; then
-        echo "$GATE: SELFTEST FAILED — this gate itself carries a status-carrying printf|grep -q pipeline" >&2
+        echo "$GATE: SELFTEST FAILED — this gate itself carries a status-carrying | grep -q pipeline" >&2
         exit 2
     fi
     # Nor may tools/scripts/sh_str.sh, the fix everyone is pointed at.
@@ -457,7 +564,7 @@ FIXTURE
         exit 2
     fi
 
-    echo "[$GATE] SELFTEST PASS (clean passes; stale baseline rows and plain, REINDENTED and one-line violations all fail; a value pipeline, a converted site, a commented-out violation and a non-printf grep -q do not count; a no-pipefail script is exempt; this gate and sh_str.sh are clean)"
+    echo "[$GATE] SELFTEST PASS (clean passes; stale baseline rows and plain, REINDENTED and one-line printf|grep -q plus plain and REINDENTED cmd|grep -q all fail; a value pipeline (grep -o / head / sed), a converted site, a commented-out violation do not count; cmd|grep -q and printf|grep -q without pipefail are exempt; this gate and sh_str.sh are clean)"
     exit 0
 fi
 
@@ -541,16 +648,20 @@ fi
 if [ "$MODE" = "UPDATE" ]; then
     {
         echo "# $GATE baseline — scripts still deciding something on the exit"
-        echo "# status of a \`printf | grep -q\` / \`echo | grep -q\` pipeline while"
-        echo "# pipefail is set. Under pipefail a MATCH can report printf's SIGPIPE"
-        echo "# 141 instead of grep's 0, so the decision can silently invert."
+        echo "# status of a \`… | grep -q\` pipeline (any producer) while"
+        echo "# pipefail is set. Under pipefail a MATCH can report the producer's"
+        echo "# SIGPIPE 141 instead of grep's 0, so the decision can silently invert."
         echo "#"
         echo "# Format: <path> <count>.  COUNTS MAY ONLY SHRINK."
         echo "#"
         echo "# Fix a row: use str_contains/str_lacks from tools/scripts/sh_str.sh, or"
         echo "# extract the match into a variable (drop -q, so grep drains stdin) and"
-        echo "# test the STRING. Then lower or delete the number here. Adding a row"
-        echo "# for a NEW file is not a fix — a file with no row may carry ZERO."
+        echo "# test the STRING. For a REGEX needle, where str_contains (fixed-needle"
+        echo "# only) does not apply, feed grep a here-string instead:"
+        echo "#     grep -qE \"\$RE\" <<<\"\$haystack\""
+        echo "# which is not a pipeline, so nothing can invert. Then lower or delete"
+        echo "# the number here. Adding a row for a NEW file is not a fix — a file"
+        echo "# with no row may carry ZERO."
         echo "#"
         echo "# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/$GATE.sh"
         for row in "${COUNT_ROWS[@]}"; do
@@ -566,11 +677,11 @@ fail=0
 if [ "${#violations[@]}" -gt 0 ]; then
     echo ""
     echo "[$GATE] ${#violations[@]} violation(s) — a new or grown status-carrying"
-    echo "        \`printf | grep -q\` / \`echo | grep -q\` pipeline under pipefail:"
+    echo "        \`… | grep -q\` pipeline under pipefail (any producer):"
     printf '  %s\n' "${violations[@]}" | sort
     echo ""
     echo "  grep -q writes nothing to stdout, so its exit status IS the decision —"
-    echo "  and under pipefail a MATCH can surface printf's SIGPIPE 141 instead of"
+    echo "  and under pipefail a MATCH can surface the producer's SIGPIPE 141 instead of"
     echo "  grep's 0. Rewrite it one of three ways:"
     echo "    . tools/scripts/sh_str.sh   # then str_contains / str_lacks"
     echo "    grep -qE 'RE' <<<\"\$out\"          # here-string: not a pipeline"

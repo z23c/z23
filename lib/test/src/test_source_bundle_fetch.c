@@ -1373,7 +1373,7 @@ static int test_one_seeder_fills_the_candidate_set(void)
     return failures;
 }
 
-int test_source_bundle_fetch(void)
+static int test_source_bundle_fetch_platform_arm(void)
 {
     int failures = 0;
     failures += test_header_shape_pinned();
@@ -1396,10 +1396,15 @@ int test_source_bundle_fetch(void)
  * fail-closed refusal stub on native Windows (lib/net/src/file_service.c:26,
  * lib/net/src/rom_fetch.c:504): no case below can complete a real fetch on
  * this lane. */
-int test_source_bundle_fetch(void)
+static int test_source_bundle_fetch_platform_arm(void)
 {
     printf("source_bundle_fetch: SKIP (Windows): file-service transport is "
            "a refusal stub on native Windows (file_service.c:26)\n");
     return 0;
 }
 #endif
+
+int test_source_bundle_fetch(void)
+{
+    return test_source_bundle_fetch_platform_arm();
+}

@@ -229,8 +229,8 @@ static long rfa_slurp(const char *path, char *buf, size_t cap)
     return (long)n;
 }
 
-int test_refold_from_anchor_fatal(void);
-int test_refold_from_anchor_fatal(void)
+static int test_refold_from_anchor_fatal_platform_arm(void);
+static int test_refold_from_anchor_fatal_platform_arm(void)
 {
     printf("\n=== refold_from_anchor_fatal tests ===\n");
     int failures = 0;
@@ -397,9 +397,14 @@ int test_refold_from_anchor_fatal(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork crash-window refold lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_refold_from_anchor_fatal(void)
+static int test_refold_from_anchor_fatal_platform_arm(void)
 {
     printf("refold_from_anchor_fatal: SKIP (Windows): fork crash-window refold lane\n");
     return 0;
 }
 #endif
+
+int test_refold_from_anchor_fatal(void)
+{
+    return test_refold_from_anchor_fatal_platform_arm();
+}

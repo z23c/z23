@@ -187,7 +187,7 @@ case_shim_platform() {
         Z23_FD_TEST_UNAME_S=Darwin Z23_FD_TEST_UNAME_M=arm64 \
         Z23_INSTALL_TEST_BOOT_SHA256="$BOOT_SHA"
     [ "$RC" -eq 1 ] || die "an unpublished platform must refuse (rc=$RC)"
-    grep -q 'no Z23 bootstrap is published for darwin-aarch64' "$ERR" \
+    grep -q 'no Z23 bootstrap is published for darwin-arm64' "$ERR" \
         || die "the refusal must name this machine"
     grep -q 'published: linux-x86_64' "$ERR" \
         || die "the refusal must name what we do publish"
@@ -482,7 +482,7 @@ case_boot_platform() {
         Z23_INSTALL_TEST_UNAME_S=Darwin \
         Z23_INSTALL_TEST_UNAME_M=arm64
     [ "$RC" -eq 1 ] || die "an unpublished platform must refuse (rc=$RC)"
-    grep -q 'no Z23 runtime is published for darwin-aarch64' "$ERR" \
+    grep -q 'no Z23 runtime is published for darwin-arm64' "$ERR" \
         || die "the refusal must name this machine"
     grep -q 'published: linux-x86_64' "$ERR" \
         || die "the refusal must name what we do publish"

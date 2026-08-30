@@ -64,7 +64,7 @@ const char *mesh_terminal_worker_error_string(
 
 /* Honest refusal on platforms with no Landlock/seccomp cage: never a
  * simulated success, never a degraded shell. */
-struct zcl_result mesh_terminal_worker_spawn(
+static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
     const struct mesh_terminal_worker_config *cfg, int64_t now_unix,
     struct mesh_terminal_worker *out)
 {
@@ -73,7 +73,7 @@ struct zcl_result mesh_terminal_worker_spawn(
                    "terminal worker requires the Linux confinement stack");
 }
 
-struct zcl_result mesh_terminal_worker_input(struct mesh_terminal_worker *w,
+static struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_terminal_worker *w,
                                              const uint8_t *bytes, size_t n,
                                              int64_t now_unix)
 {
@@ -82,7 +82,7 @@ struct zcl_result mesh_terminal_worker_input(struct mesh_terminal_worker *w,
                    "terminal worker requires the Linux confinement stack");
 }
 
-struct zcl_result mesh_terminal_worker_output(struct mesh_terminal_worker *w,
+static struct zcl_result mesh_terminal_worker_output_platform_arm(struct mesh_terminal_worker *w,
                                               uint8_t *buf, size_t cap,
                                               size_t *out_len,
                                               int64_t now_unix)
@@ -93,7 +93,7 @@ struct zcl_result mesh_terminal_worker_output(struct mesh_terminal_worker *w,
                    "terminal worker requires the Linux confinement stack");
 }
 
-struct zcl_result mesh_terminal_worker_resize(struct mesh_terminal_worker *w,
+static struct zcl_result mesh_terminal_worker_resize_platform_arm(struct mesh_terminal_worker *w,
                                               uint16_t cols, uint16_t rows)
 {
     (void)w; (void)cols; (void)rows;
@@ -101,20 +101,20 @@ struct zcl_result mesh_terminal_worker_resize(struct mesh_terminal_worker *w,
                    "terminal worker requires the Linux confinement stack");
 }
 
-bool mesh_terminal_worker_budget_exceeded(struct mesh_terminal_worker *w,
+static bool mesh_terminal_worker_budget_exceeded_platform_arm(struct mesh_terminal_worker *w,
                                           int64_t now_unix)
 {
     (void)w; (void)now_unix;
     return true; /* no session could ever be started */
 }
 
-bool mesh_terminal_worker_alive(struct mesh_terminal_worker *w)
+static bool mesh_terminal_worker_alive_platform_arm(struct mesh_terminal_worker *w)
 {
     (void)w;
     return false;
 }
 
-void mesh_terminal_worker_kill(struct mesh_terminal_worker *w)
+static void mesh_terminal_worker_kill_platform_arm(struct mesh_terminal_worker *w)
 {
     (void)w;
 }
@@ -232,7 +232,7 @@ tty_fail:
     _exit(126);
 }
 
-struct zcl_result mesh_terminal_worker_spawn(
+static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
     const struct mesh_terminal_worker_config *cfg, int64_t now_unix,
     struct mesh_terminal_worker *out)
 {
@@ -372,7 +372,7 @@ struct zcl_result mesh_terminal_worker_spawn(
     return ZCL_OK;
 }
 
-struct zcl_result mesh_terminal_worker_input(struct mesh_terminal_worker *w,
+static struct zcl_result mesh_terminal_worker_input_platform_arm(struct mesh_terminal_worker *w,
                                              const uint8_t *bytes, size_t n,
                                              int64_t now_unix)
 {
@@ -424,7 +424,7 @@ struct zcl_result mesh_terminal_worker_input(struct mesh_terminal_worker *w,
     return ZCL_OK;
 }
 
-struct zcl_result mesh_terminal_worker_output(struct mesh_terminal_worker *w,
+static struct zcl_result mesh_terminal_worker_output_platform_arm(struct mesh_terminal_worker *w,
                                               uint8_t *buf, size_t cap,
                                               size_t *out_len,
                                               int64_t now_unix)
@@ -465,7 +465,7 @@ struct zcl_result mesh_terminal_worker_output(struct mesh_terminal_worker *w,
                    "pty read failed errno=%d", errno);
 }
 
-struct zcl_result mesh_terminal_worker_resize(struct mesh_terminal_worker *w,
+static struct zcl_result mesh_terminal_worker_resize_platform_arm(struct mesh_terminal_worker *w,
                                               uint16_t cols, uint16_t rows)
 {
     if (!w)
@@ -486,7 +486,7 @@ struct zcl_result mesh_terminal_worker_resize(struct mesh_terminal_worker *w,
     return ZCL_OK;
 }
 
-bool mesh_terminal_worker_budget_exceeded(struct mesh_terminal_worker *w,
+static bool mesh_terminal_worker_budget_exceeded_platform_arm(struct mesh_terminal_worker *w,
                                           int64_t now_unix)
 {
     if (!w)
@@ -517,7 +517,7 @@ bool mesh_terminal_worker_budget_exceeded(struct mesh_terminal_worker *w,
     return false;
 }
 
-bool mesh_terminal_worker_alive(struct mesh_terminal_worker *w)
+static bool mesh_terminal_worker_alive_platform_arm(struct mesh_terminal_worker *w)
 {
     if (!w)
         return false;
@@ -525,7 +525,7 @@ bool mesh_terminal_worker_alive(struct mesh_terminal_worker *w)
     return w->running;
 }
 
-void mesh_terminal_worker_kill(struct mesh_terminal_worker *w)
+static void mesh_terminal_worker_kill_platform_arm(struct mesh_terminal_worker *w)
 {
     if (!w)
         return;
@@ -566,3 +566,48 @@ void mesh_terminal_worker_kill(struct mesh_terminal_worker *w)
 }
 
 #endif /* __linux__ */
+
+struct zcl_result mesh_terminal_worker_spawn(
+    const struct mesh_terminal_worker_config *cfg, int64_t now_unix,
+    struct mesh_terminal_worker *out)
+{
+    return mesh_terminal_worker_spawn_platform_arm(cfg, now_unix, out);
+}
+
+struct zcl_result mesh_terminal_worker_input(struct mesh_terminal_worker *w,
+                                             const uint8_t *bytes, size_t n,
+                                             int64_t now_unix)
+{
+    return mesh_terminal_worker_input_platform_arm(w, bytes, n, now_unix);
+}
+
+struct zcl_result mesh_terminal_worker_output(struct mesh_terminal_worker *w,
+                                              uint8_t *buf, size_t cap,
+                                              size_t *out_len,
+                                              int64_t now_unix)
+{
+    return mesh_terminal_worker_output_platform_arm(
+        w, buf, cap, out_len, now_unix);
+}
+
+struct zcl_result mesh_terminal_worker_resize(struct mesh_terminal_worker *w,
+                                              uint16_t cols, uint16_t rows)
+{
+    return mesh_terminal_worker_resize_platform_arm(w, cols, rows);
+}
+
+bool mesh_terminal_worker_budget_exceeded(struct mesh_terminal_worker *w,
+                                          int64_t now_unix)
+{
+    return mesh_terminal_worker_budget_exceeded_platform_arm(w, now_unix);
+}
+
+bool mesh_terminal_worker_alive(struct mesh_terminal_worker *w)
+{
+    return mesh_terminal_worker_alive_platform_arm(w);
+}
+
+void mesh_terminal_worker_kill(struct mesh_terminal_worker *w)
+{
+    mesh_terminal_worker_kill_platform_arm(w);
+}

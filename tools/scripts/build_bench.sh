@@ -663,7 +663,7 @@ run_selftest() {
     grep -q '"name":"compile_edit_header","state":"UNTRUSTED"' "$art" ||
         { echo "build-bench selftest: FAIL — a build that recompiled nothing must read UNTRUSTED" >&2
           exit 1; }
-    if grep -o '{"name":"compile_edit_header","state":"UNTRUSTED"[^}]*}' "$art" | grep -q 'median_ms'; then
+    if grep -q 'median_ms' <<<"$(grep -o '{"name":"compile_edit_header","state":"UNTRUSTED"[^}]*}' "$art")"; then
         echo "build-bench selftest: FAIL — an UNTRUSTED scenario must publish no duration" >&2
         exit 1
     fi
@@ -691,7 +691,7 @@ run_selftest() {
     art="$tmp/bad/build-bench/last-run.json"
     grep -q '"state":"FAILED"' "$art" ||
         { echo "build-bench selftest: FAIL — a nonzero build was not recorded FAILED" >&2; exit 1; }
-    if grep -o '{"name":"compile_noop","state":"FAILED"[^}]*}' "$art" | grep -q 'median_ms'; then
+    if grep -q 'median_ms' <<<"$(grep -o '{"name":"compile_noop","state":"FAILED"[^}]*}' "$art")"; then
         echo "build-bench selftest: FAIL — a FAILED scenario must publish no duration" >&2
         exit 1
     fi

@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,7 @@ struct proof_paths {
     char lock[PATH_MAX];
     char failure[PATH_MAX];
     char changed[PATH_MAX];
+    char bundle_log[PATH_MAX];
     char helper_log[PATH_MAX];
 };
 
@@ -59,6 +61,22 @@ static void proof_why(char *why, size_t why_len, const char *message)
 {
     if (why && why_len)
         (void)snprintf(why, why_len, "%s", message ? message : "unknown");
+}
+
+/* Same contract as proof_why, for a refusal that can name the exact thing it
+ * refused over. A bare code makes the reader open this file and hand-check a
+ * twenty-entry list; the missing path plus the command that produces it is the
+ * whole diagnosis. */
+static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
+{
+    if (!why || !why_len)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(why, why_len, fmt, ap);
+    va_end(ap);
 }
 
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
@@ -179,6 +197,9 @@ static bool proof_paths_fill(const char *repo_root, const char *local,
                  out->state, out->key) >= (int)sizeof(out->failure) ||
         snprintf(out->changed, sizeof(out->changed), "%s/%s.files",
                  out->state, out->key) >= (int)sizeof(out->changed) ||
+        snprintf(out->bundle_log, sizeof(out->bundle_log),
+                 "%s/%s.bundle.log", out->logs, out->key) >=
+            (int)sizeof(out->bundle_log) ||
         snprintf(out->helper_log, sizeof(out->helper_log), "%s/%s.helper.log",
                  out->logs, out->key) >= (int)sizeof(out->helper_log))
         return false;
@@ -789,7 +810,12 @@ static bool generation_prepare(const struct proof_paths *paths,
             (int)sizeof(bin_dir) ||
         !platform_private_directory_ensure(build_dir) ||
         !platform_private_directory_ensure(bin_dir)) {
-        proof_why(why, why_len, "proof_generation_dependency_unavailable");
+        /* Distinct from the dependency loop below: nothing is missing from
+         * the checkout here, the generation's own build tree could not be
+         * created. Conflating the two sent a reader hunting a vendored
+         * archive that was present all along. */
+        proof_whyf(why, why_len, "proof_generation_build_dir_unwritable:%s",
+                   build_dir);
         return false;
     }
     for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++) {
@@ -800,7 +826,15 @@ static bool generation_prepare(const struct proof_paths *paths,
                      dependencies[i]) >= (int)sizeof(target) ||
             !dependency_parent_ensure(target) ||
             !dependency_materialize(source, target)) {
-            proof_why(why, why_len, "proof_generation_dependency_unavailable");
+            /* vendor/ entries come from the vendored-archive build; the
+             * git-hook pair comes from arming the clone. Naming the target
+             * turns a class into one command the reader can run. */
+            const char *fix = strncmp(dependencies[i], "vendor/", 7) == 0
+                                  ? "make vendor"
+                                  : "make install-hooks";
+            proof_whyf(why, why_len,
+                       "proof_generation_dependency_unavailable:%s (%s)",
+                       dependencies[i], fix);
             return false;
         }
     }
@@ -915,23 +949,36 @@ static bool test_log_account(const char *path,
     FILE *f = fopen(path, "r");
     if (!f) return false;
     char line[4096], verdict[4096] = {0};
-    while (fgets(line, sizeof(line), f))
-        if (strncmp(line, "SUITE VERDICT ", 14) == 0)
+    uint32_t verdict_count = 0;
+    bool truncated = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "SUITE VERDICT ", 14) == 0) {
+            verdict_count++;
+            if (!strchr(line, '\n'))
+                truncated = true;
             (void)snprintf(verdict, sizeof(verdict), "%s", line);
-    bool ok = !ferror(f);
+        }
+    }
+    bool ok = !ferror(f) && !truncated && verdict_count == 1;
     fclose(f);
-    uint32_t ran = 0, reused = 0, failed = 0, skipped = 0;
+    uint32_t total = 0, ran = 0, reused = 0, gated = 0;
+    uint32_t failed = 0, skipped = 0, unobserved = 0;
     if (!ok || !verdict[0] ||
+        !parse_uint_field(verdict, "groups_total=", &total) ||
         !parse_uint_field(verdict, "groups_ran=", &ran) ||
         !parse_uint_field(verdict, "groups_cached=", &reused) ||
+        !parse_uint_field(verdict, "groups_gated=", &gated) ||
         !parse_uint_field(verdict, "groups_failed=", &failed) ||
-        !parse_uint_field(verdict, "self_skips=", &skipped))
+        !parse_uint_field(verdict, "self_skips=", &skipped) ||
+        !parse_uint_field(verdict, "env_unobserved=", &unobserved))
         return false;
     dim->ran = ran;
     dim->reused = reused;
     dim->failed = failed;
     dim->skipped = skipped;
-    return ran + reused == dim->selected && failed == 0 && skipped == 0;
+    return (uint64_t)total == (uint64_t)ran + reused + gated &&
+           (uint64_t)ran + reused == dim->selected && failed == 0 &&
+           skipped == 0 && unobserved == 0;
 }
 
 static bool run_dimension(const struct proof_paths *paths,
@@ -1082,6 +1129,19 @@ static bool admitted_executable_materialize(
         dependency_materialize(source, target);
 }
 
+static bool admitted_executable_mark_fresh(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    const struct timespec times[2] = {
+        {.tv_nsec = UTIME_OMIT},
+        {.tv_nsec = UTIME_NOW},
+    };
+    bool ok = futimens(fd, times) == 0;
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
 static bool test_object_dir_relative(const struct proof_paths *paths,
                                      char object_dir[PATH_MAX])
 {
@@ -1174,8 +1234,7 @@ static bool test_depfiles_prepare(const struct proof_paths *paths,
         !test_epoch_pointer_prepare(paths, generation, relative, pointer_root))
         return false;
     uint8_t count_le[8];
-    for (size_t i = 0; i < sizeof(count_le); i++)
-        count_le[i] = (uint8_t)(((uint64_t)count) >> (i * 8));
+    zcl_write_u64_le(count_le, (uint64_t)count);
     sha3_256_write(&root, count_le, sizeof(count_le));
     sha3_256_write(&root, pointer_root, sizeof(pointer_root));
     sha3_256_finalize(&root, depfile_root);
@@ -1219,7 +1278,7 @@ static bool test_helpers_prepare(
         !admitted_executable_materialize(
             paths, generation, node_source, "build/bin/zclassic23",
             expected_source,
-            node_target) ||
+            node_target) || !admitted_executable_mark_fresh(node_target) ||
         !test_depfiles_prepare(paths, generation, depfile_root)) {
         proof_why(why, why_len, "proof_test_helper_admission_failed");
         return false;
@@ -1474,35 +1533,38 @@ static bool proof_worker(const struct proof_paths *paths,
             }
             char binary[PATH_MAX], generation_binary[PATH_MAX];
             uint8_t helper_root[32];
-            bool runner_reused = test_binary_path(paths, binary) &&
+            bool runner_ready = test_binary_path(paths, binary) &&
                 test_helpers_prepare(
                     paths, generation, binary, &source_before,
                     make_jobs, generation_binary, helper_root, why, why_len);
-            if (runner_reused) {
-                const char *argv[] = {generation_binary, only, "--cache",
-                                      "--activate-proof-contracts", NULL};
-                if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv,
-                                   test, true, why, why_len))
-                    return false;
-                test_receipt_bind_helpers(test, helper_root);
-            } else {
+            if (!runner_ready) {
                 if (why && why_len > 0) why[0] = 0;
-                char make_only[sizeof(groups) + 8];
-                if (snprintf(make_only, sizeof(make_only), "ONLY=%s", groups) >=
-                    (int)sizeof(make_only)) {
-                    proof_why(why, why_len,
-                              "test_selection_invalid_or_truncated");
+                const char *bundle_argv[] = {
+                    "make", "--no-print-directory", make_jobs,
+                    "dev-proof-bundle", NULL};
+                if (run_logged(paths->root, paths->bundle_log, bundle_argv,
+                               PROOF_TIMEOUT_MS) != 0) {
+                    proof_why(why, why_len, "proof_bundle_build_failed");
                     return false;
                 }
-                const char *argv[] = {
-                    "make", "--no-print-directory", make_jobs,
-                    "t-fast-exact", make_only,
-                    "T_FAST_EXACT_ARGS=--cache --activate-proof-contracts",
-                    NULL};
-                if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv, test,
-                                   true, why, why_len))
+                runner_ready = test_binary_path(paths, binary) &&
+                    test_helpers_prepare(
+                        paths, generation, binary, &source_before,
+                        make_jobs, generation_binary, helper_root,
+                        why, why_len);
+                if (!runner_ready) {
+                    if (!why || !why[0])
+                        proof_why(why, why_len,
+                                  "proof_bundle_admission_failed");
                     return false;
+                }
             }
+            const char *argv[] = {generation_binary, only, "--cache",
+                                  "--activate-proof-contracts", NULL};
+            if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv,
+                               test, true, why, why_len))
+                return false;
+            test_receipt_bind_helpers(test, helper_root);
         } else unused_dimension(ZCL_DEV_PROOF_TEST, test);
     }
 

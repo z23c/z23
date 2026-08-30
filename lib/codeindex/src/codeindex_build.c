@@ -12,6 +12,7 @@
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_build.h"
 
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #if !defined(_WIN32)
@@ -524,6 +525,7 @@ struct stage_identity {
 #ifdef ZCL_TESTING
 static _Atomic int g_test_crash_point = CODEINDEX_TEST_CRASH_NONE;
 static _Atomic int g_test_stage_tamper = CODEINDEX_TEST_STAGE_TAMPER_NONE;
+static _Atomic bool g_test_remove_lock_directory = false;
 static _Atomic uint64_t g_test_exact_bytes_read = 0;
 static char g_test_stage_victim[CI_PATH_MAX];
 
@@ -559,6 +561,19 @@ void codeindex_test_set_stage_tamper(
                           memory_order_relaxed);
 }
 
+void codeindex_test_remove_lock_directory_once(void)
+{
+    atomic_store_explicit(&g_test_remove_lock_directory, true,
+                          memory_order_relaxed);
+}
+
+static void codeindex_test_maybe_remove_lock_directory(const char *dir)
+{
+    if (atomic_exchange_explicit(&g_test_remove_lock_directory, false,
+                                 memory_order_relaxed))
+        (void)rmdir(dir);
+}
+
 static bool codeindex_test_maybe_tamper_stage(int dirfd, const char *name)
 {
     int tamper = atomic_exchange_explicit(
@@ -588,6 +603,7 @@ static void codeindex_test_maybe_crash(enum codeindex_test_crash_point point)
 #else
 #define codeindex_test_maybe_crash(...) ((void)0)
 #define codeindex_test_maybe_tamper_stage(...) true
+#define codeindex_test_maybe_remove_lock_directory(...) ((void)0)
 #endif
 
 static bool rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
@@ -598,38 +614,61 @@ static bool rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
     int n = snprintf(dir, CI_PATH_MAX, "%s/.codeindex", root);
     if (n <= 0 || n >= CI_PATH_MAX)
         LOG_FAIL("codeindex", "index directory path too long");
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
-        LOG_FAIL("codeindex", "create index directory failed: %s",
-                 strerror(errno));
+    enum { LOCK_DIRECTORY_ATTEMPTS = 8 };
+    for (int attempt = 0; attempt < LOCK_DIRECTORY_ATTEMPTS; attempt++) {
+        if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+            LOG_FAIL("codeindex", "create index directory failed: %s",
+                     strerror(errno));
 
-    int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (dirfd < 0)
-        LOG_FAIL("codeindex", "open index directory failed: %s",
-                 strerror(errno));
-    struct stat dir_st;
-    if (fstat(dirfd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) ||
-        dir_st.st_uid != geteuid() || (dir_st.st_mode & (S_IWGRP | S_IWOTH))) {
-        close(dirfd);
-        LOG_FAIL("codeindex",
-                 "index directory must be owner-controlled and not writable by group/other");
+        int dirfd = open(dir,
+                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (dirfd < 0) {
+            int saved = errno;
+            if (saved == ENOENT && attempt + 1 < LOCK_DIRECTORY_ATTEMPTS) {
+                platform_sleep_ms(1);
+                continue;
+            }
+            LOG_FAIL("codeindex", "open index directory failed: %s",
+                     strerror(saved));
+        }
+        struct stat dir_st;
+        if (fstat(dirfd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) ||
+            dir_st.st_uid != geteuid() ||
+            (dir_st.st_mode & (S_IWGRP | S_IWOTH))) {
+            close(dirfd);
+            LOG_FAIL("codeindex",
+                     "index directory must be owner-controlled and not writable by group/other");
+        }
+
+        codeindex_test_maybe_remove_lock_directory(dir);
+        int lockfd = openat(dirfd, "rebuild.lock",
+                            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (lockfd < 0) {
+            int saved = errno;
+            close(dirfd);
+            /* An opened directory may be unlinked before O_CREAT reaches it.
+             * Reacquire by pathname, then revalidate ownership and mode; the
+             * stale descriptor is never used for publication. */
+            if (saved == ENOENT && attempt + 1 < LOCK_DIRECTORY_ATTEMPTS) {
+                platform_sleep_ms(1);
+                continue;
+            }
+            LOG_FAIL("codeindex", "open rebuild lock failed: %s",
+                     strerror(saved));
+        }
+        if (flock(lockfd, LOCK_EX) != 0) {
+            int saved = errno;
+            close(lockfd);
+            close(dirfd);
+            LOG_FAIL("codeindex", "acquire rebuild lock failed: %s",
+                     strerror(saved));
+        }
+        *out_dirfd = dirfd;
+        *out_lockfd = lockfd;
+        return true;
     }
-    int lockfd = openat(dirfd, "rebuild.lock",
-                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (lockfd < 0) {
-        int saved = errno;
-        close(dirfd);
-        LOG_FAIL("codeindex", "open rebuild lock failed: %s", strerror(saved));
-    }
-    if (flock(lockfd, LOCK_EX) != 0) {
-        int saved = errno;
-        close(lockfd);
-        close(dirfd);
-        LOG_FAIL("codeindex", "acquire rebuild lock failed: %s",
-                 strerror(saved));
-    }
-    *out_dirfd = dirfd;
-    *out_lockfd = lockfd;
-    return true;
+    LOG_FAIL("codeindex",
+             "index directory changed repeatedly during lock acquisition");
 }
 
 static bool cleanup_orphan_stages(int dirfd)

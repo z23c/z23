@@ -131,7 +131,7 @@ check_package() {
     done < <(find "$d/src" -type f | sort)
 
     # R8 — tests exist.
-    if ! find "$d/tests" -name '*.c' -type f 2>/dev/null | grep -q .; then
+    if [ -z "$(find "$d/tests" -name '*.c' -type f 2>/dev/null)" ]; then
         fail "$pkg: tests/ holds no .c file"
     fi
 

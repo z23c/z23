@@ -2,6 +2,7 @@
  * purpose: Native command adapter for exact local push-proof receipts. */
 
 #include "command/native_command.h"
+#include "command/native_dev_loop_command.h"
 #include "command/native_dev_proof_command.h"
 
 #include "dev_proof.h"
@@ -141,7 +142,7 @@ static void proof_ensure(
     }
     struct zcl_command_reply watcher;
     zcl_command_reply_init(&watcher, "zcl.dev_loop_status.v1");
-    zcl_native_handle_dev_loop_ensure(request, &watcher);
+    zcl_native_handle_dev_loop_start_async(request, &watcher);
     zcl_command_reply_free(&watcher);
     if (!zcl_dev_proof_ensure(
             proof_source_root(request),

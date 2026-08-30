@@ -118,7 +118,7 @@
 #include <unistd.h>
 #if !defined(_WIN32)
 
-int test_block_status_event_restart_proof(void);
+static int test_block_status_event_restart_proof_platform_arm(void);
 
 #define RP_N_BLOCKS     48
 #define RP_SOLUTION_LEN 96
@@ -493,7 +493,7 @@ static int rp_one_cycle(const char *log_path, const char *bip_path,
     return failures;
 }
 
-int test_block_status_event_restart_proof(void)
+static int test_block_status_event_restart_proof_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== test_block_status_event_restart_proof "
@@ -605,9 +605,14 @@ int test_block_status_event_restart_proof(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork+SIGKILL restart-proof child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_block_status_event_restart_proof(void)
+static int test_block_status_event_restart_proof_platform_arm(void)
 {
     printf("block_status_event_restart_proof: SKIP (Windows): fork+SIGKILL restart-proof child lane\n");
     return 0;
 }
 #endif
+
+int test_block_status_event_restart_proof(void)
+{
+    return test_block_status_event_restart_proof_platform_arm();
+}

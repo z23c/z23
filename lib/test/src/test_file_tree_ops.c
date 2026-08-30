@@ -477,7 +477,7 @@ static int test_depth_bound(void)
     return failures;
 }
 
-int test_file_tree_ops(void)
+static int test_file_tree_ops_platform_arm(void)
 {
     int failures = 0;
 
@@ -497,7 +497,7 @@ int test_file_tree_ops(void)
 /* Production file_tree_ops refuses every recursive mutation on Windows
  * (lib/util/src/file_tree_ops.c: "disabled pending handle-bound no-reparse
  * qualification"), so no case here can run. */
-int test_file_tree_ops(void)
+static int test_file_tree_ops_platform_arm(void)
 {
     printf("test_file_tree_ops: SKIP (Windows): file_tree_ops recursive "
            "mutation is disabled on Windows by production refusal\n");
@@ -505,3 +505,8 @@ int test_file_tree_ops(void)
 }
 
 #endif /* !_WIN32 */
+
+int test_file_tree_ops(void)
+{
+    return test_file_tree_ops_platform_arm();
+}

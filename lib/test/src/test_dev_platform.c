@@ -3494,7 +3494,7 @@ static int test_hotfork_descriptor_boundary(void)
     return failures;
 }
 
-int test_dev_platform(void)
+static int test_dev_platform_platform_arm(void)
 {
     int failures = 0;
     failures += test_failure_store();
@@ -3533,9 +3533,14 @@ int test_dev_platform(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked dev-platform child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_dev_platform(void)
+static int test_dev_platform_platform_arm(void)
 {
     printf("dev_platform: SKIP (Windows): forked dev-platform child lane\n");
     return 0;
 }
 #endif
+
+int test_dev_platform(void)
+{
+    return test_dev_platform_platform_arm();
+}

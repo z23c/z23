@@ -42,7 +42,7 @@
 
 #if !defined(__linux__)
 
-int test_terminal_worker_sandbox(void)
+static int test_terminal_worker_sandbox_platform_arm(void)
 {
     printf("\n=== terminal worker sandbox tests ===\n");
     printf("terminal_worker_sandbox: Linux confinement — not applicable here\n");
@@ -337,7 +337,7 @@ static int c_tw_ptrace_killed(void)
     return 12; /* reached only if ptrace was not denied */
 }
 
-int test_terminal_worker_sandbox(void)
+static int test_terminal_worker_sandbox_platform_arm(void)
 {
     printf("\n=== terminal worker sandbox attack tests ===\n");
     int failures = 0;
@@ -515,3 +515,8 @@ int test_terminal_worker_sandbox(void)
 }
 
 #endif /* __linux__ */
+
+int test_terminal_worker_sandbox(void)
+{
+    return test_terminal_worker_sandbox_platform_arm();
+}

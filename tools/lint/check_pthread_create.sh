@@ -26,7 +26,7 @@ HITS=$(grep -rn 'pthread_create\s*(' lib/ app/ tools/ config/ --include='*.c' \
         n=$(echo "$line" | cut -d: -f2)
         prev=$((n - 1))
         if [ "$prev" -gt 0 ] && \
-           sed -n "${prev}p" "$f" | grep -q 'raw-pthread-ok'; then
+           grep -q 'raw-pthread-ok' <<<"$(sed -n "${prev}p" "$f")"; then
             continue
         fi
         echo "$line"

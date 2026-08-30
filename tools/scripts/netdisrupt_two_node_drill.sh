@@ -360,7 +360,7 @@ nd2_check_port() {  # SKIP (not fatal) on any violation
     [ "$p" -ge 39000 ] && [ "$p" -le 39990 ] || skip "port $p out of the 39000-39990 isolation band"
     for lp in $ND2_LIVE_PORTS;     do [ "$p" = "$lp" ] && skip "port $p is in the live refuse-set"; done
     for lp in $ND2_RESERVED_PORTS; do [ "$p" = "$lp" ] && skip "port $p is reserved for a sibling fixture (39070-39073)"; done
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+    if [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]; then
         skip "port $p is already LISTENing — a sibling fixture likely owns it (refusing, never dodging)"
     fi
     return 0

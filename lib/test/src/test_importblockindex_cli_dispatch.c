@@ -28,6 +28,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/importblockindex_fixture.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -304,9 +305,9 @@ static int icd_test_fresh_datadir_chooses_bulk(const char *src_dir,
     return failures;
 }
 
-int test_importblockindex_cli_dispatch(void);
+static int test_importblockindex_cli_dispatch_platform_arm(void);
 
-int test_importblockindex_cli_dispatch(void)
+static int test_importblockindex_cli_dispatch_platform_arm(void)
 {
     int failures = 0;
 
@@ -323,15 +324,22 @@ int test_importblockindex_cli_dispatch(void)
         return 0;
     }
 
-    char base[256];
-    snprintf(base, sizeof(base), "/tmp/zcl_icd_cli_%d", (int)getpid());
-    char src_dir[300], target_db[340], target_db2[340], target_db3[340];
+    char base[PATH_MAX];
+    test_make_tmpdir(base, sizeof(base), "importblockindex_cli_dispatch",
+                     "main");
+    char src_dir[PATH_MAX], target_db[PATH_MAX], target_db2[PATH_MAX];
+    char target_db3[PATH_MAX];
     snprintf(src_dir, sizeof(src_dir), "%s/legacy_src", base);
     snprintf(target_db, sizeof(target_db), "%s/node1.db", base);
     snprintf(target_db2, sizeof(target_db2), "%s/node2.db", base);
     snprintf(target_db3, sizeof(target_db3), "%s/node3.db", base);
-    icd_mkdir_p(base);
     icd_mkdir_p(src_dir);
+    if (!test_importblockindex_fixture_build_minimal(src_dir)) {
+        fprintf(stderr, "importblockindex_cli_dispatch: failed to build "
+                "real legacy blocks/index fixture\n");
+        (void)test_rm_rf_recursive(base);
+        return 1;
+    }
 
     failures += icd_test_dispatch_reaches_importer(src_dir, target_db);
     failures += icd_test_flaglike_target_refused(src_dir);
@@ -340,27 +348,22 @@ int test_importblockindex_cli_dispatch(void)
     failures += icd_test_missing_source_arg_refuses();
     failures += icd_test_fresh_datadir_chooses_bulk(src_dir, target_db3);
 
-    /* Best-effort cleanup; failure here doesn't fail the test. */
-    const char *targets[] = { target_db, target_db2, target_db3 };
-    char cleanup_target[360];
-    for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
-        snprintf(cleanup_target, sizeof(cleanup_target), "%s-wal", targets[i]);
-        unlink(cleanup_target);
-        snprintf(cleanup_target, sizeof(cleanup_target), "%s-shm", targets[i]);
-        unlink(cleanup_target);
-        unlink(targets[i]);
-    }
-    rmdir(src_dir);
-    rmdir(base);
+    /* LevelDB and SQLite both own nested/sidecar files. */
+    (void)test_rm_rf_recursive(base);
 
     return failures;
 }
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked CLI-dispatch child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_importblockindex_cli_dispatch(void)
+static int test_importblockindex_cli_dispatch_platform_arm(void)
 {
     printf("importblockindex_cli_dispatch: SKIP (Windows): forked CLI-dispatch child lane\n");
     return 0;
 }
 #endif
+
+int test_importblockindex_cli_dispatch(void)
+{
+    return test_importblockindex_cli_dispatch_platform_arm();
+}

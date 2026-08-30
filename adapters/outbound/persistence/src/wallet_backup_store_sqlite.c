@@ -16,6 +16,7 @@
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
 
+#include "platform/private_file.h"
 #include "util/ar_step_readonly.h"
 
 #include <stddef.h>
@@ -28,6 +29,50 @@
  * snapshot build its per-table manifest on the stack with no allocation.
  * A caller asking for more is refused rather than silently truncated. */
 #define WBS_MAX_TABLES 16
+
+/* SQLite closes the completed snapshot before this runs.  Reopen that exact
+ * no-follow pathname, take the private-file lock, drive an authority-grade
+ * device barrier, then persist the new directory entry.  On Darwin the file
+ * barrier is F_FULLFSYNC rather than ordinary fsync; failure is a failed
+ * backup, never a silently weaker success. */
+static bool wbs_store_authority_publish(const char *path,
+                                        char *out_err, size_t out_err_cap)
+{
+    char resolved[1024], parent[1024];
+    if (!platform_private_destination_resolve(
+            path, resolved, sizeof(resolved), parent, sizeof(parent))) {
+        if (out_err && out_err_cap)
+            snprintf(out_err, out_err_cap,
+                     "cannot resolve completed backup path %s", path);
+        return false;
+    }
+
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_open_locked(resolved, &file)) {
+        if (out_err && out_err_cap)
+            snprintf(out_err, out_err_cap,
+                     "cannot reopen completed backup for authority flush: %s",
+                     resolved);
+        return false;
+    }
+    bool ok = platform_private_file_authority_flush(&file);
+    platform_private_file_close(&file);
+    if (!ok) {
+        if (out_err && out_err_cap)
+            snprintf(out_err, out_err_cap,
+                     "authority durability barrier failed for %s", resolved);
+        return false;
+    }
+    if (!platform_private_parent_flush(parent)) {
+        if (out_err && out_err_cap)
+            snprintf(out_err, out_err_cap,
+                     "backup parent durability barrier failed for %s",
+                     parent);
+        return false;
+    }
+    return true;
+}
 
 static inline struct wallet_backup_store_sqlite_ctx *ctx_of(void *self)
 {
@@ -235,7 +280,7 @@ static enum wallet_backup_store_status wbs_store_write_snapshot(
 
     /* Detach + close. */
     (void)sqlite3_exec(dst, "DETACH DATABASE src", NULL, NULL, NULL);
-    sqlite3_close(dst);
+    int close_rc = sqlite3_close(dst);
 
     if (out_stats)
         memcpy(out_stats, stat, n_tables * sizeof(stat[0]));
@@ -247,6 +292,14 @@ static enum wallet_backup_store_status wbs_store_write_snapshot(
             snprintf(out_copy_err, copy_err_cap,
                      "manifest write failed for %s", dst_path);
         return WB_STORE_MANIFEST_FAILED;
+    }
+    if (close_rc != SQLITE_OK ||
+        !wbs_store_authority_publish(dst_path, out_copy_err, copy_err_cap)) {
+        if (out_copy_err && copy_err_cap && out_copy_err[0] == '\0')
+            snprintf(out_copy_err, copy_err_cap,
+                     "close/authority durability failed for %s (sqlite rc=%d)",
+                     dst_path, close_rc);
+        return WB_STORE_COPY_FAILED;
     }
     return WB_STORE_OK;
 }
