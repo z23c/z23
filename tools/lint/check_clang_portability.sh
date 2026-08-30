@@ -500,7 +500,7 @@ print_diags_for() {
     while read -r f; do
         [ -n "$f" ] || continue
         gate_grep -E "^${f//./\\.}:" "$SITES" | sed 's/^/    /' >&2 || true
-    done < <(printf '%s' "$list" | sed 's/^  //; s/:.*//')
+    done < <(printf '%s\n' "$list" | sed 's/^  //; s/:.*//')
 }
 
 if [ -n "${regressions//[[:space:]]/}" ]; then
