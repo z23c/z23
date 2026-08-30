@@ -491,6 +491,52 @@ static inline int platform_socket_set_no_delay(platform_socket_t sock,
 #endif
 }
 
+/* Default P2P stream buffer size for platforms whose TCP stack does not
+ * auto-tune socket buffers (macOS, Windows, BSD).  Linux is left to the
+ * kernel auto-tuner, so this constant is intentionally not applied there. */
+#define PLATFORM_P2P_SOCKET_BUFFER_SIZE (1 * 1024 * 1024)
+
+static inline int platform_socket_set_receive_buffer(platform_socket_t sock,
+                                                      int size)
+{
+#if defined(_WIN32)
+    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *)&size,
+                      (int)sizeof(size));
+#else
+    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+#endif
+}
+
+static inline int platform_socket_set_send_buffer(platform_socket_t sock,
+                                                   int size)
+{
+#if defined(_WIN32)
+    return setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char *)&size,
+                      (int)sizeof(size));
+#else
+    return setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+#endif
+}
+
+/* Best-effort buffer sizing for P2P sockets.  On Linux this is a no-op so
+ * the kernel's dynamic auto-tuning is preserved; everywhere else it asks for
+ * PLATFORM_P2P_SOCKET_BUFFER_SIZE for both directions.  Callers should treat
+ * a failure as a degrade (smaller default buffers), not a fatal error. */
+static inline int platform_socket_set_p2p_buffers(platform_socket_t sock)
+{
+#if defined(__linux__)
+    (void)sock;
+    return 0;
+#else
+    int rc = platform_socket_set_receive_buffer(
+        sock, PLATFORM_P2P_SOCKET_BUFFER_SIZE);
+    if (rc != 0)
+        return rc;
+    return platform_socket_set_send_buffer(sock,
+                                           PLATFORM_P2P_SOCKET_BUFFER_SIZE);
+#endif
+}
+
 static inline bool platform_socket_send_all(platform_socket_t sock,
                                              const void *data, size_t size)
 {
@@ -575,14 +621,22 @@ static inline int platform_socket_send_nonblocking(platform_socket_t sock,
                                                     size_t size)
 {
     int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32) || !defined(MSG_DONTWAIT)
+    /* Windows and BSD-family systems (including Darwin) have no MSG_DONTWAIT.
+     * Temporarily flip the socket to non-blocking and restore the caller's
+     * mode, mirroring the Windows arm. */
+    if (!platform_socket_set_nonblocking(sock, true)) return -1;
+    int result = (int)send(sock, data, (size_t)part, 0);
+    int error = result < 0 ? platform_socket_last_error() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) && result >= 0)
+        return -1;
+    if (result < 0) {
 #if defined(_WIN32)
-    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
-    int result = send(sock, (const char *)data, part, 0);
-    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
-    if (!platform_socket_set_nonblocking(sock, false) &&
-        result != SOCKET_ERROR)
-        return SOCKET_ERROR;
-    if (result == SOCKET_ERROR) WSASetLastError(error);
+        WSASetLastError(error);
+#else
+        errno = error;
+#endif
+    }
     return result;
 #else
     int flags = MSG_DONTWAIT;
@@ -597,14 +651,19 @@ static inline int platform_socket_receive_nonblocking(platform_socket_t sock,
                                                        void *data, size_t size)
 {
     int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32) || !defined(MSG_DONTWAIT)
+    if (!platform_socket_set_nonblocking(sock, true)) return -1;
+    int result = (int)recv(sock, data, (size_t)part, 0);
+    int error = result < 0 ? platform_socket_last_error() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) && result >= 0)
+        return -1;
+    if (result < 0) {
 #if defined(_WIN32)
-    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
-    int result = recv(sock, (char *)data, part, 0);
-    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
-    if (!platform_socket_set_nonblocking(sock, false) &&
-        result != SOCKET_ERROR)
-        return SOCKET_ERROR;
-    if (result == SOCKET_ERROR) WSASetLastError(error);
+        WSASetLastError(error);
+#else
+        errno = error;
+#endif
+    }
     return result;
 #else
     return (int)recv(sock, data, (size_t)part, MSG_DONTWAIT);

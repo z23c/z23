@@ -1939,6 +1939,13 @@ else
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 endif
 
+.PHONY: macos-acceptance
+# Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived
+# from the closed capability matrix; unavailable rows run their refusal proof
+# rather than disappearing as hand-maintained skips.
+macos-acceptance:
+	@./tools/scripts/macos_acceptance.sh --run
+
 .PHONY: windows-service-install windows-service-status windows-service-remove
 windows-service-install: z23
 	@packaging/windows/install-service.sh install
@@ -2666,6 +2673,7 @@ $(BUILD_DIR)/hotswap/zcl_rollback_fixture_%.so: $(HOTSWAP_ROLLBACK_FIXTURE_SRC) 
 	  -c -o "$$tmp_o" $(HOTSWAP_ROLLBACK_FIXTURE_SRC); \
 	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o"; \
 	mv -f -- "$$tmp_so" "$@"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$@"; \
 	rm -f "$$tmp_o"; \
 	trap - EXIT HUP INT TERM
 
@@ -4142,8 +4150,19 @@ hotswap:
 # shared by this recipe and the fast path's cached flags.env. -Wl,-Bsymbolic
 # is LOAD-BEARING: without it a dlopen'd handler's internal calls interpose
 # back onto the resident (old) code and the swap silently does nothing.
+# Platform-appropriate link flags for a loadable hot-swap module.  -Bsymbolic
+# is load-bearing on Linux: without it a dlopen'd handler's internal calls
+# interpose back onto the resident (old) code and the swap silently does
+# nothing.  macOS uses -bundle for dlopen-able Mach-O images and omits the
+# GNU/Linux linker hardening flags.
+ifeq ($(ZCL_HOST_OS),Darwin)
+HOTSWAP_MODULE_LDFLAGS = -bundle -Wl,-undefined,dynamic_lookup -Wl,-dead_strip
+HOTSWAP_MODULE_CODESIGN = codesign --sign - --force
+else
 HOTSWAP_MODULE_LDFLAGS = -shared -nostartfiles -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now \
 	-Wl,-z,noexecstack -Wl,-Bsymbolic
+HOTSWAP_MODULE_CODESIGN = true
+endif
 
 # Intentionally NOT ordered on $(BUILD_IDENTITY_STAMP): that stamp exists to
 # gate $(BUILD_IDENTITY_CPPFLAGS) into clientversion.o for whole-program
@@ -4241,6 +4260,7 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	publish_exact "$$tmp_so" "$$so" || { \
 	  echo "hotswap-module-so: REFUSING mismatched existing candidate $$so" >&2; exit 3; }; \
 	chmod a-w "$$o" "$$so"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$$so"; \
 	cache_o="$(HOTSWAP_SO_DIR)/fast/$$safe.o"; \
 	cache_d="$(HOTSWAP_SO_DIR)/fast/$$safe.d"; \
 	cache_cmd="$(HOTSWAP_SO_DIR)/fast/$$safe.cmd"; \
@@ -4405,6 +4425,7 @@ hotswap-test-so: $(VIEW_GEN_HEADERS)
 	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o" >&2; \
 	so="$(HOTSWAP_TEST_SO_DIR)/$$safe.so"; \
 	mv -f -- "$$tmp_so" "$$so"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$$so"; \
 	rm -f "$$tmp_o"; \
 	trap - EXIT HUP INT TERM; \
 	{ \
@@ -5174,6 +5195,15 @@ zcl-rpc: $(ZCL_RPC_BIN)
 $(ZCL_RPC_BIN): FORCE tools/zcl-rpc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -o $@ $(filter-out FORCE,$^)
+
+# Portable syscall-level replacement for the util-linux setsid(1) command,
+# which macOS does not ship.  Isolated acceptance harnesses use it so cleanup
+# can signal the spawned node's whole process group on every POSIX host.
+.PHONY: process-group-exec
+process-group-exec: $(BIN_DIR)/process-group-exec
+$(BIN_DIR)/process-group-exec: tools/process_group_exec.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -o $@ $<
 
 # zcl-portfwd: tiny self-contained userspace TCP forwarder that maps public
 # 443/80 -> the node's unprivileged high ports (8443/8080). It is the ONE file
@@ -6467,7 +6497,7 @@ test-reindex-killmid: zclassic23 zcl-rpc
 .PHONY: test-two-node-peer-tip
 # Runs under bash for `set -o pipefail` parity with the other spawn
 # harnesses; the script itself sets -euo pipefail.
-test-two-node-peer-tip: zclassic23 zcl-rpc
+test-two-node-peer-tip: zclassic23 zcl-rpc process-group-exec
 	@bash tools/scripts/two_node_peer_tip.sh
 
 # ZCODE science-slice v1 acceptance proof: two disjoint isolated regtest

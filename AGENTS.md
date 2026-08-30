@@ -186,20 +186,17 @@ and independent-checkout binaries execute and hash identically. Package builds
 that require Linux full isolation continue to refuse on macOS.
 
 The macOS capability boundary is explicit: the public node, wallet, P2P, RPC,
-database, and cryptography build natively; Linux Landlock and seccomp
-confinement, signal-context self-backtraces, the inotify developer watcher, and
-`O_TMPFILE` consensus snapshot export are currently unavailable. Those paths
-refuse or report unavailable instead of claiming Linux guarantees. Only arm64
-macOS is measured; Intel macOS remains unverified.
+database, cryptography, embedded Tor, and a native kqueue directory watcher build
+natively; Linux Landlock and seccomp confinement, signal-context
+self-backtraces, native hot-swap activation, and `O_TMPFILE` consensus snapshot
+export are currently unavailable. Those paths refuse or report unavailable
+instead of claiming Linux guarantees. Only arm64 macOS is measured; Intel macOS
+remains unverified.
 
-Embedded full Tor is no longer on that unavailable list, and is not yet on the
-verified list either. The build used to pin Darwin to the offline Tor stub
-whatever the Tor archives contained; that pin is gone, and `make tor-full`
-points Tor's configure at the vendored OpenSSL, libevent, and zlib instead of
-the system trees macOS does not ship. What the node links is now decided by
-which archives exist, on every host. No Mac has yet been observed completing
-that build, so it is **untested on macOS** — claim it only from a Mac that ran
-it. Build and test instructions are in
+Embedded full Tor has been observed to complete on the arm64 Mac host
+(`make tor-full`, ~110 s, producing `vendor/tor/libtor.a` from vendored
+OpenSSL/libevent/zlib). What the node links is decided by which archives exist,
+on every host. Build and test instructions are in
 [`docs/GETTING_STARTED.md`](./docs/GETTING_STARTED.md).
 
 ## Orient before editing

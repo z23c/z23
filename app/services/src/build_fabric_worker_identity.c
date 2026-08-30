@@ -35,7 +35,7 @@
 
 /* Build the advertised capability string for a host that can actually
  * capture a toolchain capsule, or the named refusal for one that cannot.
- * vcs_toolchain_capsule_v1_capture_gcc() probes crt1.o/crti.o/crtn.o and
+ * vcs_toolchain_capsule_v1_capture() probes crt1.o/crti.o/crtn.o and
  * libc.so.6 (ELF/glibc-specific) and is the exact gate
  * build_fabric_worker_execute() rechecks before running any dispatched
  * c23.compile/.test/.fuzz/.package action; a worker that fails this probe
@@ -52,7 +52,7 @@ static __attribute__((unused)) struct zcl_result build_fabric_worker_capabilitie
         return ZCL_ERR(-1,
                        "build worker declines: host platform \"%s\" cannot "
                        "capture a %s gcc toolchain capsule "
-                       "(vcs_toolchain_capsule_v1_capture_gcc failed "
+                       "(vcs_toolchain_capsule_v1_capture failed "
                        "probing crt1.o/crti.o/crtn.o/libc.so.6); refusing "
                        "to advertise c23.compile/.test/.fuzz/.package "
                        "capability it cannot execute",
@@ -155,7 +155,7 @@ struct zcl_result build_fabric_worker_identity_load(
     zcl_hex_encode(worker_id, sizeof(worker_id), worker->worker_id);
     zcl_hex_encode(signer_pubkey, 32, worker->signer_pubkey);
     struct vcs_toolchain_capsule_v1 capsule;
-    bool have_toolchain = vcs_toolchain_capsule_v1_capture_gcc(&capsule);
+    bool have_toolchain = vcs_toolchain_capsule_v1_capture(&capsule);
     return build_fabric_worker_capabilities(
         have_toolchain, worker->capabilities, sizeof(worker->capabilities));
 #endif

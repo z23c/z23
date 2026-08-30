@@ -572,6 +572,9 @@ static int test_native_catalog_resolution(void)
             "test_chain_advance_atomicity"));
         ASSERT(zcl_test_group_is_integration_only(
             "test_reducer_block_ingest_gate"));
+        ASSERT(zcl_test_group_is_integration_only("test_store_e2e_gate"));
+        ASSERT(zcl_test_group_is_integration_only(
+            "test_store_e2e_shielded"));
         ASSERT(!zcl_test_group_is_integration_only("test_event_log"));
         ASSERT(zcl_test_group_proof_contracts_valid());
         ASSERT(zcl_test_group_proof_contract(
@@ -589,6 +592,10 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_proof_contract(
                    "test_reducer_forward_progress_gate") ==
                ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_store_e2e_gate") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_store_e2e_shielded") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
                    "test_event_log_kill9") == ZCL_TEST_PROOF_EVENT_LOG_KILL9);
         ASSERT(zcl_test_group_proof_contract(

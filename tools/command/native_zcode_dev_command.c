@@ -1209,7 +1209,7 @@ void zcl_native_handle_zcode_improve(
     memcpy(task.proof_policy_root, policy_root, 32);
     sha3_256((const uint8_t *)goal, strlen(goal), task.goal_root);
     struct vcs_toolchain_capsule_v1 capsule;
-    if (!vcs_toolchain_capsule_v1_capture_gcc(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
         !vcs_toolchain_capsule_v1_root(&capsule,
                                        task.toolchain_capsule_root)) {
         zdev_fail(reply, "TOOLCHAIN_CAPTURE_FAILED",

@@ -282,6 +282,53 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_territory)
 
+/* `code.kpi` is the one code.* leaf that WRITES, and it is classed MUTATE for
+ * that reason rather than dressed as a read. Every run appends one frame to
+ * <root>/.codeindex/kpi.chainlog, which is exactly the point: a ledger that
+ * only reported would have no history to report against. The risk class is
+ * DEV_MUTATION and the scope LOCAL because the only thing it can touch is
+ * developer-local derived state in a gitignored directory — it reaches no
+ * node, no datadir, no wallet and no consensus surface. Calling it a READ
+ * would put it in the READY-read latency contract, which dispatches every
+ * code.* read leaf four times per run, and those dispatches would silently
+ * become ledger entries. */
+ZCL_COMMAND_READY_COMMAND(
+    "code.kpi", "code", "",
+    "Record and compare the build's own numbers over time",
+    "One canonical frame per run, appended to a hash-chained ledger at "
+    ".codeindex/kpi.chainlog, holding numbers this build ALREADY produces: "
+    "capabilities, duplicate candidates and untested invariants from the "
+    "generated capability inventory; territories and files owned from the "
+    "code index; registered test groups from the parallel-test catalog; lint "
+    "gates from the Makefile's own list; and determinism debt from the "
+    "ratchet baseline. Each is reported with its previous value, its delta, "
+    "which direction is better, a verdict, and the EXACT command that shows "
+    "the rows behind the number. A metric whose artifact is missing, "
+    "unreadable, or whose parse recognised nothing is UNAVAILABLE and is "
+    "NEVER reported as 0 — those are different facts, and a ledger that "
+    "conflated them would make every delta across that boundary a fiction. "
+    "Such a run still writes its frame, because the unavailability is itself "
+    "the fact being recorded, and the summary says how many were unavailable. "
+    "`previous` is the most recent PRIOR frame, never the one just written; "
+    "with no prior frame the verdict is no_baseline, never unchanged. The "
+    "frame payload is canonical bytes with no timestamp, path or pid, so two "
+    "honest runs over one tree produce identical bytes and the ledger stays "
+    "comparable; ordering comes from the chainlog sequence number. It grants "
+    "nothing and gates nothing: a frame is a measurement, never an approval.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,kpi,metrics,ledger,progress,trend,delta,inventory,debt",
+    "zcl.command.empty_input.v1",
+    "zcl.code_kpi.v1", "", "",
+    "z23 code kpi",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_code_kpi)
+
 /* `code.general` carries the bare `general` alias, so `z23 general lib/net`
  * works without a fourth word. It is a code.* child and NOT a new root: the
  * registry has exactly twelve roots and the root menu has a byte budget, both

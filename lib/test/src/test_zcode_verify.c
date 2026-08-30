@@ -3689,15 +3689,26 @@ static int t_verifier_e2e(void)
                                   sizeof(out));
         struct vcs_package_attest satt;
         bool have_satt = zv_read_only_attestation(store4, &satt);
+        bool socket_contract = f4 && src == 0 && have_satt &&
+            vcs_package_attest_verify(&satt) == VCS_PACKAGE_ATTEST_OK;
+#if defined(__APPLE__)
+        /* Candidate mode may run with its truthful degraded-isolation tag on
+         * Darwin.  It must never be mistaken for the Linux seccomp claim. */
+        socket_contract = socket_contract &&
+            satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED &&
+            satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
+            satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_NONE;
+        ZV_CHECK("e2e: socket() test records degraded Darwin isolation",
+                 socket_contract);
+#else
+        socket_contract = socket_contract &&
+            satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL &&
+            satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL &&
+            satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_TEST_SIGNAL;
         ZV_CHECK("e2e: socket() test killed by sandbox (test-fail/signal)",
-                 f4 && src == 0 && have_satt &&
-                 satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL &&
-                 satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_TEST_SIGNAL &&
-                 vcs_package_attest_verify(&satt) == VCS_PACKAGE_ATTEST_OK);
-        if (!f4 || src != 0 || !have_satt ||
-            satt.result_class != VCS_PACKAGE_ATTEST_RESULT_TEST_FAIL ||
-            satt.detail_code != VCS_PACKAGE_ATTEST_DETAIL_TEST_SIGNAL ||
-            vcs_package_attest_verify(&satt) != VCS_PACKAGE_ATTEST_OK)
+                 socket_contract);
+#endif
+        if (!socket_contract)
             printf("  zcode_verify: socket e2e f4=%d src=%d have=%d "
                    "class=%s detail=%s text=%s out=%s\n", f4, src, have_satt,
                    vcs_package_attest_result_string(satt.result_class),

@@ -23,7 +23,7 @@ struct zcl_result build_fabric_worker_execute(
 
 /* Load or atomically create the operator-owned local worker key. The returned
  * row is suitable for explicit -buildworker self-approval. A host that
- * cannot capture a gcc toolchain capsule (vcs_toolchain_capsule_v1_capture_gcc,
+ * cannot capture a gcc toolchain capsule (vcs_toolchain_capsule_v1_capture,
  * ELF/glibc-specific) cannot execute c23.compile/.test/.fuzz/.package and
  * this returns a named error instead of an approvable row that would
  * advertise capability it cannot honor. */
@@ -35,7 +35,7 @@ struct zcl_result build_fabric_worker_identity_load(
 /* Test seam: the honest capabilities-or-refusal decision, driven by a
  * caller-supplied outcome rather than the real toolchain probe, so tests
  * can exercise the refusal path on a host (e.g. this repo's own Linux CI)
- * where vcs_toolchain_capsule_v1_capture_gcc() always succeeds. Mirrors
+ * where vcs_toolchain_capsule_v1_capture() always succeeds. Mirrors
  * the "force the outcome, run the real decision code" shape of
  * os_proc_mem_set_override() / platform_clock_set_source(). */
 struct zcl_result build_fabric_worker_capabilities_for_test(

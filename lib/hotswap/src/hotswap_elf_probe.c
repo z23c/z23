@@ -973,3 +973,15 @@ bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
     }
     return true;
 }
+
+bool hotswap_elf_probe_and_admit_fd(int fd,
+                                    const char expected_core_seal_root[65],
+                                    uint32_t expected_abi,
+                                    char *err, size_t err_cap)
+{
+    struct hotswap_elf_facts facts;
+    if (!hotswap_elf_probe_fd(fd, &facts, err, err_cap))
+        return false;
+    return hotswap_elf_pre_map_admit(&facts, expected_core_seal_root,
+                                     expected_abi, err, err_cap);
+}

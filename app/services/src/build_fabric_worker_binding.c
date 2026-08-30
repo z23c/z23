@@ -42,7 +42,7 @@ bool bfw_toolchain_current(const struct db_build_job *job)
 {
     struct vcs_toolchain_capsule_v1 capsule;
     uint8_t root[32]; char root_hex[65];
-    if (!vcs_toolchain_capsule_v1_capture_gcc(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
         !vcs_toolchain_capsule_v1_root(&capsule, root))
         return false;
     zcl_hex_encode(root, 32, root_hex);
