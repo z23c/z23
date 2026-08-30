@@ -45,12 +45,17 @@ static int test_hotswap_path_acceptance(void)
         ASSERT(hotswap_path_is_acceptable(okp, why, sizeof(why)));
         unlink(okp);
 
-        /* A real .so NOT under /tmp or a build/hotswap dir is rejected. */
-        const char *home = getenv("HOME");
+        /* A real .so NOT under /tmp or a build/hotswap dir is rejected.
+         * Do not derive this fixture from HOME: isolated proof lanes put
+         * HOME under /tmp so parameter files and datadirs cannot touch the
+         * operator's home, which would turn the intended rejection path into
+         * an admitted /tmp path. /var/tmp is writable on the supported POSIX
+         * hosts but resolves outside /tmp on both Darwin and Linux. */
         char rej[512];
-        snprintf(rej, sizeof(rej), "%s/zcl_hs_reject_%d.so",
-                 home ? home : ".", (int)getpid());
+        snprintf(rej, sizeof(rej), "/var/tmp/zcl_hs_reject_%d.so",
+                 (int)getpid());
         FILE *g = fopen(rej, "w");
+        ASSERT(g != NULL);
         if (g) { fputs("x", g); fclose(g); }
         ASSERT(!hotswap_path_is_acceptable(rej, why, sizeof(why)));
         unlink(rej);
