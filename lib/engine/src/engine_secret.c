@@ -22,6 +22,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32) && !defined(O_CLOEXEC)
+/* mingw's <fcntl.h> ships no O_CLOEXEC and no close-on-exec emulation;
+ * Windows children here are not fork+exec, so the flag is a hygiene no-op.
+ * Same zero fallback as lib/net/src/rom_fetch.c. */
+#define O_CLOEXEC 0
+#endif
+
 #define ENGINE_SECRET_MIN 12
 #define ENGINE_REDACTED   "[REDACTED]"
 

@@ -121,6 +121,9 @@ void inv_group_for_path(const char *path, char out[64])
     (void)snprintf(out, 64, "%.*s", (int)n, path);
 }
 
+#if !defined(_WIN32)
+/* Only inv_collect_dir (POSIX arm below) uses these helpers; on Windows the
+ * traversal refuses in inv_collect_paths and these would be dead code. */
 static bool inv_source_name(const char *name)
 {
     size_t n = strlen(name);
@@ -136,7 +139,9 @@ static bool inv_prune_dir(const char *name)
            strcmp(name, "fixtures") == 0 ||
            strncmp(name, "test-tmp", 8) == 0;
 }
+#endif
 
+#if !defined(_WIN32)
 static bool inv_path_push(struct inv_scan *s, const char *path,
                           const struct stat *st)
 {
@@ -161,7 +166,6 @@ static bool inv_path_push(struct inv_scan *s, const char *path,
     return true;
 }
 
-#if !defined(_WIN32)
 static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 {
     char full[INV_PATH_MAX];
@@ -194,11 +198,13 @@ static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 }
 #endif
 
+#if !defined(_WIN32)
 static int inv_path_cmp(const void *a, const void *b)
 {
     return strcmp(((const struct inv_path *)a)->path,
                   ((const struct inv_path *)b)->path);
 }
+#endif
 
 bool inv_collect_paths(struct inv_scan *s)
 {
