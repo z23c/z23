@@ -112,10 +112,11 @@ compiler.
 Compile reuse initially left the isolated generation with no depfiles, so the
 test cache correctly refused all 131 closure-based groups even though their
 PASS objects were available. The broker now copies only the exact active test
-epoch's depfiles into the generation with fresh private inodes, binds their
-paths and content hashes into the test-helper receipt, and leaves object files
-behind. Source and include-graph reads therefore stay generation-local while
-the immutable PASS objects remain shared.
+epoch's depfiles and validated current-epoch selector into the generation with
+fresh private inodes, binds their paths and content hashes into the test-helper
+receipt, and leaves object files behind. Source and include-graph reads
+therefore stay generation-local while the immutable PASS objects remain
+shared.
 
 ## Knowledge gained
 

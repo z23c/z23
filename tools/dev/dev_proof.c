@@ -1036,11 +1036,44 @@ static bool test_binary_path(const struct proof_paths *paths,
     return n > 0 && n < PATH_MAX && access(out, X_OK) == 0;
 }
 
+static bool test_epoch_pointer_prepare(const struct proof_paths *paths,
+                                       const char *generation,
+                                       const char *object_dir,
+                                       uint8_t pointer_root[32])
+{
+    const char *epoch = strrchr(object_dir, '/');
+    char source[PATH_MAX], target[PATH_MAX];
+    if (!epoch || !epoch[1] || strchr(epoch + 1, '/') ||
+        snprintf(source, sizeof(source), "%s/build/test-obj/.current-epoch",
+                 paths->root) >= (int)sizeof(source) ||
+        snprintf(target, sizeof(target), "%s/build/test-obj/.current-epoch",
+                 generation) >= (int)sizeof(target) ||
+        !dependency_parent_ensure(target) ||
+        !dependency_copy_fresh(source, target))
+        return false;
+    int fd = open(target, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    char value[72];
+    ssize_t got;
+    do {
+        got = read(fd, value, sizeof(value));
+    } while (got < 0 && errno == EINTR);
+    bool ok = close(fd) == 0 && got > 0 && got < (ssize_t)sizeof(value);
+    size_t len = ok ? (size_t)got : 0;
+    while (len > 0 && (value[len - 1] == '\n' || value[len - 1] == '\r'))
+        len--;
+    ok = ok && strlen(epoch + 1) == len &&
+        memcmp(value, epoch + 1, len) == 0 &&
+        hash_file("zcl.dev_proof_epoch_pointer.v1", target, pointer_root);
+    return ok;
+}
+
 static bool test_depfiles_prepare(const struct proof_paths *paths,
                                   const char *generation,
                                   uint8_t depfile_root[32])
 {
     char relative[PATH_MAX], source[PATH_MAX], target[PATH_MAX];
+    uint8_t pointer_root[32];
     if (!test_object_dir_relative(paths, relative) ||
         snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
             (int)sizeof(source) ||
@@ -1051,12 +1084,14 @@ static bool test_depfiles_prepare(const struct proof_paths *paths,
     hash_begin(&root, "zcl.dev_proof_depfiles.v1");
     size_t count = 0;
     if (!depfile_tree_copy(source, target, strlen(source), &root, &count) ||
-        count == 0)
+        count == 0 ||
+        !test_epoch_pointer_prepare(paths, generation, relative, pointer_root))
         return false;
     uint8_t count_le[8];
     for (size_t i = 0; i < sizeof(count_le); i++)
         count_le[i] = (uint8_t)(((uint64_t)count) >> (i * 8));
     sha3_256_write(&root, count_le, sizeof(count_le));
+    sha3_256_write(&root, pointer_root, sizeof(pointer_root));
     sha3_256_finalize(&root, depfile_root);
     return true;
 }
