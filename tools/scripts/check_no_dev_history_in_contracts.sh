@@ -51,16 +51,75 @@ is_allowlisted_path() {
             return 0
         fi
     done
-    base="$(basename "$p")"
+    base="${p##*/}"   # not `basename`: 1500+ forks per run, same result
     [[ "$base" == *_test.* ]] && return 0
     return 1
 }
 
+# The scan root is overridable via ZCL_NDH_SCAN_ROOT so --selftest can point
+# the gate at a SUBSET of the tree and prove the coverage check below sees the
+# shortfall. Production scans the whole checkout.
+NDH_SCAN_ROOT="${ZCL_NDH_SCAN_ROOT:-.}"
+
+# ── --selftest: the coverage check, exercised on every `make lint` ──────────
+# Three answers, not two. Each case re-invokes this gate for real with
+# ZCL_NDH_COVERAGE_ONLY=1, so it stops the moment the coverage verdict is in
+# and the umbrella never pays for a second full phrase-grep pass over 1500
+# files (the real, complete run follows immediately in the same
+# `--selftest && <gate>` command).
+if [ "${1:-}" = "--selftest" ]; then
+    self="$PWD/tools/scripts/check_no_dev_history_in_contracts.sh"
+    cov_case() { # $1=want-rc $2=msg  rest: VAR=VAL env assignments
+        local want="$1" msg="$2" rc=0
+        shift 2
+        env "$@" "$self" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne "$want" ]; then
+            echo "$GATE_NAME: SELFTEST FAILED — $msg (wanted exit $want, got $rc)" >&2
+            exit 2
+        fi
+    }
+    # (1) the full, real scan clears its own expectation.
+    cov_case 0 "the complete scan did not pass its coverage expectation" \
+        ZCL_LINT_PRODUCTION_SCAN=1 ZCL_NDH_COVERAGE_ONLY=1
+    # (2) a scan narrowed to one subtree is UNPROVEN exit 2 — never 0, never 1.
+    #     The old floor of 1 could not see this: 1513 of 1514 in-scope contract
+    #     files could vanish from the scan and the floor still cleared.
+    cov_case 2 "a scan narrowed to one subtree was not UNPROVEN" \
+        ZCL_LINT_PRODUCTION_SCAN=1 ZCL_NDH_COVERAGE_ONLY=1 \
+        ZCL_NDH_SCAN_ROOT=lib
+    # (3) a shortfall SMALLER than the recorded allowance is a stale ratchet,
+    #     exit 1 — an allowance that may only ever rise rusts shut.
+    cov_case 1 "an allowance above the true shortfall was silently tolerated" \
+        ZCL_LINT_PRODUCTION_SCAN=1 ZCL_NDH_COVERAGE_ONLY=1 \
+        ZCL_NDH_COVERAGE_ALLOWANCE=1
+    echo "[$GATE_NAME] SELFTEST PASS (a full scan passes coverage, a scan" \
+         "narrowed to one subtree is UNPROVEN exit 2, and an allowance above" \
+         "the true shortfall is a stale-ratchet exit 1)"
+    exit 0
+fi
+
+# Directory prune, production scans only. `-not -path '*/build/*'` FILTERS a
+# path only AFTER find has already walked into it; on this checkout that walk
+# costs ~11 s (90 agent worktrees under .claude/, plus build/ and vendor/),
+# and it was the whole reason this gate was the slowest in the umbrella.
+# Pruning exactly the directories the exclusion set already discards is
+# byte-for-byte equivalent — a file under them was never in the scan set —
+# and takes the two walks from ~11.5 s to ~0.17 s (verified: both listings
+# identical, 1435 *.h + 110 *.def). Empty when ZCL_LINT_PRODUCTION_SCAN is
+# unset, exactly like LINT_FIND_PRUNE_ARGS itself, so a selftest that execs
+# this script directly still sees the unfiltered tree.
+NDH_PRUNE_ARGS=()
+if [[ "${ZCL_LINT_PRODUCTION_SCAN:-0}" == "1" ]]; then
+    NDH_PRUNE_ARGS=( '(' -path '*/build' -o -path '*/vendor' -o -path '*/.claude' \
+                     -o -path '*/test-tmp' -o -path "*/$LINT_PLANTED_DIR" ')' -prune -o )
+fi
 # ── Scan set ──────────────────────────────────────────────────────────────
-mapfile -t h_candidates < <(find . -type f -name '*.h' -path '*/include/*' \
-    "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sed 's|^\./||' | sort)
-mapfile -t def_candidates < <(find . -type f -name '*.def' \
-    "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sed 's|^\./||' | sort)
+mapfile -t h_candidates < <(find "$NDH_SCAN_ROOT" "${NDH_PRUNE_ARGS[@]}" \
+    -type f -name '*.h' -path '*/include/*' \
+    "${LINT_FIND_PRUNE_ARGS[@]}" -print 2>/dev/null | sed 's|^\./||' | sort)
+mapfile -t def_candidates < <(find "$NDH_SCAN_ROOT" "${NDH_PRUNE_ARGS[@]}" \
+    -type f -name '*.def' \
+    "${LINT_FIND_PRUNE_ARGS[@]}" -print 2>/dev/null | sed 's|^\./||' | sort)
 
 files=()
 for f in "${h_candidates[@]}" "${def_candidates[@]}"; do
@@ -70,6 +129,57 @@ done
 
 gate_require_scanned "${#files[@]}" 1 "$GATE_NAME" \
     "no in-scope *.h (**/include/**) or *.def file found -- was a dir renamed/moved?"
+
+# ── Coverage: did the scan reach everything it claims to cover? ─────────────
+# The floor above answers "did the scan produce anything at all" — and it was
+# set to 1, i.e. this gate reported clean off a single file. Measured
+# 2026-08-30 the realized scan is 1514 in-scope files, so the floor was 0.07%
+# of the surface: a scan that silently lost 1513 of 1514 contract files still
+# passed. This gate greps each file for a fixed phrase set, so a dropped file
+# drops its whole verdict while the file COUNT stays large. This asks the right
+# question: did the scan reach every file an INDEPENDENT oracle — the git
+# index, which knows nothing about the two finds above, so the two cannot fail
+# together — says it should have?
+#
+# The oracle is NOT root-anchored (unlike the *.c gates): it asks git for every
+# tracked *.h under an include/ dir and every tracked *.def, ANYWHERE. So a
+# renamed subtree does not cancel out of both sides — the files simply move and
+# the find must still reach them.
+#
+# Scope, unchanged: the expectation is passed through the SAME
+# is_allowlisted_path predicate the scan uses, so docs/, vendor/, any
+# test/tests path component and any *_test.* basename are out of both. A
+# coverage check that fired on files this gate deliberately never reads would
+# only teach people to ignore it. Untracked files (build debris, a planted
+# fixture) are EXTRA in the scan and never missing from it, so they cannot
+# manufacture a pass.
+#
+# Allowance 0, shrink-only: measured expected 1510 tracked in-scope files,
+# scanned 1514 (the 4 extra are untracked build-work debris), missing 0.
+NDH_COVERAGE_ALLOWANCE="${ZCL_NDH_COVERAGE_ALLOWANCE:-0}"
+if [ "${ZCL_NDH_COVERAGE:-1}" = "1" ]; then
+    ndh_cov_dir="$(mktemp -d "${TMPDIR:-/tmp}/zcl-ndh-cov.XXXXXX")" || {
+        echo "$GATE_NAME: FATAL — mktemp failed for the coverage check." >&2
+        exit 2; }
+    trap 'rm -rf "$ndh_cov_dir"' EXIT
+    gate_git_oracle "$ndh_cov_dir/tracked.txt" "$GATE_NAME" \
+        '*/include/*.h' 'include/*.h' '*.def'
+    : > "$ndh_cov_dir/expected.txt"
+    while IFS= read -r ndh_cov_path; do
+        is_allowlisted_path "$ndh_cov_path" && continue
+        printf '%s\n' "$ndh_cov_path" >> "$ndh_cov_dir/expected.txt"
+    done < "$ndh_cov_dir/tracked.txt"
+    gate_require_coverage - "$ndh_cov_dir/expected.txt" "$NDH_COVERAGE_ALLOWANCE" \
+        "$GATE_NAME" ZCL_NDH_COVERAGE_ALLOWANCE \
+        "Re-run from a clean checkout. If a listed file genuinely left this gate's scope, move it under an allowlisted path (docs/, vendor/, a test/tests component, a *_test.* name) — raising ZCL_NDH_COVERAGE_ALLOWANCE is a last resort and needs the reason written down." \
+        < <(printf '%s\n' "${files[@]}")
+    rm -rf "$ndh_cov_dir"
+    trap - EXIT
+fi
+if [ "${ZCL_NDH_COVERAGE_ONLY:-0}" = "1" ]; then
+    echo "$GATE_NAME: coverage-only PASS (${#files[@]} in-scope file(s) reached)"
+    exit 0
+fi
 
 # ── Phrase set (high-signal only). Each entry is "grep-flag|pattern". ────
 PHRASES=(
