@@ -28,6 +28,7 @@
 #include "models/swap_contract.h"
 #include "models/wallet_tx.h"
 #include "models/znam.h"
+#include "models/zslp.h"
 #include "controllers/swap_controller.h"
 #include "script/htlc.h"
 #include "services/vault_read.h"
@@ -73,6 +74,50 @@ static const struct vault_row *vr_row(const struct vault_snapshot *snap,
         if (strcmp(snap->rows[i].class_name, class_name) == 0)
             return &snap->rows[i];
     return NULL;
+}
+
+static bool vr_seed_token_holdings(struct node_db *ndb)
+{
+    uint8_t owner[20], token_a[32], token_b[32], txid[32];
+    sqlite3_stmt *s = NULL;
+    bool ok = true;
+
+    memset(owner, 0xA1, sizeof(owner));
+    memset(token_a, 0x11, sizeof(token_a));
+    memset(token_b, 0x22, sizeof(token_b));
+    if (sqlite3_prepare_v2(ndb->db,
+            "INSERT INTO wallet_keys"
+            "(pubkey_hash,pubkey,privkey,compressed,created_at)"
+            " VALUES(?,zeroblob(33),zeroblob(32),1,0)", -1, &s, NULL) !=
+        SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(s, 1, owner, 20, SQLITE_STATIC);
+    ok = sqlite3_step(s) == SQLITE_DONE; /* raw-sql-ok:test-fixture-insert */
+    sqlite3_finalize(s);
+
+    if (sqlite3_prepare_v2(ndb->db,
+            "INSERT INTO zslp_ledger"
+            "(token_id,txid,vout,amount,address,created_height,role)"
+            " VALUES(?,?,?,?,?,1,1)", -1, &s, NULL) != SQLITE_OK)
+        return false;
+    for (int i = 0; ok && i < 3; i++) {
+        const uint8_t *token = i < 2 ? token_a : token_b;
+        memset(txid, (unsigned char)(0x31 + i), sizeof(txid));
+        sqlite3_reset(s);
+        sqlite3_clear_bindings(s);
+        sqlite3_bind_blob(s, 1, token, 32, SQLITE_STATIC);
+        sqlite3_bind_blob(s, 2, txid, 32, SQLITE_STATIC);
+        sqlite3_bind_int(s, 3, i + 1);
+        sqlite3_bind_int64(s, 4, i == 0 ? 700 : i == 1 ? 300 : 9);
+        sqlite3_bind_blob(s, 5, owner, 20, SQLITE_STATIC);
+        ok = sqlite3_step(s) == SQLITE_DONE; /* raw-sql-ok:test-fixture-insert */
+    }
+    sqlite3_finalize(s);
+    ok = ok && db_zslp_token_save(ndb, token_a, "ONE", "Token One", 2,
+                                  "", 1, 1000);
+    ok = ok && db_zslp_token_save(ndb, token_b, "TWO", "Token Two", 0,
+                                  "", 1, 9);
+    return ok && node_db_state_set_int(ndb, "zslp_ledger_cursor_height", 1);
 }
 
 int test_vault_read(void)
@@ -242,6 +287,47 @@ int test_vault_read(void)
     }
 
     /* ── 7. JSON surface + guards ─────────────────────────────────── */
+
+    {
+        struct vault_snapshot token_snap;
+        const struct vault_row *tokens;
+        struct json_value out;
+        const struct json_value *classes, *token_json = NULL, *items;
+
+        VR_CHECK("two token holdings seeded", vr_seed_token_holdings(&ndb));
+        VR_CHECK("token snapshot builds",
+                 vault_read_snapshot(&ndb, &token_snap).ok);
+        tokens = vr_row(&token_snap, "zslp_tokens");
+        VR_CHECK("tokens remain two separately identified holdings",
+                 tokens && tokens->determined && tokens->spendable == 0 &&
+                 tokens->item_count == 2 &&
+                 token_snap.token_item_count == 2 &&
+                 token_snap.token_items[0].units == 1000 &&
+                 token_snap.token_items[0].utxo_count == 2 &&
+                 strcmp(token_snap.token_items[0].ticker, "ONE") == 0 &&
+                 token_snap.token_items[0].decimals == 2 &&
+                 token_snap.token_items[1].units == 9 &&
+                 strcmp(token_snap.token_items[1].name, "Token Two") == 0);
+
+        json_init(&out);
+        VR_CHECK("token snapshot renders to json",
+                 vault_read_snapshot_to_json(&token_snap, &out).ok);
+        classes = json_get(&out, "classes");
+        for (size_t i = 0; classes && i < json_size(classes); i++) {
+            const struct json_value *candidate = json_at(classes, i);
+            const char *name = json_get_str(json_get(candidate, "class"));
+            if (name && strcmp(name, "zslp_tokens") == 0)
+                token_json = candidate;
+        }
+        items = token_json ? json_get(token_json, "items") : NULL;
+        VR_CHECK("json carries two per-token unit balances",
+                 items && items->type == JSON_ARR && json_size(items) == 2 &&
+                 json_get_int(json_get(json_at(items, 0), "units")) == 1000 &&
+                 json_get_int(json_get(json_at(items, 1), "units")) == 9);
+        VR_CHECK("token JSON has no cross-token zatoshi total",
+                 token_json && json_get(token_json, "total_zat") == NULL);
+        json_free(&out);
+    }
 
     {
         struct json_value out;
