@@ -257,7 +257,7 @@ struct zpd_benchmark_case {
     bool refused;
 };
 
-static int zpd_test_twelve_task_benchmark(void)
+static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
 {
     static const struct zpd_benchmark_case cases[] = {
         {"seeded_repair", "Repair seeded parser branch A", 0, false},
@@ -1138,7 +1138,7 @@ static int zpd_test_work_start_package_bounds(void)
     return failures;
 }
 
-static int zpd_test_work_start(void)
+static __attribute__((unused)) int zpd_test_work_start(void)
 {
     int failures = 0;
     TEST("zcode work start: goal and profile compose existing task owners") {
@@ -2205,7 +2205,7 @@ static int zpd_test_work_start(void)
     return failures;
 }
 
-static int zpd_test_standard_profile(void)
+static __attribute__((unused)) int zpd_test_standard_profile(void)
 {
     int failures = 0;
     TEST("zcode work standard: warning-fatal sanitizer evidence reaches acceptance") {
@@ -2755,12 +2755,18 @@ int test_zcode_package_dev(void)
                    zpd_test_project_init() +
                    zpd_test_reuse_plan() +
                    zpd_test_work_start_package_bounds() +
-                   zpd_test_work_start() +
                    zpd_test_work_toolchain() +
                    zpd_test_commons_join_front_doors() +
-                   zpd_test_standard_profile() +
-                   zpd_test_admitted_single_interpretation() +
-                   zpd_test_twelve_task_benchmark();
+                   zpd_test_admitted_single_interpretation();
+#ifndef __APPLE__
+    /* These scenarios execute fetched candidate source and assert Linux's
+     * FULL Landlock/seccomp build lane.  Darwin deliberately refuses that
+     * authority as LOCAL_FALLBACK; portable refusal is pinned by the build
+     * fabric contract, while the planning/read-only cases above still run. */
+    failures += zpd_test_work_start() +
+                zpd_test_standard_profile() +
+                zpd_test_twelve_task_benchmark();
+#endif
     secp256k1_context_destroy(ctx);
     return failures;
 }
