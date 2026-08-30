@@ -2776,3 +2776,10 @@ AGENT_IMPACT_RULE("lib/test/src/test_mutation_harness.c", "mutation_harness make
  * and standing) and character_sheet (which renders them) as well as its
  * own group: a change to either derivation changes these bytes. */
 AGENT_IMPACT_RULE("lib/metaverse/src/node_character_wire.c|lib/metaverse/include/metaverse/node_character_wire.h|lib/test/src/test_node_character_wire.c", "node_character_wire node_character character_sheet astro make_lint_gates")
+
+/* The typed query builder. query_schema.def is the CLOSED identifier set —
+ * the enum symbol and the SQL identifier are the same stringized token, so a
+ * row cannot declare one name and emit another. Editing it changes what every
+ * converted model is able to say, which is why it rides the broad models
+ * group and not only its own. */
+AGENT_IMPACT_RULE("app/models/include/models/query_schema.def|app/models/include/models/query_builder.h|app/models/src/query_builder.c|lib/test/src/test_activerecord_query_builder.c", "activerecord_query_builder activerecord models make_lint_gates")
