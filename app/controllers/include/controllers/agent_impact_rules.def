@@ -2860,6 +2860,19 @@ AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib
  * change to that seam's locking, truncation or fsync behaviour changes what
  * this module's recovery rule actually does. */
 AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")
+/* The claim register. Rides its own group and the chainlog group: every claim
+ * and every trial is a chainlog frame, so a change to that log's recovery or
+ * verification rule changes what "these trials survived a reopen" proves.
+ * It does NOT ride the engine group — it reads enum engine_verdict and calls
+ * engine_verdict_is_pass(), which is a compile-time coupling the build
+ * catches, not a behavioural one this group could observe. */
+AGENT_IMPACT_RULE("lib/science/src/*.c|lib/science/include/science/*.h|lib/test/src/test_science.c", "science chainlog make_lint_gates")
+/* The corpus command surface: the honest distance-to-100M report. It rides
+ * the `science` group because every number it renders comes from
+ * lib/science/science_corpus.c, and the registry groups because it is a
+ * READY_READ code.* leaf — dispatched four times per suite run by the
+ * read-latency contract, so a slow walk here shows up there. */
+AGENT_IMPACT_RULE("tools/command/native_code_corpus_command.c", "science command_registry_catalog command_registry_latency native_api_contract make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
  * because the ratchet it guards is the whole point — the recorded set of

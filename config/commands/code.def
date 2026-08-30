@@ -282,6 +282,40 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_territory)
 
+ZCL_COMMAND_READY_READ(
+    "code.corpus", "code", "",
+    "Honest distance to 100M lines of proven, non-duplicated C23",
+    "Two independent readings of the same tree, reported side by side and "
+    "never blended into one score. The LINE half is a walk of the maintained "
+    "C23 roots, now: lines, files, bytes, and what fraction of the "
+    "100,000,000-line goal that is — a line count, which says nothing about "
+    "proof. The PROOF half is read from the generated capability inventory: "
+    "how many public symbols a REGISTERED TEST actually reaches, how many are "
+    "unproven, how many duplicate-body candidates exist, and how many declared "
+    "invariants nothing asserts. `headline` leads with the UNPROVEN count on "
+    "purpose; a progress bar that hides its denominator is exactly the "
+    "self-flattery this leaf exists to refuse. The proven fraction is over "
+    "PUBLIC SYMBOLS and says so — `proof.lines_proven` is reported as "
+    "unmeasured, because nothing in this tree attributes proof at line "
+    "granularity and inventing a number would be a fabrication. Because the "
+    "two halves come from two different walks, `scope.agrees` compares the "
+    "file counts: when they differ the inventory is stale, the reply says so, "
+    "and the proof figures describe an older tree. With no inventory present "
+    "the proof figures are absent rather than zero — nobody measured is not "
+    "the same fact as nothing is proven.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,corpus,lines,proven,tested,duplicate,goal,100m,honest,coverage",
+    "zcl.code_corpus_input.v1",
+    "zcl.code_corpus.v1", "", "",
+    "z23 code corpus",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_corpus)
+
 /* `code.general` carries the bare `general` alias, so `z23 general lib/net`
  * works without a fourth word. It is a code.* child and NOT a new root: the
  * registry has exactly twelve roots and the root menu has a byte budget, both

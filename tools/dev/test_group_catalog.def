@@ -679,6 +679,14 @@ ZCL_TEST_GROUP(retrieval)
  * exactly where it is. Confusing the two would either lose history or
  * destroy the evidence that history was changed. */
 ZCL_TEST_GROUP(chainlog)
+/* The claim register. The group exists for one refusal and one derivation:
+ * a claim that does not say how it could be shown wrong is refused by the
+ * field that is missing, and a claim's status is COMPUTED from its trials
+ * with no path by which a caller could assert it. The lopsided-but-untested
+ * case is the load-bearing one — a huge-looking effect on three trials is
+ * still UNTESTED, and skipping that check is how a register of measurements
+ * becomes a register of impressions. */
+ZCL_TEST_GROUP(science)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)
