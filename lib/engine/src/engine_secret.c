@@ -263,6 +263,12 @@ void engine_emit(FILE *f, const char *fmt, ...)
         return;
     engine_redact_inplace(line);
     (void)fputs(line, f);
+    /* Flush every line. A dispatch runs for minutes and its output is almost
+     * always redirected to a file someone is tailing; block buffering turns
+     * that into a silent process, which is indistinguishable from a hung one.
+     * A harness whose whole purpose is honest reporting must not look wedged
+     * while it is working. */
+    (void)fflush(f);
 }
 
 bool engine_emit_file(const char *path, const char *text, size_t len)
