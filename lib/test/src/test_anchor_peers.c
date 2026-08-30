@@ -123,10 +123,26 @@ static struct p2p_node *anchor_add_peer(struct connman *cm,
 
 #ifdef ZCL_TESTING
 /* Fork+exec the floor lint gate in isolated selftest mode; return exit code. */
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <fcntl.h>
 static int run_floor_gate_selftest(const char *fixture_path)
 {
+#if defined(_WIN32)
+    /* No fork()/execl on Windows: CreateProcess through the MSYS2 sh (the
+     * lint gate is POSIX shell); the env is inherited across the spawn. */
+    if (_putenv_s("ZCL_PEER_FLOOR_SELFTEST", "1") != 0 ||
+        _putenv_s("ZCL_PEER_FLOOR_SELFTEST_FILE", fixture_path) != 0)
+        return -1;
+    const char *const argv[] = {
+        "sh", "tools/lint/check_peer_floor_single_source.sh", NULL,
+    };
+    int rc = test_spawn_argv_wait(argv);
+    _putenv_s("ZCL_PEER_FLOOR_SELFTEST", "");
+    _putenv_s("ZCL_PEER_FLOOR_SELFTEST_FILE", "");
+    return rc;
+#else
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
@@ -142,6 +158,7 @@ static int run_floor_gate_selftest(const char *fixture_path)
     while (waitpid(pid, &rc, 0) < 0) { if (errno != EINTR) return -1; }
     if (WIFEXITED(rc)) return WEXITSTATUS(rc);
     return -1;
+#endif
 }
 #endif
 

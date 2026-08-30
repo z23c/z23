@@ -659,6 +659,11 @@ make a red build green. `tools/ldb_verify_c23.c` deliberately keeps linking
 both readers: an independent oracle you delete cannot catch a native-reader
 regression.
 
+The release-artifact ceiling is 100,000,000 bytes. This is a capacity limit,
+not a pinned current-size claim; query `tools/scripts/binary_size.sh` for the
+artifact actually built. Functionality and verifiable static dependencies take
+priority below that ceiling.
+
 The canonical x86-64 portable build supplies that old userspace boundary even
 on a newer workstation. The short operator command and its explicit alias are
 identical:

@@ -1,5 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Confined fixed-C23 execution backed by the existing ZVCS CAS. */
+/* realpath() reaches this TU only through the glibc fortify inline that
+ * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
+ * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
+ * compiles by accident of optimisation and breaks at -O0, under
+ * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
+ * include: after them it does nothing. See lib/util/src/hw_profile.c. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "services/build_fabric_worker.h"
 #include "build_fabric_worker_internal.h"
 #include "base/hex.h"
@@ -298,7 +308,7 @@ struct zcl_result build_fabric_worker_execute(
     struct vcs_toolchain_capsule_v1 capsule;
     uint8_t capsule_root[32];
     char capsule_hex[65];
-    if (!vcs_toolchain_capsule_v1_capture_gcc(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
         !vcs_toolchain_capsule_v1_root(&capsule, capsule_root))
         return bfw_fail(ndb, action_id, lease_id, "toolchain-capture-failed");
     zcl_hex_encode(capsule_root, 32, capsule_hex);

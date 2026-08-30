@@ -14,6 +14,8 @@
 struct receiver_fixture {
     struct mesh_private_object_offer_v1 offer;
     uint8_t target_secret[32];
+    uint8_t online_seed[32];
+    uint8_t grant_nonce[32];
     uint8_t sealed[2][MESH_PRIVATE_OBJECT_CHUNK_BYTES];
     size_t sealed_len[2];
 };
@@ -26,12 +28,11 @@ static void receiver_fill(uint8_t out[32], uint8_t first)
 static bool receiver_fixture_make(struct receiver_fixture *f, uint8_t tag)
 {
     memset(f, 0, sizeof(*f));
-    uint8_t source_secret[32], online_seed[32], ignored_secret[32];
-    uint8_t grant_nonce[32];
+    uint8_t source_secret[32], ignored_secret[32];
     receiver_fill(source_secret, (uint8_t)(0x11u + tag));
     receiver_fill(f->target_secret, 0x31);
-    receiver_fill(online_seed, (uint8_t)(0x51u + tag));
-    receiver_fill(grant_nonce, (uint8_t)(0x71u + tag));
+    receiver_fill(f->online_seed, (uint8_t)(0x51u + tag));
+    receiver_fill(f->grant_nonce, (uint8_t)(0x71u + tag));
     if (!curve25519_scalarmult_base(
             f->offer.ephemeral_x25519_pubkey, source_secret) ||
         !curve25519_scalarmult_base(
@@ -44,7 +45,7 @@ static bool receiver_fixture_make(struct receiver_fixture *f, uint8_t tag)
     receiver_fill(f->offer.source_master_pubkey, (uint8_t)(0x61u + tag));
     receiver_fill(f->offer.source_noise_static, (uint8_t)(0x81u + tag));
     ed25519_keypair(f->offer.source_online_pubkey, ignored_secret,
-                    online_seed);
+                    f->online_seed);
     memset(ignored_secret, 0, sizeof(ignored_secret));
     receiver_fill(f->offer.target_master_pubkey, 0xa1);
     receiver_fill(f->offer.transcript_hash, (uint8_t)(0xc1u + tag));
@@ -101,9 +102,9 @@ static bool receiver_fixture_make(struct receiver_fixture *f, uint8_t tag)
             &root, f->offer.ciphertext_root) != MESH_PRIVATE_OBJECT_ROOT_OK)
         return false;
     return mesh_private_object_offer_request_id_v1_derive(
-               &f->offer, grant_nonce, f->offer.request_id) ==
+               &f->offer, f->grant_nonce, f->offer.request_id) ==
                MESH_PRIVATE_OBJECT_PROTO_OK &&
-        mesh_private_object_offer_v1_sign(&f->offer, online_seed) ==
+        mesh_private_object_offer_v1_sign(&f->offer, f->online_seed) ==
             MESH_PRIVATE_OBJECT_PROTO_OK;
 }
 
@@ -238,6 +239,13 @@ static int receiver_resume(void)
         ASSERT(result.ok);
         ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_STAGED);
         ASSERT_EQ(mesh_private_object_receiver_active(receiver), 0);
+        struct mesh_private_object_cancel_v1 late_cancel = {.cancel_id = 7};
+        memcpy(late_cancel.transfer_id, admission.transfer_id, 32);
+        memcpy(late_cancel.offer_request_id, f.offer.request_id, 32);
+        result = mesh_private_object_receiver_cancel(
+            receiver, &late_cancel, 9, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_NOT_FOUND);
         result = mesh_private_object_receiver_admit(
             receiver, &f.offer, &admission, 10, 300, &outcome);
         ASSERT(result.ok);
@@ -257,9 +265,11 @@ static int receiver_capacity_and_cancel(void)
         struct receiver_fixture fixture;
         struct mesh_private_object_offer_v1 offers[5];
         struct mesh_private_object_admission admissions[5];
+        uint8_t grant_nonces[5][32];
         for (uint8_t i = 0; i < 5; i++) {
             ASSERT(receiver_fixture_make(&fixture, (uint8_t)(i + 1u)));
             offers[i] = fixture.offer;
+            memcpy(grant_nonces[i], fixture.grant_nonce, 32);
             ASSERT(receiver_admission_make(&offers[i], &admissions[i]));
         }
         struct mesh_private_object_receiver *receiver = NULL;
@@ -287,8 +297,32 @@ static int receiver_capacity_and_cancel(void)
             receiver, &cancel, 2, &outcome);
         ASSERT(result.ok);
         ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_BINDING);
+        cancel.offer_request_id[0] ^= 1u;
         result = mesh_private_object_receiver_cancel(
             receiver, &cancel, 1, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_BINDING);
+        cancel.offer_request_id[0] ^= 1u;
+        mesh_private_object_receiver_free(receiver);
+        receiver = NULL;
+        result = mesh_private_object_receiver_create(
+            dir, fixture.target_secret, &receiver);
+        ASSERT(result.ok);
+        for (uint8_t i = 0; i < MESH_PRIVATE_OBJECT_RECEIVER_MAX_TRANSFERS;
+             i++) {
+            result = mesh_private_object_receiver_admit(
+                receiver, &offers[i], &admissions[i], i + 1u, 200 + i,
+                &outcome);
+            ASSERT(result.ok);
+            ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_OK);
+        }
+        result = mesh_private_object_receiver_cancel(
+            receiver, &cancel, 1, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+        ASSERT_EQ(mesh_private_object_receiver_active(receiver), 3);
+        result = mesh_private_object_receiver_admit(
+            receiver, &offers[0], &admissions[0], 1, 200, &outcome);
         ASSERT(result.ok);
         ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
         ASSERT_EQ(mesh_private_object_receiver_active(receiver), 3);
@@ -297,6 +331,108 @@ static int receiver_capacity_and_cancel(void)
         ASSERT(result.ok);
         ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_OK);
         mesh_private_object_receiver_free(receiver);
+        receiver = NULL;
+        result = mesh_private_object_receiver_create(
+            dir, fixture.target_secret, &receiver);
+        ASSERT(result.ok);
+        result = mesh_private_object_receiver_admit(
+            receiver, &offers[0], &admissions[0], 9, 300, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+        ASSERT_EQ(mesh_private_object_receiver_active(receiver), 0);
+
+        struct mesh_private_object_offer_v1 reconnect = offers[0];
+        reconnect.transcript_hash[0] ^= 1u;
+        reconnect.connection_generation++;
+        reconnect.issued_unix++;
+        reconnect.expires_unix++;
+        uint8_t reconnect_seed[32], ignored_secret[32];
+        receiver_fill(reconnect_seed, 0xe3);
+        ed25519_keypair(reconnect.source_online_pubkey, ignored_secret,
+                        reconnect_seed);
+        memset(ignored_secret, 0, sizeof(ignored_secret));
+        ASSERT_EQ(mesh_private_object_offer_request_id_v1_derive(
+                      &reconnect, grant_nonces[0], reconnect.request_id),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        ASSERT_EQ(mesh_private_object_offer_v1_sign(
+                      &reconnect, reconnect_seed),
+                  MESH_PRIVATE_OBJECT_PROTO_OK);
+        struct mesh_private_object_admission reconnect_admission;
+        ASSERT(receiver_admission_make(&reconnect, &reconnect_admission));
+        ASSERT(memcmp(reconnect_admission.transfer_id,
+                      admissions[0].transfer_id, 32) == 0);
+        ASSERT(memcmp(reconnect.request_id, offers[0].request_id, 32) != 0);
+        result = mesh_private_object_receiver_admit(
+            receiver, &reconnect, &reconnect_admission, 10, 400, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+        struct receiver_emissions none = {0};
+        size_t emitted_count = 99;
+        result = mesh_private_object_receiver_drive(
+            receiver, &reconnect_admission, 10, 6000, receiver_emit,
+            &none, &emitted_count, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_NOT_FOUND);
+        ASSERT_EQ(emitted_count, 0);
+        ASSERT_EQ(none.count, 0);
+        mesh_private_object_receiver_free(receiver);
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
+static int receiver_cancel_before_chunk(void)
+{
+    int failures = 0;
+    TEST_CASE("private receiver cancellation wins an outstanding chunk race") {
+        char dir[512];
+        test_make_tmpdir(dir, sizeof(dir),
+                         "mesh_private_receiver", "cancel-race");
+        struct receiver_fixture f;
+        ASSERT(receiver_fixture_make(&f, 9));
+        struct mesh_private_object_admission admission;
+        ASSERT(receiver_admission_make(&f.offer, &admission));
+        struct mesh_private_object_receiver *receiver = NULL;
+        struct zcl_result result = mesh_private_object_receiver_create(
+            dir, f.target_secret, &receiver);
+        ASSERT(result.ok);
+        enum mesh_private_object_receiver_result outcome;
+        result = mesh_private_object_receiver_admit(
+            receiver, &f.offer, &admission, 31, 500, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_OK);
+        struct receiver_emissions emitted = {0};
+        size_t count = 0;
+        result = mesh_private_object_receiver_drive(
+            receiver, &admission, 31, 5000, receiver_emit,
+            &emitted, &count, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(count, 2);
+        struct mesh_private_object_cancel_v1 cancel = {.cancel_id = 41};
+        memcpy(cancel.transfer_id, admission.transfer_id, 32);
+        memcpy(cancel.offer_request_id, f.offer.request_id, 32);
+        result = mesh_private_object_receiver_cancel(
+            receiver, &cancel, 31, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+
+        struct mesh_private_object_chunk_v1 chunk = {
+            .chunk_request_id = emitted.requests[0].chunk_request_id,
+            .chunk_index = emitted.requests[0].chunk_index,
+            .sealed = f.sealed[0],
+            .sealed_len = (uint32_t)f.sealed_len[0],
+        };
+        memcpy(chunk.transfer_id, admission.transfer_id, 32);
+        memcpy(chunk.offer_request_id, f.offer.request_id, 32);
+        result = mesh_private_object_receiver_chunk(
+            receiver, &chunk, &admission, 31, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_NOT_FOUND);
+        result = mesh_private_object_receiver_admit(
+            receiver, &f.offer, &admission, 31, 600, &outcome);
+        ASSERT(result.ok);
+        ASSERT_EQ(outcome, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+        mesh_private_object_receiver_free(receiver);
         test_rm_rf_recursive(dir);
     } TEST_END
     return failures;
@@ -304,5 +440,6 @@ static int receiver_capacity_and_cancel(void)
 
 int test_mesh_private_object_receiver(void)
 {
-    return receiver_resume() + receiver_capacity_and_cancel();
+    return receiver_resume() + receiver_capacity_and_cancel() +
+           receiver_cancel_before_chunk();
 }

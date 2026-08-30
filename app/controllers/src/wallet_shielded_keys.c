@@ -5,6 +5,7 @@
  *
  * Shielded key/viewing-key import-export and memo lookup RPC handlers. */
 
+#include "base/hex.h"
 #include "controllers/wallet_shielded_internal.h"
 
 bool rpc_z_exportkey(const struct json_value *params, bool help,
@@ -227,11 +228,10 @@ bool rpc_z_getmemo(const struct json_value *params, bool help,
         LOG_FAIL("wallet_shielded", "z_getmemo: txid not 64 hex chars: '%s'",
                  txid_str ? txid_str : "(null)");
     }
-    for (int i = 0; i < 32; i++) {
-        unsigned int b;
-        sscanf(txid_str + (31 - i) * 2, "%2x", &b);
-        txid[i] = (uint8_t)b;
-    }
+    uint8_t txid_be[32];
+    zcl_hex_decode(txid_str, txid_be, 32);
+    for (int i = 0; i < 32; i++)
+        txid[i] = txid_be[31 - i];
 
     struct db_sapling_note notes[16];
     int count = db_wallet_tx_notes(ctx->node_db, txid, notes, 16);

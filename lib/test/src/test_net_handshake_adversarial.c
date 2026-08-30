@@ -31,6 +31,7 @@
  * addr_info_is_terrible() with a fixed "now" anchor. */
 
 #include "test/test_core.h"
+#include "platform/socket_compat.h"
 
 #include "chain/chainparams.h"
 #include "core/hash.h"
@@ -44,7 +45,7 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
+#include "platform/socket_compat.h"
 #include <unistd.h>
 
 /* Fixed epoch anchor — never read the wall clock in this group. */
@@ -57,7 +58,7 @@ struct hs_fixture {
     struct net_manager nm;
     struct msg_processor mp;
     struct p2p_node node;
-    int peer_fd;
+    platform_socket_t peer_fd;
 };
 
 static bool hs_fixture_setup(struct hs_fixture *f, bool inbound)
@@ -76,9 +77,17 @@ static bool hs_fixture_setup(struct hs_fixture *f, bool inbound)
     msg_version_clear_external_ip_for_test();
 #endif
 
-    int fds[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
+    platform_socket_t fds[2];
+    if (!platform_socket_pair(fds))
         return false;
+    /* Production P2P sockets are nonblocking.  Keep the fixture faithful so
+     * a large eager addr response queues on EAGAIN instead of deadlocking
+     * the test on Darwin's smaller AF_UNIX socket buffer. */
+    if (!platform_socket_set_nonblocking((platform_socket_t)fds[0], true)) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
 
     f->node.socket = fds[0];
     f->peer_fd = fds[1];
@@ -102,7 +111,7 @@ static bool hs_fixture_setup(struct hs_fixture *f, bool inbound)
 
 static void hs_fixture_teardown(struct hs_fixture *f)
 {
-    close(f->peer_fd);
+    platform_socket_close(f->peer_fd);
 
     struct send_segment *seg = f->node.send_head;
     while (seg) {
@@ -193,12 +202,12 @@ struct hs_capture {
     size_t len;
 };
 
-static void hs_capture_sent(int peer_fd, struct hs_capture *cap)
+static void hs_capture_sent(platform_socket_t peer_fd, struct hs_capture *cap)
 {
     cap->len = 0;
     for (;;) {
-        ssize_t n = recv(peer_fd, cap->buf + cap->len,
-                         sizeof(cap->buf) - cap->len, MSG_DONTWAIT);
+        int n = platform_socket_receive_nonblocking(
+            peer_fd, cap->buf + cap->len, sizeof(cap->buf) - cap->len);
         if (n <= 0)
             break;
         cap->len += (size_t)n;

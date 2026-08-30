@@ -71,7 +71,8 @@ void boot_mesh_status_register_rpc(struct rpc_table *table,
 
 /* Advance the bounded owner-status refresh lane from the supervised network
  * clock. Completed receipts enter the serialized writer before their slot is
- * reused. New work is admitted only at chain tip; no connection is created. */
+ * reused. New work is admitted only at chain tip; a current signed direct
+ * endpoint may be queued, but no status frame precedes identity proof. */
 void boot_mesh_status_refresh_start(struct boot_svc_ctx *svc);
 void boot_mesh_status_refresh_shutdown(void);
 
@@ -89,6 +90,9 @@ enum boot_mesh_status_begin_result {
     MESH_STATUS_BEGIN_REVOKED,
     MESH_STATUS_BEGIN_EXPIRED,
     MESH_STATUS_BEGIN_PEER_NOT_CONNECTED,
+    MESH_STATUS_BEGIN_ROUTE_PENDING,
+    MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH,
+    MESH_STATUS_BEGIN_ROUTE_DOWNGRADE,
     MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE,
     MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE,
     MESH_STATUS_BEGIN_BUSY,              /* pending table full */
@@ -99,9 +103,9 @@ const char *boot_mesh_status_begin_result_string(
     enum boot_mesh_status_begin_result result);
 
 /* Begin one bounded status request to the paired peer. On OK,
- * request_id_out carries the random 32-byte request id. No dial is ever
- * performed: a paired peer without a live established Noise session is
- * PEER_NOT_CONNECTED. */
+ * request_id_out carries the random 32-byte request id. ROUTE_PENDING means a
+ * chain-bound direct endpoint was queued without sending a private frame; the
+ * caller may retry until its own fixed deadline. */
 enum boot_mesh_status_begin_result boot_mesh_status_begin(
     const char *pairing_id_hex, uint8_t request_id_out[32]);
 

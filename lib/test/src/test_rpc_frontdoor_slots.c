@@ -38,11 +38,43 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <poll.h>
+#endif
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
+#endif
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include "platform/socket_compat.h"
+
+#include <stdint.h>
+
+/* Simulated clients hold peer sockets as int fds; socketpair becomes the
+ * verified loopback-TCP pair, write()/close() SOCKET verbs, and the
+ * poll(NULL, 0, 25) pause becomes Sleep. Every write()/close() in this TU
+ * targets one of those sockets. */
+static int rfs_socketpair(int sv[2])
+{
+    platform_socket_t pair[2];
+    if (!platform_socket_pair(pair))
+        return -1;
+    sv[0] = (int)(intptr_t)pair[0];
+    sv[1] = (int)(intptr_t)pair[1];
+    return 0;
+}
+
+#define socketpair(domain, type, protocol, sv) rfs_socketpair(sv)
+#define write(fd, buf, len) \
+    ((ssize_t)platform_socket_send((platform_socket_t)(intptr_t)(fd), \
+                                   buf, len))
+#define close(fd) \
+    (platform_socket_close((platform_socket_t)(intptr_t)(fd)) == 0 ? 0 : -1)
+#define poll(fds, count, ms) (Sleep(ms), 0)
+#endif
 
 /* One simulated client: [0] is the client end, [1] is the end the
  * server accepted and hands to the admission queue. */
@@ -101,7 +133,15 @@ static void sim_close(struct sim_client *c)
  * doing all of its opens before the reclaim it is testing. */
 static bool fd_is_closed(int fd)
 {
+#if defined(_WIN32)
+    int type = 0;
+    int len = sizeof(type);
+    return getsockopt((platform_socket_t)(intptr_t)fd, SOL_SOCKET, SO_TYPE,
+                      (char *)&type, &len) == SOCKET_ERROR &&
+           WSAGetLastError() == WSAENOTSOCK;
+#else
     return fcntl(fd, F_GETFD) == -1 && errno == EBADF;
+#endif
 }
 
 int test_rpc_frontdoor_slots(void)

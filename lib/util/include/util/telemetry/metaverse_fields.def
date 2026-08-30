@@ -141,4 +141,14 @@ TL_LEAF(catalog, reader_contract_swap, TLC_BOOL, TFU_BOOL, TLV_NORMAL,
     "list+show reader wired in this build",
     "", "")
 
+TL_LEAF(catalog, reader_character_sheet, TLC_BOOL, TFU_BOOL, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "whether the `character_sheet` kind (authority "
+    "metaverse.character_sheet) has a list+show reader wired in this build. "
+    "False does not mean a character cannot be checked: a character is "
+    "content-addressed and is verified by recomputing it from the birth seed "
+    "presented with it. It means no datadir path enumerates the seeds this "
+    "node holds",
+    "", "")
+
 TL_GROUP_END(catalog)

@@ -307,6 +307,11 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     int one = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
                (const char *)&one, sizeof(one));
+    if (!net_configure_p2p_socket_buffers(sock)) {
+        LOG_WARN("net",
+                 "accept_connection: P2P socket buffer configuration or "
+                 "readback degraded");
+    }
 
     /* The accepted socket is a NEW socket and does NOT inherit the listener's
      * non-blocking mode: POSIX accept(2) does not carry file status flags

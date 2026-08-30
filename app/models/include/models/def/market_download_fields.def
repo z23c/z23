@@ -1,0 +1,33 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * market_download_fields.def — the persisted columns of the buyer-side paid
+ * file assembly models, declared ONCE. See models/model_fields.h.
+ *
+ * Before this list these two tables spelled their columns out five times
+ * between them (two INSERT column clauses, two SELECT lists, two read bodies,
+ * two bind lists) with no macro anywhere. Order here is the SQL column order,
+ * the read index, and the bind position simultaneously.
+ */
+
+/* market_downloads — restart-safe progress for one paid file. */
+#define MARKET_DOWNLOAD_FIELDS \
+    ZCL_MODEL_BLOB(plan_id,             plan_id,   32), \
+    ZCL_MODEL_BLOB(offer_id,            offer_id,  32), \
+    ZCL_MODEL_BLOB(root_hash,           root_hash, 32), \
+    ZCL_MODEL_TEXT(private_destination, private_destination), \
+    ZCL_MODEL_TEXT(private_staging,     private_staging),     \
+    ZCL_MODEL_U64 (size_bytes,          size_bytes),      \
+    ZCL_MODEL_U32 (num_chunks,          num_chunks),      \
+    ZCL_MODEL_U32 (chunks_received,     chunks_received), \
+    ZCL_MODEL_U64 (bytes_received,      bytes_received),  \
+    ZCL_MODEL_ENUM(state,               state, enum market_download_state), \
+    ZCL_MODEL_I64 (created_at,          created_at), \
+    ZCL_MODEL_I64 (updated_at,          updated_at)
+
+/* market_download_chunks — one verified chunk of that file. */
+#define MARKET_DOWNLOAD_CHUNK_FIELDS \
+    ZCL_MODEL_BLOB(plan_id,     plan_id, 32),  \
+    ZCL_MODEL_U32 (chunk_index, chunk_index),  \
+    ZCL_MODEL_U32 (size_bytes,  size_bytes),   \
+    ZCL_MODEL_BLOB(chunk_sha3,  chunk_sha3, 32), \
+    ZCL_MODEL_I64 (created_at,  created_at)

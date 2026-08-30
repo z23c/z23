@@ -149,7 +149,7 @@ read -r -d '' DECL_AWK <<'AWK_EOF'
 AWK_EOF
 
 # ── memcmp/bcmp scanner ──────────────────────────────────────────────────
-# Reads one file; `idlist` (-v, newline-separated) is the set of snapshot
+# Reads one file; `idlist` (-v, space-separated) is the set of snapshot
 # object names collected from that same file by DECL_AWK above. For every
 # memcmp(/bcmp( call whose ARGUMENT LIST closes on the same physical line,
 # split the top-level (paren/bracket/brace-depth 0) comma-separated
@@ -178,7 +178,7 @@ function split_top(s, arr,    i, c, n, depth, cur, cnt) {
     return cnt
 }
 BEGIN {
-    nids = split(idlist, idtmp, "\n")
+    nids = split(idlist, idtmp, /[ \t]+/)
     for (i = 1; i <= nids; i++) if (idtmp[i] != "") ids[idtmp[i]] = 1
 }
 {
@@ -241,7 +241,10 @@ run_scan() {
         [ -z "$ids" ] && continue
         n_ids=$(printf '%s\n' "$ids" | wc -l)
         SCAN_DECL_COUNT=$((SCAN_DECL_COUNT + n_ids))
-        idlist="$ids"
+        # BSD awk rejects a literal newline inside an -v string assignment.
+        # C identifiers cannot contain spaces, so flatten the already parsed
+        # identifier set before crossing that command-line boundary.
+        idlist="$(printf '%s\n' "$ids" | tr '\n' ' ')"
         hits="$(awk -v ure="$USE_RE" -v idlist="$idlist" "$SCAN_AWK" "$f")"
         if [ -n "$hits" ]; then
             if [ -n "$SCAN_VIOLATIONS" ]; then

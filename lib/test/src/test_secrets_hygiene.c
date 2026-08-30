@@ -35,9 +35,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 #include "util/safe_alloc.h"
+
+#if defined(_WIN32)
+/* The UCRT system() returns the child's raw exit code, not a wait(2)
+ * status word; map the two macros onto that honestly. cmd.exe cannot run
+ * the POSIX lint script, so it is dispatched through the MSYS2 sh on the
+ * lane's PATH. */
+#define WIFEXITED(s) ((s) >= 0)
+#define WEXITSTATUS(s) (s)
+#endif
 
 /* ── Golden corpus ─────────────────────────────────────────── */
 
@@ -207,7 +218,12 @@ static int test_check_no_secret_printf_script(void)
 
         /* Run silently and inspect the exit code. If the script ever
          * flags a real leak, the test blows up with a clear signal. */
+#if defined(_WIN32)
+        int rc = system("sh -c \"tools/scripts/check_no_secret_printf.sh"
+                        " >/dev/null 2>&1\"");
+#else
         int rc = system("tools/scripts/check_no_secret_printf.sh >/dev/null 2>&1");
+#endif
         ASSERT(WIFEXITED(rc));
         int exit_status = WEXITSTATUS(rc);
         if (exit_status != 0) {
@@ -215,8 +231,13 @@ static int test_check_no_secret_printf_script(void)
                    exit_status);
             failures++;
             /* Re-run with output so the diff is visible. */
+#if defined(_WIN32)
+            (void)system("sh -c \"tools/scripts/check_no_secret_printf.sh"
+                         " 2>&1 | head -40\"");
+#else
             (void)system("tools/scripts/check_no_secret_printf.sh 2>&1 "
                          "| head -40");
+#endif
             goto _test_next;
         }
         PASS();

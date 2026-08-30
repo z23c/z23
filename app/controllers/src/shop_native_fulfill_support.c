@@ -2,6 +2,7 @@
  * Guarded storage, identity, clock, and moderation helpers for fulfillment. */
 
 #include "controllers/shop_native_fulfill_internal.h"
+#include "base/bytes.h"
 #include "controllers/shop_native_handler.h"
 
 #include "base/cleanse.h"
@@ -47,13 +48,6 @@ const char *shf_datadir(const struct zcl_command_request *request)
 static bool shf_hex32(const char *hex, uint8_t out[32])
 {
     return hex && strlen(hex) == 64 && zcl_hex_decode_lower(hex, out, 32);
-}
-
-bool shf_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= value[i];
-    return any != 0;
 }
 
 bool shf_now(const struct zcl_command_request *request, int64_t *out,
@@ -110,7 +104,7 @@ bool shf_required_id(const struct zcl_command_request *request,
                      struct zcl_command_reply *reply)
 {
     const char *hex = json_get_str(json_get(request->input, key));
-    if (!shf_hex32(hex, out) || !shf_nonzero(out)) {
+    if (!shf_hex32(hex, out) || !zcl_bytes_any_set(out, 32)) {
         char message[192];
         (void)snprintf(message, sizeof(message),
                        "%s must be a nonzero 64-hex SHA3 identifier", key);
@@ -128,7 +122,7 @@ bool shf_optional_id(const struct zcl_command_request *request,
     memset(out, 0, 32);
     const char *hex = json_get_str(json_get(request->input, key));
     if (!hex || !hex[0]) return true;
-    if (!shf_hex32(hex, out) || !shf_nonzero(out)) {
+    if (!shf_hex32(hex, out) || !zcl_bytes_any_set(out, 32)) {
         char message[192];
         (void)snprintf(message, sizeof(message),
                        "%s must be a nonzero 64-hex receipt id when present",

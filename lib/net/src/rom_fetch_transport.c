@@ -29,6 +29,7 @@
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -75,6 +76,21 @@
  * path a release build can reach -- the whole block compiles out. */
 #ifdef ZCL_TESTING
 static const struct onion_stream_backend *g_rf_onion_backend;
+
+/* Dial counters — see rom_fetch_dial_count_for_test. Both are bumped in one
+ * place (rf_connect's single return) so they cannot drift from reality.
+ * g_rf_dial_fail_count counts dials that came back with NO socket: a refused
+ * port, an unresolvable name, or the full transport-scaled connect budget
+ * elapsing. Each one is a stall a boot paid for; counting them is how the
+ * cost of re-dialling a peer already found unreachable becomes visible
+ * without timing anything. */
+static _Atomic uint64_t g_rf_dial_count;
+static _Atomic uint64_t g_rf_dial_fail_count;
+#define RF_NOTE_DIAL() atomic_fetch_add(&g_rf_dial_count, 1u)
+#define RF_NOTE_DIAL_FAIL() atomic_fetch_add(&g_rf_dial_fail_count, 1u)
+#else
+#define RF_NOTE_DIAL() ((void)0)
+#define RF_NOTE_DIAL_FAIL() ((void)0)
 #endif
 
 int rf_probe_io_timeout_ms(const char *peer_addr)
@@ -179,7 +195,7 @@ static platform_socket_t rf_connect_onion(const char *peer_addr, uint16_t port)
     return fd;
 }
 
-platform_socket_t rf_connect(const char *peer_addr, uint16_t port)
+static platform_socket_t rf_connect_route(const char *peer_addr, uint16_t port)
 {
     /* Route by address family, not by preference: an onion name has exactly
      * one route and never reaches the resolver below. */
@@ -236,7 +252,33 @@ platform_socket_t rf_connect(const char *peer_addr, uint16_t port)
     return fd;
 }
 
+platform_socket_t rf_connect(const char *peer_addr, uint16_t port)
+{
+    platform_socket_t fd = rf_connect_route(peer_addr, port);
+    if (fd != PLATFORM_SOCKET_INVALID)
+        RF_NOTE_DIAL();
+    else
+        RF_NOTE_DIAL_FAIL();
+    return fd;
+}
+
 #ifdef ZCL_TESTING
+void rom_fetch_dial_count_reset_for_test(void)
+{
+    atomic_store(&g_rf_dial_count, 0);
+    atomic_store(&g_rf_dial_fail_count, 0);
+}
+
+uint64_t rom_fetch_dial_count_for_test(void)
+{
+    return atomic_load(&g_rf_dial_count);
+}
+
+uint64_t rom_fetch_dial_fail_count_for_test(void)
+{
+    return atomic_load(&g_rf_dial_fail_count);
+}
+
 void rom_fetch_set_onion_backend_for_test(const struct onion_stream_backend *be)
 {
     g_rf_onion_backend = be;

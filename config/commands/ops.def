@@ -570,14 +570,14 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "ops.mesh.status", "ops.mesh", "",
     "Request one paired machine's signed status receipt",
-    "Sends a bounded mesh status request to the paired peer over the "
-    "established Noise session (multiplexed on zpkgswm), waits up to 15 "
-    "seconds for the signed receipt, and projects the receipt status token, "
+    "Uses an established Noise session or spends up to 15 seconds acquiring "
+    "one current signed direct route, then waits up to 15 seconds for the "
+    "signed receipt (multiplexed on zpkgswm) and projects its status token, "
     "responder identity fingerprints, observation times, and the redacted "
     "status capsule. A refusal receipt is a successful answer carrying the "
-    "named refusal status; a peer with no live session reports "
-    "PEER_NOT_CONNECTED and is never auto-dialed. Grants no authority beyond "
-    "the status-read capability the pairing already recorded.",
+    "named refusal status. Endpoint bytes grant no authority: no private "
+    "request is sent until the live Noise static and active ZID delegation "
+    "match the pairing. Grants no authority beyond its status-read capability.",
     ZCL_COMMAND_RESULT_BUDGET,
     "mesh,status,receipt,pairing,noise,capsule",
     "zcl.ops_mesh_status.input.v1", "zcl.mesh_status_receipt_view.v1",

@@ -7,7 +7,10 @@
  * AR_ADHOC_SAVE/AR_QUERY_* shape as models/zanc.c. */
 
 #include "models/op_return_index.h"
+#include "models/database_internal.h"
+#include "models/query_builder.h"
 
+#include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "primitives/block.h"
@@ -68,13 +71,7 @@ static void tag_to_text(const uint8_t *tag, uint8_t tag_len,
         return;
     }
 
-    static const char hex[] = "0123456789abcdef";
-    size_t o = 0;
-    for (uint8_t i = 0; i < tag_len && o + 2 < OP_RETURN_INDEX_TAG_TEXT_MAX; i++) {
-        out[o++] = hex[tag[i] >> 4];
-        out[o++] = hex[tag[i] & 0x0f];
-    }
-    out[o] = '\0';
+    zcl_hex_encode(tag, tag_len, out);
 }
 
 bool op_return_index_extract(const uint8_t *script, size_t script_len,
@@ -212,19 +209,20 @@ bool db_op_return_index_save(struct node_db *ndb,
         LOG_FAIL("op_return_index", "db_op_return_index_save: row is NULL");
 
     struct ar_callbacks *cbs = db_op_return_index_callbacks();
-    sqlite3_stmt *s = NULL;
-    AR_ADHOC_SAVE(ndb, s,
-        "INSERT OR IGNORE INTO op_return_index"
-        "(txid,vout_n,height,tag,tag_text,payload_len,payload_sha3)"
-        " VALUES(?,?,?,?,?,?,?)",
-        cbs, "op_return_index", row, db_op_return_index_validate,
-        AR_BIND_BLOB(s, 1, row->txid, 32);
-        AR_BIND_INT(s, 2, (int)row->vout_n);
-        AR_BIND_INT(s, 3, row->height);
-        AR_BIND_BLOB(s, 4, row->tag, row->tag_len);
-        AR_BIND_TEXT(s, 5, row->tag_text);
-        AR_BIND_INT(s, 6, (int)row->payload_len);
-        AR_BIND_BLOB(s, 7, row->payload_sha3, 32));
+    struct qb q;
+    qb_insert(&q, QB_T_op_return_index, QB_INSERT_OR_IGNORE);
+    qb_value_blob(&q, QB_C_op_return_index_txid, row->txid, 32);
+    qb_value_int(&q, QB_C_op_return_index_vout_n, (int64_t)row->vout_n);
+    qb_value_int(&q, QB_C_op_return_index_height, row->height);
+    qb_value_blob(&q, QB_C_op_return_index_tag, row->tag, row->tag_len);
+    qb_value_text(&q, QB_C_op_return_index_tag_text, row->tag_text);
+    qb_value_int(&q, QB_C_op_return_index_payload_len,
+                 (int64_t)row->payload_len);
+    qb_value_blob(&q, QB_C_op_return_index_payload_sha3, row->payload_sha3,
+                  32);
+    /* ar-lifecycle-ok:qb-adhoc-save-expands-to-AR_BEGIN_SAVE-and-AR_FINISH_SAVE */
+    QB_ADHOC_SAVE(ndb, &q, s, cbs, "op_return_index", row,
+                  db_op_return_index_validate);
 }
 
 bool op_return_index_apply_block_rows(struct node_db *ndb,
@@ -428,13 +426,21 @@ bool op_return_index_prune_below(struct node_db *ndb, int32_t base_height)
     if (base_height <= 0)
         return true;                       /* nothing can be below height 0 */
 
-    /* Same shape as op_return_index_truncate's DELETE: node_db_exec, not a
-     * bound AR save — there is no record to validate or run hooks on, and
-     * the only interpolated value is a machine-derived int32_t. */
-    char sql[96];
-    snprintf(sql, sizeof(sql),
-             "DELETE FROM op_return_index WHERE height<%d", base_height);
-    if (!node_db_exec(ndb, sql))
+    /* Was an snprintf'd statement ("... WHERE height<%d"). The value was a
+     * machine-derived int32_t so it was never exploitable, but it was the
+     * one place in the models layer where a value reached SQL as TEXT. The
+     * builder binds it. */
+    struct qb q;
+    qb_delete(&q, QB_T_op_return_index);
+    qb_where_int(&q, QB_C_op_return_index_height, QB_LT, base_height);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("op_return_index", "prune_below: %s", qb_error(&q));
+    bool ok = AR_STEP_DONE(s);
+    AR_FINALIZE(s);
+    node_db_note_activity(ndb, "op_return_index_prune_below",
+                          ok ? SQLITE_OK : SQLITE_ERROR);
+    if (!ok)
         LOG_FAIL("op_return_index",
                  "prune_below: DELETE below base_height=%d failed",
                  base_height);
@@ -445,7 +451,18 @@ bool op_return_index_truncate(struct node_db *ndb)
 {
     if (!ndb || !ndb->open)
         LOG_FAIL("op_return_index", "truncate: db not open");
-    if (!node_db_exec(ndb, "DELETE FROM op_return_index"))
+    struct qb q;
+    qb_delete(&q, QB_T_op_return_index);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("op_return_index", "truncate: %s", qb_error(&q));
+    bool truncated = AR_STEP_DONE(s);
+    AR_FINALIZE(s);
+    /* This DELETE used to run through node_db_exec(), which records the
+     * operation on the handle. Keep that observability. */
+    node_db_note_activity(ndb, "op_return_index_truncate",
+                          truncated ? SQLITE_OK : SQLITE_ERROR);
+    if (!truncated)
         LOG_FAIL("op_return_index", "truncate: DELETE failed");
     struct op_return_index_cursor empty;
     memset(&empty, 0, sizeof(empty));
@@ -465,19 +482,21 @@ bool op_return_index_truncate(struct node_db *ndb)
 int64_t op_return_index_count(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return 0;
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s, "SELECT COUNT(*) FROM op_return_index",
-                         (void)0);
+    struct qb q;
+    qb_select(&q, QB_T_op_return_index);
+    qb_select_count_star(&q);
+    QB_QUERY_INT64(ndb, &q, s);
 }
 
 int64_t op_return_index_count_by_tag_text(struct node_db *ndb,
                                           const char *tag_text)
 {
     if (!ndb || !ndb->open || !tag_text) return 0;
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COUNT(*) FROM op_return_index WHERE tag_text=?",
-        AR_BIND_TEXT(s, 1, tag_text));
+    struct qb q;
+    qb_select(&q, QB_T_op_return_index);
+    qb_select_count_star(&q);
+    qb_where_text(&q, QB_C_op_return_index_tag_text, QB_EQ, tag_text);
+    QB_QUERY_INT64(ndb, &q, s);
 }
 
 static void row_from_stmt(sqlite3_stmt *s, struct op_return_index_row *out)
@@ -510,28 +529,25 @@ int op_return_index_query(struct node_db *ndb, int32_t h_min, int32_t h_max,
     if (!out && max > 0)
         LOG_RETURN(0, "op_return_index", "query: out is NULL");
 
-    sqlite3_stmt *s = NULL;
-    if (tag_text_filter && tag_text_filter[0]) {
-        AR_QUERY_LIST(ndb, s,
-            "SELECT txid,vout_n,height,tag,tag_text,payload_len,payload_sha3"
-            " FROM op_return_index WHERE height>=? AND height<=?"
-            " AND tag_text=?"
-            " ORDER BY height DESC, txid ASC, vout_n ASC LIMIT ?",
-            out, max,
-            AR_BIND_INT(s, 1, h_min);
-            AR_BIND_INT(s, 2, h_max);
-            AR_BIND_TEXT(s, 3, tag_text_filter);
-            AR_BIND_INT(s, 4, (int)max),
-            row_from_stmt(s, &out[count]));
-    } else {
-        AR_QUERY_LIST(ndb, s,
-            "SELECT txid,vout_n,height,tag,tag_text,payload_len,payload_sha3"
-            " FROM op_return_index WHERE height>=? AND height<=?"
-            " ORDER BY height DESC, txid ASC, vout_n ASC LIMIT ?",
-            out, max,
-            AR_BIND_INT(s, 1, h_min);
-            AR_BIND_INT(s, 2, h_max);
-            AR_BIND_INT(s, 3, (int)max),
-            row_from_stmt(s, &out[count]));
-    }
+    /* One statement with an OPTIONAL predicate, instead of two nearly
+     * identical SQL literals that had to be kept in step by hand. */
+    static const enum qb_column k_cols[] = {
+        QB_C_op_return_index_txid,        QB_C_op_return_index_vout_n,
+        QB_C_op_return_index_height,      QB_C_op_return_index_tag,
+        QB_C_op_return_index_tag_text,    QB_C_op_return_index_payload_len,
+        QB_C_op_return_index_payload_sha3,
+    };
+    struct qb q;
+    qb_select(&q, QB_T_op_return_index);
+    qb_select_columns(&q, k_cols, sizeof(k_cols) / sizeof(k_cols[0]));
+    qb_where_int(&q, QB_C_op_return_index_height, QB_GE, h_min);
+    qb_where_int(&q, QB_C_op_return_index_height, QB_LE, h_max);
+    if (tag_text_filter && tag_text_filter[0])
+        qb_where_text(&q, QB_C_op_return_index_tag_text, QB_EQ,
+                      tag_text_filter);
+    qb_order_by(&q, QB_C_op_return_index_height, QB_DESC);
+    qb_order_by(&q, QB_C_op_return_index_txid, QB_ASC);
+    qb_order_by(&q, QB_C_op_return_index_vout_n, QB_ASC);
+    qb_limit(&q, (int64_t)max);
+    QB_QUERY_LIST(ndb, &q, s, out, max, row_from_stmt(s, &out[count]));
 }

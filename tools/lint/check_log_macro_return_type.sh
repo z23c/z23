@@ -204,14 +204,14 @@ for my $file (sort @files) {
         }
 
         if ($func_name ne '') {
-            if ($ret_is_bool && $raw =~ /\b(LOG_ERR|LOG_NULL)\s*\(/) {
+            if ($ret_is_bool && $code =~ /\b(LOG_ERR|LOG_NULL)\s*\(/) {
                 push @bad, sprintf(
                     "%s:%d: %s returns %s but %s returns %s",
                     $file, $line_no, $func_name, $ret_type, $1,
                     $1 eq 'LOG_ERR' ? '-1' : 'NULL'
                 );
             }
-            if (!$ret_is_bool && $raw =~ /\bLOG_FAIL\s*\(/) {
+            if (!$ret_is_bool && $code =~ /\bLOG_FAIL\s*\(/) {
                 push @bad, sprintf(
                     "%s:%d: %s returns %s but LOG_FAIL returns false",
                     $file, $line_no, $func_name, $ret_type

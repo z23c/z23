@@ -43,6 +43,21 @@ platform_alternative_groups=(
     "lib/platform/src/os_sandbox_linux.c lib/platform/src/os_sandbox_stub.c"
     "lib/vcs/src/vcs_devloop.c lib/vcs/src/vcs_devloop_windows.c"
 )
+# The devloop pair used to live here, because the Windows implementation was
+# compiled on EVERY host: only the POSIX one was host-optional, so "expected 1
+# on Linux, 0 on MSYS" described the build exactly. That was the defect, not
+# the description — a Windows devloop has no business being compiled into a
+# Linux binary, and once the Makefile stopped doing it the pair became a
+# straightforward platform alternative like the sandbox pair above.
+#
+# The terminal-worker sandbox extension is genuinely Linux-only in addition
+# to the linux-or-stub base sandbox alternative.  It therefore belongs in the
+# host-optional set: exactly once in the Linux monolith and absent from native
+# Windows/macOS builds, whose worker implementation refuses before sandbox
+# entry.
+host_optional_sources=(
+    lib/platform/src/os_sandbox_terminal_worker.c
+)
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
     echo "check-zcode-package-registry: FAIL — empty package or monolith source projection" >&2
@@ -55,6 +70,9 @@ for source in "${package_sources[@]}"; do
             [[ "$source" == "$alternative" ]] && continue 3
         done
     done
+    for optional in "${host_optional_sources[@]}"; do
+        [[ "$source" == "$optional" ]] && continue 2
+    done
     count=0
     for compiled in "${monolith_sources[@]}"; do
         [[ "$compiled" == "$source" ]] && ((count += 1))
@@ -63,6 +81,23 @@ for source in "${package_sources[@]}"; do
         echo "check-zcode-package-registry: FAIL — $source appears $count times in LIB_SRCS" >&2
         exit 1
     fi
+done
+
+host_name="$(uname -s 2>/dev/null || true)"
+for optional in "${host_optional_sources[@]}"; do
+    count=0
+    for compiled in "${monolith_sources[@]}"; do
+        [[ "$compiled" == "$optional" ]] && ((count += 1))
+    done
+    expected=0
+    case "$host_name" in
+        Linux*) expected=1 ;;
+    esac
+    if (( count != expected )); then
+        echo "check-zcode-package-registry: FAIL — host-optional $optional appears $count times in LIB_SRCS (expected $expected on $host_name)" >&2
+        exit 1
+    fi
+    echo "zcode package registry: host-optional source count is exact: $optional=$count"
 done
 
 for group in "${platform_alternative_groups[@]}"; do

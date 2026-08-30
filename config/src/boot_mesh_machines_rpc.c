@@ -220,7 +220,8 @@ static bool rpc_mesh_machines(const struct json_value *params, bool help,
                      "mesh_machines — every durable pairing with verified "
                      "evidence (fresh/stale/never-seen) plus this call's "
                      "bounded live probe verdict per row; probes up to 8 "
-                     "actives with a collective 12 s budget; never dials");
+                     "actives with a collective 12 s budget; direct routes "
+                     "require matching Noise and delegation identity");
         return true;
     }
     if (rpc_input(params)) {

@@ -2,6 +2,7 @@
  * Purpose: ordered epoch accounting for creation-backed ZC23 issuance. */
 #include "vcs/zcode_epoch_creation.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "codec/cursor.h"
@@ -15,14 +16,6 @@
 static const uint8_t epoch_creation_magic[8] = {
     'Z', 'C', 'E', 'P', 'O', 'C', '\r', '\n'
 };
-
-static bool epoch_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= root[i];
-    return any != 0;
-}
 
 void vcs_zcode_epoch_creation_init(
     struct vcs_zcode_epoch_creation_set_v1 *set)
@@ -99,9 +92,9 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
         set->maturity_hash,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!epoch_root_nonzero(roots[i]))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_EPOCH_CREATION_ROOT;
-    bool has_previous = epoch_root_nonzero(set->previous_epoch_creation_root);
+    bool has_previous = zcl_bytes_any_set(set->previous_epoch_creation_root, 32);
     if ((set->epoch == 0 && has_previous) ||
         (set->epoch != 0 && !has_previous))
         return VCS_ZCODE_EPOCH_CREATION_PREDECESSOR;
@@ -121,7 +114,7 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
         (set->attribution_count != 0 && !set->attribution_roots))
         return VCS_ZCODE_EPOCH_CREATION_ORDER;
     for (size_t i = 0; i < set->attribution_count; i++) {
-        if (!epoch_root_nonzero(set->attribution_roots[i]) ||
+        if (!zcl_bytes_any_set(set->attribution_roots[i], 32) ||
             (i != 0 && memcmp(set->attribution_roots[i - 1],
                               set->attribution_roots[i], 32) >= 0))
             return VCS_ZCODE_EPOCH_CREATION_ORDER;

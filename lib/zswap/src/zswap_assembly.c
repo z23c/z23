@@ -10,6 +10,7 @@
 
 #include "zswap/zswap_assembly.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "chain/chainparams.h"
 #include "core/serialize.h"
@@ -25,14 +26,6 @@
  * checksum encodes to ~26+ chars; ZCL t-addresses are 35). Anything shorter
  * is rejected at structural validation before decode_destination runs. */
 #define ZSWAP_ADDRESS_MIN_CHARS 26u
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 const char *zswap_assembly_error_string(enum zswap_assembly_error error)
 {
@@ -255,7 +248,7 @@ enum zswap_assembly_error zswap_assembly_root(
     uint8_t out[32])
 {
     if (!quote_root || !out) return ZSWAP_ASSEMBLY_ERR_NULL;
-    if (!bytes_nonzero(quote_root, 32)) return ZSWAP_ASSEMBLY_ERR_AD;
+    if (!zcl_bytes_any_set(quote_root, 32)) return ZSWAP_ASSEMBLY_ERR_AD;
     uint8_t buyer_bytes[1 + ZSWAP_MAX_BUYER_INPUTS *
                             (32 + 4 + 8 + 1 + ZSWAP_MAX_INPUT_SCRIPT_BYTES) +
                         2 * ZSWAP_ADDRESS_FIELD_BYTES + 16];

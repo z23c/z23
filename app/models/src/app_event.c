@@ -5,6 +5,8 @@
 // suffix-ok:immutable-signed-app-event-model
 
 #include "models/app_event.h"
+#include "base/bytes.h"
+#include "models/query_builder.h"
 
 #include "util/log_macros.h"
 
@@ -14,17 +16,43 @@
 
 DEFINE_MODEL_CALLBACKS(app_event)
 
-static const uint8_t g_empty_payload[1] = {0};
+/* Three projections, each matching one row reader below. Naming the column
+ * order once is the point: a reader and its SELECT can no longer drift. */
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
+/* app_event_existing() — every signed field, no cursor. */
+static const enum qb_column k_app_event_signed_cols[] = {
+    QB_C_app_events_app_id,            QB_C_app_events_topic,
+    QB_C_app_events_kind,              QB_C_app_events_chain_id,
+    QB_C_app_events_author_key_id,     QB_C_app_events_author_pubkey,
+    QB_C_app_events_sequence,          QB_C_app_events_previous_event_id,
+    QB_C_app_events_created_at,        QB_C_app_events_payload,
+    QB_C_app_events_signature,         QB_C_app_events_signature_len,
+};
+
+/* app_event_read() — the full row. */
+static const enum qb_column k_app_event_full_cols[] = {
+    QB_C_app_events_receive_cursor,    QB_C_app_events_event_id,
+    QB_C_app_events_app_id,            QB_C_app_events_topic,
+    QB_C_app_events_kind,              QB_C_app_events_chain_id,
+    QB_C_app_events_author_key_id,     QB_C_app_events_author_pubkey,
+    QB_C_app_events_sequence,          QB_C_app_events_previous_event_id,
+    QB_C_app_events_created_at,        QB_C_app_events_payload,
+    QB_C_app_events_signature,         QB_C_app_events_signature_len,
+    QB_C_app_events_received_at,
+};
+
+/* app_event_ref_read() — the index-only listing row. */
+static const enum qb_column k_app_event_ref_cols[] = {
+    QB_C_app_events_receive_cursor,    QB_C_app_events_event_id,
+    QB_C_app_events_app_id,            QB_C_app_events_topic,
+    QB_C_app_events_kind,              QB_C_app_events_author_key_id,
+    QB_C_app_events_sequence,          QB_C_app_events_previous_event_id,
+    QB_C_app_events_created_at,        QB_C_app_events_received_at,
+};
+
+#define QB_NCOLS(a) (sizeof(a) / sizeof((a)[0]))
+
+static const uint8_t g_empty_payload[1] = {0};
 
 static bool bounded_token(const char *value, size_t max_len)
 {
@@ -78,11 +106,11 @@ bool db_app_event_validate(const struct db_app_event *record,
     validates_custom(errors,
                      event->created_at > 0 && event->created_at <= INT64_MAX,
                      "created_at", "is outside storage range");
-    validates_custom(errors, bytes_nonzero(event->event_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(event->event_id, 32),
                      "event_id", "is empty");
-    validates_custom(errors, bytes_nonzero(event->chain_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(event->chain_id, 32),
                      "chain_id", "is empty");
-    validates_custom(errors, bytes_nonzero(event->author_key_id, 20),
+    validates_custom(errors, zcl_bytes_any_set(event->author_key_id, 20),
                      "author_key_id", "is empty");
     validates_custom(errors,
                      event->payload.len <= ZCL_APP_EVENT_PAYLOAD_MAX &&
@@ -124,19 +152,17 @@ enum app_event_existing_state {
 static enum app_event_existing_state app_event_existing(
     struct node_db *ndb, const struct zcl_app_signed_event_v1 *event)
 {
+    struct qb q;
+    qb_select(&q, QB_T_app_events);
+    qb_select_columns(&q, k_app_event_signed_cols,
+                      QB_NCOLS(k_app_event_signed_cols));
+    qb_where_blob(&q, QB_C_app_events_event_id, QB_EQ, event->event_id, 32);
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(ndb->db,
-            "SELECT app_id,topic,kind,chain_id,author_key_id,author_pubkey,"
-            "sequence,previous_event_id,created_at,payload,signature,"
-            "signature_len FROM app_events WHERE event_id=?",
-            -1, &s, NULL) != SQLITE_OK || !s) {
+    if (!QB_PREPARE(ndb, &q, s)) {
         LOG_WARN("app_event", "existing-event query prepare failed: %s",
-                 sqlite3_errmsg(ndb->db));
-        if (s)
-            sqlite3_finalize(s);
+                 qb_error(&q));
         return APP_EVENT_READ_ERROR;
     }
-    AR_BIND_BLOB(s, 1, event->event_id, 32);
     int rc = sqlite3_step(s); // raw-sql-ok:model-read-only-existence
     if (rc == SQLITE_DONE) {
         sqlite3_finalize(s);
@@ -168,7 +194,6 @@ bool db_app_event_save(struct node_db *ndb,
                        const struct db_app_event *record,
                        const struct zcl_app_event_scope_v1 *scope)
 {
-    sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open || !record || !scope)
         LOG_FAIL("app_event", "save requires database, event, and host scope");
     struct ar_callbacks *cbs = db_app_event_callbacks();
@@ -181,28 +206,35 @@ bool db_app_event_save(struct node_db *ndb,
 
     const struct zcl_app_signed_event_v1 *event = &record->event;
     AR_BEGIN_SAVE(cbs, "app_event", record, db_app_event_validate);
-    AR_PREPARE_BOOL(ndb, s,
-        "INSERT INTO app_events "
-        "(event_id,app_id,topic,kind,chain_id,author_key_id,author_pubkey,"
-        "sequence,previous_event_id,created_at,payload,signature,signature_len,"
-        "received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(event_id) DO NOTHING RETURNING event_id");
-    AR_BIND_BLOB(s, 1, event->event_id, 32);
-    AR_BIND_TEXT(s, 2, event->app_id);
-    AR_BIND_TEXT(s, 3, event->topic);
-    AR_BIND_INT(s, 4, event->kind);
-    AR_BIND_BLOB(s, 5, event->chain_id, 32);
-    AR_BIND_BLOB(s, 6, event->author_key_id, 20);
-    AR_BIND_BLOB(s, 7, event->author_pubkey, 33);
-    AR_BIND_INT(s, 8, (int64_t)event->sequence);
-    AR_BIND_BLOB(s, 9, event->previous_event_id, 32);
-    AR_BIND_INT(s, 10, (int64_t)event->created_at);
-    AR_BIND_BLOB(s, 11,
-                 event->payload.len ? event->payload.data : g_empty_payload,
-                 event->payload.len);
-    AR_BIND_BLOB(s, 12, event->signature, event->signature_len);
-    AR_BIND_INT(s, 13, event->signature_len);
-    AR_BIND_INT(s, 14, record->received_at);
+
+    static const enum qb_column k_conflict[] = { QB_C_app_events_event_id };
+    struct qb q;
+    qb_insert(&q, QB_T_app_events, QB_INSERT_PLAIN);
+    qb_value_blob(&q, QB_C_app_events_event_id, event->event_id, 32);
+    qb_value_text(&q, QB_C_app_events_app_id, event->app_id);
+    qb_value_text(&q, QB_C_app_events_topic, event->topic);
+    qb_value_int(&q, QB_C_app_events_kind, event->kind);
+    qb_value_blob(&q, QB_C_app_events_chain_id, event->chain_id, 32);
+    qb_value_blob(&q, QB_C_app_events_author_key_id, event->author_key_id, 20);
+    qb_value_blob(&q, QB_C_app_events_author_pubkey, event->author_pubkey, 33);
+    qb_value_int(&q, QB_C_app_events_sequence, (int64_t)event->sequence);
+    qb_value_blob(&q, QB_C_app_events_previous_event_id,
+                  event->previous_event_id, 32);
+    qb_value_int(&q, QB_C_app_events_created_at, (int64_t)event->created_at);
+    qb_value_blob(&q, QB_C_app_events_payload,
+                  event->payload.len ? event->payload.data : g_empty_payload,
+                  event->payload.len);
+    qb_value_blob(&q, QB_C_app_events_signature, event->signature,
+                  event->signature_len);
+    qb_value_int(&q, QB_C_app_events_signature_len, event->signature_len);
+    qb_value_int(&q, QB_C_app_events_received_at, record->received_at);
+    qb_on_conflict_do_nothing(&q, k_conflict, 1);
+    qb_returning(&q, QB_C_app_events_event_id);
+
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("app_event", "atomic event insert refused: %s",
+                 qb_error(&q));
     int rc = sqlite3_step(s); // raw-sql-ok:ar-lifecycle-conflict-returning
     bool inserted = rc == SQLITE_ROW;
     AR_FINALIZE(s);
@@ -269,16 +301,17 @@ bool db_app_event_find(struct node_db *ndb, const uint8_t event_id[32],
                        struct db_app_event *out,
                        uint8_t *payload, size_t payload_capacity)
 {
-    sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open || !event_id || !scope || !out ||
         (!payload && payload_capacity > 0))
         LOG_FAIL("app_event", "find requires valid arguments");
-    AR_PREPARE_BOOL(ndb, s,
-        "SELECT receive_cursor,event_id,app_id,topic,kind,chain_id,"
-        "author_key_id,author_pubkey,sequence,previous_event_id,created_at,"
-        "payload,signature,signature_len,received_at "
-        "FROM app_events WHERE event_id=?");
-    AR_BIND_BLOB(s, 1, event_id, 32);
+    struct qb q;
+    qb_select(&q, QB_T_app_events);
+    qb_select_columns(&q, k_app_event_full_cols,
+                      QB_NCOLS(k_app_event_full_cols));
+    qb_where_blob(&q, QB_C_app_events_event_id, QB_EQ, event_id, 32);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("app_event", "find refused: %s", qb_error(&q));
     if (!AR_STEP_ROW(s)) {
         AR_FINALIZE(s);
         return false;
@@ -298,20 +331,18 @@ bool db_app_event_find(struct node_db *ndb, const uint8_t event_id[32],
 int db_app_event_count(struct node_db *ndb, const char *app_id,
                        const char *topic_or_null)
 {
-    sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open || !bounded_token(app_id, ZCL_APP_ID_MAX))
         return 0;
-    if (topic_or_null && topic_or_null[0]) {
-        if (!bounded_token(topic_or_null, ZCL_APP_TOPIC_MAX))
-            return 0;
-        AR_QUERY_COUNT_BOUND(ndb, s,
-            "SELECT COUNT(*) FROM app_events WHERE app_id=? AND topic=?",
-            AR_BIND_TEXT(s, 1, app_id);
-            AR_BIND_TEXT(s, 2, topic_or_null));
-    }
-    AR_QUERY_COUNT_BOUND(ndb, s,
-        "SELECT COUNT(*) FROM app_events WHERE app_id=?",
-        AR_BIND_TEXT(s, 1, app_id));
+    bool by_topic = topic_or_null && topic_or_null[0];
+    if (by_topic && !bounded_token(topic_or_null, ZCL_APP_TOPIC_MAX))
+        return 0;
+    struct qb q;
+    qb_select(&q, QB_T_app_events);
+    qb_select_count_star(&q);
+    qb_where_text(&q, QB_C_app_events_app_id, QB_EQ, app_id);
+    if (by_topic)
+        qb_where_text(&q, QB_C_app_events_topic, QB_EQ, topic_or_null);
+    QB_QUERY_COUNT(ndb, &q, s);
 }
 
 static void app_event_ref_read(sqlite3_stmt *s,
@@ -335,22 +366,20 @@ int db_app_event_topic_after(struct node_db *ndb,
                              int64_t after_cursor,
                              struct db_app_event_ref *out, size_t max)
 {
-    sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open || !out || max == 0 || after_cursor < 0 ||
         !bounded_token(app_id, ZCL_APP_ID_MAX) ||
         !bounded_token(topic, ZCL_APP_TOPIC_MAX))
         return 0;
-    AR_QUERY_LIST(ndb, s,
-        "SELECT receive_cursor,event_id,app_id,topic,kind,author_key_id,"
-        "sequence,previous_event_id,created_at,received_at FROM app_events "
-        "WHERE app_id=? AND topic=? AND receive_cursor>? "
-        "ORDER BY receive_cursor LIMIT ?",
-        out, max,
-        AR_BIND_TEXT(s, 1, app_id);
-        AR_BIND_TEXT(s, 2, topic);
-        AR_BIND_INT(s, 3, after_cursor);
-        AR_BIND_INT(s, 4, (int64_t)max),
-        app_event_ref_read(s, &out[count]));
+    struct qb q;
+    qb_select(&q, QB_T_app_events);
+    qb_select_columns(&q, k_app_event_ref_cols,
+                      QB_NCOLS(k_app_event_ref_cols));
+    qb_where_text(&q, QB_C_app_events_app_id, QB_EQ, app_id);
+    qb_where_text(&q, QB_C_app_events_topic, QB_EQ, topic);
+    qb_where_int(&q, QB_C_app_events_receive_cursor, QB_GT, after_cursor);
+    qb_order_by(&q, QB_C_app_events_receive_cursor, QB_ASC);
+    qb_limit(&q, (int64_t)max);
+    QB_QUERY_LIST(ndb, &q, s, out, max, app_event_ref_read(s, &out[count]));
 }
 
 bool db_app_event_previous(struct node_db *ndb,
@@ -382,23 +411,25 @@ int db_app_event_successors(struct node_db *ndb,
                             const struct zcl_app_event_scope_v1 *scope,
                             struct db_app_event_ref *out, size_t max)
 {
-    sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open || !record || !scope || !out || max == 0 ||
         record->event.sequence >= (uint64_t)INT64_MAX ||
         !app_event_signature_valid(&record->event, scope))
         return 0;
-    AR_QUERY_LIST(ndb, s,
-        "SELECT receive_cursor,event_id,app_id,topic,kind,author_key_id,"
-        "sequence,previous_event_id,created_at,received_at FROM app_events "
-        "WHERE app_id=? AND topic=? AND chain_id=? AND author_key_id=? "
-        "AND previous_event_id=? AND sequence=? ORDER BY event_id LIMIT ?",
-        out, max,
-        AR_BIND_TEXT(s, 1, record->event.app_id);
-        AR_BIND_TEXT(s, 2, record->event.topic);
-        AR_BIND_BLOB(s, 3, record->event.chain_id, 32);
-        AR_BIND_BLOB(s, 4, record->event.author_key_id, 20);
-        AR_BIND_BLOB(s, 5, record->event.event_id, 32);
-        AR_BIND_INT(s, 6, (int64_t)(record->event.sequence + 1));
-        AR_BIND_INT(s, 7, (int64_t)max),
-        app_event_ref_read(s, &out[count]));
+    struct qb q;
+    qb_select(&q, QB_T_app_events);
+    qb_select_columns(&q, k_app_event_ref_cols,
+                      QB_NCOLS(k_app_event_ref_cols));
+    qb_where_text(&q, QB_C_app_events_app_id, QB_EQ, record->event.app_id);
+    qb_where_text(&q, QB_C_app_events_topic, QB_EQ, record->event.topic);
+    qb_where_blob(&q, QB_C_app_events_chain_id, QB_EQ,
+                  record->event.chain_id, 32);
+    qb_where_blob(&q, QB_C_app_events_author_key_id, QB_EQ,
+                  record->event.author_key_id, 20);
+    qb_where_blob(&q, QB_C_app_events_previous_event_id, QB_EQ,
+                  record->event.event_id, 32);
+    qb_where_int(&q, QB_C_app_events_sequence, QB_EQ,
+                 (int64_t)(record->event.sequence + 1));
+    qb_order_by(&q, QB_C_app_events_event_id, QB_ASC);
+    qb_limit(&q, (int64_t)max);
+    QB_QUERY_LIST(ndb, &q, s, out, max, app_event_ref_read(s, &out[count]));
 }

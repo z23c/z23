@@ -43,6 +43,41 @@ WORK="$VENDOR/.build"
 SECP_MANIFEST="$VENDOR/provenance/libsecp256k1.manifest"
 LIBEVENT_PATCH="$VENDOR/patches/libevent-2.1.12-secure-rng-abi.patch"
 
+# --- cross targets ---------------------------------------------------------
+# vendor/lib holds ONE target: a single slot per archive name, no target
+# segment, so a host libz.a and a cross libz.a would occupy the same path (see
+# vendor_require_same_machine below, which exists because that collision is
+# otherwise silent). A release for another platform therefore cannot reuse
+# that tree — it needs its own.
+#
+# VENDOR_TARGET=<triple> gives it one: every output moves under
+# vendor/cross/<triple>/{lib,include}, the build scratch and the build lock
+# move with it, and the compiler defaults to <triple>-gcc / <triple>-ar. The
+# pinned versions, SHA256s, patches and recipes above stay the single copy —
+# a second script restating them is exactly the divergence this repository
+# refuses. Downloads stay in the shared vendor/.cache: a source tarball is
+# target-independent, and its pin is verified on every read.
+#
+# The host build is unchanged when VENDOR_TARGET is unset: same paths, same
+# defaults, and — because nothing below appends cross-only text to a recipe
+# unless VENDOR_TARGET is set — the same provenance descriptors, so no
+# existing stamp is invalidated by this capability existing.
+VENDOR_TARGET="${VENDOR_TARGET:-}"
+if [[ -n "$VENDOR_TARGET" ]]; then
+    case "$VENDOR_TARGET" in
+        *[!A-Za-z0-9_.-]*|"")
+            printf '\033[31m[vendor] ERROR:\033[0m VENDOR_TARGET must be a bare toolchain triple\n' >&2
+            exit 1
+            ;;
+    esac
+    LIB="$VENDOR/cross/$VENDOR_TARGET/lib"
+    INC="$VENDOR/cross/$VENDOR_TARGET/include"
+    WORK="$VENDOR/.build-$VENDOR_TARGET"
+    VENDOR_CC="${VENDOR_CC:-$VENDOR_TARGET-gcc}"
+    VENDOR_AR="${VENDOR_AR:-$VENDOR_TARGET-ar}"
+    VENDOR_LOCK_DIR="${VENDOR_LOCK_DIR:-$VENDOR/.build-$VENDOR_TARGET.lock}"
+fi
+
 # shellcheck source=tools/scripts/vendor_provenance_lib.sh
 . "$SCRIPT_DIR/vendor_provenance_lib.sh"
 
@@ -120,15 +155,102 @@ vendor_require_same_machine()
     die "$what ($tool) targets $machine but VENDOR_CC ($VENDOR_CC) targets \
 $VENDOR_CC_MACHINE -- vendor/lib cannot hold two targets at once"
 }
+# Which OS the archives are FOR — read from the compiler's own target, never
+# from uname. On a native MSYS2/Darwin host the two agree, so this changes no
+# existing decision; on a cross build uname describes the wrong machine and
+# would silently select the POSIX recipes for a Windows archive set.
+vendor_target_os() {
+    case "$VENDOR_CC_MACHINE" in
+        *mingw*|*cygwin*|*windows*) printf 'windows'; return ;;
+        *darwin*|*apple*) printf 'darwin'; return ;;
+        ?*) printf 'posix'; return ;;
+    esac
+    # -dumpmachine failed (it is allowed to: see vendor_cc_machine). Fall back
+    # to the host, which is what every decision here used before.
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) printf 'windows' ;;
+        Darwin) printf 'darwin' ;;
+        *) printf 'posix' ;;
+    esac
+}
+VENDOR_TARGET_OS="$(vendor_target_os)"
+if [[ "$VENDOR_TARGET_OS" == darwin ]]; then
+    MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+    [[ "$MACOSX_DEPLOYMENT_TARGET" == "14.0" ]] ||
+        die "Darwin vendor archives require MACOSX_DEPLOYMENT_TARGET=14.0"
+    export MACOSX_DEPLOYMENT_TARGET
+fi
+
+# OpenSSL cannot infer a supported target from the MSYS2 host name even for a
+# native MinGW build, and it cannot probe any cross target. Name Windows
+# targets in both cases. Native Darwin and POSIX builds retain autodetection;
+# Darwin cross builds still name their target explicitly.
+OPENSSL_CONFIG_TARGET=""
+if [[ "$VENDOR_TARGET_OS" == windows ]]; then
+    case "$VENDOR_TARGET_OS:$VENDOR_CC_MACHINE" in
+        windows:x86_64-*) OPENSSL_CONFIG_TARGET="mingw64" ;;
+        windows:i686-*|windows:i586-*) OPENSSL_CONFIG_TARGET="mingw" ;;
+        *)
+            printf '\033[31m[vendor] ERROR:\033[0m no OpenSSL config target known for native Windows compiler %s\n' \
+                "$VENDOR_CC_MACHINE" >&2
+            exit 1
+            ;;
+    esac
+elif [[ -n "$VENDOR_TARGET" ]]; then
+    case "$VENDOR_TARGET_OS:$VENDOR_CC_MACHINE" in
+        darwin:x86_64-*) OPENSSL_CONFIG_TARGET="darwin64-x86_64-cc" ;;
+        darwin:arm64-*|darwin:aarch64-*) OPENSSL_CONFIG_TARGET="darwin64-arm64-cc" ;;
+        *)
+            printf '\033[31m[vendor] ERROR:\033[0m no OpenSSL config target known for %s (%s)\n' \
+                "$VENDOR_TARGET" "$VENDOR_CC_MACHINE" >&2
+            exit 1
+            ;;
+    esac
+fi
+# C23 has two spellings: GCC 14+ accepts -std=c23, GCC 13 only the earlier
+# -std=c2x for the same language mode. The Debian/Ubuntu mingw-w64 packages
+# are GCC 13, so a cross build must ask the compiler rather than assume. The
+# host compiler answers c23 first, so the host flag string — and therefore the
+# host provenance descriptor — is exactly what it was.
+vendor_c_std() {
+    local std
+    for std in c23 c2x; do
+        if printf 'int main(void){return 0;}\n' |
+            "$VENDOR_CC" -std="$std" -fsyntax-only -x c - 2>/dev/null; then
+            printf -- '-std=%s' "$std"
+            return 0
+        fi
+    done
+    printf '\033[31m[vendor] ERROR:\033[0m %s accepts neither -std=c23 nor -std=c2x\n' \
+        "$VENDOR_CC" >&2
+    exit 1
+}
+VENDOR_C_STD="$(vendor_c_std)"
+
+# Every cross builder below takes the same autotools/cmake host argument; the
+# host build passes none, so its command lines are byte-identical to before.
+VENDOR_CROSS_HOST_ARGS=()
+[[ -n "$VENDOR_TARGET" ]] && VENDOR_CROSS_HOST_ARGS=(--host="$VENDOR_TARGET")
+VENDOR_RANLIB="${VENDOR_RANLIB:-$(if [[ -n "$VENDOR_TARGET" ]]; then printf '%s' "$VENDOR_TARGET-ranlib"; else printf 'ranlib'; fi)}"
+
+# libevent's configure decides whether to build libevent_openssl.a by LINKING
+# a probe against SSL_new. A static OpenSSL on Windows pulls in crypt32,
+# ws2_32 and friends, so without them the probe fails to link, configure
+# reports "openssl is a must but can not be found" while its own header checks
+# passed, and the archive the node links would silently not exist. These are
+# the same system libraries ZCL_PLATFORM_NODE_LIBS hands the final link.
+# Empty off Windows, so the host configure environment is unchanged.
+LIBEVENT_CONFIGURE_LIBS=""
 LIBEVENT_CPPFLAGS="-I$INC"
 LIBEVENT_THREAD_ARCHIVE="libevent_pthreads.a"
 LEVELDB_PLATFORM="LEVELDB_PLATFORM_POSIX; env_posix.cc"
-case "$(uname -s)" in
-    MINGW*|MSYS*)
+case "$VENDOR_TARGET_OS" in
+    windows)
         # Current MinGW-w64 headers expose the iphlpapi declarations used by
         # libevent only when the supported Windows API floor is explicit.
         LIBEVENT_CPPFLAGS="$LIBEVENT_CPPFLAGS -D_WIN32_WINNT=0x0600"
         LIBEVENT_THREAD_ARCHIVE="windows-threads-in-libevent.a; empty compatibility archive"
+        LIBEVENT_CONFIGURE_LIBS="-lssl -lcrypto -lcrypt32 -lws2_32 -lgdi32 -ladvapi32 -luser32"
         LEVELDB_PLATFORM="LEVELDB_PLATFORM_WINDOWS; env_windows.cc"
         ;;
 esac
@@ -141,7 +263,7 @@ PROVENANCE_CONTRACT_REV="vp3"
 RECIPE_TOR_STUB="tor-stub-r2"
 RECIPE_SQLITE="sqlite-r2"
 RECIPE_ZLIB="zlib-r2"
-RECIPE_OPENSSL="openssl-r4"
+RECIPE_OPENSSL="openssl-r5"
 # r6: the pinned secure-rng ABI patch grew a second hunk (it now unguards the
 # evutil_secure_rng_add_bytes DECLARATION in include/event2/util.h, not only its
 # definition in evutil_rand.c), and the recipe now stages event2/ headers. The
@@ -182,7 +304,7 @@ fetch() {
     # fetch <url> <sha256> <dest-filename>  -> echoes cached path
     local url="$1" sha="$2" dest="$CACHE/$3"
     mkdir -p "$CACHE"
-    if [[ -f "$dest" ]] && echo "$sha  $dest" | sha256sum -c - >/dev/null 2>&1; then
+    if [[ -f "$dest" && "$(vp_sha256_file "$dest")" == "$sha" ]]; then
         say "cached  $(basename "$dest")"
     else
         [[ "$OFFLINE" == "1" ]] &&
@@ -193,7 +315,7 @@ fetch() {
         else
             need wget; wget -q -O "$dest.tmp" "$url"
         fi
-        echo "$sha  $dest.tmp" | sha256sum -c - >/dev/null 2>&1 \
+        [[ "$(vp_sha256_file "$dest.tmp")" == "$sha" ]] \
             || die "SHA256 mismatch for $url (expected $sha)"
         mv "$dest.tmp" "$dest"
     fi
@@ -263,9 +385,28 @@ recipe_source_fields() {
 }
 
 recipe_flags() {
+    local group="$1" flags
+    # A cross build compiles the same pinned source with a different target,
+    # so the target belongs in the recipe the stamp hashes. Appended only when
+    # cross: the host descriptor stays byte-identical to the one every existing
+    # vendor/lib stamp was written against.
+    flags="$(recipe_flags_host "$group")" || return 1
+    printf '%s' "$flags"
+    if [[ -n "$VENDOR_TARGET" ]]; then
+        printf '; target=%s' "$VENDOR_TARGET"
+    fi
+    if [[ "$group" == openssl && -n "$OPENSSL_CONFIG_TARGET" ]]; then
+        printf '; config_target=%s' "$OPENSSL_CONFIG_TARGET"
+    fi
+    if [[ "$VENDOR_TARGET_OS" == darwin ]]; then
+        printf '; macosx_deployment_target=%s' "$MACOSX_DEPLOYMENT_TARGET"
+    fi
+}
+
+recipe_flags_host() {
     local group="$1"
     case "$group" in
-        tor_stub) printf '%s' '-std=c23 -O2 -fPIC; ar=Dcr' ;;
+        tor_stub) printf '%s' "$VENDOR_C_STD -O2 -fPIC; ar=Dcr" ;;
         sqlite) printf '%s' '-O2 -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_OMIT_DEPRECATED -DSQLITE_DEFAULT_FOREIGN_KEYS=1; ar=Dcr' ;;
         zlib) printf '%s' 'CFLAGS=-O2 -fPIC; ./configure --static; make libz.a' ;;
         openssl) printf '%s' './Configure no-shared no-tests --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib; make build_libs' ;;
@@ -386,7 +527,7 @@ build_tor_stub() {     # IN-TREE: vendor/tor_stub.c
     invalidate_stamps libtor_stub.a
     local o="$WORK/tor_stub.o" built="$WORK/libtor_stub.a"
     mkdir -p "$WORK"
-    "$VENDOR_CC" -std=c23 -O2 -fPIC -c "$VENDOR/tor_stub.c" -o "$o"
+    "$VENDOR_CC" "$VENDOR_C_STD" -O2 -fPIC -c "$VENDOR/tor_stub.c" -o "$o"
     rm -f "$built"
     "$VENDOR_AR" $ARFLAGS_DET "$built" "$o" 2>/dev/null ||
         "$VENDOR_AR" cr "$built" "$o"
@@ -427,7 +568,11 @@ build_zlib() {         # FETCHED: zlib
     local tb; tb="$(fetch "$ZLIB_URL" "$ZLIB_SHA" "zlib-${ZLIB_VER}.tar.gz")"
     local d="$WORK/zlib-${ZLIB_VER}"
     rm -rf "$d"; tar -C "$WORK" -xzf "$tb"
-    ( cd "$d" && CC="$VENDOR_CC" AR="$VENDOR_AR" CFLAGS="-O2 -fPIC" \
+    # zlib's configure has no --host: it takes the toolchain from the
+    # environment and only ever COMPILES its probes, never runs them, so the
+    # cross build differs from the host build by the toolchain alone.
+    ( cd "$d" && CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
+        CFLAGS="-O2 -fPIC" \
         ./configure --static >/dev/null \
         && make -j"$JOBS" libz.a >/dev/null )
     install_archive "$d/libz.a" libz.a
@@ -460,9 +605,13 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
     # canonical /usr/local + /etc/ssl values are relocatable and operator-
     # agnostic. (Do NOT pass -DOPENSSLDIR etc — Configure already defines them
     # from --prefix/--openssldir, and a -D redefine errors the build.)
+    # $OPENSSL_CONFIG_TARGET is empty on native POSIX/Darwin builds. Windows
+    # and cross builds name the target because Configure cannot infer it from
+    # the execution environment.
+    # shellcheck disable=SC2086
     ( cd "$d" \
-        && export CC="$VENDOR_CC" AR="$VENDOR_AR" \
-        && ./Configure no-shared no-tests \
+        && export CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
+        && ./Configure $OPENSSL_CONFIG_TARGET no-shared no-tests \
              --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib >/dev/null \
         && make -j"$JOBS" build_libs >/dev/null 2>&1 )
     # OpenSSL also records the literal compiler command in its version data.
@@ -530,11 +679,12 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
     # upstream behavior while retaining the pinned release.
     if ! ( cd "$d" \
             && patch -p1 --forward <"$LIBEVENT_PATCH" \
-            && CC="$VENDOR_CC" AR="$VENDOR_AR" \
+            && CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
                CFLAGS="-O2 -fPIC -I$INC" LDFLAGS="-L$LIB" \
-               CPPFLAGS="$LIBEVENT_CPPFLAGS" \
+               CPPFLAGS="$LIBEVENT_CPPFLAGS" LIBS="$LIBEVENT_CONFIGURE_LIBS" \
                ./configure --disable-shared --enable-static \
                  --disable-samples --disable-libevent-regress \
+                 ${VENDOR_CROSS_HOST_ARGS[@]+"${VENDOR_CROSS_HOST_ARGS[@]}"} \
             && make -j"$JOBS" \
         ) >"$build_log" 2>&1; then
         tail -200 "$build_log" >&2 || true
@@ -653,8 +803,8 @@ build_leveldb_direct() {
         helpers/memenv/memenv.cc
     )
 
-    case "$(uname -s)" in
-        MINGW*|MSYS*)
+    case "$VENDOR_TARGET_OS" in
+        windows)
             sources+=(util/env_windows.cc)
             platform_define=LEVELDB_PLATFORM_WINDOWS
             ;;
@@ -733,11 +883,10 @@ build_leveldb() {      # FETCHED: LevelDB -> libleveldb.a
 }
 
 build_secp_native() {
-    local host archive
-    host="$(uname -s 2>/dev/null)"
-    case "$host" in
-        Darwin) archive=libsecp256k1-darwin.a ;;
-        MINGW*|MSYS*) archive=libsecp256k1-windows.a ;;
+    local archive
+    case "$VENDOR_TARGET_OS" in
+        darwin) archive=libsecp256k1-darwin.a ;;
+        windows) archive=libsecp256k1-windows.a ;;
         *) die "native libsecp256k1 archive requires Darwin or Windows" ;;
     esac
     have "$archive" && {
@@ -751,7 +900,19 @@ build_secp_native() {
     d="$WORK/secp256k1-${SECP_VER}"
     rm -rf "$d" "$WORK/secp-native-build"
     tar -C "$WORK" -xzf "$tb"
+    # CMAKE_SYSTEM_NAME is what puts CMake in cross mode: without it CMake
+    # keeps probing (and trying to RUN) host binaries and silently grades the
+    # wrong machine. Empty on a host build, so its command line is unchanged.
+    local -a secp_cross=()
+    if [[ -n "$VENDOR_TARGET" ]]; then
+        case "$VENDOR_TARGET_OS" in
+            windows) secp_cross=(-DCMAKE_SYSTEM_NAME=Windows) ;;
+            darwin) secp_cross=(-DCMAKE_SYSTEM_NAME=Darwin) ;;
+        esac
+        secp_cross+=(-DCMAKE_RANLIB="$VENDOR_RANLIB")
+    fi
     cmake -S "$d" -B "$WORK/secp-native-build" \
+        ${secp_cross[@]+"${secp_cross[@]}"} \
         -DCMAKE_C_COMPILER="$VENDOR_CC" -DCMAKE_AR="$VENDOR_AR" \
         -DBUILD_SHARED_LIBS=OFF \
         -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
@@ -768,7 +929,11 @@ build_secp_native() {
 }
 
 # --- orchestration ----------------------------------------------------------
-need "$VENDOR_CC"; need "$VENDOR_AR"; need sha256sum; need tar; need make
+need "$VENDOR_CC"; need "$VENDOR_AR"; need tar; need make
+if ! command -v sha256sum >/dev/null 2>&1 &&
+   ! command -v shasum >/dev/null 2>&1; then
+    die "need sha256sum or shasum"
+fi
 
 # ar carries no -dumpmachine, so its target can only be read from its name.
 # A cross VENDOR_CC left beside the host's plain `ar` is silent today: ar
@@ -787,11 +952,25 @@ acquire_vendor_lock
 REQUIRED=(libsecp256k1.a libcrypto.a libssl.a libevent.a libevent_openssl.a
           libevent_pthreads.a libleveldb.a libsqlite3.a libz.a
           libtor_stub.a)
-if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
-    REQUIRED+=(libsecp256k1-darwin.a)
-elif [[ "$(uname -s 2>/dev/null)" == MINGW* ||
-        "$(uname -s 2>/dev/null)" == MSYS* ]]; then
-    REQUIRED+=(libsecp256k1-windows.a)
+case "$VENDOR_TARGET_OS" in
+    darwin) REQUIRED+=(libsecp256k1-darwin.a) ;;
+    windows) REQUIRED+=(libsecp256k1-windows.a) ;;
+esac
+# Two archives leave the cross set, neither by relaxing anything:
+#   libsecp256k1.a  — the ONE committed archive, an ELF for this host. A cross
+#     tree neither has it nor could link it, and its per-target replacement
+#     (libsecp256k1-windows.a / -darwin.a) is already REQUIRED above.
+#   libleveldb.a    — the one C++ archive, and the node never links it: it is a
+#     differential test oracle (NODE_C23_LIBS in the Makefile names every
+#     archive the shipped binary consumes and does not name this one). A cross
+#     tree exists to link a release, so it needs no cross C++ toolchain.
+if [[ -n "$VENDOR_TARGET" ]]; then
+    REQUIRED_CROSS=()
+    for a in "${REQUIRED[@]}"; do
+        case "$a" in libsecp256k1.a|libleveldb.a) continue ;; esac
+        REQUIRED_CROSS+=("$a")
+    done
+    REQUIRED=("${REQUIRED_CROSS[@]}")
 fi
 
 check_one_provenance() {
@@ -836,9 +1015,20 @@ fi
 ALL=(build_tor_stub build_zlib build_sqlite build_openssl build_libevent build_leveldb)
 # Darwin and Windows both need secp built here; Linux takes the pinned
 # archive. One condition, because both arms appended the same builder.
-case "$(uname -s 2>/dev/null)" in
-    Darwin|MINGW*|MSYS*) ALL+=(build_secp_native) ;;
+case "$VENDOR_TARGET_OS" in
+    darwin|windows) ALL+=(build_secp_native) ;;
 esac
+# LevelDB leaves the cross build for the reason given at REQUIRED above: the
+# shipped node does not link it, so a cross tree neither builds it nor needs a
+# cross C++ toolchain to exist.
+if [[ -n "$VENDOR_TARGET" ]]; then
+    ALL_KEPT=()
+    for b in "${ALL[@]}"; do
+        [[ "$b" == "build_leveldb" ]] && continue
+        ALL_KEPT+=("$b")
+    done
+    ALL=("${ALL_KEPT[@]}")
+fi
 
 # Map .a names -> builder for the subset form.
 declare -A BUILDER=(

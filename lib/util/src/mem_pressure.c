@@ -74,6 +74,7 @@ enum mem_pressure_denominator_basis {
     MEM_PRESSURE_BASIS_NONE = 0,
     MEM_PRESSURE_BASIS_CGROUP_HIGH,
     MEM_PRESSURE_BASIS_CGROUP_MAX,
+    MEM_PRESSURE_BASIS_SYS_AVAILABLE,
     MEM_PRESSURE_BASIS_SYS_TOTAL,
 };
 
@@ -82,6 +83,7 @@ static const char *basis_name(enum mem_pressure_denominator_basis b)
     switch (b) {
     case MEM_PRESSURE_BASIS_CGROUP_HIGH: return "cgroup_high";
     case MEM_PRESSURE_BASIS_CGROUP_MAX:  return "cgroup_max";
+    case MEM_PRESSURE_BASIS_SYS_AVAILABLE: return "system_available";
     case MEM_PRESSURE_BASIS_SYS_TOTAL:   return "sys_total";
     default:                             return "unavailable";
     }
@@ -210,6 +212,11 @@ void mem_pressure_poll_tick(void)
             current_bytes = mem.cgroup_current;
             denom_bytes = mem.cgroup_max;
             basis = MEM_PRESSURE_BASIS_CGROUP_MAX;
+        } else if (mem.sys_total_bytes > 0 && mem.sys_avail_bytes >= 0 &&
+                   mem.sys_avail_bytes <= mem.sys_total_bytes) {
+            current_bytes = mem.sys_total_bytes - mem.sys_avail_bytes;
+            denom_bytes = mem.sys_total_bytes;
+            basis = MEM_PRESSURE_BASIS_SYS_AVAILABLE;
         } else if (mem.sys_total_bytes > 0) {
             current_bytes = mem.rss_bytes;
             denom_bytes = mem.sys_total_bytes;

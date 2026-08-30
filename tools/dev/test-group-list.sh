@@ -34,9 +34,11 @@
 #   --resolve-exact ID... resolve proof-plan IDs to canonical FULL names.
 #                      Accepts either the full name or the legacy prefixless
 #                      name, never a substring. Exit 1 when absent/ambiguous.
-#   --resolve-proof ID... validate every legacy plan ID has one canonical
-#                      exact group, then preserve its former substring union
-#                      as canonical full IDs. No substring reaches the runner.
+#   --resolve-proof ID... validate every plan ID has one canonical exact
+#                      group. Canonical test_*/spec_* IDs select only that
+#                      group; legacy prefixless IDs preserve their former
+#                      substring union as canonical full IDs. No substring
+#                      reaches the runner.
 #   --resolve-exact-set CSV
 #                      canonicalize/validate a comma-separated exact set.
 #   --check-impact-rules [FILE]
@@ -143,7 +145,14 @@ ${REGISTERED_CACHE}
 # primary ID, while a registry full name may additionally belong to one of
 # these declared aggregates.
 proof_plan_token_selects_full() {
-    local token="$1" full="$2" family glob
+    local token="$1" full="$2" family glob haystack
+    load_registered_cache
+    haystack="
+${REGISTERED_CACHE}
+"
+    case "$haystack" in
+        *$'\n'"$token"$'\n'*) [ "$token" = "$full" ]; return ;;
+    esac
     case "$full" in
         *"$token"*) return 0 ;;
     esac
@@ -247,9 +256,9 @@ resolve_proof() {
     local needle candidate resolved="" exact family_count
     load_registered_cache
     for needle in "$@"; do
-        # The exact primary is the fail-closed admission check. Once present,
-        # preserve the old runner's substring family as an explicit set of
-        # full IDs. This migration changes selection transport, not coverage.
+        # The exact primary is the fail-closed admission check. A canonical
+        # full ID is an explicit exact request. A legacy prefixless ID keeps
+        # the old runner's substring family as an explicit set of full IDs.
         exact="$(resolve_exact "$needle")" || return 1
         family_count=0
         while IFS= read -r candidate; do

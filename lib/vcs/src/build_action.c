@@ -175,63 +175,14 @@ static bool build_resolve_file(const char *candidate, char resolved[PATH_MAX],
     return ok;
 }
 
-static bool build_gcc_query(const char *arg, char *out, size_t cap)
+static bool build_toolchain_query(void *ctx, const char *const argv[],
+                                  char *out, size_t cap)
 {
-    const char *const argv[] = { VCS_BUILD_COMPILER_V1, arg, NULL };
+    (void)ctx;
     if (zcl_spawn_capture(argv, out, cap, 10000) != 0 || !out[0])
         return false;
     out[strcspn(out, "\r\n")] = '\0';
     return out[0] != '\0';
-}
-
-static bool build_gcc_file(const char *arg, const char *fallback,
-                           uint8_t out[32],
-                           struct build_toolchain_file *file)
-{
-    char named[4096];
-    if (!build_gcc_query(arg, named, sizeof(named))) return false;
-    const char *candidate = (strchr(named, '/') || strchr(named, '\\')) ?
-                            named : fallback;
-    char resolved[4096];
-    if (!candidate || !file || !build_resolve_file(candidate, resolved, NULL) ||
-        strlen(resolved) >= sizeof(file->path)) {
-        return false;
-    }
-    (void)snprintf(file->path, sizeof(file->path), "%s", resolved);
-    return build_sha3_file(resolved, out, &file->stamp);
-}
-
-/* Assembler identity is GNU as --version, not the assembler file bytes.
- * Distro patch levels of the same GNU as version change the binary and
- * would otherwise refuse an independent worker on an ordinary second
- * machine. The file stamp still participates in the capture cache so an
- * assembler upgrade recaptures. */
-static bool build_assembler_identity(uint8_t out[32],
-                                     struct build_toolchain_file *file)
-{
-    char named[4096];
-    if (!build_gcc_query("-print-prog-name=as", named, sizeof(named)))
-        return false;
-    const char *candidate = (strchr(named, '/') || strchr(named, '\\')) ?
-                            named : "/usr/bin/as";
-    char resolved[4096];
-    if (!file || !build_resolve_file(candidate, resolved, &file->stamp) ||
-        strlen(resolved) >= sizeof(file->path))
-        return false;
-    (void)snprintf(file->path, sizeof(file->path), "%s", resolved);
-    char version[512];
-    const char *const argv[] = { resolved, "--version", NULL };
-    if (zcl_spawn_capture(argv, version, sizeof(version), 10000) != 0 ||
-        !version[0])
-        return false;
-    version[strcspn(version, "\r\n")] = '\0';
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    static const char domain[] = "zcl.toolchain.assembler_identity.v1";
-    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    build_hash_text(&sha, version);
-    sha3_256_finalize(&sha, out);
-    return true;
 }
 
 static void build_hash_pair(struct sha3_256_ctx *sha, const char *label,
@@ -241,12 +192,12 @@ static void build_hash_pair(struct sha3_256_ctx *sha, const char *label,
     sha3_256_write(sha, digest, 32);
 }
 
-static bool build_gcc_aggregate(const char *domain,
-                                const char *const args[],
-                                const char *const fallbacks[], size_t count,
-                                uint8_t out[32],
-                                struct build_toolchain_file files[],
-                                size_t *file_count)
+static bool build_hash_aggregate(const char *domain,
+                                 const char *const labels[], size_t count,
+                                 const char paths[][ZCL_TOOLCHAIN_PATH_SIZE],
+                                 uint8_t out[32],
+                                 struct build_toolchain_file files[],
+                                 size_t *file_count)
 {
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
@@ -255,12 +206,39 @@ static bool build_gcc_aggregate(const char *domain,
         uint8_t digest[32];
         if (!files || !file_count ||
             *file_count >= BUILD_TOOLCHAIN_FILE_COUNT ||
-            !build_gcc_file(args[i], fallbacks ? fallbacks[i] : NULL,
-                            digest, &files[*file_count]))
+            !build_resolve_file(paths[i], files[*file_count].path,
+                                &files[*file_count].stamp) ||
+            !build_sha3_file(files[*file_count].path, digest,
+                             &files[*file_count].stamp))
             return false;
         (*file_count)++;
-        build_hash_pair(&sha, args[i], digest);
+        build_hash_pair(&sha, labels[i], digest);
     }
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
+/* Assembler identity is the driver's --version output, not the assembler file
+ * bytes.  Distro patch levels of the same GNU as / Apple Clang assembler
+ * change the binary and would otherwise refuse an independent worker on an
+ * ordinary second machine.  The file stamp still participates in the capture
+ * cache so an assembler upgrade recaptures. */
+static bool build_assembler_identity(const char *assembler, uint8_t out[32],
+                                     struct build_toolchain_file *file)
+{
+    if (!file || !build_resolve_file(assembler, file->path, &file->stamp))
+        return false;
+    char version[512];
+    const char *const argv[] = { file->path, "--version", NULL };
+    if (zcl_spawn_capture(argv, version, sizeof(version), 10000) != 0 ||
+        !version[0])
+        return false;
+    version[strcspn(version, "\r\n")] = '\0';
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    static const char domain[] = "zcl.toolchain.assembler_identity.v1";
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    build_hash_text(&sha, version);
     sha3_256_finalize(&sha, out);
     return true;
 }
@@ -308,60 +286,72 @@ static bool build_toolchain_capture_uncached(
     memset(out, 0, sizeof(*out));
     memset(files, 0,
            sizeof(struct build_toolchain_file) * BUILD_TOOLCHAIN_FILE_COUNT);
-    size_t file_count = 0;
-    char driver[4096];
-    if (!build_resolve_file(VCS_BUILD_COMPILER_V1, driver, NULL) ||
-        strlen(driver) >= sizeof(files[file_count].path))
+
+    struct platform_toolchain_descriptor desc;
+    if (!platform_toolchain_capture_descriptor(
+            build_toolchain_query, NULL, &desc))
         return false;
-    (void)snprintf(files[file_count].path, sizeof(files[file_count].path),
-                   "%s", driver);
-    if (!build_sha3_file(driver, out->compiler_driver_sha3,
+
+    size_t file_count = 0;
+    if (!build_resolve_file(desc.compiler_driver, files[file_count].path,
+                            &files[file_count].stamp) ||
+        !build_sha3_file(files[file_count].path, out->compiler_driver_sha3,
                          &files[file_count].stamp))
         return false;
     file_count++;
-    if (!build_gcc_file("-print-prog-name=cc1", NULL,
-                        out->compiler_backend_sha3, &files[file_count++]) ||
-        !build_assembler_identity(out->assembler_sha3, &files[file_count++]))
+
+    if (!build_resolve_file(desc.compiler_backend, files[file_count].path,
+                            &files[file_count].stamp) ||
+        !build_sha3_file(files[file_count].path, out->compiler_backend_sha3,
+                         &files[file_count].stamp))
         return false;
-    static const char *const sysroot_args[] = {
-        "-print-file-name=crt1.o", "-print-file-name=crti.o",
-        "-print-file-name=crtn.o",
+    file_count++;
+
+    if (!build_assembler_identity(desc.assembler, out->assembler_sha3,
+                                  &files[file_count]))
+        return false;
+    file_count++;
+
+    static const char *const sysroot_labels[ZCL_TOOLCHAIN_SYSROOT_COUNT] = {
+        "sysroot0", "sysroot1", "sysroot2",
     };
-    if (!build_gcc_aggregate("zcl.toolchain.sysroot.v1", sysroot_args,
-                             NULL, 3, out->sysroot_sha3, files,
-                             &file_count))
+    if (!build_hash_aggregate("zcl.toolchain.sysroot.v1", sysroot_labels,
+                              ZCL_TOOLCHAIN_SYSROOT_COUNT,
+                              desc.sysroot_files,
+                              out->sysroot_sha3, files, &file_count))
         return false;
-    char machine[256], full_version[256], version[256];
-    static const char dump_full_version_arg[] = "-dumpfullversion";
-    if (!build_gcc_query("-dumpmachine", machine, sizeof(machine)) ||
-        !build_gcc_query(dump_full_version_arg, full_version,
-                         sizeof(full_version)) ||
-        !build_gcc_query("-dumpversion", version, sizeof(version)))
-        return false;
+
     struct sha3_256_ctx probes;
     sha3_256_init(&probes);
     static const char probe_domain[] = "zcl.toolchain.target_probes.v1";
     sha3_256_write(&probes, (const uint8_t *)probe_domain,
                    sizeof(probe_domain));
-    build_hash_text(&probes, machine);
-    build_hash_text(&probes, full_version);
-    build_hash_text(&probes, version);
-    build_hash_text(&probes, VCS_BUILD_TARGET_V1);
+    build_hash_text(&probes, desc.host_triple);
+    build_hash_text(&probes, desc.full_version);
+    build_hash_text(&probes, desc.short_version);
+    build_hash_text(&probes, desc.target);
+    if (desc.platform_contract[0] != '\0') {
+        static const char contract_label[] = "platform-contract";
+        build_hash_text(&probes, contract_label);
+        build_hash_text(&probes, desc.platform_contract);
+    }
     sha3_256_finalize(&probes, out->target_probes_sha3);
-    static const char *const abi_args[] = {
-        "-print-libgcc-file-name", "-print-file-name=crtbegin.o",
-        "-print-file-name=libc.so.6",
+
+    static const char *const abi_labels[ZCL_TOOLCHAIN_ABI_COUNT] = {
+        "abi0", "abi1", "abi2",
     };
-    if (!build_gcc_aggregate("zcl.toolchain.abi_files.v1", abi_args, NULL, 3,
-                             out->abi_files_sha3, files, &file_count) ||
+    if (!build_hash_aggregate("zcl.toolchain.abi_files.v1", abi_labels,
+                              ZCL_TOOLCHAIN_ABI_COUNT,
+                              desc.abi_files,
+                              out->abi_files_sha3, files, &file_count) ||
         file_count != BUILD_TOOLCHAIN_FILE_COUNT)
         return false;
-    (void)snprintf(out->target, sizeof(out->target), "%s",
-                   VCS_BUILD_TARGET_V1);
+
+    (void)snprintf(out->target, sizeof(out->target), "%s", desc.target);
     return true;
 }
 
-bool vcs_toolchain_capsule_v1_capture_gcc(
+bool vcs_toolchain_capsule_v1_capture(
     struct vcs_toolchain_capsule_v1 *out)
 {
     if (!out) return false;
@@ -414,16 +404,24 @@ void vcs_toolchain_capsule_v1_cache_stats_for_test(
 void vcs_build_action_v1_fixed_flags_root(uint8_t out[32])
 {
     static const char domain[] = "zcl.build_action.fixed_flags.v1";
-    static const char *const values[] = {
-        VCS_BUILD_COMPILER_V1, "-x", "cpp-output", "-std=c23", "-O2",
-        "-march=x86-64-v3", "-fno-ident", "-c", "/zbuild/src/unit.i",
-        "-o", "/zbuild/out/unit.o",
-    };
+    char arch_flag[64];
+    if (!platform_toolchain_architecture_flag(arch_flag, sizeof(arch_flag)))
+        arch_flag[0] = '\0';
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++)
-        build_hash_text(&sha, values[i]);
+    build_hash_text(&sha, VCS_BUILD_COMPILER_V1);
+    build_hash_text(&sha, "-x");
+    build_hash_text(&sha, "cpp-output");
+    build_hash_text(&sha, "-std=c23");
+    build_hash_text(&sha, "-O2");
+    if (arch_flag[0])
+        build_hash_text(&sha, arch_flag);
+    build_hash_text(&sha, "-fno-ident");
+    build_hash_text(&sha, "-c");
+    build_hash_text(&sha, "/zbuild/src/unit.i");
+    build_hash_text(&sha, "-o");
+    build_hash_text(&sha, "/zbuild/out/unit.o");
     sha3_256_finalize(&sha, out);
 }
 

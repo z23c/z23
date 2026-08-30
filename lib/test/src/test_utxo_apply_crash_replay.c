@@ -63,9 +63,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define UCR_BLOCKS      240
 #define UCR_KILL_CYCLES 10
@@ -614,3 +617,12 @@ int test_utxo_apply_crash_replay(void)
            failures ? "FAILED" : "PASSED");
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork+SIGKILL UTXO-apply crash-replay lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_utxo_apply_crash_replay(void)
+{
+    printf("utxo_apply_crash_replay: SKIP (Windows): fork+SIGKILL UTXO-apply crash-replay lane\n");
+    return 0;
+}
+#endif

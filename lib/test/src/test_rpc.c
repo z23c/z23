@@ -13,14 +13,13 @@
 #include "rpc/client.h"
 #include "rpc/httpserver.h"
 #include "rpc/legacy_rpc_client.h"
+#include "services/legacy_balance_observer.h"
 #include "util/ere_match.h"
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include "platform/socket_compat.h"
 #include <unistd.h>
 
 /* Every on-disk and on-network resource this group touches must be unique to
@@ -36,20 +35,23 @@ static void rpc_test_tmpdir(char *buf, size_t n, const char *tag)
 /* Ask the kernel for a free loopback port, then release it. */
 static uint16_t rpc_test_free_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return 0;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(0);
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 
@@ -120,8 +122,108 @@ static bool rpc_test_cli_print_case(const char *body, bool want_ok,
     return ok;
 }
 
+static uint32_t balance_observer_seen_timeout;
+static bool balance_observer_call_seen;
+
+static bool balance_observer_fake_call(const char *body_json,
+                                       uint32_t timeout_ms,
+                                       char **out_resp,
+                                       char *err, size_t err_sz)
+{
+    static const char response[] =
+        "HTTP/1.1 200 OK\r\n\r\n"
+        "{\"result\":{\"transparent\":\"0.00999662\","
+        "\"private\":\"0.01970000\",\"total\":\"0.02969662\"},"
+        "\"error\":null,\"id\":\"z23-holdings\"}";
+    balance_observer_call_seen = body_json &&
+        strstr(body_json, "\"method\":\"z_gettotalbalance\"") != NULL;
+    balance_observer_seen_timeout = timeout_ms;
+    *out_resp = strdup(response);
+    if (!*out_resp && err && err_sz)
+        (void)snprintf(err, err_sz, "fixture allocation failed");
+    return *out_resp != NULL;
+}
+
 int test_rpc(void) {
     int failures = 0;
+
+    printf("legacy balance observer exact decimals... ");
+    {
+        static const char raw[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"0.00999662\","
+            "\"private\":\"0.01970000\",\"total\":\"0.02969662\"},"
+            "\"error\":null}";
+        struct legacy_balance_observation observed;
+        struct zcl_result r = legacy_balance_observation_parse(raw, &observed);
+        bool ok = r.ok && observed.complete &&
+            observed.source == LEGACY_BALANCE_SOURCE_ZCLASSICD &&
+            observed.transparent_zat == 999662 &&
+            observed.shielded_zat == 1970000 &&
+            observed.total_zat == 2969662;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("legacy balance observer rejects imprecise or inconsistent data... ");
+    {
+        static const char imprecise[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"0.000000001\","
+            "\"private\":\"0\",\"total\":\"0.000000001\"},"
+            "\"error\":null}";
+        static const char inconsistent[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"1.00000000\","
+            "\"private\":\"2.00000000\",\"total\":\"4.00000000\"},"
+            "\"error\":null}";
+        static const char overflow[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"92233720369\","
+            "\"private\":\"0\",\"total\":\"92233720369\"},"
+            "\"error\":null}";
+        static const char rpc_error[] =
+            "HTTP/1.1 500 Error\r\n\r\n"
+            "{\"result\":null,\"error\":{\"code\":-1,"
+            "\"message\":\"wallet unavailable\"}}";
+        struct legacy_balance_observation observed;
+        struct zcl_result a = legacy_balance_observation_parse(
+            imprecise, &observed);
+        struct zcl_result b = legacy_balance_observation_parse(
+            inconsistent, &observed);
+        struct zcl_result c = legacy_balance_observation_parse(
+            overflow, &observed);
+        struct zcl_result d = legacy_balance_observation_parse(
+            rpc_error, &observed);
+        struct zcl_result e = legacy_balance_observation_parse(
+            "HTTP/1.1 200 OK\r\n\r\n{", &observed);
+        struct zcl_result f = legacy_balance_observation_parse(NULL,
+                                                               &observed);
+        bool ok = !a.ok && !b.ok && !c.ok && !d.ok && !e.ok && !f.ok &&
+            !observed.complete;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("legacy balance observer enforces 250 ms transport budget... ");
+    {
+        struct legacy_balance_observation observed;
+        balance_observer_call_seen = false;
+        balance_observer_seen_timeout = 0;
+        struct zcl_result r = legacy_balance_observe_with_call(
+            balance_observer_fake_call,
+            LEGACY_BALANCE_OBSERVER_TIMEOUT_MS, &observed);
+        bool ok = r.ok && observed.complete && balance_observer_call_seen &&
+            balance_observer_seen_timeout == 250u &&
+            observed.observed_at_unix > 0;
+        balance_observer_call_seen = false;
+        struct zcl_result refused = legacy_balance_observe_with_call(
+            balance_observer_fake_call, 251u, &observed);
+        ok = ok && !refused.ok && !balance_observer_call_seen;
+        legacy_balance_observer_set_test_call(balance_observer_fake_call);
+        struct zcl_result hooked = legacy_balance_observe(&observed);
+        legacy_balance_observer_set_test_call(NULL);
+        ok = ok && hooked.ok && observed.complete;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
 
     printf("json null/bool/int/str... ");
     {
@@ -544,6 +646,24 @@ int test_rpc(void) {
                                                          errbuf,
                                                          sizeof(errbuf));
         ok = ok && strstr(errbuf, "bad item") != NULL;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("legacy_rpc bounded timeout rejects unsafe budgets... ");
+    {
+        char sentinel = '\0';
+        char *resp = &sentinel;
+        char errbuf[64] = {0};
+        bool ok = !legacy_rpc_call_with_timeout(
+            "127.0.0.1", 1, "u", "p", "{}", 0, &resp,
+            errbuf, sizeof(errbuf));
+        ok = ok && resp == NULL && strcmp(errbuf, "bad args") == 0;
+        resp = &sentinel;
+        errbuf[0] = '\0';
+        ok = ok && !legacy_rpc_call_with_timeout(
+            "127.0.0.1", 1, "u", "p", "{}", 60001, &resp,
+            errbuf, sizeof(errbuf));
+        ok = ok && resp == NULL && strcmp(errbuf, "bad args") == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -1594,16 +1714,18 @@ int test_rpc(void) {
                     if (ok) {
                         SSL_CTX *cctx = SSL_CTX_new(TLS_client_method());
                         if (cctx) {
-                            int sock = socket(AF_INET, SOCK_STREAM, 0);
+                            platform_socket_t sock = platform_socket_open(
+                                AF_INET, SOCK_STREAM, 0, true, false);
                             struct sockaddr_in sa;
                             memset(&sa, 0, sizeof(sa));
                             sa.sin_family = AF_INET;
                             sa.sin_port = htons(tls_port);
                             sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                            if (connect(sock, (struct sockaddr *)&sa,
-                                        sizeof(sa)) == 0) {
+                            if (platform_socket_connect(
+                                    sock, (struct sockaddr *)&sa,
+                                    sizeof(sa)) == 0) {
                                 SSL *ssl = SSL_new(cctx);
-                                SSL_set_fd(ssl, sock);
+                                SSL_set_fd(ssl, (int)(intptr_t)sock);
                                 if (SSL_connect(ssl) == 1) {
                                     /* Send a minimal JSON-RPC request */
                                     const char *req =
@@ -1633,7 +1755,7 @@ int test_rpc(void) {
                                 SSL_shutdown(ssl);
                                 SSL_free(ssl);
                             }
-                            close(sock);
+                            platform_socket_close(sock);
                             SSL_CTX_free(cctx);
                         }
                     }

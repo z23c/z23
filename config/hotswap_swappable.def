@@ -82,11 +82,12 @@ HOTSWAP_SWAPPABLE("app/controllers/src/app_native_handlers.c",
  * request composition only and is qualified with a fixed one-row log case. */
 HOTSWAP_SWAPPABLE("app/controllers/src/diagnostics_native_handlers.c",
                   "ops.logs core.storage.query")
-/* Read-only operator rollup dashboards. Four leaves forward a no-argument
- * read-only node RPC verbatim; selfheal renders a counter snapshot. Every body
- * is defined in this same TU, so a swap genuinely recompiles all five. */
+/* Read-only health and operator rollup dashboards. Four leaves forward a
+ * no-argument read-only node RPC, one projects its summary, and selfheal
+ * renders a counter snapshot. Every body is defined in this same TU, so a
+ * swap genuinely recompiles all six. */
 HOTSWAP_SWAPPABLE("app/controllers/src/ops_native_handlers.c",
-                  "ops.debug.dash.snapshot ops.debug.dash.summary ops.debug.dash.milestone ops.debug.dash.mirror ops.debug.dash.selfheal")
+                  "ops.health ops.debug.dash.snapshot ops.debug.dash.summary ops.debug.dash.milestone ops.debug.dash.mirror ops.debug.dash.selfheal")
 /* Project-neutral App/Metaverse property projection. The owner has no state;
  * its pure service/view/codec/adapter closure is one reloadable island. */
 HOTSWAP_SWAPPABLE("app/controllers/src/metaverse_controller.c",

@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Explorer controller unit tests — routing, edge cases, factoids. */
 
+#include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
 #include "test/test_core.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/explorer_internal.h"
@@ -20,6 +22,15 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+static int ex_environment_unset(const char *name)
+{
+#if defined(_WIN32)
+    return platform_environment_set(name, "", 1);
+#else
+    return unsetenv(name);
+#endif
+}
 
 /* Build "<cwd>/.zcl_test_explorer_<stem>_<pid>" — an ABSOLUTE fixture
  * datadir. Cases whose subject only reads from the datadir spell it
@@ -180,7 +191,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_hodl_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -284,7 +295,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_hodl_sparse_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -343,7 +354,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_hodl_latest_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -419,7 +430,7 @@ int test_explorer(void)
          * directory"). A relative datadir means the cache file is never
          * written and the cache assertion below can never pass. */
         ex_abs_dbdir(dbdir, sizeof(dbdir), "hodl_cache");
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         snprintf(cachepath, sizeof(cachepath),
                  "%s/explorer/hodl-current-v1.cache", dbdir);
@@ -528,7 +539,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_factoids_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -705,7 +716,7 @@ int test_explorer(void)
         uint8_t css_resp[20000];
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_css_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         explorer_set_state(NULL, NULL, NULL, NULL, dbdir);
         snprintf(csspath, sizeof(csspath), "%s/explorer/style.css", dbdir);
         FILE *f = fopen(csspath, "w");
@@ -714,8 +725,8 @@ int test_explorer(void)
             ok = fputs("body{background:#badbad}.stale-css-marker{}", f) >= 0;
             fclose(f);
         }
-        unsetenv("ZCL_EXPLORER_CSS_FILE");
-        unsetenv("ZCL_EXPLORER_CSS_LIVE");
+        ex_environment_unset("ZCL_EXPLORER_CSS_FILE");
+        ex_environment_unset("ZCL_EXPLORER_CSS_LIVE");
         size_t n = explorer_handle_request("GET", "/explorer/style.css",
                                             NULL, 0, css_resp,
                                             sizeof(css_resp) - 1);

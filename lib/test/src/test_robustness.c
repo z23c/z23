@@ -15,9 +15,7 @@
 #include "net/net.h"
 #include "rpc/httpserver.h"
 #include "util/template.h"
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include "platform/socket_compat.h"
 #include <unistd.h>
 #include "util/safe_alloc.h"
 #include "event/event.h"
@@ -43,8 +41,9 @@ static void cleanup_robustness_datadir(void)
 static uint16_t reserve_test_port(void)
 {
     uint16_t port = 0;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return 0;
 
     struct sockaddr_in addr;
@@ -53,12 +52,14 @@ static uint16_t reserve_test_port(void)
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(0);
 
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 

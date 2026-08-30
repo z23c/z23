@@ -89,21 +89,24 @@ check-no-retired-agent-protocol check-scanner-immunity check-malloc
 check-hotswap-dev-only check-hotswap-eligible-scope check-hotswap-static-state
 check-hotswap-service-islands check-hotswap-swappable-shape check-stable-publish-contained check-raw-sqlite
 check-raw-malloc check-json-value-init check-blob-read-bounds check-byte-order-codec-single
+check-arm-symbol-single
 check-coins-lookup-nullcheck check-silent-errors-services
 check-silent-errors-controllers check-silent-errors-jobs
 check-silent-errors-conditions check-silent-errors-bool
 check-log-macro-return-type check-no-runtime-abort check-wallet-raw-prepare-log
 check-before-save-hooks check-pthread-create check-model-validation
-check-model-ar-lifecycle check-long-functions check-rpc-registrar
+check-model-ar-lifecycle check-model-sql-literals check-persona-resolves
+check-long-functions check-rpc-registrar
 check-lag-slo-observable check-lib-layering check-shape-include-direction
 check-accel-oracle-pinned check-domain-purity check-core-include-boundary check-supervisor-registration
 check-test-registration check-typed-blocker check-blocker-escape-registered
 check-blocker-remedy check-blocker-handoff-declared
 check-supervisor-progress-declared check-framework-shape
 check-framework-filename-suffix check-no-raw-clock-outside-platform
-check-sysinit-ordering check-sandbox-wired check-no-shellouts
+check-sysinit-ordering check-sandbox-wired check-no-shellouts check-no-api-keys
 check-no-writer-below-sealed-frontier check-peer-floor-single-source
 check-proc-self-shim check-no-raw-sqlite-in-controllers check-supervisor-domain
+check-model-column-drift
 check-thread-supervision check-file-purpose check-group-purpose
 check-no-orphan-placement check-file-size-ceiling check-operator-needed-sink
 check-condition-cooldown check-doc-accuracy check-doc-counts
@@ -128,6 +131,8 @@ check-c23-only
 check-no-python
 check-no-trust-state-ordering check-no-gnu-va-args check-no-warning-suppression
 check-result-discard
+check-published-platforms
+check-platform-header-guards
 "
 
 # Why each never-cached gate can never be cached. A reason is MANDATORY —
@@ -143,18 +148,28 @@ lint_cache_never_reason() {
             echo "invokes clang/gcc over ~1174 translation units; skips or fails on the installed clang major version" ;;
         check-windows-platform-seam)
             echo "invokes x86_64-w64-mingw32-gcc over the platform seam; reports UNOBSERVED (not a pass) when mingw is absent from the box" ;;
+        check-windows-cross-syntax)
+            echo "invokes x86_64-w64-mingw32-gcc -fsyntax-only over every _WIN32 translation unit; reports SKIP (not a pass) when mingw is absent from the box" ;;
+        check-macos-acceptance)
+            echo "reports UNOBSERVED (not a pass) for the native darwin-arm64 leg, so its verdict names the HOST as well as the tree; caching it would carry one box's UNOBSERVED onto a box that could have closed it" ;;
         check-api-reference-generated)
             echo "compiles and runs a C generator with cc" ;;
         check-describe-budget)
             echo "compiles and links the real command registry with cc, twice (once against a padded catalog for its selftest)" ;;
         check-lib-module-order)
             echo "reads the link graph out of build/obj via nm" ;;
+        check-capability-closure)
+            echo "picks the newest build/dev-obj epoch by mtime and reads its undefined-symbol closure via nm — depends on build/ state no tree hash covers" ;;
         check-release-no-dev-symbols)
             echo "runs 'nm -D' over build/bin/zclassic23" ;;
         check-doc-no-false-deleted)
             echo "reads the byte size of build/bin/zclassic23" ;;
         check-observability-pairing)
             echo "runs a built binary that scans git history via merge-base/diff" ;;
+        check-determinism-ratchet)
+            echo "reads git history (the baseline as of the merge-base with origin/main) and the built determinism_scan, so its verdict depends on state no tree hash covers" ;;
+        check-cookbook)
+            echo "runs the built z23-dev binary and executes each recipe against it, so its verdict depends on a binary no tree hash covers" ;;
         check-core-seal)
             echo "runs the built core_seal binary and reads the untracked .core-unseal-token; core/ is byte-sealed" ;;
         check-git-hooks-installed)

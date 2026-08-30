@@ -14,6 +14,7 @@
 #include "models/vault_intent.h"
 #include "models/wallet_identity.h"
 #include "net/file_market.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "primitives/transaction.h"
 #include "sapling/fr.h"
@@ -472,7 +473,8 @@ int file_market_purchase_tests(void)
 
     char absolute_dir[MARKET_DOWNLOAD_PATH_MAX];
     char destination[MARKET_DOWNLOAD_PATH_MAX];
-    bool destination_ready = realpath(dir, absolute_dir) != NULL;
+    bool destination_ready = platform_directory_canonical_real(
+        dir, absolute_dir, sizeof(absolute_dir));
     snprintf(destination, sizeof(destination), "%s/purchased.bin",
              destination_ready ? absolute_dir : "");
     struct market_purchase_view downloaded;

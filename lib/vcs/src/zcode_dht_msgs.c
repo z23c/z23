@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_dht_msgs.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "support/cleanse.h"
@@ -11,14 +12,6 @@
 
 static const uint8_t msgs_magic[8] =
     {'Z','C','D','H','T','M',0x0D,0x0A};
-
-static bool nonzero(const uint8_t *p, size_t n)
-{
-    uint8_t any = 0;
-    if (!p) return false;
-    for (size_t i = 0; i < n; i++) any |= p[i];
-    return any != 0;
-}
 
 static size_t write_header(uint8_t *wire, enum vcs_zcode_dht_msg_kind kind)
 {
@@ -33,8 +26,8 @@ static enum vcs_zcode_dht_error write_auth(
     const uint8_t sender[32], const uint8_t query[16],
     const struct vcs_zcode_dht_delegation *delegation)
 {
-    if (!generation || !nonzero(sender, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
-    if (!nonzero(query, 16)) return VCS_ZCODE_DHT_ERR_QUERY_ID;
+    if (!generation || !zcl_bytes_any_set(sender, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
+    if (!zcl_bytes_any_set(query, 16)) return VCS_ZCODE_DHT_ERR_QUERY_ID;
     zcl_write_u64_le(wire + *off, generation); *off += 8;
     memcpy(wire + *off, sender, 32); *off += 32;
     memcpy(wire + *off, query, 16); *off += 16;
@@ -53,7 +46,7 @@ static enum vcs_zcode_dht_error sign_frame(
     const uint8_t online_seed[32],
     const struct vcs_zcode_dht_delegation *delegation)
 {
-    if (!nonzero(transcript, 32) || !online_seed)
+    if (!zcl_bytes_any_set(transcript, 32) || !online_seed)
         return VCS_ZCODE_DHT_ERR_SESSION;
     uint8_t pub[32], secret[32];
     ed25519_keypair(pub, secret, online_seed);
@@ -84,7 +77,7 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_find_node(
     *len_out = 0;
     if (!m || !wire || !transcript || !online_seed)
         return VCS_ZCODE_DHT_ERR_NULL;
-    if (!nonzero(m->target_node_id, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
+    if (!zcl_bytes_any_set(m->target_node_id, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
     if (cap < VCS_ZCODE_DHT_FIND_NODE_WIRE_BYTES)
         return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
     size_t off = write_header(wire, VCS_ZCODE_DHT_MSG_FIND_NODE);
@@ -111,7 +104,7 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_nodes(
         return VCS_ZCODE_DHT_ERR_NULL;
     if (m->contact_count > VCS_ZCODE_DHT_K) return VCS_ZCODE_DHT_ERR_LIMIT;
     for (uint32_t i = 0; i < m->contact_count; i++) {
-        if (!nonzero(m->node_ids[i], 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
+        if (!zcl_bytes_any_set(m->node_ids[i], 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
         if (i && memcmp(m->node_ids[i - 1], m->node_ids[i], 32) >= 0)
             return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
     }
@@ -148,7 +141,7 @@ static bool selector_valid(const struct vcs_zcode_dht_record_selector *s)
 {
     if (!s || s->kind < VCS_ZCODE_DHT_RECORD_PROVIDER ||
         s->kind > VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK ||
-        !nonzero(s->root, 32))
+        !zcl_bytes_any_set(s->root, 32))
         return false;
     size_t length = selector_length(s->namespace_name);
     if (!length || length > VCS_ZCODE_DHT_RECORD_NAMESPACE_MAX)
@@ -326,7 +319,7 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_serialize_store_result(
         return VCS_ZCODE_DHT_ERR_NULL;
     if (m->status < VCS_ZCODE_DHT_STORE_STORED ||
         m->status > VCS_ZCODE_DHT_STORE_REJECTED ||
-        !nonzero(m->record_digest, 32)) return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+        !zcl_bytes_any_set(m->record_digest, 32)) return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
     if (cap < VCS_ZCODE_DHT_STORE_RESULT_WIRE_BYTES)
         return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
     size_t off = write_header(wire, VCS_ZCODE_DHT_MSG_STORE_RESULT);
@@ -370,13 +363,13 @@ static enum vcs_zcode_dht_error read_auth(
     *generation = zcl_read_u64_le(wire + *off); *off += 8;
     memcpy(sender, wire + *off, 32); *off += 32;
     memcpy(query, wire + *off, 16); *off += 16;
-    if (!*generation || !nonzero(sender, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
-    if (!nonzero(query, 16)) return VCS_ZCODE_DHT_ERR_QUERY_ID;
+    if (!*generation || !zcl_bytes_any_set(sender, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
+    if (!zcl_bytes_any_set(query, 16)) return VCS_ZCODE_DHT_ERR_QUERY_ID;
     if (vcs_zcode_dht_delegation_decode(delegation, wire + *off,
             VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) !=
         VCS_ZCODE_DHT_DELEGATION_OK) return VCS_ZCODE_DHT_ERR_DELEGATION;
     *off += VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES;
-    if (!v->noise_established || !nonzero(v->noise_transcript_hash, 32))
+    if (!v->noise_established || !zcl_bytes_any_set(v->noise_transcript_hash, 32))
         return VCS_ZCODE_DHT_ERR_SESSION;
     if (vcs_zcode_dht_delegation_verify(
             delegation, v->network_genesis, v->remote_noise_static, 0, NULL,
@@ -538,13 +531,13 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_parse(
     if (*generation != v->session_generation) return VCS_ZCODE_DHT_ERR_SESSION;
     if (kind == VCS_ZCODE_DHT_MSG_FIND_NODE) {
         memcpy(dst->find_node.target_node_id, wire + off, 32); off += 32;
-        if (!nonzero(dst->find_node.target_node_id, 32))
+        if (!zcl_bytes_any_set(dst->find_node.target_node_id, 32))
             return VCS_ZCODE_DHT_ERR_ID_ZERO;
     } else if (kind == VCS_ZCODE_DHT_MSG_NODES) {
         off++;
         for (uint32_t i = 0; i < count; i++) {
             memcpy(dst->nodes.node_ids[i], wire + off, 32); off += 32;
-            if (!nonzero(dst->nodes.node_ids[i], 32))
+            if (!zcl_bytes_any_set(dst->nodes.node_ids[i], 32))
                 return VCS_ZCODE_DHT_ERR_ID_ZERO;
             if (i && memcmp(dst->nodes.node_ids[i - 1],
                             dst->nodes.node_ids[i], 32) >= 0)
@@ -620,7 +613,7 @@ enum vcs_zcode_dht_error vcs_zcode_dht_msg_parse(
         uint8_t status = wire[off++];
         if (status < VCS_ZCODE_DHT_STORE_STORED ||
             status > VCS_ZCODE_DHT_STORE_REJECTED ||
-            !nonzero(wire + off, 32))
+            !zcl_bytes_any_set(wire + off, 32))
             return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
         dst->store_result.status = (enum vcs_zcode_dht_store_status)status;
         memcpy(dst->store_result.record_digest, wire + off, 32); off += 32;

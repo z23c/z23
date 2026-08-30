@@ -21,16 +21,13 @@
 #include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "json/json.h"
+#include "platform/socket_compat.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -71,7 +68,7 @@ static int64_t hp_dump_int(const char *key)
  * (deserialize fails). */
 
 struct hp_mock {
-    int listen_fd;
+    platform_socket_t listen_fd;
     int port;
     int remote_tip;             /* canned getblockcount value */
     bool malformed_header;      /* true → return non-deserializable hex */
@@ -108,9 +105,11 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
     struct hp_mock *m = arg;
     while (!atomic_load(&m->stop)) {
         struct sockaddr_in cli;
-        socklen_t cl = sizeof(cli);
-        int cfd = accept(m->listen_fd, (struct sockaddr *)&cli, &cl);
-        if (cfd < 0) break;
+        size_t cl = sizeof(cli);
+        platform_socket_t cfd = platform_socket_accept(m->listen_fd,
+                                                       (struct sockaddr *)&cli,
+                                                       &cl);
+        if (cfd == PLATFORM_SOCKET_INVALID) break;
 
         /* buf MUST start terminated. Every branch below reaches for
          * strstr(buf, ...), and the read loop can legitimately exit with
@@ -125,10 +124,10 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
         /* Matches LRC_TIMEOUT_SECS in lib/rpc/src/legacy_rpc_client.c: the
          * client gives up at 5s, so a shorter ceiling here can only ever make
          * this mock the one that fails first under contention. */
-        struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        (void)platform_socket_set_receive_timeout(cfd, 5000);
         for (;;) {
-            ssize_t n = recv(cfd, buf + got, sizeof(buf) - 1 - got, 0);
+            int n = platform_socket_receive(cfd, buf + got,
+                                            sizeof(buf) - 1 - got);
             if (n <= 0) break;
             got += (size_t)n;
             buf[got] = '\0';
@@ -139,7 +138,7 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
         }
         if (got == 0) {
             /* Nothing arrived — answering would be answering noise. */
-            close(cfd);
+            platform_socket_close(cfd);
             continue;
         }
 
@@ -222,9 +221,9 @@ static void *hp_mock_loop(void *arg)  /* raw-pthread-ok: test-local */
             "Content-Length: %d\r\n"
             "Connection: close\r\n"
             "\r\n", bl);
-        (void)send(cfd, hdr, (size_t)hl, 0);
-        (void)send(cfd, body, (size_t)bl, 0);
-        close(cfd);
+        (void)platform_socket_send_all(cfd, hdr, (size_t)hl);
+        (void)platform_socket_send_all(cfd, body, (size_t)bl);
+        platform_socket_close(cfd);
         /* Don't fetch_add here — getblockhash branch already does so
          * for its sequence counter. Counting "requests_served" exactly
          * isn't load-bearing for the asserts. */
@@ -238,32 +237,33 @@ static bool hp_mock_start(struct hp_mock *m, int remote_tip,
     memset(m, 0, sizeof(*m));
     m->remote_tip = remote_tip;
     m->malformed_header = malformed;
-    m->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (m->listen_fd < 0) return false;
-    int one = 1;
-    setsockopt(m->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    m->listen_fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (m->listen_fd == PLATFORM_SOCKET_INVALID) return false;
+    (void)platform_socket_set_reuse_address(m->listen_fd, true);
 
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = 0;
-    if (bind(m->listen_fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        close(m->listen_fd);
+    if (platform_socket_bind(m->listen_fd, (struct sockaddr *)&sa,
+                             sizeof(sa)) != 0) {
+        platform_socket_close(m->listen_fd);
         return false;
     }
-    socklen_t sl = sizeof(sa);
-    if (getsockname(m->listen_fd, (struct sockaddr *)&sa, &sl) < 0) {
-        close(m->listen_fd);
+    size_t sl = sizeof(sa);
+    if (platform_socket_local_address(m->listen_fd, (struct sockaddr *)&sa,
+                                      &sl) != 0) {
+        platform_socket_close(m->listen_fd);
         return false;
     }
     m->port = ntohs(sa.sin_port);
-    if (listen(m->listen_fd, 16) < 0) {
-        close(m->listen_fd);
+    if (platform_socket_listen(m->listen_fd, 16) != 0) {
+        platform_socket_close(m->listen_fd);
         return false;
     }
     /* raw-pthread-ok: short-burst-joined-immediately */
     if (pthread_create(&m->thread, NULL, hp_mock_loop, m) != 0) {
-        close(m->listen_fd);
+        platform_socket_close(m->listen_fd);
         return false;
     }
     return true;
@@ -272,10 +272,10 @@ static bool hp_mock_start(struct hp_mock *m, int remote_tip,
 static void hp_mock_stop(struct hp_mock *m)
 {
     atomic_store(&m->stop, true);
-    if (m->listen_fd >= 0) {
-        shutdown(m->listen_fd, SHUT_RDWR);
-        close(m->listen_fd);
-        m->listen_fd = -1;
+    if (m->listen_fd != PLATFORM_SOCKET_INVALID) {
+        (void)platform_socket_shutdown_both(m->listen_fd);
+        platform_socket_close(m->listen_fd);
+        m->listen_fd = PLATFORM_SOCKET_INVALID;
     }
     pthread_join(m->thread, NULL);
 }

@@ -6,6 +6,7 @@
 #endif
 #include "devloop.h"
 
+#include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
@@ -45,13 +46,30 @@
 /* Keep the protocol implementation below platform-neutral without pretending
  * that Win32 handles are POSIX descriptors.  These bounded, process-local
  * indices retain the audited directory/file/lock capabilities and map the
- * small *at-style vocabulary used by this module onto them. */
+ * small *at-style vocabulary used by this module onto them.
+ *
+ * In the test-fast profile test/windows_compat.h is force-included ahead of
+ * this block, so ssize_t, struct stat, the S_IS macros, and the O_* stubs
+ * may already exist: guard the type definitions and take the module's own
+ * protocol values back with #undef where the compat header parked them at 0. */
+#if !defined(_SSIZE_T_DEFINED)
 typedef int64_t ssize_t;
+#endif
+#if !defined(_INC_STAT)
 struct stat { off_t st_size; unsigned st_mode, st_uid, st_nlink; };
+#define S_ISDIR(mode) (((mode) & 0170000u) == 0040000u)
+#define S_ISREG(mode) (((mode) & 0170000u) == 0100000u)
+#endif
 #define WS_MODE_DIR 0040000u
 #define WS_MODE_REG 0100000u
-#define S_ISDIR(mode) (((mode) & 0170000u) == WS_MODE_DIR)
-#define S_ISREG(mode) (((mode) & 0170000u) == WS_MODE_REG)
+#undef O_RDONLY
+#undef O_WRONLY
+#undef O_RDWR
+#undef O_CREAT
+#undef O_EXCL
+#undef O_DIRECTORY
+#undef O_CLOEXEC
+#undef O_NOFOLLOW
 #define O_RDONLY 0x0001
 #define O_WRONLY 0x0002
 #define O_RDWR 0x0004
@@ -368,14 +386,9 @@ static void hash_field(struct sha3_256_ctx *ctx, const char *name,
 
 static void digest_hex(struct sha3_256_ctx *ctx, char out[65])
 {
-    static const char digits[] = "0123456789abcdef";
     unsigned char digest[32];
     sha3_256_finalize(ctx, digest);
-    for (size_t i = 0; i < sizeof(digest); i++) {
-        out[2 * i] = digits[digest[i] >> 4];
-        out[2 * i + 1] = digits[digest[i] & 15];
-    }
-    out[64] = 0;
+    zcl_hex_encode(digest, sizeof(digest), out);
 }
 
 static bool valid_hex64(const char *value)

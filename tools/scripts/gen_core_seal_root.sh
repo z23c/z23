@@ -27,10 +27,23 @@ OUT="lib/hotswap/include/hotswap/core_seal_root.h"
 . "$ROOT_DIR/tools/scripts/source_identity_lib.sh"
 
 if [ "${1:-}" = "--selftest" ]; then
+    # `! cmd` is EXEMPT from set -e — bash does not exit for a command "whose
+    # return value is being inverted with !", and the ERR trap is exempt for
+    # the same reason. All three negative controls below used to be written
+    # that way, so this selftest printed PASS whatever zcl_is_sha256 said
+    # about a non-hex, a short, or an uppercase digest. refute() exits for
+    # itself and names the assertion that was violated.
+    refute() {
+        if "$@"; then
+            printf 'core_seal_root: selftest FAILED — expected non-zero from: %s\n' \
+                "$*" >&2
+            exit 1
+        fi
+    }
     zcl_is_sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    ! zcl_is_sha256 "aaaaaaaaZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
-    ! zcl_is_sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    ! zcl_is_sha256 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    refute zcl_is_sha256 "aaaaaaaaZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+    refute zcl_is_sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    refute zcl_is_sha256 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     echo "core_seal_root: selftest PASS — exact 64-character lowercase hex validation"
     exit 0
 fi

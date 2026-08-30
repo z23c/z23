@@ -427,7 +427,7 @@ static bool boot_zcode_work_refresh(struct boot_svc_ctx *svc, int64_t wall)
     }
     struct vcs_toolchain_capsule_v1 capsule;
     struct vcs_zcode_work_capability_v1 capability = {0};
-    if (!vcs_toolchain_capsule_v1_capture_gcc(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
         !vcs_toolchain_capsule_v1_root(
             &capsule, capability.toolchain_capsule_root))
         LOG_FAIL("net.zcode_swarm", "work toolchain capture failed");

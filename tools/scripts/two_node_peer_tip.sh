@@ -28,7 +28,8 @@
 #   - /tmp-only datadirs (mktemp -d under /tmp/zcl23-2node-*).
 #   - 39xxx isolation ports ONLY; every chosen port is checked against the
 #     live refuse-set AND ss(8)-LISTEN-probed before spawn.
-#   - Each node spawned under setsid → its OWN process group; cleanup
+#   - Each node spawned through the in-tree C23 process-group launcher → its
+#     OWN process group; cleanup
 #     kill -KILL's the whole GROUP (no orphan survives a harness crash).
 #   - EXIT/INT/TERM trap tears down BOTH groups + BOTH /tmp datadirs,
 #     re-asserting each datadir is under /tmp before rm -rf.
@@ -42,6 +43,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
+PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
 
 # ── Live-port refuse-set (verbatim from isolated_node_env.sh) ──────
 TN_LIVE_PORTS="8023 8033 8034 8035 8043 8044 8045 8046 8232 8443 \
@@ -78,8 +80,22 @@ tn_assert_not_live_port() {
 }
 tn_assert_port_free() {
     local p="$1"
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
-        tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+    # Linux iproute2 ss(8) is the preferred probe; macOS/BSD fall back to
+    # lsof(8) or netstat(8) so the harness runs on the first Mac dev host.
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+        fi
+    elif command -v lsof >/dev/null 2>&1; then
+        if lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | grep -q .; then
+            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -anv 2>/dev/null | grep -E "[.:]$p[[:space:]].*LISTEN" | grep -q .; then
+            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+        fi
+    else
+        tn_die "no port probe available (need ss, lsof, or netstat)"
     fi
     return 0
 }
@@ -105,6 +121,7 @@ tn_rm_datadir() {
     esac
 }
 tn_cleanup() {
+    local status="$?"
     [ "$TN_CLEANED" = "1" ] && return 0
     TN_CLEANED=1
     tn_kill_group "$TN_PGID_A"
@@ -112,8 +129,13 @@ tn_cleanup() {
     # Belt-and-suspenders: only ever matches our throwaway datadir strings.
     [ -n "$TN_DD_A" ] && pkill -KILL -f -- "-datadir=$TN_DD_A" 2>/dev/null || true
     [ -n "$TN_DD_B" ] && pkill -KILL -f -- "-datadir=$TN_DD_B" 2>/dev/null || true
-    tn_rm_datadir "$TN_DD_A"
-    tn_rm_datadir "$TN_DD_B"
+    if [ "$status" = "0" ]; then
+        tn_rm_datadir "$TN_DD_A"
+        tn_rm_datadir "$TN_DD_B"
+    else
+        echo "two-node-peer-tip: preserving failed fixtures: $TN_DD_A $TN_DD_B" >&2
+    fi
+    return "$status"
 }
 
 # ── RPC against a specific isolated node ───────────────────────────
@@ -137,7 +159,7 @@ tn_blockcount() {
 # $1=datadir $2=p2p $3=rpc $4=fs $5=https $6=connect-target
 tn_spawn() {
     local dd="$1" p2p="$2" rpc="$3" fs="$4" https="$5" conn="$6"
-    setsid "$NODE_BIN" \
+    "$PROCESS_GROUP_EXEC" "$NODE_BIN" \
         -datadir="$dd" -regtest \
         -port="$p2p" -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
         -connect="$conn" \
@@ -184,10 +206,13 @@ tn_wait_height() {
 }
 
 # ── Preflight + setup ──────────────────────────────────────────────
-command -v ss     >/dev/null 2>&1 || tn_die "ss(8) not found (need iproute2)"
+if ! command -v ss >/dev/null 2>&1 && ! command -v lsof >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
+    tn_die "ss(8), lsof(8), or netstat(8) not found (need one to probe listening ports)"
+fi
 command -v mktemp >/dev/null 2>&1 || tn_die "mktemp not found"
 [ -x "$NODE_BIN" ] || tn_die "$NODE_BIN not built — run make first"
 [ -x "$RPC_BIN" ]  || tn_die "$RPC_BIN not built — run make zcl-rpc"
+[ -x "$PROCESS_GROUP_EXEC" ] || tn_die "$PROCESS_GROUP_EXEC not built — run make process-group-exec"
 
 for p in "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" \
          "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "$DEAD_SINK"; do

@@ -214,6 +214,8 @@ ZCL_COMMAND_BRANCH("dev.change", "dev", "Classify and apply changes",
                    ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.loop", "dev", "Persistent save-to-verdict loop",
                    ZCL_COMMAND_LAYER_DEV)
+ZCL_COMMAND_BRANCH("dev.proof", "dev", "Exact local push-proof receipts",
+                   ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.test", "dev", "Focused proof selection",
                    ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.generation", "dev", "Generation provenance",
@@ -585,6 +587,65 @@ ZCL_COMMAND_DEV_COMMAND(
     "watcher shutdown requires the dev-only executor",
     "z23-dev dev loop stop")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.proof.ensure", "dev.proof", "",
+    "Ensure background proof for one exact commit and remote base",
+    "Returns immediately after reusing or scheduling local verification for "
+    "the exact commit/base pair. The worker binds source, mutation, changed "
+    "set, impact policy, toolchain, build graph, generated-output, compile, "
+    "lint and test receipts; it grants no deployment or remote authority.", 0,
+    "dev,proof,ensure,receipt,push,background",
+    "zcl.dev_proof_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base,mode", "",
+    "z23-dev dev proof ensure",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_dev_verify_change,
+    "background proof scheduling requires the dev binary",
+    "z23-dev dev proof status")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.proof.status", "dev.proof", "",
+    "Read exact commit/base proof status",
+    "Validates the immutable local receipt seal and its complete generated, "
+    "compile, lint and test accounting. Missing, stale, incomplete and "
+    "tampered receipts remain explicit non-passing states.", 0,
+    "dev,proof,status,receipt,push",
+    "zcl.dev_proof_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base", "",
+    "z23-dev dev proof status",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_verify_change,
+    "proof receipt status requires the dev binary",
+    "z23-dev dev proof status")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.proof.wait", "dev.proof", "",
+    "Wait for one exact commit/base receipt",
+    "Schedules the exact local proof when it is missing, then waits without "
+    "running a push gate. A timeout or failed proof returns a typed refusal "
+    "with the same exact commit/base identity.", ZCL_COMMAND_LIST_BUDGET,
+    "dev,proof,wait,receipt,push",
+    "zcl.dev_proof_wait_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base,timeout_ms", "",
+    "z23-dev dev proof wait",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_verify_change,
+    "proof receipt waiting requires the dev binary",
+    "z23-dev dev proof status")
+
 ZCL_COMMAND_READY_READ(
     "dev.test.plan", "dev.test", "", "Map changed files to mandatory proof groups",
     "A deterministic mapping of the given file list to mandatory proof "
@@ -805,3 +866,91 @@ ZCL_COMMAND_DEV_READ(
     zcl_native_handle_dev_diagnose_show,
     "durable failure artifacts are available through the dev binary",
     "z23-dev dev diagnose show <failure-id>")
+
+/* ── dev.agent ─────────────────────────────────────────────────────────────
+ * The checkout questions an agent asks most often, each of which was until
+ * now a shell recipe an agent had to remember and repeatedly got wrong:
+ *
+ *   "can this checkout ship?"      — build z23, build jsonq, read
+ *                                    ops telemetry network tor through jsonq,
+ *                                    compare to real_tor
+ *   "run this one test group"      — `make test_parallel ONLY=x` BUILDS and
+ *                                    runs nothing; the runner is
+ *                                    build/bin/test_parallel --only=x
+ *   "does that test notice this?"  — hand-rolled edit/rebuild/run/restore
+ *
+ * Each is a missing command, not a missing paragraph of documentation. These
+ * leaves are READY in the release binary on purpose: an agent has the plain
+ * `z23` it just built, and a compat leaf that redirects to a second binary is
+ * the dead end this branch exists to remove. */
+ZCL_COMMAND_BRANCH("dev.agent", "dev",
+                   "Checkout questions answered without composing shell",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.ready", "dev.agent", "dev.agent.shippable",
+    "Can this checkout link real Tor and produce a shippable candidate",
+    "Per-check verdict for THIS checkout, read at call time: the vendor "
+    "archives and sqlite3 amalgam a link needs, the vendor/tor submodule and "
+    "its four archives, and which Tor the answering binary actually linked "
+    "(the same weak-symbol fact network telemetry reports as tor_build). "
+    "shippable is true only when all of them hold. It builds nothing and "
+    "contacts no node; blocker and next_action name the exact command that "
+    "fixes the first failing check.", 8192,
+    "ready,ship,tor,worktree,prime,vendor,link,candidate",
+    "zcl.command.empty_input.v1", "zcl.agent_ready.v1", "", "",
+    "z23 dev agent ready",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_ready)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.test", "dev.agent", "dev.agent.group",
+    "Run one registered test group and report what actually RAN",
+    "Freshly executed verdict from build/bin/test_parallel with --no-cache, "
+    "parsed from the runner's own SUITE VERDICT line: groups_ran, "
+    "groups_failed, groups_gated, groups_cached, self_skips and "
+    "env_unobserved. ok is true only when at least one group EXECUTED and "
+    "none failed — a selector that matched nothing, a run served from cache, "
+    "and a red group each refuse with the command that fixes them. The group "
+    "name is resolved against the registered catalog before anything runs.",
+    8192,
+    "test,group,run,parallel,suite,verdict,ran,proof",
+    "zcl.agent_test_input.v1", "zcl.agent_test_run.v1",
+    "group,exact,timeout_ms", "group",
+    "z23 dev agent test --group=hex_codec",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_test)
+
+ZCL_COMMAND_READY_COMMAND(
+    "dev.agent.mutate", "dev.agent", "dev.agent.mutation",
+    "Break one source line and prove a test group notices",
+    "Whether one registered test group FAILS when one named source line is "
+    "deterministically broken. The command establishes a green baseline "
+    "first, writes the original bytes to build/agent-mutate before editing, "
+    "rebuilds, runs the group, then restores the file and rebuilds again; "
+    "noticed_by is 'compiler', 'test_group', or 'nothing'. 'nothing' means "
+    "that line's coverage proves nothing. An interrupted run leaves a "
+    "pending backup and the next call refuses until --restore=true clears "
+    "it. It never touches a datadir, a wallet, or any file outside the "
+    "checkout.", 8192,
+    "mutate,mutation,coverage,assertion,proof,notice,restore",
+    "zcl.agent_mutate_input.v1", "zcl.agent_mutation_check.v1",
+    "file,line,group,restore", "file",
+    "z23 dev agent mutate --file=lib/base/src/hex.c --line=42 "
+    "--group=hex_codec",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_agent_mutate)

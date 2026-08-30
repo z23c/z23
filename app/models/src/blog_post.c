@@ -5,6 +5,10 @@
 
 #include "models/blog_post.h"
 
+#include "base/bytes.h"
+#include "models/model_fields.h"
+#include "models/def/blog_post_fields.def"
+
 #include "chain/chainparams.h"
 #include "keys/key_io.h"
 #include "keys/pubkey.h"
@@ -19,13 +23,37 @@
 DEFINE_MODEL_CALLBACKS(blog_post)
 DEFINE_MODEL_CALLBACKS(blog_publication_receipt)
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
+/* ── Column mapping ───────────────────────────────────────────────────────
+ * Every spelling below is derived from the field lists in
+ * models/def/blog_post_fields.def: the SQL column list, the SELECT read
+ * index, the INSERT placeholder count, and the bind position. None of them
+ * is written down, so none of them can drift out of step with the others. */
+#define BLOG_POST_COLUMNS ZCL_MODEL_COLUMNS(BLOG_POST_FIELDS)
+#define BLOG_POST_VALUES  ZCL_MODEL_PLACEHOLDERS(BLOG_POST_FIELDS)
+
+#define BLOG_POST_SUMMARY_COLUMNS ZCL_MODEL_COLUMNS(BLOG_POST_SUMMARY_FIELDS)
+
+#define BLOG_RECEIPT_COLUMNS \
+    ZCL_MODEL_COLUMNS(BLOG_PUBLICATION_RECEIPT_FIELDS)
+#define BLOG_RECEIPT_VALUES \
+    ZCL_MODEL_PLACEHOLDERS(BLOG_PUBLICATION_RECEIPT_FIELDS)
+
+ZCL_MODEL_READ_ROW_FN(blog_post_read_row, struct db_blog_post,
+                      BLOG_POST_FIELDS)
+ZCL_MODEL_BIND_FN(blog_post_bind, struct db_blog_post, BLOG_POST_FIELDS)
+
+ZCL_MODEL_READ_ROW_FN(blog_summary_read_row, struct db_blog_post_summary,
+                      BLOG_POST_SUMMARY_FIELDS)
+
+#define BLOG_CHAIN_ANCHOR_COLUMNS ZCL_MODEL_COLUMNS(BLOG_CHAIN_ANCHOR_FIELDS)
+#define BCA_IX(kind, col, member, extra) BCA_IX_##member,
+enum { ZCL_MODEL_EXPAND(BCA_IX, BLOG_CHAIN_ANCHOR_FIELDS) BCA_IX_COUNT };
+
+ZCL_MODEL_READ_ROW_FN(blog_receipt_read_row,
+                      struct db_blog_publication_receipt,
+                      BLOG_PUBLICATION_RECEIPT_FIELDS)
+ZCL_MODEL_BIND_FN(blog_receipt_bind, struct db_blog_publication_receipt,
+                  BLOG_PUBLICATION_RECEIPT_FIELDS)
 
 static bool bounded_utf8_text(const char *text, size_t max_len,
                               bool allow_multiline)
@@ -115,7 +143,7 @@ bool db_blog_sequence_shape_valid(uint64_t sequence,
 {
     if (!previous_event_id || sequence == 0 || sequence > INT64_MAX)
         return false;
-    bool has_previous = bytes_nonzero(previous_event_id, 32);
+    bool has_previous = zcl_bytes_any_set(previous_event_id, 32);
     return (sequence == 1 && !has_previous) ||
            (sequence > 1 && has_previous);
 }
@@ -154,7 +182,7 @@ bool db_blog_post_validate(const struct db_blog_post *post,
         validates_custom(errors, false, "post", "is null");
         return false;
     }
-    validates_custom(errors, bytes_nonzero(post->event_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(post->event_id, 32),
                      "event_id", "is empty");
     validates_custom(errors, znam_validate_name(post->blog_name),
                      "blog_name", "is not a valid ZNAM name");
@@ -164,7 +192,7 @@ bool db_blog_post_validate(const struct db_blog_post *post,
                      "title", "is empty or contains control bytes");
     validates_custom(errors, db_blog_body_valid(post->body),
                      "body", "is empty or contains control bytes");
-    validates_custom(errors, bytes_nonzero(post->author_key_id, 20),
+    validates_custom(errors, zcl_bytes_any_set(post->author_key_id, 20),
                      "author_key_id", "is empty");
     validates_custom(errors,
                      post->author_pubkey[0] == 0x02 ||
@@ -177,7 +205,7 @@ bool db_blog_post_validate(const struct db_blog_post *post,
     validates_custom(errors, blog_author_identity_valid(post),
                      "author_identity",
                      "public key, key ID, and address do not match");
-    validates_custom(errors, bytes_nonzero(post->chain_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(post->chain_id, 32),
                      "chain_id", "is empty");
     validates_custom(errors,
                      db_blog_sequence_shape_valid(
@@ -203,15 +231,15 @@ bool db_blog_publication_receipt_validate(
         validates_custom(errors, false, "receipt", "is null");
         return false;
     }
-    validates_custom(errors, bytes_nonzero(receipt->txid, 32),
+    validates_custom(errors, zcl_bytes_any_set(receipt->txid, 32),
                      "txid", "is empty");
-    validates_custom(errors, bytes_nonzero(receipt->event_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(receipt->event_id, 32),
                      "event_id", "is empty");
     validates_custom(errors, znam_validate_name(receipt->blog_name),
                      "blog_name", "is not a valid ZNAM name");
-    validates_custom(errors, bytes_nonzero(receipt->author_key_id, 20),
+    validates_custom(errors, zcl_bytes_any_set(receipt->author_key_id, 20),
                      "author_key_id", "is empty");
-    validates_custom(errors, bytes_nonzero(receipt->znam_reg_txid, 32),
+    validates_custom(errors, zcl_bytes_any_set(receipt->znam_reg_txid, 32),
                      "znam_reg_txid", "is empty");
     validates_custom(errors,
                      receipt->block_height >= -1 &&
@@ -222,7 +250,7 @@ bool db_blog_publication_receipt_validate(
                      receipt->status <= BLOG_PUBLICATION_ORPHANED,
                      "status", "is unknown");
     if (receipt->status != BLOG_PUBLICATION_UNRESOLVED) {
-        validates_custom(errors, bytes_nonzero(receipt->block_hash, 32),
+        validates_custom(errors, zcl_bytes_any_set(receipt->block_hash, 32),
                          "block_hash", "is required for final status");
         validates_custom(errors, receipt->block_height >= 0,
                          "block_height", "is required for final status");
@@ -283,57 +311,11 @@ bool db_blog_post_save(struct node_db *ndb, const struct db_blog_post *post)
     }
     struct ar_callbacks *cbs = db_blog_post_callbacks();
     AR_ADHOC_SAVE(ndb, s,
-        "INSERT INTO blog_posts "
-        "(event_id,blog_name,slug,title,body,author_key_id,author_pubkey,"
-        "author_address,chain_id,sequence,previous_event_id,event_created_at,"
-        "signature,signature_len,stored_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        "INSERT INTO blog_posts (" BLOG_POST_COLUMNS ") "
+        "VALUES(" BLOG_POST_VALUES ") "
         "ON CONFLICT(event_id) DO NOTHING",
         cbs, "blog_post", post, db_blog_post_validate,
-        AR_BIND_BLOB(s, 1, post->event_id, 32);
-        AR_BIND_TEXT(s, 2, post->blog_name);
-        AR_BIND_TEXT(s, 3, post->slug);
-        AR_BIND_TEXT(s, 4, post->title);
-        AR_BIND_TEXT(s, 5, post->body);
-        AR_BIND_BLOB(s, 6, post->author_key_id, 20);
-        AR_BIND_BLOB(s, 7, post->author_pubkey, 33);
-        AR_BIND_TEXT(s, 8, post->author_address);
-        AR_BIND_BLOB(s, 9, post->chain_id, 32);
-        AR_BIND_INT(s, 10, (int64_t)post->sequence);
-        AR_BIND_BLOB(s, 11, post->previous_event_id, 32);
-        AR_BIND_INT(s, 12, post->event_created_at);
-        AR_BIND_BLOB(s, 13, post->signature, post->signature_len);
-        AR_BIND_INT(s, 14, post->signature_len);
-        AR_BIND_INT(s, 15, post->stored_at));
-}
-
-#define BLOG_POST_COLUMNS \
-    "event_id,blog_name,slug,title,body,author_key_id,author_pubkey," \
-    "author_address,chain_id,sequence,previous_event_id,event_created_at," \
-    "signature,signature_len,stored_at"
-
-static void blog_post_read_row(struct db_blog_post *out, sqlite3_stmt *s)
-{
-    memset(out, 0, sizeof(*out));
-    AR_READ_BLOB(s, 0, out->event_id, 32);
-    AR_READ_STR(s, 1, out->blog_name, sizeof(out->blog_name));
-    AR_READ_STR(s, 2, out->slug, sizeof(out->slug));
-    AR_READ_STR(s, 3, out->title, sizeof(out->title));
-    AR_READ_STR(s, 4, out->body, sizeof(out->body));
-    AR_READ_BLOB(s, 5, out->author_key_id, 20);
-    AR_READ_BLOB(s, 6, out->author_pubkey, 33);
-    AR_READ_STR(s, 7, out->author_address, sizeof(out->author_address));
-    AR_READ_BLOB(s, 8, out->chain_id, 32);
-    out->sequence = (uint64_t)AR_COL_INT(s, 9);
-    AR_READ_BLOB(s, 10, out->previous_event_id, 32);
-    out->event_created_at = AR_COL_INT(s, 11);
-    int sig_len = AR_COL_BYTES(s, 12);
-    out->signature_len = (uint32_t)AR_COL_INT(s, 13);
-    if (sig_len == (int)out->signature_len &&
-        out->signature_len <= sizeof(out->signature))
-        AR_READ_BLOB(s, 12, out->signature, out->signature_len);
-    else
-        out->signature_len = 0;
-    out->stored_at = AR_COL_INT(s, 14);
+        blog_post_bind(s, post));
 }
 
 bool db_blog_post_find(struct node_db *ndb, const uint8_t event_id[32],
@@ -387,19 +369,6 @@ int db_blog_post_count(struct node_db *ndb, const char *blog_name)
         AR_BIND_TEXT(s, 1, blog_name));
 }
 
-static void blog_summary_read_row(struct db_blog_post_summary *out,
-                                  sqlite3_stmt *s)
-{
-    memset(out, 0, sizeof(*out));
-    AR_READ_BLOB(s, 0, out->event_id, 32);
-    AR_READ_STR(s, 1, out->blog_name, sizeof(out->blog_name));
-    AR_READ_STR(s, 2, out->slug, sizeof(out->slug));
-    AR_READ_STR(s, 3, out->title, sizeof(out->title));
-    AR_READ_STR(s, 4, out->author_address, sizeof(out->author_address));
-    out->sequence = (uint64_t)AR_COL_INT(s, 5);
-    out->event_created_at = AR_COL_INT(s, 6);
-}
-
 int db_blog_post_recent_summaries(struct node_db *ndb,
                                   const char *blog_name_or_null,
                                   struct db_blog_post_summary *out,
@@ -410,8 +379,8 @@ int db_blog_post_recent_summaries(struct node_db *ndb,
         return 0;
     if (blog_name_or_null && blog_name_or_null[0]) {
         AR_QUERY_LIST(ndb, s,
-            "SELECT event_id,blog_name,slug,title,author_address,sequence,"
-            "event_created_at FROM blog_posts p WHERE blog_name=? "
+            "SELECT " BLOG_POST_SUMMARY_COLUMNS
+            " FROM blog_posts p WHERE blog_name=? "
             "AND NOT EXISTS (SELECT 1 FROM blog_posts p2 "
             "WHERE p2.blog_name=p.blog_name AND p2.slug=p.slug "
             "AND p2.event_id<p.event_id) "
@@ -422,8 +391,7 @@ int db_blog_post_recent_summaries(struct node_db *ndb,
             blog_summary_read_row(&out[count], s));
     }
     AR_QUERY_LIST(ndb, s,
-        "SELECT event_id,blog_name,slug,title,author_address,sequence,"
-        "event_created_at FROM blog_posts p "
+        "SELECT " BLOG_POST_SUMMARY_COLUMNS " FROM blog_posts p "
         "WHERE NOT EXISTS (SELECT 1 FROM blog_posts p2 "
         "WHERE p2.blog_name=p.blog_name AND p2.slug=p.slug "
         "AND p2.event_id<p.event_id) "
@@ -431,22 +399,6 @@ int db_blog_post_recent_summaries(struct node_db *ndb,
         out, max,
         AR_BIND_INT(s, 1, (int64_t)max),
         blog_summary_read_row(&out[count], s));
-}
-
-static void blog_receipt_read_row(struct db_blog_publication_receipt *out,
-                                  sqlite3_stmt *s)
-{
-    memset(out, 0, sizeof(*out));
-    AR_READ_BLOB(s, 0, out->txid, 32);
-    AR_READ_BLOB(s, 1, out->event_id, 32);
-    AR_READ_STR(s, 2, out->blog_name, sizeof(out->blog_name));
-    AR_READ_BLOB(s, 3, out->author_key_id, 20);
-    AR_READ_BLOB(s, 4, out->znam_reg_txid, 32);
-    if (sqlite3_column_type(s, 5) != SQLITE_NULL)
-        AR_READ_BLOB(s, 5, out->block_hash, 32);
-    out->block_height = AR_COL_INT(s, 6);
-    out->status = (enum blog_publication_status)AR_COL_INT(s, 7);
-    out->observed_at = AR_COL_INT(s, 8);
 }
 
 static bool blog_receipt_parent_matches(
@@ -489,9 +441,8 @@ bool db_blog_publication_receipt_save(
         LOG_FAIL("blog_receipt", "txid cannot be re-parented");
     struct ar_callbacks *cbs = db_blog_publication_receipt_callbacks();
     AR_ADHOC_SAVE(ndb, s,
-        "INSERT INTO blog_publication_receipts "
-        "(txid,event_id,blog_name,author_key_id,znam_reg_txid,block_hash,"
-        "block_height,status,observed_at) VALUES(?,?,?,?,?,?,?,?,?) "
+        "INSERT INTO blog_publication_receipts (" BLOG_RECEIPT_COLUMNS ") "
+        "VALUES(" BLOG_RECEIPT_VALUES ") "
         "ON CONFLICT(txid) DO UPDATE SET "
         "block_hash=excluded.block_hash,block_height=excluded.block_height,"
         "status=excluded.status,observed_at=excluded.observed_at "
@@ -500,18 +451,7 @@ bool db_blog_publication_receipt_save(
         "AND znam_reg_txid=excluded.znam_reg_txid",
         cbs, "blog_publication_receipt", receipt,
         db_blog_publication_receipt_validate,
-        AR_BIND_BLOB(s, 1, receipt->txid, 32);
-        AR_BIND_BLOB(s, 2, receipt->event_id, 32);
-        AR_BIND_TEXT(s, 3, receipt->blog_name);
-        AR_BIND_BLOB(s, 4, receipt->author_key_id, 20);
-        AR_BIND_BLOB(s, 5, receipt->znam_reg_txid, 32);
-        if (bytes_nonzero(receipt->block_hash, 32))
-            AR_BIND_BLOB(s, 6, receipt->block_hash, 32);
-        else
-            AR_BIND_NULL(s, 6);
-        AR_BIND_INT(s, 7, receipt->block_height);
-        AR_BIND_INT(s, 8, receipt->status);
-        AR_BIND_INT(s, 9, receipt->observed_at));
+        blog_receipt_bind(s, receipt));
 }
 
 bool db_blog_publication_receipt_find_by_event(
@@ -522,9 +462,8 @@ bool db_blog_publication_receipt_find_by_event(
     if (!ndb || !ndb->open || !event_id || !out)
         LOG_FAIL("blog_receipt", "find_by_event requires valid arguments");
     AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT txid,event_id,blog_name,author_key_id,znam_reg_txid,"
-        "block_hash,block_height,status,observed_at "
-        "FROM blog_publication_receipts WHERE event_id=? "
+        "SELECT " BLOG_RECEIPT_COLUMNS
+        " FROM blog_publication_receipts WHERE event_id=? "
         "ORDER BY observed_at DESC LIMIT 1",
         AR_BIND_BLOB(s, 1, event_id, 32),
         blog_receipt_read_row(out, s));
@@ -538,9 +477,8 @@ bool db_blog_publication_receipt_find_by_txid(
     if (!ndb || !ndb->open || !txid || !out)
         LOG_FAIL("blog_receipt", "find_by_txid requires valid arguments");
     AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT txid,event_id,blog_name,author_key_id,znam_reg_txid,"
-        "block_hash,block_height,status,observed_at "
-        "FROM blog_publication_receipts WHERE txid=? LIMIT 1",
+        "SELECT " BLOG_RECEIPT_COLUMNS
+        " FROM blog_publication_receipts WHERE txid=? LIMIT 1",
         AR_BIND_BLOB(s, 1, txid, 32),
         blog_receipt_read_row(out, s));
 }
@@ -553,9 +491,8 @@ int db_blog_post_publication_receipts(
     if (!ndb || !ndb->open || !event_id || !out || max == 0)
         return 0;
     AR_QUERY_LIST(ndb, s,
-        "SELECT txid,event_id,blog_name,author_key_id,znam_reg_txid,"
-        "block_hash,block_height,status,observed_at "
-        "FROM blog_publication_receipts WHERE event_id=? "
+        "SELECT " BLOG_RECEIPT_COLUMNS
+        " FROM blog_publication_receipts WHERE event_id=? "
         "ORDER BY observed_at DESC,txid LIMIT ?",
         out, max,
         AR_BIND_BLOB(s, 1, event_id, 32);
@@ -590,23 +527,30 @@ bool db_blog_chain_anchor_find(struct node_db *ndb,
     if (!ndb || !ndb->open || !script || script_len == 0 || !out)
         LOG_FAIL("blog_anchor", "find requires valid arguments");
     AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT o.txid,o.block_height,t.block_hash,t.block_height,b.hash "
+        "SELECT " BLOG_CHAIN_ANCHOR_COLUMNS " "
         "FROM op_returns o "
         "LEFT JOIN transactions t ON t.txid=o.txid "
         "LEFT JOIN blocks b ON b.height=t.block_height AND b.status>=3 "
         "WHERE o.script=? ORDER BY o.block_height DESC,o.txid LIMIT 1",
         AR_BIND_BLOB(s, 1, script, script_len),
         memset(out, 0, sizeof(*out));
-        AR_READ_BLOB(s, 0, out->txid, 32);
-        out->op_return_height = AR_COL_INT(s, 1);
-        out->has_transaction = sqlite3_column_type(s, 2) != SQLITE_NULL;
+        AR_READ_BLOB(s, BCA_IX_txid, out->txid, 32);
+        out->op_return_height = AR_COL_INT(s, BCA_IX_op_return_height);
+        out->has_transaction =
+            sqlite3_column_type(s, BCA_IX_transaction_block_hash)
+                != SQLITE_NULL;
         if (out->has_transaction) {
-            AR_READ_BLOB(s, 2, out->transaction_block_hash, 32);
-            out->transaction_block_height = AR_COL_INT(s, 3);
+            AR_READ_BLOB(s, BCA_IX_transaction_block_hash,
+                         out->transaction_block_hash, 32);
+            out->transaction_block_height =
+                AR_COL_INT(s, BCA_IX_transaction_block_height);
         } else {
             out->transaction_block_height = -1;
         }
-        out->has_canonical_block = sqlite3_column_type(s, 4) != SQLITE_NULL;
+        out->has_canonical_block =
+            sqlite3_column_type(s, BCA_IX_canonical_block_hash)
+                != SQLITE_NULL;
         if (out->has_canonical_block)
-            AR_READ_BLOB(s, 4, out->canonical_block_hash, 32));
+            AR_READ_BLOB(s, BCA_IX_canonical_block_hash,
+                         out->canonical_block_hash, 32));
 }

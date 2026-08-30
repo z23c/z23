@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define PCAS_COMMIT "0123456789abcdef0123456789abcdef01234567"
 
@@ -540,3 +541,11 @@ int test_consensus_state_publication_cas(void)
            failures ? "FAILED" : "ALL PASSED");
     return failures;
 }
+#else  /* _WIN32 */
+/* CAS fixture is written on the POSIX fdopendir/unlinkat directory-fd surface; the Windows production arm (consensus_state_publication_cas_windows.c) exists but this fixture cannot drive it. Skipped loudly rather than faked. */
+int test_consensus_state_publication_cas(void)
+{
+    printf("consensus_state_publication_cas: SKIP (Windows): cas fixture is written on the posix fdopendir/unlinkat directory-fd surface; the windows production arm (consensus_state_publication_cas_windows.c) exists but this fixture cannot drive it.\n");
+    return 0;
+}
+#endif

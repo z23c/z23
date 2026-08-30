@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 752 |
+| Registry entries (branches + leaves) | 765 |
 | Top-level roots | 12 |
-| Branches | 174 |
-| Leaves (dispatchable command paths) | 578 |
-| … `ready` (live handler in this build) | 522 |
-| … `compat` (metadata only, names a fallback) | 25 |
+| Branches | 176 |
+| Leaves (dispatchable command paths) | 589 |
+| … `ready` (live handler in this build) | 530 |
+| … `compat` (metadata only, names a fallback) | 28 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 205 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 27 |
+| Leaves with `effect=mutate` | 209 |
 | Leaves with `effect=destructive` | 4 |
-| Leaves requiring **owner** authority | 116 |
+| Leaves requiring **owner** authority | 119 |
 
 Per source file:
 
@@ -96,8 +96,8 @@ Per source file:
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
-| `config/commands/dev.def` | 55 | 13 | 42 |
-| `config/commands/code.def` | 17 | 2 | 15 |
+| `config/commands/dev.def` | 63 | 15 | 48 |
+| `config/commands/code.def` | 22 | 2 | 20 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
 | `config/commands/zcode.def` | 245 | 58 | 187 |
@@ -700,6 +700,14 @@ represented by its children's sections.
 | `dev loop events` | compat 🔧 → `z23-dev dev loop events --format=jsonl` | read / read / operator · persistent/stream | `after`, `heartbeat_ms` | `zcl.dev_loop_event.v1` | `z23-dev dev loop events --after=41 --format=jsonl` | Stream resumable source and cycle events — *resumable event subscription is available through the dev binary* |
 | `dev loop stop` | compat 🔧 → `z23-dev dev loop stop` | mutate / dev-mutation / **owner** · fast/low | **`watcher_id`**, `group`, `owner`, `failure_id`, `to`, `relink_generation`, `reason`, `confirm` | `zcl.dev_loop_status.v1` | `z23 dev loop stop <watcher-id>` | Stop one identified native watcher — *watcher shutdown requires the dev-only executor* |
 
+#### `dev.proof` — Exact local push-proof receipts
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev proof ensure` | compat 🔧 → `z23-dev dev proof status` | mutate / dev-mutation / **owner** · fast/low | `root`, `local_commit`, `remote_base`, `mode` | `zcl.dev_proof_status.v1` | `z23-dev dev proof ensure` | Ensure background proof for one exact commit and remote base — *background proof scheduling requires the dev binary* |
+| `dev proof status` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `root`, `local_commit`, `remote_base` | `zcl.dev_proof_status.v1` | `z23-dev dev proof status` | Read exact commit/base proof status — *proof receipt status requires the dev binary* |
+| `dev proof wait` | compat 🔧 → `z23-dev dev proof status` | mutate / dev-mutation / **owner** · persistent/low | `root`, `local_commit`, `remote_base`, `timeout_ms` | `zcl.dev_proof_status.v1` | `z23-dev dev proof wait` | Wait for one exact commit/base receipt — *proof receipt waiting requires the dev binary* |
+
 #### `dev.test` — Focused proof selection
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
@@ -751,6 +759,14 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev test background status` | planned | read / read / operator · instant/low | none | `zcl.dev_background_quality.v1` | `z23 dev test background status` | Read lint, sanitizer, replay, and reproducibility freshness — *native background-quality projection is not implemented* |
+
+#### `dev.agent` — Checkout questions answered without composing shell
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev agent ready` (aliases: `dev.agent.shippable`) | ready | read / read / operator · fast/low | none | `zcl.agent_ready.v1` | `z23 dev agent ready` | Can this checkout link real Tor and produce a shippable candidate |
+| `dev agent test` (aliases: `dev.agent.group`) | ready | read / read / operator · background/high | **`group`**, `exact`, `timeout_ms` | `zcl.agent_test_run.v1` | `z23 dev agent test --group=hex_codec` | Run one registered test group and report what actually RAN |
+| `dev agent mutate` (aliases: `dev.agent.mutation`) | ready | mutate / dev-mutation / **owner** · persistent/high | **`file`**, `line`, `group`, `restore` | `zcl.agent_mutation_check.v1` | `z23 dev agent mutate --file=lib/base/src/hex.c --line=42 --group=hex_codec` | Break one source line and prove a test group notices |
 
 ### `ops` — Node diagnostics
 
@@ -958,6 +974,11 @@ represented by its children's sections.
 | `code refs` | ready | read / read / public · fast/tiny | **`name`**, `limit` | `zcl.code_refs.v1` | `z23 code refs zcl_malloc` | List call sites and references to one symbol |
 | `code impact` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_impact.v1` | `z23 code impact lib/util/include/util/safe_alloc.h` | The reverse-dependency blast radius of one changed file |
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank N symbols by name, with a one-line context per hit |
+| `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Ask whether this checkout already does X, before building it |
+| `code territory` | ready | read / read / public · background/moderate | **`name`** | `zcl.code_territory.v1` | `z23 code territory lib/net` | One module's generated scorecard: owns, proves, depends, weak |
+| `code kpi` | ready | mutate / dev-mutation / public · background/moderate | none | `zcl.code_kpi.v1` | `z23 code kpi` | Record and compare the build's own numbers over time |
+| `code corpus` | ready | read / read / public · background/moderate | none | `zcl.code_corpus.v1` | `z23 code corpus` | Honest distance to 100M lines of proven, non-duplicated C23 |
+| `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general lib/net` | A territory's dispatch brief, or the roll-up ranked by weakest evidence |
 
 #### `code.provenance` — Attribute output back to the code that produced it
 
@@ -1649,6 +1670,10 @@ Every alias resolves through the same grammar as its canonical path
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
 | `dev.test.focused` | `dev.test.run` |
+| `dev.agent.shippable` | `dev.agent.ready` |
+| `dev.agent.group` | `dev.agent.test` |
+| `dev.agent.mutation` | `dev.agent.mutate` |
+| `general` | `code.general` |
 | `zcode.create` | `zcode.package.dev.create` |
 | `zcode.use` | `zcode.package.dev.use` |
 | `zcode.improve` | `zcode.package.dev.improve` |
@@ -1693,6 +1718,7 @@ promise the same document shape.
 | `zcl.dev_cycle.v1` | `dev.status`, `dev.change.apply`, `dev.loop.wait` |
 | `zcl.dev_hotswap.v1` | `dev.hotswap.apply`, `dev.hotswap.probe` |
 | `zcl.dev_loop_status.v1` | `dev.loop.ensure`, `dev.loop.status`, `dev.loop.stop` |
+| `zcl.dev_proof_status.v1` | `dev.proof.ensure`, `dev.proof.status`, `dev.proof.wait` |
 | `zcl.account.v1` | `app.account.show`, `app.account.whoami`, `app.account.add`, `app.account.role`, `app.account.suspend`, `app.account.unsuspend` |
 | `zcl.vault_swap_settle.v1` | `vault.swap.redeem`, `vault.swap.refund` |
 | `zcl.zcode_workspace_verify.v1` | `zcode.workspace.verify`, `zcode.workspace.show` |

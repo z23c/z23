@@ -1,0 +1,9 @@
+component=freebsd-bin-sh
+version=releng/14.2
+upstream=https://github.com/freebsd/freebsd-src
+revision=16a79708d089423ec0c3d32f25e7ca97ae58e97b
+license=BSD-3-Clause
+fetched=2026-08-30
+files=bin/sh (sources, codegen inputs, bltin/), bin/kill/kill.c, bin/test/test.c, usr.bin/printf/printf.c — every file under bin/ and usr.bin/ here is byte-identical to upstream at that revision (integrity: SHA256SUMS, checked by `make check-vendor-provenance`)
+integration=standalone `build/bin/fbsh` via `make fbsh`; upstream codegen (mkbuiltins, mktokens, mknodes, mksyntax) runs at build time into build/fbsh/gen exactly as bin/sh/Makefile does; glibc gaps are shimmed in compat/ (force-included compat.h, compat.c, compat/bin/mktemp); the single unshimmable delta (dp->d_namlen in expand.c) is applied to a build-time copy per vendor/patches/freebsd-sh-dirent-d-namlen.patch
+notes=upstream tests/ and funcs/ subdirectories and the rc/dot files were not vendored (atf/kyua-based, not runnable here); refetch with: git clone --depth 1 --filter=blob:none --sparse --branch releng/14.2 https://github.com/freebsd/freebsd-src.git && git sparse-checkout set bin/sh bin/kill bin/test usr.bin/printf

@@ -65,6 +65,14 @@ bool legacy_rpc_authenticated_call(const char *body_json,
                                    char **out_resp,
                                    char *err, size_t err_sz);
 
+/* Bounded variant for latency-sensitive observations. `timeout_ms` applies
+ * independently to socket send and receive and must be in 1..60000. The
+ * ordinary call above retains its five-second compatibility budget. */
+bool legacy_rpc_authenticated_call_with_timeout(const char *body_json,
+                                                uint32_t timeout_ms,
+                                                char **out_resp,
+                                                char *err, size_t err_sz);
+
 /* POST `body_json` to host:port with HTTP Basic auth user:pass and
  * receive the full response body into a newly malloc'd buffer.
  *
@@ -81,6 +89,13 @@ bool legacy_rpc_call(const char *host, int port,
                      const char *body_json,
                      char **out_resp,
                      char *err, size_t err_sz);
+
+bool legacy_rpc_call_with_timeout(const char *host, int port,
+                                  const char *user, const char *pass,
+                                  const char *body_json,
+                                  uint32_t timeout_ms,
+                                  char **out_resp,
+                                  char *err, size_t err_sz);
 
 /* Extract the HTTP body (after the first "\r\n\r\n") from a raw
  * response. Returns NULL if no separator found. */

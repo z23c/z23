@@ -21,13 +21,20 @@
 
 enum final_receipt_state {
     FINAL_RECEIPT_READ_ERROR = 0, FINAL_RECEIPT_ABSENT,
-    FINAL_RECEIPT_IDENTICAL, FINAL_RECEIPT_CONFLICT,
+    FINAL_RECEIPT_IDENTICAL, FINAL_RECEIPT_MONOTONIC_PREDECESSOR,
+    FINAL_RECEIPT_CONFLICT,
 };
 
 bool read_existing_receipt_fold_cursor(sqlite3 *db, int64_t *out,
                                        bool *present);
 
 bool write_final_receipt(
+    sqlite3 *db, const struct consensus_state_source_receipt *r);
+
+/* Replace one cryptographically valid, same-session predecessor with its
+ * strictly higher successor.  Call only after final_receipt_state returned
+ * FINAL_RECEIPT_MONOTONIC_PREDECESSOR. */
+bool advance_final_receipt(
     sqlite3 *db, const struct consensus_state_source_receipt *r);
 
 enum final_receipt_state final_receipt_state(

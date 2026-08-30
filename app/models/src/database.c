@@ -23,6 +23,10 @@
 #include "models/database_owner_lease.h"
 #include "models/database_internal.h"
 #include "models/database_validators.h"
+#include "models/model_fields.h"
+/* The transactions-table column order lives with the model that binds it, so
+ * the cached INSERT below and tx_index.c's binder cannot disagree. */
+#include "models/def/tx_index_fields.def"
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -200,13 +204,11 @@ static bool prepare_statements(struct node_db *ndb)
 
     PREP(stmt_tx_insert,
          "INSERT OR REPLACE INTO transactions"
-         "(txid,block_hash,block_height,"
-         "tx_index,file_num,file_pos,is_coinbase)"
-         " VALUES(?,?,?,?,?,?,?)");
+         "(" ZCL_MODEL_COLUMNS(TX_INDEX_FIELDS) ")"
+         " VALUES(" ZCL_MODEL_PLACEHOLDERS(TX_INDEX_FIELDS) ")");
 
     PREP(stmt_tx_find,
-         "SELECT block_hash,block_height,tx_index,"
-         "file_num,file_pos,is_coinbase"
+         "SELECT " ZCL_MODEL_COLUMNS(TX_INDEX_BY_TXID_FIELDS)
          " FROM transactions WHERE txid=?");
 
     PREP(stmt_wallet_utxo_insert,
@@ -559,6 +561,23 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
     if (path && !platform_path_identity(ndb->path, sizeof(ndb->path), path))
         return false;
     path = ndb->path;
+
+    /* Darwin's mutable pathname lease is a sibling file.  Refuse an
+     * unsupported existing database before acquiring that lease, otherwise
+     * a read-only schema rejection still changes the database family and its
+     * parent directory.  The identical check below remains after lease
+     * acquisition to close the inspect-to-open race. */
+    struct node_db_schema_preflight prelease_preflight =
+        node_db_schema_preflight_existing(path);
+    if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
+        node_db_log_newer_schema_refusal((int)prelease_preflight.version);
+        return false;
+    }
+    if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN) {
+        node_db_log_unknown_schema_refusal(prelease_preflight.detail);
+        return false;
+    }
+
     node_db_state_init(ndb);
     if (!db_lifetime_install())
         return node_db_open_abort(ndb);

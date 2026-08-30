@@ -117,6 +117,56 @@ void test_projection_paths(const char *dir, const char *name,
  * assertions read shared global state. See test_helpers.c for the rationale. */
 void test_reset_shared_globals(void);
 
+/* ── Windows child-process arm for fork-based tests ───────────────────────
+ * Several tests fork() a child to prove a cross-PROCESS property (a second
+ * process cannot take a live SQLite owner lease, a kill -9 mid-write leaves
+ * the store recoverable, ...). Native Windows has no fork(). The port
+ * re-executes the suite binary itself with two environment variables set:
+ *
+ *   ZCL_TEST_FORK_GROUP=<canonical group name, e.g. test_sqlite>
+ *   ZCL_TEST_FORK_ROLE=<which child body to run>
+ *
+ * test_parallel.c's main() dispatches on those variables before any suite
+ * machinery (single process layer, so a hard kill lands on the process doing
+ * the work), runs the same chain_params/ecc/event setup the forked POSIX
+ * child would have inherited, then calls the group entry, which MUST branch
+ * on the role and execute only the child body. The suite exits 0 when the
+ * body reports no failures.
+ *
+ * test_spawn_self_with_role() returns the child HANDLE (as void*), or NULL
+ * with a diagnostic on stderr. The child's stdout/stderr are captured to
+ * log_path. test_self_child_wait() blocks, closes the handle, and returns the
+ * exit code (or -1 on harness error). test_self_child_kill() is the
+ * TerminateProcess analogue of kill(pid, SIGKILL) for the kill9-recovery
+ * tests. */
+#if defined(_WIN32)
+void *test_spawn_self_with_role(const char *group, const char *role,
+                                const char *log_path);
+int test_self_child_wait(void *handle);
+void test_self_child_kill(void *handle);
+/* fork()+execvp()+waitpid() analogue for test fixtures that drive external
+ * tools (cc, fixture binaries). Runs argv synchronously — CreateProcess
+ * searches PATH when the program is named without a directory, as execvp
+ * does — and returns the exit code, or -1 on harness error. */
+int test_spawn_argv_wait(const char *const argv[]);
+/* fork()+execve()+pipe-capture analogue: runs argv synchronously with a
+ * full custom environment (envp = "KEY=VALUE" strings, NULL to inherit),
+ * captures stdout+stderr into out (NUL-terminated, truncated to cap), and
+ * returns the child's exit code or -1 on harness error. */
+int test_spawn_capture_env(const char *const argv[],
+                           const char *const envp[],
+                           char *out, size_t cap);
+/* Daemon-mode analogue of test_spawn_capture_env for a child that never
+ * exits on its own: accumulates combined stdout+stderr until EVERY string
+ * in needles is present or max_ms elapses, then TerminateProcess()es the
+ * child (the SIGKILL analogue) and reaps it. Returns true iff all needles
+ * appeared. */
+bool test_spawn_capture_kill(const char *const argv[],
+                             const char *const envp[],
+                             const char *const *needles, int max_ms,
+                             char *out, size_t cap);
+#endif
+
 /* Test group functions — each returns failure count */
 int test_crypto(void);
 int test_crypto_registry(void);
@@ -135,6 +185,7 @@ int test_netbase_split_host_port(void);
 int test_nat_route_dump(void);
 int test_peer_strategy_worker(void);
 int test_activerecord(void);
+int test_activerecord_query_builder(void);
 int test_sapling_crypto(void);
 int test_groth16_msm_parity(void);
 int test_groth16_r1cs_oracle(void);
@@ -149,10 +200,12 @@ int test_slp(void);
 int test_models(void);
 int test_core(void);
 int test_json(void);
+int test_engine(void);
 int test_validation(void);
 int test_wallet(void);
 int test_primitives(void);
 int test_bloom(void);
+int test_fingerprint(void);
 int test_compact_blocks(void);
 int test_dandelion(void);
 int test_addrman_rebalance(void);
@@ -210,6 +263,7 @@ int test_recovery_policy(void);
 int test_oracle_policy(void);
 int test_quorum_oracle(void);
 int test_db_txn(void);
+int test_model_fields(void);
 int test_sync_service(void);
 int test_node_db_catchup_service(void);
 int test_catchup_lifecycle_service(void);
@@ -705,6 +759,7 @@ int test_zslp_store_port(void);
 int test_atomic_commit_ordering(void);
 int test_shielded_spend_slice(void);
 int test_coldimport_restart_fragility(void);
+int test_territory(void);
 
 /* Spec-based user story tests (one per feature area) */
 int spec_wallet_dashboard(void);
@@ -821,8 +876,14 @@ static inline void zcl_test_print_char(long long v)
 /* The fallback arm, which every pointer type lands in. A scalar that is
  * neither an enumerated integer type nor a pointer also arrives here and
  * prints as its uintptr_t value in hex — not an address, but printing
- * something beats printing nothing. */
-static inline void zcl_test_print_opaque(const void *v) { printf("%p", v); }
+ * something beats printing nothing. glibc already prints NULL as (nil),
+ * but other C libraries (e.g. Darwin) emit 0x0; normalize so failure
+ * transcripts are platform-independent. */
+static inline void zcl_test_print_opaque(const void *v)
+{
+    if (v == NULL) printf("(nil)");
+    else           printf("%p", v);
+}
 
 /* `t` supplies the type (never evaluated), `v` supplies the value. */
 #define ZCL_TEST_PRINT_VALUE(t, v) \

@@ -1465,16 +1465,25 @@ void hotswap_activation_reset_for_testing(void)
  * one into the outer condition can never move a dl* call site out of the
  * dev-only region. */
 #ifdef ZCL_DEV_BUILD
-#if defined(__linux__) && !defined(_WIN32)
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(_WIN32)
 
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 
+#include "base/hex.h"
 #include "crypto/sha256.h"
 #include "hotswap/hotswap_artifact_digest.h"
-#include "hotswap/hotswap_elf_probe.h"
 #include "hotswap/hotswap_sealed_image.h"
+#if defined(__APPLE__)
+#include "hotswap/hotswap_macho_probe.h"
+#define HOTSWAP_PROBE_AND_ADMIT_FD hotswap_macho_probe_and_admit_fd
+#define HOTSWAP_PINNED_FMT         "/dev/fd/%d"
+#else
+#include "hotswap/hotswap_elf_probe.h"
+#define HOTSWAP_PROBE_AND_ADMIT_FD hotswap_elf_probe_and_admit_fd
+#define HOTSWAP_PINNED_FMT         "/proc/self/fd/%d"
+#endif
 
 static bool artifact_sha256_fd(int fd, char hex_out[65])
 {
@@ -1495,12 +1504,7 @@ static bool artifact_sha256_fd(int fd, char hex_out[65])
         return false;
     unsigned char digest[SHA256_OUTPUT_SIZE];
     sha256_finalize(&ctx, digest);
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < SHA256_OUTPUT_SIZE; i++) {
-        hex_out[i * 2] = hex[digest[i] >> 4];
-        hex_out[i * 2 + 1] = hex[digest[i] & 0x0f];
-    }
-    hex_out[64] = '\0';
+    zcl_hex_encode(digest, SHA256_OUTPUT_SIZE, hex_out);
     return true;
 }
 
@@ -1527,19 +1531,11 @@ bool zcl_hotswap_hotfork_visit_so(
         return false;
     }
 #if defined(__APPLE__)
-    /* On this host the pinned name is a /dev/fd path rather than an inode
-     * pin. Refuse unless it still resolves to the exact inode whose bytes
-     * were just hash-verified — the same identity discipline as
-     * execve-by-fd. The remaining window between resolve and dlopen is
-     * inherent to any name-based dlopen and is one reason pinned hosts run
-     * the Linux semantics only. */
-    struct stat current;
-    if (stat(pinned, &current) != 0 ||
-        current.st_dev != st.st_dev || current.st_ino != st.st_ino) {
-        (void)close(fd);
-        return false;
-    }
-#endif
+    /* A/B-by-fd unavailable on Darwin; silence unused params, fail closed. */
+    (void)visit; (void)ctx;
+    (void)close(fd);
+    return false;
+#else
     void *handle = dlopen(pinned, RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
         (void)close(fd);
@@ -1553,6 +1549,7 @@ bool zcl_hotswap_hotfork_visit_so(
     (void)dlclose(handle);
     (void)close(fd);
     return ok;
+#endif
 }
 
 /* ── the consensus pin ─────────────────────────────────────────────────────
@@ -1782,14 +1779,9 @@ static bool activate_from_sealed_fd(int fd,
 
     /* Pre-map shape check, against the sealed image. */
     {
-        struct hotswap_elf_facts facts;
         char probe_err[200];
-        if (!hotswap_elf_probe_fd(fd, &facts, probe_err, sizeof(probe_err))) {
-            close(fd);
-            return act_reject(report, "shape", "%s", probe_err);
-        }
-        if (!hotswap_elf_pre_map_admit(
-                &facts, ZCL_CORE_SEAL_ROOT,
+        if (!HOTSWAP_PROBE_AND_ADMIT_FD(
+                fd, ZCL_CORE_SEAL_ROOT,
                 ZCL_HOTSWAP_MODULE_ABI_V3, probe_err, sizeof(probe_err))) {
             close(fd);
             return act_reject(report, "shape", "%s", probe_err);
@@ -1803,7 +1795,7 @@ static bool activate_from_sealed_fd(int fd,
                           "could not hash the sealed module image");
     }
     char pinned[64];
-    (void)snprintf(pinned, sizeof(pinned), "/proc/self/fd/%d", fd);
+    (void)snprintf(pinned, sizeof(pinned), HOTSWAP_PINNED_FMT, fd);
     void *handle = dlopen(pinned, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         const char *dl = dlerror();
@@ -2097,16 +2089,9 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
     }
 
     {
-        struct hotswap_elf_facts vfacts;
         char vprobe_err[200];
-        if (!hotswap_elf_probe_fd(fd, &vfacts, vprobe_err, sizeof(vprobe_err))) {
-            (void)close(fd);
-            act_copy(report->stage, sizeof(report->stage), "shape");
-            act_copy(report->error, sizeof(report->error), vprobe_err);
-            return false;
-        }
-        if (!hotswap_elf_pre_map_admit(
-                &vfacts, ZCL_CORE_SEAL_ROOT,
+        if (!HOTSWAP_PROBE_AND_ADMIT_FD(
+                fd, ZCL_CORE_SEAL_ROOT,
                 ZCL_HOTSWAP_MODULE_ABI_V3, vprobe_err,
                 sizeof(vprobe_err))) {
             (void)close(fd);
@@ -2124,7 +2109,7 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
         return false;
     }
     char vpinned[64];
-    (void)snprintf(vpinned, sizeof(vpinned), "/proc/self/fd/%d", fd);
+    (void)snprintf(vpinned, sizeof(vpinned), HOTSWAP_PINNED_FMT, fd);
 
     /* RTLD_LOCAL so the candidate's symbols never join the global scope and
      * interpose on anything the verifying process later resolves. The shared

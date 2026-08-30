@@ -24,14 +24,72 @@ endif
 # That is exactly what happened -- 217d3eb6e raised the product to the
 # Windows 10 baseline and left the catalog at 0x0600.
 ZCL_WINDOWS_API_FLOOR := -D_WIN32_WINNT=0x0A00
+
+# ── Release targets ───────────────────────────────────────────────────────
+# Everything below is written against ZCL_HOST_OS, the OS the ARTIFACT is for.
+# On the default target that is this machine, which is why the variable is
+# named for the host and why nothing else here changes: `make z23` with no
+# ZCL_TARGET produces exactly the bytes it always did.
+#
+# ZCL_TARGET=windows-x86_64 asks for the other artifact this repository can
+# already almost produce. The Windows arms below, the platform seam, and the
+# acceptance catalog have been maintained by a mingw gate for months
+# (check-windows-platform-seam); what was missing was never the C, it was a
+# way to SELECT the Windows arms without standing on a Windows box, plus a
+# vendor archive set for that target (vendor/cross/<triple>, built by
+# VENDOR_TARGET=<triple> tools/scripts/build_vendor.sh).
+#
+# A cross target selects the node link only. Tests, dev tooling, benchmarks
+# and every other goal in this file stay host-targeted and are not built under
+# a cross target -- one of them would link host archives into a Windows binary
+# and the mismatch is exactly the silent kind. `make ZCL_TARGET=... release`
+# is the supported entry point.
+ZCL_TARGET ?= host
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
+ZCL_CROSS_TRIPLE :=
+ifneq ($(ZCL_TARGET),host)
+ifeq ($(ZCL_TARGET),windows-x86_64)
+ZCL_CROSS_TRIPLE := x86_64-w64-mingw32
+# The spelling every Windows arm below already tests for, so the cross build
+# takes the same branches a native MSYS2 build takes -- there is no second
+# Windows configuration to keep in sync with the first.
+ZCL_HOST_OS := MINGW64_NT-10.0
+else
+$(error unknown ZCL_TARGET '$(ZCL_TARGET)' — known: host, windows-x86_64)
+endif
+endif
+# Where the archives for THIS target live. vendor/lib holds exactly one target
+# (see tools/scripts/build_vendor.sh), so a cross target reads its own tree.
+ZCL_VENDOR_LIB := $(if $(ZCL_CROSS_TRIPLE),vendor/cross/$(ZCL_CROSS_TRIPLE)/lib,vendor/lib)
+# vendor/include holds the target-INDEPENDENT tracked headers (sqlite3.h,
+# secp256k1*.h, leveldb/); the generated ones (openssl/, event2/, zlib.h) are
+# per-target and come from the cross tree, which is therefore searched first.
+ZCL_VENDOR_INC_FLAGS := $(if $(ZCL_CROSS_TRIPLE),-Ivendor/cross/$(ZCL_CROSS_TRIPLE)/include,) -Ivendor/include
+# binutils follow the compiler. Host objcopy/strip do not understand a PE, and
+# on this host they fail in the least useful way: `strip` reports success on a
+# file it did not change.
+ZCL_OBJCOPY := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-objcopy,objcopy)
+ZCL_STRIP_TOOL := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-strip,strip)
+
 ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
-CC = gcc
-CXX ?= g++
+# A native Windows build uses the MSYS2 gcc, unchanged. A CROSS build cannot:
+# every mingw-w64 gcc packaged by Debian and Ubuntu is GCC 13, and GCC 13 does
+# not know -std=c23 -- the C23 toolchain gate below refuses it, correctly, by
+# compiling an empty TU rather than parsing a version. clang reaches the same
+# target with a flag instead of a separate driver, and clang 20 speaks C23, so
+# the cross toolchain is clang aimed at the mingw-w64 sysroot the distro
+# already installs (its headers, its CRT, its libgcc; only the front end
+# changes). --target rides in the platform CPPFLAGS rather than in $(CC) so
+# every consumer of $(CC) still receives ONE word: the epoch tools, the
+# compiler-cache wrapper and the identity record all treat it as a command.
+CC = $(if $(ZCL_CROSS_TRIPLE),clang,gcc)
+CXX ?= $(if $(ZCL_CROSS_TRIPLE),clang++,g++)
 ZCL_PLATFORM_CPPFLAGS = $(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
-	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC
-ZCL_LTO_FLAG = -flto=auto
+	-D__USE_MINGW_ANSI_STDIO=1 -DSECP256K1_STATIC \
+	$(if $(ZCL_CROSS_TRIPLE),--target=$(ZCL_CROSS_TRIPLE),)
+# -flto=auto is a GCC spelling; clang rejects the argument outright.
+ZCL_LTO_FLAG = $(if $(ZCL_CROSS_TRIPLE),-flto=thin,-flto=auto)
 # -lshlwapi is required by the vendored Tor on Windows: its own configure
 # sets TOR_LIB_SHLWAPI=-lshlwapi (vendor/tor/configure.ac:856) and a real-Tor
 # link fails without it. It is inert on the stub link -- static linking adds no
@@ -39,8 +97,17 @@ ZCL_LTO_FLAG = -flto=auto
 # work. Note the PE dependency audit does NOT pre-authorise shlwapi.dll: if a
 # real-Tor build starts importing it, the audit is meant to fail and make that
 # a deliberate decision with evidence, not one granted in advance.
-ZCL_PLATFORM_NODE_LIBS = -l:libregex.a -l:libtre.a -l:libintl.a \
-	-l:libiconv.a -lws2_32 -liphlpapi -lbcrypt -lshlwapi \
+# libregex/libtre/libintl/libiconv are MSYS2 packages, not part of the
+# mingw-w64 target sysroot a cross toolchain installs, and nothing this
+# repository wrote needs them: the node carries its own ERE matcher precisely
+# because <regex.h> does not exist on Windows (lib/util/include/util/
+# ere_match.h). They stay on the native MSYS2 link, where the real-Tor build
+# reaches them and where they have always been; a cross link asks for the
+# Windows system libraries only. If a real cross Tor ever needs one, the link
+# fails by name, which is the outcome to want.
+ZCL_PLATFORM_NODE_LIBS = \
+	$(if $(ZCL_CROSS_TRIPLE),,-l:libregex.a -l:libtre.a -l:libintl.a -l:libiconv.a) \
+	-lws2_32 -liphlpapi -lbcrypt -lshlwapi \
 	-luserenv -lcrypt32 -lshell32 -lole32 -luuid -lpsapi -lgdi32
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
@@ -48,7 +115,11 @@ ZCL_TEST_STACK_SETUP = :
 else ifeq ($(ZCL_HOST_OS),Darwin)
 CC = clang
 CXX = clang++
-ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
+ZCL_MACOS_DEPLOYMENT_TARGET := 14.0
+export MACOSX_DEPLOYMENT_TARGET := $(ZCL_MACOS_DEPLOYMENT_TARGET)
+ZCL_PLATFORM_CPPFLAGS = -mmacosx-version-min=$(ZCL_MACOS_DEPLOYMENT_TARGET) \
+	-DZCL_MACOS_DEPLOYMENT_TARGET=\"$(ZCL_MACOS_DEPLOYMENT_TARGET)\" \
+	-D_DARWIN_C_SOURCE \
 	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
 	-Dst_ctim=st_ctimespec -fblocks
 ZCL_LTO_FLAG = -flto=thin
@@ -178,9 +249,12 @@ ZCL_WORKTREE_PRIME_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-o
 # archives before entering a nested authoritative Make. On a from-empty clone,
 # do not let this outer parse first bootstrap host-ABI archives that the
 # portable builder would immediately replace.
+# doctor-env is here for a different reason than the portable sysroot
+# front doors: it must run on a machine whose compiler cannot compile
+# C23, so it cannot trip the parse-time -std=c23 toolchain gate below.
 ZCL_PORTABLE_FRONTDOOR_GOALS := portable c23-portable-toolchain \
 	c23-portable-release c23-portable-install c23-commons-installed-acceptance \
-	native-agent-ui-alpha
+	native-agent-ui-alpha doctor-env
 ZCL_PORTABLE_FRONTDOOR_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip \
 	$(filter-out $(ZCL_PORTABLE_FRONTDOOR_GOALS),$(MAKECMDGOALS))),,1),)
 
@@ -212,7 +286,7 @@ endif
 # restart, the boundary recipe must also drop this session's cached capture:
 # the pre-boundary parse may already have memoized a record that cannot see
 # the inputs this boundary establishes.
-NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),vendor/lib/libsecp256k1-darwin.a,$(if $(ZCL_HOST_WINDOWS),vendor/lib/libsecp256k1-windows.a,vendor/lib/libsecp256k1.a))
+NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),$(ZCL_VENDOR_LIB)/libsecp256k1-darwin.a,$(if $(ZCL_HOST_WINDOWS),$(ZCL_VENDOR_LIB)/libsecp256k1-windows.a,$(ZCL_VENDOR_LIB)/libsecp256k1.a))
 ZCL_GC_SECTIONS_LDFLAG = -Wl,--gc-sections
 ifeq ($(ZCL_HOST_OS),Darwin)
 # Apple ld has no --gc-sections; -dead_strip is its equivalent.
@@ -231,12 +305,14 @@ endif
 NODE_VENDOR_ARCHIVES = $(notdir $(NODE_SECP_ARCHIVE)) libcrypto.a libssl.a libevent.a \
 	libevent_openssl.a libevent_pthreads.a libsqlite3.a libz.a libtor_stub.a
 # A focused `make z23` (or legacy `make zclassic23`) needs no C++ toolchain.
+# Bare `make` is the same build because `.DEFAULT_GOAL := z23`; keep its
+# dependency and source-identity scope identical to the explicit spelling.
 # Test/dev builds retain LevelDB strictly as a differential oracle.
-ZCL_NODE_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23 zclassic23,$(MAKECMDGOALS))),,1),)
+ZCL_NODE_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23 zclassic23,$(MAKECMDGOALS))),,1),1)
 VENDOR_ARCHIVES = $(NODE_VENDOR_ARCHIVES) \
 	$(if $(ZCL_NODE_ONLY_BUILD),,libleveldb.a)
-VENDOR_LIBS = $(addprefix vendor/lib/,$(VENDOR_ARCHIVES))
-NODE_VENDOR_LIBS = $(addprefix vendor/lib/,$(NODE_VENDOR_ARCHIVES))
+VENDOR_LIBS = $(addprefix $(ZCL_VENDOR_LIB)/,$(VENDOR_ARCHIVES))
+NODE_VENDOR_LIBS = $(addprefix $(ZCL_VENDOR_LIB)/,$(NODE_VENDOR_ARCHIVES))
 VENDOR_BOOTSTRAP_MK := build/identity/vendor-inputs-ready.mk
 VENDOR_MISSING_INPUTS := $(filter-out $(wildcard $(VENDOR_LIBS)),$(VENDOR_LIBS))
 VENDOR_REPAIR_GOALS := vendor-ready deploy install
@@ -323,7 +399,14 @@ ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
 	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
-ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
+# With no explicit goal GNU Make executes `.DEFAULT_GOAL := z23`; selecting
+# every compiler profile here did not make that node build safer.  It only
+# fingerprinted nine toolchain/flag combinations that the default recipe can
+# never consume.  Keep unknown explicit goals conservative, while making the
+# documented first build pay for exactly its node-c23 authority.
+ifeq ($(strip $(MAKECMDGOALS)),)
+ZCL_EPOCH_PROFILES := node-c23
+else ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ZCL_EPOCH_PROFILES :=
@@ -381,7 +464,24 @@ BUILD_SOURCE_RECORD_VALID := yes
 else
 BUILD_SOURCE_RECORD_VALID := $(shell printf '%s\n' '$(BUILD_SOURCE_ID) $(BUILD_CLEAN) $(BUILD_MUTATION)' | awk 'BEGIN { ok=0 } $$1 ~ /^[0-9a-f]{64}$$/ && $$2 == "1" && $$3 ~ /^[0-9a-f]{64}$$/ && NF == 3 { ok=1 } END { if (ok) print "yes" }')
 ifneq ($(BUILD_SOURCE_RECORD_VALID),yes)
-$(error exact source capture failed; refusing to select a compile epoch)
+# WHY THIS ERROR USED TO NAME NOTHING. The $(shell) above discards
+# source-identity.sh's stderr (`2>/dev/null`), so the ONLY thing anyone saw was
+# "exact source capture failed" — a symptom with no cause and no next action —
+# and it stops EVERY goal before a single test runs. In a fresh `git worktree`
+# the cause is nearly always an uninitialized-but-nonempty vendor/tor gitlink:
+# `git worktree add` does not populate submodules, and copying the Tor archives
+# into the still-empty gitlink instead of initializing it FIRST is exactly what
+# produces "nonempty uninitialized gitlink would omit bytes". Re-running the
+# capture on the ERROR path costs nothing that matters — the build is already
+# over — and it turns a dead end into an instruction.
+SOURCE_CAPTURE_REASON := $(strip $(shell \
+  ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' \
+  tools/dev/source-identity.sh capture-record 2>&1 >/dev/null | head -2 | tr '\n' ' '))
+$(error exact source capture failed; refusing to select a compile epoch. \
+  Reason: $(if $(SOURCE_CAPTURE_REASON),$(SOURCE_CAPTURE_REASON),(none reported)). \
+  In a fresh git worktree this is the vendor/tor submodule holding files but no \
+  .git — run `make worktree-prime`, which initializes the submodule BEFORE \
+  copying archives into it)
 endif
 endif
 BUILD_DIR = build
@@ -564,14 +664,18 @@ LIB_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(foreach m,$(LIB_MODULES),$(wildcard lib/$(m)/src/*.c)))
 ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
-	lib/util/src/self_backtrace_stub.c,$(LIB_SRCS))
+	lib/util/src/self_backtrace_stub.c \
+	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
+	lib/platform/src/os_sandbox_terminal_worker.c \
 	lib/util/src/self_backtrace_stub.c \
 	lib/vcs/src/vcs_devloop.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
-	lib/util/src/self_backtrace.c,$(LIB_SRCS))
+	lib/platform/src/os_sandbox_terminal_worker.c \
+	lib/util/src/self_backtrace.c \
+	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 endif
 
 # Ports layer (Clean Architecture / Hexagonal interface headers).
@@ -626,6 +730,23 @@ ADAPTERS_SRCS = $(call zcl_filter_ephemeral_sources,\
 # plus any other tools headers).
 TOOLS_INCLUDES = -Itools
 
+# ZCL_ALL_INCLUDES — the one place the header roots are named as a set, so an
+# ad-hoc compile (a cross-compiler syntax sweep, a one-off -fsyntax-only check,
+# a language server) can ask the build what its include path IS instead of
+# rebuilding it by hand. Reconstructing this list with `find` looks equivalent
+# and is not: core/ headers live at core/<context>/include, sqlite3.h at
+# vendor/include, config/runtime.h at config/include, and a hand-picked subset
+# fails on exactly those. Because this variable is what the compile lines below
+# expand, a reader of `make print-includes` cannot disagree with the build.
+ZCL_ALL_INCLUDES = $(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) \
+	$(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) \
+	$(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) \
+	$(DEVLOOP_INCLUDES) -Ilib/test/include -Ivendor/include -Ivendor/x11/include
+
+.PHONY: print-includes
+print-includes:
+	@printf '%s\n' '$(ZCL_ALL_INCLUDES)'
+
 # Native development control plane.  These C adapters are the AI-facing
 # save -> classify -> prove -> publish loop; tools/dev/*.sh remain temporary
 # compatibility/self-test fixtures, not the primary interface.
@@ -644,14 +765,23 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary) — filtering there would only move the duplicate-`main` link error.
 DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
 	tools/dev/hotswap_verify_so.c \
-	tools/dev/windows_headless_run.c
+	tools/dev/mutation_campaign.c \
+	tools/dev/windows_headless_run.c \
+	tools/dev/z23_git_hook.c \
+	tools/dev/z23_doctor.c
+# The mutation harness proper (operators + campaign core) has no main() and
+# is proved by the registered `mutation_harness` group, so it is linked into
+# the dev binary and the test harness but kept out of the release node — a
+# tool that edits nothing in production has no business shipping there.
+MUTATION_LIB_SRCS = tools/dev/mutation_ops.c tools/dev/mutation_run.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(filter-out $(DEV_STANDALONE_SRCS),$(wildcard tools/dev/*.c)))
 DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/devloop_baseline.c tools/dev/dev_failure_store.c \
-	tools/dev/dev_source_identity.c
+	tools/dev/dev_source_identity.c tools/dev/dev_proof.c \
+	tools/dev/dev_proof_receipt.c $(MUTATION_LIB_SRCS)
 DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 
 # The stable public Core -> App ABI is lib/framework/include/zclassic23/app.h,
@@ -934,23 +1064,50 @@ ZCL_WARN_EXTRA_GATES = \
 	-Wflex-array-member-not-at-end
 endif
 
-CFLAGS = -std=c23 -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werror -pedantic \
+# C23 has two accepted spellings and one language: GCC 14+ takes -std=c23,
+# GCC 13 only the earlier -std=c2x. Every mingw-w64 package on Debian/Ubuntu
+# is GCC 13, and lib/platform/tests/windows_acceptance.mk has compiled the
+# Windows acceptance catalog as -std=c2x for exactly that reason since it was
+# written. So ask the selected compiler instead of asserting; the host answers
+# c23, leaving its command line byte-identical. The probe runs only when a
+# cross target is selected, so the default parse pays no shell call.
+ZCL_C_STD := c23
+ifneq ($(ZCL_CROSS_TRIPLE),)
+ZCL_C_STD := $(shell printf 'int main(void){return 0;}' | $(CC) -std=c23 -fsyntax-only -x c - >/dev/null 2>&1 && printf c23 || printf c2x)
+endif
+CFLAGS = -std=$(ZCL_C_STD) -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werror -pedantic \
 	$(REPRO_CFLAGS) \
 	$(HARDEN_CFLAGS) \
 	$(ZCL_WARN_EXTRA_GATES) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(ZCL_WARN_UNUSED_RESULT) \
 	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) $(DEVLOOP_INCLUDES) \
 	-Ilib/test/include \
-	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) -Ivendor/include -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) $(ZCL_VENDOR_INC_FLAGS) -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
 ZCL_EXPORT_DYNAMIC_FLAG = $(if $(filter Darwin,$(ZCL_HOST_OS)),,$(if $(ZCL_HOST_WINDOWS),,-rdynamic))
 ZCL_WINDOWS_CLANG_LINKER = $(if $(and $(ZCL_HOST_WINDOWS),$(ZCL_CC_IS_CLANG)),-fuse-ld=lld,)
-LDFLAGS = $(if $(ZCL_HOST_WINDOWS),-static-libgcc,-pthread) $(ZCL_LTO_FLAG) $(ZCL_WINDOWS_CLANG_LINKER) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
+# -static on the Windows cross link, not merely -static-libgcc. clang's MinGW
+# driver appends -lssp for -fstack-protector-strong, and -lssp resolves to the
+# IMPORT library libssp.dll.a before the static libssp.a beside it: the node
+# then depends on libssp-0.dll, a file no Windows machine has, and the PE
+# dependency audit fails it -- correctly, because a release that needs a DLL
+# from a Linux cross-toolchain directory is not a release. -static makes the
+# linker prefer every real archive over its import stub, which is what a
+# self-contained node wants anyway; the Windows API import libraries
+# (ws2_32 &c.) are import stubs with no static alternative and are unaffected.
+LDFLAGS = $(if $(ZCL_HOST_WINDOWS),$(if $(ZCL_CROSS_TRIPLE),-static,-static-libgcc),-pthread) $(ZCL_LTO_FLAG) $(ZCL_WINDOWS_CLANG_LINKER) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
 CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAGS))
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
 ZCL_DEV_LINKER ?= $(shell tools/dev/dev-linker-select.sh)
+# PE/COFF relocatable links are supported by the MinGW platform linker, while
+# lld-link rejects the ELF-style `-r` option.  Keep the measured fast linker
+# for executable links and use the platform linker for frozen restart bases.
+ZCL_RELOC_LINKER = $(ZCL_DEV_LINKER)
+ifneq ($(ZCL_HOST_WINDOWS),)
+ZCL_RELOC_LINKER =
+endif
 DEV_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
 	-Wno-deprecated-declarations $(ZCL_WARN_FORMAT_TRUNCATION) $(ZCL_WARN_MAYBE_UNINITIALIZED)
 DEV_HOT_CFLAGS = $(filter-out $(ZCL_DEV_OPT),$(DEV_CFLAGS)) $(ZCL_DEV_HOT_OPT)
@@ -1033,11 +1190,17 @@ DEV_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(
 # this repository already builds. A Mac without those archives simply has no
 # vendor/tor/libtor.a, so this wildcard stays empty and the stub is selected
 # for the same reason it is on any other host that never opted in.
-TOR_FULL = $(wildcard vendor/tor/libtor.a \
-	vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
-	vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
-	vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a)
-TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-Lvendor/lib -ltor_stub)
+# ...and it asks about the archives for THIS TARGET. vendor/tor holds one
+# build, for the host, exactly like vendor/lib: a cross link that consumed it
+# would be handing an ELF archive to a PE link, and the failure mode this
+# selection was written to prevent (a binary whose tor_run_main is not the one
+# the gate believes) comes straight back in a new form.
+ZCL_TOR_TREE := $(if $(ZCL_CROSS_TRIPLE),vendor/cross/$(ZCL_CROSS_TRIPLE)/tor,vendor/tor)
+TOR_FULL = $(wildcard $(ZCL_TOR_TREE)/libtor.a \
+	$(ZCL_TOR_TREE)/src/ext/ed25519/donna/libed25519_donna.a \
+	$(ZCL_TOR_TREE)/src/ext/ed25519/ref10/libed25519_ref10.a \
+	$(ZCL_TOR_TREE)/src/ext/keccak-tiny/libkeccak-tiny.a)
+TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-L$(ZCL_VENDOR_LIB) -ltor_stub)
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
 # OpenSSL 3.0 (Apache 2.0), libevent and zlib are vendored and statically
@@ -1052,7 +1215,7 @@ CXX_STDLIB_FILE := $(shell $(CXX) -print-file-name=libstdc++.a 2>/dev/null)
 endif
 CXX_STDLIB_DIR := $(if $(filter /%,$(CXX_STDLIB_FILE)),$(dir $(CXX_STDLIB_FILE)),)
 CXX_STDLIB_LDFLAGS := $(if $(CXX_STDLIB_DIR),-L$(CXX_STDLIB_DIR),)
-LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
+LIBS = $(NODE_SECP_ARCHIVE) -L$(ZCL_VENDOR_LIB) -lleveldb \
 	$(CXX_STDLIB_LDFLAGS) $(ZCL_CXX_RUNTIME_LIB) -lsqlite3 \
 	-levent -levent_openssl -levent_pthreads \
 	-lssl -lcrypto -lz $(ZCL_DLOPEN_LIB) \
@@ -1066,11 +1229,11 @@ LIBS = $(NODE_SECP_ARCHIVE) -Lvendor/lib -lleveldb \
 NODE_C23_CFLAGS = $(CFLAGS) -DZCL_C23_NODE -UHAVE_GTK -UHAVE_WEBKIT
 # Same archives-not-OS rule as TOR_LIBS above; see the comment there for why
 # the Darwin arm is gone.
-NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),vendor/lib/libtor_stub.a)
-NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) vendor/lib/libsqlite3.a \
-	vendor/lib/libevent.a vendor/lib/libevent_openssl.a \
-	vendor/lib/libevent_pthreads.a vendor/lib/libssl.a \
-	vendor/lib/libcrypto.a vendor/lib/libz.a $(ZCL_DLOPEN_LIB) \
+NODE_C23_TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),$(ZCL_VENDOR_LIB)/libtor_stub.a)
+NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) $(ZCL_VENDOR_LIB)/libsqlite3.a \
+	$(ZCL_VENDOR_LIB)/libevent.a $(ZCL_VENDOR_LIB)/libevent_openssl.a \
+	$(ZCL_VENDOR_LIB)/libevent_pthreads.a $(ZCL_VENDOR_LIB)/libssl.a \
+	$(ZCL_VENDOR_LIB)/libcrypto.a $(ZCL_VENDOR_LIB)/libz.a $(ZCL_DLOPEN_LIB) \
 	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(ZCL_PLATFORM_NODE_LIBS)
 
@@ -1329,11 +1492,11 @@ $(DEV_TSAN_LEASE): FORCE
 	  "$(DEV_TSAN_EPOCH_COMPILE_FLAGS)" "$(DEV_TSAN_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-# Make normally imports four large immutable depfile graphs even when one
-# profile (or no compiler at all) is requested.  Narrow only an exact,
-# explicitly-known single goal.  Empty/default, mixed, and unknown goals keep
-# the conservative source-wide fallback so a new target cannot accidentally
-# lose header invalidation merely because this table was not updated.
+# Make normally imports large immutable depfile graphs even when one profile
+# is requested. Narrow an exact known goal, including the empty spelling of
+# `.DEFAULT_GOAL := z23`. Mixed and unknown explicit goals keep the
+# conservative source-wide fallback so a new target cannot accidentally lose
+# header invalidation merely because this table was not updated.
 ZCL_DEPFILE_ALL_PROFILES := build-only dev test-fast test-strict coverage fuzz \
 	node-c23
 ZCL_DEPFILE_PROFILES := $(ZCL_DEPFILE_ALL_PROFILES)
@@ -1343,6 +1506,8 @@ ifeq ($(ZCL_HOTSWAP_DEPFILE_LEAN_ONLY),1)
 # tracks its own single-TU depfile. Skip every depfile graph — an unmatched
 # single goal below would otherwise fall through to importing all four.
 ZCL_DEPFILE_PROFILES :=
+else ifeq ($(strip $(MAKECMDGOALS)),)
+ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
@@ -1442,6 +1607,7 @@ check-vendor-provenance:
 	@sha256sum --check vendor/qrcodegen/SHA256SUMS
 	@sha256sum --check vendor/typography/SHA256SUMS
 	@sha256sum --check vendor/x11/SHA256SUMS
+	@sha256sum --check vendor/freebsd-sh/SHA256SUMS
 
 # Reusable native presentation package. This deliberately has a tiny source
 # closure: twelve project TUs plus pinned RGFW headers, with no node/app objects.
@@ -1789,6 +1955,13 @@ else
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 endif
 
+.PHONY: macos-acceptance
+# Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived
+# from the closed capability matrix; unavailable rows run their refusal proof
+# rather than disappearing as hand-maintained skips.
+macos-acceptance:
+	@./tools/scripts/macos_acceptance.sh --run
+
 .PHONY: windows-service-install windows-service-status windows-service-remove
 windows-service-install: z23
 	@packaging/windows/install-service.sh install
@@ -2011,15 +2184,15 @@ worktree-prime:
 # rule lets `make zclassic23` pull in `make vendor` transparently on a fresh
 # clone without re-running the whole script when the libs are already there.
 # libsecp256k1.a is tracked, so it has no recipe (git provides it).
-$(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
-	tools/scripts/build_vendor.sh $(notdir $@)
+$(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
+	VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh $(notdir $@)
 
 .PHONY: all test test-e2e test-shielded-payment test-store-e2e clean deploy deploy-dev remote-node-plan remote-node-plan-json remote-node-update remote-node-update-json lane-health lane-recover check-agent-cli check-restart-follow \
         background-fuzz background-coverage background-tests install-quality-linger quality-linger-status pre-push-ci \
         install-replay-canary replay-canary-linger-status \
         coverage coverage-clean ci audit release \
         bench bench-crypto-verify bench-regress \
-	lint check-build-epoch-integrity check-checkout-lock check-malloc check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol \
+	lint check-build-epoch-integrity check-checkout-lock check-malloc check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol check-dev-proof-native-fast-path \
         check-coins-lookup-nullcheck check-observability-pairing \
         check-silent-errors-services check-silent-errors-controllers \
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
@@ -2027,6 +2200,8 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         check-wallet-raw-prepare-log check-blob-read-bounds \
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
+        check-model-sql-literals \
+        check-persona-resolves check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
@@ -2035,6 +2210,7 @@ $(filter-out vendor/lib/libsecp256k1.a,$(VENDOR_LIBS)):
         check-verification-coverage \
         check-ship-remote-transaction \
         check-z23-release-install \
+        check-published-platforms \
         check-identity-parser-single \
         check-source-identity-authority \
         check-status-reason-single \
@@ -2091,19 +2267,43 @@ TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard lib/test/src/*.c))
 TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
 	tools/dev/dev_source_identity.c tools/dev/devloop_process.c \
-	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c
+	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
+	tools/dev/dev_proof.c tools/dev/dev_proof_receipt.c \
+	$(MUTATION_LIB_SRCS)
 SPEC_SRCS = $(wildcard lib/test/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
+# The landing queue's two library translation units. land_main.c owns a
+# main() and is deliberately NOT here — the queue logic is what the test
+# group proves, and linking the CLI's entry point would collide with the
+# harness's own.
+TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
 # helpers as sequential test_zcl.
-TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+# The strict-C23 Windows acceptance catalog (windows_acceptance.mk, included
+# above) is a set of standalone main()-bearing programs. Off Windows each is
+# an empty TU, but on a Windows host every one defines main and cannot join
+# the test_parallel_fast monolith — they build and run as individual
+# binaries via windows-acceptance.
+ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES = $(if $(ZCL_HOST_WINDOWS),\
+	$(filter lib/test/src/%,\
+	$(foreach t,$(ZCL_WINDOWS_ACCEPTANCE_TESTS),\
+	$(ZCL_WINDOWS_ACCEPTANCE_$(t)_SOURCES))),)
+TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c \
+	$(ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES), $(TEST_SRCS)) \
+	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
+# Windows test-lane compat shims (lib/test/include/test/windows_compat.h):
+# force-included into test-fast TUs on Windows hosts only. Test-only, never
+# production: where a POSIX capability genuinely does not exist the shim
+# fails the call (ENOSYS) instead of faking success.
+ZCL_TEST_WINDOWS_COMPAT_FLAGS = $(if $(ZCL_HOST_WINDOWS),-include test/windows_compat.h,)
 TEST_FAST_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
-	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) \
+	$(ZCL_TEST_WINDOWS_COMPAT_FLAGS)
 TEST_FAST_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
 TEST_FAST_EPOCH_COMPILE_FLAGS := $(strip $(TEST_FAST_CFLAGS) deps=-MD,-MP)
 TEST_FAST_EPOCH_LINK_FLAGS := $(strip $(TEST_FAST_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
@@ -2441,7 +2641,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2463,7 +2663,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2496,6 +2696,7 @@ $(BUILD_DIR)/hotswap/zcl_rollback_fixture_%.so: $(HOTSWAP_ROLLBACK_FIXTURE_SRC) 
 	  -c -o "$$tmp_o" $(HOTSWAP_ROLLBACK_FIXTURE_SRC); \
 	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o"; \
 	mv -f -- "$$tmp_so" "$@"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$@"; \
 	rm -f "$$tmp_o"; \
 	trap - EXIT HUP INT TERM
 
@@ -2527,7 +2728,7 @@ $(TEST_RESTART_BASE_RELOC): $(TEST_PARALLEL_FAST_LINK_RSP) \
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_DEV_LINKER) -r -nostdlib -o "$$tmp" \
+	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" \
 	  "@$(TEST_PARALLEL_FAST_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
@@ -2753,6 +2954,33 @@ ifneq ($(ONLY_ACTIVE_GOALS),)
   endif
 endif
 
+# ── ONLY= on a goal that cannot honour it is a REFUSAL ───────────────────
+# `make test_parallel ONLY=<group>` reads like "run that one group". It is
+# not. test_parallel is a BUILD target: it links the runner and executes
+# nothing, ONLY= is never looked at, and the caller sees a successful build
+# and believes a group passed. Every goal below either builds a test binary
+# without running it or runs the WHOLE suite; none of them consults ONLY=.
+# Silence there costs a full link and buys a false green, so name the goals
+# that DO honour it — and the runner flag, for a binary already built.
+#
+# Denylist, not allowlist, on purpose: `make t ONLY=x` re-enters make as
+# `$(MAKE) t-locked ONLY='x'`, so ONLY= legitimately reaches inner goals
+# through MAKECMDGOALS and MAKEFLAGS. Refusing everything not on a short
+# allowlist would break the working targets.
+ONLY_IGNORING_GOALS := test test-locked test-full \
+                       test_parallel test-parallel test-parallel-locked \
+                       test_parallel_fast test_parallel_wpo \
+                       test-asan test-tsan
+ONLY_IGNORED_ACTIVE := $(filter $(ONLY_IGNORING_GOALS),$(MAKECMDGOALS))
+ifneq ($(ONLY_IGNORED_ACTIVE),)
+  ifneq ($(strip $(ONLY)),)
+    $(error make $(firstword $(ONLY_IGNORED_ACTIVE)): ONLY='$(ONLY)' is IGNORED by this goal, \
+      which builds and/or runs the WHOLE suite — nothing would have been selected. \
+      Run that one group with:  make t-fast ONLY=$(ONLY)   (strict build: make t ONLY=$(ONLY)). \
+      Already built? run the runner itself:  build/bin/test_parallel --only=$(ONLY))
+  endif
+endif
+
 # Proof automation never dispatches a substring selector. Canonicalize every
 # requested ID before any prerequisite is considered, then hand the complete
 # full-ID set to the runner's exact selector.
@@ -2905,7 +3133,7 @@ worktree-gc:
 # tools/agent/gate-receipt.sh — this is EVIDENCE, not proof.
 .PHONY: gate-receipt check-claims agent-velocity agent-sha3
 
-AGENT_SHA3_SRCS := tools/agent/agent_sha3.c lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c
+AGENT_SHA3_SRCS := tools/agent/agent_sha3.c lib/sha3/src/sha3.c
 agent-sha3: $(BIN_DIR)/agent_sha3
 $(BIN_DIR)/agent_sha3: $(AGENT_SHA3_SRCS)
 	@mkdir -p $(dir $@)
@@ -2952,6 +3180,7 @@ $(ZCODE_PACKAGE_CODEC_TEST_BIN): lib/codec/tests/test_codec.c \
 zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test
 
 zcode-package-registry-check: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
+	@$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 
 # Permanent memory/undefined-behavior gate for the self-hosted package
 # foundation and its complete signed evidence lifecycle.  The first three
@@ -3005,10 +3234,18 @@ check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 .PHONY: check-zcode-package-standalone
 check-zcode-package-standalone:
 	@tools/lint/check_zcode_package_standalone.sh
+.PHONY: check-package-capabilities
+check-package-capabilities:
+	@./tools/lint/check_package_capabilities.sh --selftest
+	@./tools/lint/check_package_capabilities.sh
 .PHONY: check-package-anatomy
 check-package-anatomy:
 	@./tools/lint/check_package_anatomy.sh --selftest
 	@./tools/lint/check_package_anatomy.sh
+.PHONY: check-capability-closure
+check-capability-closure:
+	@./tools/lint/check_capability_closure.sh --selftest
+	@./tools/lint/check_capability_closure.sh
 print-zcode-monolith-lib-sources:
 	@printf '%s\n' $(LIB_SRCS)
 $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
@@ -3578,9 +3815,17 @@ verify-change:
 # This deliberately does not replace `z23`, `make deploy`, or release
 # artifacts.
 HOTSWAP_ACTION_PLAN = $(BUILD_DIR)/hotswap/fast/flags.env
+DEV_PACKAGE_VERIFIER_TARGET = dev-package-verifier
+ifneq ($(ZCL_HOST_WINDOWS),)
+# The package verifier's safety claim depends on Linux child confinement.
+# Its release target already refuses on Windows; the ordinary Windows dev
+# node must not defeat that boundary by compiling the same POSIX-only helper
+# as an unconditional convenience prerequisite.
+DEV_PACKAGE_VERIFIER_TARGET =
+endif
 dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS) \
 	$(DEV_RESTART_PLAN) \
-	$(HOTSWAP_ACTION_PLAN) dev-package-verifier \
+	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
 
 # Temporary migration alias: build/bin/zclassic23-dev keeps resolving to
@@ -3626,7 +3871,7 @@ $(DEV_RESTART_BASE_RELOC): $(DEV_LINK_RSP) $(DEV_OBJS)
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_DEV_LINKER) -r -nostdlib -o "$$tmp" "@$(DEV_LINK_RSP)"; \
+	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" "@$(DEV_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
@@ -3944,8 +4189,19 @@ hotswap:
 # shared by this recipe and the fast path's cached flags.env. -Wl,-Bsymbolic
 # is LOAD-BEARING: without it a dlopen'd handler's internal calls interpose
 # back onto the resident (old) code and the swap silently does nothing.
+# Platform-appropriate link flags for a loadable hot-swap module.  -Bsymbolic
+# is load-bearing on Linux: without it a dlopen'd handler's internal calls
+# interpose back onto the resident (old) code and the swap silently does
+# nothing.  macOS uses -bundle for dlopen-able Mach-O images and omits the
+# GNU/Linux linker hardening flags.
+ifeq ($(ZCL_HOST_OS),Darwin)
+HOTSWAP_MODULE_LDFLAGS = -bundle -Wl,-undefined,dynamic_lookup -Wl,-dead_strip
+HOTSWAP_MODULE_CODESIGN = codesign --sign - --force
+else
 HOTSWAP_MODULE_LDFLAGS = -shared -nostartfiles -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now \
 	-Wl,-z,noexecstack -Wl,-Bsymbolic
+HOTSWAP_MODULE_CODESIGN = true
+endif
 
 # Intentionally NOT ordered on $(BUILD_IDENTITY_STAMP): that stamp exists to
 # gate $(BUILD_IDENTITY_CPPFLAGS) into clientversion.o for whole-program
@@ -4043,6 +4299,7 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	publish_exact "$$tmp_so" "$$so" || { \
 	  echo "hotswap-module-so: REFUSING mismatched existing candidate $$so" >&2; exit 3; }; \
 	chmod a-w "$$o" "$$so"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$$so"; \
 	cache_o="$(HOTSWAP_SO_DIR)/fast/$$safe.o"; \
 	cache_d="$(HOTSWAP_SO_DIR)/fast/$$safe.d"; \
 	cache_cmd="$(HOTSWAP_SO_DIR)/fast/$$safe.cmd"; \
@@ -4207,6 +4464,7 @@ hotswap-test-so: $(VIEW_GEN_HEADERS)
 	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o" >&2; \
 	so="$(HOTSWAP_TEST_SO_DIR)/$$safe.so"; \
 	mv -f -- "$$tmp_so" "$$so"; \
+	$(HOTSWAP_MODULE_CODESIGN) "$$so"; \
 	rm -f "$$tmp_o"; \
 	trap - EXIT HUP INT TERM; \
 	{ \
@@ -4261,6 +4519,13 @@ syntax-check: $(VIEW_GEN_HEADERS)
 # the stray-source guard (~5 s) dominates, so the set stays ~6-8 s wall under
 # the parallel driver. Same ZCL_LINT_SERIAL=1 fallback as lint.
 # Run full `make lint` at sub-wave boundaries / before commit.
+EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
+EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
+    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
+    core/params/src/upgrades.c core/consensus/src/upgrades.c \
+    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
+    lib/base/src/log_level.c lib/base/src/result.c
+
 LINT_FAST_GATES := \
     check-no-stray-untracked-source \
     check-no-stray-root-files \
@@ -4278,6 +4543,7 @@ LINT_FAST_GATES := \
     check-log-macro-return-type \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-dev-proof-native-fast-path \
     check-equihash-params \
     check-framework-shape \
     check-supervisor-registration \
@@ -4290,7 +4556,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast:
+lint-fast: $(EQUIHASH_FACT_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
@@ -4645,18 +4911,117 @@ ACME_WORKER_SRCS = \
 	lib/json/src/json.c \
 	lib/base/src/log_level.c \
 	lib/base/src/safe_alloc.c \
-	lib/platform/src/clock.c
+	lib/platform/src/clock.c \
+	lib/platform/src/temp_directory.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/platform/src/rng.c
 ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
-	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+	-Ilib/platform/include -Ilib/util/include -Itools/acme \
+	$(ZCL_VENDOR_INC_FLAGS)
 ACME_WORKER_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(ACME_WORKER_INCLUDES)
+# The renewal worker's own selftest needs a private scratch directory, and it
+# used to call mkdtemp(3) for one. That is a POSIX-only symbol the mingw CRT
+# does not export, so the four platform TUs above are what replace it:
+# platform_temp_directory_create() and the private-directory/RNG primitives it
+# stands on, all of which the seam already builds for both arms. Same code on
+# both platforms rather than a Windows-only branch.
+# Deliberately NOT $(LDFLAGS): the node's release link flags would change this
+# worker's bytes on Linux for no reason here. Only what the Windows cross link
+# cannot do without — the static preference that keeps libssp-0.dll out (see
+# LDFLAGS above) and clang's MinGW linker.
+ACME_WORKER_LDFLAGS = $(if $(ZCL_CROSS_TRIPLE),-static $(ZCL_WINDOWS_CLANG_LINKER),)
+ACME_WORKER_LIBS = $(ZCL_VENDOR_LIB)/libssl.a $(ZCL_VENDOR_LIB)/libcrypto.a \
+	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+	$(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
+
+# ── The landing queue ─────────────────────────────────────────────────────
+# `z23-land` is the command surface of tools/dev/land.sh and the batching
+# lander. Built STRAIGHT FROM SOURCE like the ACME worker rather than linked
+# against the node: it drives git and `make`, touches no consensus state, and
+# keeping it off the node's object graph is what stops a landing queue from
+# ever becoming reachable from a peer. Its whole dependency set is the
+# chainlog it writes receipts into, the hash that chains them, and the
+# platform file seam underneath both.
+LAND_SRCS = \
+	tools/land/land_main.c \
+	tools/land/land_queue.c \
+	tools/land/land_record.c \
+	lib/chainlog/src/chainlog.c \
+	lib/sha3/src/sha3.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/private_file.c \
+	lib/platform/src/private_acl_internal.c
+LAND_INCLUDES = -Ilib/base/include -Ilib/chainlog/include -Ilib/sha3/include \
+	-Ilib/platform/include -Itools/land
+LAND_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(LAND_INCLUDES)
+
+.PHONY: z23-land
+z23-land: $(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT)
+$(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT): $(LAND_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LAND_CFLAGS) -o $@ $(LAND_SRCS)
 
 .PHONY: zclassic23-acme
-zclassic23-acme: $(BIN_DIR)/zclassic23-acme
-$(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) $(NODE_VENDOR_LIBS)
+zclassic23-acme: $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
+$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
-	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+	$(CC) $(ACME_WORKER_CFLAGS) $(ACME_WORKER_LDFLAGS) -o $@ \
+		$(ACME_WORKER_SRCS) $(ACME_WORKER_LIBS)
+
+# ── The install front door ────────────────────────────────────────────────
+# `z23-bootstrap` is the program packaging/install/install.sh downloads,
+# digest-checks and runs. It is the SECOND program in this tree that is a TLS
+# client (it fetches the release pin and the second-stage installer over
+# HTTPS), so it is built exactly the way zclassic23-acme is and for exactly
+# the same reason: STRAIGHT FROM SOURCE to an executable, with no intermediate
+# object files. lib/test/src/test_cold_join_sovereign.c P2 scans every Z23
+# object under build/*obj*/epochs for an undefined reference to a TLS-client
+# or trust-store entry point, and nothing compiled here can ever land in a
+# scanned epoch tree. That keeps P2 green honestly rather than by exemption.
+#
+# The pure judgement it makes — pin parsing, three-channel agreement, the
+# platform triple, the DNS TXT wire format — is lib/install, which links into
+# the node like any other module and is proven by the z23_front_door test
+# group. Only the transports are here.
+Z23_BOOTSTRAP_SRCS = \
+	tools/install/z23_bootstrap.c \
+	tools/acme/tls_client.c \
+	lib/install/src/front_door_pin.c \
+	lib/install/src/front_door_platform.c \
+	lib/install/src/front_door_dns_txt.c \
+	lib/crypto/src/sha256.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
+Z23_BOOTSTRAP_INCLUDES = -Ilib/base/include -Ilib/crypto/include \
+	-Ilib/install/include -Ilib/platform/include -Ilib/util/include \
+	-Itools/acme -Ivendor/include
+Z23_BOOTSTRAP_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(Z23_BOOTSTRAP_INCLUDES)
+Z23_BOOTSTRAP_BIN = $(BIN_DIR)/z23-bootstrap$(ZCL_HOST_EXEEXT)
+
+.PHONY: z23-bootstrap
+z23-bootstrap: $(Z23_BOOTSTRAP_BIN)
+$(Z23_BOOTSTRAP_BIN): $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) $(Z23_BOOTSTRAP_CFLAGS) -o $@ $(Z23_BOOTSTRAP_SRCS) \
+		vendor/lib/libssl.a vendor/lib/libcrypto.a \
+		$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+		$(ZCL_PLATFORM_NODE_LIBS)
+
+# The front-door half of a release cut: package that bootstrap under
+# bootstrap/<triple>/ and write its SHA-256 into COPIES of the two shims, into
+# build/release/front-door. It never writes into packaging/install/ — the
+# checked-in shims keep the all-zero sentinel that makes them refuse, and
+# check-published-platforms holds them to it. Serve the resulting directory at
+# the project domain root; nothing in this repository does that step yet.
+.PHONY: z23-front-door
+z23-front-door: $(Z23_BOOTSTRAP_BIN)
+	@bash packaging/release/build_release.sh --front-door
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))
@@ -4667,7 +5032,28 @@ $(eval $(call BUILD_NODE_TOOL,rebuild_recent,tools/rebuild_recent.c,-lm,-fopenmp
 # the Tor stub the only honest link input; a host's optional full-Tor build must
 # not affect verifier bytes. See tools/package_verify.c.
 .PHONY: zclassic23-package-verify
+ifneq ($(ZCL_HOST_WINDOWS),)
+# The external package verifier is the ONE program that compiles and executes
+# downloaded package code, and it is safe to do that only because it confines
+# every child: seccomp, Landlock and POSIX rlimits (tools/package_verify.c
+# reaches for <sys/resource.h> on its first page). None of those exist on
+# Windows and this tree has no Windows equivalent, so a build here can produce
+# only an UNCONFINED program wearing the name of a confined one. That is a
+# false safety claim in the exact place a false safety claim is most
+# expensive, so the build refuses instead, by name, and the Windows release
+# manifest simply does not carry this member (packaging/release/
+# build_release.sh, release_members). Nothing silently degrades.
+zclassic23-package-verify:
+	@printf '%s\n' \
+	 'zclassic23-package-verify: REFUSE: no Windows build.' \
+	 '  The verifier is only safe because it confines each child with seccomp,' \
+	 '  Landlock and rlimits. Windows has none of those here, and an unconfined' \
+	 '  binary under this name would be a false safety claim.' \
+	 '  The Windows release omits this member; z23 itself builds normally.' >&2
+	@exit 1
+else
 zclassic23-package-verify: $(BIN_DIR)/zclassic23-package-verify
+endif
 $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 		$(BUILD_IDENTITY_STAMP) $(NODE_C23_PACKAGE_VERIFY_OBJ) \
 		$(NODE_C23_PACKAGE_VERIFY_NODE_OBJS) \
@@ -4679,7 +5065,7 @@ $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 	trap 'rm -f "$$tmp" "$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)"' EXIT HUP INT TERM; \
 	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) \
 		-o "$$tmp" "@$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)" \
-		vendor/lib/libtor_stub.a $(NODE_C23_LIBS); \
+		$(ZCL_VENDOR_LIB)/libtor_stub.a $(NODE_C23_LIBS); \
 	$(BUILD_EPOCH_SESSION_TOOL) verify "$(NODE_C23_SESSION)" "$(NODE_C23_LEASE)" \
 	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
 	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
@@ -4842,9 +5228,9 @@ $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 		cp -f -- "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
 		strip -S -x "$$tmp"; \
 	else \
-		objcopy --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
-		strip $(ZCL_STRIP_ALL) "$$tmp"; \
-		objcopy --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
+		$(ZCL_OBJCOPY) --only-keep-debug "$$tmp" "$$dbgdir/$$(basename "$$dbg")"; \
+		$(ZCL_STRIP_TOOL) $(ZCL_STRIP_ALL) "$$tmp"; \
+		$(ZCL_OBJCOPY) --add-gnu-debuglink="$$dbgdir/$$(basename "$$dbg")" "$$tmp"; \
 	fi; \
 	tools/scripts/check_c23_node_binary.sh "$$tmp"; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
@@ -4889,6 +5275,15 @@ $(ZCL_RPC_BIN): FORCE tools/zcl-rpc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -o $@ $(filter-out FORCE,$^)
 
+# Portable syscall-level replacement for the util-linux setsid(1) command,
+# which macOS does not ship.  Isolated acceptance harnesses use it so cleanup
+# can signal the spawned node's whole process group on every POSIX host.
+.PHONY: process-group-exec
+process-group-exec: $(BIN_DIR)/process-group-exec
+$(BIN_DIR)/process-group-exec: tools/process_group_exec.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -o $@ $<
+
 # zcl-portfwd: tiny self-contained userspace TCP forwarder that maps public
 # 443/80 -> the node's unprivileged high ports (8443/8080). It is the ONE file
 # that gets cap_net_bind_service (via tools/scripts/zcl-portfwd-setup.sh), so
@@ -4899,6 +5294,145 @@ zcl-portfwd: $(BIN_DIR)/zcl-portfwd
 $(BIN_DIR)/zcl-portfwd: tools/zcl_portfwd.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -o $@ $<
+
+# ── fbsh: vendored FreeBSD /bin/sh (ash lineage) ─────────────────────
+# vendor/freebsd-sh holds FreeBSD releng/14.2 bin/sh byte-identical
+# (provenance: vendor/freebsd-sh/SOURCE and
+# vendor/provenance/freebsd-sh.manifest). The upstream build generates
+# builtins.[ch], nodes.[ch], syntax.[ch], and token.h from
+# bin/sh/{builtins.def,nodetypes,nodes.c.pat} via the byte-identical host
+# tools mkbuiltins/mktokens (shell) and mknodes/mksyntax (C); those run
+# here exactly as vendor/freebsd-sh/bin/sh/Makefile does, into
+# build/fbsh/gen. glibc gaps are shimmed, never patched: compat/compat.h
+# is force-included into every upstream TU, compat/compat.c supplies
+# strlcpy and setmode/getmode (the umask builtin), and compat/bin/mktemp
+# covers the `mktemp -t ka` BSD form GNU coreutils rejects, so the
+# codegen scripts run unmodified. -DNO_HISTORY drops the libedit
+# dependency (no interactive line editing; scripts and -c are fully
+# functional). Warnings are off for the vendored TUs — third-party
+# source we do not edit (same rule as the vendored sqlite3 TU above);
+# the compat layer itself builds with the strict project flags.
+.PHONY: fbsh
+fbsh: $(BIN_DIR)/fbsh
+
+FBSH_SRC_DIR := vendor/freebsd-sh
+FBSH_BUILD_DIR := build/fbsh
+FBSH_GEN_DIR := $(FBSH_BUILD_DIR)/gen
+FBSH_OBJ_DIR := $(FBSH_BUILD_DIR)/obj
+FBSH_SH_DIR := $(FBSH_SRC_DIR)/bin/sh
+
+FBSH_GEN_HDRS := $(FBSH_GEN_DIR)/token.h $(FBSH_GEN_DIR)/builtins.h \
+	$(FBSH_GEN_DIR)/nodes.h $(FBSH_GEN_DIR)/syntax.h
+
+# SHSRCS from vendor/freebsd-sh/bin/sh/Makefile, with the four sources
+# bmake finds through .PATH spelled at their real vendored locations
+# (bltin/echo.c, bin/kill, bin/test, usr.bin/printf).
+FBSH_UPSTREAM_SRCS := \
+	$(FBSH_SH_DIR)/alias.c $(FBSH_SH_DIR)/arith_yacc.c \
+	$(FBSH_SH_DIR)/arith_yylex.c $(FBSH_SH_DIR)/cd.c \
+	$(FBSH_SH_DIR)/bltin/echo.c $(FBSH_SH_DIR)/error.c \
+	$(FBSH_SH_DIR)/eval.c $(FBSH_SH_DIR)/exec.c \
+	$(FBSH_SH_DIR)/histedit.c $(FBSH_SH_DIR)/input.c \
+	$(FBSH_SH_DIR)/jobs.c $(FBSH_SRC_DIR)/bin/kill/kill.c \
+	$(FBSH_SH_DIR)/mail.c $(FBSH_SH_DIR)/main.c $(FBSH_SH_DIR)/memalloc.c \
+	$(FBSH_SH_DIR)/miscbltin.c $(FBSH_SH_DIR)/mystring.c \
+	$(FBSH_SH_DIR)/options.c $(FBSH_SH_DIR)/output.c \
+	$(FBSH_SH_DIR)/parser.c $(FBSH_SRC_DIR)/usr.bin/printf/printf.c \
+	$(FBSH_SH_DIR)/redir.c $(FBSH_SH_DIR)/show.c \
+	$(FBSH_SRC_DIR)/bin/test/test.c $(FBSH_SH_DIR)/trap.c \
+	$(FBSH_SH_DIR)/var.c
+
+# expand.c reads dp->d_namlen, a BSD struct dirent member glibc does not
+# have (the one portability delta that cannot be header-shimmed: a struct
+# member access). The tracked file stays byte-identical; the build emits
+# a one-token-patched copy into the gen dir. The delta is documented as a
+# unified diff in vendor/patches/freebsd-sh-dirent-d-namlen.patch, and the
+# recipe fails loudly if upstream ever changes the context so the patch
+# cannot silently become a no-op. namlen is strlen(d_name) on FreeBSD by
+# definition, so semantics are unchanged.
+FBSH_PATCHED_SRCS := $(FBSH_GEN_DIR)/expand.c
+
+$(FBSH_GEN_DIR)/expand.c: $(FBSH_SH_DIR)/expand.c \
+	    vendor/patches/freebsd-sh-dirent-d-namlen.patch
+	@mkdir -p $(FBSH_GEN_DIR)
+	@set -eu; tmp="$@.tmp"; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	sed 's/dp->d_namlen/strlen(dp->d_name)/' $< > "$$tmp"; \
+	grep -qF 'namlen = strlen(dp->d_name);' "$$tmp"; \
+	! grep -qF 'd_namlen' "$$tmp"; \
+	mv -f "$$tmp" $@; \
+	trap - EXIT HUP INT TERM
+
+FBSH_GEN_SRCS := $(FBSH_GEN_DIR)/builtins.c $(FBSH_GEN_DIR)/nodes.c \
+	$(FBSH_GEN_DIR)/syntax.c
+
+FBSH_CPPFLAGS := -DSHELL -DNO_HISTORY -I$(FBSH_GEN_DIR) -I$(FBSH_SH_DIR) \
+	-I$(FBSH_SRC_DIR)/compat \
+	-include $(CURDIR)/$(FBSH_SRC_DIR)/compat/compat.h
+FBSH_VENDOR_CFLAGS := -std=c23 -O2 -w $(FBSH_CPPFLAGS)
+
+FBSH_OBJS := $(addprefix $(FBSH_OBJ_DIR)/,$(addsuffix .o, \
+	$(basename $(notdir $(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) \
+	$(FBSH_GEN_SRCS))))) \
+	$(FBSH_OBJ_DIR)/compat.o
+
+# Codegen, mirroring vendor/freebsd-sh/bin/sh/Makefile. mkbuiltins and
+# mktokens write to the current directory; the mktemp shim directory is
+# prepended to PATH for exactly these two invocations. mknodes/mksyntax
+# are host tools compiled from byte-identical upstream C.
+$(FBSH_GEN_DIR)/token.h: $(FBSH_SH_DIR)/mktokens
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && PATH='$(CURDIR)/$(FBSH_SRC_DIR)/compat/bin':$$PATH \
+	    sh '$(CURDIR)/$(FBSH_SH_DIR)/mktokens'
+
+$(FBSH_GEN_DIR)/builtins.c $(FBSH_GEN_DIR)/builtins.h: $(FBSH_GEN_DIR)/.builtins.stamp
+$(FBSH_GEN_DIR)/.builtins.stamp: $(FBSH_SH_DIR)/mkbuiltins \
+	    $(FBSH_SH_DIR)/builtins.def $(FBSH_SH_DIR)/shell.h
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && PATH='$(CURDIR)/$(FBSH_SRC_DIR)/compat/bin':$$PATH \
+	    sh '$(CURDIR)/$(FBSH_SH_DIR)/mkbuiltins' '$(CURDIR)/$(FBSH_SH_DIR)'
+	@touch $@
+
+$(FBSH_BUILD_DIR)/mknodes: $(FBSH_SH_DIR)/mknodes.c $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) $(FBSH_VENDOR_CFLAGS) -o $@ $<
+
+$(FBSH_BUILD_DIR)/mksyntax: $(FBSH_SH_DIR)/mksyntax.c $(FBSH_SH_DIR)/parser.h \
+	    $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) $(FBSH_VENDOR_CFLAGS) -o $@ $<
+
+$(FBSH_GEN_DIR)/nodes.c $(FBSH_GEN_DIR)/nodes.h: $(FBSH_GEN_DIR)/.nodes.stamp
+$(FBSH_GEN_DIR)/.nodes.stamp: $(FBSH_BUILD_DIR)/mknodes $(FBSH_SH_DIR)/nodetypes \
+	    $(FBSH_SH_DIR)/nodes.c.pat
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && '$(CURDIR)/$(FBSH_BUILD_DIR)/mknodes' \
+	    '$(CURDIR)/$(FBSH_SH_DIR)/nodetypes' '$(CURDIR)/$(FBSH_SH_DIR)/nodes.c.pat'
+	@touch $@
+
+$(FBSH_GEN_DIR)/syntax.c $(FBSH_GEN_DIR)/syntax.h: $(FBSH_GEN_DIR)/.syntax.stamp
+$(FBSH_GEN_DIR)/.syntax.stamp: $(FBSH_BUILD_DIR)/mksyntax $(FBSH_GEN_DIR)/token.h
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && '$(CURDIR)/$(FBSH_BUILD_DIR)/mksyntax'
+	@touch $@
+
+define FBSH_COMPILE_RULE
+$(FBSH_OBJ_DIR)/$(notdir $(basename $(1))).o: $(1) $$(FBSH_GEN_HDRS) \
+	    $$(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $$(@D)
+	$$(CC) $$(FBSH_VENDOR_CFLAGS) -c -o $$@ $$<
+endef
+$(foreach s,$(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) $(FBSH_GEN_SRCS),\
+	$(eval $(call FBSH_COMPILE_RULE,$(s))))
+
+$(FBSH_OBJ_DIR)/compat.o: $(FBSH_SRC_DIR)/compat/compat.c \
+	    $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -I$(FBSH_SRC_DIR)/compat -c -o $@ $<
+
+$(BIN_DIR)/fbsh: $(FBSH_OBJS)
+	@mkdir -p $(@D)
+	$(CC) -std=c23 -O2 -static -o $@ $(FBSH_OBJS)
 
 # gen_sha3_windows: one-shot tool that queries a fully-synced reference
 # node and overwrites lib/chain/{include/chain,src}/sha3_windows.{h,c}
@@ -5906,6 +6440,121 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
 	    packages/zutf8/src/zutf8.c
 
+# ── determinism scan ────────────────────────────────────────────────────────
+# Measures whether every registered test group gives the SAME answer under
+# deliberately perturbed environments. It shells out to build/bin/test_parallel
+# once per perturbation, so it is a long measurement, never part of `make lint`
+# or a push gate; the cheap ratchet below guards the recorded result instead.
+DETERMINISM_LIB_SRCS = \
+    lib/determinism/src/verdict.c \
+    lib/determinism/src/classify.c \
+    lib/determinism/src/perturbation.c \
+    lib/determinism/src/receipt.c
+DETERMINISM_DEP_SRCS = \
+    lib/codec/src/cursor.c lib/sha3/src/sha3.c lib/base/src/log_level.c
+DETERMINISM_CPPFLAGS = -Ilib/determinism/include -Ilib/codec/include \
+    -Ilib/sha3/include -Ilib/base/include -Itools/dev
+DETERMINISM_SCAN_BIN = $(BIN_DIR)/determinism_scan
+.PHONY: determinism-scan determinism-receipt-abi
+determinism-scan: $(DETERMINISM_SCAN_BIN)
+$(DETERMINISM_SCAN_BIN): tools/determinism_scan.c $(DETERMINISM_LIB_SRCS) \
+    $(DETERMINISM_DEP_SRCS) tools/dev/test_group_catalog.def
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    $(DETERMINISM_CPPFLAGS) -o $@ tools/determinism_scan.c \
+	    $(DETERMINISM_LIB_SRCS) $(DETERMINISM_DEP_SRCS)
+
+# The receipt encoding must be byte-identical at every optimisation level. A
+# previous lane in this tree found two -O2-only defects, one of them struct
+# padding leaking into a hash; padding bytes are not required to be zero and
+# -O0 and -O2 need not pick the same ones. Build the SAME source twice and
+# require one line of hex out of both.
+determinism-receipt-abi:
+	@mkdir -p $(BIN_DIR)/determinism-abi
+	@for opt in 0 2; do \
+	    $(CC) -std=c23 -O$$opt -Wall -Wextra -Werror -pedantic \
+	        -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	        $(DETERMINISM_CPPFLAGS) \
+	        -o $(BIN_DIR)/determinism-abi/scan-O$$opt \
+	        tools/determinism_scan.c $(DETERMINISM_LIB_SRCS) \
+	        $(DETERMINISM_DEP_SRCS) || exit 1; \
+	    $(BIN_DIR)/determinism-abi/scan-O$$opt receipt-golden \
+	        > $(BIN_DIR)/determinism-abi/golden-O$$opt.hex || exit 1; \
+	done
+	@cmp $(BIN_DIR)/determinism-abi/golden-O0.hex \
+	     $(BIN_DIR)/determinism-abi/golden-O2.hex \
+	  || { echo "determinism-receipt-abi: FAIL — the receipt encoding differs between -O0 and -O2"; exit 1; }
+	@echo "determinism-receipt-abi: OK — identical receipt bytes at -O0 and -O2"
+	@cat $(BIN_DIR)/determinism-abi/golden-O2.hex
+
+# Gate — the NONDETERMINISTIC set may only shrink (HARD).
+# Wiring lives in THREE files: this recipe, the gate_command() case in
+# tools/lint/run_lint.sh, and the LINT-GATES block in docs/DEFENSIVE_CODING.md.
+# It reads git history, so tools/lint/lint_cache.sh refuses to cache it.
+.PHONY: check-determinism-ratchet
+check-determinism-ratchet:
+	@echo "══ LINT: determinism ratchet (shrink-only) ══"
+	@./tools/lint/check_determinism_ratchet.sh --selftest
+	@./tools/lint/check_determinism_ratchet.sh
+
+# ── Behavioral fingerprinting (lib/fingerprint) ──────────────────────────
+# `make fingerprint-scan` indexes what every in-tree function DOES rather than
+# what it is called: it derives which functions are pure and synthesisable,
+# generates a call harness for each one, runs them on a shape-seeded corpus
+# under several configurations, and reports the fingerprintable coverage, the
+# measured false-purity rate, and any two differently-named functions that
+# agree on every input. Nothing in it is hand-tagged.
+#
+# It is a development tool, not a gate: it needs the whole object tree, takes
+# minutes, and its useful output is a report. The registered `test_fingerprint`
+# group is the part that runs in the suite.
+FPSCAN_BIN = $(BIN_DIR)/fpscan
+FP_WORK = $(BUILD_DIR)/fingerprint
+FP_TREE_ARCHIVE = $(FP_WORK)/libtree.a
+FP_SRCS = tools/fingerprint_scan.c $(wildcard lib/fingerprint/src/*.c) \
+    lib/base/src/safe_alloc.c
+# Probe translation units are GENERATED, so warnings there are noise about the
+# generator rather than about the tree; -w keeps a compile FAILURE meaningful
+# (it excludes that probe) without a warning ever doing so.
+# -flto STAYS, and dropping it is a trap worth naming: $(OBJ_DIR)'s objects are
+# built with -flto=auto, so they are slim LTO objects with no machine code in
+# them. Link the archive without LTO and every tree symbol comes back
+# undefined — measured: 1532 of 1532 probes blamed and excluded, and the run
+# still finishes "successfully" reporting zero fingerprintable functions.
+FP_PROBE_CFLAGS = $(filter-out -Werror -O3,$(BUILD_ONLY_CFLAGS)) \
+    -I. -Ilib/fingerprint/include
+FP_PROBE_LDFLAGS = $(LDFLAGS)
+
+.PHONY: fpscan fingerprint-scan
+fpscan: $(FPSCAN_BIN)
+$(FPSCAN_BIN): $(FP_SRCS) \
+    lib/fingerprint/include/fingerprint/fingerprint.h \
+    lib/fingerprint/include/fingerprint/fp_runtime.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Ilib/fingerprint/include -Ilib/base/include -o $@ $(FP_SRCS)
+
+fingerprint-scan: $(FPSCAN_BIN) build-only
+	@mkdir -p $(FP_WORK)
+	@rm -f $(FP_TREE_ARCHIVE)
+# `P` (full path member names) is load-bearing, not tidiness. An archive
+# member is named by its BASENAME by default, and this tree has 18 basenames
+# that occur in more than one module (block.o, protocol.o, zanc.o, …), so
+# plain `ar rcs` silently REPLACED one object with another: 2010 objects in,
+# 2002 members out. Every symbol in a lost object then came back undefined,
+# got "stubbed" as a zeroed data byte array, and the LTO link died comparing
+# that array against the real function's header declaration — the whole scan
+# exited 2 having measured nothing.
+	@find $(OBJ_DIR) -name '*.o' -print0 | xargs -0 ar rcsP $(FP_TREE_ARCHIVE)
+	@git ls-files '*.c' '*.h' | grep -v '^vendor/' > $(FP_WORK)/sources.txt
+	$(FPSCAN_BIN) --root=. --work=$(FP_WORK) --cc='$(CC)' \
+	    --files-from=$(FP_WORK)/sources.txt \
+	    --cflags='$(FP_PROBE_CFLAGS)' --ldflags='$(FP_PROBE_LDFLAGS)' \
+	    --libs='$(NODE_C23_TOR_LIBS) $(LIBS)' --archive=$(FP_TREE_ARCHIVE) \
+	    --jobs=$$(getconf _NPROCESSORS_ONLN)
+
 # Drive tools/scripts/onion_pair_watch.sh --selftest and validate the
 # host-local pair ledger when present. Does not spawn nodes.
 .PHONY: check-onion-pair-watch
@@ -6066,7 +6715,7 @@ test-reindex-killmid: zclassic23 zcl-rpc
 .PHONY: test-two-node-peer-tip
 # Runs under bash for `set -o pipefail` parity with the other spawn
 # harnesses; the script itself sets -euo pipefail.
-test-two-node-peer-tip: zclassic23 zcl-rpc
+test-two-node-peer-tip: zclassic23 zcl-rpc process-group-exec
 	@bash tools/scripts/two_node_peer_tip.sh
 
 # Noise transport two-node/three-node interop acceptance: the evidence
@@ -6971,7 +7620,9 @@ mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
 # Binary-path argument: ZCL_BIN=/path/to/zclassic23 make
 # mvp-coldstart-to-tip-stopwatch points the stopwatch at any built binary
 # (e.g. an orchestrator's freshly-integrated candidate) without editing this
-# file or the script. ZCL_PEER=HOST:PORT names the serving peer, and it is
+# file or the script. ZCL_PEER=HOST:PORT names one serving peer; a comma list
+# names several and becomes one -connect per endpoint. Repeated --peer flags
+# are equivalent when invoking the harness directly. The peer set is
 # REQUIRED: there is deliberately no default. It used to default to
 # 127.0.0.1:8033 — the canonical node's own P2P port — so a bare
 # `make mvp-coldstart-to-tip-stopwatch` on an operator host quietly synced a
@@ -7100,7 +7751,7 @@ mvp-coldstart-to-tip-triple: zclassic23
 # (SEAM), 4 (STALLED-NAMED), 5 (FRONTIER-BUSY-TIMEOUT) and 6
 # (READBACK-FAILED) are honest verdicts and propagate as a failing recipe —
 # a remote peer that refuses the handshake is NOT laundered into a SKIP, it
-# is labelled peer_precheck=accept_close in the artifact and the run reports
+# is labelled in peer_prechecks[] as accept_close and the run reports
 # what the node actually earned.
 .PHONY: mvp-coldstart-to-tip-remote
 mvp-coldstart-to-tip-remote: zclassic23
@@ -8864,21 +9515,43 @@ replay-canary-linger-status:
 release:
 	@./tools/release.sh
 
-# Install the tracked git hooks (shared across all worktrees via core.hooksPath).
-# pre-push runs the bounded LOCAL CI gate (`make pre-push-ci`): strict
-# compile, lint-fast, and mapped focused tests for the files being pushed.
-# Unmapped code fails closed. Full-suite/fuzz/coverage proof work runs
-# through the linger timers installed by `make install-quality-linger`.
-.PHONY: install-hooks
-install-hooks:
-	@git config core.hooksPath tools/githooks
-	@chmod +x tools/githooks/* 2>/dev/null || true
-	@echo "Installed git hooks: core.hooksPath=tools/githooks"
-	@echo "  pre-push -> runs 'make pre-push-ci' before every push to origin"
+# The installed hook directory is checkout-local. Each worktree therefore
+# admits receipts produced by its own exact source and build state while the
+# repository-common config continues to share objects and refs safely.
+GIT_HOOK_BIN = $(BIN_DIR)/z23-git-hook
+GIT_HOOK_DIR = $(abspath $(BUILD_DIR)/githooks)
+GIT_HOOK_SRCS = tools/dev/z23_git_hook.c tools/dev/dev_proof_receipt.c \
+	lib/sha3/src/sha3.c
+GIT_HOOK_CFLAGS = -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
+	$(ZCL_WARN_EXTRA_GATES) $(HARDEN_CFLAGS) -D_POSIX_C_SOURCE=200809L \
+	-Itools/dev -Ilib/base/include -Ilib/sha3/include
+
+.PHONY: git-hook git-hook-selftest install-hooks
+git-hook: $(GIT_HOOK_BIN)
+
+$(GIT_HOOK_BIN): $(GIT_HOOK_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) $(HARDEN_LDFLAGS)
+
+git-hook-selftest: $(GIT_HOOK_BIN)
+	@$(GIT_HOOK_BIN) --selftest
+
+install-hooks: $(GIT_HOOK_BIN)
+	@mkdir -p $(GIT_HOOK_DIR)
+	@install -m 0755 tools/githooks/pre-commit $(GIT_HOOK_DIR)/pre-commit
+	@install -m 0755 $(GIT_HOOK_BIN) $(GIT_HOOK_DIR)/z23-git-hook
+	@for hook in pre-push post-commit post-merge post-checkout; do \
+		ln -sfn z23-git-hook $(GIT_HOOK_DIR)/$$hook; \
+	done
+	@git config extensions.worktreeConfig true
+	@git config --unset-all core.hooksPath 2>/dev/null || true
+	@git config --worktree core.hooksPath $(GIT_HOOK_DIR)
+	@echo "Installed native git hooks: core.hooksPath=$(GIT_HOOK_DIR)"
+	@echo "  pre-push -> admits one immutable exact commit/base receipt"
+	@echo "  post-commit/post-merge/post-checkout -> schedule proof and return"
 	@echo "  pre-commit -> refuses non-main-branch commits in the MAIN checkout"
 	@echo "                (lane work goes in a worktree; ZCL_LANE_COMMIT_OK=1 overrides)"
 	@echo "  full-suite/fuzz/coverage -> make install-quality-linger"
-	@echo "  bypass one push: git push --no-verify   (or ZCL_SKIP_PREPUSH=1)"
 
 .PHONY: check-git-hooks-installed
 check-git-hooks-installed:
@@ -8991,7 +9664,7 @@ $(COV_LEASE): FORCE
 	  "$(COV_EPOCH_COMPILE_FLAGS)" "$(COV_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))
 COV_LINK_RSP = $(COV_BUILD_DIR)/link-inputs.rsp
 
@@ -9217,6 +9890,22 @@ check-hotswap-denied-leaves:
 	@tools/lint/check_hotswap_denied_leaves.sh --selftest
 	@tools/lint/check_hotswap_denied_leaves.sh
 
+# Every command leaf carries exactly one remote class in
+# config/remote_command_classes.def — the decision "may a peer on our own mesh
+# ask this node to run it?" (design: docs/work/REMOTE_COMMAND_CHANNEL.md). The
+# table's default is never_remote, so a MISSING row is safe today and therefore
+# invisible; this gate makes registering a command leaf a two-file operation so
+# the decision cannot be skipped. Symmetric: a row naming a leaf the registry no
+# longer has is a permission with no owner and fails too. Covers both dispatch
+# surfaces — the typed config/commands catalog and the flat AGENT_CONTRACT
+# table. No baseline: the tree is clean, and a baseline here would only be
+# somewhere to hide the next omission. --selftest runs first and proves the gate
+# fires on each defect class.
+check-remote-command-classes:
+	@echo "══ LINT: remote command classes ══"
+	@./tools/lint/check_remote_command_classes.sh --selftest
+	@./tools/lint/check_remote_command_classes.sh
+
 # Scans the UNION of config/hotswap_eligible.def and
 # config/hotswap_swappable.def: every TU either manifest can recompile into a
 # .so must be free of mutable file-scope statics.
@@ -9328,6 +10017,33 @@ check-byte-order-codec-single:
 	@./tools/lint/check_byte_order_codec_single.sh --selftest
 	@./tools/lint/check_byte_order_codec_single.sh
 
+# Gate — a non-static function is DEFINED once per translation unit. The
+# only way one name has two bodies in a compiling .c file is two disjoint
+# preprocessor arms (platform, feature flag, test-vs-release, ...), and each
+# such pair is a place two bodies can silently drift apart under one name —
+# exactly what happened to three pure ROM wire-parsers duplicated inside
+# lib/net/src/file_service.c's `#if defined(_WIN32)` split (RATCHET at
+# <path>\t<function> granularity; tools/lint/arm_symbol_single_baseline.txt
+# may only shrink).
+check-arm-symbol-single:
+	@echo "══ LINT: one definition per non-static function per TU ══"
+	@./tools/lint/check_arm_symbol_single.sh --selftest
+	@./tools/lint/check_arm_symbol_single.sh
+
+# A .c file may not call a POSIX/GNU function whose declaration reaches it
+# ONLY through a glibc fortify inline — i.e. only when optimisation is on.
+# Found live 2026-08-30: realpath() is declared under __USE_MISC, which
+# -D_POSIX_C_SOURCE=200809L does not set, so 17 TUs compiled purely as a
+# side effect of -O1+ enabling _FORTIFY_SOURCE, and were hard C23 errors at
+# -O0 and on any non-glibc libc. The gate re-MEASURES the masked set against
+# the live toolchain on every run rather than hardcoding a list, because
+# which functions are masked is a property of the compiler and libc, not of
+# this tree. Baseline is empty by design and must stay empty.
+check-fortify-masked-decls:
+	@echo "══ LINT: no declaration that depends on optimisation ══"
+	@./tools/lint/check_fortify_masked_decls.sh --selftest
+	@./tools/lint/check_fortify_masked_decls.sh
+
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"
 	@tools/scripts/check_coins_lookup_nullcheck.sh
@@ -9372,6 +10088,89 @@ $(GROK_REPORT_BIN): $(GROK_REPORT_SRCS)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Ilib/json/include -Ilib/base/include \
 	    -o $@ $(GROK_REPORT_SRCS)
+
+# mutation-campaign measures whether a test group would NOTICE if the code it
+# covers were wrong: it enumerates one-token defects in a source file,
+# compiles each, runs ONLY the named group, and reports what survived. It is
+# a REPORTING tool — deliberately not on the default test path and not in the
+# push gate, because a mutation-score threshold imposed before the tree has
+# any measured scores would block everyone.
+#
+# Linked standalone rather than into the node: it needs a compiler and a make
+# transcript, which a running node has no business carrying. The four in-tree
+# sources it borrows are the SHA3 used for its content cache, the checked
+# allocators, and the SUITE VERDICT parser that already exists for
+# dev.agent.mutate — the same rule for reading a runner transcript, in one
+# place, so the two can never disagree about what "the group ran" means.
+#
+#   make mutation-campaign
+#   build/bin/mutation-campaign --file=lib/metaverse/src/node_character.c \
+#                               --group=test_node_character
+#   build/bin/mutation-campaign --file=<any .c> --list   # builds nothing
+MUTATION_CAMPAIGN_BIN = $(BIN_DIR)/mutation-campaign
+MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
+    tools/command/native_devagent.c lib/sha3/src/sha3.c \
+    lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c \
+    lib/platform/src/clock.c lib/platform/src/directory_compat.c \
+    lib/base/src/safe_alloc.c
+.PHONY: mutation-campaign
+mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
+$(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Itools -Itools/dev -Ilib/base/include -Ilib/sha3/include \
+	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
+	    -Ilib/platform/include -Ilib/util/include \
+	    -o $@ $(MUTATION_CAMPAIGN_SRCS) -lpthread
+# ── The engine unit dispatcher ──────────────────────────────────────────────
+# `engine_unit` sends ONE scoped unit of work to a model, applies the result in
+# an isolated worktree, and judges it by running the gate. The law it is built
+# on is in lib/engine/include/engine/engine.h: the model proposes, the gate
+# decides. It is the C23 successor to tools/dev/grok-unit.sh.
+#
+# Like $(BIN_DIR)/zclassic23-acme above, this is compiled STRAIGHT FROM SOURCE
+# to an executable with no intermediate object files, and for the same reason:
+# it links tools/acme/tls_client.c, and lib/test/src/test_cold_join_sovereign.c
+# P2 asserts that no Z23 object under build/*obj*/epochs carries an undefined
+# reference to a TLS-client or trust-store entry point. Nothing compiled here
+# can ever appear in a scanned epoch tree, which keeps P2 green honestly rather
+# than by exemption.
+#
+# lib/engine itself carries no transport at all — it is pure logic, is a normal
+# lib module, and is linked into the node like any other. That split is the
+# whole reason this program can exist without weakening the node's claim that
+# it consults no certificate authority.
+ENGINE_UNIT_BIN = $(BIN_DIR)/zclassic23-engine-unit
+ENGINE_UNIT_SRCS = tools/engine_unit.c \
+	tools/acme/tls_client.c \
+	lib/engine/src/engine_registry.c \
+	lib/engine/src/engine_cli.c \
+	lib/engine/src/engine_err.c \
+	lib/engine/src/engine_patch.c \
+	lib/engine/src/engine_prompt.c \
+	lib/engine/src/engine_secret.c \
+	lib/engine/src/engine_verdict.c \
+	lib/engine/src/engine_wire_request.c \
+	lib/engine/src/engine_wire_response.c \
+	lib/json/src/json.c \
+	lib/sha3/src/sha3.c \
+	lib/util/src/spawn.c \
+	lib/base/src/log_level.c \
+	lib/base/src/result.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
+ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
+	-Ilib/sha3/include \
+	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+.PHONY: engine-unit
+engine-unit: $(ENGINE_UNIT_BIN)
+$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ENGINE_UNIT_INCLUDES) \
+	    -o $@ $(ENGINE_UNIT_SRCS) \
+	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
@@ -9624,12 +10423,49 @@ check-model-ar-lifecycle:
 	@echo "══ LINT: model ActiveRecord lifecycle saves ══"
 	@./tools/scripts/check_model_ar_lifecycle.sh
 
+# A model file must not carry a hand-written SQL statement: reads and writes
+# build one with app/models/include/models/query_builder.h, whose identifiers
+# come from the closed set in query_schema.def and whose values can only
+# arrive as bound parameters. 70 of 87 model files carried literal SQL when
+# this gate landed, with no injection hole but also no rail — safety resting
+# on 70 files' worth of authors remembering forever. The two defects the
+# first conversion pass surfaced are exactly what hand-written SQL produces:
+# peer.c's strftime('%%s','now') evaluated to the TEXT "%s" (SQLite reads %%
+# as an escaped percent, and nothing printf-formats a model SQL string), so
+# db_peer_mark_tried had been writing two characters into peers.last_try
+# instead of an epoch; and op_return_index.c built its prune DELETE with
+# snprintf. The baseline is shrink-only and a stale row fails, so the count
+# can only go down.
+check-model-sql-literals:
+	@echo "══ LINT: literal SQL in the models layer (shrink-only) ══"
+	@./tools/lint/check_model_sql_literals.sh --selftest
+	@./tools/lint/check_model_sql_literals.sh
+
+# lib/engine/include/engine/personas.def writes down the one thing about a
+# territory that cannot be derived: an authored refusal. Everything else a
+# brief reports is regenerated from the code index on every call, precisely
+# so it cannot go stale while still reading as true. Writing a stance buys
+# that staleness problem back, and this gate is the price: every row's
+# territory must still hold tracked C, and the file it cites as evidence must
+# still be tracked. There is no baseline — a row that stopped being true is
+# not a debt, it is a false statement.
+.PHONY: check-cookbook
+check-cookbook: $(ZCLASSIC23_DEV_BIN)
+	@echo "══ LINT: every cookbook recipe still works ══"
+	@./tools/lint/check_cookbook.sh --selftest
+	@./tools/lint/check_cookbook.sh
+
+check-persona-resolves:
+	@echo "══ LINT: every authored persona still resolves ══"
+	@./tools/lint/check_persona_resolves.sh --selftest
+	@./tools/lint/check_persona_resolves.sh
+
 # Keep top-level functions in app/controllers + app/services under 500
 # lines. Single state-machines that truly belong as one function can carry
 # a `// long-function-ok:<tag>` override marker explaining WHY.
 check-long-functions:
 	@echo "══ LINT: long function cap (500 lines) ══"
-	@./tools/scripts/check_long_functions.sh
+	@./tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh
 
 # Wave 9a: every register_*_rpc_commands callsite uses rpc_table_must_append.
 # rpc_table_append returns false silently on registration failure (duplicate
@@ -9717,7 +10553,7 @@ check-domain-purity:
 # opt-in adoption of the supervisor primitive over Rounds 6-8.
 check-supervisor-registration:
 	@echo "══ LINT: supervisor registration ══"
-	@./tools/scripts/check_supervisor_registration.sh
+	@./tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh
 
 # Test-registration drift guard. A test entry point (test_<name>.c defining
 # int test_<name>(void)) that is in NEITHER the canonical test group catalog
@@ -9849,6 +10685,15 @@ check-peer-floor-single-source:
 check-no-shellouts:
 	@echo "→ Gate: no_shellouts (os-substrate Rung 0)"
 	@./tools/lint/check_no_shellouts.sh
+
+# No API credential is committed. tools/engine_unit.c dispatches work to a paid
+# API, so this tree now has a reason to hold a key near it; a key in a tracked
+# file is spent the moment it lands. HARD (FAIL), no baseline — a committed
+# credential is not something to ratchet down over time. Proven to actually
+# fail by lib/test/src/test_engine.c, which plants one in a fixture tree.
+check-no-api-keys:
+	@echo "→ Gate: no_api_keys (no committed credential)"
+	@./tools/lint/check_no_api_keys.sh
 
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
 # every saved finding under lib/test/fuzz_seeds/ has a live fuzz binary behind
@@ -10053,6 +10898,34 @@ check-windows-acceptance:
 # END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
+# Syntax-only mingw sweep of every .c under lib/ app/ config/ core/ domain/
+# ports/ whose text contains _WIN32. windows-acceptance-compile cross-links
+# the catalogued acceptance programs; gcc/clang on this box never take the
+# _WIN32 branch of the rest, so a Windows-only syntax error sat undetected.
+# -fsyntax-only, no objects, no archives. SKIP (exit 0, not a pass) when
+# mingw is absent.
+check-windows-cross-syntax:
+	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
+	@./tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh
+
+# A platform-only system header may not be included outside a conditional that
+# names that platform. Every gate above needs a cross-compiler; this one needs
+# nothing, because an unguarded <mach-o/fat.h> is a lexical fact. It closes the
+# class in all three directions (Apple, Win32, Linux) on whatever host is
+# running lint. Zero baseline: the tree is clean and stays clean.
+.PHONY: check-platform-header-guards
+check-platform-header-guards:
+	@./tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh
+
+# The STATIC half of tools/scripts/macos_acceptance.sh: the closed darwin-arm64
+# capability matrix must validate and every capability must name a REGISTERED
+# test group. The native leg (`make macos-acceptance`) needs a darwin-arm64
+# host and is reported UNOBSERVED here, never as a pass.
+.PHONY: check-macos-acceptance
+check-macos-acceptance:
+	@./tools/lint/check_macos_acceptance.sh --self-test && ./tools/lint/check_macos_acceptance.sh
+
+
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
 # existing ones. This is the excavator: a shrink-only ratchet over the cast
@@ -10068,9 +10941,20 @@ check-no-raw-sqlite-in-controllers:
 	@echo "→ Gate #20: no_raw_sqlite_in_controllers"
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_raw_sqlite_in_controllers.sh
 
+# A model must not hand-maintain the column indices of a multi-column row
+# read: that is the shape where inserting a column in the middle of the SQL
+# column list silently shifts every index below it with no compiler error.
+# The fix is a field list in app/models/include/models/def/ derived through
+# models/model_fields.h. Baseline of pre-existing models lives in
+# tools/lint/model_column_drift_baseline.txt (may only shrink).
+check-model-column-drift:
+	@echo "→ model_column_drift"
+	@./tools/lint/check_model_column_drift.sh --selftest
+	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh
+
 check-supervisor-domain:
 	@echo "→ Gate #21: supervisor_domain"
-	@./tools/lint/check_supervisor_domain.sh
+	@./tools/lint/check_supervisor_domain.sh --selftest && ./tools/lint/check_supervisor_domain.sh
 
 # Gate #23: universal thread supervision (RATCHET). Every long-running thread
 # spawned via thread_registry_spawn must be on the supervisor liveness tree
@@ -10079,7 +10963,7 @@ check-supervisor-domain:
 # baselined in tools/lint/thread_supervision_baseline.txt (shrink-only).
 check-thread-supervision:
 	@echo "→ Gate #23: thread_supervision"
-	@./tools/lint/check_thread_supervision.sh
+	@./tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh
 
 # Gate P1 (docs/work/palace-design.md §3) — every indexed .c/.h under the
 # codeindex roots has a DERIVABLE one-line purpose (a substantive top-of-file
@@ -10247,7 +11131,7 @@ check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
 # the real body has landed. docs/, vendor/, and test paths narrate history on
 # purpose and are excluded. See tools/scripts/check_no_dev_history_in_contracts.sh.
 check-no-dev-history-in-contracts:
-	@./tools/scripts/check_no_dev_history_in_contracts.sh
+	@./tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh
 
 # Funded transaction receipts and isolated recipient-wallet manifests are
 # private local state. Tracked baselines may contain reproducible simnet and
@@ -10372,11 +11256,31 @@ check-ship-remote-transaction: jsonq
 
 # Fail-closed Z23 release packager + installer: checksum mismatch never
 # installs, and the packager never invokes docker.
-check-z23-release-install:
+# The front-door harness drives the REAL bootstrap binary end to end, so the
+# gate builds it first. A missing binary must be a hard failure and never a
+# quiet pass: the front door is the one program a stranger runs before
+# anything has been verified, and an unobserved gate over it is worse than no
+# gate at all.
+check-z23-release-install: $(Z23_BOOTSTRAP_BIN)
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
 	@bash packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
 	@bash tools/scripts/deploy_z23_release.sh --selftest
+
+# Gate — every platform the install front door CLAIMS must be one the release
+# process actually produces. Widening packaging/install/install.sh's
+# PUBLISHED_PLATFORMS (or install.ps1's $$BootPins, or FD_PUBLISHED in
+# lib/install) is a one-word edit; producing that platform's artifact is a
+# toolchain, a second-stage installer and a service lifecycle. A name with
+# nothing behind it turns an honest refusal into a 404 on a stranger's
+# machine, so the claim is measured against what
+# packaging/release/build_release.sh reports it can cut. The same gate holds
+# the all-zero sentinel as the checked-in default: real digests belong only in
+# the copies `build_release.sh --front-door` publishes.
+check-published-platforms:
+	@echo "══ LINT: published platforms match what the release cutter produces ══"
+	@./tools/lint/check_published_platforms.sh --selftest
+	@./tools/lint/check_published_platforms.sh
 
 # Gate — stop a tenth copy of the source-identity JSON parser from growing
 # back. tools/scripts/source_identity_lib.sh is the one canonical reader
@@ -10432,6 +11336,20 @@ check-pipefail-status-pipe:
 	@echo "══ LINT: no status-carrying printf|grep -q under pipefail ══"
 	@./tools/lint/check_pipefail_status_pipe.sh --selftest
 	@./tools/lint/check_pipefail_status_pipe.sh
+
+# Sibling of the gate above, for two more shapes where the shell throws a
+# decision away. (A) A bare `! cmd` statement under `set -e`: bash does not
+# exit for a command whose value is being inverted, and the ERR trap is exempt
+# too, so the assertion is decorative — five live ones were found, every one a
+# negative control on a security-relevant predicate. Fix with a refute()
+# helper that exits for itself (tools/ship.sh --selftest is the reference).
+# (B) `make ... | head/tail` with no pipefail: the pipeline reports tail's 0
+# and a failed build reads as a successful one. Both prongs are HARD with no
+# baseline and no per-line escape hatch.
+check-discarded-status:
+	@echo "══ LINT: no assertion or build status the shell discards ══"
+	@./tools/lint/check_discarded_status.sh --selftest
+	@./tools/lint/check_discarded_status.sh
 
 # Anti-flake ratchet: no NEW test assertion graded on a measured wall-clock
 # interval. A verdict a busy box can flip is measuring the box, not the code —
@@ -10549,6 +11467,46 @@ tools/gen_api_reference: $(API_REFERENCE_TOOL)
 docs-api-reference: $(API_REFERENCE_TOOL)
 	@$(API_REFERENCE_TOOL) docs/API_REFERENCE.md.in docs/API_REFERENCE.md
 
+# docs/CAPABILITY_INVENTORY.jsonl is the complete source-derived public C23
+# capability census.  JSON Lines keeps 1,000+ headers and their full symbol
+# tables grep-friendly without requiring jq or loading one giant document.
+# The checked-in artifact is never edited: regenerate it with this target.
+CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory
+CAPABILITY_INVENTORY_SRCS = tools/gen_capability_inventory.c \
+	lib/codeindex/src/codeindex_inventory.c \
+	lib/codeindex/src/codeindex_inventory_scan.c \
+	lib/codeindex/src/codeindex_inventory_body.c \
+	lib/codeindex/src/codeindex_inventory_evidence.c \
+	lib/codeindex/src/codeindex_scan.c \
+	lib/codeindex/src/codeindex_scan_doc.c \
+	lib/base/src/safe_alloc.c lib/base/src/log_level.c lib/sha3/src/sha3.c
+
+$(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
+	lib/codeindex/include/codeindex/codeindex_inventory.h \
+	lib/codeindex/src/codeindex_inventory_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -O2 -Wall -Wextra -Werror \
+	    -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
+	    -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
+	    -Ilib/crypto/include -Ilib/platform/include \
+	    -o $@ $(CAPABILITY_INVENTORY_SRCS)
+
+.PHONY: tools/gen_capability_inventory docs-capability-inventory
+tools/gen_capability_inventory: $(CAPABILITY_INVENTORY_TOOL)
+docs-capability-inventory: $(CAPABILITY_INVENTORY_TOOL)
+	@$(CAPABILITY_INVENTORY_TOOL) docs/CAPABILITY_INVENTORY.jsonl .
+
+check-capability-inventory-generated:
+	@echo "══ LINT: capability inventory is complete source-derived output ══"
+	@./tools/lint/check_capability_inventory_generated.sh --selftest
+	@./tools/lint/check_capability_inventory_generated.sh
+
+check-generated-artifact-contradictions:
+	@echo "══ LINT: generated artifacts cannot contradict each other ══"
+	@./tools/lint/check_generated_artifact_contradictions.sh --selftest
+	@./tools/lint/check_generated_artifact_contradictions.sh
+
 
 # docs/EQUIHASH_PARAMS.md is GENERATED by tools/equihash_params_fact.c, which
 # LINKS the real chainparams and upgrade tables and prints what consensus
@@ -10557,13 +11515,6 @@ docs-api-reference: $(API_REFERENCE_TOOL)
 # height-selected 192,7 since Bubbles, and a reader who believes the flat
 # claim sizes a solution buffer wrongly. Fix a failure with
 # `make docs-equihash-params`, never by editing the generated page.
-EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
-EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
-    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
-    core/params/src/upgrades.c core/consensus/src/upgrades.c \
-    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
-    lib/base/src/log_level.c lib/base/src/result.c
-
 $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
@@ -10590,7 +11541,7 @@ equihash-facts-check: check-equihash-params
 # Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and
 # diffs; the other half scans prose for a flat "Equihash 200,9" claim about
 # what the chain IS, which is what was wrong across nine files.
-check-equihash-params:
+check-equihash-params: $(EQUIHASH_FACT_TOOL)
 	@echo "══ LINT: Equihash parameters are height-selected, and said so ══"
 	@./tools/lint/check_equihash_params.sh --selftest
 	@./tools/lint/check_equihash_params.sh
@@ -10846,6 +11797,10 @@ check-zcc-cache:
 	@echo "══ LINT: compile cache serves correct bytes ══"
 	@./tools/lint/check_zcc_cache.sh
 
+check-dev-proof-native-fast-path:
+	@echo "══ LINT: native push admission has no shell or build authority ══"
+	@./tools/lint/check_dev_proof_native_fast_path.sh
+
 # A build whose objects do not repeat cannot be shown to anyone. GCC seeds
 # itself from the object's output name, and every object here is written into
 # a fresh mktemp staging directory, so the shipped profile's -flto objects did
@@ -10930,12 +11885,17 @@ LINT_GATES := \
     check-git-hooks-installed \
     check-malloc \
     check-byte-order-codec-single \
+    check-arm-symbol-single \
+    check-fortify-masked-decls \
     check-zcode-package-registry \
     check-zcode-package-standalone \
+    check-package-capabilities \
     check-package-anatomy \
+    check-capability-closure \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
     check-hotswap-denied-leaves \
+    check-remote-command-classes \
     check-hotswap-static-state \
     check-hotswap-service-islands \
     check-hotswap-swappable-shape \
@@ -10959,13 +11919,18 @@ LINT_GATES := \
     check-no-runtime-abort \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-dev-proof-native-fast-path \
     check-tu-random-seed \
     check-outparam-init-before-return \
     check-equihash-params \
+    check-determinism-ratchet \
     check-before-save-hooks \
     check-pthread-create \
     check-model-validation \
     check-model-ar-lifecycle \
+    check-model-sql-literals \
+    check-persona-resolves \
+    check-cookbook \
     check-long-functions \
     check-rpc-registrar \
     check-lag-slo-observable \
@@ -10992,10 +11957,12 @@ LINT_GATES := \
     check-verification-coverage \
     check-ship-remote-transaction \
     check-z23-release-install \
+    check-published-platforms \
     check-identity-parser-single \
     check-source-identity-authority \
     check-status-reason-single \
     check-pipefail-status-pipe \
+    check-discarded-status \
     check-no-wallclock-assertion \
     check-framework-shape \
     check-framework-filename-suffix \
@@ -11003,10 +11970,12 @@ LINT_GATES := \
     check-sysinit-ordering \
     check-sandbox-wired \
     check-no-shellouts \
+    check-no-api-keys \
     check-no-writer-below-sealed-frontier \
     check-peer-floor-single-source \
     check-proc-self-shim \
     check-no-raw-sqlite-in-controllers \
+    check-model-column-drift \
     check-supervisor-domain \
     check-thread-supervision \
     check-file-purpose \
@@ -11023,6 +11992,8 @@ LINT_GATES := \
     check-doc-claims \
     check-error-doc-refs \
     check-api-reference-generated \
+    check-capability-inventory-generated \
+    check-generated-artifact-contradictions \
     check-describe-budget \
     check-markdown-links \
     check-doc-inline-paths \
@@ -11068,6 +12039,9 @@ LINT_GATES := \
     check-clang-portability \
     check-windows-platform-seam \
     check-windows-acceptance \
+    check-windows-cross-syntax \
+    check-platform-header-guards \
+    check-macos-acceptance \
     check-result-discard \
     check-c23-only \
     check-no-python \
@@ -11095,7 +12069,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
@@ -11369,7 +12343,7 @@ postmortem-to-scenario: tools/postmortem_to_scenario
 # build_vendor.sh, and there was no way to ask the host how long anything
 # actually takes. `make help` prints the live target count; do not restate it
 # here.
-.PHONY: help setup doctor timings pr-check help-selftest doctor-selftest timings-selftest first-build-timing first-build-timing-selftest
+.PHONY: help setup doctor doctor-env timings pr-check help-selftest doctor-selftest timings-selftest first-build-timing first-build-timing-selftest
 
 help:
 	@tools/scripts/make_help.sh
@@ -11395,6 +12369,16 @@ setup:
 # that table has fallen behind build_vendor.sh.
 doctor:
 	@tools/scripts/doctor.sh
+
+# C23 build-environment doctor. Compiles with a plain `cc -std=c2x` so a
+# gcc-13 box (which cannot build the node) can still ask what is missing.
+# Listed in ZCL_PORTABLE_FRONTDOOR_GOALS so the parse-time toolchain gate
+# does not fire. ARGS=--input=json for a flat JSON object; ARGS=--root=DIR
+# to inspect another tree.
+doctor-env:
+	@mkdir -p build/bin
+	cc -std=c2x -Wall -Wextra -o build/bin/z23_doctor tools/dev/z23_doctor.c
+	@build/bin/z23_doctor $(ARGS)
 
 # Where the wall time went, read from artifacts measured on this host.
 # Never prints a duration it did not measure here.

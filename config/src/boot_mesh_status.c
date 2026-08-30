@@ -7,6 +7,7 @@
 // text crosses the wire. Drop/refusal logging happens at the frame edge.
 
 #include "config/boot_mesh_status.h"
+#include "config/boot_mesh_route.h"
 #include "boot_mesh_status_internal.h"
 
 #include "config/boot_internal.h"
@@ -904,6 +905,7 @@ void boot_mesh_status_wire(struct boot_svc_ctx *svc)
 void boot_mesh_status_shutdown(void)
 {
     boot_mesh_status_refresh_shutdown();
+    boot_mesh_route_reset();
     mesh_lock();
     g_mesh_svc = NULL;
     g_mesh_generation++;

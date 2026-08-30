@@ -4,6 +4,7 @@
 #include "models/wallet_backup_receipt.h"
 
 #include "models/model_text.h"
+#include "platform/path_compat.h"
 #include "util/log_macros.h"
 
 #include <string.h>
@@ -22,7 +23,7 @@ bool db_wallet_backup_receipt_validate(
     validates_non_negative(errors, receipt, key_count);
     validates_positive(errors, receipt, tables_verified);
     validates_positive(errors, receipt, size_bytes);
-    validates_custom(errors, receipt->backup_path[0] == '/' &&
+    validates_custom(errors, platform_path_is_absolute(receipt->backup_path) &&
                      strlen(receipt->backup_path) <
                          WALLET_BACKUP_RECEIPT_PATH_MAX &&
                      model_string_is_printable(receipt->backup_path),

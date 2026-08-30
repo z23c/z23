@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/cleanse.h"
 
@@ -45,7 +46,80 @@ static int test_cleanse_cross_tu(void)
     return failures;
 }
 
+/* The polarity of these two is the whole reason base/bytes.h exists: 119
+ * private copies of this loop disagreed, 13 of them answering the OPPOSITE
+ * question under a name that looked the same. These checks pin the two
+ * predicates as exact negations, and pin NULL to fail closed in BOTH
+ * directions, which is what makes a "reject a zero root" caller also reject
+ * a NULL one instead of accepting it. */
+static int test_bytes_polarity(void)
+{
+    int failures = 0;
+    TEST("base bytes: all_zero is the exact negation of any_set") {
+        uint8_t buf[32];
+
+        /* NULL and zero length: nothing is set, everything is zero. */
+        ASSERT(!zcl_bytes_any_set(NULL, 32));
+        ASSERT(zcl_bytes_all_zero(NULL, 32));
+        ASSERT(!zcl_bytes_any_set(NULL, 0));
+        ASSERT(zcl_bytes_all_zero(NULL, 0));
+        memset(buf, 0xff, sizeof(buf));
+        ASSERT(!zcl_bytes_any_set(buf, 0));
+        ASSERT(zcl_bytes_all_zero(buf, 0));
+
+        /* An all-zero buffer. */
+        memset(buf, 0, sizeof(buf));
+        ASSERT(!zcl_bytes_any_set(buf, sizeof(buf)));
+        ASSERT(zcl_bytes_all_zero(buf, sizeof(buf)));
+
+        /* Only the first byte set. */
+        memset(buf, 0, sizeof(buf));
+        buf[0] = 0x01u;
+        ASSERT(zcl_bytes_any_set(buf, sizeof(buf)));
+        ASSERT(!zcl_bytes_all_zero(buf, sizeof(buf)));
+
+        /* Only the last byte set — the copies that stopped early still had
+         * to reach this one. */
+        memset(buf, 0, sizeof(buf));
+        buf[sizeof(buf) - 1u] = 0x01u;
+        ASSERT(zcl_bytes_any_set(buf, sizeof(buf)));
+        ASSERT(!zcl_bytes_all_zero(buf, sizeof(buf)));
+
+        /* Only a middle byte set. */
+        memset(buf, 0, sizeof(buf));
+        buf[sizeof(buf) / 2u] = 0x80u;
+        ASSERT(zcl_bytes_any_set(buf, sizeof(buf)));
+        ASSERT(!zcl_bytes_all_zero(buf, sizeof(buf)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Every single bit in a 32-byte root, one at a time: no position and no bit
+ * within a position is allowed to be missed. */
+static int test_bytes_single_bit(void)
+{
+    int failures = 0;
+    TEST("base bytes: a 32-byte buffer with any single bit set is any_set") {
+        for (size_t byte = 0; byte < 32u; byte++) {
+            for (unsigned bit = 0; bit < 8u; bit++) {
+                uint8_t root[32];
+                memset(root, 0, sizeof(root));
+                root[byte] = (uint8_t)(1u << bit);
+                ASSERT(zcl_bytes_any_set(root, sizeof(root)));
+                ASSERT(!zcl_bytes_all_zero(root, sizeof(root)));
+                /* The negation must hold for this input too. */
+                ASSERT(zcl_bytes_all_zero(root, sizeof(root)) !=
+                       zcl_bytes_any_set(root, sizeof(root)));
+            }
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_base_foundation(void)
 {
-    return test_checked_arithmetic() + test_cleanse_cross_tu();
+    return test_checked_arithmetic() + test_cleanse_cross_tu() +
+           test_bytes_polarity() + test_bytes_single_bit();
 }

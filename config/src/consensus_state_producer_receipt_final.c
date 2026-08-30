@@ -102,13 +102,53 @@ bool write_final_receipt(
     return ok;
 }
 
-static bool receipt_blob_equal(sqlite3_stmt *st, int column,
-                               const uint8_t expected[32])
+bool advance_final_receipt(
+    sqlite3 *db, const struct consensus_state_source_receipt *r)
 {
-    const void *blob = sqlite3_column_type(st, column) == SQLITE_BLOB
-                           ? sqlite3_column_blob(st, column) : NULL;
-    return blob && sqlite3_column_bytes(st, column) == 32 &&
-           memcmp(blob, expected, 32) == 0;
+    const char *schema =
+        consensus_state_source_receipt_schema(r->schema_version);
+    size_t commit_len = strnlen(r->producer_commit,
+                                sizeof(r->producer_commit));
+    if (r->schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2 || !schema ||
+        !consensus_state_source_receipt_commit_valid(
+            r->schema_version, r->producer_commit, commit_len))
+        return false;
+    static const char sql[] =
+        "UPDATE consensus_state_source_receipt SET "
+        "schema=?,source_epoch_digest=?,source_tree_root=?,"
+        "running_binary_digest=?,toolchain_digest=?,build_inputs_digest=?,"
+        "chain_corpus_digest=?,source_clean=?,validation_profile=?,"
+        "producer_commit=?,fold_cursor=?,receipt_digest=? WHERE singleton=1";
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    int i = 1;
+    bool ok = sqlite3_bind_text(st, i++, schema, -1, SQLITE_STATIC) ==
+                  SQLITE_OK &&
+              sqlite3_bind_blob(st, i++, r->source_epoch_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(st, i++, r->source_tree_root, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(st, i++, r->running_binary_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(st, i++, r->toolchain_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(st, i++, r->build_inputs_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(st, i++, r->chain_corpus_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_int(st, i++, r->source_clean ? 1 : 0) ==
+                  SQLITE_OK &&
+              sqlite3_bind_int(st, i++, r->validation_profile) == SQLITE_OK &&
+              sqlite3_bind_text(st, i++, r->producer_commit, (int)commit_len,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_int64(st, i++, r->fold_cursor) == SQLITE_OK &&
+              sqlite3_bind_blob(st, i++, r->receipt_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_step(st) == SQLITE_DONE && // raw-sql-ok:progress-kv-kernel-store
+              sqlite3_changes(db) == 1;
+    sqlite3_finalize(st);
+    return ok;
 }
 
 static bool receipt_text_equal(sqlite3_stmt *st, int column,
@@ -121,10 +161,10 @@ static bool receipt_text_equal(sqlite3_stmt *st, int column,
            memcmp(text, expected, expected_len) == 0;
 }
 
-/* A finalized receipt is an append-only ownership record. A retry may observe
- * the exact row it already committed, but must never heal, replace, or silently
- * adopt a malformed/different row. That distinction matters after a crash:
- * exact retry is safe; conflicting durable evidence is a named refusal. */
+/* A finalized receipt is a monotonic ownership record.  An exact retry is
+ * idempotent.  A cryptographically valid row owned by the same binary/session
+ * may advance to a strictly higher fold cursor; malformed, foreign, equal-
+ * height-different, or backward evidence is always a conflict. */
 enum final_receipt_state final_receipt_state(
     sqlite3 *db, const struct consensus_state_source_receipt *expected)
 {
@@ -150,29 +190,77 @@ enum final_receipt_state final_receipt_state(
         consensus_state_source_receipt_schema(expected->schema_version);
     size_t commit_len = strnlen(expected->producer_commit,
                                 sizeof(expected->producer_commit));
-    bool identical =
+    struct consensus_state_source_receipt prior;
+    memset(&prior, 0, sizeof(prior));
+    bool prior_shape =
         expected->schema_version == CONSENSUS_STATE_SOURCE_RECEIPT_V2 &&
         schema &&
         consensus_state_source_receipt_commit_valid(
             expected->schema_version, expected->producer_commit, commit_len) &&
         receipt_text_equal(st, 0, schema, strlen(schema)) &&
-        receipt_blob_equal(st, 1, expected->source_epoch_digest) &&
-        receipt_blob_equal(st, 2, expected->source_tree_root) &&
-        receipt_blob_equal(st, 3, expected->running_binary_digest) &&
-        receipt_blob_equal(st, 4, expected->toolchain_digest) &&
-        receipt_blob_equal(st, 5, expected->build_inputs_digest) &&
-        receipt_blob_equal(st, 6, expected->chain_corpus_digest) &&
+        sqlite3_column_type(st, 1) == SQLITE_BLOB &&
+        sqlite3_column_bytes(st, 1) == 32 &&
+        sqlite3_column_type(st, 2) == SQLITE_BLOB &&
+        sqlite3_column_bytes(st, 2) == 32 &&
+        sqlite3_column_type(st, 3) == SQLITE_BLOB &&
+        sqlite3_column_bytes(st, 3) == 32 &&
+        sqlite3_column_type(st, 4) == SQLITE_BLOB &&
+        sqlite3_column_bytes(st, 4) == 32 &&
+        sqlite3_column_type(st, 5) == SQLITE_BLOB &&
+        sqlite3_column_bytes(st, 5) == 32 &&
+        sqlite3_column_type(st, 6) == SQLITE_BLOB &&
+        sqlite3_column_bytes(st, 6) == 32 &&
         sqlite3_column_type(st, 7) == SQLITE_INTEGER &&
-        sqlite3_column_int(st, 7) == (expected->source_clean ? 1 : 0) &&
+        (sqlite3_column_int(st, 7) == 0 ||
+         sqlite3_column_int(st, 7) == 1) &&
         sqlite3_column_type(st, 8) == SQLITE_INTEGER &&
-        sqlite3_column_int(st, 8) == expected->validation_profile &&
         receipt_text_equal(st, 9, expected->producer_commit, commit_len) &&
         sqlite3_column_type(st, 10) == SQLITE_INTEGER &&
-        sqlite3_column_int64(st, 10) == expected->fold_cursor &&
-        receipt_blob_equal(st, 11, expected->receipt_digest);
+        sqlite3_column_type(st, 11) == SQLITE_BLOB &&
+        sqlite3_column_bytes(st, 11) == 32;
+    if (prior_shape) {
+        prior.schema_version = CONSENSUS_STATE_SOURCE_RECEIPT_V2;
+        memcpy(prior.source_epoch_digest, sqlite3_column_blob(st, 1), 32);
+        memcpy(prior.source_tree_root, sqlite3_column_blob(st, 2), 32);
+        memcpy(prior.running_binary_digest, sqlite3_column_blob(st, 3), 32);
+        memcpy(prior.toolchain_digest, sqlite3_column_blob(st, 4), 32);
+        memcpy(prior.build_inputs_digest, sqlite3_column_blob(st, 5), 32);
+        memcpy(prior.chain_corpus_digest, sqlite3_column_blob(st, 6), 32);
+        prior.source_clean = sqlite3_column_int(st, 7) == 1;
+        prior.validation_profile = (uint8_t)sqlite3_column_int(st, 8);
+        prior.producer_commit[0] = '\0';
+        prior.fold_cursor = sqlite3_column_int64(st, 10);
+        memcpy(prior.receipt_digest, sqlite3_column_blob(st, 11), 32);
+    }
     rc = sqlite3_step(st); // raw-sql-ok:progress-kv-kernel-store
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE)
         return FINAL_RECEIPT_READ_ERROR;
-    return identical ? FINAL_RECEIPT_IDENTICAL : FINAL_RECEIPT_CONFLICT;
+    if (!prior_shape)
+        return FINAL_RECEIPT_CONFLICT;
+    uint8_t recomputed[32];
+    consensus_state_source_receipt_digest(&prior, recomputed);
+    bool prior_valid = memcmp(recomputed, prior.receipt_digest, 32) == 0;
+    bool same_owner =
+        prior_valid &&
+        memcmp(prior.source_epoch_digest, expected->source_epoch_digest, 32) ==
+            0 &&
+        memcmp(prior.source_tree_root, expected->source_tree_root, 32) == 0 &&
+        memcmp(prior.running_binary_digest, expected->running_binary_digest,
+               32) == 0 &&
+        memcmp(prior.toolchain_digest, expected->toolchain_digest, 32) == 0 &&
+        memcmp(prior.build_inputs_digest, expected->build_inputs_digest, 32) ==
+            0 &&
+        prior.source_clean == expected->source_clean &&
+        prior.validation_profile == expected->validation_profile;
+    if (!same_owner)
+        return FINAL_RECEIPT_CONFLICT;
+    if (prior.fold_cursor == expected->fold_cursor &&
+        memcmp(prior.chain_corpus_digest, expected->chain_corpus_digest, 32) ==
+            0 &&
+        memcmp(prior.receipt_digest, expected->receipt_digest, 32) == 0)
+        return FINAL_RECEIPT_IDENTICAL;
+    if (prior.fold_cursor < expected->fold_cursor)
+        return FINAL_RECEIPT_MONOTONIC_PREDECESSOR;
+    return FINAL_RECEIPT_CONFLICT;
 }

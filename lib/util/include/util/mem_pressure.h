@@ -20,11 +20,15 @@
  *      against — the most accurate "getting close to trouble" signal when
  *      set)
  *   2. cgroup memory.max (the hard OOM-kill ceiling)
- *   3. system total RAM (no cgroup v2 available — bare-metal/non-systemd)
+ *   3. observed host available memory against system total RAM (Darwin and
+ *      Linux bare-metal/non-systemd)
+ *   4. process RSS against system total RAM when host availability is unknown
  * current usage is cgroup memory.current when a cgroup denominator was
- * selected (matches what the kernel enforces against), else this
- * process's RSS. Thresholds are env-tunable percentages of that
- * denominator (ZCL_MEM_PRESSURE_ELEVATED_PCT / _HIGH_PCT / _CRITICAL_PCT,
+ * selected (matches what the kernel enforces against). With an observed host
+ * availability value it is total minus available, so Commons/background work
+ * yields to unified-memory contention created by the rest of the Mac too;
+ * otherwise it is this process's RSS. Thresholds are env-tunable percentages
+ * of that denominator (ZCL_MEM_PRESSURE_ELEVATED_PCT / _HIGH_PCT / _CRITICAL_PCT,
  * defaults 50/75/90 — see mem_pressure_thresholds_from_env()).
  *
  * SINKS: any subsystem with a cheap, safe, reversible way to shed RAM can

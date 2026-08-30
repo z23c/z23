@@ -67,9 +67,15 @@ scan_prose()
     local root="$1" hits
     hits="$(
         cd "$root" &&
-        grep -rn --include='*.md' --include='*.c' --include='*.h' \
-            --include='*.def' --include='*.in' -E \
-            'Equihash[ -]?\(?200[,/ ]?9\)?' . 2>/dev/null |
+        if [ "$(git rev-parse --show-toplevel 2>/dev/null || true)" = "$(pwd -P)" ]; then
+            git grep -n -E 'Equihash[ -]?\(?200[,/ ]?9\)?' -- \
+                '*.md' '*.c' '*.h' '*.def' '*.in' 2>/dev/null |
+                sed 's#^#./#'
+        else
+            grep -rn --include='*.md' --include='*.c' --include='*.h' \
+                --include='*.def' --include='*.in' -E \
+                'Equihash[ -]?\(?200[,/ ]?9\)?' . 2>/dev/null
+        fi |
         grep -v '^\./build/' | grep -v '^\./vendor/' |
         grep -v '^\./\.claude/worktrees/' | grep -v '^\./test-tmp/' |
         grep -v "^\./$DOC:" |
@@ -123,11 +129,9 @@ status=0
 
 # ── 1. the generated page still matches the consensus tables ─────────────
 TOOL="build/bin/equihash-params-fact"
-# Ask make on every run.  An executable left by an older checkout is not
-# evidence that it was built from the current generator source.
-make --no-print-directory tools/equihash-params-fact >/dev/null 2>&1 || true
 if [ ! -x "$TOOL" ]; then
     echo "check_equihash_params: FAIL — could not build $TOOL" >&2
+    echo "  run: make tools/equihash-params-fact" >&2
     exit 1
 fi
 fresh="$(mktemp)"

@@ -105,6 +105,7 @@ declare -A DARWIN_EXEMPT=(
     [fuzz_zcode_commons]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
     [fuzz_zcode_dht]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
     [fuzz_zcode_science]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
+    [fuzz_mesh_status_proto]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
 )
 
 # ── Windows-only tools (exempt on every host that is NOT Windows) ────────
@@ -300,6 +301,21 @@ violations=0
 failed=()
 build_log=$(mktemp)
 trap 'rm -f "$build_log"' EXIT
+
+# The receipt wrapper owns a fast private build path for agent_sha3 so a direct
+# invocation does not pay a Makefile parse. Prove that ACTUAL path from an
+# absent output, not only the sibling `make agent-sha3` rule: the two source
+# lists once drifted, leaving every Makefile tool gate green while a fresh
+# `make gate-receipt` failed before its child gate could start.
+if helper_selftest="$(tools/agent/gate-receipt.sh --selftest-helper 2>&1)"; then
+    echo "[check_standalone_tools_link] $helper_selftest"
+else
+    echo "[check_standalone_tools_link] gate-receipt helper selftest failed:" >&2
+    printf '    %s\n' "$helper_selftest" >&2
+    printf '%s\n' "$helper_selftest" >>"$build_log"
+    failed+=("gate-receipt fresh agent_sha3 helper")
+    violations=$((violations + 1))
+fi
 
 # Parallelism. MEASURED, not guessed: this one gate was 191 s of a 199 s lint
 # wall on a 32-core host (the other 136 gates finished inside its shadow), and

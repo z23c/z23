@@ -22,6 +22,14 @@ vendor/tor/
 # `make vendor` scratch: pinned source downloads + per-lib build trees.
 vendor/.cache/
 vendor/.build/
+vendor/.build-*/
+vendor/.build-*.lock/
+# Per-target archives + headers, built from the SAME pinned sources by
+# VENDOR_TARGET=<triple> tools/scripts/build_vendor.sh for a cross release
+# (e.g. vendor/cross/x86_64-w64-mingw32). vendor/lib holds exactly one target,
+# so another one needs its own tree; like vendor/lib it is generated, never
+# tracked.
+vendor/cross/
 # Vendored OpenSSL/zlib/libevent headers installed by `make vendor`
 # (regenerated). event2/ exists for the embedded Tor build (`make tor-full`),
 # which on macOS has no system libevent to discover.
@@ -111,3 +119,9 @@ deploy/devfleet/*.sync
 deploy/devfleet/*.status
 deploy/devfleet/*.identity
 deploy/devfleet/*.jsonl
+
+# Installed agent CLIs write their own per-directory state into the checkout
+# when they are dispatched to. `zai` drops .zai/settings.json on first run.
+# It is the CLI's state, not this project's, and a committed copy would pin
+# every operator to whatever model the last dispatch happened to use.
+.zai/

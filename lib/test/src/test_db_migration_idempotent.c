@@ -91,6 +91,29 @@ static int db_mig_family_file_cmp(const void *a, const void *b)
     return strcmp(fa->name, fb->name);
 }
 
+/* UCRT struct stat carries second-resolution st_mtime/st_ctime and no
+ * st_mtim/st_ctim; the comparison below only needs change detection, and a
+ * same-second rewrite keeping the same hash is not a mutation this test is
+ * trying to catch. */
+static struct timespec db_mig_stat_mtime(const struct stat *st)
+{
+#if defined(_WIN32)
+    struct timespec ts = { (time_t)st->st_mtime, 0 };
+    return ts;
+#else
+    return st->st_mtim;
+#endif
+}
+static struct timespec db_mig_stat_ctime(const struct stat *st)
+{
+#if defined(_WIN32)
+    struct timespec ts = { (time_t)st->st_ctime, 0 };
+    return ts;
+#else
+    return st->st_ctim;
+#endif
+}
+
 /* Snapshot every directory entry in the SQLite database family, not merely
  * node.db.  A refusal that creates/deletes/changes WAL, SHM, rollback-journal
  * or master-journal state has mutated the database even when node.db itself
@@ -118,8 +141,8 @@ static bool db_mig_snapshot_family(const char *dbpath,
     struct stat dst;
     if (stat(dir, &dst) != 0)
         return false;
-    out->dir_mtime = dst.st_mtim;
-    out->dir_ctime = dst.st_ctim;
+    out->dir_mtime = db_mig_stat_mtime(&dst);
+    out->dir_ctime = db_mig_stat_ctime(&dst);
 
     DIR *d = opendir(dir);
     if (!d)
@@ -151,8 +174,8 @@ static bool db_mig_snapshot_family(const char *dbpath,
             break;
         }
         f->mode = st.st_mode;
-        f->mtime = st.st_mtim;
-        f->ctime = st.st_ctim;
+        f->mtime = db_mig_stat_mtime(&st);
+        f->ctime = db_mig_stat_ctime(&st);
         out->count++;
     }
     closedir(d);
@@ -170,8 +193,22 @@ static bool db_mig_family_same(const struct db_mig_family_snapshot *a,
         a->dir_mtime.tv_sec != b->dir_mtime.tv_sec ||
         a->dir_mtime.tv_nsec != b->dir_mtime.tv_nsec ||
         a->dir_ctime.tv_sec != b->dir_ctime.tv_sec ||
-        a->dir_ctime.tv_nsec != b->dir_ctime.tv_nsec)
+        a->dir_ctime.tv_nsec != b->dir_ctime.tv_nsec) {
+        fprintf(stderr,
+                "db_mig family metadata changed count=%zu/%zu "
+                "dir_mtime=%lld.%09ld/%lld.%09ld "
+                "dir_ctime=%lld.%09ld/%lld.%09ld\n",
+                a ? a->count : 0, b ? b->count : 0,
+                a ? (long long)a->dir_mtime.tv_sec : 0,
+                a ? a->dir_mtime.tv_nsec : 0,
+                b ? (long long)b->dir_mtime.tv_sec : 0,
+                b ? b->dir_mtime.tv_nsec : 0,
+                a ? (long long)a->dir_ctime.tv_sec : 0,
+                a ? a->dir_ctime.tv_nsec : 0,
+                b ? (long long)b->dir_ctime.tv_sec : 0,
+                b ? b->dir_ctime.tv_nsec : 0);
         return false;
+    }
     for (size_t i = 0; i < a->count; i++) {
         const struct db_mig_family_file *fa = &a->files[i];
         const struct db_mig_family_file *fb = &b->files[i];
@@ -181,8 +218,11 @@ static bool db_mig_family_same(const struct db_mig_family_snapshot *a,
             fa->mtime.tv_nsec != fb->mtime.tv_nsec ||
             fa->ctime.tv_sec != fb->ctime.tv_sec ||
             fa->ctime.tv_nsec != fb->ctime.tv_nsec ||
-            memcmp(fa->sha3, fb->sha3, sizeof(fa->sha3)) != 0)
+            memcmp(fa->sha3, fb->sha3, sizeof(fa->sha3)) != 0) {
+            fprintf(stderr, "db_mig family file changed: %s/%s\n",
+                    fa->name, fb->name);
             return false;
+        }
     }
     return true;
 }

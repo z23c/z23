@@ -36,8 +36,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define ICD_BIN "build/bin/zclassic23"
 
@@ -352,3 +355,12 @@ int test_importblockindex_cli_dispatch(void)
 
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked CLI-dispatch child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_importblockindex_cli_dispatch(void)
+{
+    printf("importblockindex_cli_dispatch: SKIP (Windows): forked CLI-dispatch child lane\n");
+    return 0;
+}
+#endif

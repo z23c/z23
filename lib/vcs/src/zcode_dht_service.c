@@ -2,6 +2,7 @@
  * purpose: Bounded long-lived FIND_NODE/NODES service for the ZCODE DHT. */
 
 #include "vcs/zcode_dht_service.h"
+#include "base/bytes.h"
 #include "zcode_dht_service_internal.h"
 
 #include "base/safe_alloc.h"
@@ -15,15 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static bool nonzero(const uint8_t *p, size_t n) {
-  uint8_t any = 0;
-  if (!p)
-    return false;
-  for (size_t i = 0; i < n; i++)
-    any |= p[i];
-  return any != 0;
-}
 
 static bool pending_candidate_valid(struct vcs_zcode_dht_service *s,
                                     const struct vcs_zcode_dht_pending *p,
@@ -138,7 +130,7 @@ static bool query_id(struct vcs_zcode_dht_service *s, uint64_t peer,
   sha3_256_write(&h, (uint8_t *)&s->serial, 8);
   sha3_256_finalize(&h, digest);
   memcpy(out, digest, 16);
-  return nonzero(out, 16);
+  return zcl_bytes_any_set(out, 16);
 }
 
 static bool outbound_push(struct vcs_zcode_dht_service *s, uint64_t peer,
@@ -223,7 +215,7 @@ void vcs_zcode_dht_service_query_finish(
     }
     if (l && l->queries_pending)
       l->queries_pending--;
-  } else if (q->kind == QUERY_PROBE && nonzero(q->victim, 32)) {
+  } else if (q->kind == QUERY_PROBE && zcl_bytes_any_set(q->victim, 32)) {
     enum vcs_zcode_dht_probe_state terminal =
         outcome == QUERY_OUTCOME_RESPONSE
             ? VCS_ZCODE_DHT_PROBE_RESPONDED

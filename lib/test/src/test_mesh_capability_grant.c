@@ -153,6 +153,16 @@ static int claim_complete_restart(struct node_db *ndb, const char *path,
         ASSERT_EQ(found.claimed_at, 2200);
         ASSERT_EQ(found.consumed_at, 2203);
         ASSERT(db_mesh_capability_grant_revoke(ndb, grant.grant_id, 2205));
+        ASSERT(db_mesh_capability_grant_find(ndb, grant.grant_id, &found));
+        ASSERT_EQ(found.revoked_at, 2205);
+        ASSERT_EQ(found.revocation_generation, 1);
+        node_db_close(ndb);
+        ASSERT(node_db_open(ndb, path));
+        ASSERT(db_mesh_capability_grant_revoke(ndb, grant.grant_id, 2300));
+        ASSERT(db_mesh_capability_grant_insert(ndb, &grant));
+        ASSERT(db_mesh_capability_grant_find(ndb, grant.grant_id, &found));
+        ASSERT_EQ(found.revoked_at, 2205);
+        ASSERT_EQ(found.revocation_generation, 1);
         ASSERT_EQ(db_mesh_capability_grant_complete(
                       ndb, grant.grant_id, transfer, 0, 0, 2206),
                   MESH_CAPABILITY_COMPLETE_REFUSED);

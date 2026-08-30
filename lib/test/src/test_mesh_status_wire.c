@@ -757,6 +757,24 @@ int test_mesh_status_wire(void)
                   MESH_MACHINE_UNREACHABLE);
         ASSERT_STR_EQ(detail, "no_live_noise_session");
         ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_ROUTE_PENDING,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_TIMEOUT);
+        ASSERT_STR_EQ(detail, "route_acquisition_pending");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_REFUSED);
+        ASSERT_STR_EQ(detail, "route-identity-mismatch");
+        ASSERT_EQ(mesh_machine_derive_state(
+                      "active", MESH_STATUS_BEGIN_ROUTE_DOWNGRADE,
+                      MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
+                      &detail),
+                  MESH_MACHINE_REFUSED);
+        ASSERT_STR_EQ(detail, "route-plaintext-downgrade");
+        ASSERT_EQ(mesh_machine_derive_state(
                       "active", MESH_STATUS_BEGIN_NOISE_DISABLED,
                       MESH_STATUS_POLL_PENDING, MESH_STATUS_RECEIPT_INTERNAL,
                       &detail),

@@ -398,6 +398,12 @@ static int t_mvp_scope_decision(void)
     static const enum metaverse_kind k_out_of_scope[] = {
         METAVERSE_KIND_HOSTED_SERVICE, METAVERSE_KIND_ENDPOINT_ONION,
         METAVERSE_KIND_STOREFRONT_PRODUCT, METAVERSE_KIND_CONTRACT_SWAP,
+        /* Content-addressed but not ENUMERABLE from a datadir: a character is
+         * verified by recomputing it from the birth seed presented with it,
+         * and no path on disk lists the seeds this node holds. Out of scope
+         * for the same reason as the four above — no honest datadir-only
+         * projection exists — arrived at from the opposite direction. */
+        METAVERSE_KIND_CHARACTER_SHEET,
     };
     size_t in_wired = 0, out_reasoned = 0;
 
@@ -417,9 +423,9 @@ static int t_mvp_scope_decision(void)
     }
     MV_CHECK("mvp-scope: the four datadir-provable kinds are wired",
              in_wired == 4);
-    MV_CHECK("mvp-scope: the four out-of-scope kinds stay unavailable and "
+    MV_CHECK("mvp-scope: the five out-of-scope kinds stay unavailable and "
              "each still says why",
-             out_reasoned == 4);
+             out_reasoned == 5);
     return failures;
 }
 
@@ -455,6 +461,13 @@ static const struct mv_expected_settlement k_expected_settlement[] = {
      * can observe. Chain-anchored, not measurable here. */
     { METAVERSE_KIND_CONTRACT_SWAP,
       METAVERSE_SETTLEMENT_CHAIN_ANCHORED_INCOMPLETE },
+    /* The id is the hash of the character's own birth seed plus the rules
+     * revision, and metaverse/character_sheet.h recomputes the whole sheet
+     * from it: a verifier hashes what it was handed. No registry, no chain,
+     * no peer — the same mechanism as content and zcode_package, reached
+     * without any store existing at all. */
+    { METAVERSE_KIND_CHARACTER_SHEET,
+      METAVERSE_SETTLEMENT_CONTENT_ADDRESSED },
 };
 
 static int t_settlement_classes(void)

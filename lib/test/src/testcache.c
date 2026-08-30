@@ -75,6 +75,7 @@ struct trc_memo {
 struct testcache {
     struct codeindex *ci;
     char              root[4096];
+    char              store_root[4096];
     struct trc_memo   memo;
     char            (*closure)[256];   /* TRC_MAX_CLOSURE scratch rows */
     /* Include-graph liveness, from the graph itself, measured once at open. */
@@ -139,8 +140,13 @@ static bool trc_memo_grow(struct trc_memo *m)
 
 static int64_t trc_stat_mtime_ns(const struct stat *st)
 {
+#if defined(_WIN32)
+    /* UCRT struct stat has second resolution only. */
+    return (int64_t)st->st_mtime * INT64_C(1000000000);
+#else
     return (int64_t)st->st_mtim.tv_sec * INT64_C(1000000000) +
            (int64_t)st->st_mtim.tv_nsec;
+#endif
 }
 
 /* SHA3-256 the bytes of <root>/<relpath> via a streaming read (no whole-file
@@ -265,6 +271,7 @@ static bool trc_env_is_cache_control(const char *name, size_t namelen)
 {
     static const char *const ctl[] = {
         "ZCL_TEST_CACHE", "ZCL_TEST_CACHE_DUMP",
+        "ZCL_TESTCACHE_STORE_ROOT",
     };
     for (size_t i = 0; i < sizeof(ctl) / sizeof(ctl[0]); i++)
         if (strlen(ctl[i]) == namelen && strncmp(name, ctl[i], namelen) == 0)
@@ -564,9 +571,19 @@ static struct testcache *testcache_open_mode(
         LOG_NULL("testcache", "root path overflow");
     }
 
-    if (!vcs_object_store_init(tc->root)) {
+    const char *configured_store = getenv("ZCL_TESTCACHE_STORE_ROOT");
+    const char *store_root = configured_store && configured_store[0]
+        ? configured_store : root;
+    n = snprintf(tc->store_root, sizeof(tc->store_root), "%s", store_root);
+    if (n < 0 || (size_t)n >= sizeof(tc->store_root)) {
         free(tc);
-        LOG_NULL("testcache", "vcs object store init failed under %s", root);
+        LOG_NULL("testcache", "store root path overflow");
+    }
+
+    if (!vcs_object_store_init(tc->store_root)) {
+        free(tc);
+        LOG_NULL("testcache", "vcs object store init failed under %s",
+                 store_root);
     }
 
     tc->closure = zcl_malloc(sizeof(*tc->closure) * TRC_MAX_CLOSURE,
@@ -775,10 +792,11 @@ void testcache_probe_group(struct testcache *tc, const char *group_name,
     /* Is there a stored PASS at this exact key? Probe existence first (a quiet
      * access() — a MISS is the common, non-error case) before the verifying
      * load, so a cold cache never spams the log with "object not found". */
-    if (vcs_object_has(tc->root, out->key)) {
+    if (vcs_object_has(tc->store_root, out->key)) {
         uint8_t *buf = NULL;
         size_t len = 0;
-        if (vcs_object_load_raw(tc->root, out->key, &buf, &len) == 0 && buf) {
+        if (vcs_object_load_raw(tc->store_root, out->key, &buf, &len) == 0 &&
+            buf) {
             if (len >= sizeof(struct trc_record)) {
                 const struct trc_record *r = (const struct trc_record *)buf;
                 if (memcmp(r->magic, TRC_MAGIC, 8) == 0 &&
@@ -804,7 +822,7 @@ void testcache_store_pass(struct testcache *tc, const uint8_t key[32])
     uint64_t gen = (uint64_t)platform_time_wall_time_t();
     for (int i = 0; i < 8; i++)
         r.generation_le[i] = (uint8_t)(gen >> (8 * i));
-    if (!vcs_object_put_addressed(tc->root, key,
+    if (!vcs_object_put_addressed(tc->store_root, key,
                                   (const uint8_t *)&r, sizeof(r)))
         ZCL_LOG_EMIT_AT(ZCL_LOG_WARN,
                         "[testcache] store_pass put_addressed failed\n");

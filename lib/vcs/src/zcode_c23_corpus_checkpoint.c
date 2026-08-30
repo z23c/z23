@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_c23_corpus.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
@@ -15,17 +16,9 @@ static const uint8_t checkpoint_magic[8] = {'Z','C','C','P','1',0,0,0};
 static const char checkpoint_signature_domain[] =
     "zcl.zcode.c23_corpus_checkpoint.signature.v1";
 
-static bool nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool zero_root(const uint8_t root[32])
 {
-    return !nonzero(root, 32);
+    return !zcl_bytes_any_set(root, 32);
 }
 
 size_t vcs_zcode_c23_corpus_checkpoint_v1_wire_size(size_t shard_count)
@@ -65,7 +58,7 @@ static enum vcs_zcode_c23_error checkpoint_shape(
         checkpoint->replication_evidence_root, checkpoint->signer_pubkey,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!nonzero(roots[i], 32)) return VCS_ZCODE_C23_ROOT;
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_C23_ROOT;
     if (!checkpoint->shards || checkpoint->shard_count == 0 ||
         checkpoint->shard_count > VCS_ZCODE_C23_CHECKPOINT_SHARD_MAX)
         return VCS_ZCODE_C23_SIZE;
@@ -74,9 +67,9 @@ static enum vcs_zcode_c23_error checkpoint_shape(
     for (size_t i = 0; i < checkpoint->shard_count; i++) {
         const struct vcs_zcode_c23_checkpoint_shard_v1 *binding =
             &checkpoint->shards[i];
-        if (!nonzero(binding->shard_root, 32) ||
-            !nonzero(binding->first_lineage_root, 32) ||
-            !nonzero(binding->last_lineage_root, 32) ||
+        if (!zcl_bytes_any_set(binding->shard_root, 32) ||
+            !zcl_bytes_any_set(binding->first_lineage_root, 32) ||
+            !zcl_bytes_any_set(binding->last_lineage_root, 32) ||
             memcmp(binding->first_lineage_root,
                    binding->last_lineage_root, 32) > 0 ||
             binding->entry_count == 0)
@@ -119,7 +112,7 @@ static enum vcs_zcode_c23_error checkpoint_shape(
                total_loc < VCS_ZCODE_C23_FIRST_MILESTONE_LOC) {
         return VCS_ZCODE_C23_POLICY;
     }
-    if (require_signature && !nonzero(checkpoint->signature, 64))
+    if (require_signature && !zcl_bytes_any_set(checkpoint->signature, 64))
         return VCS_ZCODE_C23_SIGNATURE;
     return VCS_ZCODE_C23_OK;
 }
@@ -368,12 +361,12 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_verify_successor(
     uint8_t expected_50m[32] = {0};
     if (prior->milestone == VCS_ZCODE_C23_MILESTONE_50M)
         memcpy(expected_50m, prior_root, 32);
-    else if (nonzero(prior->verified_50m_ancestor_root, 32))
+    else if (zcl_bytes_any_set(prior->verified_50m_ancestor_root, 32))
         memcpy(expected_50m, prior->verified_50m_ancestor_root, 32);
     if (memcmp(next->verified_50m_ancestor_root, expected_50m, 32) != 0)
         return VCS_ZCODE_C23_ANCESTRY;
     if (next->milestone == VCS_ZCODE_C23_MILESTONE_100M &&
-        !nonzero(expected_50m, 32))
+        !zcl_bytes_any_set(expected_50m, 32))
         return VCS_ZCODE_C23_ANCESTRY;
     return VCS_ZCODE_C23_OK;
 }

@@ -194,6 +194,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 
@@ -248,16 +249,6 @@ static void die(const char *msg)
     if (errno)
         fprintf(stderr, "core_seal: errno: %s\n", strerror(errno));
     exit(2);
-}
-
-static void hex_of(const unsigned char *in, size_t n, char *out /* 2n+1 */)
-{
-    static const char d[] = "0123456789abcdef";
-    for (size_t i = 0; i < n; i++) {
-        out[2 * i] = d[in[i] >> 4];
-        out[2 * i + 1] = d[in[i] & 0x0f];
-    }
-    out[2 * n] = '\0';
 }
 
 /* The first 2*HSZ bytes of `s` are lowercase hex. Does not look past them. */
@@ -1283,7 +1274,7 @@ static int verify_files(const char *manifest_path, const struct manifest_view *m
             rc = 1;
             continue;
         }
-        hex_of(ents[i].hash, HSZ, hex);
+        zcl_hex_encode(ents[i].hash, HSZ, hex);
         if (strcmp(mv->file[i].hex, hex) != 0) {
             fprintf(stderr,
                     "core_seal: DRIFT — sealed file '%s' digest changed.\n"
@@ -1339,7 +1330,7 @@ static int verify_sections(const char *manifest_path,
             rc = 1;
             continue;
         }
-        hex_of(nodes[k].digest, HSZ, hex);
+        zcl_hex_encode(nodes[k].digest, HSZ, hex);
         int bad = 0;
         if (found->count != nodes[k].file_count) {
             fprintf(stderr,
@@ -1381,7 +1372,7 @@ static int verify_sections(const char *manifest_path,
         }
     }
 
-    hex_of(tree, HSZ, hex);
+    zcl_hex_encode(tree, HSZ, hex);
     if (strcmp(mv->tree_hex, hex) != 0) {
         fprintf(stderr,
                 "core_seal: DRIFT — TREE root does not match.\n"
@@ -1477,37 +1468,37 @@ static int do_seal(const char *manifest_path)
     char hex[HEXSZ];
     char line[4096];
     for (size_t i = 0; i < n; i++) {
-        hex_of(ents[i].hash, HSZ, hex);
+        zcl_hex_encode(ents[i].hash, HSZ, hex);
         fprintf(m, "%s" SEP "%s\n", hex, ents[i].path);
     }
     /* Skip node 0 (the root, dirpath "") — it is the TREE line. */
     for (size_t k = 1; k < dn; k++) {
-        hex_of(nodes[k].digest, HSZ, hex);
+        zcl_hex_encode(nodes[k].digest, HSZ, hex);
         if (section_line_format(line, sizeof(line), nodes[k].path,
                                 nodes[k].file_count, hex) == 0)
             die("internal error: a section could not be encoded");
         fputs(line, m);
     }
     if (dn > 0) {
-        hex_of(tree, HSZ, hex);
+        zcl_hex_encode(tree, HSZ, hex);
         fprintf(m, "TREE" SEP "%s\n", hex);
     }
-    hex_of(root, HSZ, hex);
+    zcl_hex_encode(root, HSZ, hex);
     fprintf(m, "ROOT" SEP "%s\n", hex);
     if (fclose(m) != 0)
         die("write error closing manifest");
 
     for (size_t k = 1; k < dn; k++) {
-        hex_of(nodes[k].digest, HSZ, hex);
+        zcl_hex_encode(nodes[k].digest, HSZ, hex);
         fprintf(stderr, "core_seal:   section %-44s %3llu file(s)  %s\n",
                 nodes[k].path, (unsigned long long)nodes[k].file_count, hex);
     }
     if (dn > 0) {
-        hex_of(tree, HSZ, hex);
+        zcl_hex_encode(tree, HSZ, hex);
         fprintf(stderr, "core_seal:   TREE (%zu directory node(s)) %s\n", dn,
                 hex);
     }
-    hex_of(root, HSZ, hex);
+    zcl_hex_encode(root, HSZ, hex);
     fprintf(stderr, "core_seal: sealed %zu file(s), ROOT %s\n", n, hex);
     free(nodes);
     for (size_t i = 0; i < n; i++)
@@ -1542,7 +1533,7 @@ static int do_check(const char *manifest_path)
     unsigned char root[HSZ];
     compute_root(ents, n, root);
     char now[HEXSZ];
-    hex_of(root, HSZ, now);
+    zcl_hex_encode(root, HSZ, now);
 
     int rc = 0;
     if (strcmp(mv.root_hex, now) != 0) {

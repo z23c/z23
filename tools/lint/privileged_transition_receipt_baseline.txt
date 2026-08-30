@@ -48,6 +48,7 @@ dev.loop.stop              exempt: verify-only dev loop, no live generation swap
 dev.generation.rollback    exempt: dev generation store, contained
 dev.generation.compact     exempt: dev generation store, contained
 dev.generation.activate    receipt:tools/command/native_dev_activation_command.c
+dev.agent.mutate           exempt: edits one line of one CHECKOUT source file and writes it back in the same call; installs no artifact, opens no datadir, and refuses any path outside the checkout
 ops.recovery.rebuild       exempt: refold reset, gated by copy-prove doctrine
 ops.mesh.pair.commit       exempt: node.db pairing AR write via mesh_pairing_service, no artifact install
 
@@ -165,6 +166,8 @@ app.shop.want.fulfill.post  exempt: persists a signed evidence claim over alread
 app.shop.want.fulfill.withdraw  exempt: marks only the signer-owned local evidence projection withdrawn; installs no artifact and moves no value
 app.shop.want.fulfill.review  exempt: changes only this node's local moderation view metadata; the signed claim is unchanged and no artifact or value moves
 dev.begin                   exempt: starts or reattaches only the checkout-local development watcher; installs no privileged artifact and changes no canonical node
+dev.proof.ensure            exempt: schedules checkout-local verification and publishes local evidence; installs no privileged artifact and changes no canonical node
+dev.proof.wait              exempt: schedules missing checkout-local verification before a bounded wait; installs no privileged artifact and changes no canonical node
 dev.publication.mirror.record exempt: appends optional declared mirror evidence after verified P2P publication; installs no artifact and grants no Git, network, source or publication authority
 dev.publication.collect exempt: appends verified signed storage evidence to an immutable dev publication job; installs no artifact and grants no approval, deployment, wallet or publication authority
 ops.mesh.pair.revoke exempt: removes one target-local status-read authority through bounded plan/commit; it creates no authority and installs no artifact

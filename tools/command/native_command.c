@@ -89,6 +89,13 @@ bool zcl_native_command_is_root(const char *word)
          * for exactly the reason above: a four-word canonical path is not
          * what someone types on their first day. */
         "join", "update",
+        /* `general` is the dispatch brief for one territory (config/commands/
+         * code.def). It is a root rather than a `code.*` child because it is
+         * what an agent runs BEFORE it starts work, and putting a prefix
+         * between an agent and the inventory it keeps mis-remembering is how
+         * the inventory keeps getting mis-remembered. It grants no authority:
+         * it reports and never decides. */
+        "general",
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
         if (strcmp(word, roots[i]) == 0)
@@ -138,6 +145,7 @@ static const struct {
     { "ops.logs", zcl_native_node_log_body },
     { "ops.timeline", zcl_native_timeline_body },
     { "ops.metrics", zcl_native_metrics_body },
+    { "ops.health", zcl_native_ops_health_body },
     { "ops.postmortem.list", zcl_native_postmortem_list_body },
     { "ops.debug.dash.kpi", zcl_native_kpi_body },
     { "ops.debug.dash.snapshot", zcl_native_operator_snapshot_body },
@@ -231,9 +239,6 @@ static const struct bridge_rpc_binding g_bridge_rpc_direct[] = {
     { "core.mining.benchmark", "benchmark", JSON_OBJ,
       {{"primary_benchmark_source", JSON_STR},
        {"primary_benchmarks", JSON_ARR}}, BRIDGE_RPC_ARRAY_NONE },
-    { "ops.health", "healthcheck", JSON_OBJ,
-      {{"status", JSON_STR}, {"healthy", JSON_BOOL}, {"serving", JSON_BOOL}},
-      BRIDGE_RPC_ARRAY_NONE },
     { "ops.lanes", "agentlanes", JSON_OBJ,
       {{"status", JSON_STR}, {"lanes", JSON_ARR}}, BRIDGE_RPC_ARRAY_NONE },
     { "ops.recovery.status", "refold", JSON_OBJ,
@@ -888,6 +893,8 @@ void zcl_native_bridge_run(const struct zcl_command_request *request,
                 failure_exit = ZCL_COMMAND_EXIT_INVALID;
             } else if (body_err.status == ZCL_NATIVE_BODY_INTERNAL) {
                 failure_exit = ZCL_COMMAND_EXIT_INTERNAL;
+            } else if (body_err.status == ZCL_NATIVE_BODY_PROTOCOL) {
+                failure_exit = ZCL_COMMAND_EXIT_FAILED;
             }
         } else {
             (void)snprintf(msgbuf, sizeof(msgbuf), "RPC %s returned null",
@@ -3803,11 +3810,47 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
         return ZCL_COMMAND_EXIT_INVALID;
     }
 
-    /* Discovery leaves render their native document directly. */
+    /* Discovery leaves render their native document directly.
+     *
+     * They read the POSITIONAL argument, but their declared contract also
+     * lists that argument as an input key (`discover.schema` declares
+     * "path,side"), and every other leaf in the tree accepts its keys through
+     * --input. Ignoring --input here broke the one loop these leaves exist to
+     * close: an INVALID_INPUT reply suggests `discover.schema` with
+     * `{"path":"<leaf>"}`, and following that suggestion literally answered
+     * UNKNOWN_PATH because the object was never read. Honour the declared
+     * keys: the positional still wins when both are given, so no existing
+     * invocation changes meaning. */
     if (spec->layer == ZCL_COMMAND_LAYER_DISCOVER &&
         spec->mode != ZCL_COMMAND_MODE_BRANCH) {
         const char *arg = npos > 0 ? positional[0] : NULL;
+        struct json_value disc_input;
+        json_init(&disc_input);
+        bool have_disc_input =
+            !arg && input_flag && strcmp(input_flag, "-") != 0 &&
+            json_read(&disc_input, input_flag, strlen(input_flag)) &&
+            disc_input.type == JSON_OBJ;
+        if (have_disc_input) {
+            /* The leaf's own first positional key names the argument. */
+            const char *pk = spec->positional_keys ? spec->positional_keys : "";
+            const char *end = strchr(pk, ',');
+            char key[64];
+            size_t klen = end ? (size_t)(end - pk) : strlen(pk);
+            if (klen > 0 && klen < sizeof(key)) {
+                memcpy(key, pk, klen);
+                key[klen] = '\0';
+                const char *v = json_get_str(json_get(&disc_input, key));
+                if (v && v[0]) arg = v;
+            }
+            if (!side) {
+                const char *s = json_get_str(json_get(&disc_input, "side"));
+                if (s && s[0] && (strcmp(s, "input") == 0 ||
+                                  strcmp(s, "output") == 0))
+                    side = s;
+            }
+        }
         int rc = nc_run_discover(spec, arg, side);
+        json_free(&disc_input);
         json_free(&flags);
         return rc;
     }
@@ -3947,11 +3990,22 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
         (void)used;
     }
 
-    /* Reject unknown keys and duplicates before any side effect. */
+    /* Reject unknown keys and duplicates before any side effect.
+     *
+     * The message NAMES the keys this leaf accepts. A rejection that only says
+     * which key was wrong, and points at a second command to learn the right
+     * one, costs a caller one round trip it usually will not spend: the
+     * observed failure was an agent guessing `name` for `code find`, reading
+     * "inspect the input schema", and falling back to grep. The accepted set
+     * is already in the spec at this point, so carrying it in the error is
+     * free and removes the trip entirely. */
     if (!zcl_command_registry_input_validate(spec, &input, why, sizeof(why))) {
         json_free(&input);
+        char detail[ZCL_COMMAND_MAX_PATH + 512];
+        (void)zcl_command_registry_input_reject_detail(spec, why, detail,
+                                                       sizeof(detail));
         nc_print_error_next_string(
-            spec->path, "INVALID_INPUT", "normalize", why, spec->path,
+            spec->path, "INVALID_INPUT", "normalize", detail, spec->path,
             "discover.schema", "path", spec->path,
             "inspect the input schema");
         return ZCL_COMMAND_EXIT_INVALID;

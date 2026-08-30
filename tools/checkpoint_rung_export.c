@@ -29,24 +29,13 @@
 
 #include "storage/checkpoint_rung.h"
 
+#include "base/hex.h"
+
 #include <sqlite3.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static int hex_to_32(const char *hex, uint8_t out[32])
-{
-    if (strlen(hex) != 64)
-        return 0;
-    for (int i = 0; i < 32; i++) {
-        unsigned v;
-        if (sscanf(hex + 2 * i, "%2x", &v) != 1)
-            return 0;
-        out[i] = (uint8_t)v;
-    }
-    return 1;
-}
 
 int main(int argc, char **argv)
 {
@@ -57,7 +46,7 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--chainwork=", 12) == 0) {
-            if (!hex_to_32(argv[i] + 12, chainwork)) {
+            if (!zcl_hex_decode(argv[i] + 12, chainwork, 32)) {
                 fprintf(stderr, "checkpoint_rung_export: --chainwork must be "
                                 "64 hex chars (32-byte big-endian)\n");
                 return 2;

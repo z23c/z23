@@ -59,11 +59,133 @@ static int test_rom_manifest_request_parse(void)
         ASSERT(fs_parse_rom_manifest_request(req, sizeof(req), root));
         ASSERT(memcmp(root, req + 3, 32) == 0);
 
-        /* Reject: too short, wrong magic, NULL. */
+        /* Reject: too short, wrong magic, NULL payload. */
         ASSERT(!fs_parse_rom_manifest_request(req, 34, root));
         req[0] = 'X';
         ASSERT(!fs_parse_rom_manifest_request(req, sizeof(req), root));
+        req[0] = 'R';
         ASSERT(!fs_parse_rom_manifest_request(NULL, sizeof(req), root));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Pins the exact-length + non-NULL-output contract that used to differ
+ * between the Windows and POSIX arms of fs_parse_rom_manifest_request:
+ * Windows required n == FS_ROM_MANIFEST_REQUEST_SIZE and refused a NULL
+ * root_out; POSIX accepted n >= the size (silently ignoring trailing
+ * bytes) and treated root_out as optional, returning true having
+ * written nothing. Both axes now fail closed everywhere. */
+static int test_rom_manifest_request_overlong_and_null(void)
+{
+    int failures = 0;
+    TEST("rom_manifest: RMF request rejects an over-long payload and a NULL root_out") {
+        uint8_t req[FS_ROM_MANIFEST_REQUEST_SIZE + 1];
+        memcpy(req, "RMF", 3);
+        for (int i = 0; i < 32; i++) req[3 + i] = (uint8_t)(i + 1);
+        req[FS_ROM_MANIFEST_REQUEST_SIZE] = 0xEE; /* trailing byte */
+        uint8_t root[32];
+        memset(root, 0, sizeof(root));
+
+        /* One byte too long: refused, not silently truncated. */
+        ASSERT(!fs_parse_rom_manifest_request(req, sizeof(req), root));
+        /* Exact length still accepts. */
+        ASSERT(fs_parse_rom_manifest_request(req, FS_ROM_MANIFEST_REQUEST_SIZE, root));
+        ASSERT(memcmp(root, req + 3, 32) == 0);
+
+        /* NULL root_out: refused (never "true" with nothing written). */
+        ASSERT(!fs_parse_rom_manifest_request(req, FS_ROM_MANIFEST_REQUEST_SIZE, NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_rom_request_parse(void)
+{
+    int failures = 0;
+    TEST("rom_manifest: well-formed ROM chunk request parses and round-trips root+idx") {
+        uint8_t req[FS_ROM_REQUEST_SIZE];
+        memcpy(req, "ROM", 3);
+        for (int i = 0; i < 32; i++) req[3 + i] = (uint8_t)(i + 1);
+        req[35] = 0x78; req[36] = 0x56; req[37] = 0x34; req[38] = 0x12;
+        uint8_t root[32];
+        uint32_t idx = 0;
+        memset(root, 0, sizeof(root));
+        ASSERT(fs_parse_rom_request(req, sizeof(req), root, &idx));
+        ASSERT(memcmp(root, req + 3, 32) == 0);
+        ASSERT(idx == 0x12345678u);
+
+        /* Reject: too short, wrong magic, NULL payload. */
+        ASSERT(!fs_parse_rom_request(req, sizeof(req) - 1, root, &idx));
+        uint8_t bad_magic = req[0];
+        req[0] = 'X';
+        ASSERT(!fs_parse_rom_request(req, sizeof(req), root, &idx));
+        req[0] = bad_magic;
+        ASSERT(!fs_parse_rom_request(NULL, sizeof(req), root, &idx));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_rom_request_overlong_and_null(void)
+{
+    int failures = 0;
+    TEST("rom_manifest: ROM chunk request rejects an over-long payload and NULL outputs") {
+        uint8_t req[FS_ROM_REQUEST_SIZE + 1];
+        memcpy(req, "ROM", 3);
+        for (int i = 0; i < 32; i++) req[3 + i] = (uint8_t)(i + 1);
+        req[35] = 0x78; req[36] = 0x56; req[37] = 0x34; req[38] = 0x12;
+        req[FS_ROM_REQUEST_SIZE] = 0xEE; /* trailing byte */
+        uint8_t root[32];
+        uint32_t idx = 0;
+        memset(root, 0, sizeof(root));
+
+        /* One byte too long: refused, not silently truncated. */
+        ASSERT(!fs_parse_rom_request(req, sizeof(req), root, &idx));
+        /* Exact length still accepts and extracts the right bytes. */
+        ASSERT(fs_parse_rom_request(req, FS_ROM_REQUEST_SIZE, root, &idx));
+        ASSERT(memcmp(root, req + 3, 32) == 0);
+        ASSERT(idx == 0x12345678u);
+
+        /* NULL root or NULL idx: refused (never "true" with nothing written). */
+        ASSERT(!fs_parse_rom_request(req, FS_ROM_REQUEST_SIZE, NULL, &idx));
+        ASSERT(!fs_parse_rom_request(req, FS_ROM_REQUEST_SIZE, root, NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_rom_list_request_parse(void)
+{
+    int failures = 0;
+    TEST("rom_manifest: well-formed RLS directory-listing request is accepted") {
+        uint8_t req[FS_ROM_LIST_REQUEST_SIZE];
+        memcpy(req, "RLS", 3);
+        ASSERT(fs_parse_rom_list_request(req, sizeof(req)));
+
+        /* Reject: too short, wrong magic, NULL payload. */
+        ASSERT(!fs_parse_rom_list_request(req, sizeof(req) - 1));
+        req[0] = 'X';
+        ASSERT(!fs_parse_rom_list_request(req, sizeof(req)));
+        req[0] = 'R';
+        ASSERT(!fs_parse_rom_list_request(NULL, sizeof(req)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_rom_list_request_overlong(void)
+{
+    int failures = 0;
+    TEST("rom_manifest: RLS request rejects an over-long payload") {
+        uint8_t req[FS_ROM_LIST_REQUEST_SIZE + 1];
+        memcpy(req, "RLS", 3);
+        req[FS_ROM_LIST_REQUEST_SIZE] = 0xEE; /* trailing byte */
+
+        /* One byte too long: refused, not silently accepted. */
+        ASSERT(!fs_parse_rom_list_request(req, sizeof(req)));
+        /* Exact length still accepts. */
+        ASSERT(fs_parse_rom_list_request(req, FS_ROM_LIST_REQUEST_SIZE));
         PASS();
     } _test_next:;
     return failures;
@@ -370,6 +492,11 @@ int test_rom_manifest(void)
     int failures = 0;
     failures += test_rom_manifest_request_sizes();
     failures += test_rom_manifest_request_parse();
+    failures += test_rom_manifest_request_overlong_and_null();
+    failures += test_rom_request_parse();
+    failures += test_rom_request_overlong_and_null();
+    failures += test_rom_list_request_parse();
+    failures += test_rom_list_request_overlong();
     failures += test_rom_manifest_blob_golden();
     failures += test_rom_manifest_blob_bounds();
     failures += test_rom_manifest_parse_roundtrip();

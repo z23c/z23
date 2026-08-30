@@ -26,16 +26,41 @@ providing that property.
 
 ## What exists
 
-`packaging/release/build_release.sh` packages a Linux-x86_64 runtime.
+`packaging/release/build_release.sh` packages a `linux-x86_64` runtime and a
+`windows-x86_64` runtime. It decides which by reading the object format of the
+binary it is handed, not by asking what machine it is running on.
 `tools/scripts/install_z23.sh` accepts a local release directory or an HTTP(S)
 mirror, requires an independently supplied manifest digest for a remote
 mirror, checks the exact closed manifest, verifies every payload, and installs
 a systemd user unit. Its remote source is not hardcoded.
 
 `packaging/install/install.sh` and `install.ps1` are fail-closed front-door
-scaffolds. Their all-zero baked pin means no release is published. The POSIX
-front door recognizes only Linux-x86_64. The PowerShell front door publishes no
-Windows platform and exits before downloading anything.
+shims. Each is roughly thirty lines and makes exactly one decision: it names
+the machine, fetches the one C23 bootstrap binary published for it, checks its
+SHA-256 against a digest baked into the shim, and runs it with every argument
+forwarded. Their all-zero baked digest is the sentinel that means no bootstrap
+is published, and both refuse on it before touching a network. The POSIX shim
+names `linux-x86_64` and nothing else; the PowerShell shim has no Windows row
+at all, even though a Windows runtime is now built and packaged — see
+"Platform work" below for what stands between built and published.
+
+Every other front-door decision — the three pin channels, the agreement rule,
+the platform refusal, the second-stage installer verification and the handoff —
+lives in `tools/install/z23_bootstrap.c` over the pure `lib/install` library,
+written once for every platform and executed only after a digest check. This
+matters because a shim served at the domain is executing before anything has
+been verified, so logic inside it is logic a compromised origin replaces for
+free; the shim's remaining surface is one hash comparison. The judgement is
+proved by the `z23_front_door` test group and driven end to end against the
+real binary by `packaging/install/install_selftest.sh`.
+
+`packaging/release/build_release.sh --front-door` is the release cutter's
+front-door stage: it packages `z23-bootstrap` per platform triple under
+`bootstrap/<triple>/` and writes the digests into COPIES of both shims, so the
+copies that get served name real bytes while the copies in this repository stay
+all-zero refusals. `tools/lint/check_published_platforms.sh` refuses any
+platform either shim claims that the cutter cannot actually produce a bootstrap
+for, and refuses a non-sentinel digest checked into the tree.
 
 The three current pin channels are:
 
@@ -92,15 +117,115 @@ authority.
   remains disabled until the external authority, immutable hosting, and mirror
   acceptance are complete.
 - **macOS:** the native node build exists, but there is no accepted release
-  package or launchd installer. Linux confinement claims must not be made on
-  macOS.
-- **Windows:** the front door is a refusal scaffold. There is no published
-  Windows runtime, second-stage PowerShell installer, or accepted service or
-  scheduled-task lifecycle.
+  package or launchd installer, and no Linux host can produce a Mach-O. Linux
+  confinement claims must not be made on macOS. The exact sequence a Mac
+  worker runs is below.
+- **Windows-x86_64:** a runtime is BUILT and PACKAGED, and still not
+  published. `build_release.sh --platform windows-x86_64` produces a real
+  x86-64 PE with an exact closed SHA-256 manifest. It has never been executed
+  — the host that builds it has no Windows machine and no Wine — there is no
+  second-stage PowerShell installer, and no service or scheduled-task
+  lifecycle has been accepted. The front door stays a refusal scaffold until
+  all three change.
 
 Cross-platform acceptance requires a native package, native service lifecycle,
 fresh-host install, restart persistence, exact running-image qualification,
-and rollback proof on each platform.
+and rollback proof on each platform. A successful build is none of those.
+
+## Building a release for another platform
+
+`packaging/release/build_release.sh` packages `linux-x86_64`,
+`darwin-arm64`, and `windows-x86_64`. None is published yet; each is produced
+from this checkout and verified by an exact closed SHA256SUMS manifest.
+
+```text
+# linux-x86_64 (native)
+make vendor && make tor-full
+make -j"$(nproc)" z23 zclassic23-package-verify zclassic23-acme
+packaging/release/build_release.sh --platform linux-x86_64
+
+# windows-x86_64 (cross-linked on Linux; needs clang >= 20 and the
+# mingw-w64 target sysroot, e.g. Debian/Ubuntu's mingw-w64 package)
+VENDOR_TARGET=x86_64-w64-mingw32 tools/scripts/build_vendor.sh
+make ZCL_TARGET=windows-x86_64 -j"$(nproc)" z23 zclassic23-acme
+packaging/release/build_release.sh --platform windows-x86_64
+```
+
+The Windows cross build uses clang, not the mingw-w64 gcc: every mingw-w64
+gcc Debian and Ubuntu package is GCC 13, which does not accept `-std=c23`,
+and the C23 toolchain gate refuses it. clang reaches the same target with
+`--target=x86_64-w64-mingw32` over the same sysroot headers, CRT and libgcc.
+
+The Windows release carries three executables, not four. There is no Windows
+`zclassic23-package-verify`: that worker compiles and executes downloaded
+package code and is safe only because it confines every child with seccomp,
+Landlock and POSIX rlimits, none of which exist for it on Windows. The
+Makefile refuses to build it there rather than produce an unconfined program
+under a name that promises confinement.
+
+The Windows runtime is **built and packaged, not published**. It has never
+been executed: this host has no Windows machine and no Wine, so the evidence
+stops at "genuine x86-64 PE that links and imports only Windows system DLLs".
+`packaging/install/install.ps1` therefore still publishes no platform, and
+its second stage (`install_z23.ps1`) does not exist.
+
+## macOS: what a Mac worker has to run
+
+No Linux host can produce a Mach-O for this project. Cross-linking to Darwin
+needs the macOS SDK — its headers and `libSystem.tbd` — which Apple does not
+permit redistributing, so the SDK can only come off a Mac the operator owns.
+This is a licensing wall, not a missing feature, so the packager accepts
+Darwin only when it is running natively on qualified Apple hardware.
+
+The node itself already builds natively on macOS (see AGENTS.md, "Verified
+platform baseline": arm64, macOS 26.0.1, Apple Clang 17). A worker on an
+Apple Silicon Mac can produce the measured runtime package by running the
+following, in order.
+
+```bash
+# 0. Toolchain and the one extra build-time tool this repo needs.
+xcode-select --install        # clang, ld, strip, otool, nm, make
+brew install cmake            # vendored libsecp256k1-darwin.a
+
+# 1. Vendor archives for this Mac. Native, not cross: leave VENDOR_TARGET
+#    unset. Produces vendor/lib/libsecp256k1-darwin.a among the rest.
+make vendor
+
+# 2. The embedded Tor archives. Without them the link silently selects the
+#    offline stub and the onion claim is false.
+make tor-full
+
+# 3. The node and the workers.
+make -j"$(sysctl -n hw.ncpu)" z23 zclassic23-package-verify zclassic23-acme
+
+# 4. Package the measured thin Apple Silicon runtime.
+packaging/release/build_release.sh --platform darwin-arm64
+```
+
+The runtime cutter was proved natively on Apple Silicon on 2026-08-30. It
+uses `lipo -archs` as the Mach-O slice authority, accepts exactly thin arm64,
+uses Apple's `strip -S -x`, falls back to stock `shasum -a 256` and BSD
+`stat`, and retains the four-member runtime set. The verifier is deliberately
+present so it can inspect exact inputs and report capability; downloaded
+source execution still refuses without a qualified full-isolation worker.
+
+Every shipped source and vendor archive is built with a macOS 14.0 deployment
+floor. The cutter reads each executable's `LC_BUILD_VERSION` and refuses the
+set unless every member reports `minos 14.0`; it then applies the Mach-O
+dependency audit to all four executables. The node, package verifier, ACME
+worker, bootstrap helper, SQLite, secp256k1, OpenSSL, libevent, and embedded
+Tor have all been observed at that floor. The closed manifest verifies with
+stock macOS tools, and `z23`/`zclassic23` remain one hardlinked payload.
+
+The Linux-only audits are already correctly skipped: `ci_symbol_floor_gate.sh`
+is a glibc-symbol question and runs only for `linux-x86_64`, and
+`tools/scripts/check_c23_node_binary.sh` already carries a Mach-O branch that
+audits `otool -L` dependencies and weak-undefined symbols.
+
+Runtime packaging does not add macOS to `PUBLISHED_PLATFORMS`. Publication
+still needs the release installed on a fresh Mac,
+the node started and stopped through its own launchd unit, and the exact
+running image qualified — the same bar the "Platform work" list above states.
 
 ## Certificates and hosting
 

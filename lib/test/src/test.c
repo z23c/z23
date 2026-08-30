@@ -1239,8 +1239,12 @@ int main(int argc, char **argv)
       failures += test_zses(); }
     { extern int test_mesh_pairing(void);
       failures += test_mesh_pairing(); }
+    { extern int test_mesh_route(void);
+      failures += test_mesh_route(); }
     { extern int test_mesh_capability_grant(void);
       failures += test_mesh_capability_grant(); }
+    { extern int test_mesh_capability_proto(void);
+      failures += test_mesh_capability_proto(); }
     { extern int test_mesh_pairing_controller(void);
       failures += test_mesh_pairing_controller(); }
     { extern int test_mesh_status_proto(void);
@@ -1249,6 +1253,8 @@ int main(int argc, char **argv)
       failures += test_mesh_private_object_proto(); }
     { extern int test_mesh_private_object_crypto(void);
       failures += test_mesh_private_object_crypto(); }
+    { extern int test_mesh_private_object_grant_pipeline(void);
+      failures += test_mesh_private_object_grant_pipeline(); }
     { extern int test_mesh_private_object_root(void);
       failures += test_mesh_private_object_root(); }
     { extern int test_mesh_private_object_frame(void);
@@ -1342,6 +1348,7 @@ int main(int argc, char **argv)
     failures += test_oracle_policy();
     failures += test_quorum_oracle();
     failures += test_db_txn();
+    failures += test_model_fields();
     failures += test_sync_service();
     failures += test_node_db_catchup_service();
     failures += test_catchup_lifecycle_service();
@@ -1693,6 +1700,8 @@ int main(int argc, char **argv)
     { extern int test_vcs_core(void); failures += test_vcs_core(); }
     { extern int test_vcs_release(void); failures += test_vcs_release(); }
     { extern int test_vcs_accept(void); failures += test_vcs_accept(); }
+    { extern int test_package_capability_claim(void);
+      failures += test_package_capability_claim(); }
     { extern int test_zcode_store(void); failures += test_zcode_store(); }
     { extern int test_zcode_publish(void); failures += test_zcode_publish(); }
     { extern int test_zcode_package_dev(void); failures += test_zcode_package_dev(); }

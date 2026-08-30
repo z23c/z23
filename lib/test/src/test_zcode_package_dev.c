@@ -10,6 +10,7 @@
 #include "json/json.h"
 #include "models/build_fabric.h"
 #include "models/database.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
 #include "services/zcode_lane_service.h"
@@ -30,6 +31,55 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+static bool zpd_symlink_create(const char *target, const char *link,
+                               bool directory)
+{
+#if defined(_WIN32)
+    DWORD flags = (directory ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0) |
+                  SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if (CreateSymbolicLinkA(link, target, flags) != 0)
+        return true;
+    flags &= ~SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    return GetLastError() == ERROR_INVALID_PARAMETER &&
+           CreateSymbolicLinkA(link, target, flags) != 0;
+#else
+    (void)directory;
+    return symlink(target, link) == 0;
+#endif
+}
+
+static bool zpd_symlink_remove(const char *path, bool directory)
+{
+#if defined(_WIN32)
+    return directory ? RemoveDirectoryA(path) != 0 : DeleteFileA(path) != 0;
+#else
+    (void)directory;
+    return unlink(path) == 0;
+#endif
+}
+
+static bool zpd_special_create(const char *path)
+{
+#if defined(_WIN32)
+    return platform_directory_create(path, 0700) == 0;
+#else
+    return mkfifo(path, 0600) == 0;
+#endif
+}
+
+static bool zpd_special_remove(const char *path)
+{
+#if defined(_WIN32)
+    return rmdir(path) == 0;
+#else
+    return unlink(path) == 0;
+#endif
+}
 
 static bool zpd_write(const char *path, const char *text)
 {
@@ -101,7 +151,7 @@ static bool zpd_plant_build_output(const char *root)
 {
     char path[320];
     (void)snprintf(path, sizeof(path), "%s/build", root);
-    if (mkdir(path, 0700) != 0) return false;
+    if (platform_directory_create(path, 0700) != 0) return false;
     (void)snprintf(path, sizeof(path), "%s/build/obj.o", root);
     return zpd_write(path, "not source\n");
 }
@@ -201,11 +251,11 @@ static bool zpd_fixture(const char *root, bool unknown_key)
 {
     char path[512];
     zpd_fixture_cleanup(root);
-    if (mkdir(root, 0700) != 0) return false;
+    if (platform_directory_create(root, 0700) != 0) return false;
     static const char *const dirs[] = { "src", "include", "tests" };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
-        if (mkdir(path, 0700) != 0) return false;
+        if (platform_directory_create(path, 0700) != 0) return false;
     }
     (void)snprintf(path, sizeof(path), "%s/LICENSE", root);
     if (!zpd_write(path, "MIT\n")) return false;
@@ -225,12 +275,12 @@ static bool zpd_benchmark_project(const char *root, const char *name,
                                   int value)
 {
     ZCL_IGNORE_RESULT(zcl_tree_remove(root), "benchmark fixture reset");
-    if (mkdir(root, 0700) != 0) return false;
+    if (platform_directory_create(root, 0700) != 0) return false;
     char path[512], text[512];
     static const char *const dirs[] = {"src", "include", "tests"};
     for (size_t i = 0; i < 3; i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
-        if (mkdir(path, 0700) != 0) return false;
+        if (platform_directory_create(path, 0700) != 0) return false;
     }
     (void)snprintf(path, sizeof(path), "%s/LICENSE", root);
     if (!zpd_write(path, "MIT\n")) return false;
@@ -257,7 +307,7 @@ struct zpd_benchmark_case {
     bool refused;
 };
 
-static int zpd_test_twelve_task_benchmark(void)
+static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
 {
     static const struct zpd_benchmark_case cases[] = {
         {"seeded_repair", "Repair seeded parser branch A", 0, false},
@@ -599,11 +649,11 @@ static int zpd_test_control_stores(const uint8_t pubkey[33])
         ASSERT(vcs_package_prepare(&options, &before, detail,
                                    sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
         (void)snprintf(path, sizeof(path), "%s/.zvcs", root);
-        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(platform_directory_create(path, 0700) == 0);
         (void)snprintf(path, sizeof(path), "%s/.zvcs/control", root);
         ASSERT(zpd_write(path, "local vcs state\n"));
         (void)snprintf(path, sizeof(path), "%s/.codeindex", root);
-        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(platform_directory_create(path, 0700) == 0);
         (void)snprintf(path, sizeof(path), "%s/.codeindex/control", root);
         ASSERT(zpd_write(path, "derived index state\n"));
         ASSERT(zpd_plant_build_output(root));
@@ -739,8 +789,6 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
         (void)snprintf(root, sizeof(root),
                        "test-tmp/zcode-package-dev-%ld", (long)getpid());
         ASSERT(zpd_fixture(root, false));
-        (void)snprintf(path, sizeof(path), "%s/link", root);
-        ASSERT(symlink("src/x.c", path) == 0);
         struct vcs_package_prepare_options options = {
             .dir = root, .publisher_sequence = 1,
             .reward_address = "", .chain_id = "zclassic-main",
@@ -748,29 +796,41 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
         memcpy(options.publisher_pubkey, pubkey, 33);
         struct vcs_package_prepared prepared;
         char detail[256];
+#if defined(_WIN32)
+        /* CreateSymbolicLinkA fails with ERROR_PRIVILEGE_NOT_HELD without
+         * Developer Mode / SeCreateSymbolicLinkPrivilege, and mkfifo does
+         * not exist: the non-regular-file refusal fixtures cannot be built
+         * here. The portable ERR_META case below still runs. */
+        (void)path;
+        printf("zcode_package_dev: SKIP (Windows): symlink/FIFO file-type "
+               "refusal fixtures (symlink privilege unavailable; no mkfifo)\n");
+#else
+        (void)snprintf(path, sizeof(path), "%s/link", root);
+        ASSERT(zpd_symlink_create("src/x.c", path, false));
         (void)snprintf(path, sizeof(path), "%s/.zvcs", root);
-        ASSERT(symlink("src", path) == 0);
+        ASSERT(zpd_symlink_create("src", path, true));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_symlink_remove(path, true));
         (void)snprintf(path, sizeof(path), "%s/build", root);
-        ASSERT(symlink("src", path) == 0);
+        ASSERT(zpd_symlink_create("src", path, true));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_symlink_remove(path, true));
         (void)snprintf(path, sizeof(path), "%s/link", root);
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_symlink_remove(path, false));
         (void)snprintf(path, sizeof(path), "%s/special", root);
-        ASSERT(mkfifo(path, 0600) == 0);
+        ASSERT(zpd_special_create(path));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_special_remove(path));
+#endif
         zpd_fixture_cleanup(root);
         ASSERT(zpd_fixture(root, true));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
@@ -975,9 +1035,16 @@ static int zpd_test_project_init(void)
         json_free(&input);
         ASSERT(unlink(added) == 0);
 
+#if defined(_WIN32)
+        /* Same constraint as the prepare fail-closed fixtures: no symlink
+         * privilege here, so the "symlink in workspace fails init plan"
+         * probe cannot be built. */
+        printf("zcode_package_dev: SKIP (Windows): init-plan symlink "
+               "refusal fixture (symlink privilege unavailable)\n");
+#else
         char link[320];
         (void)snprintf(link, sizeof(link), "%s/link", root);
-        ASSERT(symlink("LICENSE", link) == 0);
+        ASSERT(zpd_symlink_create("LICENSE", link, false));
         json_init(&input); json_set_object(&input);
         ASSERT(json_push_kv_str(&input, "workspace", root));
         request.input = &input;
@@ -987,6 +1054,7 @@ static int zpd_test_project_init(void)
         ASSERT(access(meta, F_OK) != 0);
         zcl_command_reply_free(&reply);
         json_free(&input);
+#endif
         zpd_fixture_cleanup(root);
         PASS();
     } _test_next:;
@@ -1076,15 +1144,16 @@ static int zpd_test_work_start_package_bounds(void)
         (void)snprintf(root, sizeof(root),
                        "test-tmp/zcode-work-init-%ld", (long)getpid());
         zpd_fixture_cleanup(root);
-        ASSERT(mkdir(root, 0700) == 0);
+        ASSERT(platform_directory_create(root, 0700) == 0);
         char path[320];
         (void)snprintf(path, sizeof(path), "%s/src", root);
-        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(platform_directory_create(path, 0700) == 0);
         (void)snprintf(path, sizeof(path), "%s/src/x.c", root);
         ASSERT(zpd_write(path, "int x(void) { return 1; }\n"));
         ASSERT(zpd_plant_build_output(root));
         char absolute_root[4400];
-        ASSERT(realpath(root, absolute_root) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, absolute_root, sizeof(absolute_root)));
 
         struct json_value input;
         json_init(&input); json_set_object(&input);
@@ -1138,7 +1207,7 @@ static int zpd_test_work_start_package_bounds(void)
     return failures;
 }
 
-static int zpd_test_work_start(void)
+static __attribute__((unused)) int zpd_test_work_start(void)
 {
     int failures = 0;
     TEST("zcode work start: goal and profile compose existing task owners") {
@@ -1147,7 +1216,8 @@ static int zpd_test_work_start(void)
                        "test-tmp/zcode-work-start-%ld", (long)getpid());
         ASSERT(zpd_fixture(root, false));
         char absolute_root[4400];
-        ASSERT(realpath(root, absolute_root) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, absolute_root, sizeof(absolute_root)));
         uint8_t source_before[32], source_after[32];
         ASSERT(vcs_tree_capture_path(root, source_before) == VCS_OK);
 
@@ -1869,7 +1939,9 @@ static int zpd_test_work_start(void)
         (void)snprintf(publication_job_hex, sizeof(publication_job_hex), "%s",
                        publication_job_text);
         char resolved_authority_workspace[4400];
-        ASSERT(realpath(root, resolved_authority_workspace) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, resolved_authority_workspace,
+            sizeof(resolved_authority_workspace)));
         ASSERT(reply.next_count == 1);
         ASSERT(strcmp(reply.next[0].command,
                       "dev.publication.advance") == 0);
@@ -2205,7 +2277,7 @@ static int zpd_test_work_start(void)
     return failures;
 }
 
-static int zpd_test_standard_profile(void)
+static __attribute__((unused)) int zpd_test_standard_profile(void)
 {
     int failures = 0;
     TEST("zcode work standard: warning-fatal sanitizer evidence reaches acceptance") {
@@ -2338,14 +2410,16 @@ static int zpd_test_admitted_single_interpretation(void)
                        "test-tmp/zcode-admitted-%ld", (long)getpid());
         ASSERT(zpd_fixture(root, false));
         char absolute_root[4400];
-        ASSERT(realpath(root, absolute_root) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, absolute_root, sizeof(absolute_root)));
         char datadir[256];
         (void)snprintf(datadir, sizeof(datadir),
                        "test-tmp/zcode-admitted-node-%ld", (long)getpid());
         ZCL_IGNORE_RESULT(zcl_tree_remove(datadir), "datadir fixture reset");
-        ASSERT(mkdir(datadir, 0700) == 0);
+        ASSERT(platform_directory_create(datadir, 0700) == 0);
         char absolute_datadir[4400];
-        ASSERT(realpath(datadir, absolute_datadir) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            datadir, absolute_datadir, sizeof(absolute_datadir)));
 
         struct json_value input;
         json_init(&input); json_set_object(&input);
@@ -2568,7 +2642,7 @@ static int zpd_test_work_toolchain(void)
         char dir[256], abs[4096];
         test_make_tmpdir(dir, sizeof(dir), "zcode_package_dev",
                          "toolchain-join-dd");
-        ASSERT(realpath(dir, abs) != NULL);
+        ASSERT(platform_directory_canonical_real(dir, abs, sizeof(abs)));
         zcl_native_bridge_bind_rpc(abs, 0);
         struct zcl_command_request request = { .input = NULL };
         struct zcl_command_reply reply;
@@ -2755,12 +2829,18 @@ int test_zcode_package_dev(void)
                    zpd_test_project_init() +
                    zpd_test_reuse_plan() +
                    zpd_test_work_start_package_bounds() +
-                   zpd_test_work_start() +
                    zpd_test_work_toolchain() +
                    zpd_test_commons_join_front_doors() +
-                   zpd_test_standard_profile() +
-                   zpd_test_admitted_single_interpretation() +
-                   zpd_test_twelve_task_benchmark();
+                   zpd_test_admitted_single_interpretation();
+#ifndef __APPLE__
+    /* These scenarios execute fetched candidate source and assert Linux's
+     * FULL Landlock/seccomp build lane.  Darwin deliberately refuses that
+     * authority as LOCAL_FALLBACK; portable refusal is pinned by the build
+     * fabric contract, while the planning/read-only cases above still run. */
+    failures += zpd_test_work_start() +
+                zpd_test_standard_profile() +
+                zpd_test_twelve_task_benchmark();
+#endif
     secp256k1_context_destroy(ctx);
     return failures;
 }

@@ -38,6 +38,7 @@
 #include "net/file_service.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
+#include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
 
@@ -48,9 +49,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 
 /* SQLite-magic-prefixed deterministic content the serve path accepts + the
@@ -607,6 +605,90 @@ static int case_parallel_probe(void)
     } _test_next:;
     return failures;
 }
+/* ── (e1b) The per-chunk manifest pre-flight is a SWEEP, not a walk ──────
+ *
+ * A seed that accepts and then goes silent costs the connect budget plus the
+ * probe budget. Walking the seed set multiplied that by the seed count before
+ * boot could give up; sweeping it makes the worst case one seed's budget.
+ * The two properties that must hold together: the probes OVERLAP, and the
+ * winner is still the lowest-indexed seed with a matching chunk count, so
+ * seed ordering remains policy and concurrency is only about the clock. */
+
+static _Atomic int rmf_active, rmf_peak;
+/* Seed 0 answers with the WRONG chunk count, seed 1 and seed 2 with the right
+ * one but different digests — so "lowest matching index wins" is observable. */
+static bool delayed_manifest_fetch(const char *addr, uint16_t port,
+                                   const uint8_t chunk_root[32],
+                                   uint8_t (*out)[32], uint32_t cap,
+                                   uint32_t *out_n)
+{
+    (void)chunk_root;
+    (void)port;
+    int active = atomic_fetch_add(&rmf_active, 1) + 1;
+    int peak = atomic_load(&rmf_peak);
+    while (peak < active && !atomic_compare_exchange_weak(&rmf_peak, &peak,
+                                                          active)) {}
+    platform_sleep_ms(50);
+    atomic_fetch_sub(&rmf_active, 1);
+    if (cap < 4)
+        return false;
+    unsigned which = (unsigned)(addr[strlen(addr) - 1] - '0');
+    /* Seed 0 is the "answers, but not about this artifact" case. */
+    *out_n = which == 0 ? 3u : 4u;
+    for (uint32_t k = 0; k < *out_n; k++)
+        memset(out[k], (int)(0x10u * (which + 1u) + k), 32);
+    return true;
+}
+
+static int case_parallel_manifest_probe(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: the per-chunk manifest pre-flight sweeps every "
+         "seed at once and still settles on the lowest-indexed match") {
+        struct rom_fetch_peer peers[4] = {0};
+        for (size_t i = 0; i < 4; i++) {
+            snprintf(peers[i].addr, sizeof(peers[i].addr), "seed%zu", i);
+            peers[i].port = (uint16_t)(18034 + i);
+        }
+        uint8_t root[32];
+        memset(root, 0x77, sizeof(root));
+        uint8_t digests[8][32];
+        memset(digests, 0, sizeof(digests));
+        uint32_t n = 0;
+
+        atomic_store(&rmf_active, 0);
+        atomic_store(&rmf_peak, 0);
+        int64_t t0 = platform_time_monotonic_ms();
+        ASSERT(boot_bundle_probe_manifest_for_test(peers, 4, root, 4, digests,
+                                                   8, &n,
+                                                   delayed_manifest_fetch));
+        int64_t elapsed = platform_time_monotonic_ms() - t0;
+
+        /* OVERLAP: at least two seeds were in flight together, and four 50 ms
+         * probes did not cost four 50 ms waits. */
+        ASSERT(atomic_load(&rmf_peak) >= 2);
+        ASSERT(elapsed < 4 * 50);
+
+        /* ORDERING: seed 0 answered first but about a 3-chunk artifact, so it
+         * is not a match; seed 1 is the lowest-indexed seed that IS. */
+        ASSERT(n == 4);
+        uint8_t expect[32];
+        memset(expect, 0x20, sizeof(expect)); /* 0x10 * (1 + 1) + 0 */
+        ASSERT(memcmp(digests[0], expect, 32) == 0);
+        memset(expect, 0x23, sizeof(expect)); /* 0x10 * (1 + 1) + 3 */
+        ASSERT(memcmp(digests[3], expect, 32) == 0);
+
+        /* A sweep that matches nothing must report that, not a partial fill. */
+        uint32_t none = 0;
+        ASSERT(!boot_bundle_probe_manifest_for_test(peers, 4, root, 9, digests,
+                                                    8, &none,
+                                                    delayed_manifest_fetch));
+        ASSERT(none == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── (e2) Newest-by-height pick + legacy size fallback (GAP-4) ──────────── */
 
 static int case_pick_newest(void)
@@ -1299,19 +1381,23 @@ static int case_peer_seed_stall_is_bounded(void)
          * the expensive shape a bounded wait exists for. Never accept(): the
          * kernel backlog completes the connect, so the client gets a live
          * socket and no reply. */
-        int stall_fd = socket(AF_INET, SOCK_STREAM, 0);
-        ASSERT(stall_fd >= 0);
-        int one = 1;
-        (void)setsockopt(stall_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        platform_socket_t stall_fd = platform_socket_open(AF_INET,
+                                                          SOCK_STREAM, 0,
+                                                          true, false);
+        ASSERT(stall_fd != PLATFORM_SOCKET_INVALID);
+        ASSERT(platform_socket_set_reuse_address(stall_fd, true) == 0);
         struct sockaddr_in sa;
         memset(&sa, 0, sizeof(sa));
         sa.sin_family = AF_INET;
         sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         sa.sin_port = 0; /* OS-assigned */
-        ASSERT(bind(stall_fd, (struct sockaddr *)&sa, sizeof(sa)) == 0);
-        ASSERT(listen(stall_fd, 8) == 0);
-        socklen_t slen = sizeof(sa);
-        ASSERT(getsockname(stall_fd, (struct sockaddr *)&sa, &slen) == 0);
+        ASSERT(platform_socket_bind(stall_fd, (struct sockaddr *)&sa,
+                                    sizeof(sa)) == 0);
+        ASSERT(platform_socket_listen(stall_fd, 8) == 0);
+        size_t slen = sizeof(sa);
+        ASSERT(platform_socket_local_address(stall_fd,
+                                             (struct sockaddr *)&sa,
+                                             &slen) == 0);
         uint16_t stall_port = ntohs(sa.sin_port);
         ASSERT(stall_port != 0);
 
@@ -1344,7 +1430,7 @@ static int case_peer_seed_stall_is_bounded(void)
         ASSERT(rom_fetch_directory_io_timeout_ms_for_test() ==
                rom_fetch_directory_io_timeout_default_ms_for_test());
 
-        close(stall_fd);
+        platform_socket_close(stall_fd);
         test_rm_rf_recursive(cdir);
         bbf_seeder_stop(&srv);
     } _test_next:;
@@ -1370,6 +1456,7 @@ int test_boot_bundle_fetch(void)
     failures += case_pick_newest();
     failures += case_quorum();
     failures += case_parallel_probe();
+    failures += case_parallel_manifest_probe();
     failures += case_discovery();
     failures += case_discovery_outcome_persists();
     printf("=== boot_bundle_fetch: %d failure(s) ===\n", failures);

@@ -1,0 +1,11 @@
+--- a/bin/sh/expand.c
++++ b/bin/sh/expand.c
+@@ -1169,7 +1169,7 @@
+ 		if (dp->d_name[0] == '.' && ! matchdot)
+ 			continue;
+ 		if (patmatch(start, dp->d_name)) {
+-			namlen = dp->d_namlen;
++			namlen = strlen(dp->d_name);
+ 			if (enddir + namlen + 1 > expdir_end)
+ 				continue;
+ 			memcpy(enddir, dp->d_name, namlen + 1);

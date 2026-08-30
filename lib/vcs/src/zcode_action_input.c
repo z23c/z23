@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_action_input.h"
 
+#include "base/bytes.h"
 #include "vcs_priv.h"
 
 #include "crypto/sha3.h"
@@ -55,13 +56,6 @@ void vcs_zcode_action_input_free(struct vcs_zcode_action_input_v1 *input)
     vcs_zcode_action_input_init(input);
 }
 
-static bool action_input_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
-
 static bool action_input_kind_valid(uint8_t kind)
 {
     return kind == VCS_ZCODE_WORK_BUILD || kind == VCS_ZCODE_WORK_TEST ||
@@ -105,12 +99,12 @@ static enum vcs_zcode_action_input_result action_input_shape(
         input->payload_len == 0 ||
         input->payload_len > VCS_BUILD_ARTIFACT_MAX_BYTES)
         return VCS_ZCODE_ACTION_INPUT_SHAPE;
-    if (!action_input_nonzero(input->task_root) ||
-        !action_input_nonzero(input->candidate_root) ||
-        !action_input_nonzero(input->candidate_source_root) ||
-        !action_input_nonzero(input->dependency_lock_root) ||
-        !action_input_nonzero(input->acceptance_tests_root) ||
-        !action_input_nonzero(input->payload_blob_root))
+    if (!zcl_bytes_any_set(input->task_root, 32) ||
+        !zcl_bytes_any_set(input->candidate_root, 32) ||
+        !zcl_bytes_any_set(input->candidate_source_root, 32) ||
+        !zcl_bytes_any_set(input->dependency_lock_root, 32) ||
+        !zcl_bytes_any_set(input->acceptance_tests_root, 32) ||
+        !zcl_bytes_any_set(input->payload_blob_root, 32))
         return VCS_ZCODE_ACTION_INPUT_BINDING;
     uint8_t blob[32];
     vcs_sha3_tag(VCS_TAG_BLOB, input->payload, input->payload_len, blob);
@@ -383,12 +377,12 @@ static enum vcs_zcode_action_input_result package_action_input_shape(
     if (!input) return VCS_ZCODE_ACTION_INPUT_NULL;
     if (input->schema_version != VCS_ZCODE_PACKAGE_ACTION_INPUT_VERSION)
         return VCS_ZCODE_ACTION_INPUT_SHAPE;
-    return action_input_nonzero(input->task_root) &&
-           action_input_nonzero(input->candidate_root) &&
-           action_input_nonzero(input->candidate_source_root) &&
-           action_input_nonzero(input->base_source_root) &&
-           action_input_nonzero(input->dependency_lock_root) &&
-           action_input_nonzero(input->acceptance_recipe_root)
+    return zcl_bytes_any_set(input->task_root, 32) &&
+           zcl_bytes_any_set(input->candidate_root, 32) &&
+           zcl_bytes_any_set(input->candidate_source_root, 32) &&
+           zcl_bytes_any_set(input->base_source_root, 32) &&
+           zcl_bytes_any_set(input->dependency_lock_root, 32) &&
+           zcl_bytes_any_set(input->acceptance_recipe_root, 32)
         ? VCS_ZCODE_ACTION_INPUT_OK : VCS_ZCODE_ACTION_INPUT_BINDING;
 }
 

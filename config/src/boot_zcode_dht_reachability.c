@@ -27,6 +27,7 @@
 
 struct reachability_entry {
   uint8_t node_id[32];
+  uint8_t master_pubkey[32];
   struct net_address address;
 };
 
@@ -188,6 +189,7 @@ bool boot_zcode_dht_reachability_refresh(
                                beacon->phashBlock->data) ||
         !address_from_view(&entry->address, &views[i], now.wall_unix))
       continue;
+    memcpy(entry->master_pubkey, views[i].master_pubkey, 32);
     rebuilt_count++;
   }
   qsort(rebuilt, rebuilt_count, sizeof(rebuilt[0]), entry_compare);
@@ -209,6 +211,33 @@ bool boot_zcode_dht_reachability_refresh(
   g_reach.rebuilds++;
   zcl_mutex_unlock(&g_reach_lock);
   return true;
+}
+
+enum boot_zcode_dht_direct_lookup
+boot_zcode_dht_reachability_direct_for_master(
+    const uint8_t master_pubkey[32], struct net_address *out) {
+  if (!master_pubkey || !out)
+    return BOOT_ZCODE_DHT_DIRECT_MISSING;
+  bool found = false;
+  struct net_address selected;
+  reach_lock();
+  for (size_t i = 0; i < g_reach.entry_count; i++) {
+    if (memcmp(g_reach.entries[i].master_pubkey, master_pubkey, 32) != 0)
+      continue;
+    if (!found) {
+      selected = g_reach.entries[i].address;
+      found = true;
+    } else if (!net_service_eq(&selected.svc,
+                               &g_reach.entries[i].address.svc)) {
+      zcl_mutex_unlock(&g_reach_lock);
+      return BOOT_ZCODE_DHT_DIRECT_AMBIGUOUS;
+    }
+  }
+  zcl_mutex_unlock(&g_reach_lock);
+  if (!found)
+    return BOOT_ZCODE_DHT_DIRECT_MISSING;
+  *out = selected;
+  return BOOT_ZCODE_DHT_DIRECT_FOUND;
 }
 
 bool boot_zcode_dht_reachability_request(void *ctx,

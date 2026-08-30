@@ -70,8 +70,12 @@ git -C "$ROOT" grep -q -- '-Wl,--allow-multiple-definition' -- \
     fail 'overlay objects are not ordered ahead of the frozen base'
 git -C "$ROOT" grep -q 'dev-bin z23-dev zclassic23-dev:.*\$(ZCLASSIC23_DEV_BIN)' -- Makefile ||
     fail 'dev-bin target is missing'
-git -C "$ROOT" grep -q '\$(HOTSWAP_ACTION_PLAN) dev-package-verifier' -- Makefile ||
-    fail 'dev-bin does not bootstrap the fixed development package verifier'
+git -C "$ROOT" grep -q '\$(HOTSWAP_ACTION_PLAN) \$(DEV_PACKAGE_VERIFIER_TARGET)' -- Makefile ||
+    fail 'dev-bin does not use the platform-qualified package verifier prerequisite'
+git -C "$ROOT" grep -q '^DEV_PACKAGE_VERIFIER_TARGET = dev-package-verifier' -- Makefile ||
+    fail 'non-Windows dev-bin does not bootstrap the fixed development package verifier'
+git -C "$ROOT" grep -q '^DEV_PACKAGE_VERIFIER_TARGET =$' -- Makefile ||
+    fail 'Windows dev-bin does not preserve the package-verifier refusal boundary'
 git -C "$ROOT" grep -q '^test-parallel-fast-active-locked:.*dev-package-verifier-ensure' -- \
     Makefile ||
     fail 'locked focused test profile does not use the non-LTO package verifier'
@@ -102,7 +106,7 @@ git -C "$ROOT" grep -q 'rm -f .*\$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)' -- Makefil
 git -C "$ROOT" grep -q '\$(BUILD_EPOCH_SESSION_TOOL) verify "\$(NODE_C23_SESSION)" "\$(NODE_C23_LEASE)"' -- \
     Makefile ||
     fail 'release object-graph links do not verify their build epoch before publication'
-if git -C "$ROOT" grep -q '^\t\t$(BUILD_IDENTITY_STAMP) tools/package_verify.c $(ALL_SRCS)' -- \
+if git -C "$ROOT" grep -Fq '$(BUILD_IDENTITY_STAMP) tools/package_verify.c $(ALL_SRCS)' -- \
         Makefile; then
     fail 'release package verifier recompiles the complete source tree'
 fi
@@ -120,6 +124,22 @@ git -C "$ROOT" grep -q '\$(DEV_LIVE_CFLAGS) -fPIC' -- Makefile ||
 git -C "$ROOT" grep -q 'resident action plan contains release-only LTO flags' -- \
     tools/dev/devloop_hotswap_build.c ||
     fail 'resident action-plan LTO refusal is missing'
+git -C "$ROOT" grep -q '^ifeq ($(strip $(MAKECMDGOALS)),)' -- Makefile ||
+    fail 'default build does not have an explicit epoch-profile selection'
+awk '$0 == "ifeq ($(strip $(MAKECMDGOALS)),)" {
+         if (getline > 0 && $0 == "ZCL_EPOCH_PROFILES := node-c23")
+             found = 1
+     }
+     END { exit found ? 0 : 1 }' "$ROOT/Makefile" ||
+    fail 'default z23 build fingerprints profiles it cannot consume'
+git -C "$ROOT" grep -q '^ZCL_NODE_ONLY_BUILD := .*),1)$' -- Makefile ||
+    fail 'default z23 build does not select the node-only dependency scope'
+awk '$0 == "else ifeq ($(strip $(MAKECMDGOALS)),)" {
+         if (getline > 0 && $0 == "ZCL_DEPFILE_PROFILES := node-c23")
+             found = 1
+     }
+     END { exit found ? 0 : 1 }' "$ROOT/Makefile" ||
+    fail 'default z23 build imports unrelated dependency graphs'
 
 # Isolate these diagnostic Makes from the parent jobserver. Invoked under
 # `make pre-push-ci`, an inherited MAKEFLAGS/MAKELEVEL recursive make prints

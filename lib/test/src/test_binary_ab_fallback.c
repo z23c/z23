@@ -7,6 +7,7 @@
 #include "test/test_core.h"
 #include "services/binary_ab_fallback.h"
 #include "platform/clock.h"
+#include "platform/directory_compat.h"
 #include "platform/os_binary_slots.h"
 #include "platform/os_proc.h"
 #include "platform/process_compat.h"
@@ -20,10 +21,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <signal.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
+#if !defined(_WIN32)
 extern char **environ;
+#endif
 
 #if defined(__APPLE__)
 #define AB_TRUE_PATH "/usr/bin/true"
@@ -36,6 +41,8 @@ extern char **environ;
     if ((expr)) printf("OK\n"); \
     else { printf("FAIL\n"); failures++; } \
 } while (0)
+
+#if !defined(_WIN32)
 
 static int ab_write_file(const char *path, const char *contents, mode_t mode)
 {
@@ -71,11 +78,30 @@ static bool ab_pinned_bytes_equal(int fd, const char *expected)
     return strcmp(buf, expected) == 0;
 }
 
-/* ── the FIFO "promptness" checks: why they are no longer stopwatch-graded ──
+static bool ab_special_create(const char *path, mode_t mode)
+{
+#if defined(_WIN32)
+    (void)mode;
+    return platform_directory_create(path, 0700) == 0;
+#else
+    return mkfifo(path, mode) == 0;
+#endif
+}
+
+static bool ab_special_remove(const char *path)
+{
+#if defined(_WIN32)
+    return rmdir(path) == 0;
+#else
+    return unlink(path) == 0;
+#endif
+}
+
+/* ── non-regular-path promptness is not stopwatch-graded ──────────────────
  *
- * Section 9 below replaces streak/current/last-good with a FIFO that has no
- * writer, and proves os_binary_slots_prepare_launch() refuses it instead of
- * parking forever in open(). That property used to be graded
+ * Section 9 uses a writer-less FIFO on POSIX and a directory on Windows to
+ * prove os_binary_slots_prepare_launch() promptly refuses non-regular paths.
+ * The FIFO property used to be graded
  * `elapsed < 250 ms`, which flakes on a loaded box: 250 ms of scheduler delay
  * is ordinary on a 32-worker run, and it says nothing whatever about the
  * code. A 7200rpm-disk box measured under 2 MB/s — the honest worst case this
@@ -99,6 +125,12 @@ static bool ab_pinned_bytes_equal(int fd, const char *expected)
 static volatile sig_atomic_t g_ab_hang_fired;
 static void ab_hang_handler(int sig) { (void)sig; g_ab_hang_fired = 1; }
 
+/* struct sigaction, sigaction(2), SIGALRM, and alarm(2) are POSIX-only —
+ * mingw has none of them. The hang guard below is not exercised on
+ * Windows, only kept syntactically valid there; the stub arm/disarm pair
+ * reports "no hang" unconditionally, which is correct for code that never
+ * runs. */
+#if !defined(_WIN32)
 static struct sigaction g_ab_old_alrm;
 static void ab_hang_guard_arm(unsigned secs)
 {
@@ -117,6 +149,10 @@ static bool ab_hang_guard_disarm(void)
     (void)sigaction(SIGALRM, &g_ab_old_alrm, NULL);
     return g_ab_hang_fired == 0;
 }
+#else
+static void ab_hang_guard_arm(unsigned secs) { (void)secs; }
+static bool ab_hang_guard_disarm(void) { return true; }
+#endif /* !defined(_WIN32) */
 
 /* Print a measured duration next to a check WITHOUT grading anything on it.
  * The load average is printed too, so a reader looking at a red run can tell
@@ -142,6 +178,11 @@ static bool ab_fexecve_true(int fd)
     char *const args[] = { (char *)AB_TRUE_PATH, NULL };
     errno = 0;
     return platform_execve_fd(fd, args, environ) == -1 && errno == ENOTSUP;
+#elif defined(_WIN32)
+    /* fork()/waitpid() have no Windows equivalent; this descriptor-bound
+     * exec path is POSIX-only and not exercised there. */
+    (void)fd;
+    return false;
 #else
     pid_t child = fork();
     if (child < 0)
@@ -157,6 +198,10 @@ static bool ab_fexecve_true(int fd)
 #endif
 }
 
+/* fork()/pipe()/waitpid() have no Windows equivalent; this native-launch
+ * adapter is POSIX-only and is not exercised on Windows, only kept
+ * syntactically valid there. */
+#if !defined(_WIN32)
 static bool ab_run_nodectl(const char *slots, const char *threshold,
                            const char *echo_value, const char *node,
                            char *output, size_t output_size,
@@ -227,6 +272,17 @@ static bool ab_run_nodectl(const char *slots, const char *threshold,
     *exit_status = WEXITSTATUS(status);
     return true;
 }
+#else
+static bool ab_run_nodectl(const char *slots, const char *threshold,
+                           const char *echo_value, const char *node,
+                           char *output, size_t output_size,
+                           int *exit_status)
+{
+    (void)slots; (void)threshold; (void)echo_value; (void)node;
+    (void)output; (void)output_size; (void)exit_status;
+    return false;
+}
+#endif /* !defined(_WIN32) */
 
 int test_binary_ab_fallback(void)
 {
@@ -242,7 +298,8 @@ int test_binary_ab_fallback(void)
         return 1;
     }
     char resolved_dir[PATH_MAX];
-    if (!realpath(dir, resolved_dir)) {
+    if (!platform_directory_canonical_real(dir, resolved_dir,
+                                           sizeof(resolved_dir))) {
         printf("ab: realpath failed — cannot run seam tests\n");
         return 1;
     }
@@ -479,8 +536,8 @@ int test_binary_ab_fallback(void)
          * hypothetical infinite park in open() into a legible failure; the
          * elapsed time is printed and graded by nobody. */
         const unsigned hang_guard_secs = 30;
-        AB_CHECK("replace streak with FIFO", unlink(streak) == 0 &&
-                 mkfifo(streak, 0600) == 0);
+        AB_CHECK("replace streak with non-regular object",
+                 unlink(streak) == 0 && ab_special_create(streak, 0600));
         int64_t started = clock_now_monotonic_ns();
         struct os_binary_slots_launch fifo_launch;
         ab_hang_guard_arm(hang_guard_secs);
@@ -494,12 +551,12 @@ int test_binary_ab_fallback(void)
                  no_hang && fifo_ok && fifo_launch.fallback_active &&
                  fifo_launch.streak_corrupt);
         os_binary_slots_close_launch(&fifo_launch);
-        AB_CHECK("remove FIFO streak", unlink(streak) == 0);
+        AB_CHECK("remove non-regular streak", ab_special_remove(streak));
 
         AB_CHECK("seed streak before FIFO current",
                  ab_write_file(streak, "0\n", 0600) == 0);
-        AB_CHECK("replace current with FIFO", unlink(cur) == 0 &&
-                 mkfifo(cur, 0700) == 0);
+        AB_CHECK("replace current with non-regular object",
+                 unlink(cur) == 0 && ab_special_create(cur, 0700));
         started = clock_now_monotonic_ns();
         ab_hang_guard_arm(hang_guard_secs);
         bool promote_refused = !binary_ab_promote(dir, cur);
@@ -519,14 +576,14 @@ int test_binary_ab_fallback(void)
                  "(no park in open(): guard did not fire)",
                  no_hang && fifo_ok && fifo_launch.fallback_active);
         os_binary_slots_close_launch(&fifo_launch);
-        AB_CHECK("remove FIFO current", unlink(cur) == 0);
+        AB_CHECK("remove non-regular current", ab_special_remove(cur));
         AB_CHECK("restore regular current",
                  ab_write_file(cur, "CURRENT-AFTER-FIFO", 0755) == 0);
 
         AB_CHECK("seed threshold before FIFO last-good",
                  ab_write_file(streak, "3\n", 0600) == 0);
-        AB_CHECK("replace last-good with FIFO", unlink(lastgood) == 0 &&
-                 mkfifo(lastgood, 0700) == 0);
+        AB_CHECK("replace last-good with non-regular object",
+                 unlink(lastgood) == 0 && ab_special_create(lastgood, 0700));
         started = clock_now_monotonic_ns();
         ab_hang_guard_arm(hang_guard_secs);
         fifo_ok = os_binary_slots_prepare_launch(dir, cur, 3, &fifo_launch);
@@ -537,7 +594,8 @@ int test_binary_ab_fallback(void)
                  "(no park in open(): guard did not fire)",
                  no_hang && !fifo_ok && fifo_launch.executable_fd < 0);
         os_binary_slots_close_launch(&fifo_launch);
-        AB_CHECK("remove FIFO last-good", unlink(lastgood) == 0);
+        AB_CHECK("remove non-regular last-good",
+                 ab_special_remove(lastgood));
         AB_CHECK("restore regular last-good",
                  ab_write_file(lastgood, "LAST-GOOD-AFTER-FIFO", 0755) == 0);
 
@@ -668,3 +726,34 @@ int test_binary_ab_fallback(void)
 
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows refuses the whole A/B slot surface by name, errno == ENOTSUP —
+ * see SLOT_WIN32_REFUSAL in lib/platform/src/os_binary_slots.c: there is no
+ * directory-handle-relative O_NOFOLLOW open and no descriptor-bound exec,
+ * and a partial emulation was deliberately rejected. This lane asserts the
+ * refusal contract itself; the launch matrix above is the POSIX lane. */
+int test_binary_ab_fallback(void)
+{
+    printf("\n=== binary_ab_fallback tests (Windows refusal lane) ===\n");
+    int failures = 0;
+
+    struct os_binary_slots_launch launch;
+    errno = 0;
+    bool prepare_refused =
+        !os_binary_slots_prepare_launch("/nonexistent-slots",
+                                        "/nonexistent-node", 3, &launch) &&
+        errno == ENOTSUP;
+    AB_CHECK("os_binary_slots_prepare_launch refuses by name (ENOTSUP)",
+             prepare_refused);
+
+    errno = 0;
+    char *const args[] = { (char *)"/nonexistent-node", NULL };
+    AB_CHECK("platform_execve_fd refuses descriptor-bound exec (ENOTSUP)",
+             platform_execve_fd(-1, args, NULL) == -1 && errno == ENOTSUP);
+
+    if (!failures)
+        printf("binary_ab_fallback: SKIP (Windows): descriptor-bound A/B "
+               "launch lane is POSIX-only; refusal contract asserted\n");
+    return failures;
+}
+#endif

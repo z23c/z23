@@ -30,6 +30,9 @@
  *   - an encrypted backup with no password available
  */
 
+#include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
+#include "platform/private_directory.h"
 #include "test/test_core.h"
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
@@ -45,10 +48,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+
+static int wr_environment_unset(const char *name)
+{
+#if defined(_WIN32)
+    return platform_environment_set(name, "", 1);
+#else
+    return unsetenv(name);
+#endif
+}
 
 /* Fixture scratch root, as an ABSOLUTE path.
  *
@@ -62,7 +76,7 @@
 static const char *wr_dir(void)
 {
     static char dir[512];
-    mkdir(WR_DIR_REL, 0755);
+    platform_directory_create(WR_DIR_REL, 0755);
     if (dir[0])
         return dir;
     char cwd[384];
@@ -320,6 +334,19 @@ static int wr_test_rescan_reports_missing_bodies(void)
 
 int test_wallet_restore(void)
 {
+#if defined(_WIN32)
+    /* Production native-Windows wallet restore is FAIL-CLOSED by design:
+     * wallet_restore_datadir_free/_hold refuse (-58) until current-SID
+     * single-writer qualification passes (app/services/src/
+     * wallet_restore_service.c:69-72 and :128-132). Every case below runs
+     * through those gates, so none can pass here. The refusal contract
+     * itself is proven by the Windows-lane acceptance
+     * (lib/test/src/wallet_restore_windows_refusal_acceptance.c). */
+    printf("wallet_restore: SKIP (Windows): restore is fail-closed on "
+           "native Windows; refusal proven by "
+           "wallet_restore_windows_refusal_acceptance\n");
+    return 0;
+#else
     int failures = 0;
     char src_db[256], backup_dir[256], target[256], target_db[320];
     const char *scratch = wr_dir();
@@ -332,8 +359,8 @@ int test_wallet_restore(void)
     /* wallet_backup_run_once -> wbs_ensure_backup_dir ->
      * platform_private_directory_ensure requires exactly 0700 and refuses a
      * wider directory. mkdir is umask-masked, so restate the mode. */
-    mkdir(backup_dir, 0700);
-    chmod(backup_dir, 0700);
+    if (!platform_private_directory_ensure(backup_dir))
+        return false;
 
     /* ---- source wallet with transparent AND shielded rows ---- */
     struct node_db ndb;
@@ -420,8 +447,13 @@ int test_wallet_restore(void)
         WR_CHECK("refuses a database holding no wallet tables", !r.ok);
         wr_rm(empty);
     }
-    {   /* a datadir another writer is holding */
-        mkdir(target, 0700);
+    {   /* a datadir another writer is holding
+         *
+         * flock(2) and O_CLOEXEC have no Windows equivalent in this shape;
+         * this sub-test is not exercised on Windows, only kept
+         * syntactically valid there. */
+#if !defined(_WIN32)
+        platform_directory_create(target, 0700);
         char pidfile[400];
         snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", target);
         int fd = open(pidfile, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
@@ -443,6 +475,7 @@ int test_wallet_restore(void)
         unlink(pidfile);
         WR_CHECK("datadir_free is ok once the lock is released",
                  wallet_restore_datadir_free(target).ok);
+#endif /* !defined(_WIN32) */
     }
 
     /* ---- (A) dry run: exact counts, nothing written ---- */
@@ -638,7 +671,7 @@ int test_wallet_restore(void)
         ereq.backup_path = enc;
         ereq.dry_run = true;
         ereq.password = NULL;
-        (void)unsetenv("WALLET_BACKUP_PASSWORD");
+        (void)wr_environment_unset("WALLET_BACKUP_PASSWORD");
         struct zcl_result nr = wallet_restore_run(&ereq, &rep);
         WR_CHECK("refuses an encrypted backup with no password", !nr.ok);
         WR_CHECK("the refusal says the file is encrypted",
@@ -671,4 +704,5 @@ int test_wallet_restore(void)
     wr_rmdir_datadir(target);
     rmdir(backup_dir);
     return failures;
+#endif
 }

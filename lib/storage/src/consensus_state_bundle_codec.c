@@ -3,6 +3,7 @@
 
 #include "storage/consensus_state_bundle_codec.h"
 
+#include "base/bytes.h"
 #include "crypto/sha3.h"
 
 #include <string.h>
@@ -244,4 +245,61 @@ void consensus_state_bundle_proof_manifest_digest(
         sha3_256_write(&ctx, summaries[i].component_digest, 32);
     }
     sha3_256_finalize(&ctx, out);
+}
+
+bool consensus_state_bundle_proof_extension_digest(
+    const struct consensus_state_bundle_proof_parent *parent,
+    size_t ordinal, uint8_t out[32])
+{
+    if (!out)
+        return false;
+    memset(out, 0, 32);
+    if (!parent || !parent->present ||
+        ordinal >= CONSENSUS_STATE_BUNDLE_PROOF_COUNT ||
+        parent->base_height < 0 ||
+        (parent->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
+         parent->validation_profile !=
+             CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
+        !zcl_bytes_any_set(parent->base_block_hash, 32) ||
+        !zcl_bytes_any_set(parent->proof_manifest_digest, 32) ||
+        !zcl_bytes_any_set(parent->source_digest, 32) ||
+        !zcl_bytes_any_set(parent->artifact_digest, 32) ||
+        !zcl_bytes_any_set(
+            parent->components[ordinal].component_digest, 32) ||
+        !zcl_bytes_any_set(parent->suffix_digest[ordinal], 32))
+        return false;
+    const struct consensus_state_bundle_proof_summary *component =
+        &parent->components[ordinal];
+    size_t name_len = strnlen(component->component,
+                              CONSENSUS_STATE_BUNDLE_PROOF_NAME_MAX + 1u);
+    if (name_len == 0 ||
+        name_len > CONSENSUS_STATE_BUNDLE_PROOF_NAME_MAX ||
+        component->first_height != 0 ||
+        component->last_height != parent->base_height ||
+        component->row_count != (uint64_t)parent->base_height + 1u)
+        return false;
+
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    static const char domain[] =
+        "zcl.consensus_state_bundle.v1/proof-extension";
+    sha3_256_write(&ctx, (const uint8_t *)domain, sizeof(domain));
+    digest_u64(&ctx, (uint64_t)parent->base_height);
+    sha3_256_write(&ctx, parent->base_block_hash, 32);
+    sha3_256_write(&ctx, &parent->validation_profile, 1);
+    sha3_256_write(&ctx, parent->proof_manifest_digest, 32);
+    sha3_256_write(&ctx, parent->source_digest, 32);
+    sha3_256_write(&ctx, parent->artifact_digest, 32);
+    digest_u64(&ctx, (uint64_t)ordinal);
+    digest_u64(&ctx, (uint64_t)name_len);
+    sha3_256_write(&ctx, (const uint8_t *)component->component, name_len);
+    digest_u64(&ctx, component->cursor);
+    digest_u64(&ctx, (uint64_t)component->first_height);
+    digest_u64(&ctx, (uint64_t)component->last_height);
+    digest_u64(&ctx, component->row_count);
+    digest_u64(&ctx, component->hash_bound_count);
+    sha3_256_write(&ctx, component->component_digest, 32);
+    sha3_256_write(&ctx, parent->suffix_digest[ordinal], 32);
+    sha3_256_finalize(&ctx, out);
+    return true;
 }

@@ -32,17 +32,22 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 
+#include <errno.h>
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
+#endif
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if !defined(_WIN32)
 
 static void gen_content(uint8_t *buf, size_t size)
 {
@@ -201,6 +206,207 @@ static void rf_hang_seeder_stop(struct rf_hang_seeder *h)
     atomic_store(&h->stop, true);
     pthread_join(h->tid, NULL);
     close(h->listen_fd);
+}
+
+/* ── Latency fixture: a loopback relay that charges for DISTANCE ────────
+ *
+ * Loopback hides the one cost that dominates a real fetch — the round trip.
+ * This relay sits between the client and the real serve path and charges
+ * `one_way_ms` every time the byte flow TURNS AROUND (a send followed by a
+ * receive, or the reverse), plus a full round trip when the connection is
+ * opened. It is a latency model, not a throttle: a stream running in one
+ * direction pays nothing extra however long it runs, so a big chunk transfer
+ * is NOT slowed and only the protocol's round trips show up in the clock.
+ *
+ * That separation is the whole point. "How many round trips does this cost"
+ * is a property of the client's wire choreography; "how fast is this peer"
+ * is a property of the peer. Measuring the first must never be done by
+ * shortening a budget that grades the second. */
+#define RF_RELAY_MAX_CONNS 64
+
+struct rf_lat_relay {
+    int listen_fd;
+    uint16_t port;           /* the address the CLIENT dials */
+    uint16_t upstream_port;   /* the real serve path */
+    int one_way_ms;
+    _Atomic bool stop;
+    _Atomic uint64_t turnarounds; /* direction changes across all connections */
+    pthread_t acceptor;
+    pthread_t conns[RF_RELAY_MAX_CONNS];
+    _Atomic unsigned nconns;
+};
+
+struct rf_lat_conn {
+    struct rf_lat_relay *r;
+    int client_fd;
+};
+
+static bool rf_relay_write_all(int fd, const uint8_t *buf, size_t n)
+{
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, buf + off, n - off);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        if (w == 0)
+            return false;
+        off += (size_t)w;
+    }
+    return true;
+}
+
+static void *rf_lat_conn_thread(void *arg)
+{
+    struct rf_lat_conn *c = (struct rf_lat_conn *)arg;
+    struct rf_lat_relay *r = c->r;
+    int cfd = c->client_fd;
+    free(c);
+
+    int ufd = socket(AF_INET, SOCK_STREAM, 0);
+    if (ufd < 0) {
+        close(cfd);
+        return NULL;
+    }
+    struct sockaddr_in up;
+    memset(&up, 0, sizeof(up));
+    up.sin_family = AF_INET;
+    up.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    up.sin_port = htons(r->upstream_port);
+    if (connect(ufd, (struct sockaddr *)&up, sizeof(up)) != 0) {
+        close(ufd);
+        close(cfd);
+        return NULL;
+    }
+    /* The TCP open itself is a round trip the client already paid for on a
+     * real link; charge it once, here, before any payload moves. */
+    platform_sleep_ms(2 * r->one_way_ms);
+
+    uint8_t *buf = malloc(65536);
+    if (!buf) {
+        close(ufd);
+        close(cfd);
+        return NULL;
+    }
+    int last_dir = -1; /* 0 = client->server, 1 = server->client */
+    for (;;) {
+        struct pollfd pfds[2] = {
+            { .fd = cfd, .events = POLLIN },
+            { .fd = ufd, .events = POLLIN },
+        };
+        int pr = poll(pfds, 2, 100);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (pr == 0) {
+            if (atomic_load(&r->stop))
+                break;
+            continue;
+        }
+        bool broke = false;
+        for (int d = 0; d < 2 && !broke; d++) {
+            if (!(pfds[d].revents & (POLLIN | POLLHUP | POLLERR)))
+                continue;
+            int from = d == 0 ? cfd : ufd;
+            int to = d == 0 ? ufd : cfd;
+            ssize_t n = read(from, buf, 65536);
+            if (n <= 0) {
+                broke = true;
+                break;
+            }
+            if (d != last_dir) {
+                last_dir = d;
+                atomic_fetch_add(&r->turnarounds, 1u);
+                platform_sleep_ms(r->one_way_ms);
+            }
+            if (!rf_relay_write_all(to, buf, (size_t)n)) {
+                broke = true;
+                break;
+            }
+        }
+        if (broke)
+            break;
+    }
+    free(buf);
+    close(ufd);
+    close(cfd);
+    return NULL;
+}
+
+static void *rf_lat_acceptor(void *arg)
+{
+    struct rf_lat_relay *r = (struct rf_lat_relay *)arg;
+    while (!atomic_load(&r->stop)) {
+        struct pollfd pfd = { .fd = r->listen_fd, .events = POLLIN };
+        if (poll(&pfd, 1, 100) <= 0)
+            continue;
+        int cfd = accept(r->listen_fd, NULL, NULL);
+        if (cfd < 0)
+            continue;
+        unsigned slot = atomic_load(&r->nconns);
+        struct rf_lat_conn *c = malloc(sizeof(*c));
+        if (slot >= RF_RELAY_MAX_CONNS || !c) {
+            free(c);
+            close(cfd);
+            continue;
+        }
+        c->r = r;
+        c->client_fd = cfd;
+        if (pthread_create(&r->conns[slot], NULL, rf_lat_conn_thread, c) != 0) {
+            free(c);
+            close(cfd);
+            continue;
+        }
+        atomic_store(&r->nconns, slot + 1);
+    }
+    return NULL;
+}
+
+static bool rf_lat_relay_start(struct rf_lat_relay *r, uint16_t upstream_port,
+                               int one_way_ms)
+{
+    memset(r, 0, sizeof(*r));
+    r->upstream_port = upstream_port;
+    r->one_way_ms = one_way_ms;
+    r->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (r->listen_fd < 0)
+        return false;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+    socklen_t alen = sizeof(addr);
+    if (bind(r->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(r->listen_fd, 32) != 0 ||
+        getsockname(r->listen_fd, (struct sockaddr *)&addr, &alen) != 0) {
+        close(r->listen_fd);
+        return false;
+    }
+    r->port = ntohs(addr.sin_port);
+    if (r->port == 0) {
+        close(r->listen_fd);
+        return false;
+    }
+    if (pthread_create(&r->acceptor, NULL, rf_lat_acceptor, r) != 0) {
+        close(r->listen_fd);
+        return false;
+    }
+    return true;
+}
+
+static void rf_lat_relay_stop(struct rf_lat_relay *r)
+{
+    atomic_store(&r->stop, true);
+    pthread_join(r->acceptor, NULL);
+    unsigned n = atomic_load(&r->nconns);
+    for (unsigned i = 0; i < n && i < RF_RELAY_MAX_CONNS; i++)
+        pthread_join(r->conns[i], NULL);
+    close(r->listen_fd);
 }
 
 /* ── (a) Manifest sanity ────────────────────────────────────────────── */
@@ -1114,6 +1320,309 @@ static int test_default_caps_parallel_multichunk(void)
     return failures;
 }
 
+/* ── (i2) BOOT LATENCY: what one artifact fetch costs in ROUND TRIPS ───
+ *
+ * A fresh node's instant-on fetch is a pre-flight probe followed by a
+ * per-chunk verified download. On loopback every one of those steps looks
+ * free; on a real link — and far more so on a Tor circuit — each DIAL costs a
+ * TCP/circuit open plus the two-round-trip X25519 key confirmation before a
+ * single byte of payload can be asked for.
+ *
+ * This test pins the number that decides that cost: how many dials one
+ * K-chunk download performs. It asserts a BOUND on dials, never a wall-clock
+ * duration and never a budget — a slow-but-honest seeder is not what is being
+ * graded here, and nothing in this test may be read as licence to shorten a
+ * timeout. The elapsed milliseconds are PRINTED (through the latency relay,
+ * which charges only for round trips) so the consequence of the dial count is
+ * visible, but the pass/fail gate is the deterministic dial count alone. */
+struct rf_lat_result {
+    uint64_t probe_dials;
+    uint64_t download_dials;
+    uint64_t turnarounds;
+    int64_t  probe_ms;
+    int64_t  download_ms;
+    bool     ok;
+};
+
+/* One measured pass: probe + full verified download. `one_way_ms < 0` dials
+ * the serve path DIRECTLY (no relay at all) — the control pass that says what
+ * the bytes and the disk cost on this machine with no distance and no relay
+ * copying. `one_way_ms >= 0` inserts the relay charging that much per
+ * direction change. `cdir` must be empty of this artifact. */
+static struct rf_lat_result rf_measure_pass(uint16_t server_port,
+                                            const struct rom_fetch_manifest *m,
+                                            const char *cdir, int one_way_ms)
+{
+    struct rf_lat_result r;
+    memset(&r, 0, sizeof(r));
+
+    struct rf_lat_relay relay;
+    uint16_t dial_port = server_port;
+    if (one_way_ms >= 0) {
+        if (!rf_lat_relay_start(&relay, server_port, one_way_ms))
+            return r;
+        dial_port = relay.port;
+    }
+
+    uint8_t (*chunk_sha3)[32] = malloc((size_t)ROM_SEED_MAX_CHUNKS * 32);
+    if (!chunk_sha3) {
+        if (one_way_ms >= 0)
+            rf_lat_relay_stop(&relay);
+        return r;
+    }
+
+    rom_fetch_dial_count_reset_for_test();
+    int64_t t0 = platform_time_monotonic_ms();
+    uint32_t manifest_chunks = 0;
+    bool got = rom_fetch_get_manifest("127.0.0.1", dial_port, m->chunk_root,
+                                      chunk_sha3, ROM_SEED_MAX_CHUNKS,
+                                      &manifest_chunks);
+    int64_t t1 = platform_time_monotonic_ms();
+    r.probe_dials = rom_fetch_dial_count_for_test();
+    r.probe_ms = t1 - t0;
+
+    if (got && manifest_chunks == m->num_chunks) {
+        struct rom_fetch_peer peers[1];
+        memset(peers, 0, sizeof(peers));
+        snprintf(peers[0].addr, sizeof(peers[0].addr), "%s", "127.0.0.1");
+        peers[0].port = dial_port;
+        r.ok = rom_fetch_download_verified_parallel(peers, 1, m, chunk_sha3,
+                                                    manifest_chunks, cdir,
+                                                    NULL, NULL);
+    }
+    int64_t t2 = platform_time_monotonic_ms();
+    r.download_dials = rom_fetch_dial_count_for_test() - r.probe_dials;
+    r.download_ms = t2 - t1;
+
+    free(chunk_sha3);
+    if (one_way_ms >= 0) {
+        r.turnarounds = atomic_load(&relay.turnarounds);
+        rf_lat_relay_stop(&relay);
+    }
+    return r;
+}
+
+static int test_dial_cost_of_a_download(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: a K-chunk verified download costs O(workers) dials, not "
+         "O(K) — the per-chunk session is reused, not re-established") {
+        fs_server_stop();
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        /* Raise the byte-rate caps: this measurement is about round trips,
+         * not about the seeder's uplink policy (which test_default_caps_
+         * parallel_multichunk covers under the shipped defaults). */
+        rom_seed_set_peer_bps_cap(1ull << 30);
+        rom_seed_set_global_bps_cap(1ull << 30);
+
+        char sroot[] = "/tmp/zcl_romfetch_latsrv_XXXXXX";
+        char *sdir = mkdtemp(sroot);
+        ASSERT(sdir != NULL);
+        char croot[] = "/tmp/zcl_romfetch_latcli_XXXXXX";
+        char *cdir = mkdtemp(croot);
+        ASSERT(cdir != NULL);
+
+        /* 16 full chunks: 2 chunks per worker, so a per-chunk dial policy
+         * costs twice what a per-session one does and the two cannot be
+         * confused. (The reported before/after profile was taken the same way
+         * at 32 chunks; the count here is trimmed to keep the group fast.) */
+        const uint32_t want_chunks = 16;
+        uint64_t size = (uint64_t)want_chunks * (uint64_t)ROM_SEED_CHUNK_SIZE;
+        ASSERT(write_sparse_bundle(sdir, "consensus-state-bundle-lat.sqlite",
+                                   size));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-lat.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        ASSERT(art.num_chunks == want_chunks);
+        struct rom_fetch_manifest m;
+        manifest_from_artifact(&art, &m);
+
+        uint16_t port = 0;
+        fs_server_start(sdir, 0);
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+            platform_sleep_ms(50);
+        if (fs_server_is_running())
+            port = fs_server_get_port();
+        ASSERT(port != 0);
+
+        char final_path[1200];
+        snprintf(final_path, sizeof(final_path), "%s/%s", cdir, m.filename);
+
+        /* One pass at 200 ms each way — a 400 ms round trip, well past any
+         * clearnet link and a fraction of a Tor circuit. The wall clock is
+         * REPORTED, never asserted: a loaded machine can only add time, and a
+         * timing assertion here would be a flake generator and, worse, an
+         * invitation to "fix" it by shortening a budget. The pass/fail gate
+         * is the deterministic dial count alone. probe_ms is what ONE dial
+         * plus one exchange costs at this distance — the unit price the dial
+         * count is multiplied by. */
+        struct rf_lat_result far_ = rf_measure_pass(port, &m, cdir, 200);
+        ASSERT(far_.ok);
+        ASSERT(rom_fetch_verify_file(final_path, &m));
+
+        printf("BOOT-LATENCY chunks=%u workers=%u rtt=400ms dl_dials=%llu "
+               "turnarounds=%llu one_dial_probe_ms=%lld download_ms=%lld\n",
+               want_chunks, (unsigned)ROM_FETCH_MAX_WORKERS,
+               (unsigned long long)far_.download_dials,
+               (unsigned long long)far_.turnarounds,
+               (long long)far_.probe_ms, (long long)far_.download_ms);
+
+        uint64_t dl_dials = far_.download_dials;
+
+        /* THE assertion. One dial per WORKER is the contract; one dial per
+         * CHUNK is the cost this test exists to keep from coming back. The
+         * margin allows a worker to re-dial a session a seeder legitimately
+         * dropped, while staying strictly below the chunk count so a return
+         * to per-chunk dialling cannot slip through. */
+        ASSERT(dl_dials <= (uint64_t)ROM_FETCH_MAX_WORKERS + 2u);
+        ASSERT(dl_dials < (uint64_t)want_chunks);
+
+        fs_server_stop();
+        char p[1200];
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-lat.sqlite", sdir);
+        unlink(p);
+        unlink(final_path);
+        rmdir(sdir);
+        rmdir(cdir);
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── (i3) BOOT LATENCY: what a DEAD seed costs a download ──────────────
+ *
+ * The other half of onion boot latency is the seed that is not there. A dial
+ * that never completes costs the full transport-scaled connect budget — 10 s
+ * to a socket, 120 s to build a Tor circuit — and that budget is correct: a
+ * circuit really is slower to establish, and shortening it to notice a dead
+ * peer sooner would also abandon honest onion seeders mid-handshake. What is
+ * NOT correct is paying it over and over. Every worker walking past the same
+ * dead seeds, on every chunk, multiplies one absence into minutes.
+ *
+ * This measures that directly: one live seeder, three seeds that are simply
+ * not listening, and a full verified download. The instrument is the count of
+ * FAILED dials, which is deterministic and completely insensitive to how
+ * loaded the machine is — it is a number of events, not a duration. The
+ * shipped default byte caps are used deliberately: a stock seeder answers
+ * back-to-back requests with a typed refusal, and every refusal sends the
+ * worker on around the ring, into the dead seeds, again.
+ *
+ * Nothing here asserts on time, and nothing here may be satisfied by making a
+ * budget smaller. The only thing asserted is that the same absence is not
+ * rediscovered once per chunk. */
+static int test_dead_seed_is_dialled_once_per_job(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: a seed that cannot be dialled costs a download ONE connect "
+         "budget per worker, not one per chunk — and the file still verifies") {
+        fs_server_stop();
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        /* A seeder under real pressure. The per-peer cap is set to two chunks
+         * a second — a busy seeder, not a broken one — so the eight workers
+         * get typed BUSY refusals through most of this download, exactly as
+         * they would against a popular seed. That matters because a refusal is
+         * what sends a worker on around the ring; without it the dead seeds
+         * are met only once, on a worker's first chunk, and the repeated cost
+         * this test is about never appears. Capping the SEEDER is a property
+         * of the fixture; no client budget is touched. */
+        rom_seed_set_peer_bps_cap(2ull * (uint64_t)ROM_SEED_CHUNK_SIZE);
+        rom_seed_set_global_bps_cap(4ull * (uint64_t)ROM_SEED_CHUNK_SIZE);
+
+        char sroot[] = "/tmp/zcl_romfetch_deadsrv_XXXXXX";
+        char *sdir = mkdtemp(sroot);
+        ASSERT(sdir != NULL);
+        char croot[] = "/tmp/zcl_romfetch_deadcli_XXXXXX";
+        char *cdir = mkdtemp(croot);
+        ASSERT(cdir != NULL);
+
+        /* 9 chunks against 8 workers, so at least one worker fetches twice and
+         * the per-chunk cost is separable from the per-worker one. */
+        uint64_t size = 8ull * (uint64_t)ROM_SEED_CHUNK_SIZE + 4096;
+        ASSERT(write_sparse_bundle(sdir, "consensus-state-bundle-dead.sqlite",
+                                   size));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-dead.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        ASSERT(art.num_chunks == 9);
+        struct rom_fetch_manifest m;
+        manifest_from_artifact(&art, &m);
+
+        uint16_t port = 0;
+        fs_server_start(sdir, 0);
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+            platform_sleep_ms(50);
+        if (fs_server_is_running())
+            port = fs_server_get_port();
+        ASSERT(port != 0);
+
+        uint8_t (*chunk_sha3)[32] = malloc((size_t)ROM_SEED_MAX_CHUNKS * 32);
+        ASSERT(chunk_sha3 != NULL);
+        uint32_t manifest_chunks = 0;
+        ASSERT(rom_fetch_get_manifest("127.0.0.1", port, m.chunk_root,
+                                      chunk_sha3, ROM_SEED_MAX_CHUNKS,
+                                      &manifest_chunks));
+        ASSERT(manifest_chunks == art.num_chunks);
+
+        /* The live seeder first, then three addresses nothing is listening on.
+         * Ports 1-3 on loopback refuse immediately, so the WALL CLOCK of this
+         * test says nothing about the production budget — which is the point:
+         * the budget is unchanged and unmeasured here, only the number of
+         * times it would have been spent. */
+        const size_t npeers = 4;
+        struct rom_fetch_peer peers[4];
+        memset(peers, 0, sizeof(peers));
+        snprintf(peers[0].addr, sizeof(peers[0].addr), "%s", "127.0.0.1");
+        peers[0].port = port;
+        for (size_t i = 1; i < npeers; i++) {
+            snprintf(peers[i].addr, sizeof(peers[i].addr), "%s", "127.0.0.1");
+            peers[i].port = (uint16_t)i;
+        }
+
+        rom_fetch_dial_count_reset_for_test();
+        ASSERT(rom_fetch_download_verified_parallel(peers, npeers, &m,
+                                                    chunk_sha3,
+                                                    manifest_chunks, cdir,
+                                                    NULL, NULL));
+        uint64_t dead_dials = rom_fetch_dial_fail_count_for_test();
+
+        char final_path[1200];
+        snprintf(final_path, sizeof(final_path), "%s/%s", cdir, m.filename);
+        ASSERT(rom_fetch_verify_file(final_path, &m));
+
+        printf("DEAD-SEED-DIALS chunks=%u dead_seeds=%zu workers=%u "
+               "failed_dials=%llu\n", art.num_chunks, npeers - 1,
+               (unsigned)ROM_FETCH_MAX_WORKERS,
+               (unsigned long long)dead_dials);
+
+        /* THE assertion. Each worker may discover each dead seed once — that
+         * is the herd of workers starting at the same instant, before any of
+         * them has recorded the absence, and it is bounded by the seed set,
+         * not by the artifact. What must not happen is the count scaling with
+         * the number of chunks (or with the refusals a rate-limited seeder
+         * legitimately sends), which is what re-walking the ring per chunk
+         * produced. */
+        ASSERT(dead_dials <= (uint64_t)(npeers - 1) *
+                             (uint64_t)ROM_FETCH_MAX_WORKERS);
+
+        free(chunk_sha3);
+        fs_server_stop();
+        char p[1200];
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-dead.sqlite", sdir);
+        unlink(p);
+        unlink(final_path);
+        rmdir(sdir);
+        rmdir(cdir);
+        rom_seed_reset();
+        rom_peer_scoring_test_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── (i) Native command layer: typed blocker + typed refusal ───────────
  *
  * rom_fetch.c/test_rom_fetch.c above prove the ENGINE fails closed; these
@@ -1367,7 +1876,22 @@ int test_rom_fetch(void)
     failures += test_verified_multi_seeder_hang_failover();
     failures += test_refusal_frame_decode();
     failures += test_default_caps_parallel_multichunk();
+    failures += test_dial_cost_of_a_download();
+    failures += test_dead_seed_is_dialled_once_per_job();
     failures += test_bundle_handler_no_seeder_blocker();
     failures += test_bundle_handler_corrupted_refused();
     return failures;
 }
+#else /* _WIN32 */
+
+/* The ROM fetch transport is fail-closed ENOTSUP on native Windows
+ * (lib/net/src/rom_fetch.c:504 and :739): every case below drives a real
+ * fs/TCP fetch that cannot succeed on this lane, so the group reports one
+ * loud skip rather than a field of transport refusals. */
+int test_rom_fetch(void)
+{
+    printf("rom_fetch: SKIP (Windows): ROM fetch transport is fail-closed "
+           "ENOTSUP on native Windows (rom_fetch.c:504,739)\n");
+    return 0;
+}
+#endif

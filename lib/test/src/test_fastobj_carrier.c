@@ -69,6 +69,8 @@
 #include "vcs/package_public_shape.h"
 #include "vcs/package_store.h"
 
+#if !defined(_WIN32)
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -534,6 +536,23 @@ int test_fastobj_carrier(void)
                                 prep.recipe_wire_len));
     if (prc != VCS_PACKAGE_PREPARE_OK)
         goto done;
+
+#ifdef __APPLE__
+    /* Carrier production starts by executing fetched package source. Darwin
+     * has no Landlock/seccomp equivalent, so the public contract is the
+     * named fail-closed refusal, not a degraded cache artifact. */
+    struct fcw_build_result refusal;
+    fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit1, lock_hex,
+                        cacheA, false, &refusal);
+    FC_CHECK("Darwin refuses carrier production without full isolation",
+             !refusal.ok && refusal.exit_code == 4 &&
+                 strstr(refusal.first_line, "offers no Landlock") != NULL);
+    if (refusal.ok || refusal.exit_code != 4 ||
+        strstr(refusal.first_line, "offers no Landlock") == NULL)
+        printf("    refusal exit %d: %.200s\n", refusal.exit_code,
+               refusal.first_line);
+    goto done;
+#endif
 
     /* 2. candidate build #1 on a COLD cacheA: the compile really runs. */
     struct fcw_build_result run1, run2;
@@ -1098,3 +1117,18 @@ done:
            failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");
     return failures;
 }
+
+#else /* _WIN32 */
+
+/* Every candidate build here runs the confined package verifier with
+ * --require-full-isolation, which refuses off Linux (no Landlock/seccomp;
+ * the Windows sandbox is unqualified). The fork+pipe drain plumbing has no
+ * Windows analogue either, so no case in this group can run. */
+int test_fastobj_carrier(void)
+{
+    printf("test_fastobj_carrier: SKIP (Windows): confined package builds "
+           "require Linux full isolation\n");
+    return 0;
+}
+
+#endif /* !_WIN32 */

@@ -29,6 +29,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #include <unistd.h>
 
 #define HWP_CHECK(name, expr) do { \
@@ -36,6 +39,16 @@
     if ((expr)) printf("OK\n"); \
     else { printf("FAIL\n"); failures++; } \
 } while (0)
+
+#if defined(__APPLE__)
+static bool hwp_sysctl_feature(const char *name)
+{
+    int value = 0;
+    size_t size = sizeof(value);
+    return sysctlbyname(name, &value, &size, NULL, 0) == 0 &&
+           size == sizeof(value) && value == 1;
+}
+#endif
 
 /* ── Fixture helpers ──────────────────────────────────────────────── */
 
@@ -175,6 +188,22 @@ int test_hw_profile(void)
 
     const struct hw_profile_isa *isa = hw_profile_isa();
     HWP_CHECK("isa pointer non-NULL", isa != NULL);
+#if defined(__APPLE__) && defined(__aarch64__)
+    HWP_CHECK("Darwin NEON fact matches the independent OS report",
+              isa && isa->arm_neon == hwp_sysctl_feature("hw.optional.neon"));
+    HWP_CHECK("Darwin SHA-256 fact matches the independent OS report",
+              isa && isa->arm_sha256 ==
+                         hwp_sysctl_feature("hw.optional.arm.FEAT_SHA256"));
+    HWP_CHECK("Darwin SHA3 fact matches the independent OS report",
+              isa && isa->arm_sha3 ==
+                         hwp_sysctl_feature("hw.optional.arm.FEAT_SHA3"));
+    HWP_CHECK("Darwin CRC32 fact matches the independent OS report",
+              isa && isa->arm_crc32 ==
+                         hwp_sysctl_feature("hw.optional.arm.FEAT_CRC32"));
+    HWP_CHECK("Darwin AES fact matches the independent OS report",
+              isa && isa->arm_aes ==
+                         hwp_sysctl_feature("hw.optional.arm.FEAT_AES"));
+#endif
 
     bool known = true;
     (void)hw_profile_datadir_rotational(&known);
@@ -199,6 +228,28 @@ int test_hw_profile(void)
                   json_get(isa_dump, "sha256_transform") != NULL);
         HWP_CHECK("dump names active Equihash BLAKE2b batch tier",
                   json_get(isa_dump, "equihash_blake2b_batch") != NULL);
+        HWP_CHECK("dump names active CRC32C transform",
+                  json_get(isa_dump, "crc32c_transform") != NULL);
+        HWP_CHECK("dump reports four-lane Keccak availability",
+                  json_get(isa_dump, "keccak_x4_available") != NULL);
+#if defined(__APPLE__) && defined(__aarch64__)
+        HWP_CHECK("dump reports the observed Darwin ARM ISA facts",
+                  json_get(isa_dump, "arm_neon") &&
+                  json_get_bool(json_get(isa_dump, "arm_neon")) ==
+                      isa->arm_neon &&
+                  json_get(isa_dump, "arm_sha256") &&
+                  json_get_bool(json_get(isa_dump, "arm_sha256")) ==
+                      isa->arm_sha256 &&
+                  json_get(isa_dump, "arm_sha3") &&
+                  json_get_bool(json_get(isa_dump, "arm_sha3")) ==
+                      isa->arm_sha3 &&
+                  json_get(isa_dump, "arm_crc32") &&
+                  json_get_bool(json_get(isa_dump, "arm_crc32")) ==
+                      isa->arm_crc32 &&
+                  json_get(isa_dump, "arm_aes") &&
+                  json_get_bool(json_get(isa_dump, "arm_aes")) ==
+                      isa->arm_aes);
+#endif
         HWP_CHECK("dump has storage object", json_get(&v, "storage") != NULL);
         HWP_CHECK("dump has l3 object", json_get(&v, "l3") != NULL);
         HWP_CHECK("dump has derived object", json_get(&v, "derived") != NULL);
@@ -341,8 +392,13 @@ int test_hw_profile(void)
                       ((snap.cpus[0] == 2 && snap.cpus[1] == 3) ||
                        (snap.cpus[0] == 3 && snap.cpus[1] == 2)));
 
+#if defined(__APPLE__)
+            HWP_CHECK("pin_reducer_thread refuses where Darwin has no affinity API",
+                      !hw_profile_pin_reducer_thread(pthread_self()));
+#else
             HWP_CHECK("pin_reducer_thread succeeds on asymmetric fixture",
                       hw_profile_pin_reducer_thread(pthread_self()));
+#endif
         }
 
         /* restore real topology for anything running after this test */

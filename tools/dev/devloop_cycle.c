@@ -831,7 +831,11 @@ static size_t cycle_json(const struct zcl_devloop_plan *plan,
                         g_cycle_failure.source.source_id) ||
          !appendf(out, out_sz, &pos, ",\"source_mutation_sha256\":") ||
          !append_string(out, out_sz, &pos,
-                        g_cycle_failure.source.mutation_id)))
+                        g_cycle_failure.source.mutation_id) ||
+         (g_cycle_failure.source.cas_present &&
+          (!appendf(out, out_sz, &pos, ",\"source_cas_sha3\":") ||
+           !append_string(out, out_sz, &pos,
+                          g_cycle_failure.source.cas_root_sha3)))))
         return 0;
     if (g_cycle_failure.execution_ready &&
         (!appendf(out, out_sz, &pos, ",\"execution_id_sha3\":") ||

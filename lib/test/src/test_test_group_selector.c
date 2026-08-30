@@ -10,11 +10,31 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
+#endif
+
+#if defined(_WIN32)
+/* The UCRT _pclose() returns the child's raw exit code, not a wait(2)
+ * status word; map the two macros onto that honestly. popen() routes
+ * through cmd.exe, which cannot run the POSIX test-group-list.sh driver,
+ * so commands are re-dispatched through the MSYS2 sh on the lane's PATH.
+ * The command strings in this file carry no double quotes. */
+#define WIFEXITED(s) ((s) >= 0)
+#define WEXITSTATUS(s) (s)
+static const char *tgs_wrap_command(const char *command, char *buf,
+                                    size_t cap)
+{
+    int n = snprintf(buf, cap, "sh -c \"%s\"", command);
+    if (n < 0 || (size_t)n >= cap)
+        return NULL;
+    return buf;
+}
 #endif
 
 static int capture_command(const char *command, char *out, size_t cap)
@@ -22,6 +42,12 @@ static int capture_command(const char *command, char *out, size_t cap)
     if (!command || !out || cap == 0)
         return -1;
     out[0] = '\0';
+#if defined(_WIN32)
+    char wrapped[4096];
+    command = tgs_wrap_command(command, wrapped, sizeof(wrapped));
+    if (!command)
+        return -1;
+#endif
     FILE *pipe = popen(command, "r");
     if (!pipe)
         return -1;
@@ -77,6 +103,12 @@ static int capture_command_ends(const char *command, char *head,
         return -1;
     head[0] = '\0';
     tail[0] = '\0';
+#if defined(_WIN32)
+    char wrapped[4096];
+    command = tgs_wrap_command(command, wrapped, sizeof(wrapped));
+    if (!command)
+        return -1;
+#endif
     FILE *pipe = popen(command, "r");
     if (!pipe)
         return -1;
@@ -440,6 +472,20 @@ static int test_registry_exact_resolution(void)
         ASSERT(strstr(out, "test_api\n") != NULL);
         ASSERT(strstr(out, "test_native_api_contract\n") != NULL);
 
+        rc = capture_command(
+            "tools/dev/test-group-list.sh --resolve-proof test_api 2>&1",
+            out, sizeof(out));
+        ASSERT(rc == 0);
+        ASSERT(strcmp(out, "test_api\n") == 0);
+
+        /* A legacy prefixless ID may itself begin with "test_". It is exact
+         * only when that literal full ID exists in the registry. */
+        rc = capture_command(
+            "tools/dev/test-group-list.sh --resolve-proof "
+            "test_group_selector 2>&1", out, sizeof(out));
+        ASSERT(rc == 0);
+        ASSERT(strcmp(out, "test_test_group_selector\n") == 0);
+
         /* Coverage migration is lossless: a legacy family selector becomes
          * exact full IDs, but only after its exact primary is admitted. */
         rc = capture_command(
@@ -482,6 +528,13 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_resolve_exact("test_api", full));
         ASSERT(strcmp(full, "test_api") == 0);
         ASSERT(!zcl_test_group_resolve_exact("api_missing", full));
+        ASSERT(zcl_test_group_plan_selects("test_api", "test_api"));
+        ASSERT(!zcl_test_group_plan_selects("test_api",
+                                            "test_native_api_contract"));
+        ASSERT(zcl_test_group_plan_selects("api",
+                                           "test_native_api_contract"));
+        ASSERT(zcl_test_group_plan_selects("test_group_selector",
+                                           "test_test_group_selector"));
 
         const char *ids[] = { "api", "stage_repair", "oracle_policy" };
         char expanded[16][ZCL_TEST_GROUP_FULL_MAX];
@@ -507,6 +560,14 @@ static int test_native_catalog_resolution(void)
         }
         ASSERT(saw_api && saw_native_api && saw_stage_coin);
         ASSERT(saw_groth && saw_zclassicd && saw_quorum);
+
+        const char *exact_ids[] = { "test_api" };
+        truncated = true;
+        ASSERT(zcl_test_group_expand_plan(
+                   exact_ids, 1, expanded,
+                   sizeof(expanded) / sizeof(expanded[0]), &truncated) == 1);
+        ASSERT(!truncated);
+        ASSERT(strcmp(expanded[0], "test_api") == 0);
 
         char one[1][ZCL_TEST_GROUP_FULL_MAX];
         truncated = false;
@@ -540,6 +601,9 @@ static int test_native_catalog_resolution(void)
             "test_chain_advance_atomicity"));
         ASSERT(zcl_test_group_is_integration_only(
             "test_reducer_block_ingest_gate"));
+        ASSERT(zcl_test_group_is_integration_only("test_store_e2e_gate"));
+        ASSERT(zcl_test_group_is_integration_only(
+            "test_store_e2e_shielded"));
         ASSERT(!zcl_test_group_is_integration_only("test_event_log"));
         ASSERT(zcl_test_group_proof_contracts_valid());
         ASSERT(zcl_test_group_proof_contract(
@@ -557,6 +621,10 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_proof_contract(
                    "test_reducer_forward_progress_gate") ==
                ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_store_e2e_gate") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_store_e2e_shielded") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
                    "test_event_log_kill9") == ZCL_TEST_PROOF_EVENT_LOG_KILL9);
         ASSERT(zcl_test_group_proof_contract(

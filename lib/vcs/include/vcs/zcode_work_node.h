@@ -41,9 +41,9 @@ void vcs_zcode_work_node_set_global(struct vcs_zcode_work_node *node);
 struct vcs_zcode_work_node *vcs_zcode_work_node_global(void);
 
 /* Reentrant diagnostic snapshot for the native agent status instrument.
- * Reports bounded counts, enablement, capable_peers, and one next_action;
- * no peer identity, request, capability document, key material, or action
- * root leaves this boundary. */
+ * Reports bounded counts, enablement, and fresh signature-verified worker
+ * capability projections. Public signers are domain-separated fingerprints;
+ * no request, signature, key material, or action root leaves this boundary. */
 struct json_value;
 bool vcs_zcode_work_node_dump_state_json(struct json_value *out,
                                          const char *key);

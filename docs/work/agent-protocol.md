@@ -64,6 +64,53 @@ Then **execute the assignment's Tasks section in order**.
 
 ---
 
+## Ask the checkout, do not grep it
+
+The node binary answers questions about THIS checkout, offline, with no node
+running and no datadir. Use it before reaching for `grep`, `find`, or a guess.
+A document can drift from the tree; these answers are computed from the tree.
+
+**Native mode needs no running node.** `build/bin/z23-dev <leaf>` runs the
+command in-process. (`./build/bin/zclassic23-dev z23 <leaf>` is CLI-CLIENT mode
+and requires a live node and an RPC cookie — that failure reads
+`CONNECT_REFUSED ... no RPC cookie`, which is not a broken command, it is the
+wrong mode. Note also that in that mode flags take a SINGLE dash:
+`-datadir=DIR`, not `--datadir=DIR`.)
+
+The four that pay for themselves immediately:
+
+```
+build/bin/z23-dev discover help                 # every command root, with risk
+                                                # and latency; start here
+build/bin/z23-dev code tests --input='{"path":"<file>"}'
+                                                # which focused test group a
+                                                # change to that file routes to
+build/bin/z23-dev code room  --input='{"path":"<file>"}'
+                                                # purpose, group, neighbours
+build/bin/z23-dev agentmap --input=json         # where code, docs and tests live
+build/bin/z23-dev agentimpact <files...>        # changed files -> tests + risk
+```
+
+`code tests` answers in ~10 ms. Deriving the same answer by reading a suite log
+by hand takes an hour and can be got wrong. Measured today.
+
+Two honest caveats, so nobody reports these as new bugs:
+
+- `code room` currently blows its 250 ms budget badly on a cold index (17.5 s
+  measured, and it says so: `"budget_exceeded": true`). It returns the right
+  answer; it is not fast yet.
+- `discover search` searches the COMMAND REGISTRY, not the source tree. A query
+  for a source symbol legitimately returns `count: 0`. Use `code group` /
+  `code room` for source.
+
+**Before building anything, ask whether it already exists.** In one session this
+repository nearly grew a second doc-path checker, a second task board, and a
+second metaverse module — all three already existed. The cost of asking is one
+command; the cost of not asking is a duplicate subsystem someone must later
+delete.
+
+---
+
 ## Per-task discipline
 
 Each Task has a **scope** (exact files) and an **acceptance test** (concrete
@@ -157,7 +204,81 @@ When all tasks pass:
 
 ---
 
+## Delegating to a cheaper worker
+
+A second model (`tools/dev/grok-unit.sh`) can take work off you. Tokens are
+not free and the owner has asked that cheaper capacity be used where it
+genuinely helps. It does not help everywhere, and the shape of the task is
+what decides.
+
+**Delegate when the task is:** one file, one purpose, with an acceptance bar
+that can be checked mechanically. Greppable sweeps, a well-specified addition
+to an existing script, a rename with a clear rule. Measured 2026-08-29: a
+~50-line addition to `tools/ship.sh` cost $0.08 and was kept essentially as
+written, including comments it added unprompted.
+
+**Do NOT delegate** work whose acceptance needs judgement. You have to do that
+judging yourself either way, and the judging is the expensive half — so you
+pay twice and save nothing.
+
+How to write the task file:
+
+- Give the FAILURE that motivated the work, not just the change you want.
+- State constraints as prohibitions: what must NOT be weakened, removed, or
+  baselined. These are honoured well.
+- Include an explicit acceptance list of commands to RUN, and say that output
+  must be shown.
+- Add "leave it alone and list it as unsure" for anything ambiguous. A wrong
+  edit costs far more than a missed one.
+- Ask for the closing JSON report **in band**, at the end of the prompt.
+
+### ⛔ Three ways a delegated unit exits 0 having written nothing
+
+All three end with rc=0 and an empty diff, so an exit code proves nothing:
+
+1. `--json-schema` — the schema is satisfied on turn one by a status object,
+   which ends the turn. Never pass it.
+2. `--permission-mode acceptEdits` — it plans, narrates, and exits without
+   editing. `--always-approve` is the mode that acts.
+3. A timeout mid-thought. Budget hours, not minutes, and say `timeout` returned
+   124 out loud rather than reporting a partial file set as a result.
+
+**Always check the diff yourself: `git -C <worktree> status --porcelain`.**
+
+### ⛔ It cannot judge whether its own test is a test
+
+This is the limit that matters. A delegated unit will write assertions that
+look right, pass, and cannot fail — it inherits whatever idiom the file
+already uses and has no way to notice the idiom is broken. Measured
+2026-08-29: assertions written as `! check ...` are exempt from `set -e` AND
+from the `ERR` trap, so ten of them in one file could never fail, under a
+comment claiming they were assertions under `set -e`.
+
+**Never accept a delegated assertion without mutating the code it guards and
+watching it fail.** "The selftest passed" can be true and worthless — break the
+thing the assertion protects, watch the check go red, then put it back. A test
+file that exists is not coverage, and an assertion that cannot fail is not an
+assertion.
+
+---
+
 ## Memory discipline
+
+**Your local memory does not reach the other agents.** It lives on one
+machine, in one agent's state directory. Several agents work this repository
+from different machines, so a lesson saved only to local memory is a lesson
+the others will each rediscover the expensive way.
+
+So decide by AUDIENCE, not by importance:
+
+- **Anything another agent needs → the REPO.** A doctrine or a trap belongs in
+  this file or the relevant `docs/`; a fact about the code belongs in a comment
+  next to the code, where it cannot drift out of sight.
+- **Local memory is for what is true of THIS machine and THIS operator** —
+  host paths, which box is slow, what the owner said they wanted.
+
+When in doubt, write it in the repo. A duplicated note costs nothing; a lesson
+four agents each relearn costs four times.
 
 After completing the assignment:
 

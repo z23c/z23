@@ -82,6 +82,26 @@ static bool parse_source_record(const struct zcl_devloop_process_result *result,
     return true;
 }
 
+bool zcl_dev_executable_source_record_read(
+    const char *repo_root, int executable_fd, const char *display_path,
+    struct dev_source_record *out, char *why, size_t why_len)
+{
+    if (!repo_root || executable_fd < 0 || !display_path || !out || !why ||
+        why_len == 0) {
+        if (why && why_len > 0)
+            (void)snprintf(why, why_len, "source_record_input_invalid");
+        return false;
+    }
+    struct zcl_devloop_process_result result = {0};
+    const char *argv[] = {display_path, "--source-record", NULL};
+    if (!zcl_devloop_process_run_fd(repo_root, executable_fd, argv, 5000,
+                                    &result)) {
+        (void)snprintf(why, why_len, "source_record_execution_failed");
+        return false;
+    }
+    return parse_source_record(&result, out, why, why_len);
+}
+
 bool zcl_dev_source_cas_capture(const char *repo_root,
                                 struct dev_source_record *out)
 {

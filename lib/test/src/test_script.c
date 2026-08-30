@@ -11,8 +11,29 @@
 #include "script/sigcache.h"
 #include "consensus/validation.h"
 #include "validation/sigops.h"
+#if defined(_WIN32)
+#include "platform/os_proc.h"
+#else
 #include <sys/resource.h>
+#endif
 #include <sys/time.h>
+
+/* Process RSS in KB: ru_maxrss on POSIX, current working set via the
+ * platform authority on Windows (same "<10 MB growth" assertion shape). */
+static long ts_rss_kb(void)
+{
+#if defined(_WIN32)
+    struct os_proc_mem m;
+    if (!os_proc_mem_read(&m) || m.rss_bytes < 0)
+        return 0;
+    return (long)(m.rss_bytes / 1024);
+#else
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0)
+        return 0;
+    return ru.ru_maxrss;
+#endif
+}
 
 int test_script(void)
 {
@@ -1143,8 +1164,7 @@ int test_script(void)
      * ================================================================ */
     printf("deep nested OP_IF — 100 frames succeed ... ");
     {
-        struct rusage before, after;
-        getrusage(RUSAGE_SELF, &before);
+        long rss_before_kb = ts_rss_kb();
 
         struct script s;
         script_init(&s);
@@ -1161,8 +1181,7 @@ int test_script(void)
         ScriptError err;
         bool ok = eval_script(&stk, &s, 0, NULL, 0, &err);
 
-        getrusage(RUSAGE_SELF, &after);
-        long ru_delta_kb = after.ru_maxrss - before.ru_maxrss;
+        long ru_delta_kb = ts_rss_kb() - rss_before_kb;
         bool memory_ok = ru_delta_kb < 10 * 1024;  /* <10 MB growth */
 
         if (ok && stk.count == 1 && cast_to_bool(stack_top(&stk, -1)) &&

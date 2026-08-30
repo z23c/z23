@@ -2,6 +2,7 @@
  * Purpose: deterministic fixture-only C23 evidence snapshots and elections. */
 #include "vcs/zcode_shadow_election.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -26,14 +27,6 @@ struct shadow_evidence {
     uint64_t event_epoch;
     uint32_t points;
 };
-
-static bool shadow_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static int shadow_candidate_cmp(const void *a, const void *b)
 {
@@ -168,9 +161,9 @@ enum vcs_c23_shadow_election_error vcs_c23_evidence_snapshot_build(
         !input->policy_root || !input->seeds || !input->freeze_hash ||
         !input->anchor_is_active)
         return VCS_C23_SHADOW_ELECTION_NULL;
-    if (!shadow_nonzero(input->network_genesis_root) ||
-        !shadow_nonzero(input->policy_root) ||
-        !shadow_nonzero(input->freeze_hash))
+    if (!zcl_bytes_any_set(input->network_genesis_root, 32) ||
+        !zcl_bytes_any_set(input->policy_root, 32) ||
+        !zcl_bytes_any_set(input->freeze_hash, 32))
         return VCS_C23_SHADOW_ELECTION_ROOT;
     if (input->seed_count == 0 ||
         input->seed_count > VCS_C23_SHADOW_MAX_CANDIDATES ||
@@ -246,8 +239,8 @@ enum vcs_c23_shadow_election_error vcs_c23_evidence_snapshot_build(
         memcpy(evidence[i].zid_pubkey, input->evidence[i].zid_pubkey, 32);
         evidence[i].event_epoch = input->evidence[i].event_epoch;
         evidence[i].points = input->evidence[i].points;
-        if (!shadow_nonzero(evidence[i].contribution_root) ||
-            !shadow_nonzero(evidence[i].zid_pubkey) ||
+        if (!zcl_bytes_any_set(evidence[i].contribution_root, 32) ||
+            !zcl_bytes_any_set(evidence[i].zid_pubkey, 32) ||
             evidence[i].event_epoch >= input->election_epoch) {
             error = VCS_C23_SHADOW_ELECTION_EVIDENCE;
             goto evidence_done;
@@ -324,14 +317,14 @@ static bool shadow_snapshot_valid(
             VCS_C23_SHADOW_ELECTION_VERSION || !snapshot->rows ||
         snapshot->candidate_count == 0 ||
         snapshot->candidate_count > VCS_C23_SHADOW_MAX_CANDIDATES ||
-        !shadow_nonzero(snapshot->snapshot_root) ||
-        !shadow_nonzero(snapshot->evidence_set_root) ||
+        !zcl_bytes_any_set(snapshot->snapshot_root, 32) ||
+        !zcl_bytes_any_set(snapshot->evidence_set_root, 32) ||
         snapshot->total_weight == 0)
         return false;
     uint64_t total = 0;
     for (size_t i = 0; i < snapshot->candidate_count; i++) {
-        if (!shadow_nonzero(snapshot->rows[i].seed_root) ||
-            !shadow_nonzero(snapshot->rows[i].zid_pubkey) ||
+        if (!zcl_bytes_any_set(snapshot->rows[i].seed_root, 32) ||
+            !zcl_bytes_any_set(snapshot->rows[i].zid_pubkey, 32) ||
             snapshot->rows[i].weight == 0 ||
             snapshot->rows[i].weight > VCS_C23_SHADOW_MAX_WEIGHT ||
             (i != 0 && memcmp(snapshot->rows[i - 1].zid_pubkey,
@@ -456,7 +449,7 @@ enum vcs_c23_shadow_election_error vcs_c23_shadow_election_build(
         input->seat_count > seat_capacity)
         return VCS_C23_SHADOW_ELECTION_SEATS;
     for (size_t i = 0; i < VCS_C23_SHADOW_ELECTION_BLOCKS; i++)
-        if (!shadow_nonzero(input->seed_block_hashes[i]))
+        if (!zcl_bytes_any_set(input->seed_block_hashes[i], 32))
             return VCS_C23_SHADOW_ELECTION_ROOT;
 
     struct shadow_candidate *candidates = zcl_calloc(

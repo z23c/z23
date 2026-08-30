@@ -3,6 +3,7 @@
 
 #include "services/zslp_transaction_intent_service.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
@@ -29,13 +30,6 @@ struct zti_payload {
     uint8_t txid[32];
     int64_t actual_fee_zat;
 };
-
-static bool zti_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 static bool zti_idempotency_valid(const char *key)
 {
@@ -91,7 +85,7 @@ static struct zcl_result zti_runtime_validate(
     const struct zslp_intent_runtime *rt, bool planning, bool committing)
 {
     if (!rt || !rt->node_db || !rt->node_db->open || !rt->read_money ||
-        rt->tip_height < 0 || !zti_nonzero(rt->tip_hash, 32) ||
+        rt->tip_height < 0 || !zcl_bytes_any_set(rt->tip_hash, 32) ||
         rt->maximum_fee_zat <= 0 || rt->now_unix <= 0)
         return ZCL_ERR(-1, "ZSLP intent requires current custody and chain runtime");
     if (planning && !rt->prepare)
@@ -290,7 +284,7 @@ static void zti_view(const struct vault_intent_row *row,
     }
     out->units = payload->request.operation == ZSLP_INTENT_GENESIS
         ? payload->request.supply : payload->request.units;
-    out->has_txid = zti_nonzero(payload->txid, 32);
+    out->has_txid = zcl_bytes_any_set(payload->txid, 32);
     memcpy(out->txid, payload->txid, 32);
     out->broadcast = row->state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
                      row->state <= VAULT_INTENT_REORGED;
@@ -347,7 +341,7 @@ struct zcl_result zslp_transaction_intent_plan(
     if (!prepared.ok || raw_len == 0 || input_count == 0 ||
         payload.actual_fee_zat < 0 ||
         payload.actual_fee_zat > rt->maximum_fee_zat ||
-        !zti_nonzero(payload.txid, 32)) {
+        !zcl_bytes_any_set(payload.txid, 32)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
         memory_cleanse(&payload, sizeof(payload));
         free(raw); free(inputs);

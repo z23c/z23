@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Owner-private paid-content registration, restart, and tamper tests. */
 
+#include "platform/directory_compat.h"
 #include "test/test_core.h"
 
 #include "base/hex.h"
@@ -11,6 +12,8 @@
 #include "models/file_offer.h"
 #include "models/market_content.h"
 #include "net/file_market.h"
+#include "platform/positioned_file.h"
+#include "platform/positioned_io.h"
 #include "platform/time_compat.h"
 #include "rpc/server.h"
 #include "sapling/sapling.h"
@@ -25,11 +28,58 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+#if defined(_WIN32) && !defined(O_CLOEXEC)
+/* mingw's <fcntl.h> ships no O_CLOEXEC and no close-on-exec emulation. This
+ * file exercises fork-free, single-process fixture I/O only; the flag is a
+ * hygiene no-op here regardless of platform, so a zero fallback keeps the
+ * open() calls below syntactically valid on Windows without touching the
+ * value POSIX platforms see. */
+#define O_CLOEXEC 0
+#endif
+
 #define CONTENT_CHECK(label, condition) do {                         \
     printf("file_market content: %s... ", (label));                 \
     if (condition) printf("OK\n");                                  \
     else { printf("FAIL\n"); failures++; }                          \
 } while (0)
+
+static bool content_symlink_create(const char *target, const char *link)
+{
+#if defined(_WIN32)
+    DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if (CreateSymbolicLinkA(link, target, flags) != 0)
+        return true;
+    return GetLastError() == ERROR_INVALID_PARAMETER &&
+           CreateSymbolicLinkA(link, target, 0) != 0;
+#else
+    return symlink(target, link) == 0;
+#endif
+}
+
+static bool content_special_create(const char *path)
+{
+#if defined(_WIN32)
+    return platform_directory_create(path, 0700) == 0;
+#else
+    return mkfifo(path, 0600) == 0;
+#endif
+}
+
+static bool content_canonical_file(const char *path, char *canonical,
+                                   size_t canonical_size)
+{
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    bool ok = platform_positioned_file_open(&file, path) &&
+              platform_positioned_file_path(&file, canonical,
+                                            canonical_size);
+    platform_positioned_file_close(&file);
+    return ok;
+}
 
 static bool content_write_file(const char *path, const uint8_t *data,
                                size_t size)
@@ -157,8 +207,8 @@ int file_market_content_tests(void)
     char dir[256], dbpath[512], filepath[512], symlink_path[512];
     char fifo_path[512], wrong_path[512];
     snprintf(dir, sizeof(dir), "./test-tmp/market_content_%d", (int)getpid());
-    (void)mkdir("./test-tmp", 0700);
-    if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+    (void)platform_directory_create("./test-tmp", 0700);
+    if (platform_directory_create(dir, 0700) != 0 && errno != EEXIST) {
         CONTENT_CHECK("create fixture directory", false);
         return failures;
     }
@@ -167,10 +217,23 @@ int file_market_content_tests(void)
     snprintf(symlink_path, sizeof(symlink_path), "%s/content-link", dir);
     snprintf(fifo_path, sizeof(fifo_path), "%s/content-fifo", dir);
     snprintf(wrong_path, sizeof(wrong_path), "%s/wrong.bin", dir);
+#if defined(_WIN32)
+    /* No mkfifo, and symlink creation needs a privilege this host may not
+     * grant (CreateSymbolicLinkA -> ERROR_PRIVILEGE_NOT_HELD), so the
+     * non-regular-file refusal fixtures cannot be built. */
     bool files_ready = content_write_file(filepath, payload, sizeof(payload)) &&
-        symlink(filepath, symlink_path) == 0 && mkfifo(fifo_path, 0600) == 0 &&
         content_write_file(wrong_path, payload, sizeof(payload) - 1);
-    CONTENT_CHECK("regular, symlink, fifo, and mismatch fixtures", files_ready);
+    CONTENT_CHECK("regular and mismatch fixtures", files_ready);
+    (void)symlink_path;
+    (void)fifo_path;
+#else
+    bool files_ready = content_write_file(filepath, payload, sizeof(payload)) &&
+        content_symlink_create(filepath, symlink_path) &&
+        content_special_create(fifo_path) &&
+        content_write_file(wrong_path, payload, sizeof(payload) - 1);
+    CONTENT_CHECK("regular, symlink, special, and mismatch fixtures",
+                  files_ready);
+#endif
 
     int64_t now_unix = (int64_t)platform_time_wall_time_t();
     struct file_offer offer;
@@ -241,12 +304,19 @@ int file_market_content_tests(void)
         memcmp(loaded.sha3, chunk_sha3, 32) == 0);
     free(loaded.data);
 
+#if !defined(_WIN32)
     result = file_market_content_register(
         &ndb, offer.offer_id, symlink_path, now_unix + 1, &registered);
     CONTENT_CHECK("symbolic-link registration fails closed", !result.ok);
     result = file_market_content_register(
         &ndb, offer.offer_id, fifo_path, now_unix + 1, &registered);
-    CONTENT_CHECK("nonblocking FIFO registration fails closed", !result.ok);
+    CONTENT_CHECK("non-regular registration fails closed", !result.ok);
+#else
+    printf("file_market_content: SKIP (Windows): symbolic-link registration "
+           "fails closed (fixture unbuildable)\n");
+    printf("file_market_content: SKIP (Windows): nonblocking FIFO "
+           "registration fails closed (no mkfifo)\n");
+#endif
     result = file_market_content_register(
         &ndb, offer.offer_id, wrong_path, now_unix + 1, &registered);
     CONTENT_CHECK("signed size mismatch fails before persistence", !result.ok);
@@ -327,13 +397,17 @@ int file_market_content_tests(void)
 
     /* An in-place rewrite that restores its old mtime with utimensat(2)
      * must still refuse: ctime cannot be set backwards, so the key misses,
-     * the bytes are re-hashed, and the registration digest disagrees. */
+     * the bytes are re-hashed, and the registration digest disagrees.
+     * st_atim/st_mtim and AT_FDCWD/utimensat(2) are POSIX-only (no Windows
+     * struct stat member or call has this shape), so this sub-test is not
+     * exercised on Windows, only kept syntactically valid there. */
+#if !defined(_WIN32)
     struct stat before_rewrite;
     bool captured = stat(filepath, &before_rewrite) == 0;
     int rewrite_fd = open(filepath, O_WRONLY | O_CLOEXEC);
     uint8_t swapped = (uint8_t)(payload[0] ^ 0xffu);
     bool rewrote = captured && rewrite_fd >= 0 &&
-        pwrite(rewrite_fd, &swapped, 1, 0) == 1;
+        platform_positioned_write(rewrite_fd, &swapped, 1, 0) == 1;
     if (rewrite_fd >= 0)
         close(rewrite_fd);
     const struct timespec keep_times[2] = {
@@ -345,10 +419,12 @@ int file_market_content_tests(void)
         &ndb, offer.offer_id, 0, &loaded);
     CONTENT_CHECK("mtime-frozen rewrite cannot ride the digest table",
                   clock_frozen && !load_result.ok && loaded.data == NULL);
+#endif /* !defined(_WIN32) */
 
     int mutate_fd = open(filepath, O_WRONLY | O_CLOEXEC);
     uint8_t changed = (uint8_t)(payload[0] ^ 0xffu);
-    bool mutated = mutate_fd >= 0 && pwrite(mutate_fd, &changed, 1, 0) == 1;
+    bool mutated = mutate_fd >= 0 &&
+        platform_positioned_write(mutate_fd, &changed, 1, 0) == 1;
     if (mutate_fd >= 0) close(mutate_fd);
     load_result = file_market_content_load_chunk(
         &ndb, offer.offer_id, 0, &loaded);
@@ -365,8 +441,8 @@ int file_market_content_tests(void)
         char wdir[256], wdbpath[512];
         snprintf(wdir, sizeof(wdir), "./test-tmp/market_index_window_%d",
                  (int)getpid());
-        (void)mkdir("./test-tmp", 0700);
-        if (mkdir(wdir, 0700) != 0 && errno != EEXIST) {
+        (void)platform_directory_create("./test-tmp", 0700);
+        if (platform_directory_create(wdir, 0700) != 0 && errno != EEXIST) {
             CONTENT_CHECK("create index window fixture directory", false);
             node_db_close(&ndb);
             test_cleanup_tmpdir(dir);
@@ -622,8 +698,10 @@ int file_market_content_tests(void)
                  dir);
         bool alternate_ready =
             content_write_file(alternate_path, payload, sizeof(payload)) &&
-            realpath(gate_path, canonical_gate) &&
-            realpath(alternate_path, canonical_alternate);
+            content_canonical_file(gate_path, canonical_gate,
+                                   sizeof(canonical_gate)) &&
+            content_canonical_file(alternate_path, canonical_alternate,
+                                   sizeof(canonical_alternate));
         uint8_t before_same_second[32], after_same_second[32];
         char state_name[MARKET_CONTENT_REGISTRATION_STATE_MAX];
         struct zcl_result before_plan = alternate_ready

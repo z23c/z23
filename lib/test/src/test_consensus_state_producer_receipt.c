@@ -8,6 +8,7 @@
 
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "config/consensus_state_producer_receipt.h"
 #include "config/consensus_state_snapshot_export.h"
 #include "chain/checkpoints.h"
@@ -396,17 +397,16 @@ int test_consensus_state_producer_receipt(void)
     int failures = 0;
     uint8_t running_digest_a[32] = {0};
     uint8_t running_digest_b[32] = {0};
-    uint8_t running_any = 0;
     bool running_a_ok =
         consensus_state_producer_receipt_test_running_binary_digest(
             running_digest_a);
     bool running_b_ok =
         consensus_state_producer_receipt_test_running_binary_digest(
             running_digest_b);
-    for (size_t i = 0; i < sizeof(running_digest_a); i++)
-        running_any |= running_digest_a[i];
     PR_CHECK("running image handle digest is stable and nonzero",
-             running_a_ok && running_b_ok && running_any != 0 &&
+             running_a_ok && running_b_ok &&
+                 zcl_bytes_any_set(running_digest_a,
+                                   sizeof(running_digest_a)) &&
                  memcmp(running_digest_a, running_digest_b,
                         sizeof(running_digest_a)) == 0);
     consensus_state_producer_receipt_test_set_identity(PR_TEST_SOURCE_ID,
@@ -422,11 +422,12 @@ int test_consensus_state_producer_receipt(void)
     PR_CHECK("owned progress store opens", progress_store_open(dir));
     sqlite3 *db = progress_store_db();
 
-    uint8_t hash[2][32] = {{0}};
+    uint8_t hash[3][32] = {{0}};
     uint8_t nf[32] = {0};
     for (size_t i = 0; i < 32; i++) {
         hash[0][i] = (uint8_t)(0x21u + i);
         hash[1][i] = (uint8_t)(0x61u + i);
+        hash[2][i] = (uint8_t)(0x81u + i);
         nf[i] = (uint8_t)(0xa1u + i);
     }
 
@@ -619,6 +620,24 @@ int test_consensus_state_producer_receipt(void)
              accepted.nullifier_count == 1 &&
              lstat(accepted_output, &st) == 0 && S_ISREG(st.st_mode));
 
+    /* Standing export cadence: the same receipt-owning producer may advance
+     * the singleton to a strictly higher, newly linked corpus.  This was
+     * previously impossible: the monotonic guard admitted h=2, then the
+     * generic conflict branch rejected it unconditionally. */
+    PR_CHECK("producer fixture extends the linked header corpus",
+             pr_insert_header(db, 2, hash[2], hash[1]));
+    PR_CHECK("producer receipt advances monotonically under the same session",
+             consensus_state_producer_receipt_finalize(db, 2, hash[2], err,
+                                                        sizeof(err)) &&
+             pr_scalar_true(db,
+                 "SELECT fold_cursor=3 FROM consensus_state_source_receipt "
+                 "WHERE singleton=1"));
+    PR_CHECK("producer receipt refuses a backward re-finalize",
+             !consensus_state_producer_receipt_finalize(db, 1, hash[1], err,
+                                                         sizeof(err)) &&
+             strstr(err, "cannot move the committed fold cursor backward") !=
+                 NULL);
+
     /* TAMPER: flip a byte of the receipt digest — the exporter refuses. */
     char tamper_output[640];
     snprintf(tamper_output, sizeof(tamper_output), "%s/tamper.bundle.db",
@@ -634,7 +653,7 @@ int test_consensus_state_producer_receipt(void)
              !producer_status.receipt_finalized &&
              strstr(status_err, "digest verification") != NULL);
     PR_CHECK("finalize refuses to overwrite conflicting durable evidence",
-             !consensus_state_producer_receipt_finalize(db, 1, hash[1], err,
+             !consensus_state_producer_receipt_finalize(db, 2, hash[2], err,
                                                          sizeof(err)) &&
              strstr(err, "conflicting finalized receipt") != NULL);
     struct consensus_state_export_result tampered;

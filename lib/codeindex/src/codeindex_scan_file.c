@@ -13,7 +13,7 @@
 
 bool ci_scan_file(const char *root, const char *relpath,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
-                  uint8_t out_sha3[32], char purpose_out[160])
+                  uint8_t out_sha3[32], char purpose_out[CI_FILE_PURPOSE_MAX])
 {
     if (purpose_out) purpose_out[0] = '\0';
     if (!root || !relpath || !on_sym || !on_ref)

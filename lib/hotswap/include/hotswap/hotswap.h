@@ -34,10 +34,12 @@ extern "C" {
  * need the dump signature. */
 struct json_value;
 
-/* Resident native-image activation is currently proved only for Linux DEV
- * builds. Other platforms retain the pure admission and status surfaces but
- * fail closed before dynamic loading. */
-#if defined(ZCL_DEV_BUILD) && defined(__linux__) && !defined(_WIN32)
+/* Resident native-image activation is proved for Linux DEV builds and, as of
+ * the macOS bring-up, for Apple DEV builds with a Mach-O probe + immutable
+ * staged image. Other platforms retain the pure admission and status surfaces
+ * but fail closed before dynamic loading. */
+#if defined(ZCL_DEV_BUILD) && !defined(_WIN32) && \
+    (defined(__linux__) || defined(__APPLE__))
 #define ZCL_HOTSWAP_NATIVE_AVAILABLE 1
 #else
 #define ZCL_HOTSWAP_NATIVE_AVAILABLE 0
@@ -50,10 +52,10 @@ static inline bool hotswap_native_activation_available(void)
 
 static inline const char *hotswap_native_unavailable_stage(void)
 {
-#if defined(_WIN32)
+#if !defined(ZCL_DEV_BUILD)
+    return "release";
+#elif defined(_WIN32)
     return "windows";
-#elif defined(__APPLE__)
-    return "macos";
 #else
     return "release";
 #endif
@@ -61,12 +63,11 @@ static inline const char *hotswap_native_unavailable_stage(void)
 
 static inline const char *hotswap_native_unavailable_reason(void)
 {
-#if defined(_WIN32)
+#if !defined(ZCL_DEV_BUILD)
+    return "hotswap unavailable in release build";
+#elif defined(_WIN32)
     return "native Windows DLL hot-swap is disabled pending sandbox and "
            "validated immutable PE loading";
-#elif defined(__APPLE__)
-    return "native macOS hot-swap is disabled pending validated Mach-O "
-           "imports and immutable executable-image staging";
 #else
     return "hotswap unavailable in release build";
 #endif

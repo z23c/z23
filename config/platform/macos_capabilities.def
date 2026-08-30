@@ -1,0 +1,22 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ *
+ * Declarative darwin-arm64 capability truth.  This is deliberately data, not
+ * prose: tools/scripts/macos_acceptance.sh validates the closed capability
+ * set and derives the exact registered-test aggregate from the final field.
+ *
+ * ZCL_MACOS_CAPABILITY(id, state, reason_code, exact_test_groups_csv)
+ * state is one of available, degraded, unavailable.  A capability may be
+ * unavailable and still name evidence: that group proves the refusal path. */
+ZCL_MACOS_CAPABILITY(node, available, native_public_node, test_boot_shutdown_marker_persistence,test_net,test_rpc)
+ZCL_MACOS_CAPABILITY(arm_acceleration, available, runtime_gated_and_oracle_checked_apple_arm_tiers, test_arm_hw_tiers,test_sha256_isa_parity,test_blake2b_batch_parity,test_sha3_256_x4,test_sha3_512_x4,test_encoding,test_hw_profile)
+ZCL_MACOS_CAPABILITY(wallet, available, native_wallet_custody, test_wallet,test_wallet_backup)
+ZCL_MACOS_CAPABILITY(tor, available, embedded_full_tor_when_archive_present, test_tor)
+ZCL_MACOS_CAPABILITY(noise, available, native_noise_transport, test_noise_nk_handshake,test_noise_xx_handshake,test_noise_transport_parity)
+ZCL_MACOS_CAPABILITY(kqueue, available, native_recursive_directory_watcher, test_directory_watcher,test_watcher_record)
+ZCL_MACOS_CAPABILITY(launchd, available, native_launchagent_lifecycle, test_service_state,test_service_state_driver)
+ZCL_MACOS_CAPABILITY(scheduler_qos, available, apple_background_qos_applied_before_worker_entry, test_thread_qos)
+ZCL_MACOS_CAPABILITY(resident_confinement, unavailable, landlock_and_seccomp_are_linux_only, test_os_sandbox,test_confine)
+ZCL_MACOS_CAPABILITY(package_execution, degraded, rlimits_are_not_full_isolation, test_os_sandbox,test_sandbox_process_budget,test_zcode_verify)
+ZCL_MACOS_CAPABILITY(release_packaging, unavailable, notarized_darwin_release_not_published, test_z23_front_door)
+ZCL_MACOS_CAPABILITY(hot_activation, unavailable, descriptor_bound_ab_execution_unavailable, test_binary_ab_fallback,test_dev_activation)
+ZCL_MACOS_CAPABILITY(snapshot_export, unavailable, o_tmpfile_consensus_export_unavailable, test_fast_sync_coins_export)

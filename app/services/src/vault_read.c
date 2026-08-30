@@ -16,6 +16,7 @@
 
 #include "chain/chainparams.h"
 #include "config/runtime.h"
+#include "core/uint256.h"
 #include "json/json.h"
 #include "keys/key_io.h"
 #include "models/activerecord.h"
@@ -25,6 +26,7 @@
 #include "models/wallet_key.h"
 #include "models/wallet_tx.h"
 #include "models/znam.h"
+#include "models/zslp.h"
 #include "models/zslp_ledger.h"
 #include "net/file_market.h"
 #include "script/htlc.h"
@@ -45,7 +47,6 @@
 #define VAULT_MAX_SWAPS     512
 #define VAULT_MAX_OFFERS    FILE_MARKET_MAX_OFFERS
 #define VAULT_MAX_NAMES     256
-#define VAULT_MAX_TOKENS    256
 
 /* A raw Sapling payment address is diversifier(11) || pk_d(32); that is
  * exactly the 43 bytes file_offers.z_addr stores. */
@@ -241,12 +242,14 @@ static bool ident_owns_z_raw(const struct vault_ident *ids,
  * The difference is immature coinbase — owned, but not spendable yet. */
 static void collect_transparent(struct node_db *ndb,
                                 const struct vault_ident *ids,
+                                struct vault_snapshot *snap,
                                 struct vault_row *row)
 {
     int utxo_count = 0;
     int64_t total, spendable;
 
     (void)ids;
+    (void)snap;
     total     = db_wallet_utxo_balance_with_count(ndb, &utxo_count);
     spendable = db_wallet_utxo_spendable_balance(ndb, NULL);
 
@@ -264,11 +267,13 @@ static void collect_transparent(struct node_db *ndb,
  * decrypted with its own incoming viewing key, so membership is ownership. */
 static void collect_shielded(struct node_db *ndb,
                              const struct vault_ident *ids,
+                             struct vault_snapshot *snap,
                              struct vault_row *row)
 {
     int note_count = 0;
 
     (void)ids;
+    (void)snap;
     row->spendable  = db_sapling_note_balance_with_count(ndb, &note_count);
     row->item_count = note_count;
     row_determined(row, VAULT_EVIDENCE_EXACT_NOTE_SUM,
@@ -277,22 +282,24 @@ static void collect_shielded(struct node_db *ndb,
                   "own viewing key");
 }
 
-/* ZSLP tokens. zslp_ledger is the debit-correct per-(token,outpoint)
- * projection; zslp_ledger_balance owns the arithmetic. This function only
- * enumerates which (token, our-address) pairs exist and adds up what that
- * primitive returns for each.
+/* ZSLP tokens. zslp_ledger_wallet_tokens is the debit-correct wallet-wide
+ * projection. It returns one balance per token ID; those balances must never
+ * be added because their units are unrelated.
  *
  * The projection is built by a backfill service, so an empty ledger is
  * ambiguous: it means either "holds no tokens" or "the backfill has not
  * run". The cursor distinguishes them, and a cursor still at -1 makes this
  * row undetermined rather than a confident zero. */
 static void collect_tokens(struct node_db *ndb, const struct vault_ident *ids,
+                           struct vault_snapshot *snap,
                            struct vault_row *row)
 {
     int32_t cursor = -1;
     uint8_t digest[32];
-    int64_t total = 0, pairs = 0;
-    bool saturated = false;
+    struct zslp_wallet_token held[VAULT_TOKEN_ITEMS_MAX + 1];
+    int n, metadata_missing = 0, metadata_errors = 0;
+
+    (void)ids;
 
     memset(digest, 0, sizeof(digest));
     if (!zslp_ledger_get_cursor(ndb, &cursor, digest)) {
@@ -306,64 +313,54 @@ static void collect_tokens(struct node_db *ndb, const struct vault_ident *ids,
                               "unbuilt projection as an empty wallet");
         return;
     }
-    if (ids->n_t == 0) {
-        row_determined(row, VAULT_EVIDENCE_EXACT_LEDGER_UNSPENT,
-                       "zslp_ledger_balance");
-        row_note(row, "no transparent identity to hold tokens against "
-                      "(cursor h=%d)", (int)cursor);
+    n = zslp_ledger_wallet_tokens(ndb, held, VAULT_TOKEN_ITEMS_MAX + 1);
+    snap->token_item_count = (size_t)(n > VAULT_TOKEN_ITEMS_MAX
+                                      ? VAULT_TOKEN_ITEMS_MAX : n);
+    snap->token_items_truncated = n > VAULT_TOKEN_ITEMS_MAX;
+    for (size_t i = 0; i < snap->token_item_count; i++) {
+        struct db_zslp_token_info meta;
+        int found;
+
+        memcpy(snap->token_items[i].token_id, held[i].token_id, 32);
+        snap->token_items[i].units = held[i].balance;
+        snap->token_items[i].utxo_count = held[i].utxo_count;
+        memset(&meta, 0, sizeof(meta));
+        found = db_zslp_asset_lookup(ndb, held[i].token_id, &meta);
+        if (found == 1) {
+            (void)snprintf(snap->token_items[i].ticker,
+                           sizeof(snap->token_items[i].ticker), "%s",
+                           meta.ticker);
+            (void)snprintf(snap->token_items[i].name,
+                           sizeof(snap->token_items[i].name), "%s",
+                           meta.name);
+            snap->token_items[i].decimals = meta.decimals;
+            snap->token_items[i].metadata_available = true;
+        } else if (found == 0) {
+            metadata_missing++;
+        } else {
+            metadata_errors++;
+        }
+    }
+    row->item_count = (int64_t)snap->token_item_count;
+
+    if (snap->token_items_truncated) {
+        row_undetermined(row, "more than %d distinct tokens are held; the "
+                              "bounded item list is partial",
+                         VAULT_TOKEN_ITEMS_MAX);
+        return;
+    }
+    if (metadata_errors > 0 || metadata_missing > 0) {
+        row_undetermined(row, "%d held token definitions missing and %d "
+                              "metadata lookups failed; item balances are "
+                              "shown but the holdings view is incomplete",
+                         metadata_missing, metadata_errors);
         return;
     }
 
-    for (int i = 0; i < ids->n_t && !saturated; i++) {
-        uint8_t tokens[VAULT_MAX_TOKENS][32];
-        int n_tokens = 0;
-        sqlite3_stmt *s = NULL;
-
-        /* Enumeration only — which tokens does this address hold unspent
-         * rows for. Not a balance: every amount below comes back from
-         * zslp_ledger_balance. */
-        if (!vault_prepare(ndb, &s,
-                "SELECT DISTINCT token_id FROM zslp_ledger"
-                " WHERE address=? AND spent_by_txid IS NULL LIMIT ?")) {
-            row_undetermined(row, "zslp_ledger token enumeration failed for "
-                                  "identity %d of %d", i + 1, ids->n_t);
-            return;
-        }
-        AR_BIND_BLOB(s, 1, ids->t_hash[i], 20);
-        AR_BIND_INT(s, 2, VAULT_MAX_TOKENS);
-        while (AR_STEP_ROW(s)) {
-            const void *t = sqlite3_column_blob(s, 0);
-            if (!t || sqlite3_column_bytes(s, 0) != 32)
-                continue;
-            if (n_tokens >= VAULT_MAX_TOKENS) {
-                saturated = true;
-                break;
-            }
-            memcpy(tokens[n_tokens++], t, 32);
-        }
-        AR_FINALIZE(s);
-        if (n_tokens >= VAULT_MAX_TOKENS)
-            saturated = true;
-
-        for (int t = 0; t < n_tokens; t++) {
-            total += zslp_ledger_balance(ndb, tokens[t], ids->t_hash[i]);
-            pairs++;
-        }
-    }
-
-    if (saturated) {
-        row_undetermined(row, "more than %d distinct tokens on one address: "
-                              "the total would be partial",
-                         VAULT_MAX_TOKENS);
-        return;
-    }
-
-    row->spendable  = total;
-    row->item_count = pairs;
     row_determined(row, VAULT_EVIDENCE_EXACT_LEDGER_UNSPENT,
-                   "zslp_ledger_balance");
-    row_note(row, "sum over %lld (token,address) pairs; projection folded "
-                  "through h=%d", (long long)pairs, (int)cursor);
+                   "zslp_ledger_wallet_tokens");
+    row_note(row, "%zu token IDs held; balances remain separate; projection "
+                  "folded through h=%d", snap->token_item_count, (int)cursor);
 }
 
 /* ZNAM names. znam_names.owner_address is a direct ownership column, so a
@@ -371,12 +368,14 @@ static void collect_tokens(struct node_db *ndb, const struct vault_ident *ids,
  * (expiry_height) are recorded but not enforced by resolution today, so
  * every owned name counts as held. */
 static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
+                          struct vault_snapshot *snap,
                           struct vault_row *row)
 {
     struct znam_entry *entries;
     int64_t held = 0;
     bool saturated = false;
 
+    (void)snap;
     if (ids->n_t == 0) {
         row_determined(row, VAULT_EVIDENCE_EXACT_OWNER_ADDRESS_MATCH,
                        "db_znam_list_by_owner");
@@ -444,12 +443,14 @@ static void collect_names(struct node_db *ndb, const struct vault_ident *ids,
  * a ZCL total would be a unit error, so those are counted separately and
  * named in the row's note. */
 static void collect_swaps(struct node_db *ndb, const struct vault_ident *ids,
+                          struct vault_snapshot *snap,
                           struct vault_row *row)
 {
     struct swap_contract *swaps;
     int n, foreign = 0, unmatched = 0;
     int64_t encumbered = 0, pending = 0, live = 0;
 
+    (void)snap;
     swaps = zcl_calloc(VAULT_MAX_SWAPS, sizeof(*swaps), "vault_swaps");
     if (!swaps) {
         row_undetermined(row, "allocation for %d swap contracts failed",
@@ -506,12 +507,14 @@ static void collect_swaps(struct node_db *ndb, const struct vault_ident *ids,
  * With no Sapling key there is nothing to match against and the row is
  * undetermined rather than zero. */
 static void collect_market(struct node_db *ndb, const struct vault_ident *ids,
+                           struct vault_snapshot *snap,
                            struct vault_row *row)
 {
     struct file_offer *offers;
     int n;
     int64_t mine = 0;
 
+    (void)snap;
     if (ids->n_z == 0) {
         row_undetermined(row, "file_offers has no ownership column and this "
                               "node has no Sapling key to match z_addr "
@@ -553,6 +556,7 @@ static void collect_market(struct node_db *ndb, const struct vault_ident *ids,
 
 typedef void (*vault_collect_fn)(struct node_db *ndb,
                                  const struct vault_ident *ids,
+                                 struct vault_snapshot *snap,
                                  struct vault_row *row);
 
 static const struct vault_collector {
@@ -650,7 +654,7 @@ struct zcl_result vault_read_snapshot(struct node_db *ndb,
         struct vault_row *row = &out->rows[c->cls];
 
         row_begin(row, c->cls);
-        c->fn(ndb, ids, row);
+        c->fn(ndb, ids, out, row);
     }
     free(ids);
 
@@ -677,7 +681,8 @@ struct zcl_result vault_read_snapshot(struct node_db *ndb,
 
 /* ── json ─────────────────────────────────────────────────────────── */
 
-static void row_to_json(const struct vault_row *row, struct json_value *obj)
+static void row_to_json(const struct vault_snapshot *snap,
+                        const struct vault_row *row, struct json_value *obj)
 {
     json_set_object(obj);
     (void)json_push_kv_str(obj, "class", row->class_name);
@@ -694,6 +699,43 @@ static void row_to_json(const struct vault_row *row, struct json_value *obj)
     (void)json_push_kv_int(obj, "item_count", row->item_count);
     (void)json_push_kv_str(obj, row->determined ? "note" : "reason",
                            row->reason);
+    if (row->cls == VAULT_CLASS_TOKEN) {
+        struct json_value items;
+        json_init(&items);
+        json_set_array(&items);
+        for (size_t i = 0; i < snap->token_item_count; i++) {
+            struct uint256 token_id;
+            struct json_value item;
+            char token_hex[65];
+
+            memcpy(token_id.data, snap->token_items[i].token_id, 32);
+            uint256_get_hex(&token_id, token_hex);
+            json_init(&item);
+            json_set_object(&item);
+            (void)json_push_kv_str(&item, "id", token_hex);
+            (void)json_push_kv_int(&item, "units",
+                                   snap->token_items[i].units);
+            (void)json_push_kv_int(&item, "utxo_count",
+                                   snap->token_items[i].utxo_count);
+            (void)json_push_kv_bool(&item, "metadata_available",
+                                    snap->token_items[i].metadata_available);
+            if (snap->token_items[i].metadata_available) {
+                (void)json_push_kv_str(&item, "ticker",
+                                       snap->token_items[i].ticker);
+                (void)json_push_kv_str(&item, "name",
+                                       snap->token_items[i].name);
+                (void)json_push_kv_int(&item, "decimals",
+                                       snap->token_items[i].decimals);
+            }
+            (void)json_push_kv_bool(&item, "encumbered", false);
+            (void)json_push_back(&items, &item);
+            json_free(&item);
+        }
+        (void)json_push_kv(obj, "items", &items);
+        json_free(&items);
+        (void)json_push_kv_bool(obj, "items_truncated",
+                                snap->token_items_truncated);
+    }
 }
 
 struct zcl_result vault_read_snapshot_to_json(const struct vault_snapshot *snap,
@@ -724,7 +766,7 @@ struct zcl_result vault_read_snapshot_to_json(const struct vault_snapshot *snap,
     for (size_t i = 0; i < VAULT_CLASS_COUNT; i++) {
         struct json_value row;
         json_init(&row);
-        row_to_json(&snap->rows[i], &row);
+        row_to_json(snap, &snap->rows[i], &row);
         (void)json_push_back(&classes, &row);
         json_free(&row);
     }
@@ -782,7 +824,7 @@ bool vault_read_dump_state_json(struct json_value *out, const char *key)
             if (strcmp(snap.rows[i].class_name, key) != 0)
                 continue;
             json_init(&row);
-            row_to_json(&snap.rows[i], &row);
+            row_to_json(&snap, &snap.rows[i], &row);
             (void)json_push_kv(out, "selected", &row);
             json_free(&row);
             found = true;

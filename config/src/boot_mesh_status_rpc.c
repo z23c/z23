@@ -84,8 +84,17 @@ static bool rpc_mesh_status_request(const struct json_value *params, bool help,
             message = "the pairing has expired";
             break;
         case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED:
-            message = "the paired peer has no established Noise session; no "
-                      "dial is attempted";
+            message = "the paired peer has no established Noise session and "
+                      "no current direct route is available";
+            break;
+        case MESH_STATUS_BEGIN_ROUTE_PENDING:
+            message = "a bounded direct route is still being acquired";
+            break;
+        case MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH:
+            message = "the direct endpoint presented the wrong Noise identity";
+            break;
+        case MESH_STATUS_BEGIN_ROUTE_DOWNGRADE:
+            message = "the direct endpoint completed a plaintext handshake";
             break;
         case MESH_STATUS_BEGIN_NOISE_DISABLED:
             message = "the Noise transport is disabled on this node";

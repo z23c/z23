@@ -5,6 +5,7 @@
 #ifndef ZCL_BOOT_INTERNAL_H
 #define ZCL_BOOT_INTERNAL_H
 
+#include "net/netbase.h"
 #include "config/boot.h"
 #include "config/boot_flyclient.h"
 #include "config/db_service.h"
@@ -293,13 +294,14 @@ bool boot_profile_has_file_service(const struct app_context *ctx);
 
 /* ── boot_frontend_services.c ───────────────────────────────────
  * Clearnet frontend service lifecycle (file server, JSON-RPC HTTP, explorer
- * API cache, HTTPS explorer, miner, embedded Tor, store payment processor)
- * and the spec-table registrar that wires them into svc->frontend_kernel.
- * Not part of the SIGTERM shutdown sequence — the frontend kernel is torn
- * down by zcl_service_kernel_stop_all() from the boot_services.c shutdown
- * path. The runtime-profile gate accessors below STAY in boot_services.c
- * (several staying app_init call sites read them); they are declared here so
- * the frontend TU resolves them across the boundary. */
+ * API cache, HTTPS explorer, miner, embedded Tor) and the spec-table registrar
+ * that wires them into svc->frontend_kernel. The store payment adapters stay
+ * beside this composition but are owned by svc->runtime_kernel.
+ * The frontend kernel is torn down before network quiesce; the payment spec
+ * is separately torn down with the runtime kernel before persistence. The
+ * runtime-profile gate accessors below STAY in boot_services.c (several
+ * staying app_init call sites read them); they are declared here so the
+ * frontend TU resolves them across the boundary. */
 bool boot_profile_has_explorer(const struct app_context *ctx);
 bool boot_profile_has_store(const struct app_context *ctx);
 bool boot_profile_has_onion(const struct app_context *ctx);
@@ -309,6 +311,12 @@ bool boot_profile_has_onion(const struct app_context *ctx);
  * can cycle stop_all -> start_all over the REAL start/stop hooks in
  * isolation. Its start hook clears RPC warmup; its stop hook re-arms it. */
 struct zcl_service_spec boot_frontend_rpc_http_spec(struct boot_svc_ctx *svc);
+
+/* The node.db-writing store payment worker spec. Runtime registration starts
+ * it only after running=true and reverse-order runtime shutdown joins it before
+ * the DB/WAL/state durability boundary. */
+struct zcl_service_spec boot_store_payment_spec(struct boot_svc_ctx *svc);
+bool boot_register_store_payment_runtime(struct boot_svc_ctx *svc);
 
 /* FIX 1 (loader_owns_seed) — PURE seam for the daily-driver seed-clobber guard
  * at app_init_services (boot_services.c). When -load-snapshot-at-own-height is

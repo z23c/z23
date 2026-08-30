@@ -8,11 +8,12 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "19545f108524a16d1635abf327f60c73189838e684c8612128d53ab78f28c0a6",
+      "root": "14d3e982d5cfe5e4600b39ca2c8cca880f4941e678d9bb8159ec1310de3c866d",
       "name": "zclassic23/sha3",
       "semver": "0.1.0-dev.1"
     }
   ],
+  "capabilities": [],
   "files": [
     "LICENSE",
     "include/crypto/sha3.h",

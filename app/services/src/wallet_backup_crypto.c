@@ -139,11 +139,20 @@ static bool wbs_write_file_atomic(const char *path,
         LOG_FAIL("wallet_backup", "write_file_atomic: NULL path or buf");
 
     char destination[1024], parent[1024];
+    /* The message names the next action, not just the symptom. "not a safe
+     * real directory" reads like corruption; the cause is almost always a
+     * RELATIVE destination whose parent does not exist yet — a `-datadir=./x`
+     * or a relative file argument. The resolver canonicalizes a relative
+     * parent that DOES exist, so the two cases are worth distinguishing for
+     * the reader rather than leaving them to guess. */
     if (!platform_private_destination_resolve(path, destination,
                                               sizeof(destination), parent,
                                               sizeof(parent)))
         LOG_FAIL("wallet_backup",
-                 "write_file_atomic: destination parent is not a safe real directory");
+                 "write_file_atomic: cannot resolve the parent directory of "
+                 "'%s' — pass an ABSOLUTE path and create the parent first "
+                 "(a relative destination, or a relative -datadir=, lands "
+                 "here)", path);
 
     struct platform_positioned_file existing;
     platform_positioned_file_init(&existing);

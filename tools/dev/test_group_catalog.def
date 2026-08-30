@@ -5,10 +5,12 @@
  * is transcript order and therefore stable evidence. */
 
 ZCL_TEST_GROUP(hex_codec)
+ZCL_TEST_GROUP(code_inventory)
 ZCL_TEST_GROUP(base_foundation)
 ZCL_TEST_GROUP(script_tail_poison)
 ZCL_TEST_GROUP(byte_order_codec)
 ZCL_TEST_GROUP(codec_cursor)
+ZCL_TEST_GROUP(determinism)
 ZCL_TEST_GROUP(zcode_creation_attribution)
 ZCL_TEST_GROUP(zcode_shadow_policy)
 ZCL_TEST_GROUP(zcode_score_receipt)
@@ -42,6 +44,10 @@ ZCL_TEST_GROUP(shared_validators_zcl_address)
 ZCL_TEST_GROUP(script)
 ZCL_TEST_GROUP(net)
 ZCL_TEST_GROUP(netbase_split_host_port)
+/* The install front door's release-pin judgement (lib/install), which used to
+ * live twice in shell and PowerShell and so was proved by neither runner. */
+ZCL_TEST_GROUP(z23_front_door)
+ZCL_TEST_GROUP(engine)
 ZCL_TEST_GROUP(acme_b64url)
 ZCL_TEST_GROUP(acme_challenge)
 ZCL_TEST_GROUP(acme_renewal)
@@ -57,6 +63,7 @@ ZCL_TEST_GROUP(accept_to_mempool)
 ZCL_TEST_GROUP(rpc)
 ZCL_TEST_GROUP(sqlite)
 ZCL_TEST_GROUP(activerecord)
+ZCL_TEST_GROUP(activerecord_query_builder)
 ZCL_TEST_GROUP(validation)
 ZCL_TEST_GROUP(sapling_lazy_init)
 ZCL_TEST_GROUP(sapling)
@@ -132,13 +139,16 @@ ZCL_TEST_GROUP(test_zmsg_memo_codec)
 ZCL_TEST_GROUP(zpay)
 ZCL_TEST_GROUP(zses)
 ZCL_TEST_GROUP(mesh_pairing)
+ZCL_TEST_GROUP(mesh_route)
 ZCL_TEST_GROUP(mesh_capability_grant)
+ZCL_TEST_GROUP(mesh_capability_proto)
 ZCL_TEST_GROUP(mesh_pairing_controller)
 ZCL_TEST_GROUP(mesh_status_proto)
 /* mesh terminal open/receipt/data/resize/close wire codec and receipt proof */
 ZCL_TEST_GROUP(mesh_terminal_proto)
 ZCL_TEST_GROUP(mesh_private_object_proto)
 ZCL_TEST_GROUP(mesh_private_object_crypto)
+ZCL_TEST_GROUP(mesh_private_object_grant_pipeline)
 ZCL_TEST_GROUP(mesh_private_object_root)
 ZCL_TEST_GROUP(mesh_private_object_frame)
 ZCL_TEST_GROUP(mesh_private_object_stage)
@@ -187,6 +197,7 @@ ZCL_TEST_GROUP(agent_copy_prove)
 ZCL_TEST_GROUP(agent_test)
 ZCL_TEST_GROUP(source_identity_authority)
 ZCL_TEST_GROUP(db_txn)
+ZCL_TEST_GROUP(model_fields)
 ZCL_TEST_GROUP(sync_service)
 ZCL_TEST_GROUP(node_db_catchup_service)
 ZCL_TEST_GROUP(catchup_lifecycle_service)
@@ -214,6 +225,7 @@ ZCL_TEST_GROUP(rom_manifest)
 ZCL_TEST_GROUP(rom_journal_resume)
 ZCL_TEST_GROUP(sync_trust_policy)
 ZCL_TEST_GROUP(code_capsule)
+ZCL_TEST_GROUP(code_have)
 ZCL_TEST_GROUP(code_impact)
 ZCL_TEST_GROUP(code_merkle)
 ZCL_TEST_GROUP(code_merkle_proof)
@@ -240,6 +252,8 @@ ZCL_TEST_GROUP(hotswap_rollback)
 ZCL_TEST_GROUP(dev_platform)
 ZCL_TEST_GROUP(impact_composition)
 ZCL_TEST_GROUP(dev_activation)
+ZCL_TEST_GROUP(devagent_surface)
+ZCL_TEST_GROUP(mutation_harness)
 ZCL_TEST_GROUP(command_registry_catalog)
 ZCL_TEST_GROUP(command_registry_latency)
 ZCL_TEST_GROUP(metaverse_agent_broker)
@@ -608,6 +622,9 @@ ZCL_TEST_GROUP(seal_ratify)
 ZCL_TEST_GROUP(vcs_core)
 ZCL_TEST_GROUP(vcs_release)
 ZCL_TEST_GROUP(vcs_accept)
+/* The receiver's own re-derivation of a package capability claim: what a
+ * node that never met the publisher can check for itself. */
+ZCL_TEST_GROUP(package_capability_claim)
 ZCL_TEST_GROUP(zcode_store)
 ZCL_TEST_GROUP(zcode_publish)
 ZCL_TEST_GROUP(zcode_package_dev)
@@ -656,9 +673,68 @@ ZCL_TEST_GROUP(zcode_benchmark_exec)
 ZCL_TEST_GROUP(zcode_discovery_projection)
 ZCL_TEST_GROUP(vcs_devloop)
 ZCL_TEST_GROUP(codeindex)
+ZCL_TEST_GROUP(fingerprint)
+ZCL_TEST_GROUP(territory)
+/* BM25 ranked retrieval. The group exists for the properties a ranking has
+ * to have before one node can quote it to another: the same corpus and the
+ * same query give the same list, ties included; a rarer term outranks a
+ * common one; and an index that failed an insertion answers nothing at all
+ * rather than answering from a corpus with holes in it. */
+ZCL_TEST_GROUP(retrieval)
+/* A proof receipt: one node's claim that a named group reached a named
+ * verdict over an exactly identified tree, and the rule a receiver applies.
+ * The group exists for the refusals: only a PASS carrying a measured vector
+ * publishes as a pass, an ineligible group produces no receipt at all rather
+ * than an empty one, and belief is never read off the wire. */
+/* A durable hash-chained log. The group exists for the distinction the
+ * module is built around: an interrupted append leaves an uncommitted tail
+ * that recovery may discard, and an altered frame is refused and left
+ * exactly where it is. Confusing the two would either lose history or
+ * destroy the evidence that history was changed. */
+ZCL_TEST_GROUP(chainlog)
+/* The build's own numbers, recorded rather than remembered. The group exists
+ * for one distinction: a metric whose artifact could not be read is
+ * UNAVAILABLE and encodes differently from a metric that honestly measured
+ * zero. Collapsing those two would make every delta computed across the
+ * boundary a fiction, so the encoding is asserted directly rather than
+ * inferred from a rendered number. */
+ZCL_TEST_GROUP(kpi)
+/* The claim register. The group exists for one refusal and one derivation:
+ * a claim that does not say how it could be shown wrong is refused by the
+ * field that is missing, and a claim's status is COMPUTED from its trials
+ * with no path by which a caller could assert it. The lopsided-but-untested
+ * case is the load-bearing one — a huge-looking effect on three trials is
+ * still UNTESTED, and skipping that check is how a register of measurements
+ * becomes a register of impressions. */
+ZCL_TEST_GROUP(science)
+/* The batching landing queue. The group exists for one distinction and one
+ * guarantee. The distinction: "the gate did not run" and "the gate passed"
+ * are different facts, so four cases try to fabricate a landing through the
+ * four ways that could collapse — no gate run, a run that did not contain
+ * this submission, a red run, and a run that skipped its groups — and each
+ * must refuse by name. The guarantee: a red batch refuses ONLY the culprit,
+ * because a batch that rejected an agent's work over a stranger's bug would
+ * be worse than not batching at all. */
+ZCL_TEST_GROUP(land_queue)
+ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)
 ZCL_TEST_GROUP(metaverse_catalog)
+ZCL_TEST_GROUP(node_character)
+/* A node's character with a birthday, in the fixed 128-byte form it travels
+ * in, and the rule a receiving node applies to it. The assertion the group
+ * exists for is that verify() accepts EXACTLY the self-consistent frames —
+ * driven against an independent oracle over every single-bit mutation — and
+ * that a claimed standing never becomes a believed one: a stranger recomputes
+ * form and chart, refuses any disagreement, and still believes zero energy
+ * however much the sheet claims. */
+ZCL_TEST_GROUP(node_character_wire)
+/* A role-playing character held as content-addressed property, whose six
+ * attributes are derived from a birth chart. The assertion the group exists
+ * for is that the attribute TOTAL is identical for every character over many
+ * thousands of seeds — the anti-grinding property, since the owner picks the
+ * birth moment — while the chart still decides a genuinely varying spread. */
+ZCL_TEST_GROUP(character_sheet)
 ZCL_TEST_GROUP(metaverse_site)
 ZCL_TEST_GROUP(site_routes)
 ZCL_TEST_GROUP(space)
@@ -891,6 +967,7 @@ ZCL_TEST_GROUP(rpc_safety)
 ZCL_TEST_GROUP(rpc_service_restart)
 ZCL_TEST_GROUP(app_context)
 ZCL_TEST_GROUP(service_kernel)
+ZCL_TEST_GROUP(payment_shutdown_owner)
 ZCL_TEST_GROUP(service_manifest)
 ZCL_TEST_GROUP(service_binding)
 ZCL_TEST_GROUP(app_checkpoint_manifest)
@@ -1032,6 +1109,12 @@ ZCL_TEST_GROUP(replay_receipt_root)
  * of the watcher family sits behind #if defined(_WIN32). */
 ZCL_TEST_GROUP(directory_watcher)
 ZCL_TEST_GROUP(watcher_record)
+/* astro lane: lib/astro's exact fixed-grid arithmetic and the birth chart
+ * built on it. The determinism cases are the point — a chart another node
+ * recomputes must match bit for bit, so the group asserts that property by
+ * construction against a `double` control rather than against golden
+ * numbers. */
+ZCL_TEST_GROUP(astro)
 /* vendored FreeBSD /bin/sh smoke acceptance: execs build/bin/fbsh (a
  * standalone `make fbsh` artifact, deliberately not a prerequisite of
  * the test binaries) and skips when it is absent. */

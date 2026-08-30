@@ -308,6 +308,13 @@ void zcl_native_handle_code_refs(
 void zcl_native_handle_code_find(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.have — "does this checkout ALREADY DO X?" Ranks capabilities by
+ * concept (stemmed terms over symbol names, doc comments, file purposes,
+ * paths and groups), reports how many files actually CALL each one, and
+ * returns a verdict derived from those same numbers. */
+void zcl_native_handle_code_have(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.map — the whole-tree map: the 9 root groups (aggregate file counts +
  * purposes) and the 8 app/ shapes (direct file counts), plus a total. */
 void zcl_native_handle_code_map(
@@ -339,6 +346,52 @@ void zcl_native_handle_code_impact(
  * bytes hashed, directory nodes recomputed). Backed by
  * lib/codeindex/src/codeindex_merkle.c; does not open the symbol index. */
 void zcl_native_handle_code_merkle(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+/* code.territory — one module's generated scorecard: the files/bytes it owns,
+ * its purpose, the registered groups its files ROUTE to, and — kept strictly
+ * apart from routing — how many of its public functions a registered test
+ * entry point actually REACHES through the call graph, plus include-edge
+ * neighbours both ways and the weak spots. reached + unreached + unknown
+ * always equals public_symbols. Backed by lib/territory; the registered
+ * catalog (tools/dev) and the changed-file router (app/controllers) are handed
+ * in as ports because lib/ sits below both. */
+void zcl_native_handle_code_territory(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+/* code.corpus — honest distance to 100M lines of proven, non-duplicated C23.
+ * Two readings kept apart: a live walk of the maintained C23 roots for lines,
+ * and the generated capability inventory for what a registered test actually
+ * reaches, plus a scope check saying whether those two walks saw the same
+ * tree. Backed by lib/science/science_corpus.c; opens no code index. The
+ * reply leads with the UNPROVEN count, which is the point of the leaf. */
+void zcl_native_handle_code_corpus(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* code.kpi — the build's own numbers, recorded rather than remembered. Reads
+ * artifacts the build already writes plus the code index's territory rows,
+ * appends one canonical frame to <root>/.codeindex/kpi.chainlog, and reports
+ * each metric against the most recent PRIOR frame with its direction, verdict
+ * and the exact drill-down command. The only code.* leaf that writes, which is
+ * why it is classed MUTATE. A metric whose artifact could not be read is
+ * UNAVAILABLE and is never rendered as 0. Backed by lib/kpi. */
+void zcl_native_handle_code_kpi(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* general — the dispatch brief for one territory (owns / proves / trusts /
+ * weak at / refuses), or with no argument the roll-up across every territory
+ * ranked by where the evidence is weakest. Every field is generated per call
+ * from the code index, the registered test catalog, the shared impact router,
+ * and the lint gate wiring; nothing is stored, because a written brief goes
+ * stale the way a MAINTAINERS file does.
+ *
+ * A GENERAL GRANTS NO AUTHORITY. It reports and never decides — no approval,
+ * no gate, no veto, no privileged owner. "No referee, no authority — everyone
+ * runs a full node" is the project's rule, and metaverse_grant_check() stays
+ * the only answer to what anything may do. Do not add an approval path here. */
+void zcl_native_handle_general(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
@@ -2232,6 +2285,23 @@ void zcl_native_handle_rom_fetch_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_rom_fetch_bundle(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* dev.agent.* — the checkout questions an agent asks most often, answered as
+ * one typed envelope so no agent has to compose shell. Deliberately NOT
+ * dev-build-only: an agent has the plain `z23` it just built, and a compat
+ * leaf redirecting to a second binary is the dead end this branch removes.
+ * Handlers in tools/command/native_devagent_command.c and
+ * native_devagent_mutate_command.c; they spawn only through lib/util spawn
+ * and link none of the dev-only devloop executors. */
+void zcl_native_handle_dev_agent_ready(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_test(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_mutate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 

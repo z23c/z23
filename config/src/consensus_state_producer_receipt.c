@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Producer-owned durable source receipt for the full-history exporter. */
 #include "config/consensus_state_producer_receipt.h"
+#include "base/hex.h"
 #include "consensus_state_producer_receipt_internal.h"
 #include "consensus_state_producer_receipt_final_internal.h"
 #include "storage/consensus_state_bundle_codec.h"
@@ -52,27 +53,6 @@ static bool set_err(char *err, size_t err_size, const char *msg)
     if (err && err_size)
         snprintf(err, err_size, "%s", msg);
     return false; /* raw-return-ok:bounded policy reason returned to caller */
-}
-static int lowercase_hex_nibble(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    return -1;
-}
-static bool decode_sha256_identity(const char *hex, uint8_t out[32])
-{
-    if (!hex || strnlen(hex, 65) != 64)
-        return false;
-    for (size_t i = 0; i < 32; i++) {
-        int high = lowercase_hex_nibble(hex[i * 2]);
-        int low = lowercase_hex_nibble(hex[i * 2 + 1]);
-        if (high < 0 || low < 0)
-            return false;
-        out[i] = (uint8_t)((high << 4) | low);
-    }
-    return true;
 }
 static bool producer_snapshot_equal(
     const struct platform_positioned_file_snapshot *a,
@@ -174,7 +154,7 @@ static bool fill_source_identity_claim(struct consensus_state_source_receipt *r)
         clean = g_override_clean;
     }
 #endif
-    if (!decode_sha256_identity(source_id, r->source_tree_root))
+    if (!zcl_hex_decode_lower(source_id, r->source_tree_root, 32))
         return false; /* raw-return-ok:unstamped build cannot earn a receipt */
     r->schema_version = CONSENSUS_STATE_SOURCE_RECEIPT_V2;
     r->producer_commit[0] = '\0';
@@ -612,7 +592,9 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
                  pdb, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
                  receipt.source_epoch_digest, 32) &&
              (prior == FINAL_RECEIPT_IDENTICAL ||
-              write_final_receipt(pdb, &receipt));
+              (prior == FINAL_RECEIPT_MONOTONIC_PREDECESSOR
+                   ? advance_final_receipt(pdb, &receipt)
+                   : write_final_receipt(pdb, &receipt)));
     if (ok)
         ok = exec_checked(pdb, "COMMIT");
     if (ok)

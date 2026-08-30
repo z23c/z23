@@ -3,9 +3,11 @@
 
 #include "models/market_content.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "net/file_market.h"
+#include "platform/path_compat.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
@@ -14,14 +16,6 @@
 #include <string.h>
 
 DEFINE_MODEL_CALLBACKS(market_content)
-
-static bool market_content_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= value[i];
-    return any != 0;
-}
 
 bool db_market_content_validate(const struct market_content_record *record,
                                 struct ar_errors *errors)
@@ -32,11 +26,11 @@ bool db_market_content_validate(const struct market_content_record *record,
         return false;
     }
     uint32_t expected_chunks = 0;
-    validates_custom(errors, market_content_nonzero(record->offer_id),
+    validates_custom(errors, zcl_bytes_any_set(record->offer_id, 32),
                      "offer_id", "can't be all zero");
-    validates_custom(errors, market_content_nonzero(record->root_hash),
+    validates_custom(errors, zcl_bytes_any_set(record->root_hash, 32),
                      "root_hash", "can't be all zero");
-    validates_custom(errors, record->private_path[0] == '/' &&
+    validates_custom(errors, platform_path_is_absolute(record->private_path) &&
         strnlen(record->private_path, MARKET_CONTENT_PATH_MAX) <
             MARKET_CONTENT_PATH_MAX,
         "private_path", "must be a bounded absolute canonical path");
@@ -132,7 +126,7 @@ bool db_market_content_find_chunk(
         AR_READ_STR(s, 5, out->private_path, sizeof(out->private_path));
         AR_READ_BLOB(s, 6, out->chunk_sha3, 32);
         out->chunk_index = chunk_index;
-        if (out->private_path[0] != '/') {
+        if (!platform_path_is_absolute(out->private_path)) {
             AR_FINALIZE(s);
             return false;
         });

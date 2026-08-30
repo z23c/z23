@@ -146,17 +146,22 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/chain") == 0) return "chain index primitives: MMB/MMR fast-sync proofs, UTXO-root ladder, snapshot loader";
     if (strcmp(group, "lib/codec") == 0) return "allocation-free bounded reader/writer cursors over caller-owned buffers";
     if (strcmp(group, "lib/commons_demo") == 0) return "standalone C23 Commons application core composed from base, codec, and JSON packages";
+    if (strcmp(group, "lib/determinism") == 0) return "verdict vectors and their digest, the four-bucket determinism classifier (deterministic, nondeterministic, timing-sensitive, unknown), and the determinism receipt (evidence, never permission)";
     if (strcmp(group, "lib/coins") == 0) return "the UTXO set: coins view, undo data, compression, SHA3 UTXO commitment";
+    if (strcmp(group, "lib/astro") == 0) return "deterministic positional astronomy: one exact fixed-grid numeric type, CORDIC trigonometry over it, and reproducible birth-chart assembly";
     if (strcmp(group, "lib/core") == 0) return "small consensus-adjacent primitives: amount, random, time-since-epoch helpers";
     if (strcmp(group, "lib/sha3") == 0) return "scalar FIPS-202 SHA3/SHAKE primitives";
     if (strcmp(group, "lib/crypto") == 0) return "hash/cipher/PoW primitives and batched SHA3 acceleration: SHA-2, Blake2, ChaCha20-Poly1305, Ed25519, Equihash";
     if (strcmp(group, "lib/crypto_registry") == 0) return "singleton catalog of pluggable cryptographic verifier implementations";
     if (strcmp(group, "lib/encoding") == 0) return "string encoding helpers: money strings, hex/bin string encodings";
+    if (strcmp(group, "lib/engine") == 0) return "engine-dispatch harness (pure half): vendor registry, request document, hardened response decoder, file envelope, key holder + redactor, and the gate-derived verdict";
     if (strcmp(group, "lib/event") == 0) return "the in-process publish/subscribe event bus that decouples subsystems";
+    if (strcmp(group, "lib/fingerprint") == 0) return "behavioral fingerprints: fail-closed purity judgement, signature-derived call harnesses, shape-seeded input corpora";
     if (strcmp(group, "lib/framework") == 0) return "app-shape platform glue: app_platform bootstrap + the typed-blocker condition contract";
     if (strcmp(group, "lib/health") == 0) return "single in-process heartbeat/watchdog ring (replaces the old per-subsystem watchdogs)";
     if (strcmp(group, "lib/hotswap") == 0) return "Tier-1 dev-only dlopen hot-swap loader for hotswap-eligible controller/handler TUs";
     if (strcmp(group, "lib/kernel") == 0) return "service lifecycle kernel (init/start/stop/status ordering) + the native command registry";
+    if (strcmp(group, "lib/install") == 0) return "install front door: release-pin parsing, three-channel agreement, platform triple, DNS TXT wire (pure, no I/O)";
     if (strcmp(group, "lib/json") == 0) return "minimal in-tree JSON value/parse/serialize library (no external deps)";
     if (strcmp(group, "lib/keys") == 0) return "EC key material: private/public keys, bech32/base58 address key encoding";
     if (strcmp(group, "lib/metrics") == 0) return "Prometheus-style in-process node metrics";
@@ -187,6 +192,12 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/zdir") == 0) return "ZCL Directory (ZDIR) on-chain node directory overlay — .onion peer discovery folded from block history";
     if (strcmp(group, "lib/zid") == 0) return "sovereign identity Phase 1: signed identity documents + blinded record keys (ed25519/SHA3, pure codec)";
     if (strcmp(group, "lib/codeindex") == 0) return "the in-binary source-code navigator index: scan, store, query, the `code` CLI";
+    if (strcmp(group, "lib/retrieval") == 0) return "BM25 ranked retrieval over an in-memory corpus: an inverted index that answers \"which records are about this?\" in rank order rather than in match order";
+    if (strcmp(group, "lib/chainlog") == 0) return "a durable append-only log whose every frame is SHA3-linked to the one before it, so an edit anywhere shows up as a named first bad sequence number";
+    if (strcmp(group, "lib/science") == 0) return "the claim register for what makes a model write good C23: a claim is refused unless it names the metric, direction, effect floor and sample floor that could show it wrong, and status is derived from recorded trials rather than set";
+    if (strcmp(group, "lib/receipt") == 0) return "a proof receipt: one node's claim that a named test group reached a named verdict over an exactly identified source tree, in the fixed form it travels in";
+    if (strcmp(group, "lib/territory") == 0) return "generated per-module scorecard: what a module owns, what proves it (routed vs actually reached), what it depends on, where it is weak";
+    if (strcmp(group, "lib/kpi") == 0) return "the durable ledger of the numbers this build already produces: canonical frames appended to a hash-chained log, where a metric nobody could read is UNAVAILABLE and never 0";
     if (strcmp(group, "lib/metaverse") == 0) return "sovereign digital property: property identity, action vocabulary, read-only per-kind catalog adapters, the pure grant/delegation rule evaluator, signed hash-chained receipts";
 
     /* domain/<ctx> — one line per bounded context in k_domain_contexts[] above. */

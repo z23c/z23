@@ -5,6 +5,7 @@
  * contract: config/consensus_state_snapshot_install.h. */
 
 #include "config/consensus_state_snapshot_install.h"
+#include "base/bytes.h"
 #include "consensus_state_snapshot_install_internal.h" /* lease + authority resolver */
 #include "jobs/reducer_frontier.h"       /* reducer_frontier_compute_hstar,
                                           * REDUCER_TRUSTED_BASE_*_KEY */
@@ -38,6 +39,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "consensus_state_snapshot_install_activate_internal.h"
+#include "consensus_state_proof_prefix.h"
 /* Reuse the content-verify heartbeat primitive for the multi-minute activate
  * phases so a long install is never silent (VALIDATE_SUBSYS aliases here). */
 #define VALIDATE_SUBSYS ACTIVATE_SUBSYS
@@ -154,14 +156,6 @@ static bool activate_fail(struct consensus_state_activate_result *result,
     }
     LOG_WARN(ACTIVATE_SUBSYS, "%s", reason);
     return false;
-}
-
-static bool activate_digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= digest[i];
-    return any != 0;
 }
 
 /* Bind one source column into the destination statement, preserving type.
@@ -362,6 +356,19 @@ static bool activate_apply_in_tx(
                              "failed");
     if (!activate_clear_generation_metadata(progress_db, result))
         return false; // raw-return-ok:logged-by-activate_fail
+
+    /* The installed bundle's producer session/receipt were just purged: they
+     * belong to a foreign generation and must never become this node's local
+     * authority.  Retain the distinct, already-admitted proof PREFIX before
+     * clearing to an anchor, however.  Without it every successful install
+     * destroys the only genesis..anchor evidence a later standing exporter
+     * needs, making fresh generations impossible by construction.  This write
+     * joins the cutover transaction, so prefix and state land or roll back as
+     * one generation. */
+    if (!consensus_state_proof_prefix_install_in_tx(
+            progress_db, bundle_db, m))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "retaining admitted bundle proof prefix failed");
 
     /* 4. Stream coins + anchors (by pool) + nullifiers from the bundle. */
     uint64_t coins = 0, sprout = 0, sapling = 0, nfs = 0;
@@ -635,8 +642,8 @@ bool consensus_state_snapshot_install_activate(
      * digest + descriptor identity). This closes the ADMIT-to-activate rename
      * window, including replacement by another valid same-height/hash bundle. */
     uint8_t reopened_receipt_digest[32];
-    if (!activate_digest_nonzero(
-            request->expected_artifact_receipt_digest) ||
+    if (!zcl_bytes_any_set(
+            request->expected_artifact_receipt_digest, 32) ||
         !consensus_state_artifact_evidence_receipt_digest(
             evidence, reopened_receipt_digest) ||
         memcmp(reopened_receipt_digest,

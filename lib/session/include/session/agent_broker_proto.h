@@ -109,7 +109,8 @@ enum mvap_kind {
     MVAP_KIND_ENDPOINT  = 6,   /* endpoint / onion site                  */
     MVAP_KIND_PRODUCT   = 7,   /* storefront product                     */
     MVAP_KIND_CONTRACT  = 8,   /* contract / swap                        */
-    MVAP_KIND__COUNT    = 9,
+    MVAP_KIND_CHARACTER = 9,   /* character sheet                        */
+    MVAP_KIND__COUNT    = 10,
 };
 
 /* Response status. Negative values are refusals; every refusal names WHICH

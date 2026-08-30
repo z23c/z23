@@ -8,6 +8,7 @@
 
 #include "vcs/zcode_discovery_projection.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
@@ -22,16 +23,6 @@
 #include <string.h>
 
 #define ZDP_LOG "vcs.discovery_projection"
-
-static bool zdp_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root)
-        return false;
-    for (size_t i = 0; i < 32; i++)
-        any |= root[i];
-    return any != 0;
-}
 
 static int zdp_root_cmp(const void *a, const void *b)
 {
@@ -318,7 +309,7 @@ static bool zdp_absorb_citations(const char *workspace,
                                  const uint8_t citations_root[32],
                                  struct zdp_root_list *out)
 {
-    if (!zdp_nonzero(citations_root))
+    if (!zcl_bytes_any_set(citations_root, 32))
         return true; /* nothing committed: no edges, not an error */
     uint8_t *payload = NULL;
     size_t len = 0;

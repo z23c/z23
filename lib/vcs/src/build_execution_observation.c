@@ -3,19 +3,13 @@
 
 #include "vcs/build_execution_observation.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 
 #include <string.h>
 
 static const uint8_t k_magic[8] = {'Z','B','O','B','S','V','1','\0'};
-
-static bool obs_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static void obs_hash_text(struct sha3_256_ctx *sha, const char *text)
 {
@@ -34,17 +28,17 @@ bool vcs_build_execution_observation_v1_valid(
             VCS_BUILD_OBS_REQUIRED_FLAGS ||
         (o->flags & ~VCS_BUILD_OBS_REQUIRED_FLAGS) != 0 ||
         o->exit_status < 0 || o->exit_status > 255 ||
-        !obs_nonzero(o->action_root) ||
-        !obs_nonzero(o->action_input_root) ||
-        !obs_nonzero(o->observed_input_bytes_root) ||
-        !obs_nonzero(o->artifact_root) ||
-        !obs_nonzero(o->output_bytes_root) ||
-        !obs_nonzero(o->toolchain_root) || !obs_nonzero(o->flags_root) ||
-        !obs_nonzero(o->environment_root) ||
-        !obs_nonzero(o->declared_reads_root) ||
-        !obs_nonzero(o->observed_reads_root) ||
-        !obs_nonzero(o->declared_writes_root) ||
-        !obs_nonzero(o->observed_writes_root) ||
+        !zcl_bytes_any_set(o->action_root, 32) ||
+        !zcl_bytes_any_set(o->action_input_root, 32) ||
+        !zcl_bytes_any_set(o->observed_input_bytes_root, 32) ||
+        !zcl_bytes_any_set(o->artifact_root, 32) ||
+        !zcl_bytes_any_set(o->output_bytes_root, 32) ||
+        !zcl_bytes_any_set(o->toolchain_root, 32) || !zcl_bytes_any_set(o->flags_root, 32) ||
+        !zcl_bytes_any_set(o->environment_root, 32) ||
+        !zcl_bytes_any_set(o->declared_reads_root, 32) ||
+        !zcl_bytes_any_set(o->observed_reads_root, 32) ||
+        !zcl_bytes_any_set(o->declared_writes_root, 32) ||
+        !zcl_bytes_any_set(o->observed_writes_root, 32) ||
         o->cpu_seconds_limit == 0 || o->memory_bytes_limit == 0 ||
         o->process_limit == 0 || o->file_limit == 0 ||
         o->file_bytes_limit == 0 || o->output_bytes_limit == 0 ||

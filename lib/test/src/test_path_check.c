@@ -22,9 +22,71 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include "platform/socket_compat.h"
+
+#include <stdint.h>
+
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 1
+#endif
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
+
+/* Fixture peer sockets held as int fds; socketpair becomes the verified
+ * loopback-TCP pair, dup() a WSADuplicateSocketW in-process duplicate, and
+ * the I/O verbs the platform socket calls. Every close()/dup() in this TU
+ * targets one of those sockets. */
+static int pc_socketpair(int sv[2])
+{
+    platform_socket_t pair[2];
+    if (!platform_socket_pair(pair))
+        return -1;
+    sv[0] = (int)(intptr_t)pair[0];
+    sv[1] = (int)(intptr_t)pair[1];
+    return 0;
+}
+
+static int pc_dup(int fd)
+{
+    WSAPROTOCOL_INFOW info;
+    if (WSADuplicateSocketW((platform_socket_t)(intptr_t)fd,
+                            GetCurrentProcessId(), &info) != 0)
+        return -1;
+    platform_socket_t s = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+                                     FROM_PROTOCOL_INFO, &info, 0, 0);
+    return s == PLATFORM_SOCKET_INVALID ? -1 : (int)(intptr_t)s;
+}
+
+static ssize_t pc_recv(int fd, void *buf, size_t len, int flags)
+{
+    platform_socket_t sock = (platform_socket_t)(intptr_t)fd;
+    if (flags == MSG_DONTWAIT)
+        return platform_socket_receive_nonblocking(sock, buf, len);
+    return platform_socket_receive(sock, buf, len);
+}
+
+static ssize_t pc_send(int fd, const void *buf, size_t len, int flags)
+{
+    (void)flags;
+    return platform_socket_send((platform_socket_t)(intptr_t)fd, buf, len);
+}
+
+#define socketpair(domain, type, protocol, sv) pc_socketpair(sv)
+#define dup(fd) pc_dup(fd)
+#define recv(fd, buf, len, flags) pc_recv(fd, buf, len, flags)
+#define send(fd, buf, len, flags) pc_send(fd, buf, len, flags)
+#define close(fd) \
+    (platform_socket_close((platform_socket_t)(intptr_t)(fd)) == 0 ? 0 : -1)
+#define shutdown(fd, how) shutdown((platform_socket_t)(intptr_t)(fd), how)
+#endif
 
 #define PC_CHECK(name, expr) do { \
     printf("path_check: %s... ", (name)); \
@@ -273,14 +335,14 @@ int test_path_check(void)
         struct https_frontdoor_client popped = {.fd = -1};
         bool fifo_preserved = replacement_owned &&
             https_frontdoor_queue_pop(&queue, &popped) &&
-            popped.fd == first_fd && !popped.tls &&
+            (int)(intptr_t)popped.fd == first_fd && !popped.tls &&
             popped.deadline_ms == 2000;
         char byte = 0;
         bool expired_closed = replacement_owned &&
             recv(expired_pair[1], &byte, 1, MSG_DONTWAIT) == 0;
         PC_CHECK("https queue reclaims out-of-order expiry and preserves FIFO",
                  fifo_preserved && expired_closed);
-        if (popped.fd >= 0)
+        if ((int)(intptr_t)popped.fd >= 0)
             close(popped.fd);
         https_frontdoor_queue_close_all(&queue);
         platform_clock_clear_source();

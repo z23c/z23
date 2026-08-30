@@ -33,12 +33,25 @@
 
 /* Bounds. An ACME directory, order, or certificate chain is a few kilobytes;
  * these caps are ~50x that and exist so a hostile or broken peer cannot make
- * the node allocate without limit. */
+ * the node allocate without limit.
+ *
+ * TLS_CLIENT_MAX_BODY is the DEFAULT cap, and the only one the ACME worker
+ * ever uses. A caller with a documented reason may raise its own request's
+ * cap through tls_client_request.max_body, up to TLS_CLIENT_ABS_MAX_BODY and
+ * no further. That ceiling is a compile-time constant precisely so raising a
+ * cap is bounded rather than open: a caller can ask for more room, it cannot
+ * ask for unlimited room. The second caller of this client — the engine
+ * harness in tools/engine_unit.c — needs it, because a model's reply carrying
+ * whole file bodies is routinely larger than a certificate chain. Nothing
+ * about ACME changes: a request that leaves max_body at 0 behaves exactly as
+ * it did before this field existed, including its allocation size. */
 #define TLS_CLIENT_MAX_BODY        (256u * 1024u)
+#define TLS_CLIENT_ABS_MAX_BODY    (8u * 1024u * 1024u)
 #define TLS_CLIENT_MAX_HEADER_BLOB (32u * 1024u)
 #define TLS_CLIENT_MAX_RESPONSE    (TLS_CLIENT_MAX_BODY + TLS_CLIENT_MAX_HEADER_BLOB)
 #define TLS_CLIENT_MAX_HOST        256
 #define TLS_CLIENT_MAX_PATH        1024
+#define TLS_CLIENT_MAX_EXTRA_HEADERS 8
 #define TLS_CLIENT_DEFAULT_TIMEOUT_MS 30000
 
 struct tls_client_url {
@@ -73,10 +86,32 @@ bool tls_client_response_parse(const char *raw, size_t len,
  * stop; exported because it is the part worth testing byte by byte. */
 bool tls_client_response_complete(const char *raw, size_t len);
 
+/* The two above, with an explicit body cap. `body_cap` of 0 selects
+ * TLS_CLIENT_MAX_BODY; anything over TLS_CLIENT_ABS_MAX_BODY is refused
+ * rather than clamped, because a caller that asked for more than the ceiling
+ * has a bug and silently giving it less is how a truncated body becomes a
+ * parse error somewhere far away. The unsuffixed forms above are these with
+ * body_cap = 0 and are the ONLY forms ACME uses. */
+bool tls_client_response_parse_bounded(const char *raw, size_t len,
+                                       size_t body_cap,
+                                       struct tls_client_response *out);
+bool tls_client_response_complete_bounded(const char *raw, size_t len,
+                                          size_t body_cap);
+
 /* Case-insensitive lookup of a single header value. Values are copied with
  * surrounding whitespace stripped. Returns false when absent or too long. */
 bool tls_client_response_header(const struct tls_client_response *r,
                                 const char *name, char *out, size_t out_len);
+
+/* One extra request header. Both halves are validated before they are sent:
+ * a CR, LF, or NUL in either, or a colon in the name, is response splitting
+ * and the whole request is refused. This is the field an API credential
+ * travels in, so it is also the field an injected newline would use to append
+ * a header of the attacker's choosing. */
+struct tls_client_header {
+    const char *name;
+    const char *value;
+};
 
 struct tls_client_request {
     const char *method;        /* "GET", "HEAD", "POST"; NULL means GET */
@@ -86,6 +121,11 @@ struct tls_client_request {
     size_t      body_len;
     const char *user_agent;    /* optional */
     int         timeout_ms;    /* total deadline; <= 0 selects the default */
+    /* Optional extras. Zero of them reproduces the pre-existing behaviour
+     * byte for byte, which is what keeps ACME unchanged. */
+    const struct tls_client_header *headers;
+    size_t      header_count;  /* <= TLS_CLIENT_MAX_EXTRA_HEADERS */
+    size_t      max_body;      /* 0 selects TLS_CLIENT_MAX_BODY */
 };
 
 /* Perform one request. Returns false on any transport, TLS, verification,

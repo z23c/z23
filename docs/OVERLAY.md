@@ -57,7 +57,7 @@ anyone touching `lib/net/src/tor_integration.c`, `onion_service.c`, or
 | Surface | Digest / KDF | Why |
 | --- | --- | --- |
 | Block hash, txid, merkle, sighash, Equihash | SHA-256d / Equihash | Consensus parity with `zclassicd` |
-| Noise P2P transport | HKDF-SHA256 (Noise spec) | Interop with the v2 handshake |
+| Noise P2P transport | HKDF-SHA256 (Noise spec) | Interop with the Bitcoin v2 handshake |
 | FlyClient samples, MMB / MMR nodes | SHA3-256 with domain tags | Overlay proof, not a block hash |
 | Snapshot / chunk / block-piece ids | SHA3-256 | Swarm integrity |
 | File-service session key | X25519 + HKDF-SHA3-256 | Overlay confidentiality |
@@ -144,7 +144,8 @@ experiments.
 ## What this is not
 
 - Not a consensus fork. Do not SHA3 block hashes or Equihash.
-- Not a Noise change. The project Noise transport stays HKDF-SHA256.
+- Not a Noise change. The Bitcoin-compatible P2P transport (BIP324 v2) stays
+  HKDF-SHA256.
 - Not a grant of wallet, deployment, or datadir authority. Fetching overlay
   bytes is storage; building and testing are separate; installing or
   deploying is operator-gated.

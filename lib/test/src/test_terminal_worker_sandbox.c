@@ -22,11 +22,14 @@
 #define _GNU_SOURCE  /* fork, mmap — must precede every include */
 
 #include "test/test_core.h"
+
+#include <stdio.h>
+
+#if defined(__linux__)
 #include "platform/os_sandbox.h"
 
 #include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
@@ -35,6 +38,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #if !defined(__linux__)
 

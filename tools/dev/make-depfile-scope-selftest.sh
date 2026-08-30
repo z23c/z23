@@ -145,14 +145,15 @@ assert_exact_profiles "$WORK/node-alias.out" node-c23
 run_probe "$WORK/verifier.out" zclassic23-package-verify
 assert_exact_profiles "$WORK/verifier.out" node-c23
 
-# Two goals, an unknown goal, and no explicit goal are all ambiguous.  They
-# must import every depfile, so all four newer headers schedule rebuilds.
+# Two goals and an unknown explicit goal are ambiguous. They must import every
+# depfile, so every newer header schedules a rebuild. No explicit goal is the
+# exact spelling of `.DEFAULT_GOAL := z23`, so it remains node-c23 scoped.
 run_probe "$WORK/mixed.out" fast-compile build-only
 assert_exact_profiles "$WORK/mixed.out" "build-only dev test-fast test-strict node-c23"
 run_probe "$WORK/unknown.out" zcl-depfile-unknown
 assert_exact_profiles "$WORK/unknown.out" "build-only dev test-fast test-strict node-c23"
 run_probe "$WORK/default.out"
-assert_exact_profiles "$WORK/default.out" "build-only dev test-fast test-strict node-c23"
+assert_exact_profiles "$WORK/default.out" node-c23
 
 printf '%s\n' \
-    'make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true mixed_unknown_default_all=true'
+    'make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true mixed_unknown_all=true default_node_c23=true'

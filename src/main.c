@@ -36,6 +36,7 @@
 #include "util/signal_handler.h"        /* process-wide signal ownership */
 #include "util/util.h"                  /* ParseParameters */
 #include "util/sd_notify.h"             /* -sandbox=steady NOTIFY_SOCKET check */
+#include "util/clientversion.h"         /* exact executable source admission */
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
 #ifdef ZCL_DEV_BUILD
@@ -184,6 +185,11 @@ static void report_app_init_failed(const struct app_context *ctx)
 int main(int argc, char **argv)
 {
 #ifdef ZCL_DEV_BUILD
+    if (argc == 2 && strcmp(argv[1], "--source-record") == 0) {
+        printf("%s 1 %s\n", zcl_build_source_id_sha256(),
+               zcl_build_source_mutation_sha256());
+        return 0;
+    }
     if (argc == 6 && strcmp(argv[1], "--z23-internal-watch-worker") == 0) {
         char *end = NULL;
         uint64_t inherited = strtoull(argv[2], &end, 10);

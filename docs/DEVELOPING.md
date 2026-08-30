@@ -22,13 +22,32 @@ development convenience.
 8. Run the integration gates and push a coherent slice.
 9. Continue the mission while deeper proof runs asynchronously.
 
+When you know WHAT you want to do and have forgotten HOW, do not re-read this
+document: [`COOKBOOK.md`](COOKBOOK.md) is the lookup table — one question, one
+answer, and every recipe in it is executed by `make check-cookbook`, so a
+recipe that stopped working fails the build instead of costing you an hour.
+This document is the ORDER; the cookbook is the incantations.
+
 A push is a checkpoint, not completion. Remote proof must not block the
 developer's ability to continue editing. Acceptance remains a local policy
 decision over exact canonical task, candidate, action, and receipt objects.
 
 ## 1. Orient
 
-Start by identifying the checkout and preserving existing work:
+On a new Linux, macOS, or Windows machine, run this first — it compiles with
+a plain `cc` and does not require a C23 toolchain:
+
+```bash
+make doctor-env
+```
+
+It reports the compiler (`-std=c23` capability, not a version parse), git,
+`vendor/tor` submodule state, make, optional mingw/ccache/zcc, the stack
+soft limit, CPU count, and free disk. Each failing required check prints the
+exact fix command for this platform. `make doctor` remains the separate
+package-prerequisite doctor (`tools/scripts/vendor_prereqs.tsv`).
+
+Then identify the checkout and preserve existing work:
 
 ```bash
 pwd
@@ -57,7 +76,40 @@ integration blackboard.
 
 ## 2. Inspect exact context
 
-Use the in-tree source navigator before broad text search:
+**Before you build any capability, ask whether this tree already has it.**
+`code find` searches symbol NAMES; `code have` searches what code *does*, by
+stemming the query and matching it against symbol names, doc comments, file
+purposes, paths, and groups. Run it first — it is the cheapest step in the
+loop and the one that prevents the most expensive mistake:
+
+```bash
+build/bin/z23 code have --input='{"text":"validation"}'
+```
+
+Real output from this checkout, abridged (warm: ~85 ms):
+
+```json
+{"verdict":"ALREADY EXISTS","capabilities":[
+ {"what":"validation (12 matching symbols)",
+  "header":"core/params/include/consensus/validation.h",
+  "symbol_count":12,"used_by_files":72,
+  "count_basis":"callers-of-matched-symbols"},
+ {"what":"activerecord (24 matching symbols)",
+  "header":"app/models/include/models/activerecord.h",
+  "symbol_count":24,"used_by_files":66,
+  "example_caller":"app/controllers/src/store_controller.c"}]}
+```
+
+`used_by_files` is the field to read: it counts files holding a recorded CALL
+SITE, so it separates a live capability from code somebody left behind. A
+comment that merely names a symbol is not a use. `verdict` is derived from
+those same numbers and is one of `ALREADY EXISTS` / `PARTIAL` / `NOT FOUND`;
+`NOT FOUND` means the recorded names, docs and purposes do not say so — the
+`searched` block reports exactly what was looked at. Usage through function
+pointers or `dlopen` is not a recorded call site, so the count undercounts
+those and never overcounts.
+
+Then use the rest of the in-tree source navigator before broad text search:
 
 ```bash
 build/bin/z23 code map
@@ -70,7 +122,23 @@ build/bin/z23 code find --input='{"text":"<needle>","limit":20}'
 `code capsule` combines identity, definition, direct callers/callees, includes,
 and command routes within a bounded response. `code file` and `code group`
 show a file or directory surface. Ask `discover schema <leaf>` for exact input
-keys rather than guessing.
+keys rather than guessing — and if you guess wrong anyway, the refusal names
+the keys the leaf accepts, so a wrong key costs one call, not a source dive.
+
+Before creating a reusable helper or importing a library, search the generated
+capability census in [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl).
+It includes package public headers that the interactive code index does not,
+and records exposed symbols, verified direct-use file counts, registered-test
+reachability, ranked normalized duplicate bodies, and untested declared header
+invariants. Header prose and alpha-shape matches are explicitly `UNPROVEN`;
+definition, use, and registered-test call edges are path-bound, and every
+macro-generated or platform-ambiguous test root is emitted as a named
+`test_root_gap` with the evidence needed to resolve it.
+Regenerate the entire report from source with:
+
+```bash
+make docs-capability-inventory
+```
 
 When the navigator cannot answer a prose or non-symbol question, use `git grep`
 or `git ls-files`; never recursively scan the repository root. Scratch
@@ -290,6 +358,78 @@ for each compile when a rebuild is slower than it should be. See
 [`BUILD.md`](./BUILD.md#the-compile-cache-is-in-the-repository) for how a hit
 is kept honest and how to clear or audit the cache.
 
+### Measuring whether a group would NOTICE — mutation testing
+
+Green tells you the tests pass. It does not tell you the tests would go red if
+the code were wrong, and those are different facts. An audit of one 12,474-line
+module found ~80 defects in code that compiled under
+`-Wall -Wextra -Werror -pedantic` and whose suite was green — including a
+declared validator whose body was `return true;`, a signature check that hashed
+bytes nobody had written, and an index that silently held exactly 32 keys.
+Nothing was wrong with those tests' assertions. Nothing in the suite ever
+inserted a 33rd key.
+
+`mutation-campaign` measures the second fact. It enumerates every realistic
+one-token defect in a source file, compiles each one, runs ONLY the group that
+covers it, and reports the fraction the group killed.
+
+```bash
+make mutation-campaign
+build/bin/mutation-campaign --file=lib/metaverse/src/node_character.c \
+                            --group=test_node_character
+build/bin/mutation-campaign --file=<any .c> --list   # enumerate only; no build
+```
+
+`z23 code tests <file.c>` names the group that covers a file, which is the
+`--group=` argument. `--limit=N` takes a sample instead of the whole file, and
+`--target=` points the plan at a build other than `test_parallel`.
+
+**The survivors are the product, not the score.** Each survivor is a specific
+line the group's assertions cannot see, printed as `file:line:col` with the
+exact change. A score with no survivor list is a number nobody can act on.
+
+Five buckets, and only two of them are the suite's business:
+
+| bucket | meaning | in the score |
+|---|---|---|
+| `KILLED` | the group went red | yes (numerator) |
+| `SURVIVED` | different machine code, group still green | yes (denominator) |
+| `STILLBORN` | the mutant did not compile | **no** — `-Werror` caught it, not a test |
+| `EQUIVALENT` | byte-identical object file | **no** — provably unkillable |
+| `ERROR` | no usable `SUITE VERDICT`, or `groups_ran=0` | **no** — never silently a survivor |
+
+`score = KILLED / (KILLED + SURVIVED)`.
+
+Equivalent mutants are undecidable in general and this does not pretend
+otherwise. Byte-identical object code is the cheap SOUND half: what it flags is
+certainly equivalent (an ignored array bound in a parameter, an enum constant
+that really is `0`). A semantically equivalent mutant whose machine code
+differs still lands in `SURVIVED`, where it depresses the score. That is
+another reason to read the list rather than the number.
+
+**It never edits your checkout.** The mutant is compiled from a scratch copy
+carrying a `#line` directive back to the real path, so `__FILE__` and `__LINE__`
+are unchanged and the target file is never opened for writing on any path.
+There is no restore step to get wrong: interrupt it at any moment and the file
+is byte-identical. The report prints the source's SHA3-256 before and after so
+that is checkable rather than promised. `dev.agent.mutate`, which edits in
+place, is the single-mutation interactive tool; this is the campaign.
+
+Cost, measured on this tree: about **5–8s per mutant** (one TU compile, one
+link of the harness, one group run of ~70ms). `make` is deliberately not in the
+loop — it runs once per campaign as `make -n -W <src> <target>` to learn the
+exact compile and link argv — because `make`'s no-op dependency scan alone is
+13s and a one-file incremental rebuild is 26s.
+
+**This is a reporting tool. It is not on the default test path, not in
+`make lint`, and not in the push gate.** A mutation-score threshold imposed
+before the tree has measured scores would block everyone. Run it on the file
+you are changing.
+
+What mutation testing does NOT catch is in
+[`tools/dev/mutation_harness.h`](../tools/dev/mutation_harness.h); read it
+before treating any score as a quality claim.
+
 ### Proving a permissionless cold join
 
 One claim gets asserted often enough in prose that it earned a single command:
@@ -314,18 +454,22 @@ not hold the transcript says so instead of asserting it away. The propositions,
 and which are narrower than the story, are enumerated at the top of
 [`lib/test/src/test_cold_join_sovereign.c`](../lib/test/src/test_cold_join_sovereign.c).
 
-For a push checkpoint:
+For an exact push checkpoint, commit first. The notification hook schedules
+the commit/base proof in the existing development service and returns. Inspect
+or wait for that immutable receipt with:
 
 ```bash
-make pre-push-ci
+build/bin/z23-dev dev proof status
+build/bin/z23-dev dev proof wait
 ```
 
-It gates whatever your branch would actually push. When the working tree
-has uncommitted edits it uses those; when the tree is clean — the normal
-state at push time — it falls back to the commits between your upstream
-(or `origin/main`) and `HEAD`. The log says which source it used and how
-many files it found, so `count=0` is legible as "nothing to push" rather
-than passing silently over untested commits.
+`dev.proof.ensure` is idempotent and normally runs from `post-commit`,
+`post-merge`, or `post-checkout`. It binds the local commit and advertised
+remote base to exact source/CAS and mutation roots, changed-set and impact
+policy, compiler/flags/environment/build graph, and complete generated,
+compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
+tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
+legacy parity oracle; it is not called by the installed push hook.
 
 Full `make lint` is the umbrella (every gate, including whole-node tool links).
 Run it only when an impact rule names a gate that `lint-fast` excludes, or at
@@ -376,15 +520,16 @@ Before committing:
    unrelated local work.
 5. Rerun the minimum gates affected by that integration.
 6. Commit one coherent change with an evidence-backed message.
-7. Push normally; the pre-push hook runs `make pre-push-ci`.
+7. Wait for `dev proof status` to report `passed`, then push normally. The
+   native pre-push hook reads only the exact sealed receipt.
 8. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 Every changed C path must map to focused proof through the repository's impact
-rules. The pre-push hook runs those mapped groups only; an unmapped code path
-fails closed so it cannot expand to the full suite. If the pre-push hook reports a write/SIGPIPE failure after its underlying
-gate genuinely completed, inspect the saved log and reproduce the gate
-out-of-band before considering the documented verified bypass. Never bypass an
-unknown or failing gate.
+rules. Unmapped or incomplete closure refuses receipt publication. The hook
+never builds, tests, lints, waits, invokes a shell, or fetches; a missing or
+running receipt refuses within the bounded read path and prints the exact
+`z23-dev dev proof wait` command for that commit/base pair. A normal
+non-fast-forward race also refuses without deleting reusable child evidence.
 
 Canonical deployment remains owner-gated. Development generation activation is
 an explicit plan/commit transaction with source, resident-CAS, process, probe,

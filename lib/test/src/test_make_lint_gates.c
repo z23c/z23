@@ -102,7 +102,7 @@ bool lint_gates_group_requires_quiet_pool(const char *group_name)
     return false;
 }
 
-#ifdef ZCL_TESTING
+#if defined(ZCL_TESTING) && !defined(_WIN32)
 
 #include "lint_gate_selftests.h"
 #include "platform/os_proc.h"
@@ -681,7 +681,30 @@ static int lint_run_shard(int shard)
     repo_root_set_override(sb_root);
     unlink_lint_fixtures();          /* defensive clean start in this sandbox */
 
+    /* The sandbox is a copy of the worktree with .git deliberately EXCLUDED
+     * (see lint_sandbox_build). Gates that verify their own scan coverage
+     * against a git-derived expectation (gate_lib.sh gate_git_oracle) are
+     * fail-closed by design: no git index means no independent oracle, which
+     * is UNPROVEN (exit 2), never a quiet pass. That refusal is correct — and
+     * inside a deliberately git-less clone it is also unavoidable, so opt those
+     * checks out here, once, for every gate this shard runs. Their coverage is
+     * proven where the oracle actually exists: each gate's own `--selftest`,
+     * which `make lint` runs against the real checkout on every invocation.
+     * Do NOT paper over this per-test; a new git-oracle gate belongs on this
+     * list. */
+    (void)setenv("ZCL_SUPDOM_COVERAGE",    "0", 1);
+    (void)setenv("ZCL_THREADSUP_COVERAGE", "0", 1);
+    (void)setenv("ZCL_SUPREG_COVERAGE",    "0", 1);
+    (void)setenv("ZCL_LONGFN_COVERAGE",    "0", 1);
+    (void)setenv("ZCL_NDH_COVERAGE",       "0", 1);
+
     int failures = lint_run_owned(shard);
+
+    (void)unsetenv("ZCL_SUPDOM_COVERAGE");
+    (void)unsetenv("ZCL_THREADSUP_COVERAGE");
+    (void)unsetenv("ZCL_SUPREG_COVERAGE");
+    (void)unsetenv("ZCL_LONGFN_COVERAGE");
+    (void)unsetenv("ZCL_NDH_COVERAGE");
 
     repo_root_set_override(NULL);
     if (chdir(real_root) != 0)
@@ -912,6 +935,43 @@ int test_make_lint_gates_partition(void)
     return failures;
 }
 
+#else  /* !ZCL_TESTING, or _WIN32 */
+
+#if defined(_WIN32)
+
+#include <stdio.h>
+
+/* These groups prove POSIX shell lint scripts by fork+execing them against
+ * planted fixtures in private worktrees. Native Windows has no fork/exec
+ * contract. Keep every catalog symbol present and report the unobserved
+ * family explicitly; the Windows lane runs `make lint` itself separately. */
+static int lint_gate_skip_windows(const char *group)
+{
+    printf("[lint-gate] SKIP (Windows): %s requires POSIX fork/exec; "
+           "run make lint under MSYS2 for the Windows lint contract\n", group);
+    return 0;
+}
+
+int test_make_lint_gates(void)
+{ return lint_gate_skip_windows("make_lint_gates"); }
+int test_make_lint_gates_realroot(void)
+{ return lint_gate_skip_windows("make_lint_gates_realroot"); }
+int test_make_lint_gates_heavy_01(void)
+{ return lint_gate_skip_windows("make_lint_gates_heavy_01"); }
+int test_make_lint_gates_heavy_02(void)
+{ return lint_gate_skip_windows("make_lint_gates_heavy_02"); }
+int test_make_lint_gates_partition(void)
+{ return lint_gate_skip_windows("make_lint_gates_partition"); }
+
+#define LINT_SHARD_SKIP(tag, idx) \
+    int test_make_lint_gates_shard_##tag(void) \
+    { \
+        (void)idx; \
+        return lint_gate_skip_windows("make_lint_gates_shard_" #tag); \
+    }
+LINT_SHARD_LIST(LINT_SHARD_SKIP)
+#undef LINT_SHARD_SKIP
+
 #else  /* !ZCL_TESTING */
 
 /* No-ops when the lint-gate integration test is disabled. */
@@ -926,5 +986,7 @@ int test_make_lint_gates_partition(void) { return 0; }
 LINT_SHARD_STUB(01) LINT_SHARD_STUB(02) LINT_SHARD_STUB(03) LINT_SHARD_STUB(04)
 LINT_SHARD_STUB(05) LINT_SHARD_STUB(06) LINT_SHARD_STUB(07) LINT_SHARD_STUB(08)
 #undef LINT_SHARD_STUB
+
+#endif /* _WIN32 */
 
 #endif /* ZCL_TESTING */

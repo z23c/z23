@@ -491,6 +491,113 @@ static inline int platform_socket_set_no_delay(platform_socket_t sock,
 #endif
 }
 
+/* Default P2P stream buffer size for platforms whose TCP stack does not
+ * auto-tune socket buffers (macOS, Windows, BSD).  Linux is left to the
+ * kernel auto-tuner, so this constant is intentionally not applied there. */
+#define PLATFORM_P2P_SOCKET_BUFFER_SIZE (1 * 1024 * 1024)
+
+/* Exact result of one P2P socket-buffer configuration attempt.  Darwin and
+ * Windows may clamp a requested size to a platform ceiling; the value passed
+ * to setsockopt is therefore only intent.  getsockopt readback is the fact
+ * operators and adaptive policy may safely report.  Linux requests zero
+ * because its TCP auto-tuner remains authoritative, but still reports the
+ * live kernel grants. */
+struct platform_socket_buffer_observation {
+    int requested_receive_bytes;
+    int requested_send_bytes;
+    int actual_receive_bytes;
+    int actual_send_bytes;
+    bool receive_configured;
+    bool send_configured;
+    bool receive_observed;
+    bool send_observed;
+};
+
+static inline int platform_socket_set_receive_buffer(platform_socket_t sock,
+                                                      int size)
+{
+#if defined(_WIN32)
+    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *)&size,
+                      (int)sizeof(size));
+#else
+    return setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+#endif
+}
+
+static inline int platform_socket_set_send_buffer(platform_socket_t sock,
+                                                   int size)
+{
+#if defined(_WIN32)
+    return setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char *)&size,
+                      (int)sizeof(size));
+#else
+    return setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+#endif
+}
+
+static inline int platform_socket_get_receive_buffer(platform_socket_t sock,
+                                                      int *size_out)
+{
+    if (!size_out) return -1;
+#if defined(_WIN32)
+    int size_len = (int)sizeof(*size_out);
+    return getsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char *)size_out,
+                      &size_len);
+#else
+    socklen_t size_len = (socklen_t)sizeof(*size_out);
+    return getsockopt(sock, SOL_SOCKET, SO_RCVBUF, size_out, &size_len);
+#endif
+}
+
+static inline int platform_socket_get_send_buffer(platform_socket_t sock,
+                                                   int *size_out)
+{
+    if (!size_out) return -1;
+#if defined(_WIN32)
+    int size_len = (int)sizeof(*size_out);
+    return getsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char *)size_out,
+                      &size_len);
+#else
+    socklen_t size_len = (socklen_t)sizeof(*size_out);
+    return getsockopt(sock, SOL_SOCKET, SO_SNDBUF, size_out, &size_len);
+#endif
+}
+
+/* Configure and then read back both directions.  Both sets are attempted so
+ * one denied direction cannot hide the independent result of the other. */
+static inline bool platform_socket_configure_p2p_buffers(
+    platform_socket_t sock, struct platform_socket_buffer_observation *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+#if defined(__linux__)
+    out->receive_configured = true;
+    out->send_configured = true;
+#else
+    out->requested_receive_bytes = PLATFORM_P2P_SOCKET_BUFFER_SIZE;
+    out->requested_send_bytes = PLATFORM_P2P_SOCKET_BUFFER_SIZE;
+    out->receive_configured = platform_socket_set_receive_buffer(
+        sock, out->requested_receive_bytes) == 0;
+    out->send_configured = platform_socket_set_send_buffer(
+        sock, out->requested_send_bytes) == 0;
+#endif
+    out->receive_observed =
+        platform_socket_get_receive_buffer(sock, &out->actual_receive_bytes) == 0;
+    out->send_observed =
+        platform_socket_get_send_buffer(sock, &out->actual_send_bytes) == 0;
+    return out->receive_configured && out->send_configured &&
+           out->receive_observed && out->send_observed;
+}
+
+/* Compatibility wrapper for callers that need only success/degrade.  Linux
+ * preserves dynamic auto-tuning and reads back its current grants; everywhere
+ * else requests PLATFORM_P2P_SOCKET_BUFFER_SIZE before the same readback. */
+static inline int platform_socket_set_p2p_buffers(platform_socket_t sock)
+{
+    struct platform_socket_buffer_observation observation;
+    return platform_socket_configure_p2p_buffers(sock, &observation) ? 0 : -1;
+}
+
 static inline bool platform_socket_send_all(platform_socket_t sock,
                                              const void *data, size_t size)
 {
@@ -575,14 +682,22 @@ static inline int platform_socket_send_nonblocking(platform_socket_t sock,
                                                     size_t size)
 {
     int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32) || !defined(MSG_DONTWAIT)
+    /* Windows and BSD-family systems (including Darwin) have no MSG_DONTWAIT.
+     * Temporarily flip the socket to non-blocking and restore the caller's
+     * mode, mirroring the Windows arm. */
+    if (!platform_socket_set_nonblocking(sock, true)) return -1;
+    int result = (int)send(sock, data, (size_t)part, 0);
+    int error = result < 0 ? platform_socket_last_error() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) && result >= 0)
+        return -1;
+    if (result < 0) {
 #if defined(_WIN32)
-    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
-    int result = send(sock, (const char *)data, part, 0);
-    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
-    if (!platform_socket_set_nonblocking(sock, false) &&
-        result != SOCKET_ERROR)
-        return SOCKET_ERROR;
-    if (result == SOCKET_ERROR) WSASetLastError(error);
+        WSASetLastError(error);
+#else
+        errno = error;
+#endif
+    }
     return result;
 #else
     int flags = MSG_DONTWAIT;
@@ -597,14 +712,19 @@ static inline int platform_socket_receive_nonblocking(platform_socket_t sock,
                                                        void *data, size_t size)
 {
     int part = size > INT32_MAX ? INT32_MAX : (int)size;
+#if defined(_WIN32) || !defined(MSG_DONTWAIT)
+    if (!platform_socket_set_nonblocking(sock, true)) return -1;
+    int result = (int)recv(sock, data, (size_t)part, 0);
+    int error = result < 0 ? platform_socket_last_error() : 0;
+    if (!platform_socket_set_nonblocking(sock, false) && result >= 0)
+        return -1;
+    if (result < 0) {
 #if defined(_WIN32)
-    if (!platform_socket_set_nonblocking(sock, true)) return SOCKET_ERROR;
-    int result = recv(sock, (char *)data, part, 0);
-    int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
-    if (!platform_socket_set_nonblocking(sock, false) &&
-        result != SOCKET_ERROR)
-        return SOCKET_ERROR;
-    if (result == SOCKET_ERROR) WSASetLastError(error);
+        WSASetLastError(error);
+#else
+        errno = error;
+#endif
+    }
     return result;
 #else
     return (int)recv(sock, data, (size_t)part, MSG_DONTWAIT);

@@ -3,6 +3,7 @@
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
 #include "platform/barrier.h"
+#include "platform/socket_compat.h"
 #include "test/test_core.h"
 #include "core/hash.h"
 #include "core/random.h"
@@ -32,10 +33,14 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#if defined(_WIN32)
+#include "platform/socket_compat.h"  /* platform_socket_pair over loopback */
+#else
 #include <sys/socket.h>   /* socketpair() — slow-reader send-queue fixture */
 #include <netinet/in.h>   /* sockaddr_in — accept() non-blocking fixture */
 #include <arpa/inet.h>
 #include <fcntl.h>        /* F_GETFL — reads back the accepted socket mode */
+#endif
 #include "util/safe_alloc.h"
 
 static int test_onion_peer_discover(const char *datadir,
@@ -1796,6 +1801,20 @@ int test_net(void)
         net_addr_set_ipv4(&addr.svc.addr, ip4);
         addr.svc.port = 8033;
 
+#if defined(_WIN32)
+        zcl_socket_t sv[2] = {ZCL_INVALID_SOCKET, ZCL_INVALID_SOCKET};
+        bool ok = platform_socket_pair(sv);
+        if (ok) {
+            /* Squeeze both ends so the kernel absorbs only a few KB and
+             * the rest has to sit in our own queue, exactly as it would
+             * for a peer on a congested circuit that has stopped reading. */
+            int small = 2048;
+            setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF,
+                       (const char *)&small, sizeof(small));
+            setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF,
+                       (const char *)&small, sizeof(small));
+        }
+#else
         int sv[2] = {-1, -1};
         bool ok = (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
         if (ok) {
@@ -1805,7 +1824,10 @@ int test_net(void)
             int small = 2048;
             setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
             setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+            ok = platform_socket_set_nonblocking(
+                (platform_socket_t)sv[0], true);
         }
+#endif
 
         const size_t hard_cap = net_send_peer_bytes_hard_cap();
         ok = ok && (hard_cap == 2 * net_send_peer_bytes_cap());
@@ -1880,7 +1902,11 @@ int test_net(void)
         }
 
         if (node) p2p_node_free(node);
+#if defined(_WIN32)
+        if (sv[1] != ZCL_INVALID_SOCKET) platform_socket_close(sv[1]);
+#else
         if (sv[1] >= 0) close(sv[1]);
+#endif
         net_manager_free(&nm);
         unsetenv("ZCL_MAX_SENDBUFFER_PEER_BYTES");
 

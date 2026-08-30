@@ -56,6 +56,7 @@ connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &addnode addnode.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &zcl23_db zcl23_db.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &reactor reactor.
+connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &socket_buffers_j socket_buffers.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &census_j noisetransport.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &msg message_cycle.
 connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &am addrman_summary.
@@ -92,4 +93,4 @@ TABLE storage   lib/util/include/util/telemetry/storage_fields.def   1
 TABLE wallet    lib/util/include/util/telemetry/wallet_fields.def    1
 TABLE agents    lib/util/include/util/telemetry/agents_fields.def    1
 TABLE zcode     lib/util/include/util/telemetry/zcode_fields.def     1
-TABLE metaverse lib/util/include/util/telemetry/metaverse_fields.def 13
+TABLE metaverse lib/util/include/util/telemetry/metaverse_fields.def 14
