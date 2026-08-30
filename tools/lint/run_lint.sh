@@ -143,7 +143,7 @@ gate_command() {
         check-pthread-create)              echo './tools/lint/check_pthread_create.sh' ;;
         check-model-validation)            echo './tools/scripts/check_model_validation.sh' ;;
         check-model-ar-lifecycle)          echo './tools/scripts/check_model_ar_lifecycle.sh' ;;
-        check-long-functions)              echo './tools/scripts/check_long_functions.sh' ;;
+        check-long-functions)              echo './tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh' ;;
         check-rpc-registrar)               echo './tools/scripts/check_rpc_registrar.sh' ;;
         check-lag-slo-observable)          echo './tools/scripts/check_lag_slo_observable.sh' ;;
         check-lib-layering)                echo './tools/scripts/check_lib_layering.sh' ;;
@@ -156,7 +156,7 @@ gate_command() {
         check-accel-oracle-pinned)         echo './tools/lint/check_accel_oracle_pinned.sh' ;;
         check-no-adx-overclaim)            echo './tools/lint/check_no_adx_overclaim.sh && ./tools/lint/check_asan_adx_exception.sh --selftest && ./tools/lint/check_asan_adx_exception.sh' ;;
         check-simd-os-support)             echo './tools/lint/check_simd_os_support.sh' ;;
-        check-supervisor-registration)     echo './tools/scripts/check_supervisor_registration.sh' ;;
+        check-supervisor-registration)     echo './tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh' ;;
         check-test-registration)           echo './tools/scripts/check_test_registration.sh' ;;
         check-typed-blocker)               echo './tools/scripts/check_typed_blocker.sh' ;;
         check-blocker-escape-registered)   echo './tools/scripts/check_blocker_escape_registered.sh' ;;
@@ -197,8 +197,8 @@ gate_command() {
         check-proc-self-shim)              echo './tools/lint/check_proc_self_shim.sh' ;;
         check-no-raw-sqlite-in-controllers) echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_raw_sqlite_in_controllers.sh' ;;
         check-model-column-drift)          echo './tools/lint/check_model_column_drift.sh --selftest && ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh' ;;
-        check-supervisor-domain)           echo './tools/lint/check_supervisor_domain.sh' ;;
-        check-thread-supervision)          echo './tools/lint/check_thread_supervision.sh' ;;
+        check-supervisor-domain)           echo './tools/lint/check_supervisor_domain.sh --selftest && ./tools/lint/check_supervisor_domain.sh' ;;
+        check-thread-supervision)          echo './tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh' ;;
         check-file-purpose)                echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh' ;;
         check-group-purpose)               echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_group_purpose.sh' ;;
         check-no-orphan-placement)         echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_orphan_placement.sh' ;;
@@ -230,7 +230,7 @@ gate_command() {
         check-no-utxo-projection)          echo './tools/scripts/check_no_utxo_projection.sh' ;;
         check-no-utxos-mirror-read)        echo './tools/scripts/check_no_utxos_mirror_read.sh' ;;
         check-no-authoritative-ram-state)  echo './tools/scripts/check_no_authoritative_ram_state.sh' ;;
-        check-no-dev-history-in-contracts) echo './tools/scripts/check_no_dev_history_in_contracts.sh' ;;
+        check-no-dev-history-in-contracts) echo './tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh' ;;
         check-no-live-lab-history)        echo './tools/scripts/check_no_live_lab_history.sh --selftest && ./tools/scripts/check_no_live_lab_history.sh' ;;
         check-stage-advances-or-blocks)    echo './tools/scripts/check_stage_advances_or_blocks.sh' ;;
         check-no-silent-ready)             echo './tools/scripts/check_no_silent_ready.sh' ;;

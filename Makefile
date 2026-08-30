@@ -10272,7 +10272,7 @@ check-persona-resolves:
 # a `// long-function-ok:<tag>` override marker explaining WHY.
 check-long-functions:
 	@echo "══ LINT: long function cap (500 lines) ══"
-	@./tools/scripts/check_long_functions.sh
+	@./tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh
 
 # Wave 9a: every register_*_rpc_commands callsite uses rpc_table_must_append.
 # rpc_table_append returns false silently on registration failure (duplicate
@@ -10360,7 +10360,7 @@ check-domain-purity:
 # opt-in adoption of the supervisor primitive over Rounds 6-8.
 check-supervisor-registration:
 	@echo "══ LINT: supervisor registration ══"
-	@./tools/scripts/check_supervisor_registration.sh
+	@./tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh
 
 # Test-registration drift guard. A test entry point (test_<name>.c defining
 # int test_<name>(void)) that is in NEITHER the canonical test group catalog
@@ -10761,7 +10761,7 @@ check-model-column-drift:
 
 check-supervisor-domain:
 	@echo "→ Gate #21: supervisor_domain"
-	@./tools/lint/check_supervisor_domain.sh
+	@./tools/lint/check_supervisor_domain.sh --selftest && ./tools/lint/check_supervisor_domain.sh
 
 # Gate #23: universal thread supervision (RATCHET). Every long-running thread
 # spawned via thread_registry_spawn must be on the supervisor liveness tree
@@ -10770,7 +10770,7 @@ check-supervisor-domain:
 # baselined in tools/lint/thread_supervision_baseline.txt (shrink-only).
 check-thread-supervision:
 	@echo "→ Gate #23: thread_supervision"
-	@./tools/lint/check_thread_supervision.sh
+	@./tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh
 
 # Gate P1 (docs/work/palace-design.md §3) — every indexed .c/.h under the
 # codeindex roots has a DERIVABLE one-line purpose (a substantive top-of-file
@@ -10938,7 +10938,7 @@ check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
 # the real body has landed. docs/, vendor/, and test paths narrate history on
 # purpose and are excluded. See tools/scripts/check_no_dev_history_in_contracts.sh.
 check-no-dev-history-in-contracts:
-	@./tools/scripts/check_no_dev_history_in_contracts.sh
+	@./tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh
 
 # Funded transaction receipts and isolated recipient-wallet manifests are
 # private local state. Tracked baselines may contain reproducible simnet and

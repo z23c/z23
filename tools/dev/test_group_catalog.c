@@ -170,6 +170,8 @@ bool zcl_test_group_plan_selects(const char *plan_id, const char *full_id)
         !zcl_test_group_resolve_exact(plan_id, primary) ||
         !zcl_test_group_catalog_contains(full_id))
         return false;
+    if (strcmp(plan_id, primary) == 0)
+        return strcmp(full_id, primary) == 0;
     return strstr(full_id, plan_id) != NULL ||
            declared_family_selects(plan_id, full_id);
 }
