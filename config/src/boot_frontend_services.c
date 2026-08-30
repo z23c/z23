@@ -3,18 +3,20 @@
  * Clearnet frontend service lifecycle: the start/stop adapters for the
  * operator-facing surfaces — local file-transfer server, JSON-RPC HTTP
  * endpoint, block-explorer API cache, HTTPS explorer, the miner, the
- * embedded Tor onion service, and the store payment processor — plus the
- * onion request adapter and the spec-table registrar that wires them into
- * svc->frontend_kernel.
+ * embedded Tor onion service — plus the onion request adapter and the
+ * spec-table registrar that wires them into svc->frontend_kernel. The store
+ * payment processor adapters remain here beside the store RPC composition,
+ * but their spec is owned by svc->runtime_kernel because the worker writes
+ * node.db and must drain at the runtime durability boundary.
  *
  * Part of the boot composition root (paired with config/src/boot_services.c
  * via config/boot_internal.h). These services are OPTIONAL and gated on the
  * runtime profile; a start failure degrades the node rather than crashing it.
- * NONE of this file participates in the SIGTERM shutdown sequence — the
- * frontend kernel is torn down by zcl_service_kernel_stop_all() from
- * boot_services.c's shutdown path. The thread-spawning surfaces (HTTPS, Tor,
- * miner, file server) own their internal worker lifecycles inside the called
- * library functions; these adapters spawn no threads of their own.
+ * The frontend kernel is torn down by zcl_service_kernel_stop_all() from the
+ * shutdown path. The payment adapter is the exception: its tracked worker is
+ * started and joined by the later runtime kernel so node.db remains live
+ * through its join. Other thread-spawning surfaces (HTTPS, Tor, miner, file
+ * server) own their internal worker lifecycles inside the called functions.
  */
 
 #include "config/boot_internal.h"
@@ -547,6 +549,8 @@ static bool boot_store_payment_start(void *ctx)
     struct boot_svc_ctx *svc = ctx;
     if (!svc || !svc->app_ctx || !boot_profile_has_store(svc->app_ctx))
         return true;
+    if (!boot_running(svc))
+        LOG_FAIL("store", "payment processor start preceded runtime readiness");
     if (svc->defer_payment_service) {
         printf("Store payment processor deferred during bootstrap receiver mode\n");
         return true;
@@ -563,6 +567,25 @@ static void boot_store_payment_stop(void *ctx)
     struct boot_svc_ctx *svc = ctx;
     if (svc)
         boot_join_payment_service(svc);
+}
+
+struct zcl_service_spec boot_store_payment_spec(struct boot_svc_ctx *svc)
+{
+    return (struct zcl_service_spec){
+        .name = "store_payment",
+        .start = boot_store_payment_start,
+        .stop = boot_store_payment_stop,
+        .ctx = svc,
+        .flags = ZCL_SERVICE_OPTIONAL,
+    };
+}
+
+bool boot_register_store_payment_runtime(struct boot_svc_ctx *svc)
+{
+    if (!svc)
+        LOG_FAIL("store", "payment runtime registration: null service context");
+    struct zcl_service_spec payment = boot_store_payment_spec(svc);
+    return zcl_service_kernel_register(&svc->runtime_kernel, &payment);
 }
 
 /* ZCODE package store (slice 2): local content-addressed store under
@@ -647,13 +670,6 @@ bool boot_register_frontend_services(struct boot_svc_ctx *svc)
             .name = "onion_tor",
             .start = boot_onion_tor_start,
             .stop = boot_onion_tor_stop,
-            .ctx = svc,
-            .flags = ZCL_SERVICE_OPTIONAL,
-        },
-        {
-            .name = "store_payment",
-            .start = boot_store_payment_start,
-            .stop = boot_store_payment_stop,
             .ctx = svc,
             .flags = ZCL_SERVICE_OPTIONAL,
         },

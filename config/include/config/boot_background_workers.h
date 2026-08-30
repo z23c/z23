@@ -40,9 +40,9 @@
 
 struct boot_svc_ctx;
 
-/* Generic bounded thread join used by both this unit and the catchup-job
- * helpers that remain in boot_services.c. Joins with a timeout; on timeout or
- * error it logs and detaches so shutdown never blocks indefinitely. */
+/* Generic diagnostic-budget thread join used by both this unit and the
+ * catchup-job helpers that remain in boot_services.c. A timeout is logged,
+ * then ownership is retained until the thread exits. */
 bool boot_join_thread_bounded(pthread_t thread, const char *name,
                               int timeout_sec);
 
@@ -89,8 +89,8 @@ void boot_worker_clear_stall_blocker(const struct liveness_contract *c);
  * and the register helper remains idempotent. */
 void boot_complete_worker_supervisor(_Atomic supervisor_child_id *slot);
 
-/* Store payment processor (store profile). Start is gated by
- * boot_store_payment_start in boot_frontend_services.c. */
+/* Store payment processor (store profile). Its runtime-kernel start/stop
+ * adapters live in boot_frontend_services.c beside store RPC composition. */
 bool boot_start_payment_service(struct boot_svc_ctx *svc);
 void boot_join_payment_service(struct boot_svc_ctx *svc);
 
