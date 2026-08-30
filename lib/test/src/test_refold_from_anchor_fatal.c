@@ -56,8 +56,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define RFA_CHECK(name, expr) do {                            \
     printf("refold_from_anchor_fatal: %s... ", (name));       \
@@ -391,3 +394,12 @@ int test_refold_from_anchor_fatal(void)
     test_cleanup_tmpdir(dir);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork crash-window refold lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_refold_from_anchor_fatal(void)
+{
+    printf("refold_from_anchor_fatal: SKIP (Windows): fork crash-window refold lane\n");
+    return 0;
+}
+#endif

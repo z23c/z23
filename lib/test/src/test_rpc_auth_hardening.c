@@ -17,13 +17,11 @@
 #include "rpc/httpserver.h"
 #include "encoding/utilstrencodings.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include "platform/socket_compat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -390,24 +388,25 @@ static bool metrics_read_cookie(const char *dir, char *out, size_t outsz)
 
 static uint16_t metrics_reserve_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return 0;
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
-        close(fd);
+    if (platform_socket_bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+        platform_socket_close(fd);
         return 0;
     }
-    socklen_t sl = sizeof(a);
-    if (getsockname(fd, (struct sockaddr *)&a, &sl) < 0) {
-        close(fd);
+    size_t sl = sizeof(a);
+    if (platform_socket_local_address(fd, (struct sockaddr *)&a, &sl) < 0) {
+        platform_socket_close(fd);
         return 0;
     }
     uint16_t port = ntohs(a.sin_port);
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 
@@ -418,8 +417,9 @@ static uint16_t metrics_reserve_port(void)
 static int metrics_get(uint16_t port, const char *auth_b64,
                        char *out_body, size_t body_cap)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return -1;
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -427,12 +427,12 @@ static int metrics_get(uint16_t port, const char *auth_b64,
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
 
-    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)platform_socket_set_send_timeout(fd, 2000);
+    (void)platform_socket_set_receive_timeout(fd, 2000);
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+    if (platform_socket_connect(fd, (struct sockaddr *)&addr,
+                                sizeof(addr)) < 0) {
+        platform_socket_close(fd);
         return -1;
     }
 
@@ -453,8 +453,10 @@ static int metrics_get(uint16_t port, const char *auth_b64,
             "\r\n");
     }
 
-    ssize_t sent = write(fd, req, (size_t)reqlen);
-    if (sent != reqlen) { close(fd); return -1; }
+    if (!platform_socket_send_all(fd, req, (size_t)reqlen)) {
+        platform_socket_close(fd);
+        return -1;
+    }
 
     /* Read the full response into a local buffer. The Prometheus body
      * can be several KB; the 8 KB response buffer below is sufficient
@@ -462,11 +464,12 @@ static int metrics_get(uint16_t port, const char *auth_b64,
     char resp[8192];
     size_t total = 0;
     while (total < sizeof(resp) - 1) {
-        ssize_t n = read(fd, resp + total, sizeof(resp) - 1 - total);
+        int n = platform_socket_receive(fd, resp + total,
+                                        sizeof(resp) - 1 - total);
         if (n <= 0) break;
         total += (size_t)n;
     }
-    close(fd);
+    platform_socket_close(fd);
     if (total == 0) return -1;
     resp[total] = '\0';
 

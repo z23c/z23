@@ -40,13 +40,13 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
-#include <arpa/inet.h>
+#include "platform/socket_compat.h"
+
 #include <errno.h>
-#include <netinet/in.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -72,8 +72,9 @@ static _Atomic int g_port = 0;
 
 static uint16_t free_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return 0;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -81,12 +82,14 @@ static uint16_t free_port(void)
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(0);
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 
@@ -130,20 +133,22 @@ static bool handshake(const char *sni, bool offer_acme_alpn,
     SSL *ssl = NULL;
     X509 *leaf = NULL;
 
-    const int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    const platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM,
+                                                      0, true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return false;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons((uint16_t)port);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    if (platform_socket_connect(fd, (struct sockaddr *)&addr,
+                                sizeof(addr)) != 0)
         goto done;
 
     ctx = SSL_CTX_new(TLS_client_method());
     ssl = ctx ? SSL_new(ctx) : NULL;
-    if (!ssl || SSL_set_fd(ssl, fd) != 1)
+    if (!ssl || SSL_set_fd(ssl, (int)(intptr_t)fd) != 1)
         goto done;
     if (sni && !SSL_set_tlsext_host_name(ssl, sni))
         goto done;
@@ -187,8 +192,8 @@ done:
         SSL_free(ssl);
     }
     SSL_CTX_free(ctx);
-    if (fd >= 0)
-        close(fd);
+    if (fd != PLATFORM_SOCKET_INVALID)
+        platform_socket_close(fd);
     return ok;
 }
 

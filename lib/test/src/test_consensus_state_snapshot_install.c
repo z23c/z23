@@ -48,6 +48,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define CSI_CHECK(label, expr) do {                                      \
     printf("consensus_state_install: %s... ", (label));                  \
@@ -3822,3 +3823,11 @@ int test_consensus_state_snapshot_install(void)
     printf("=== consensus_state_snapshot_install: %d failure(s) ===\n",failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Install-proof fixture is written on the POSIX fstatat/openat/renameat surface; no Windows analogue for the fixture. Skipped loudly rather than faked. */
+int test_consensus_state_snapshot_install(void)
+{
+    printf("consensus_state_snapshot_install: SKIP (Windows): install-proof fixture is written on the posix fstatat/openat/renameat surface; no windows analogue for the fixture.\n");
+    return 0;
+}
+#endif

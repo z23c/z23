@@ -30,6 +30,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 void reducer_frontier_test_set_compiled_anchor(int32_t height);
 
@@ -1871,3 +1872,11 @@ int test_consensus_state_snapshot_export(void)
     (void)rmdir(dir);
     return failures;
 }
+#else  /* _WIN32 */
+/* Export-proof fixture is written on the POSIX at()/fcntl(F_DUPFD_CLOEXEC)/futimens surface; no Windows analogue for the fixture. Skipped loudly rather than faked. */
+int test_consensus_state_snapshot_export(void)
+{
+    printf("consensus_state_snapshot_export: SKIP (Windows): export-proof fixture is written on the posix at()/fcntl(f_dupfd_cloexec)/futimens surface; no windows analogue for the fixture.\n");
+    return 0;
+}
+#endif

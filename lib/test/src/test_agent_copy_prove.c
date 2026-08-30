@@ -23,6 +23,7 @@
 #include "test/test_core.h"
 #include "controllers/agent_copy_prove_controller.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -242,8 +243,8 @@ static int test_acp_script_no_run_json(void)
     test_make_tmpdir(work, sizeof(work), "acp_script", "norun");
     snprintf(home, sizeof(home), "%s/home", work);
     snprintf(src, sizeof(src), "%s/src", work);
-    mkdir(home, 0700);
-    mkdir(src, 0700);
+    platform_directory_create(home, 0700);
+    platform_directory_create(src, 0700);
     /* A couple of tiny files so the light-copy loop has something to
      * (successfully) skip past; content is irrelevant to --no-run. */
     char marker[700];
@@ -404,7 +405,7 @@ static int test_acp_rpc_launch_and_poll(void)
     char work[512], status_dir[560], stub[600];
     test_make_tmpdir(work, sizeof(work), "acp_launch", "poll");
     snprintf(status_dir, sizeof(status_dir), "%s/status", work);
-    mkdir(status_dir, 0700);
+    platform_directory_create(status_dir, 0700);
     snprintf(stub, sizeof(stub), "%s/stub_repro.sh", work);
 
     /* Minimal stand-in for repro_on_copy.sh's --status-file contract:

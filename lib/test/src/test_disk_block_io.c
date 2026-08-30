@@ -14,6 +14,19 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+/* NTFS hard links via the Win32 API; errno set for the fixture message. */
+static int dbio_link(const char *existing, const char *alias)
+{
+    if (CreateHardLinkA(alias, existing, NULL))
+        return 0;
+    errno = EIO;
+    return -1;
+}
+#define link dbio_link
+#endif
+
 /* ── Helpers ──────────────────────────────────────────────── */
 
 static void make_test_dir(char *buf, size_t len)

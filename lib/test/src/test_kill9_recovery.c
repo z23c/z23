@@ -122,7 +122,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -331,6 +333,51 @@ static int p11_7_one_cycle(const char *dbpath, int cycle_idx,
         return 1;
     }
 
+#if defined(_WIN32)
+    /* Re-exec the crash victim; TerminateProcess is the SIGKILL analogue. */
+    void *hp = NULL;
+    {
+        char k9_log[560];
+        char k9_start[32];
+        snprintf(k9_log, sizeof(k9_log), "%s.k9child.log", dbpath);
+        snprintf(k9_start, sizeof(k9_start), "%d", start_height);
+        if (_putenv_s("ZCL_K9_DB", dbpath) != 0 ||
+            _putenv_s("ZCL_K9_START", k9_start) != 0) {
+            printf("FAIL (cycle %d: child env setup failed)\n", cycle_idx);
+            return 1;
+        }
+        hp = test_spawn_self_with_role("test_kill9_recovery", "p11_7",
+                                       k9_log);
+        _putenv_s("ZCL_K9_DB", "");
+        _putenv_s("ZCL_K9_START", "");
+    }
+    if (!hp) {
+        printf("FAIL (cycle %d: child spawn failed)\n", cycle_idx);
+        return 1;
+    }
+
+    /* Randomised kill delay: 0.5ms to ~40ms.  Covers cases where the
+     * child is (a) still opening the DB, (b) mid-transaction, (c)
+     * between COMMIT rounds, (d) already finished (delay > 30ms). */
+    long delay_us = 500 + (long)(rand_r(rng_state) % 40000);
+    struct timespec delay_ts = {
+        .tv_sec = 0,
+        .tv_nsec = delay_us * 1000,
+    };
+    nanosleep(&delay_ts, NULL);
+
+    /* Like kill(pid, SIGKILL): if the child already finished, the terminate
+     * is a no-op and the reaped exit code is its own. */
+    test_self_child_kill(hp);
+    int wcode = test_self_child_wait(hp);
+    bool killed = (wcode == 137); /* test_self_child_kill's exit code */
+    bool exited = (wcode == 0);
+    if (!killed && !exited) {
+        printf("FAIL (cycle %d: child ended abnormally; exit=%d)\n",
+               cycle_idx, wcode);
+        return 1;
+    }
+#else
     pid_t pid = fork();
     if (pid < 0) {
         perror("fork");
@@ -372,6 +419,7 @@ static int p11_7_one_cycle(const char *dbpath, int cycle_idx,
                cycle_idx, WIFSIGNALED(status), WIFEXITED(status), status);
         return 1;
     }
+#endif
 
     /* Parent reopens through the live node's entry point.  This is
      * where the "UTXOs ahead of tip → auto-rewind-or-refuse" invariant
@@ -572,6 +620,49 @@ static int p11_7mf_run_phase(void)
         int32_t end_step = start_step + MF_BATCH;
         if (end_step > MF_N_STEPS) end_step = MF_N_STEPS;
 
+#if defined(_WIN32)
+        void *hp = NULL;
+        {
+            char k9_log[340];
+            char k9_ss[24], k9_se[24];
+            snprintf(k9_log, sizeof(k9_log), "%s/k9mf_child.log", dir);
+            snprintf(k9_ss, sizeof(k9_ss), "%d", (int)start_step);
+            snprintf(k9_se, sizeof(k9_se), "%d", (int)end_step);
+            if (_putenv_s("ZCL_K9_DIR", dir) != 0 ||
+                _putenv_s("ZCL_K9_START", k9_ss) != 0 ||
+                _putenv_s("ZCL_K9_END", k9_se) != 0) {
+                printf("FAIL (mint-fold cycle %d: child env setup failed)\n",
+                       i);
+                failures++;
+                break;
+            }
+            hp = test_spawn_self_with_role("test_kill9_recovery", "mf",
+                                           k9_log);
+            _putenv_s("ZCL_K9_DIR", "");
+            _putenv_s("ZCL_K9_START", "");
+            _putenv_s("ZCL_K9_END", "");
+        }
+        if (!hp) {
+            printf("FAIL (mint-fold cycle %d: child spawn failed)\n", i);
+            failures++;
+            break;
+        }
+
+        long delay_us = 300 + (long)(rand_r(&rng) % 9000);
+        struct timespec delay_ts = { .tv_sec = 0, .tv_nsec = delay_us * 1000 };
+        nanosleep(&delay_ts, NULL);
+
+        test_self_child_kill(hp);
+        int wcode = test_self_child_wait(hp);
+        bool killed = (wcode == 137);
+        bool exited_ok = (wcode == 0);
+        if (!killed && !exited_ok) {
+            printf("FAIL (mint-fold cycle %d: child ended abnormally; "
+                   "exit=%d)\n", i, wcode);
+            failures++;
+            break;
+        }
+#else
         pid_t pid = fork();
         if (pid < 0) { perror("fork"); failures++; break; }
         if (pid == 0) {
@@ -604,6 +695,7 @@ static int p11_7mf_run_phase(void)
             failures++;
             break;
         }
+#endif
 
         /* Reopen — the same durable-marker inspection a real restart of the
          * offline -mint-anchor producer performs before resuming a fold. */
@@ -954,6 +1046,30 @@ static int p11_7ib_run_phase(void)
     time_t t0 = platform_time_wall_time_t();
 
     for (int i = 0; i < n_cycles; i++) {
+#if defined(_WIN32)
+        void *hp = NULL;
+        {
+            char k9_log[420];
+            snprintf(k9_log, sizeof(k9_log), "%s/k9ib_child.log", base);
+            if (_putenv_s("ZCL_K9_SRC", src_dir) != 0 ||
+                _putenv_s("ZCL_K9_DB", db_path) != 0) {
+                printf("FAIL (importblockindex cycle %d: child env setup "
+                       "failed)\n", i);
+                failures++;
+                break;
+            }
+            hp = test_spawn_self_with_role("test_kill9_recovery", "ib",
+                                           k9_log);
+            _putenv_s("ZCL_K9_SRC", "");
+            _putenv_s("ZCL_K9_DB", "");
+        }
+        if (!hp) {
+            printf("FAIL (importblockindex cycle %d: child spawn failed)\n",
+                   i);
+            failures++;
+            break;
+        }
+#else
         pid_t pid = fork();
         if (pid < 0) { perror("fork"); failures++; break; }
         if (pid == 0) {
@@ -962,6 +1078,7 @@ static int p11_7ib_run_phase(void)
                                                   /*header_only=*/true, &child_count);
             _exit(ok ? 0 : 1);
         }
+#endif
 
         long delay_us = 300 + (long)(rand_r(&rng) % (unsigned long)delay_ceiling_us);
         struct timespec delay_ts = {
@@ -970,6 +1087,18 @@ static int p11_7ib_run_phase(void)
         };
         nanosleep(&delay_ts, NULL);
 
+#if defined(_WIN32)
+        test_self_child_kill(hp);
+        int wcode = test_self_child_wait(hp);
+        bool killed = (wcode == 137);
+        bool exited_ok = (wcode == 0);
+        if (!killed && !exited_ok) {
+            printf("FAIL (importblockindex cycle %d: child ended abnormally; "
+                   "exit=%d)\n", i, wcode);
+            failures++;
+            break;
+        }
+#else
         if (kill(pid, SIGKILL) != 0 && errno != ESRCH) {
             perror("kill");
             waitpid(pid, NULL, 0);
@@ -991,6 +1120,7 @@ static int p11_7ib_run_phase(void)
             failures++;
             break;
         }
+#endif
 
         struct node_db ndb;
         if (!node_db_open(&ndb, db_path)) {
@@ -1085,6 +1215,43 @@ static int p11_7ib_run_phase(void)
 int test_kill9_recovery(void)
 {
     int failures = 0;
+#if defined(_WIN32)
+    /* Windows has no fork(): the crash-victim child is this same binary
+     * re-exec'd with ZCL_TEST_FORK_ROLE set (see test_spawn_self_with_role).
+     * Run the worker body — which always _exit()s — with its parameters
+     * passed through the environment. TerminateProcess from the parent is
+     * the uncatchable SIGKILL analogue, so the crash-window semantics are
+     * identical. */
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        if (strcmp(fork_role, "p11_7") == 0) {
+            const char *db = getenv("ZCL_K9_DB");
+            const char *st = getenv("ZCL_K9_START");
+            if (!db || !st) _exit(98);
+            p11_7_child_worker(db, atoi(st));
+            _exit(99); /* unreachable */
+        }
+        if (strcmp(fork_role, "mf") == 0) {
+            const char *dir = getenv("ZCL_K9_DIR");
+            const char *ss = getenv("ZCL_K9_START");
+            const char *se = getenv("ZCL_K9_END");
+            if (!dir || !ss || !se) _exit(98);
+            mf_child_worker(dir, (int32_t)atoi(ss), (int32_t)atoi(se));
+            _exit(99); /* unreachable */
+        }
+        if (strcmp(fork_role, "ib") == 0) {
+            const char *src = getenv("ZCL_K9_SRC");
+            const char *db = getenv("ZCL_K9_DB");
+            if (!src || !db) _exit(98);
+            int child_count = -1;
+            bool ok = snapshot_import_block_index(src, db,
+                                                  /*header_only=*/true,
+                                                  &child_count);
+            _exit(ok ? 0 : 1);
+        }
+        _exit(97); /* unknown role */
+    }
+#endif
     printf("\n=== kill -9 recovery (MVP #7, <2 min) — three crash-window "
            "phases: UTXO-apply, mint-fold, importblockindex ===\n");
     printf("kill9_recovery SIGKILL-mid-apply × 10 cycles... ");

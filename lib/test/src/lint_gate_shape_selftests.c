@@ -14,7 +14,11 @@
 
 #include "test/test_core.h"
 
-#ifdef ZCL_TESTING
+/* The lint-gate self-test family fork+execs POSIX bash gate scripts; native
+ * Windows has no fork/exec/waitpid, so on _WIN32 every check compiles out and
+ * the registered group entry points (test_make_lint_gates.c) report a loud
+ * skip instead. */
+#if defined(ZCL_TESTING) && !defined(_WIN32)
 
 #include "lint_gate_selftests.h"
 

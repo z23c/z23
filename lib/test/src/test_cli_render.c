@@ -34,7 +34,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 /* ── shared helpers ────────────────────────────────────────────────── */
@@ -695,6 +697,13 @@ static bool cr_bin_fresh(const char **stale_out)
 static int cr_run(char *const argv[], char *const envp[], char *out,
                   size_t cap)
 {
+#if defined(_WIN32)
+    /* No fork/execve: CreateProcess with a custom environment block and a
+     * captured pipe. CreateProcess resolves the extension-less CR_BIN to
+     * zclassic23.exe. */
+    return test_spawn_capture_env(
+        (const char *const *)argv, (const char *const *)envp, out, cap);
+#else
     int pipefd[2];
     if (pipe(pipefd) != 0)
         return -1;
@@ -734,6 +743,7 @@ static int cr_run(char *const argv[], char *const envp[], char *out,
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return -100;
+#endif
 }
 
 /* envp: HOME, PATH, the service-lookup suppressor, plus up to two extra

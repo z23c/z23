@@ -56,14 +56,18 @@
 #endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#endif
 #if defined(__linux__)
 #include <sys/random.h>
 #endif
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#endif
 
 #include <sqlite3.h>
 

@@ -40,15 +40,20 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <poll.h>
+#endif
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
-#include <string.h>
 #include <sys/un.h>
+#endif
+#include <string.h>
 #include <unistd.h>
 
+#if !defined(_WIN32)
 #define SDN_CHECK(name, expr) do { \
     printf("sd_notify: %s... ", (name)); \
     if ((expr)) printf("OK\n"); \
@@ -861,3 +866,17 @@ int test_sd_notify(void)
 
     return failures;
 }
+
+#else /* _WIN32 */
+
+/* Production sd_notify is a no-op stub on Windows (lib/util/src/sd_notify.c)
+ * and there is no AF_UNIX datagram socket or systemd to speak the protocol
+ * to, so none of these fixtures can run. */
+int test_sd_notify(void)
+{
+    printf("test_sd_notify: SKIP (Windows): sd_notify is a no-op stub and "
+           "AF_UNIX datagram sockets are unavailable\n");
+    return 0;
+}
+
+#endif /* !_WIN32 */
