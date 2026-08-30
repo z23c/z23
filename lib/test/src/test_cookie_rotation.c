@@ -10,14 +10,12 @@
 #include "rpc/httpserver.h"
 #include "rpc/server.h"
 #include "encoding/utilstrencodings.h"
+#include "platform/socket_compat.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -26,8 +24,9 @@
 
 static uint16_t reserve_test_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return 0;
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -36,12 +35,14 @@ static uint16_t reserve_test_port(void)
     addr.sin_port = htons(0);
 
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 
@@ -68,8 +69,9 @@ static bool read_cookie_password(const char *datadir, char *pass, size_t passsz)
  * Returns -1 on connection/network error. */
 static int rpc_with_auth(uint16_t port, const char *user, const char *pass)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return -1;
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -77,13 +79,13 @@ static int rpc_with_auth(uint16_t port, const char *user, const char *pass)
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
 
-    /* Non-blocking connect with short timeout */
-    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    /* Short I/O timeout */
+    (void)platform_socket_set_send_timeout(fd, 2000);
+    (void)platform_socket_set_receive_timeout(fd, 2000);
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
+    if (platform_socket_connect(fd, (struct sockaddr *)&addr,
+                                sizeof(addr)) != 0) {
+        platform_socket_close(fd);
         return -1;
     }
 
@@ -102,13 +104,15 @@ static int rpc_with_auth(uint16_t port, const char *user, const char *pass)
         "\r\n"
         "%s", b64, strlen(body), body);
 
-    ssize_t sent = write(fd, req, (size_t)reqlen);
-    if (sent != reqlen) { close(fd); return -1; }
+    if (!platform_socket_send_all(fd, req, (size_t)reqlen)) {
+        platform_socket_close(fd);
+        return -1;
+    }
 
     /* Read response — just need the status line */
     char resp[4096];
-    ssize_t n = read(fd, resp, sizeof(resp) - 1);
-    close(fd);
+    int n = platform_socket_receive(fd, resp, sizeof(resp) - 1);
+    platform_socket_close(fd);
     if (n <= 0) return -1;
     resp[n] = '\0';
 

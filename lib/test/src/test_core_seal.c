@@ -41,11 +41,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #define CORE_SEAL_NO_MAIN 1
 #include "../../../tools/core_seal.c"
+#if !defined(_WIN32)
 
 static int cs_failures;
 
@@ -792,3 +795,12 @@ int test_core_seal(void)
     printf("core_seal: %d failure(s)\n", cs_failures);
     return cs_failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked seal-violation child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_core_seal(void)
+{
+    printf("core_seal: SKIP (Windows): forked seal-violation child lane\n");
+    return 0;
+}
+#endif

@@ -37,7 +37,9 @@
 #endif
 #include <unistd.h>
 
+#if !defined(_WIN32)
 extern char **environ;
+#endif
 
 #if defined(__APPLE__)
 #define AB_TRUE_PATH "/usr/bin/true"
@@ -50,6 +52,8 @@ extern char **environ;
     if ((expr)) printf("OK\n"); \
     else { printf("FAIL\n"); failures++; } \
 } while (0)
+
+#if !defined(_WIN32)
 
 static int ab_write_file(const char *path, const char *contents, mode_t mode)
 {
@@ -712,3 +716,34 @@ int test_binary_ab_fallback(void)
 
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows refuses the whole A/B slot surface by name, errno == ENOTSUP —
+ * see SLOT_WIN32_REFUSAL in lib/platform/src/os_binary_slots.c: there is no
+ * directory-handle-relative O_NOFOLLOW open and no descriptor-bound exec,
+ * and a partial emulation was deliberately rejected. This lane asserts the
+ * refusal contract itself; the launch matrix above is the POSIX lane. */
+int test_binary_ab_fallback(void)
+{
+    printf("\n=== binary_ab_fallback tests (Windows refusal lane) ===\n");
+    int failures = 0;
+
+    struct os_binary_slots_launch launch;
+    errno = 0;
+    bool prepare_refused =
+        !os_binary_slots_prepare_launch("/nonexistent-slots",
+                                        "/nonexistent-node", 3, &launch) &&
+        errno == ENOTSUP;
+    AB_CHECK("os_binary_slots_prepare_launch refuses by name (ENOTSUP)",
+             prepare_refused);
+
+    errno = 0;
+    char *const args[] = { (char *)"/nonexistent-node", NULL };
+    AB_CHECK("platform_execve_fd refuses descriptor-bound exec (ENOTSUP)",
+             platform_execve_fd(-1, args, NULL) == -1 && errno == ENOTSUP);
+
+    if (!failures)
+        printf("binary_ab_fallback: SKIP (Windows): descriptor-bound A/B "
+               "launch lane is POSIX-only; refusal contract asserted\n");
+    return failures;
+}
+#endif

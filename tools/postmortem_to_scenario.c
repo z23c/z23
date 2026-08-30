@@ -72,6 +72,26 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#if defined(_WIN32)
+/* strsignal(3) has no UCRT analogue; the postmortem capsules this renders
+ * carry POSIX signal numbers, so name the common ones by number. */
+static const char *strsignal(int sig)
+{
+    switch (sig) {
+    case 1:  return "Hangup";
+    case 2:  return "Interrupt";
+    case 4:  return "Illegal instruction";
+    case 6:  return "Aborted";
+    case 8:  return "Floating point exception";
+    case 9:  return "Killed";
+    case 11: return "Segmentation fault";
+    case 13: return "Broken pipe";
+    case 15: return "Terminated";
+    default: return NULL;
+    }
+}
+#endif
+
 /* ── Bounds ──────────────────────────────────────────────────────────── */
 
 #define P2S_MANIFEST_MAX      (64u * 1024u)  /* generous cap for a small JSON file */

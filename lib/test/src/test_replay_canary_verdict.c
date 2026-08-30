@@ -38,9 +38,12 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 /* ── repo_root: walk UP from the test binary to the tree that holds the
  * Makefile AND the canary harness, so the shell-out hits the right file
@@ -1213,3 +1216,12 @@ int test_replay_canary_verdict(void)
     failures += test_source_guard_mvp_binds_canary_to_running_binary();
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork/exec verdict-child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_replay_canary_verdict(void)
+{
+    printf("replay_canary_verdict: SKIP (Windows): fork/exec verdict-child lane\n");
+    return 0;
+}
+#endif

@@ -19,11 +19,14 @@
 #include <sys/qos.h>
 #else
 #include <sched.h>
+#if !defined(_WIN32)
 #include <sys/syscall.h>
+#endif
 #endif
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#if !defined(_WIN32)
 
 #ifndef IOPRIO_WHO_PROCESS
 #define IOPRIO_WHO_PROCESS 1
@@ -199,3 +202,11 @@ int test_thread_qos(void)
     failures += t_thread_qos_idempotent();
     return failures;
 }
+#else  /* _WIN32 */
+/* Thread-QoS proof reads ioprio_get(2)/sched_getscheduler via raw Linux syscalls (sys/syscall.h); no Windows analogue. Skipped loudly rather than faked. */
+int test_thread_qos(void)
+{
+    printf("thread_qos: SKIP (Windows): thread-qos proof reads ioprio_get(2)/sched_getscheduler via raw linux syscalls (sys/syscall.h); no windows analogue.\n");
+    return 0;
+}
+#endif

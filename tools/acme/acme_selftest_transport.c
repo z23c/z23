@@ -25,6 +25,14 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+/* On Windows, <wincrypt.h> (pulled in transitively by <windows.h> through
+ * platform/socket_compat.h) defines X509_NAME as the object-like macro
+ * ((LPCSTR) 7), which would rewrite the OpenSSL X509_NAME type used below
+ * into a cast expression. Drop the macro — this file means the OpenSSL type. */
+#if defined(_WIN32) && defined(X509_NAME)
+#undef X509_NAME
+#endif
+
 #if !defined(_WIN32)
 #include <errno.h>
 #include <netinet/in.h>

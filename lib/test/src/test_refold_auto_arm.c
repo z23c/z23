@@ -58,8 +58,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define RAA_CHECK(name, expr) do {                       \
     printf("  refold_auto_arm: %s... ", (name));          \
@@ -548,3 +551,12 @@ int test_refold_auto_arm(void)
     checkpoints_set_sha3_override_for_test(NULL);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork crash-window refold lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_refold_auto_arm(void)
+{
+    printf("refold_auto_arm: SKIP (Windows): fork crash-window refold lane\n");
+    return 0;
+}
+#endif

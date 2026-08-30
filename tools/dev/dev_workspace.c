@@ -45,13 +45,30 @@
 /* Keep the protocol implementation below platform-neutral without pretending
  * that Win32 handles are POSIX descriptors.  These bounded, process-local
  * indices retain the audited directory/file/lock capabilities and map the
- * small *at-style vocabulary used by this module onto them. */
+ * small *at-style vocabulary used by this module onto them.
+ *
+ * In the test-fast profile test/windows_compat.h is force-included ahead of
+ * this block, so ssize_t/struct stat/S_IS*/the O_* stubs may already exist:
+ * guard the type definitions and take the module's own protocol values back
+ * with #undef where the compat header parked them at 0. */
+#if !defined(_SSIZE_T_DEFINED)
 typedef int64_t ssize_t;
+#endif
+#if !defined(_INC_STAT)
 struct stat { off_t st_size; unsigned st_mode, st_uid, st_nlink; };
+#define S_ISDIR(mode) (((mode) & 0170000u) == 0040000u)
+#define S_ISREG(mode) (((mode) & 0170000u) == 0100000u)
+#endif
 #define WS_MODE_DIR 0040000u
 #define WS_MODE_REG 0100000u
-#define S_ISDIR(mode) (((mode) & 0170000u) == WS_MODE_DIR)
-#define S_ISREG(mode) (((mode) & 0170000u) == WS_MODE_REG)
+#undef O_RDONLY
+#undef O_WRONLY
+#undef O_RDWR
+#undef O_CREAT
+#undef O_EXCL
+#undef O_DIRECTORY
+#undef O_CLOEXEC
+#undef O_NOFOLLOW
 #define O_RDONLY 0x0001
 #define O_WRONLY 0x0002
 #define O_RDWR 0x0004

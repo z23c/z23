@@ -11,9 +11,12 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 static bool spawn_contains(const char *hay, const char *needle)
 {
@@ -292,3 +295,12 @@ int test_spawn(void)
     printf("Spawn: %d failures\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's zcl_spawn_detached POSIX process-model fixture (/bin/echo, waitpid ECHILD)
+ * cannot run here. Skipped loudly rather than faked. */
+int test_spawn(void)
+{
+    printf("spawn: SKIP (Windows): zcl_spawn_detached POSIX process-model fixture (/bin/echo, waitpid ECHILD)\n");
+    return 0;
+}
+#endif

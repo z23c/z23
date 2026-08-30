@@ -10,11 +10,31 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
+#endif
+
+#if defined(_WIN32)
+/* The UCRT _pclose() returns the child's raw exit code, not a wait(2)
+ * status word; map the two macros onto that honestly. popen() routes
+ * through cmd.exe, which cannot run the POSIX test-group-list.sh driver,
+ * so commands are re-dispatched through the MSYS2 sh on the lane's PATH.
+ * The command strings in this file carry no double quotes. */
+#define WIFEXITED(s) ((s) >= 0)
+#define WEXITSTATUS(s) (s)
+static const char *tgs_wrap_command(const char *command, char *buf,
+                                    size_t cap)
+{
+    int n = snprintf(buf, cap, "sh -c \"%s\"", command);
+    if (n < 0 || (size_t)n >= cap)
+        return NULL;
+    return buf;
+}
 #endif
 
 static int capture_command(const char *command, char *out, size_t cap)
@@ -22,6 +42,12 @@ static int capture_command(const char *command, char *out, size_t cap)
     if (!command || !out || cap == 0)
         return -1;
     out[0] = '\0';
+#if defined(_WIN32)
+    char wrapped[4096];
+    command = tgs_wrap_command(command, wrapped, sizeof(wrapped));
+    if (!command)
+        return -1;
+#endif
     FILE *pipe = popen(command, "r");
     if (!pipe)
         return -1;
@@ -77,6 +103,12 @@ static int capture_command_ends(const char *command, char *head,
         return -1;
     head[0] = '\0';
     tail[0] = '\0';
+#if defined(_WIN32)
+    char wrapped[4096];
+    command = tgs_wrap_command(command, wrapped, sizeof(wrapped));
+    if (!command)
+        return -1;
+#endif
     FILE *pipe = popen(command, "r");
     if (!pipe)
         return -1;

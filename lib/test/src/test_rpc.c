@@ -19,9 +19,7 @@
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include "platform/socket_compat.h"
 #include <unistd.h>
 
 /* Every on-disk and on-network resource this group touches must be unique to
@@ -37,20 +35,23 @@ static void rpc_test_tmpdir(char *buf, size_t n, const char *tag)
 /* Ask the kernel for a free loopback port, then release it. */
 static uint16_t rpc_test_free_port(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID) return 0;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(0);
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        socklen_t len = sizeof(addr);
-        if (getsockname(fd, (struct sockaddr *)&addr, &len) == 0)
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
             port = ntohs(addr.sin_port);
     }
-    close(fd);
+    platform_socket_close(fd);
     return port;
 }
 
@@ -1713,16 +1714,18 @@ int test_rpc(void) {
                     if (ok) {
                         SSL_CTX *cctx = SSL_CTX_new(TLS_client_method());
                         if (cctx) {
-                            int sock = socket(AF_INET, SOCK_STREAM, 0);
+                            platform_socket_t sock = platform_socket_open(
+                                AF_INET, SOCK_STREAM, 0, true, false);
                             struct sockaddr_in sa;
                             memset(&sa, 0, sizeof(sa));
                             sa.sin_family = AF_INET;
                             sa.sin_port = htons(tls_port);
                             sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                            if (connect(sock, (struct sockaddr *)&sa,
-                                        sizeof(sa)) == 0) {
+                            if (platform_socket_connect(
+                                    sock, (struct sockaddr *)&sa,
+                                    sizeof(sa)) == 0) {
                                 SSL *ssl = SSL_new(cctx);
-                                SSL_set_fd(ssl, sock);
+                                SSL_set_fd(ssl, (int)(intptr_t)sock);
                                 if (SSL_connect(ssl) == 1) {
                                     /* Send a minimal JSON-RPC request */
                                     const char *req =
@@ -1752,7 +1755,7 @@ int test_rpc(void) {
                                 SSL_shutdown(ssl);
                                 SSL_free(ssl);
                             }
-                            close(sock);
+                            platform_socket_close(sock);
                             SSL_CTX_free(cctx);
                         }
                     }

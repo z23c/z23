@@ -117,7 +117,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach-o/loader.h>
@@ -550,6 +552,18 @@ static bool zwn_sign_executable_identity(const char *binary)
 
 static bool zwn_compile_c23(const char *source, const char *binary)
 {
+#if defined(_WIN32)
+    /* Same compile contract, driven through CreateProcess (no fork/execvp).
+     * -Wl,--build-id=none is ELF-only; the Windows fixture identity comes
+     * from the content hash over the PE, which zwn_normalize_executable_
+     * identity's non-Apple arm accepts as-is. */
+    const char *const argv[] = {
+        "cc", "-std=c2x", "-O2", "-fno-ident", source, "-o", binary, NULL,
+    };
+    return test_spawn_argv_wait(argv) == 0 &&
+           zwn_normalize_executable_identity(binary) &&
+           zwn_sign_executable_identity(binary);
+#else
     pid_t child = fork();
     if (child < 0)
         return false;
@@ -578,10 +592,15 @@ static bool zwn_compile_c23(const char *source, const char *binary)
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
            zwn_normalize_executable_identity(binary) &&
            zwn_sign_executable_identity(binary);
+#endif
 }
 
 static bool zwn_run_fixture_binary(const char *binary)
 {
+#if defined(_WIN32)
+    const char *const argv[] = {binary, NULL};
+    return test_spawn_argv_wait(argv) == 0;
+#else
     pid_t child = fork();
     if (child < 0)
         return false;
@@ -596,6 +615,7 @@ static bool zwn_run_fixture_binary(const char *binary)
             return false;
     }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
 }
 
 static bool zwn_sha3_file(const char *path, uint8_t out[32])
