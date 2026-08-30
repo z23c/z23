@@ -9657,6 +9657,20 @@ check-arm-symbol-single:
 	@./tools/lint/check_arm_symbol_single.sh --selftest
 	@./tools/lint/check_arm_symbol_single.sh
 
+# A .c file may not call a POSIX/GNU function whose declaration reaches it
+# ONLY through a glibc fortify inline — i.e. only when optimisation is on.
+# Found live 2026-08-30: realpath() is declared under __USE_MISC, which
+# -D_POSIX_C_SOURCE=200809L does not set, so 17 TUs compiled purely as a
+# side effect of -O1+ enabling _FORTIFY_SOURCE, and were hard C23 errors at
+# -O0 and on any non-glibc libc. The gate re-MEASURES the masked set against
+# the live toolchain on every run rather than hardcoding a list, because
+# which functions are masked is a property of the compiler and libc, not of
+# this tree. Baseline is empty by design and must stay empty.
+check-fortify-masked-decls:
+	@echo "══ LINT: no declaration that depends on optimisation ══"
+	@./tools/lint/check_fortify_masked_decls.sh --selftest
+	@./tools/lint/check_fortify_masked_decls.sh
+
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"
 	@tools/scripts/check_coins_lookup_nullcheck.sh
@@ -11402,6 +11416,7 @@ LINT_GATES := \
     check-malloc \
     check-byte-order-codec-single \
     check-arm-symbol-single \
+    check-fortify-masked-decls \
     check-zcode-package-registry \
     check-zcode-package-standalone \
     check-package-anatomy \

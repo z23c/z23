@@ -2784,3 +2784,11 @@ AGENT_IMPACT_RULE("lib/metaverse/src/node_character_wire.c|lib/metaverse/include
  * converted model is able to say, which is why it rides the broad models
  * group and not only its own. */
 AGENT_IMPACT_RULE("app/models/include/models/query_schema.def|app/models/include/models/query_builder.h|app/models/src/query_builder.c|lib/test/src/test_activerecord_query_builder.c", "activerecord_query_builder activerecord models make_lint_gates")
+
+/* The gate that forbids a declaration arriving only via a fortify inline.
+ * It has no baseline file on purpose — the empty set IS the contract — so
+ * the rule covers the script alone. It re-measures the masked set against
+ * the live compiler on each run, which means its verdict can change when
+ * the toolchain changes and not only when this tree does; that is why it
+ * rides make_lint_gates rather than any subject group. */
+AGENT_IMPACT_RULE("tools/lint/check_fortify_masked_decls.sh", "make_lint_gates")

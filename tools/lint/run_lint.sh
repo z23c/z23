@@ -119,6 +119,7 @@ gate_command() {
         check-outparam-init-before-return) echo 'bash tools/lint/check_outparam_init_before_return.sh --selftest && bash tools/lint/check_outparam_init_before_return.sh' ;;
         check-byte-order-codec-single)     echo './tools/lint/check_byte_order_codec_single.sh --selftest && ./tools/lint/check_byte_order_codec_single.sh' ;;
         check-arm-symbol-single)           echo './tools/lint/check_arm_symbol_single.sh --selftest && ./tools/lint/check_arm_symbol_single.sh' ;;
+        check-fortify-masked-decls)        echo './tools/lint/check_fortify_masked_decls.sh --selftest && ./tools/lint/check_fortify_masked_decls.sh' ;;
         check-model-sql-literals)          echo './tools/lint/check_model_sql_literals.sh --selftest && ./tools/lint/check_model_sql_literals.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-zcode-package-standalone)    echo './tools/lint/check_zcode_package_standalone.sh' ;;
