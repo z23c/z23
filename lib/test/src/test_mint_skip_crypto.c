@@ -920,20 +920,21 @@ static int test_mint_anchor_lane_containment(void)
     bool stat_before=lstat(progress_path,&before)==0;
     MSC_CHECK("producer lane: earliest preflight refuses producer datadir",
               stat_before&&!boot_mint_anchor_normal_boot_preflight(dir));
-    MSC_CHECK("producer lane: preflight is read-only and precedes node/wallet",
-              lstat(progress_path,&after)==0&&
-              before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&
-              before.st_size==after.st_size&&before.st_mode==after.st_mode&&
+    bool stat_after=lstat(progress_path,&after)==0;
 #if defined(_WIN32)
-              /* UCRT struct stat carries second-resolution times only. */
-              before.st_mtime==after.st_mtime&&
-              before.st_ctime==after.st_ctime&&
+    bool timestamps_same=stat_after&&before.st_mtime==after.st_mtime&&
+                         before.st_ctime==after.st_ctime;
 #else
-              before.st_mtim.tv_sec==after.st_mtim.tv_sec&&
-              before.st_mtim.tv_nsec==after.st_mtim.tv_nsec&&
-              before.st_ctim.tv_sec==after.st_ctim.tv_sec&&
-              before.st_ctim.tv_nsec==after.st_ctim.tv_nsec&&
+    bool timestamps_same=stat_after&&
+                         before.st_mtim.tv_sec==after.st_mtim.tv_sec&&
+                         before.st_mtim.tv_nsec==after.st_mtim.tv_nsec&&
+                         before.st_ctim.tv_sec==after.st_ctim.tv_sec&&
+                         before.st_ctim.tv_nsec==after.st_ctim.tv_nsec;
 #endif
+    MSC_CHECK("producer lane: preflight is read-only and precedes node/wallet",
+              stat_after&&before.st_dev==after.st_dev&&
+              before.st_ino==after.st_ino&&before.st_size==after.st_size&&
+              before.st_mode==after.st_mode&&timestamps_same&&
               access(node_path,F_OK)!=0&&access(wallet_path,F_OK)!=0);
     test_cleanup_tmpdir(dir);
     return failures;
