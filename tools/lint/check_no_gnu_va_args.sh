@@ -40,7 +40,7 @@ HITS=$(grep -rn ',[[:space:]]*##[[:space:]]*__VA_ARGS__' \
         n=${rest%%:*}
         prev=$((n - 1))
         if [ "$prev" -gt 0 ] && \
-           sed -n "${prev}p" "$f" 2>/dev/null | grep -q 'gnu-va-args-ok'; then
+           grep -q 'gnu-va-args-ok' <<<"$(sed -n "${prev}p" "$f" 2>/dev/null)"; then
             continue
         fi
         echo "$line"

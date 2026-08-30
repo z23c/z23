@@ -82,7 +82,7 @@ FAKE_SYSTEMCTL_MODE=inactive "$GUARD" tests
 grep -qx 'background:tests' "$CALLS"
 
 FAKE_SYSTEMCTL_MODE=inactive "$GUARD" simnet-nightly
-tail -n 1 "$CALLS" | grep -qx 'simnet'
+[ "$(tail -n 1 "$CALLS")" = 'simnet' ]
 
 set +e
 FAKE_SYSTEMCTL_MODE=inactive "$GUARD" unknown > "$TMP/invalid.out" 2>&1

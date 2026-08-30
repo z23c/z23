@@ -153,7 +153,7 @@ cmd_status() {
     fi
     # Surface the 8080 collision if visible.
     if command -v ss >/dev/null 2>&1; then
-        if ss -ltnp 2>/dev/null | grep -q '127.0.0.1:8080'; then
+        if grep -q '127.0.0.1:8080' <<<"$(ss -ltnp 2>/dev/null)"; then
             local who; who="$(ss -ltnp 2>/dev/null | grep '127.0.0.1:8080' | grep -oE 'users:\(\("[^"]+' | head -1 | sed 's/.*"//')"
             say "8080 listener   : $who is on 127.0.0.1:8080 (must be the NODE, not zcl-supply)"
         fi

@@ -314,8 +314,8 @@ set -e
     fail 'same-epoch object/dependency publication was incomplete'
 grep -Fq "$CONCURRENT_OBJECT:" "${CONCURRENT_OBJECT%.o}.d" ||
     fail 'dependency target does not name the final object'
-if find "$(dirname "$CONCURRENT_OBJECT")" -maxdepth 1 \
-        -name '.concurrent.o.compile.*' -print -quit | grep -q .; then
+if [ -n "$(find "$(dirname "$CONCURRENT_OBJECT")" -maxdepth 1 \
+        -name '.concurrent.o.compile.*' -print -quit)" ]; then
     fail 'successful atomic object compile leaked staging directories'
 fi
 read -r -a cc_argv <<< "$CC_COMMAND"
@@ -331,8 +331,8 @@ if "$OBJECT_TOOL" dep "$FAILED_OBJECT" "$CONCURRENT_SOURCE" \
         "$SESSION_MAIN" -- /bin/false >/dev/null 2>&1; then
     fail 'failing compiler unexpectedly published an object'
 fi
-if find "$(dirname "$FAILED_OBJECT")" -maxdepth 1 \
-        -name '.failure.o.compile.*' -print -quit | grep -q .; then
+if [ -n "$(find "$(dirname "$FAILED_OBJECT")" -maxdepth 1 \
+        -name '.failure.o.compile.*' -print -quit)" ]; then
     fail 'failing compiler leaked its staging directory'
 fi
 

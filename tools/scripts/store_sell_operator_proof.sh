@@ -126,7 +126,7 @@ sp_assert_not_live_port() {
 }
 sp_assert_port_free() {
     local p="$1"
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+    if [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]; then
         sp_log "FATAL: port $p is already LISTENING — refusing (operator port math is wrong)" >&2
         exit 2
     fi

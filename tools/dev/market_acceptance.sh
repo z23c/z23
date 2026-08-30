@@ -76,7 +76,7 @@ mkt_assert_port() {
     for live in $MKT_LIVE_PORTS; do
         [ "$p" = "$live" ] && mkt_die "port $p is in the live refuse-set"
     done
-    ss -tlnH "sport = :$p" 2>/dev/null | grep -q . &&
+    [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ] &&
         mkt_die "port $p is already listening"
     return 0
 }
