@@ -49,7 +49,27 @@
  * on an otherwise quiet box". That is not "the answer changed under arbitrary
  * contention". A group can read DETERMINISTIC here and still refute a receipt
  * on a loaded node, so DETERMINISTIC is necessary for receipt eligibility and
- * is not sufficient for it. */
+ * is not sufficient for it.
+ *
+ * ONE DIFFERING OBSERVATION IS A HYPOTHESIS, NOT A PROOF. Each slot here holds
+ * a single run, so a verdict of NONDETERMINISTIC rests on one pair of samples.
+ * On a shared box that is not enough. Another lane in this tree ran three cold
+ * suites and got a different failing group each time, every one of them a
+ * wall-clock or poll budget and every one green when re-run alone; it also
+ * watched a group fail at HEAD, pass at its base commit — which looks exactly
+ * like a regression — and then pass three times out of three at HEAD once the
+ * box was quieter. "Passes at base, fails at head" is not sufficient evidence
+ * of a regression here, and by the same argument one split is not sufficient
+ * evidence of nondeterminism.
+ *
+ * Two things carry that weight instead of a bigger sample. The scan records
+ * the load every profile ran at and refuses to write a baseline at all when
+ * the two reference profiles disagree, so a contaminated sweep produces
+ * UNCONFIRMED rather than a list. And the baseline is shrink-only, which makes
+ * a row cheap to be wrong about in the safe direction: a false positive is
+ * removed by the next clean sweep, while a false negative would need a new row
+ * and the gate does not accept one. Read a row as "this needs explaining",
+ * not as "this is proven broken". */
 #ifndef ZCL_DETERMINISM_CLASSIFY_H
 #define ZCL_DETERMINISM_CLASSIFY_H
 
