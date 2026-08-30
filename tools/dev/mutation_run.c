@@ -922,9 +922,15 @@ static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
     if (c->plan->rsp[0]) {
         char rsp_path[PATH_MAX];
         const char *p = c->plan->rsp;
-        if (platform_path_is_absolute(p))
-            (void)snprintf(rsp_path, sizeof rsp_path, "%s", p);
-        else if (!mut_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
+        if (platform_path_is_absolute(p)) {
+            size_t path_len = strlen(p);
+            if (path_len >= sizeof rsp_path) {
+                (void)snprintf(rep->error, sizeof rep->error,
+                               "absolute response path is too long");
+                return false;
+            }
+            memcpy(rsp_path, p, path_len + 1u);
+        } else if (!mut_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
             (void)snprintf(rep->error, sizeof rep->error, "rsp path too long");
             return false;
         }
