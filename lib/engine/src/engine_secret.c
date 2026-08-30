@@ -24,7 +24,8 @@
 
 /* The Windows CRT does not expose O_CLOEXEC. Its descriptors wrap
  * non-inheritable handles unless inheritance is explicitly requested, so a
- * zero-valued compatibility flag preserves the intended boundary. */
+ * zero-valued compatibility flag preserves the intended boundary.
+ * (Same zero fallback as lib/net/src/rom_fetch.c.) */
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
 #endif

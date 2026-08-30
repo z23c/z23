@@ -122,6 +122,8 @@ void inv_group_for_path(const char *path, char out[64])
 }
 
 #if !defined(_WIN32)
+/* Only inv_collect_dir (POSIX arm below) uses these helpers; on Windows the
+ * traversal refuses in inv_collect_paths and these would be dead code. */
 static bool inv_source_name(const char *name)
 {
     size_t n = strlen(name);

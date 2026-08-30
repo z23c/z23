@@ -382,8 +382,11 @@ int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms)
     if (!root || !target)
         return -1;
     char jobs[32];
-    long online = (long)platform_logical_cpu_count();
-    (void)snprintf(jobs, sizeof(jobs), "-j%ld", online > 0 ? online : 1);
+    /* platform_logical_cpu_count spans POSIX sysconf and Win32 processor
+     * groups; it never returns 0, so the fallback below is belt-and-braces. */
+    uint32_t online = platform_logical_cpu_count();
+    (void)snprintf(jobs, sizeof(jobs), "-j%lu",
+                   (unsigned long)(online > 0 ? online : 1));
     const char *argv[] = { "make", "--no-print-directory", jobs, target, NULL };
     char *buf = zcl_malloc(DVA_CAPTURE_BYTES, "devagent.capture");
     if (!buf)
