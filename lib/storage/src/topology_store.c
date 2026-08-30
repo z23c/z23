@@ -16,6 +16,7 @@
 
 #include "storage/topology_store.h"
 
+#include "base/hex.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -181,14 +182,8 @@ static void topology_render_addr(const struct net_addr *a, char *out,
     if (!a || !out_sz)
         return;
     if (a->has_torv3) {
-        static const char hexch[] = "0123456789abcdef";
         char hex[2 * TORV3_ADDR_SIZE + 1];
-        size_t n = 0;
-        for (int i = 0; i < TORV3_ADDR_SIZE; i++) {
-            hex[n++] = hexch[(a->torv3[i] >> 4) & 0xf];
-            hex[n++] = hexch[a->torv3[i] & 0xf];
-        }
-        hex[n] = '\0';
+        zcl_hex_encode(a->torv3, TORV3_ADDR_SIZE, hex);
         snprintf(out, out_sz, "onion:%s", hex);
         return;
     }

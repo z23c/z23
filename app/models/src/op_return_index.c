@@ -10,6 +10,7 @@
 #include "models/database_internal.h"
 #include "models/query_builder.h"
 
+#include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "primitives/block.h"
@@ -70,13 +71,7 @@ static void tag_to_text(const uint8_t *tag, uint8_t tag_len,
         return;
     }
 
-    static const char hex[] = "0123456789abcdef";
-    size_t o = 0;
-    for (uint8_t i = 0; i < tag_len && o + 2 < OP_RETURN_INDEX_TAG_TEXT_MAX; i++) {
-        out[o++] = hex[tag[i] >> 4];
-        out[o++] = hex[tag[i] & 0x0f];
-    }
-    out[o] = '\0';
+    zcl_hex_encode(tag, tag_len, out);
 }
 
 bool op_return_index_extract(const uint8_t *script, size_t script_len,

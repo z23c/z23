@@ -5,6 +5,7 @@
  */
 #include "jobs/psc_audit.h"
 
+#include "base/hex.h"
 #include "jobs/psc_block_source.h"
 #include "jobs/psc_range_fold.h"
 
@@ -31,16 +32,6 @@ static void psc_audit_store(const struct psc_audit_result *r)
     g_psc_audit_last = *r;
     g_psc_audit_has_run = true;
     pthread_mutex_unlock(&g_psc_audit_mu);
-}
-
-static void psc_hex32(const uint8_t d[32], char out[65])
-{
-    static const char *hx = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        out[2 * i]     = hx[d[i] >> 4];
-        out[2 * i + 1] = hx[d[i] & 15];
-    }
-    out[64] = '\0';
 }
 
 bool psc_audit_run(struct main_state *ms, const char *datadir,
@@ -140,8 +131,8 @@ bool psc_dump_state_json(struct json_value *out, const char *key)
         return true;
 
     char phex[65], dhex[65];
-    psc_hex32(r.parallel_sha3, phex);
-    psc_hex32(r.durable_sha3, dhex);
+    zcl_hex_encode(r.parallel_sha3, 32, phex);
+    zcl_hex_encode(r.durable_sha3, 32, dhex);
 
     json_push_kv_bool(out, "ran", r.ran);
     json_push_kv_bool(out, "match", r.match);

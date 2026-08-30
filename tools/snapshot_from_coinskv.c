@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <signal.h>
 
+#include "base/hex.h"
 #include "storage/progress_store.h"
 #include "storage/coins_kv.h"
 #include "storage/snapshot_shielded.h"
@@ -34,14 +35,6 @@
 /* Provided by the node binary's main.c; this standalone tool defines its own
  * so the shared object set links (shutdown is irrelevant for a one-shot run). */
 volatile sig_atomic_t g_shutdown_requested = 0;
-
-static int hexnib(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
 
 int main(int argc, char **argv)
 {
@@ -73,16 +66,13 @@ int main(int argc, char **argv)
     }
     /* Display hex is big-endian; internal hashBlock is little-endian.
      * Reverse byte order so anchor_block_hash matches block_index.hashBlock. */
-    uint8_t anchor_hash[32];
-    for (int i = 0; i < 32; i++) {
-        int hi = hexnib(hexhash[i * 2]);
-        int lo = hexnib(hexhash[i * 2 + 1]);
-        if (hi < 0 || lo < 0) {
-            fprintf(stderr, "bad hex at byte %d\n", i);
-            return 2;
-        }
-        anchor_hash[31 - i] = (uint8_t)((hi << 4) | lo);
+    uint8_t anchor_hash[32], anchor_hash_be[32];
+    if (!zcl_hex_decode(hexhash, anchor_hash_be, 32)) {
+        fprintf(stderr, "bad hex in blockhash\n");
+        return 2;
     }
+    for (int i = 0; i < 32; i++)
+        anchor_hash[31 - i] = anchor_hash_be[i];
 
     if (!progress_store_open(datadir)) {
         fprintf(stderr, "progress_store_open(%s) failed\n", datadir);

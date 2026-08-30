@@ -28,6 +28,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/time_compat.h"
+#include "base/hex.h"
 #include "chain/sha3_windows.h"
 #include "crypto/sha3.h"
 #include "encoding/utilstrencodings.h"
@@ -352,16 +353,6 @@ static bool parse_cli(int argc, char **argv, struct cli *c)
     return true;
 }
 
-static void hex32(const uint8_t hash[32], char out[65])
-{
-    static const char hexdigits[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; i++) {
-        out[i * 2] = hexdigits[hash[i] >> 4];
-        out[i * 2 + 1] = hexdigits[hash[i] & 0x0f];
-    }
-    out[64] = '\0';
-}
-
 /* ── Streaming hex decoder feeding SHA3 ─────────────────────────────── */
 
 /* Decode hex string `hex[0..hex_len)` into bytes and feed into ctx.
@@ -591,8 +582,8 @@ static int check_one_window(struct rpc_ctx *r, int window, int tip)
         return 1;
 
     char expected_hex[65], actual_hex[65];
-    hex32(g_sha3_windows[window].hash, expected_hex);
-    hex32(actual, actual_hex);
+    zcl_hex_encode(g_sha3_windows[window].hash, 32, expected_hex);
+    zcl_hex_encode(actual, 32, actual_hex);
     bool ok = memcmp(actual, g_sha3_windows[window].hash, 32) == 0;
     printf("[gen_sha3_windows] check window=%d h=%d..%d "
            "expected=%s actual=%s ok=%s (%.1fs)\n",
@@ -649,8 +640,8 @@ static int run_extend(struct rpc_ctx *r, const struct cli *c, int tip)
         if (!compute_window_digest(r, start, end, digest)) return 1;
         if (memcmp(digest, g_sha3_windows[probe].hash, 32) != 0) {
             char want[65], got[65];
-            hex32(g_sha3_windows[probe].hash, want);
-            hex32(digest, got);
+            zcl_hex_encode(g_sha3_windows[probe].hash, 32, want);
+            zcl_hex_encode(digest, 32, got);
             fprintf(stderr, "[extend] continuity FAILED at window %zu "
                             "(h=%d..%d): locked=%s source=%s — the source "
                             "node disagrees with locked history; refusing "
@@ -674,8 +665,8 @@ static int run_extend(struct rpc_ctx *r, const struct cli *c, int tip)
             memcmp(last_digest, g_sha3_windows[wi].hash, 32) != 0;
         if (last_replaced) {
             char want[65], got[65];
-            hex32(g_sha3_windows[wi].hash, want);
-            hex32(last_digest, got);
+            zcl_hex_encode(g_sha3_windows[wi].hash, 32, want);
+            zcl_hex_encode(last_digest, 32, got);
             printf("[extend] REPLACING trailing window %zu (h=%d..%d): "
                    "locked=%s (partial-window mint) full=%s\n",
                    wi, start, end, want, got);

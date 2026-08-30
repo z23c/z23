@@ -10,6 +10,7 @@
 
 #include "services/seed_integrity_gate.h"
 #include "base/format_attribute.h"
+#include "base/hex.h"
 
 #include "config/runtime.h"
 #include "event/event.h"
@@ -98,16 +99,6 @@ static int gate_row_by_hash(sqlite3 *db, const uint8_t hash[32],
     return found;
 }
 
-static void hash8_hex(const uint8_t h[32], char out[17])
-{
-    static const char hexd[] = "0123456789abcdef";
-    for (int i = 0; i < 8; i++) {
-        out[i * 2]     = hexd[h[i] >> 4];
-        out[i * 2 + 1] = hexd[h[i] & 0xf];
-    }
-    out[16] = '\0';
-}
-
 /* Check 7 core: follow prev_hash from the seed tip through PRESENT rows;
  * every resolved parent must be labeled child-1. Returns true = clean (or
  * suffix ended / walk budget exhausted); false = refused (named). */
@@ -131,7 +122,7 @@ static bool gate_linkage_walk(sqlite3 *db, int height,
     /* step 0 — authority pair at the seed tip itself. */
     if (row_h != (int64_t)height) {
         char hh[17];
-        hash8_hex(tip_hash, hh);
+        zcl_hex_encode(tip_hash, 8, hh);
         gate_refuse(height,
                     "seed pair mismatch: blocks row for hash=%s has "
                     "height=%lld, seed says %d",
@@ -162,7 +153,7 @@ static bool gate_linkage_walk(sqlite3 *db, int height,
 
         if (parent_h != child_h - 1) {
             char ch[17];
-            hash8_hex(child_prev, ch);
+            zcl_hex_encode(child_prev, 8, ch);
             gate_refuse(height,
                         "linkage break at h=%lld: parent %s is labeled "
                         "h=%lld (expected %lld) — label splice at birth",

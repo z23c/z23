@@ -12,6 +12,7 @@
 
 #include "services/mirror_divergence_locator.h"
 
+#include "base/hex.h"
 #include "config/runtime.h"
 #include "event/event.h"
 #include "json/json.h"
@@ -81,12 +82,10 @@ static bool mdl_local_hash(int height, char out_hex[65])
             /* Block hashes display reversed (big-endian), matching
              * getblockhash and uint256_get_hex. */
             const uint8_t *b = blob;
-            static const char hexd[] = "0123456789abcdef";
-            for (int i = 0; i < 32; i++) {
-                out_hex[i * 2]     = hexd[b[31 - i] >> 4];
-                out_hex[i * 2 + 1] = hexd[b[31 - i] & 0xf];
-            }
-            out_hex[64] = '\0';
+            uint8_t rev[32];
+            for (int i = 0; i < 32; i++)
+                rev[i] = b[31 - i];
+            zcl_hex_encode(rev, 32, out_hex);
             ok = true;
         }
     }

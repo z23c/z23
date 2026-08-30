@@ -600,7 +600,7 @@ AGENT_IMPACT_RULE("lib/sim/src/simnet_sapling.c|lib/sim/include/sim/simnet_sapli
  * z_sendmany calls sovereignty_guard_allow("wallet_spend", ...) to refuse a
  * spend while the tip is release_assisted (borrowed shielded history, not
  * self-folded) — include sovereignty_guard. */
-AGENT_IMPACT_RULE("app/controllers/src/wallet_shielded_controller.c|app/controllers/src/wallet_shielded_send.c|app/controllers/src/wallet_shielded_send_shielded.c", "wallet shielded_payment_gate sovereignty_guard make_lint_gates")
+AGENT_IMPACT_RULE("app/controllers/src/wallet_shielded_keys.c|app/controllers/src/wallet_shielded_controller.c|app/controllers/src/wallet_shielded_send.c|app/controllers/src/wallet_shielded_send_shielded.c", "wallet shielded_payment_gate sovereignty_guard make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/vault_intent_controller.c|app/controllers/src/vault_intent_common.c|app/controllers/src/vault_intent_private.c|app/controllers/src/vault_intent_publish.c|app/controllers/include/controllers/vault_intent_controller.h|app/controllers/include/controllers/vault_intent_private.h|app/controllers/include/controllers/vault_intent_publish.h", "transaction_intent wallet_funds_safety shielded_payment_gate command_registry_catalog command_input_bounds make_lint_gates")
 /* The operational-vs-sovereign trust split (coins_kv_is_proven_authority vs
  * coins_kv_contains_refold_marker): the shared guard + dumper, and its two
@@ -2889,6 +2889,16 @@ AGENT_IMPACT_RULE("lib/science/src/*.c|lib/science/include/science/*.h|lib/test/
  * READY_READ code.* leaf — dispatched four times per suite run by the
  * read-latency contract, so a slow walk here shows up there. */
 AGENT_IMPACT_RULE("tools/command/native_code_corpus_command.c", "science command_registry_catalog command_registry_latency native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog land_queue dev_platform make_lint_gates")
+/* The batching landing queue: its canonical bytes, its replay, its CLI, the
+ * developer front door and the lander that drives them. It rides the chainlog
+ * group as well as its own because the queue HAS no state outside that log —
+ * every state a caller can observe is replayed from it, so a change to the
+ * chainlog's recovery, locking or ordering rules changes what a receipt
+ * means. The shell entry points and the unit are listed with the C: a lander
+ * whose service file drifts from the script it starts is a queue nobody
+ * drains, and the impact rule is the only thing that would notice. */
+AGENT_IMPACT_RULE("tools/land/*.c|tools/land/*.h|lib/test/src/test_land_queue.c|tools/dev/land.sh|tools/dev/land_lander.sh|tools/dev/land_bench.sh|deploy/zclassic23-lander.service", "land_queue chainlog make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
  * because the ratchet it guards is the whole point — the recorded set of
@@ -2901,3 +2911,13 @@ AGENT_IMPACT_RULE("lib/determinism/src/*.c|lib/determinism/include/determinism/*
  * gate IS the coverage, and it runs the recipes rather than reading about
  * them. */
 AGENT_IMPACT_RULE("config/cookbook.def|tools/lint/check_cookbook.sh|docs/COOKBOOK.md", "make_lint_gates")
+
+/* These five carried no rule until a tree-wide hex-codec consolidation
+ * touched them and the push gate refused. A file with no rule is not one CI
+ * fails on — it is one CI never runs, so the absence was the more expensive
+ * state. Each maps to the group that already tests it; wallet_shielded_keys.c
+ * has no group of its own and joined the wallet_shielded family rule above. */
+AGENT_IMPACT_RULE("app/services/src/agent_session_service.c|app/services/include/services/agent_session_service.h|lib/test/src/test_agent_session.c", "agent_session make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/seed_integrity_gate.c|app/services/include/services/seed_integrity_gate.h|lib/test/src/test_seed_integrity_gate.c", "seed_integrity_gate make_lint_gates")
+AGENT_IMPACT_RULE("lib/policy/src/anchor_finality.c|lib/policy/include/policy/anchor_finality.h|lib/test/src/test_anchor_finality.c", "anchor_finality make_lint_gates")
+AGENT_IMPACT_RULE("lib/storage/src/topology_store.c|lib/storage/include/storage/topology_store.h|lib/test/src/test_topology_store.c", "topology_store make_lint_gates")

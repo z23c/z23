@@ -1471,6 +1471,7 @@ void hotswap_activation_reset_for_testing(void)
 #include <fcntl.h>
 #include <sys/stat.h>
 
+#include "base/hex.h"
 #include "crypto/sha256.h"
 #include "hotswap/hotswap_artifact_digest.h"
 #include "hotswap/hotswap_sealed_image.h"
@@ -1503,12 +1504,7 @@ static bool artifact_sha256_fd(int fd, char hex_out[65])
         return false;
     unsigned char digest[SHA256_OUTPUT_SIZE];
     sha256_finalize(&ctx, digest);
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < SHA256_OUTPUT_SIZE; i++) {
-        hex_out[i * 2] = hex[digest[i] >> 4];
-        hex_out[i * 2 + 1] = hex[digest[i] & 0x0f];
-    }
-    hex_out[64] = '\0';
+    zcl_hex_encode(digest, SHA256_OUTPUT_SIZE, hex_out);
     return true;
 }
 

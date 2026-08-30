@@ -552,7 +552,7 @@ static void csi_real_sections(void)
     bool faithful = true;
     for (size_t i = 0; i < seal.nents && faithful; i++) {
         char hex[HEXSZ];
-        hex_of(seal.ents[i].hash, HSZ, hex);
+        zcl_hex_encode(seal.ents[i].hash, HSZ, hex);
         /* mv.file[] and seal.ents[] are both path-sorted over the same set. */
         faithful = strcmp(seal.ents[i].path, mv.file[i].path) == 0 &&
                    strcmp(hex, mv.file[i].hex) == 0;
@@ -562,8 +562,8 @@ static void csi_real_sections(void)
 
     if (faithful) {
         char tree_hex[HEXSZ], root_hex[HEXSZ];
-        hex_of(seal.tree, HSZ, tree_hex);
-        hex_of(seal.root, HSZ, root_hex);
+        zcl_hex_encode(seal.tree, HSZ, tree_hex);
+        zcl_hex_encode(seal.root, HSZ, root_hex);
         CSI_CHECK("sealer reproduces the manifest TREE line",
                   strcmp(tree_hex, mv.tree_hex) == 0);
         CSI_CHECK("sealer reproduces the manifest ROOT line",
@@ -605,7 +605,7 @@ static void csi_real_sections(void)
              * hex the manifest actually shipped. */
             if (faithful) {
                 char hex[HEXSZ];
-                hex_of(sn->digest, HSZ, hex);
+                zcl_hex_encode(sn->digest, HSZ, hex);
                 if (strcmp(hex, mv.sec[s].hex) != 0) {
                     printf("     %-42s  MANIFEST HEX MISMATCH\n", dir);
                     csi_failures++;
@@ -616,7 +616,7 @@ static void csi_real_sections(void)
         } else {
             disagreed++;
             char a[HEXSZ], b[HEXSZ];
-            hex_of(sn->digest, HSZ, a);
+            zcl_hex_encode(sn->digest, HSZ, a);
             if (found)
                 ci_merkle_hex(&cn.digest, b);
             else
@@ -812,7 +812,7 @@ static void csi_synthetic_tree(void)
     bool got = ci_merkle_root(m, &croot);
     rf = got;
     char a[HEXSZ], b[HEXSZ];
-    hex_of(seal.tree, HSZ, a);
+    zcl_hex_encode(seal.tree, HSZ, a);
     if (rf)
         ci_merkle_hex(&croot.digest, b);
     else
