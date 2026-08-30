@@ -547,6 +547,24 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    printf("legacy_rpc bounded timeout rejects unsafe budgets... ");
+    {
+        char sentinel = '\0';
+        char *resp = &sentinel;
+        char errbuf[64] = {0};
+        bool ok = !legacy_rpc_call_with_timeout(
+            "127.0.0.1", 1, "u", "p", "{}", 0, &resp,
+            errbuf, sizeof(errbuf));
+        ok = ok && resp == NULL && strcmp(errbuf, "bad args") == 0;
+        resp = &sentinel;
+        errbuf[0] = '\0';
+        ok = ok && !legacy_rpc_call_with_timeout(
+            "127.0.0.1", 1, "u", "p", "{}", 60001, &resp,
+            errbuf, sizeof(errbuf));
+        ok = ok && resp == NULL && strcmp(errbuf, "bad args") == 0;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     printf("rpc_table init/append/find... ");
     {
         struct rpc_table t;
