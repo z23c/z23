@@ -30,6 +30,8 @@
 #include "engine/engine.h"
 #include "engine/engine_err.h"
 #include "engine/engine_patch.h"
+#include "engine/engine_prompt.h"
+#include "base/safe_alloc.h"
 #include "engine/engine_secret.h"
 #include "engine/engine_verdict.h"
 #include "engine/engine_wire.h"
@@ -883,6 +885,272 @@ static int case_key_gate(void)
     return failures;
 }
 
+
+/* ── 10. the prompt every vendor actually receives ───────────────────────
+ *
+ * This case exists because of a defect it would have caught. The rules a
+ * dispatched unit is held to were attached to the OpenAI request body's
+ * system field, and a CLI vendor has no such field — it is handed one file.
+ * Nothing put the rules in that file, so every CLI dispatch went out without
+ * them, while --dry-run printed them to the operator. Every dispatch this
+ * project has ever completed was a CLI dispatch.
+ *
+ * So the assertion is not "compose returns a string". It is: for every wire
+ * in the enum, either the wire has a system channel of its own, or the bytes
+ * it receives contain the rules. There is no third answer, and a wire added
+ * later without a decision falls into the second branch. */
+
+static bool prompt_holds_rules(const char *s)
+{
+    return s && strstr(s, "C23 only") != NULL &&
+           strstr(s, "Never weaken an assertion") != NULL &&
+           strstr(s, "must actually run") != NULL;
+}
+
+static int case_prompt(void)
+{
+    int failures = 0;
+    const char *task = "TASK MARKER: the composed unit prompt.";
+
+    EN_CHECK("the rules name the C23 constraint",
+             prompt_holds_rules(engine_system_rules()));
+
+    /* The load-bearing one: no wire may end up with neither channel. */
+    const enum engine_wire wires[] = { ENGINE_WIRE_OPENAI_CHAT,
+                                       ENGINE_WIRE_LOCAL_CLI,
+                                       ENGINE_WIRE_LOCAL_FIXTURE };
+    bool every_wire_told = true;
+    bool every_wire_keeps_task = true;
+    for (size_t i = 0; i < sizeof wires / sizeof wires[0]; i++) {
+        size_t len = 0;
+        char *got = engine_prompt_compose(wires[i], task, &len);
+        if (!got) {
+            every_wire_told = false;
+            every_wire_keeps_task = false;
+            break;
+        }
+        if (!engine_wire_has_system_channel(wires[i]) && !prompt_holds_rules(got))
+            every_wire_told = false;
+        if (!strstr(got, task) || len != strlen(got))
+            every_wire_keeps_task = false;
+        free(got);
+    }
+    EN_CHECK("every wire either has a system channel or is told the rules "
+             "in its prompt", every_wire_told);
+    EN_CHECK("and every wire still receives the task, with a truthful length",
+             every_wire_keeps_task);
+
+    /* A CLI vendor is the case that was broken. Name it directly so a
+     * regression reads as itself rather than as a loop failing. */
+    size_t cli_len = 0;
+    char *cli = engine_prompt_compose(ENGINE_WIRE_LOCAL_CLI, task, &cli_len);
+    EN_CHECK("a CLI vendor receives the rules", prompt_holds_rules(cli));
+    EN_CHECK("with the rules first and the task after",
+             cli && strstr(cli, "C23 only") < strstr(cli, task));
+
+    /* An HTTP vendor must NOT get them twice: the same block in two places
+     * teaches a model the block is decoration. */
+    size_t http_len = 0;
+    char *http = engine_prompt_compose(ENGINE_WIRE_OPENAI_CHAT, task, &http_len);
+    EN_CHECK("an HTTP vendor is not told the rules twice",
+             http && !prompt_holds_rules(http));
+    EN_CHECK("an HTTP vendor receives exactly the composed prompt",
+             http && strcmp(http, task) == 0 && http_len == strlen(task));
+    EN_CHECK("the CLI prompt is the longer of the two", cli_len > http_len);
+    free(cli);
+    free(http);
+
+    /* An over-long prompt is refused, never cut: half a prompt still looks
+     * like a prompt, and the model would answer it. */
+    size_t huge_len = ENGINE_MAX_PROMPT_BYTES + 1u;
+    char *huge = zcl_malloc(huge_len + 1, "test_engine_huge_prompt");
+    if (huge) {
+        memset(huge, 'x', huge_len);
+        huge[huge_len] = '\0';
+        size_t out_len = 12345;
+        char *over = engine_prompt_compose(ENGINE_WIRE_LOCAL_CLI, huge, &out_len);
+        EN_CHECK("a prompt over the ceiling is refused", over == NULL);
+        EN_CHECK("and the refusal reports no length", out_len == 0);
+        free(over);
+        free(huge);
+    } else {
+        EN_CHECK("the over-length fixture allocates", false);
+    }
+
+    size_t nul_len = 999;
+    EN_CHECK("a NULL prompt refuses",
+             engine_prompt_compose(ENGINE_WIRE_LOCAL_CLI, NULL, &nul_len) == NULL);
+    EN_CHECK("and reports no length", nul_len == 0);
+    return failures;
+}
+
+
+/* ── the declared prompt shape ────────────────────────────────────────────
+ * The registry states what a dispatch prompt must contain. These checks hold
+ * it to the two things that make it worth having: a prompt missing a required
+ * section is REFUSED rather than dispatched, and the refusal names the section
+ * so an operator is not left comparing two blobs. The rules row is the one
+ * that already went missing once, so it is checked from both directions —
+ * required inline for a CLI wire, forbidden inline for an HTTP wire. */
+
+/* A prompt with every section a CLI wire needs, in order. Built from the
+ * registry itself, so a new row cannot be added without this fixture
+ * carrying it — the alternative is a hand-written fixture that silently
+ * stops covering the thing it was written for. */
+static char *shape_fixture(enum engine_wire wire, const char *skip_id,
+                           bool out_of_order)
+{
+    size_t total = 1;
+    size_t n = engine_prompt_section_count();
+    for (size_t i = 0; i < n; i++)
+        total += strlen(engine_prompt_section_at(i)->marker) + 2;
+    char *buf = zcl_malloc(total, "test_engine_shape_fixture");
+    if (!buf) return NULL;
+    buf[0] = '\0';
+    /* Optional rows are carried too: a fixture that omits them would never
+     * exercise the ordering cursor they advance. */
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = i;
+        if (out_of_order && n >= 2) {
+            /* Swap the first two rows this wire actually carries. */
+            if (i == 0) idx = 1;
+            else if (i == 1) idx = 0;
+        }
+        const struct engine_prompt_section *s = engine_prompt_section_at(idx);
+        if (skip_id && strcmp(s->id, skip_id) == 0) continue;
+        if (s->need == ENGINE_PROMPT_NEED_NO_SYSTEM_CHANNEL
+            && engine_wire_has_system_channel(wire)) continue;
+        strcat(buf, s->marker);
+        strcat(buf, "\n\n");
+    }
+    return buf;
+}
+
+static int case_prompt_shape(void)
+{
+    int failures = 0;
+
+    EN_CHECK("the prompt shape registry is not empty",
+             engine_prompt_section_count() > 0);
+    EN_CHECK("an index past the end has no section",
+             engine_prompt_section_at(engine_prompt_section_count()) == NULL);
+
+    bool ids_and_markers_present = true;
+    for (size_t i = 0; i < engine_prompt_section_count(); i++) {
+        const struct engine_prompt_section *s = engine_prompt_section_at(i);
+        if (!s || !s->id || !s->id[0] || !s->marker || !s->marker[0])
+            ids_and_markers_present = false;
+    }
+    EN_CHECK("every row has a name and a marker", ids_and_markers_present);
+
+    /* A well-formed prompt passes for every wire in the enum. */
+    const enum engine_wire wires[] = { ENGINE_WIRE_OPENAI_CHAT,
+                                       ENGINE_WIRE_LOCAL_CLI,
+                                       ENGINE_WIRE_LOCAL_FIXTURE };
+    bool all_wires_pass = true;
+    bool all_wires_require_something = true;
+    for (size_t i = 0; i < sizeof wires / sizeof wires[0]; i++) {
+        char *good = shape_fixture(wires[i], NULL, false);
+        struct engine_prompt_audit a;
+        if (!good || !engine_prompt_audit_text(wires[i], good, &a))
+            all_wires_pass = false;
+        else if (a.required == 0 || a.present != a.required)
+            all_wires_require_something = false;
+        free(good);
+    }
+    EN_CHECK("a prompt built from the registry passes for every wire",
+             all_wires_pass);
+    EN_CHECK("and every wire requires at least one section, all found",
+             all_wires_require_something);
+
+    /* Drop each required section in turn. Every one must be refused BY NAME:
+     * a refusal that cannot say what is wrong sends the operator back to
+     * diffing two prompts by eye. */
+    bool each_omission_refused = true;
+    bool each_omission_named = true;
+    size_t omissions_tested = 0;
+    for (size_t i = 0; i < engine_prompt_section_count(); i++) {
+        const struct engine_prompt_section *s = engine_prompt_section_at(i);
+        if (s->need == ENGINE_PROMPT_NEED_OPTIONAL) continue;
+        if (s->need == ENGINE_PROMPT_NEED_NO_SYSTEM_CHANNEL
+            && engine_wire_has_system_channel(ENGINE_WIRE_LOCAL_CLI)) continue;
+        char *bad = shape_fixture(ENGINE_WIRE_LOCAL_CLI, s->id, false);
+        struct engine_prompt_audit a;
+        omissions_tested++;
+        if (!bad || engine_prompt_audit_text(ENGINE_WIRE_LOCAL_CLI, bad, &a))
+            each_omission_refused = false;
+        else if (!a.missing || strcmp(a.missing, s->id) != 0)
+            each_omission_named = false;
+        free(bad);
+    }
+    EN_CHECK("dropping any required section is refused", each_omission_refused);
+    EN_CHECK("and the refusal names the section that is gone",
+             each_omission_named);
+    EN_CHECK("more than one required section was actually dropped and tested",
+             omissions_tested >= 2);
+
+    /* Order is part of the shape: a task placed after the output protocol
+     * reads as an example of the protocol. */
+    char *swapped = shape_fixture(ENGINE_WIRE_LOCAL_CLI, NULL, true);
+    struct engine_prompt_audit ord;
+    bool ord_refused = swapped
+                       && !engine_prompt_audit_text(ENGINE_WIRE_LOCAL_CLI,
+                                                    swapped, &ord);
+    EN_CHECK("a prompt with two sections swapped is refused", ord_refused);
+    EN_CHECK("and the refusal reports a misplaced section, not a missing one",
+             ord_refused && ord.misplaced != NULL && ord.missing == NULL);
+    free(swapped);
+
+    /* The rules must not be repeated to a wire that carries them on its own
+     * channel. This is the other half of the defect: not sending them, and
+     * sending them twice, are both wrong. */
+    char *cli_shaped = shape_fixture(ENGINE_WIRE_LOCAL_CLI, NULL, false);
+    struct engine_prompt_audit dup;
+    bool dup_refused = cli_shaped
+                       && !engine_prompt_audit_text(ENGINE_WIRE_OPENAI_CHAT,
+                                                    cli_shaped, &dup);
+    EN_CHECK("a CLI-shaped prompt sent to an HTTP wire is refused",
+             dup_refused);
+    EN_CHECK("and the refusal names the repeated section",
+             dup_refused && dup.repeated != NULL);
+    free(cli_shaped);
+
+    /* What engine_prompt_compose actually produces must pass its own audit,
+     * for every wire. This is the check that binds the two halves: a shape
+     * registry nothing composes against is a document, not a gate. */
+    const char *task = "# Your unit of work\n\nTASK\n\n"
+                       "# OUTPUT PROTOCOL\n\n# How this unit will be judged\n";
+    bool compose_matches_shape = true;
+    for (size_t i = 0; i < sizeof wires / sizeof wires[0]; i++) {
+        char *got = engine_prompt_compose(wires[i], task, NULL);
+        struct engine_prompt_audit a;
+        if (!got || !engine_prompt_audit_text(wires[i], got, &a))
+            compose_matches_shape = false;
+        free(got);
+    }
+    EN_CHECK("what compose produces passes the audit for every wire",
+             compose_matches_shape);
+
+    EN_CHECK("a NULL prompt fails the audit",
+             !engine_prompt_audit_text(ENGINE_WIRE_LOCAL_CLI, NULL, NULL));
+
+    /* The shape hash is the version identity of the prompt. It must be
+     * stable within a build and must not be all zeros — a hash function that
+     * quietly did nothing would otherwise read as agreement. */
+    uint8_t h1[32], h2[32];
+    memset(h1, 0, sizeof h1);
+    memset(h2, 0xff, sizeof h2);
+    engine_prompt_shape_sha3(h1);
+    engine_prompt_shape_sha3(h2);
+    bool nonzero = false;
+    for (size_t i = 0; i < sizeof h1; i++) if (h1[i]) nonzero = true;
+    EN_CHECK("the shape hash is stable across calls",
+             memcmp(h1, h2, sizeof h1) == 0);
+    EN_CHECK("and is not the empty digest of a hash that did nothing",
+             nonzero);
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
@@ -895,6 +1163,8 @@ int test_engine(void)
     failures += case_gate_read();
     failures += case_err();
     failures += case_key_gate();
+    failures += case_prompt();
+    failures += case_prompt_shape();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }

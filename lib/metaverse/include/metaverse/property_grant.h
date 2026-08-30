@@ -24,6 +24,19 @@
  * a liveness/abuse bound, not a value bound — the two are independent and both
  * are enforced.
  *
+ * AND IT BOUNDS THE WHOLE SUBTREE, not just the grant that holds it. Checking
+ * a child's declared maximum against the parent's remaining budget at mint
+ * time is not a budget either: each of two 5000-zat children is a legal
+ * attenuation of a 5000-zat parent on its own, and 10000 then moves beneath a
+ * grant that authorized 5000. Reserving the child's declared maximum at
+ * delegation time is the other wrong answer — it charges the operator for
+ * money the child may never spend, and it turns revoking an unused child into
+ * a refund. So the ceiling binds where value actually MOVES: a committed
+ * action charges the acting grant AND every ancestor
+ * (metaverse_grant_record_descendant_charge), and is refused unless all of
+ * them can pay. This module cannot see other grants, so the walk itself
+ * belongs to whoever holds the store — services/property_grant_service.h.
+ *
  * ── REVOCATION IS A GENERATION, NOT A FLAG ────────────────────────────────
  * Every grant carries the generation of each of its ANCESTORS as observed at
  * mint time (`lineage[]`), plus its own current `revocation_generation`.
@@ -121,8 +134,14 @@ struct metaverse_grant {
      * what let one identifier mean both "enumerate" and "list for sale". */
     metaverse_query_set queries;
 
-    int64_t max_value_zat;          /* CUMULATIVE ceiling; 0 = no value may move */
-    int64_t spent_zat;              /* running total, monotonic */
+    /* CUMULATIVE ceiling over this grant AND everything delegated beneath it;
+     * 0 = no value may move. */
+    int64_t max_value_zat;
+    /* Running total, monotonic. Moved by this grant's own committed actions
+     * AND by every descendant's, so a parent's number is the real exposure of
+     * its whole delegation subtree rather than of the grants it happened to
+     * use itself. */
+    int64_t spent_zat;
 
     char counterparties[METAVERSE_GRANT_COUNTERPARTIES_MAX]
                        [METAVERSE_PRINCIPAL_MAX + 1];
@@ -283,6 +302,23 @@ uint32_t metaverse_grant_rate_remaining(const struct metaverse_grant *g,
  * for the same request. */
 bool metaverse_grant_record_commit(struct metaverse_grant *g,
                                   const struct metaverse_action_request *req);
+
+/* Record the same committed action against an ANCESTOR of the grant that
+ * committed it — the other half of the cumulative ceiling described at the top
+ * of this file. Charges the identical value (the same charge rule, read from
+ * the same place, so the two cannot drift) and NOTHING ELSE: the rate window is
+ * not touched, because it bounds how often this ancestor's own holder may act
+ * and a descendant's action is not the ancestor's.
+ *
+ * Returns false, mutating nothing, when the ancestor cannot pay — a caller
+ * that ignores that is over-spending the operator's ceiling. Charging a
+ * lineage is therefore ALL OR NONE: the caller must restore every ancestor it
+ * already charged before it refuses. This module holds one grant at a time and
+ * cannot walk a lineage itself; the store does that
+ * (services/property_grant_service.h). */
+bool metaverse_grant_record_descendant_charge(
+    struct metaverse_grant *ancestor,
+    const struct metaverse_action_request *req);
 
 /* True when `id` is inside the grant's scope, ignoring every other rule.
  * Exposed because the catalog projection wants to render "which of these

@@ -9842,17 +9842,20 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	lib/engine/src/engine_registry.c \
 	lib/engine/src/engine_err.c \
 	lib/engine/src/engine_patch.c \
+	lib/engine/src/engine_prompt.c \
 	lib/engine/src/engine_secret.c \
 	lib/engine/src/engine_verdict.c \
 	lib/engine/src/engine_wire_request.c \
 	lib/engine/src/engine_wire_response.c \
 	lib/json/src/json.c \
+	lib/sha3/src/sha3.c \
 	lib/util/src/spawn.c \
 	lib/base/src/log_level.c \
 	lib/base/src/result.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
 ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
+	-Ilib/sha3/include \
 	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
 .PHONY: engine-unit
 engine-unit: $(ENGINE_UNIT_BIN)
