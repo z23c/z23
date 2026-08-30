@@ -26,6 +26,7 @@
 #include <string.h>
 #else
 #include "command/native_command.h"
+#include "command/native_dev_loop_command.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"

@@ -2,6 +2,7 @@
  * purpose: Native command adapter for exact local push-proof receipts. */
 
 #include "command/native_command.h"
+#include "command/native_dev_loop_command.h"
 #include "command/native_dev_proof_command.h"
 
 #include "dev_proof.h"

@@ -987,6 +987,7 @@ static int test_ic_dev_proof_contract_is_direct(void)
             "tools/dev/dev_proof.c",
             "tools/dev/dev_proof_receipt.h",
             "tools/dev/devloop.h",
+            "tools/command/native_dev_loop_command.h",
             "tools/command/native_dev_proof_command.c",
             "tools/command/native_dev_verify_change_command.c",
         };

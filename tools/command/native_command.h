@@ -2323,9 +2323,6 @@ void zcl_native_handle_dev_begin(
 void zcl_native_handle_dev_loop_ensure(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
-void zcl_native_handle_dev_loop_start_async(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply);
 void zcl_native_handle_dev_loop_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
