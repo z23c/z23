@@ -1142,6 +1142,24 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("post-rename generation reopens and verifies", ci && found);
     CI_CHECK("post-rename crash leaves no staging file", no_staging_files());
 
+    /* A removed directory capability between validation and O_CREAT is
+     * reacquired and revalidated rather than turning into a sporadic cold
+     * open failure. This is the exact ENOENT boundary stressed by the 32-way
+     * case below. */
+    if (ci) { codeindex_close(ci); ci = NULL; }
+    used = strlen(source_current);
+    snprintf(source_current + used, sizeof(source_current) - used,
+             "int ci_lock_dir_retry(void){return 8;}\n");
+    CI_CHECK("lock-directory retry fixture writes",
+             mk_write(FIX, "lib/net/src/foo.c", source_current));
+    (void)test_rm_rf_recursive(FIX "/.codeindex");
+    codeindex_test_remove_lock_directory_once();
+    ci = codeindex_open(FIX);
+    found = false;
+    if (ci) codeindex_symbol(ci, "ci_lock_dir_retry", &s, &found);
+    CI_CHECK("cold open reacquires a removed lock-directory capability",
+             ci && found);
+
     /* ── 9e: 32 processes start with no index. Exactly one rebuilds; losers
      * wait, recheck the winner's content root, and adopt it. */
     if (ci) { codeindex_close(ci); ci = NULL; }

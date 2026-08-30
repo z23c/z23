@@ -53,6 +53,10 @@ enum codeindex_test_stage_tamper {
 void codeindex_test_set_stage_tamper(
     enum codeindex_test_stage_tamper tamper, const char *victim_path);
 
+/* Remove the validated lock directory once, immediately before lock-file
+ * creation, proving the opener reacquires a live directory capability. */
+void codeindex_test_remove_lock_directory_once(void);
+
 /* Warm-open proof: an unchanged metadata stamp must reuse the exact roots
  * sealed by the published generation without rereading source/depfile bytes. */
 void codeindex_test_reset_exact_bytes_read(void);
