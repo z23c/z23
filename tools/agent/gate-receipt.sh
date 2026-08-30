@@ -60,6 +60,8 @@
 #   --forbid <token>   literal that must NOT appear. Both may repeat.
 #   --label <text>     free-text note carried into the receipt.
 #   --quiet            do not mirror the child's output to this terminal.
+#   --selftest-helper  compile the helper into a fresh temporary directory,
+#                      verify SHA3-256("abc"), then exit without running a gate.
 #
 # Known slugs carry default tokens (see TOKEN DEFAULTS below) so that
 # `--gate lint` already means "and the literal all-checks-passed banner was
@@ -78,8 +80,24 @@ QUIET=0
 EXPECT=()
 FORBID=()
 CMD=()
+SELFTEST_HELPER=0
 
 die() { echo "gate-receipt: $*" >&2; exit 2; }
+
+# The receipt helper uses only the scalar streaming SHA3 surface. Keep this
+# build path small: keccak_x4.c is the independent four-message accelerator,
+# is never called by agent_sha3, and pulls in platform SIMD dispatch providers
+# that a fresh standalone link otherwise has to mirror forever.
+build_sha3_helper() {
+    local out="$1"
+    mkdir -p "$(dirname "$out")"
+    "${CC:-cc}" -std=c23 -O2 -Wall -Wextra -Werror \
+        -I"$REPO/lib/sha3/include" -I"$REPO/lib/crypto/include" \
+        -I"$REPO/lib/support/include" -I"$REPO/lib/base/include" \
+        -o "$out" \
+        "$REPO/tools/agent/agent_sha3.c" \
+        "$REPO/lib/sha3/src/sha3.c"
+}
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -89,11 +107,32 @@ while [ "$#" -gt 0 ]; do
         --expect) [ "$#" -ge 2 ] || die "--expect needs a value"; EXPECT+=("$2"); shift 2 ;;
         --forbid) [ "$#" -ge 2 ] || die "--forbid needs a value"; FORBID+=("$2"); shift 2 ;;
         --quiet)  QUIET=1; shift ;;
+        --selftest-helper) SELFTEST_HELPER=1; shift ;;
         --)       shift; CMD=("$@"); break ;;
         -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
         *)        die "unknown option '$1' (the command goes after --)" ;;
     esac
 done
+
+if [ "$SELFTEST_HELPER" = "1" ]; then
+    selftest_tmp="$(mktemp -d "${TMPDIR:-/tmp}/zcl-gate-receipt-selftest.XXXXXX")" \
+        || die "selftest mktemp failed"
+    selftest_bin="$selftest_tmp/agent_sha3"
+    selftest_cleanup() {
+        rm -f "$selftest_bin"
+        rmdir "$selftest_tmp" 2>/dev/null || true
+    }
+    trap selftest_cleanup EXIT
+    trap 'exit 130' INT TERM
+    build_sha3_helper "$selftest_bin" \
+        || die "selftest could not build a fresh agent_sha3 helper"
+    selftest_got="$(printf '%s' abc | "$selftest_bin" -)"
+    selftest_want="3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"
+    [ "$selftest_got" = "$selftest_want" ] \
+        || die "selftest SHA3-256(abc) mismatch: got=$selftest_got want=$selftest_want"
+    echo "gate-receipt: selftest PASS — fresh scalar helper links and hashes SHA3-256(abc)"
+    exit 0
+fi
 
 [ -n "$GATE" ] || die "--gate <slug> is required; it is the name of the claim"
 [ "${#CMD[@]}" -gt 0 ] || die "no command — put it after --, e.g. -- make lint"
@@ -119,18 +158,11 @@ DIR="$(cd "$DIR" && pwd)"
 
 SHA3_BIN="$REPO/build/bin/agent_sha3"
 if [ ! -x "$SHA3_BIN" ]; then
-    # One translation unit plus the in-tree SHA3; under a second. Built here
+    # One translation unit plus the scalar in-tree SHA3; under a second. Built here
     # rather than made a Makefile prerequisite so that a receipt never costs a
     # Makefile parse (~6 s on this host) it did not already owe.
-    mkdir -p "$REPO/build/bin"
-    "${CC:-cc}" -std=c23 -O2 -Wall -Wextra -Werror \
-        -I"$REPO/lib/sha3/include" -I"$REPO/lib/crypto/include" \
-        -I"$REPO/lib/support/include" \
-        -I"$REPO/lib/base/include" \
-        -o "$SHA3_BIN" \
-        "$REPO/tools/agent/agent_sha3.c" \
-        "$REPO/lib/sha3/src/sha3.c" "$REPO/lib/crypto/src/keccak_x4.c" \
-        >&2 || die "cannot build $SHA3_BIN (see above)"
+    build_sha3_helper "$SHA3_BIN" >&2 \
+        || die "cannot build $SHA3_BIN (see above)"
 fi
 
 sha3_of_file() { "$SHA3_BIN" "$1" | cut -d' ' -f1; }
