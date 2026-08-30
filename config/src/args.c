@@ -72,6 +72,10 @@ void print_usage(const char *prog)
     printf("  -noisetransport        Enable authenticated Noise XX peer transport\n");
     printf("                      (required for the ZCODE DHT; default off)\n");
     printf("  -v2transport        Deprecated alias for -noisetransport\n");
+    printf("  -terminalshell=PATH Absolute path of the shell binary granted to\n");
+    printf("                      paired-machine confined terminals (default:\n");
+    printf("                      none; terminal OPENs are refused\n");
+    printf("                      confinement-unavailable without it)\n");
     printf("  -packagequota=<n>   Package store quota in bytes (default 10737418240;\n");
     printf("                      20%% pins / 40%% hot / 30%% rare / 10%% staging)\n");
     printf("  -confine            After boot reaches activation-ready, apply strict\n");
@@ -182,6 +186,7 @@ static const char *const k_extra_getarg_flags[] = {
     "-buildworker", "-nobuildworker",
     "-noisetransport", "-nonoisetransport",
     "-v2transport", "-nov2transport",
+    "-terminalshell",
 };
 
 static bool main_flag_is_known_extra(const char *arg)

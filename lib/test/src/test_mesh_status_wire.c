@@ -174,8 +174,9 @@ static bool mesh_wire_fixture_open(struct mesh_wire_fixture *f,
     mesh_fill32(tip, 0x33);
     mesh_fill32(peer_online, 0x44);
     mesh_fill32(peer_master_seed, 0x66);
-    if (!mesh_seed_block(&f->ndb, 0, f->genesis) ||
-        !mesh_seed_block(&f->ndb, ZCL_FINALITY_DEPTH, beacon) ||
+    /* No genesis row is seeded: a locally-mining node never persists one,
+     * and the authority must bind the caller-supplied genesis instead. */
+    if (!mesh_seed_block(&f->ndb, ZCL_FINALITY_DEPTH, beacon) ||
         !mesh_seed_block(&f->ndb, 2 * ZCL_FINALITY_DEPTH, tip))
         return false;
     if (vcs_zcode_dht_delegation_sign(
@@ -313,7 +314,7 @@ int test_mesh_status_wire(void)
         uint8_t fingerprint[32];
         ASSERT(v2_identity_public_fingerprint(f.peer_noise_pub, fingerprint));
         ASSERT_EQ(mesh_pairing_service_accept(
-                      &f.ndb, &f.peer_delegation, fingerprint,
+                      &f.ndb, f.genesis, &f.peer_delegation, fingerprint,
                       f.peer_noise_pub, true, MESH_PAIRING_CAP_STATUS_READ,
                       2000, 3000, &f.pairing),
                   MESH_PAIRING_OK);

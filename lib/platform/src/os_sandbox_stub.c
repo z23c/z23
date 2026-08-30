@@ -139,6 +139,12 @@ const int *os_sandbox_node_steady_denied_syscalls(size_t *count)
     return NULL;
 }
 
+const int *os_sandbox_terminal_worker_denied_syscalls(size_t *count)
+{
+    if (count) *count = 0;
+    return NULL;
+}
+
 const int *os_sandbox_node_confine_allowed_syscalls(size_t *count)
 {
     if (count) *count = 0;
@@ -203,6 +209,18 @@ struct zcl_result os_sandbox_set_rlimits(const struct os_sandbox_rlimits *limits
      * enforcement. */
     return ZCL_OK;
 #endif
+}
+
+struct os_sandbox_rlimits os_sandbox_terminal_worker_rlimits(void)
+{
+    return (struct os_sandbox_rlimits){
+        .as_bytes = 256u * 1024u * 1024u,
+        .cpu_seconds = 300,
+        .nproc = 32,
+        .fsize_bytes = 1024u * 1024u,
+        .nofile = 64,
+        .core_bytes = 0,
+    };
 }
 
 #if defined(__APPLE__)
@@ -399,12 +417,23 @@ struct os_sandbox_profile os_sandbox_session_child_profile(
     return value;
 }
 
+struct os_sandbox_profile os_sandbox_terminal_worker_profile(
+    const struct os_sandbox_path_rule *rules, size_t count)
+{
+    /* Confinement refuses on non-Linux: os_sandbox_enter() rejects every
+     * profile here, so the profile's named fields only document the intent. */
+    struct os_sandbox_profile value = profile("terminal_worker", rules, count);
+    value.no_new_privs = true;
+    value.apply_rlimits = true;
+    value.rlimits = os_sandbox_terminal_worker_rlimits();
+    return value;
+}
+
 struct os_sandbox_profile os_sandbox_node_steady_state_profile(
     const struct os_sandbox_path_rule *rules, size_t count)
 {
     return profile("node_steady_state", rules, count);
 }
-
 struct os_sandbox_profile os_sandbox_node_confine_profile(
     const struct os_sandbox_path_rule *rules, size_t count)
 {

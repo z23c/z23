@@ -216,6 +216,16 @@ const int *os_sandbox_session_denied_syscalls(size_t *count_out);
  * its length. Named the NODE STEADY-STATE deny-set constant. */
 const int *os_sandbox_node_steady_denied_syscalls(size_t *count_out);
 
+/* The TERMINAL WORKER's denied-syscall set: the session deny-set MINUS the
+ * fork/vfork/clone/clone3/execve/execveat family — the confined shell must
+ * spawn and exec its own children, so those are reachable, while Landlock
+ * confines exactly what execve can reach (the session tmpdir and the one
+ * granted shell binary). The socket/connect family, ptrace/process_vm_*,
+ * mount/namespace escape, kernel surface, keyrings, and open_by_handle_at
+ * stay denied. Returns a static const array; *count_out receives its
+ * length. Named the TERMINAL WORKER deny-set constant. */
+const int *os_sandbox_terminal_worker_denied_syscalls(size_t *count_out);
+
 /* Install a hand-rolled seccomp-bpf DENY-list (no libseccomp): every syscall
  * in `denied` returns SECCOMP_RET_KILL_PROCESS; everything else defaults to
  * SECCOMP_RET_ALLOW. A deny-list (not an allow-list) is deliberate — even a
@@ -358,6 +368,15 @@ struct zcl_result os_sandbox_landlock_apply_to_self(void);
  * per session). */
 struct os_sandbox_rlimits os_sandbox_session_rlimits(void);
 
+/* The terminal worker's resource caps: AS=256 MiB, CPU=300 s, FSIZE=1 MiB,
+ * NOFILE=64, CORE=0, NPROC=KEEP. Unlike the session child the worker's
+ * shell forks children, and RLIMIT_NPROC is charged against the real uid's
+ * TOTAL task count — any fixed ceiling below the uid's live load would
+ * block every fork inside the cage. The real process budget is enforced
+ * subtree-scoped by the parent's process-group census over the session's
+ * pgid (see the process-budget block below). */
+struct os_sandbox_rlimits os_sandbox_terminal_worker_rlimits(void);
+
 /* Apply the resource caps in `lim` (fields == OS_SANDBOX_RLIMIT_KEEP are
  * skipped). Returns non-ok on the first setrlimit failure. */
 struct zcl_result os_sandbox_set_rlimits(const struct os_sandbox_rlimits *lim);
@@ -462,6 +481,15 @@ bool os_sandbox_userns_available(void);
  * the seccomp session deny-list with W^X. Namespaces (SANDBOX_SESSION_NS_
  * FLAGS) are assumed already entered by the caller's clone(). */
 struct os_sandbox_profile os_sandbox_session_child_profile(
+    const struct os_sandbox_path_rule *fs_rules, size_t n_fs_rules);
+
+/* The mesh terminal worker's confinement: no_new_privs + the terminal-worker
+ * rlimits + Landlock scoped to `fs_rules` (the per-terminal tmpdir r/w/create/
+ * execute plus the one granted shell binary read/execute) + the seccomp
+ * TERMINAL WORKER deny-list (session set minus the fork/exec family, so the
+ * shell can spawn children) with W^X. Linux only; the stub profile refuses in
+ * os_sandbox_enter() like every other profile. */
+struct os_sandbox_profile os_sandbox_terminal_worker_profile(
     const struct os_sandbox_path_rule *fs_rules, size_t n_fs_rules);
 
 /* The lighter node-self profile (Rung 2, os-substrate-plan §3): no_new_privs
