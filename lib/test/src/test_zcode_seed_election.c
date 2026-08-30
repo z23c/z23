@@ -2,6 +2,7 @@
  * Purpose: prove canonical C23 seed and fixture-only shadow elections. */
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "vcs/zcode_seed.h"
@@ -26,14 +27,6 @@ static const char *const shadow_election_root_hex[4] = {
 static void seed_test_fill(uint8_t root[32], uint8_t value)
 {
     memset(root, value, 32);
-}
-
-static bool seed_test_zero(const void *value, size_t size)
-{
-    const uint8_t *bytes = value;
-    uint8_t any = 0;
-    for (size_t i = 0; i < size; i++) any |= bytes[i];
-    return any == 0;
 }
 
 static bool seed_test_fixture(
@@ -98,7 +91,7 @@ static bool seed_test_anchor(void *opaque, uint64_t height,
                              const uint8_t hash[32])
 {
     const struct seed_anchor_fixture *fixture = opaque;
-    return seed_test_zero(hash, 32) == false &&
+    return zcl_bytes_all_zero((const uint8_t *)hash, 32) == false &&
         (!fixture || fixture->rejected_height != height);
 }
 
@@ -151,13 +144,13 @@ static int test_seed_wire(void)
         for (size_t n = 0; n < sizeof(wire); n++) {
             memset(&parsed, 0xa5, sizeof(parsed));
             ASSERT(vcs_c23_seed_parse(wire, n, &parsed) != VCS_C23_SEED_OK);
-            ASSERT(seed_test_zero(&parsed, sizeof(parsed)));
+            ASSERT(zcl_bytes_all_zero((const uint8_t *)&parsed, sizeof(parsed)));
         }
         uint8_t trailing[VCS_C23_SEED_WIRE_BYTES + 1u];
         memcpy(trailing, wire, sizeof(wire)); trailing[sizeof(wire)] = 0;
         ASSERT_EQ(vcs_c23_seed_parse(trailing, sizeof(trailing), &parsed),
                   VCS_C23_SEED_ERR_WIRE_SIZE);
-        ASSERT(seed_test_zero(&parsed, sizeof(parsed)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&parsed, sizeof(parsed)));
 
         struct vcs_c23_seed_v1 invalid = seed;
         invalid.source_flags = VCS_C23_SEED_SOURCE_GENERATED;

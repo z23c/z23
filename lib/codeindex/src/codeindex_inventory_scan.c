@@ -121,6 +121,7 @@ void inv_group_for_path(const char *path, char out[64])
     (void)snprintf(out, 64, "%.*s", (int)n, path);
 }
 
+#if !defined(_WIN32)
 static bool inv_source_name(const char *name)
 {
     size_t n = strlen(name);
@@ -160,6 +161,7 @@ static bool inv_path_push(struct inv_scan *s, const char *path,
     row->inode = (uint64_t)st->st_ino;
     return true;
 }
+#endif
 
 #if !defined(_WIN32)
 static bool inv_collect_dir(struct inv_scan *s, const char *rel)
@@ -194,11 +196,13 @@ static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 }
 #endif
 
+#if !defined(_WIN32)
 static int inv_path_cmp(const void *a, const void *b)
 {
     return strcmp(((const struct inv_path *)a)->path,
                   ((const struct inv_path *)b)->path);
 }
+#endif
 
 bool inv_collect_paths(struct inv_scan *s)
 {

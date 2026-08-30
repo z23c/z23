@@ -17,27 +17,11 @@
  * one table to eight and this file passed the 800-line shape ceiling.
  */
 
-/* realpath() is declared in <stdlib.h> only under a POSIX feature-test
- * macro. Without one, glibc still supplies it through the fortify inline,
- * which is enabled only when optimising — so the omission is invisible at
- * -O1 and up and only shows as an implicit declaration at -O0. The guard
- * must precede every include, or the first header pulled in fixes the
- * feature set before this is seen. */
-#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
-#define _XOPEN_SOURCE 700
-#endif
-#include <limits.h>
-
-/* Some POSIX hosts leave PATH_MAX undefined in <limits.h>. realpath() still
- * needs a bound, and 4096 is the value the rest of this tree uses. */
-#ifndef PATH_MAX
-#define PATH_MAX 4096
-#endif
-
 #include "base/result.h"
 #include "base/text_fit.h"
 #include "crypto/sha3.h"
 #include "models/wallet_backup_receipt.h"
+#include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
 #include "platform/time_compat.h"
@@ -652,17 +636,19 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
         char src_dir[1024];
         snprintf(src_dir, sizeof(src_dir), "%s", src_path);
         char *slash = strrchr(src_dir, '/');
+#if defined(_WIN32)
+        char *backslash = strrchr(src_dir, '\\');
+        if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
         if (slash) *slash = '\0';
-        /* realpath() writes up to PATH_MAX bytes into its output buffer and
-         * POSIX requires the caller to supply at least that much. These were
-         * 1024, so a path longer than that overflowed the stack — glibc's
-         * fortify check caught it as "buffer overflow detected" and aborted
-         * the process. Only the OUTPUT buffer has this requirement; the input
-         * may be any length. */
-        char src_real[PATH_MAX], backup_real[PATH_MAX];
-        const char *src_compare = realpath(src_dir, src_real)
+        char src_real[WALLET_BACKUP_RECEIPT_PATH_MAX];
+        char backup_real[WALLET_BACKUP_RECEIPT_PATH_MAX];
+        const char *src_compare = platform_directory_canonical_real(
+                                      src_dir, src_real, sizeof(src_real))
             ? src_real : src_dir;
-        const char *backup_compare = realpath(cfg->backup_dir, backup_real)
+        const char *backup_compare = platform_directory_canonical_real(
+                                         cfg->backup_dir, backup_real,
+                                         sizeof(backup_real))
             ? backup_real : cfg->backup_dir;
         if (strcmp(src_compare, backup_compare) == 0) {
             struct zcl_result r = ZCL_ERR(-21,

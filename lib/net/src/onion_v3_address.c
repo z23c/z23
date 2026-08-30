@@ -5,6 +5,7 @@
 
 #include "net/onion_v3_address.h"
 
+#include "base/bytes.h"
 #include "crypto/sha3.h"
 #include "encoding/utilstrencodings.h"
 
@@ -67,10 +68,7 @@ bool onion_v3_address_from_pubkey(const uint8_t pubkey[32],
         out[0] = '\0';
     if (!pubkey || !out)
         return false;
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= pubkey[i];
-    if (any == 0)
+    if (!zcl_bytes_any_set(pubkey, 32))
         return false;
     uint8_t blob[35];
     memcpy(blob, pubkey, 32);

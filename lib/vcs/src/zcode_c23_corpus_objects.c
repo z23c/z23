@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_c23_corpus.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -15,14 +16,6 @@ static const uint8_t assignment_magic[8] = {'Z','C','S','A','1',0,0,0};
 static const uint8_t rules_magic[8] = {'Z','C','C','R','1',0,0,0};
 static const char assignment_signature_domain[] =
     "zcl.zcode.source_assignment.signature.v1";
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_c23_error_string(enum vcs_zcode_c23_error error)
 {
@@ -69,16 +62,16 @@ static enum vcs_zcode_c23_error assignment_shape(
     if (!assignment->sequence || !assignment->assigned_height ||
         assignment->assigned_mtp <= 0)
         return VCS_ZCODE_C23_TIME;
-    if (!bytes_nonzero(assignment->source_root, 32) ||
-        !bytes_nonzero(assignment->author_binding_root, 32) ||
-        !bytes_nonzero(assignment->license_root, 32) ||
-        !bytes_nonzero(assignment->assignment_evidence_root, 32) ||
-        !bytes_nonzero(assignment->signer_pubkey, 32))
+    if (!zcl_bytes_any_set(assignment->source_root, 32) ||
+        !zcl_bytes_any_set(assignment->author_binding_root, 32) ||
+        !zcl_bytes_any_set(assignment->license_root, 32) ||
+        !zcl_bytes_any_set(assignment->assignment_evidence_root, 32) ||
+        !zcl_bytes_any_set(assignment->signer_pubkey, 32))
         return VCS_ZCODE_C23_ROOT;
     bool has_upstream_source =
-        bytes_nonzero(assignment->upstream_source_root, 32);
+        zcl_bytes_any_set(assignment->upstream_source_root, 32);
     bool has_upstream_author =
-        bytes_nonzero(assignment->upstream_author_root, 32);
+        zcl_bytes_any_set(assignment->upstream_author_root, 32);
     if (assignment->source_kind == VCS_ZCODE_SOURCE_CANONICAL_IMPORT ||
         assignment->source_kind == VCS_ZCODE_SOURCE_VENDOR_MATERIAL) {
         if (!has_upstream_source || !has_upstream_author)
@@ -90,7 +83,7 @@ static enum vcs_zcode_c23_error assignment_shape(
     } else if (has_upstream_source || has_upstream_author) {
         return VCS_ZCODE_C23_POLICY;
     }
-    if (require_signature && !bytes_nonzero(assignment->signature, 64))
+    if (require_signature && !zcl_bytes_any_set(assignment->signature, 64))
         return VCS_ZCODE_C23_SIGNATURE;
     return VCS_ZCODE_C23_OK;
 }
@@ -291,9 +284,9 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_rules_v1_validate(
         rules->required_evidence_mask !=
             VCS_ZCODE_C23_EVIDENCE_REQUIRED_MASK)
         return VCS_ZCODE_C23_POLICY;
-    if (!bytes_nonzero(rules->syntax_profile_root, 32) ||
-        !bytes_nonzero(rules->semantic_unitizer_root, 32) ||
-        !bytes_nonzero(rules->permissive_license_policy_root, 32))
+    if (!zcl_bytes_any_set(rules->syntax_profile_root, 32) ||
+        !zcl_bytes_any_set(rules->semantic_unitizer_root, 32) ||
+        !zcl_bytes_any_set(rules->permissive_license_policy_root, 32))
         return VCS_ZCODE_C23_ROOT;
     struct vcs_zcode_c23_corpus_rules_v1 expected;
     vcs_zcode_c23_corpus_rules_v1_default(&expected);

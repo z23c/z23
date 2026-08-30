@@ -2,6 +2,7 @@
  * Purpose: deterministic scratch-only Living Commons shadow plans. */
 #include "vcs/zcode_shadow_simulation.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "codec/cursor.h"
@@ -28,13 +29,6 @@ struct shadow_fixture_callbacks {
 static bool shadow_sim_equal(const uint8_t a[32], const uint8_t b[32])
 {
     return memcmp(a, b, 32) == 0;
-}
-
-static bool shadow_sim_zero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any == 0;
 }
 
 static bool shadow_sim_load(const char *workspace, const uint8_t root[32],
@@ -75,7 +69,7 @@ bool vcs_zcode_shadow_fixture_anchor_root(
     uint64_t epoch, uint8_t anchor_kind, uint8_t out[32])
 {
     if (!policy_root || !branch_root || !out ||
-        shadow_sim_zero(policy_root) || shadow_sim_zero(branch_root) ||
+        zcl_bytes_all_zero(policy_root, 32) || zcl_bytes_all_zero(branch_root, 32) ||
         (anchor_kind != 1u && anchor_kind != 2u)) {
         if (out) memset(out, 0, 32);
         return false;
@@ -406,7 +400,7 @@ enum vcs_zcode_shadow_simulation_error vcs_zcode_shadow_epoch_plan_cas(
     free(wire); wire = NULL;
 
     if (attribution.epoch == 0) {
-        if (!shadow_sim_zero(input->previous_epoch_creation_root))
+        if (!zcl_bytes_all_zero(input->previous_epoch_creation_root, 32))
             return VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR;
     } else {
         struct vcs_zcode_epoch_creation_set_v1 previous;

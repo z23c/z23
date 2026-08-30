@@ -3,6 +3,7 @@
 
 #include "storage/consensus_state_bundle_codec.h"
 
+#include "base/bytes.h"
 #include "crypto/sha3.h"
 
 #include <string.h>
@@ -246,14 +247,6 @@ void consensus_state_bundle_proof_manifest_digest(
     sha3_256_finalize(&ctx, out);
 }
 
-static bool codec_digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= digest[i];
-    return any != 0;
-}
-
 bool consensus_state_bundle_proof_extension_digest(
     const struct consensus_state_bundle_proof_parent *parent,
     size_t ordinal, uint8_t out[32])
@@ -267,13 +260,13 @@ bool consensus_state_bundle_proof_extension_digest(
         (parent->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
          parent->validation_profile !=
              CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !codec_digest_nonzero(parent->base_block_hash) ||
-        !codec_digest_nonzero(parent->proof_manifest_digest) ||
-        !codec_digest_nonzero(parent->source_digest) ||
-        !codec_digest_nonzero(parent->artifact_digest) ||
-        !codec_digest_nonzero(
-            parent->components[ordinal].component_digest) ||
-        !codec_digest_nonzero(parent->suffix_digest[ordinal]))
+        !zcl_bytes_any_set(parent->base_block_hash, 32) ||
+        !zcl_bytes_any_set(parent->proof_manifest_digest, 32) ||
+        !zcl_bytes_any_set(parent->source_digest, 32) ||
+        !zcl_bytes_any_set(parent->artifact_digest, 32) ||
+        !zcl_bytes_any_set(
+            parent->components[ordinal].component_digest, 32) ||
+        !zcl_bytes_any_set(parent->suffix_digest[ordinal], 32))
         return false;
     const struct consensus_state_bundle_proof_summary *component =
         &parent->components[ordinal];

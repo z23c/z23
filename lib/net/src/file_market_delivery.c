@@ -9,6 +9,7 @@
 
 #include "net/file_market_delivery.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
@@ -60,16 +61,16 @@ static enum file_market_delivery_error delivery_fields(
         return FILE_MARKET_DELIVERY_ERR_NULL;
     if (request->version != FILE_MARKET_DELIVERY_VERSION)
         return FILE_MARKET_DELIVERY_ERR_VERSION;
-    if (!delivery_bytes_nonzero(request->network_genesis, 32))
+    if (!zcl_bytes_any_set(request->network_genesis, 32))
         return FILE_MARKET_DELIVERY_ERR_NETWORK;
-    if (!delivery_bytes_nonzero(request->offer_id, 32))
+    if (!zcl_bytes_any_set(request->offer_id, 32))
         return FILE_MARKET_DELIVERY_ERR_OFFER_ID;
-    if (!delivery_bytes_nonzero(request->buyer_pubkey, 32))
+    if (!zcl_bytes_any_set(request->buyer_pubkey, 32))
         return FILE_MARKET_DELIVERY_ERR_BUYER_KEY;
-    if (!delivery_bytes_nonzero(request->session_id, 32))
+    if (!zcl_bytes_any_set(request->session_id, 32))
         return FILE_MARKET_DELIVERY_ERR_SESSION;
     if (require_signature &&
-        !delivery_bytes_nonzero(request->buyer_signature, 64))
+        !zcl_bytes_any_set(request->buyer_signature, 64))
         return FILE_MARKET_DELIVERY_ERR_SIGNATURE;
     if (require_signature && request->issued_unix <= 0)
         return FILE_MARKET_DELIVERY_ERR_EXPIRED;

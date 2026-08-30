@@ -3,6 +3,7 @@
  * as a simulation-only epoch proposer alongside the frozen era curve. */
 #include "vcs/zcode_epoch_schedule.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "codec/cursor.h"
@@ -16,14 +17,6 @@
 static const uint8_t epoch_schedule_magic[8] = {
     'Z', 'C', 'E', 'S', 'P', 'O', '\r', '\n'
 };
-
-static bool schedule_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= root[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_epoch_schedule_error_string(
     enum vcs_zcode_epoch_schedule_error error)
@@ -122,7 +115,7 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
     if (proposal->epoch == 0)
         return VCS_ZCODE_EPOCH_SCHEDULE_EPOCH;
     bool has_previous =
-        schedule_root_nonzero(proposal->previous_proposal_root);
+        zcl_bytes_any_set(proposal->previous_proposal_root, 32);
     if ((proposal->epoch == 1 && has_previous) ||
         (proposal->epoch != 1 && !has_previous))
         return VCS_ZCODE_EPOCH_SCHEDULE_PREDECESSOR;
@@ -155,7 +148,7 @@ enum vcs_zcode_epoch_schedule_error vcs_zcode_epoch_schedule_validate(
     for (size_t i = 0; i < proposal->allocation_count; i++) {
         const struct vcs_zcode_epoch_schedule_allocation *allocation =
             &proposal->allocations[i];
-        if (!schedule_root_nonzero(allocation->contributor_binding_root) ||
+        if (!zcl_bytes_any_set(allocation->contributor_binding_root, 32) ||
             allocation->award_atoms == 0)
             return VCS_ZCODE_EPOCH_SCHEDULE_ORDER;
         if (allocation->schedule_class ==
@@ -366,7 +359,7 @@ static int schedule_row_compare(const void *left, const void *right)
 static enum vcs_zcode_epoch_schedule_error schedule_check_predecessor(
     const struct vcs_zcode_epoch_schedule_input *input)
 {
-    bool has_previous = schedule_root_nonzero(input->previous_proposal_root);
+    bool has_previous = zcl_bytes_any_set(input->previous_proposal_root, 32);
     if (input->epoch == 1)
         return has_previous ? VCS_ZCODE_EPOCH_SCHEDULE_PREDECESSOR
                             : VCS_ZCODE_EPOCH_SCHEDULE_OK;

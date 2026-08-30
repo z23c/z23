@@ -2,6 +2,7 @@
  * Purpose: canonical signed simulation-only ZC23 creation claim object. */
 #include "vcs/zcode_creation_claim.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -12,14 +13,6 @@
 
 static const uint8_t claim_magic[8] =
     {'Z','C','C','L','M','2',0,0};
-
-static bool claim_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
 
 static enum vcs_zcode_creation_claim_error claim_shape(
     const struct vcs_zcode_creation_claim_wire_v2 *claim,
@@ -42,11 +35,11 @@ static enum vcs_zcode_creation_claim_error claim_shape(
         claim->commons_admission_root, claim->signer_pubkey,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!claim_nonzero(roots[i], 32))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_CREATION_CLAIM_ROOT;
     if (claim->maturity_height == 0 || claim->maturity_mtp <= 0)
         return VCS_ZCODE_CREATION_CLAIM_TIME;
-    if (require_signature && !claim_nonzero(claim->signature, 64))
+    if (require_signature && !zcl_bytes_any_set(claim->signature, 64))
         return VCS_ZCODE_CREATION_CLAIM_SIGNATURE;
     return VCS_ZCODE_CREATION_CLAIM_OK;
 }

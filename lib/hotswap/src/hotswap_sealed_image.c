@@ -27,6 +27,7 @@
  * errno is captured by the CALLER into `saved` before any cleanup runs,
  * because close() and fcntl() are entitled to clobber errno on their way out
  * and a message reading "Success" is worse than no message at all. */
+#if defined(__linux__) || defined(__APPLE__)
 static int si_fail(int fd_to_close, char *err, size_t err_cap,
                    const char *fmt, ...)
 {
@@ -40,6 +41,7 @@ static int si_fail(int fd_to_close, char *err, size_t err_cap,
     }
     return -1;
 }
+#endif
 
 #if defined(__linux__)
 #include <sys/mman.h>

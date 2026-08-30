@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_family_admission.h"
 
+#include "base/bytes.h"
 #include "base/safe_alloc.h"
 
 #include <pthread.h>
@@ -23,17 +24,9 @@ struct vcs_zcode_family_access_service {
     struct family_access_snapshot snapshot;
 };
 
-static bool access_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
-
 static bool access_zero(const uint8_t root[32])
 {
-    return !access_nonzero(root);
+    return !zcl_bytes_any_set(root, 32);
 }
 
 static enum vcs_zcode_sovereignty_action access_local_action(
@@ -99,8 +92,8 @@ static bool request_family_public_valid(
     const struct vcs_zcode_family_access_request_v1 *request)
 {
     return request->action != VCS_ZCODE_FAMILY_ACTION_PROTOCOL_FRAME &&
-           access_nonzero(request->content_root) &&
-           access_nonzero(request->dependency_closure_root) &&
+           zcl_bytes_any_set(request->content_root, 32) &&
+           zcl_bytes_any_set(request->dependency_closure_root, 32) &&
            request_subject_binds_content(request) &&
            request_extras_zero(request);
 }
@@ -110,9 +103,9 @@ static bool request_intake_valid(
 {
     bool action_ok = request->action == VCS_ZCODE_FAMILY_ACTION_FETCH ||
                      request->action == VCS_ZCODE_FAMILY_ACTION_STORE;
-    return action_ok && access_nonzero(request->content_root) &&
-           access_nonzero(request->dependency_closure_root) &&
-           access_nonzero(request->provider_root) &&
+    return action_ok && zcl_bytes_any_set(request->content_root, 32) &&
+           zcl_bytes_any_set(request->dependency_closure_root, 32) &&
+           zcl_bytes_any_set(request->provider_root, 32) &&
            request_subject_binds_content(request) &&
            request->expected_bytes > 0 &&
            request->expected_bytes <= request->byte_budget &&
@@ -129,8 +122,8 @@ static bool request_diagnostic_valid(
 {
     bool action_ok = request->action == VCS_ZCODE_FAMILY_ACTION_SHOW ||
                      request->action == VCS_ZCODE_FAMILY_ACTION_REST;
-    return action_ok && access_nonzero(request->content_root) &&
-           access_nonzero(request->dependency_closure_root) &&
+    return action_ok && zcl_bytes_any_set(request->content_root, 32) &&
+           zcl_bytes_any_set(request->dependency_closure_root, 32) &&
            request_subject_binds_content(request) &&
            request->operator_authorized && request->redacted &&
            access_zero(request->provider_root) && !request->expected_bytes &&
@@ -343,7 +336,7 @@ struct vcs_zcode_family_access_decision_v1 vcs_zcode_family_access_decide_v1(
     } else if (request->intent != VCS_ZCODE_FAMILY_INTENT_FAMILY_PUBLIC) {
         decision.allow = true;
         decision.reason = allowed_intent_reason(request->intent);
-    } else if (!access_nonzero(service->snapshot.root)) {
+    } else if (!zcl_bytes_any_set(service->snapshot.root, 32)) {
         decision.reason = VCS_ZCODE_FAMILY_ACCESS_NO_PROJECTION;
     } else {
         const struct vcs_zcode_family_admission_projection_entry_v1 *entry =

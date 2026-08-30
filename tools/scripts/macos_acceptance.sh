@@ -61,7 +61,13 @@ validate() {
         [ -n "$groups" ] || die "$id has no refusal/availability evidence group"
         while IFS= read -r group; do
             grep -Fqx "$group" <<< "$registered" || die "$id names unregistered group '$group'"
-        done < <(printf '%s' "$groups" | tr ',' '\n')
+        # printf '%s' emits no trailing newline, so `tr ',' '\n'` leaves the
+        # LAST group as an unterminated partial line and `read` returns
+        # non-zero without running the body for it. Until check-macos-acceptance
+        # started running this script, that silently skipped the last evidence
+        # group of every row — and validated NOTHING at all for the rows that
+        # name exactly one group (tor, release_packaging, snapshot_export).
+        done < <(printf '%s\n' "$groups" | tr ',' '\n')
     done <<< "$rows"
 }
 

@@ -3,6 +3,7 @@
 
 #include "vcs/vcs_devloop_mirror.h"
 
+#include "base/bytes.h"
 #include "vcs/vcs_devloop.h"
 #include "vcs/vcs_object.h"
 #include "vcs_priv.h"
@@ -33,27 +34,19 @@
 
 static const uint8_t mirror_magic[8] = {'Z','M','R','R','1',0,0,0};
 
-static bool mirror_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
-
 static bool mirror_receipt_serialize(
     const struct vcs_devloop_mirror_receipt *receipt,
     uint8_t wire[VCS_DEVLOOP_MIRROR_WIRE_BYTES])
 {
     if (!receipt || !wire ||
         receipt->version != VCS_DEVLOOP_MIRROR_RECEIPT_VERSION ||
-        !mirror_root_nonzero(receipt->job_root) ||
-        !mirror_root_nonzero(receipt->vcs_commit_root) ||
-        !mirror_root_nonzero(receipt->source_identity_sha256) ||
-        !mirror_root_nonzero(receipt->proof_receipt_root) ||
-        !mirror_root_nonzero(receipt->release_root) ||
-        !mirror_root_nonzero(receipt->workspace_root) ||
-        !mirror_root_nonzero(receipt->provider_record_root) ||
+        !zcl_bytes_any_set(receipt->job_root, 32) ||
+        !zcl_bytes_any_set(receipt->vcs_commit_root, 32) ||
+        !zcl_bytes_any_set(receipt->source_identity_sha256, 32) ||
+        !zcl_bytes_any_set(receipt->proof_receipt_root, 32) ||
+        !zcl_bytes_any_set(receipt->release_root, 32) ||
+        !zcl_bytes_any_set(receipt->workspace_root, 32) ||
+        !zcl_bytes_any_set(receipt->provider_record_root, 32) ||
         (receipt->git_oid_len != 0 && receipt->git_oid_len != 20 &&
          receipt->git_oid_len != 32))
         return false;

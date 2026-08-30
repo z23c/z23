@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_sovereignty_policy.h"
 
+#include "base/bytes.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -78,14 +79,6 @@ const char *vcs_zcode_sovereignty_result_string(
   return "unknown";
 }
 
-static bool value_nonzero(const uint8_t value[32])
-{
-  uint8_t any = 0;
-  for (size_t i = 0; i < 32; i++)
-    any |= value[i];
-  return any != 0;
-}
-
 static bool text_value_valid(const uint8_t value[32])
 {
   size_t length = 0;
@@ -120,7 +113,7 @@ static bool rule_shape(const struct vcs_zcode_sovereignty_rule *rule)
   if (rule->scope == VCS_ZCODE_SOVEREIGNTY_SERVICE_TYPE ||
       rule->scope == VCS_ZCODE_SOVEREIGNTY_CLASSIFICATION)
     return text_value_valid(rule->value);
-  return value_nonzero(rule->value);
+  return zcl_bytes_any_set(rule->value, 32);
 }
 
 static void rule_write_prefix(const struct vcs_zcode_sovereignty_rule *rule,
@@ -205,7 +198,7 @@ enum vcs_zcode_sovereignty_result vcs_zcode_sovereignty_rule_build(
 struct vcs_zcode_sovereignty_policy *vcs_zcode_sovereignty_policy_create(
     const uint8_t network_genesis[32])
 {
-  if (!network_genesis || !value_nonzero(network_genesis))
+  if (!network_genesis || !zcl_bytes_any_set(network_genesis, 32))
     return NULL;
   struct vcs_zcode_sovereignty_policy *policy =
       zcl_calloc(1, sizeof(*policy), "sovereignty.policy");

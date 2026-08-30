@@ -231,7 +231,7 @@ static int test_code_capsule_static_id_is_exact(void)
     TEST("code_capsule: stable id selects one same-named static definition "
          "and scopes its call graph to that file") {
         const char *id =
-            "fn:static:app/models/src/app_event.c:bytes_nonzero";
+            "fn:static:lib/storage/src/wallet_projection.c:ensure_schema";
         struct json_value input;
         json_init(&input); json_set_object(&input);
         (void)json_push_kv_str(&input, "name", id);
@@ -248,20 +248,20 @@ static int test_code_capsule_static_id_is_exact(void)
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "resolution")),
                       "exact_stable_id");
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "def_path")),
-                      "app/models/src/app_event.c");
+                      "lib/storage/src/wallet_projection.c");
 
         const struct json_value *callers = json_get(&reply.data, "callers");
         ASSERT(callers && callers->type == JSON_ARR);
         for (size_t i = 0; i < callers->num_children; i++)
             ASSERT_STR_EQ(json_get_str(
                 json_get(&callers->children[i], "file")),
-                "app/models/src/app_event.c");
+                "lib/storage/src/wallet_projection.c");
         const struct json_value *callees = json_get(&reply.data, "callees");
         ASSERT(callees && callees->type == JSON_ARR);
         for (size_t i = 0; i < callees->num_children; i++)
             ASSERT_STR_EQ(json_get_str(
                 json_get(&callees->children[i], "file")),
-                "app/models/src/app_event.c");
+                "lib/storage/src/wallet_projection.c");
 
         const struct json_value *others =
             json_get(&reply.data, "other_defs");
@@ -288,7 +288,7 @@ static int test_code_change_plan_symbol(void)
         struct json_value input;
         json_init(&input); json_set_object(&input);
         (void)json_push_kv_str(&input, "name",
-            "fn:static:app/models/src/app_event.c:bytes_nonzero");
+            "fn:static:lib/storage/src/wallet_projection.c:ensure_schema");
         struct zcl_command_request request = {
             .input = &input, .view = "normal",
             .invoked_name = "code.change-plan",
@@ -300,11 +300,11 @@ static int test_code_change_plan_symbol(void)
                       "exact_stable_id");
         ASSERT(json_get_bool(json_get(&reply.data, "symbol_found")));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "symbol_id")),
-            "fn:static:app/models/src/app_event.c:bytes_nonzero");
+            "fn:static:lib/storage/src/wallet_projection.c:ensure_schema");
         const struct json_value *read = json_get(&reply.data, "read");
         ASSERT(read && read->type == JSON_ARR && read->num_children > 0);
         ASSERT_STR_EQ(json_get_str(json_get(&read->children[0], "path")),
-                      "app/models/src/app_event.c");
+                      "lib/storage/src/wallet_projection.c");
         const struct json_value *tests = json_get(&reply.data, "test_groups");
         ASSERT(tests && tests->type == JSON_ARR && tests->num_children > 0);
         zcl_command_reply_free(&reply);

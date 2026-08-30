@@ -5,6 +5,7 @@
 // suffix-ok:immutable-signed-app-event-model
 
 #include "models/app_event.h"
+#include "base/bytes.h"
 #include "models/query_builder.h"
 
 #include "util/log_macros.h"
@@ -52,16 +53,6 @@ static const enum qb_column k_app_event_ref_cols[] = {
 #define QB_NCOLS(a) (sizeof(a) / sizeof((a)[0]))
 
 static const uint8_t g_empty_payload[1] = {0};
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static bool bounded_token(const char *value, size_t max_len)
 {
@@ -115,11 +106,11 @@ bool db_app_event_validate(const struct db_app_event *record,
     validates_custom(errors,
                      event->created_at > 0 && event->created_at <= INT64_MAX,
                      "created_at", "is outside storage range");
-    validates_custom(errors, bytes_nonzero(event->event_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(event->event_id, 32),
                      "event_id", "is empty");
-    validates_custom(errors, bytes_nonzero(event->chain_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(event->chain_id, 32),
                      "chain_id", "is empty");
-    validates_custom(errors, bytes_nonzero(event->author_key_id, 20),
+    validates_custom(errors, zcl_bytes_any_set(event->author_key_id, 20),
                      "author_key_id", "is empty");
     validates_custom(errors,
                      event->payload.len <= ZCL_APP_EVENT_PAYLOAD_MAX &&

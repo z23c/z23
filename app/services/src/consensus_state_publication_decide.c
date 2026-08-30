@@ -10,6 +10,7 @@
 
 #include "services/consensus_state_publication_cas.h"
 
+#include "base/bytes.h"
 #include "consensus_state_publication_cas_internal.h"
 #include "config/consensus_state_snapshot_install.h"
 
@@ -18,14 +19,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
-static bool digest_nonzero(const uint8_t d[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= d[i];
-    return any != 0;
-}
 
 /* Re-derive the manifest's own artifact digest and assert the complete/self-
  * bound shape the chain binder and exporter both require. Pure. */
@@ -40,11 +33,11 @@ static bool manifest_complete_self_bound(
         m->sapling_frontier_height > m->height ||
         (m->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
          m->validation_profile != CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !digest_nonzero(m->block_hash) ||
-        !digest_nonzero(m->sapling_frontier_root) ||
-        !digest_nonzero(m->proof_manifest_digest) ||
-        !digest_nonzero(m->source_digest) ||
-        !digest_nonzero(m->artifact_digest))
+        !zcl_bytes_any_set(m->block_hash, 32) ||
+        !zcl_bytes_any_set(m->sapling_frontier_root, 32) ||
+        !zcl_bytes_any_set(m->proof_manifest_digest, 32) ||
+        !zcl_bytes_any_set(m->source_digest, 32) ||
+        !zcl_bytes_any_set(m->artifact_digest, 32))
         return false;
     uint8_t computed[32];
     consensus_state_bundle_artifact_digest(m, computed);
@@ -61,12 +54,12 @@ static bool source_receipt_self_consistent(
      * derived claim is never publication authority. */
     if (r->schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2 ||
         !r->source_clean ||
-        !digest_nonzero(r->source_epoch_digest) ||
-        !digest_nonzero(r->source_tree_root) ||
-        !digest_nonzero(r->toolchain_digest) ||
-        !digest_nonzero(r->build_inputs_digest) ||
-        !digest_nonzero(r->chain_corpus_digest) ||
-        !digest_nonzero(r->receipt_digest) ||
+        !zcl_bytes_any_set(r->source_epoch_digest, 32) ||
+        !zcl_bytes_any_set(r->source_tree_root, 32) ||
+        !zcl_bytes_any_set(r->toolchain_digest, 32) ||
+        !zcl_bytes_any_set(r->build_inputs_digest, 32) ||
+        !zcl_bytes_any_set(r->chain_corpus_digest, 32) ||
+        !zcl_bytes_any_set(r->receipt_digest, 32) ||
         !consensus_state_source_receipt_commit_valid(
             r->schema_version, r->producer_commit,
             strnlen(r->producer_commit, sizeof(r->producer_commit))) ||
@@ -144,7 +137,7 @@ void consensus_state_publication_cas_decide(
     }
     /* (a) same artifact logical identity: the opaque artifact's logical digest
      * must equal the manifest it exposed. */
-    if (!digest_nonzero(in->artifact_logical_digest) ||
+    if (!zcl_bytes_any_set(in->artifact_logical_digest, 32) ||
         memcmp(in->artifact_logical_digest, in->manifest.artifact_digest,
                32) != 0) {
         finish(out, CONSENSUS_PUBLICATION_REFUSED,
@@ -155,8 +148,8 @@ void consensus_state_publication_cas_decide(
     /* (b) same artifact file/inode identity + lane: the selected-chain evidence
      * must be bound to THIS artifact receipt digest and target lane. */
     if (!in->chain_evidence_present || !in->chain_bound_to_artifact ||
-        !digest_nonzero(in->chain_evidence_digest) ||
-        !digest_nonzero(in->artifact_receipt_digest)) {
+        !zcl_bytes_any_set(in->chain_evidence_digest, 32) ||
+        !zcl_bytes_any_set(in->artifact_receipt_digest, 32)) {
         finish(out, CONSENSUS_PUBLICATION_REFUSED,
                CONSENSUS_PUBLICATION_REFUSAL_CHAIN_ARTIFACT_MISMATCH,
                "selected-chain evidence is absent or not bound to this "

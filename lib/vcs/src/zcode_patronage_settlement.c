@@ -2,6 +2,7 @@
  * Purpose: canonical simulated patronage settlement and refund receipts. */
 #include "vcs/zcode_patronage_settlement.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "vcs/signed_evidence.h"
 
@@ -9,13 +10,6 @@
 
 static const uint8_t settlement_magic[8] =
     {'Z','C','P','S','E','T','\r','\n'};
-
-static bool settlement_nonzero(const uint8_t *value, size_t value_len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < value_len; i++) any |= value[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_patronage_settlement_error_string(
     enum vcs_zcode_patronage_settlement_error error)
@@ -62,7 +56,7 @@ static enum vcs_zcode_patronage_settlement_error settlement_fields(
         settlement->settler_zid_pubkey,
     };
     for (size_t i = 0; i < sizeof(common) / sizeof(common[0]); i++)
-        if (!settlement_nonzero(common[i], 32))
+        if (!zcl_bytes_any_set(common[i], 32))
             return VCS_ZCODE_PATRONAGE_SETTLEMENT_ROOT;
     const uint8_t *evidence[] = {
         settlement->creation_attribution_root, settlement->task_root,
@@ -72,7 +66,7 @@ static enum vcs_zcode_patronage_settlement_error settlement_fields(
     };
     size_t evidence_count = 0;
     for (size_t i = 0; i < sizeof(evidence) / sizeof(evidence[0]); i++)
-        evidence_count += settlement_nonzero(evidence[i], 32) ? 1u : 0u;
+        evidence_count += zcl_bytes_any_set(evidence[i], 32) ? 1u : 0u;
     /* Direct gifts carry no proof chain.  Proof-conditioned settlements carry
      * the complete chain; partial evidence can never be canonical. */
     if ((settlement->action == VCS_ZCODE_PATRONAGE_SIMULATED_SETTLED &&
@@ -86,7 +80,7 @@ static enum vcs_zcode_patronage_settlement_error settlement_fields(
     if (settlement->created_unix <= 0 || settlement->observed_height == 0 ||
         settlement->observed_mtp <= 0 || settlement->sequence == 0)
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_TIME;
-    if (signed_wire && !settlement_nonzero(settlement->signature, 64))
+    if (signed_wire && !zcl_bytes_any_set(settlement->signature, 64))
         return VCS_ZCODE_PATRONAGE_SETTLEMENT_SIGNATURE;
     return VCS_ZCODE_PATRONAGE_SETTLEMENT_OK;
 }
