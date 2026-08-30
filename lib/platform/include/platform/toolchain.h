@@ -12,6 +12,7 @@
 #include <stddef.h>
 
 #define ZCL_TOOLCHAIN_TARGET_SIZE   64
+#define ZCL_TOOLCHAIN_CONTRACT_SIZE 64
 #define ZCL_TOOLCHAIN_PATH_SIZE     4096
 #define ZCL_TOOLCHAIN_VERSION_SIZE  256
 #define ZCL_TOOLCHAIN_SYSROOT_COUNT 3
@@ -21,6 +22,11 @@ struct platform_toolchain_descriptor {
     /* Canonical target identity used in build receipts and toolchain capsules,
      * e.g. "linux-x86_64-v3", "darwin-arm64", "windows-x86_64". */
     char target[ZCL_TOOLCHAIN_TARGET_SIZE];
+
+    /* Platform release contract that affects produced bytes but is not
+     * implied by the compiler/SDK identity. Empty where no contract exists;
+     * darwin-arm64 binds "macos-min=14.0" into target probes. */
+    char platform_contract[ZCL_TOOLCHAIN_CONTRACT_SIZE];
 
     /* Resolved paths to the compiler driver, its backend, and the assembler. */
     char compiler_driver[ZCL_TOOLCHAIN_PATH_SIZE];

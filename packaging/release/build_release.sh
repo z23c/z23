@@ -10,6 +10,10 @@
 # Platforms, and the build that produces each:
 #   linux-x86_64     make -j z23 zclassic23-package-verify zclassic23-acme
 #                    make tor-full
+#   darwin-arm64     make vendor && make tor-full
+#                    make -j z23 zclassic23-package-verify zclassic23-acme
+#                    (built natively on Apple Silicon with the macOS SDK;
+#                     every shipped Mach-O has a macOS 14.0 floor.)
 #   windows-x86_64   VENDOR_TARGET=x86_64-w64-mingw32 \
 #                        tools/scripts/build_vendor.sh
 #                    make ZCL_TARGET=windows-x86_64 -j z23 zclassic23-acme
@@ -17,8 +21,8 @@
 #                     sysroot; see the Makefile's release-target block. There
 #                     is no Windows zclassic23-package-verify on purpose --
 #                     see release_binaries below.)
-# macOS is NOT packaged here and cannot be: a Mach-O needs the macOS SDK,
-# which no Linux host may redistribute. See docs/work/BOOTSTRAP_PLAN.md.
+# Darwin cannot be cross-built on Linux because its SDK is not redistributable;
+# the native Apple worker path is documented in docs/work/BOOTSTRAP_PLAN.md.
 #
 # --front-door is the other half of a cut: it packages `z23-bootstrap` under
 # bootstrap/<triple>/ and writes its SHA-256 into COPIES of the two shims
@@ -73,9 +77,23 @@ assert_no_docker() {
 # platform_of_binary echoes a release platform name, or nothing when the
 # format is one this packager has no release contract for.
 platform_of_binary() {
-    local format
+    local format archs
+    # On Darwin, lipo is the native authority for Mach-O slices. Require one
+    # thin arm64 slice: Universal output is not equivalent to the measured
+    # artifact contract, and Intel remains unqualified.
+    if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && command -v lipo >/dev/null 2>&1; then
+        archs="$(lipo -archs "$1" 2>/dev/null || true)"
+        case "$archs" in
+            arm64) printf 'darwin-arm64'; return 0 ;;
+            '') ;;
+            *) return 1 ;;
+        esac
+    fi
     command -v objdump >/dev/null 2>&1 || return 1
-    format="$(objdump -f "$1" 2>/dev/null | sed -n 's/^.*file format //p' | head -1)"
+    # Apple LLVM objdump prints a useful Mach-O format but exits 1.  The
+    # emitted format is still authoritative input to the closed case below.
+    format="$(objdump -f "$1" 2>/dev/null |
+        sed -n 's/^.*file format //p' | head -1 || true)"
     case "$format" in
         elf64-x86-64) printf 'linux-x86_64' ;;
         pei-x86-64) printf 'windows-x86_64' ;;
@@ -90,7 +108,7 @@ platform_of_binary() {
 # with a regex, so there is one authority for what a release contains and no
 # second copy to drift.
 runtime_platforms() {
-    printf '%s\n' linux-x86_64 windows-x86_64
+    printf '%s\n' linux-x86_64 darwin-arm64 windows-x86_64
 }
 
 # Split out from the call site so the refusal message can be selftested on any
@@ -122,6 +140,37 @@ platform_strip() {
     esac
 }
 
+# Strip one exact input into one exact output.  GNU/MinGW strip accepts
+# --strip-unneeded -o; Apple's strip does not implement that GNU interface.
+# Copy first on Darwin, then apply the same -S -x contract as the node link.
+strip_binary() {
+    local platform="$1" src="$2" dst="$3" tool
+    case "$platform" in
+        darwin-arm64)
+            cp -f -- "$src" "$dst" || return 1
+            strip -S -x "$dst"
+            ;;
+        *)
+            tool="$(platform_strip "$platform")" || return 1
+            "$tool" --strip-unneeded -o "$dst" "$src"
+            ;;
+    esac
+}
+
+assert_platform_minimum_os() {
+    local platform="$1" bin="$2" min_os
+    [ "$platform" = "darwin-arm64" ] || return 0
+    command -v otool >/dev/null 2>&1 \
+        || die "otool is required to grade the macOS deployment floor"
+    min_os="$(otool -l "$bin" 2>/dev/null |
+        awk '/cmd LC_BUILD_VERSION/{seen=1; next}
+             seen && $1 == "minos" {print $2; exit}')"
+    [ -n "$min_os" ] \
+        || die "$bin has no readable LC_BUILD_VERSION minimum OS"
+    [ "$min_os" = "14.0" ] \
+        || die "$bin requires macOS $min_os; darwin-arm64 contract is 14.0"
+}
+
 # The EXACT closed set of executables a release for this platform ships, in
 # the order they are produced. Closedness is the whole point -- it is what
 # makes "sha256sum -c --strict SHA256SUMS" a complete statement about every
@@ -139,7 +188,7 @@ platform_strip() {
 # verifier is the C23 Commons reproduction worker, not part of the node.
 release_binaries() {
     case "$1" in
-        linux-x86_64)
+        linux-x86_64|darwin-arm64)
             printf '%s\n' z23 zclassic23 zclassic23-package-verify zclassic23-acme
             ;;
         windows-x86_64)
@@ -156,25 +205,54 @@ build_release: REFUSE: no release contract for $what.
 
 Packaged today:
   - linux-x86_64    (native build:  make z23 && make tor-full)
+  - darwin-arm64    (native build on Apple Silicon; macOS 14.0 floor)
   - windows-x86_64  (cross build:   make ZCL_TARGET=windows-x86_64 z23)
 
-Not packaged yet:
-  - macOS (any architecture)
+Not packaged:
+  - darwin-x86_64   (no native Intel hardware qualification)
 
-What has to land first for macOS (docs/work/BOOTSTRAP_PLAN.md, "Platform work"):
-  - a Darwin build of the node produced on a Mac. The node already builds
-    natively there (AGENTS.md, "Verified platform baseline"), but no Linux
-    host can produce a Mach-O: it needs the macOS SDK, which is not
-    redistributable, so there is nothing here to strip and package.
-  - the per-file strip/audit/checksum steps below are already
-    platform-generic; what a Mac worker has to run is written out in
-    docs/work/BOOTSTRAP_PLAN.md.
-  - the installer (tools/scripts/install_z23.sh) and the domain-side
-    checksum agreement do not need to change first — they already accept
-    any node URL as a source and verify bytes independent of the mirror
+darwin-arm64 artifacts must be cut natively on Apple hardware because the
+macOS SDK is not redistributable. The downloaded-source verifier is included
+so it can verify exact inputs and report capabilities, but Darwin execution
+continues to refuse unless a qualified disposable worker supplies full-
+isolation evidence. Runtime packaging is not publication: the public
+bootstrap platform list remains separately owner-gated.
 
 Nothing was packaged.
 EOF
+}
+
+sha256_lines() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$@"
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$@"
+    else
+        die "neither sha256sum nor shasum is available"
+    fi
+}
+
+sha256_check() {
+    local manifest="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -c --strict "$manifest"
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -c "$manifest"
+    else
+        die "neither sha256sum nor shasum is available"
+    fi
+}
+
+sha256_digest() {
+    sha256_lines "$1" | awk 'NR == 1 { print $1 }'
+}
+
+file_inode() {
+    stat -c %i "$1" 2>/dev/null || /usr/bin/stat -f %i "$1"
+}
+
+file_nlink() {
+    stat -c %h "$1" 2>/dev/null || /usr/bin/stat -f %l "$1"
 }
 
 write_sha256sums() {
@@ -198,7 +276,7 @@ write_sha256sums() {
         cd "$dir" || exit 1
         # GNU sha256sum two-space format; sorted so the file is deterministic.
         # shellcheck disable=SC2086
-        sha256sum $members AGENT_CARD.md | sort -k2 >SHA256SUMS
+        sha256_lines $members AGENT_CARD.md | sort -k2 >SHA256SUMS
     ) || die "could not write SHA256SUMS in $dir"
 }
 
@@ -329,7 +407,7 @@ package_from_bin() {
     mkdir -p "$out_dir"
     for member in $members; do rm -f "$out_dir/$member"; done
     rm -f "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
-    "$strip_tool" --strip-unneeded -o "$out_dir/z23$exe" "$src" || die "strip failed"
+    strip_binary "$platform" "$src" "$out_dir/z23$exe" || die "strip failed"
     chmod 755 "$out_dir/z23$exe"
     link_or_copy "$out_dir/z23$exe" "$out_dir/zclassic23$exe"
     chmod 755 "$out_dir/zclassic23$exe"
@@ -337,9 +415,12 @@ package_from_bin() {
         case "$member" in
             "z23$exe"|"zclassic23$exe") continue ;;
         esac
-        "$strip_tool" --strip-unneeded -o "$out_dir/$member" "$bin_dir/$member" \
+        strip_binary "$platform" "$bin_dir/$member" "$out_dir/$member" \
             || die "strip failed for $member"
         chmod 755 "$out_dir/$member"
+    done
+    for member in $members; do
+        assert_platform_minimum_os "$platform" "$out_dir/$member"
     done
     copy_agent_card "$out_dir"
     write_sha256sums "$out_dir" "$platform"
@@ -363,6 +444,12 @@ package_from_bin() {
                 "$out_dir/zclassic23-acme" \
                 || die "certificate worker failed the C23 binary ABI audit"
             ;;
+        darwin-arm64)
+            for member in $members; do
+                bash "$NODE_AUDIT" "$out_dir/$member" \
+                    || die "$member failed the C23 Mach-O audit"
+            done
+            ;;
         *)
             bash "$NODE_AUDIT" "$out_dir/z23$exe" \
                 || die "stripped z23$exe failed the C23 node ABI audit"
@@ -370,7 +457,7 @@ package_from_bin() {
                 || die "certificate worker$exe failed the C23 binary ABI audit"
             ;;
     esac
-    (cd "$out_dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+    (cd "$out_dir" && sha256_check SHA256SUMS >/dev/null) \
         || die "SHA256SUMS does not match packaged files"
 
     say "packed $out_dir for $platform ($(printf '%s, ' $members)AGENT_CARD.md, SHA256SUMS)"
@@ -523,9 +610,9 @@ package_front_door() {
         # A one-member closed manifest beside the binary. The shim's baked
         # digest is what actually gates the fetch; this is for an operator or
         # a mirror checking what it is serving.
-        (cd "$out_dir/bootstrap/$platform" && sha256sum "$member" >SHA256SUMS) \
+        (cd "$out_dir/bootstrap/$platform" && sha256_lines "$member" >SHA256SUMS) \
             || die "could not write SHA256SUMS for $platform"
-        (cd "$out_dir/bootstrap/$platform" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+        (cd "$out_dir/bootstrap/$platform" && sha256_check SHA256SUMS >/dev/null) \
             || die "SHA256SUMS does not match the packaged bootstrap for $platform"
         cut -d' ' -f1 <"$out_dir/bootstrap/$platform/SHA256SUMS" >"$digests/$platform"
         packaged="$packaged $platform"
@@ -538,9 +625,15 @@ package_front_door() {
 }
 
 selftest() {
-    local tmp rc name
+    local tmp rc name host_fixture host_platform
     tmp="$(mktemp -d /tmp/zcl-build-release-selftest.XXXXXX)" || die "mktemp failed"
     trap 'rm -rf "$tmp"' EXIT
+    printf 'int main(void) { return 0; }\n' >"$tmp/native-fixture.c"
+    "${CC:-cc}" -o "$tmp/native-fixture" "$tmp/native-fixture.c" \
+        || die "selftest: could not compile native object-format fixture"
+    host_fixture="$tmp/native-fixture"
+    host_platform="$(platform_of_binary "$host_fixture")" \
+        || die "selftest: cannot classify native fixture $host_fixture"
 
     # Missing binaries refuse (subshell: die() must not kill the suite).
     mkdir -p "$tmp/empty"
@@ -559,7 +652,7 @@ selftest() {
     # can actually classify. A script would be refused for its format and this
     # case would stop grading what it says it grades.
     mkdir -p "$tmp/no-verifier"
-    cp -f -- "$(command -v sha256sum)" "$tmp/no-verifier/z23"
+    cp -f -- "$host_fixture" "$tmp/no-verifier/z23"
     chmod 755 "$tmp/no-verifier/z23"
     rc=0
     (package_from_bin "$tmp/no-verifier" "$tmp/out") \
@@ -572,9 +665,9 @@ selftest() {
     # task closes: a node that can obtain a certificate but ships with no
     # way to ever renew it. This refusal occurs before strip/audit work too.
     mkdir -p "$tmp/no-acme"
-    cp -f -- "$(command -v sha256sum)" "$tmp/no-acme/z23"
+    cp -f -- "$host_fixture" "$tmp/no-acme/z23"
     chmod 755 "$tmp/no-acme/z23"
-    cp -f -- "$(command -v sha256sum)" "$tmp/no-acme/zclassic23-package-verify"
+    cp -f -- "$host_fixture" "$tmp/no-acme/zclassic23-package-verify"
     chmod 755 "$tmp/no-acme/zclassic23-package-verify"
     rc=0
     (package_from_bin "$tmp/no-acme" "$tmp/out") \
@@ -583,27 +676,25 @@ selftest() {
     grep -q 'no zclassic23-acme' "$tmp/acme.err" \
         || die "selftest: missing zclassic23-acme must name the refusal"
 
-    # An unsupported platform must refuse informatively, not just die. The
-    # refusal path cannot be observed by running package_from_bin for real
-    # here -- this checkout has no Mach-O to hand it -- so exercise the same
-    # two functions package_from_bin calls, directly.
+    # Apple Silicon is a measured runtime target. Intel Darwin remains an
+    # explicit refusal until native hardware earns the same contract.
     rc=0
-    platform_supported "darwin-arm64" && rc=1
-    [ "$rc" -eq 0 ] || die "selftest: platform_supported must reject darwin-arm64"
+    platform_supported "darwin-x86_64" && rc=1
+    [ "$rc" -eq 0 ] || die "selftest: platform_supported must reject darwin-x86_64"
+    platform_supported "darwin-arm64" \
+        || die "selftest: platform_supported must accept darwin-arm64"
     platform_supported "linux-x86_64" \
         || die "selftest: platform_supported must accept linux-x86_64"
     platform_supported "windows-x86_64" \
         || die "selftest: platform_supported must accept windows-x86_64"
-    platform_refusal "darwin-arm64" >"$tmp/darwin.err" 2>&1 || true
+    platform_refusal "darwin-x86_64" >"$tmp/darwin.err" 2>&1 || true
     grep -q 'linux-x86_64' "$tmp/darwin.err" \
         || die "selftest: platform refusal must name what IS packaged"
     grep -q 'windows-x86_64' "$tmp/darwin.err" \
         || die "selftest: platform refusal must name what IS packaged"
-    grep -q 'macOS' "$tmp/darwin.err" \
-        || die "selftest: platform refusal must name macOS as not yet packaged"
-    grep -q 'BOOTSTRAP_PLAN' "$tmp/darwin.err" \
-        || die "selftest: platform refusal must point at the plan for what lands first"
-    grep -qi 'darwin-arm64' "$tmp/darwin.err" \
+    grep -q 'darwin-arm64' "$tmp/darwin.err" \
+        || die "selftest: platform refusal must name measured Apple Silicon support"
+    grep -qi 'darwin-x86_64' "$tmp/darwin.err" \
         || die "selftest: platform refusal must name the thing refused"
 
     # Naming a platform is not the same as recognising one. platform_of_binary
@@ -612,8 +703,8 @@ selftest() {
     # (any executable on PATH), and a PE built here if a cross toolchain is
     # present. A wrong answer here is the silent kind -- a PE graded by the
     # ELF/glibc branch passes having checked nothing.
-    [ "$(platform_of_binary "$(command -v sha256sum)")" = "linux-x86_64" ] \
-        || die "selftest: platform_of_binary must recognise a Linux ELF"
+    [ "$(platform_of_binary "$host_fixture")" = "$host_platform" ] \
+        || die "selftest: platform_of_binary must recognise its native fixture"
     rc=0
     platform_of_binary "$SCRIPT_DIR/build_release.sh" >/dev/null 2>&1 && rc=1
     [ "$rc" -eq 0 ] \
@@ -641,10 +732,9 @@ selftest() {
     [ "$(release_binaries windows-x86_64 | tr '\n' ' ')" \
         = "z23.exe zclassic23.exe zclassic23-acme.exe " ] \
         || die "selftest: the windows-x86_64 member set changed"
-    rc=0
-    release_binaries darwin-arm64 >/dev/null 2>&1 && rc=1
-    [ "$rc" -eq 0 ] \
-        || die "selftest: release_binaries must have no set for an unpackaged platform"
+    [ "$(release_binaries darwin-arm64 | tr '\n' ' ')" \
+        = "z23 zclassic23 zclassic23-package-verify zclassic23-acme " ] \
+        || die "selftest: the darwin-arm64 member set changed"
     # Every member name must carry the platform's suffix, or SHA256SUMS names
     # files the platform cannot run.
     for name in $(release_binaries windows-x86_64); do
@@ -652,6 +742,9 @@ selftest() {
     done
     for name in $(release_binaries linux-x86_64); do
         case "$name" in *.exe) die "selftest: Linux member $name carries .exe" ;; esac
+    done
+    for name in $(release_binaries darwin-arm64); do
+        case "$name" in *.exe) die "selftest: Darwin member $name carries .exe" ;; esac
     done
 
     # SHA256SUMS writer: the complete five-file manifest -- z23, zclassic23,
@@ -679,14 +772,14 @@ selftest() {
         || die "selftest: SHA256SUMS missing zclassic23-acme"
     grep -q '  AGENT_CARD.md$' "$tmp/sums/SHA256SUMS" \
         || die "selftest: SHA256SUMS missing AGENT_CARD.md"
-    (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+    (cd "$tmp/sums" && sha256_check SHA256SUMS >/dev/null) \
         || die "selftest: SHA256SUMS must verify the files it names"
     printf 'tamper\n' >"$tmp/sums/z23"
     rc=0
-    (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS >/dev/null 2>"$tmp/bad.err") || rc=$?
+    (cd "$tmp/sums" && sha256_check SHA256SUMS >/dev/null 2>"$tmp/bad.err") || rc=$?
     [ "$rc" -ne 0 ] || die "selftest: tampered z23 must fail SHA256SUMS"
     printf 'alpha\n' >"$tmp/sums/z23"
-    (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+    (cd "$tmp/sums" && sha256_check SHA256SUMS >/dev/null) \
         || die "selftest: restored z23 must pass SHA256SUMS again"
 
     # AGENT_CARD.md tamper round-trip, proven explicitly and in both
@@ -696,18 +789,18 @@ selftest() {
     # commands must be caught by --strict, and restoring the original
     # bytes must make the manifest pass again, the same as any binary.
     rc=0
-    (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS >/dev/null 2>"$tmp/precard.err") \
+    (cd "$tmp/sums" && sha256_check SHA256SUMS >/dev/null 2>"$tmp/precard.err") \
         || rc=$?
     [ "$rc" -eq 0 ] || die "selftest: SHA256SUMS must pass before the card-tamper probe"
     printf 'TAMPERED-CARD-BYTES\n' >"$tmp/sums/AGENT_CARD.md"
     rc=0
-    (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS \
+    (cd "$tmp/sums" && sha256_check SHA256SUMS \
         >"$tmp/card-tamper.out" 2>"$tmp/card-tamper.err") || rc=$?
     [ "$rc" -ne 0 ] || die "selftest: tampered AGENT_CARD.md must fail SHA256SUMS (direction 1 of 2)"
     grep -q 'AGENT_CARD.md: FAILED' "$tmp/card-tamper.out" \
         || die "selftest: SHA256SUMS failure must name AGENT_CARD.md, not just fail generically"
     printf 'card\n' >"$tmp/sums/AGENT_CARD.md"
-    (cd "$tmp/sums" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+    (cd "$tmp/sums" && sha256_check SHA256SUMS >/dev/null) \
         || die "selftest: restored AGENT_CARD.md must pass SHA256SUMS again (direction 2 of 2)"
 
     # link_or_copy: zclassic23 must land as a real, independently readable,
@@ -720,11 +813,11 @@ selftest() {
     [ -f "$tmp/link/zclassic23" ] || die "selftest: link_or_copy produced no file"
     cmp -s "$tmp/link/z23" "$tmp/link/zclassic23" \
         || die "selftest: link_or_copy result has different bytes than the source"
-    [ "$(sha256sum <"$tmp/link/z23" | awk '{print $1}')" \
-        = "$(sha256sum <"$tmp/link/zclassic23" | awk '{print $1}')" ] \
+    [ "$(sha256_digest "$tmp/link/z23")" \
+        = "$(sha256_digest "$tmp/link/zclassic23")" ] \
         || die "selftest: link_or_copy result hashes differently than the source"
-    if [ "$(stat -c %i "$tmp/link/z23")" = "$(stat -c %i "$tmp/link/zclassic23")" ]; then
-        [ "$(stat -c %h "$tmp/link/z23")" -ge 2 ] \
+    if [ "$(file_inode "$tmp/link/z23")" = "$(file_inode "$tmp/link/zclassic23")" ]; then
+        [ "$(file_nlink "$tmp/link/z23")" -ge 2 ] \
             || die "selftest: same inode but link count did not increase"
     else
         say "selftest: link_or_copy fell back to a copy on this filesystem (still correct)"
@@ -738,7 +831,7 @@ selftest() {
     write_sha256sums "$tmp/link"
     [ "$(wc -l <"$tmp/link/SHA256SUMS")" -eq 5 ] \
         || die "selftest: hardlinked pair did not still produce a five-line SHA256SUMS"
-    (cd "$tmp/link" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+    (cd "$tmp/link" && sha256_check SHA256SUMS >/dev/null) \
         || die "selftest: SHA256SUMS must verify a hardlinked pair too"
 
     # copy_agent_card: now a required, checksummed manifest member (see
@@ -794,7 +887,7 @@ selftest() {
     # A REAL ELF, for the same reason the runtime fixtures above use one:
     # package_front_door asks the binary what platform it is, and a shell
     # script would be refused for its format and stop grading anything.
-    cp -f -- "$(command -v sha256sum)" "$tmp/fd/bin/z23-bootstrap"
+    cp -f -- "$host_fixture" "$tmp/fd/bin/z23-bootstrap"
     chmod 755 "$tmp/fd/bin/z23-bootstrap"
 
     # Missing bootstrap: refuse by name, before anything is written.
@@ -806,6 +899,10 @@ selftest() {
     grep -q 'no z23-bootstrap in' "$tmp/fd-missing.err" \
         || die "selftest: the missing-bootstrap refusal must name the member"
 
+    # The published bootstrap is currently Linux-only. Its full cut/stamp
+    # round-trip is eligible only with a real Linux ELF fixture; Darwin still
+    # proves the platform tables and missing-bootstrap refusal above.
+    if [ "$host_platform" = "linux-x86_64" ]; then
     # The happy path, over fixture shims.
     mkdir -p "$tmp/fd/shims"
     cp -f -- "$POSIX_SHIM" "$tmp/fd/shims/install.sh"
@@ -816,10 +913,10 @@ selftest() {
         || die "selftest: the front-door stage refused a complete input"
     [ -f "$tmp/fd/out/bootstrap/linux-x86_64/z23-bootstrap" ] \
         || die "selftest: no bootstrap was packaged at bootstrap/<triple>/"
-    (cd "$tmp/fd/out/bootstrap/linux-x86_64" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+    (cd "$tmp/fd/out/bootstrap/linux-x86_64" && sha256_check SHA256SUMS >/dev/null) \
         || die "selftest: the packaged bootstrap does not match its own manifest"
     local cut_sha
-    cut_sha="$(sha256sum "$tmp/fd/out/bootstrap/linux-x86_64/z23-bootstrap" | cut -d' ' -f1)"
+    cut_sha="$(sha256_digest "$tmp/fd/out/bootstrap/linux-x86_64/z23-bootstrap")"
     grep -q "^BOOT_LINUX_X86_64=$cut_sha\$" "$tmp/fd/out/install.sh" \
         || die "selftest: the cut shim does not name the bytes that were packaged"
     if grep -q '^BOOT_LINUX_X86_64="\$BOOT_ZERO"$' "$tmp/fd/out/install.sh"; then
@@ -885,6 +982,9 @@ selftest() {
         || die "selftest: a Windows row with no Windows bootstrap must refuse (rc=$rc)"
     grep -q 'install.ps1 publishes windows-x86_64' "$tmp/fd-win.err" \
         || die "selftest: the Windows over-claim refusal must name the platform"
+    else
+        say "selftest: Linux bootstrap cut is not eligible on $host_platform (runtime checks passed)"
+    fi
 
     say "selftest PASS"
     trap - EXIT
