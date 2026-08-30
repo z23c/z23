@@ -50,6 +50,22 @@ static inline bool platform_path_identity(char *out, size_t out_size,
         }
     }
 #endif
+#if defined(_WIN32)
+    /* Windows likewise admits several spellings of one file: /tmp/x,
+     * C:\tmp\x, C:/tmp/x, relative forms.  SQLite reports db filenames in
+     * its own resolved form, so a re-open through sqlite3_db_filename()
+     * must key to the same identity as the caller's original spelling.
+     * _fullpath() is lexical (works for not-yet-created paths) and always
+     * returns an absolute backslash form; GetFullPathName is what SQLite's
+     * win32 VFS applies to every path it opens. */
+    if (strcmp(path, ":memory:") != 0) {
+        char resolved[4096];
+        if (_fullpath(resolved, path, sizeof(resolved))) {
+            int written = snprintf(out, out_size, "%s", resolved);
+            return written >= 0 && (size_t)written < out_size;
+        }
+    }
+#endif
     int written = snprintf(out, out_size, "%s", path);
     return written >= 0 && (size_t)written < out_size;
 }
