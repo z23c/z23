@@ -1,0 +1,27 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: exact paths whose declared development proof is their graph boundary. */
+
+/* Format:
+ *   AGENT_DIRECT_DEVELOPMENT_CONTRACT("repo-relative-path")
+ *
+ * agent_impact_rules.c owns this classification. devloop_plan consumes that
+ * owner instead of carrying a second list, and test_impact_composition expands
+ * these same rows to prove every direct contract remains impact-routed. */
+
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("app/controllers/include/controllers/agent_direct_development_contracts.def")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("app/controllers/include/controllers/agent_impact_rules.def")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("config/commands/dev.def")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("lib/test/src/lint_gate_hygiene_selftests.c")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("lib/test/src/lint_gate_selftests.h")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/command/native_dev_loop_command.h")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/command/native_dev_proof_command.c")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/command/native_dev_proof_command.h")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/command/native_dev_verify_change_command.c")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/dev_proof.c")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/dev_proof.h")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/dev_proof_receipt.c")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/dev_proof_receipt.h")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/devloop.h")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/devloop_cycle.c")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/devloop_plan.c")
+AGENT_DIRECT_DEVELOPMENT_CONTRACT("tools/dev/z23_git_hook.c")
