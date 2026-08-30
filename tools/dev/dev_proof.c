@@ -434,12 +434,14 @@ static bool changed_files_capture(const struct proof_paths *paths,
 }
 
 static bool worktree_exact(const char *root, const char *local,
-                           char *why, size_t why_len)
+                           bool include_untracked, char *why, size_t why_len)
 {
     char head[65], status[ZCL_DEVLOOP_OUTPUT_MAX];
     const char *head_argv[] = {"git", "rev-parse", "--verify", "HEAD", NULL};
-    const char *status_argv[] = {"git", "status", "--porcelain=v1",
-                                 "--untracked-files=normal", NULL};
+    const char *status_argv[] = {
+        "git", "status", "--porcelain=v1",
+        include_untracked ? "--untracked-files=normal" : "--untracked-files=no",
+        NULL};
     if (!git_capture(root, head_argv, head, sizeof(head)) ||
         strcmp(head, local) != 0) {
         proof_why(why, why_len, "head_changed_during_proof");
@@ -521,7 +523,7 @@ static bool generation_prepare(const struct proof_paths *paths,
             return false;
         }
     }
-    if (!worktree_exact(generation, local, why, why_len)) {
+    if (!worktree_exact(generation, local, false, why, why_len)) {
         proof_why(why, why_len, "proof_generation_not_exact");
         return false;
     }
@@ -843,7 +845,7 @@ static bool proof_worker(const struct proof_paths *paths,
                          char *why, size_t why_len)
 {
     int64_t started_us = platform_time_monotonic_us();
-    if (!worktree_exact(paths->root, local, why, why_len)) return false;
+    if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
     char generation[PATH_MAX];
     if (!generation_prepare(paths, local, generation, why, why_len))
         return false;
@@ -877,7 +879,7 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "impact_plan_render_failed");
         return false;
     }
-    if (!worktree_exact(paths->root, local, why, why_len)) return false;
+    if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
 
     struct dev_source_record source_before = {0}, source_after = {0};
     if (!zcl_dev_source_cas_capture(generation, &source_before) ||
@@ -1016,7 +1018,7 @@ static bool proof_worker(const struct proof_paths *paths,
         } else unused_dimension(ZCL_DEV_PROOF_TEST, test);
     }
 
-    if (!worktree_exact(generation, local, why, why_len) ||
+    if (!worktree_exact(generation, local, false, why, why_len) ||
         !zcl_dev_source_cas_capture(generation, &source_after) ||
         !source_after.cas_present ||
         strcmp(source_before.cas_root_sha3, source_after.cas_root_sha3) != 0) {
