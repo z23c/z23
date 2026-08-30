@@ -82,6 +82,20 @@ static const struct canonical_column k_bundle_proof_columns[] = {
     COL("hash_bound_count","INTEGER",0),
     COL("component_digest","BLOB",0),
 };
+static const struct canonical_column k_proof_parent_columns[] = {
+    COL("singleton","INTEGER",1), COL("base_height","INTEGER",0),
+    COL("base_block_hash","BLOB",0),
+    COL("validation_profile","INTEGER",0),
+    COL("proof_manifest_digest","BLOB",0),
+    COL("source_digest","BLOB",0), COL("artifact_digest","BLOB",0),
+};
+static const struct canonical_column k_proof_parent_component_columns[] = {
+    COL("ordinal","INTEGER",1), COL("component","TEXT",0),
+    COL("cursor","INTEGER",0), COL("first_height","INTEGER",0),
+    COL("last_height","INTEGER",0), COL("row_count","INTEGER",0),
+    COL("hash_bound_count","INTEGER",0),
+    COL("component_digest","BLOB",0), COL("suffix_digest","BLOB",0),
+};
 static const struct canonical_column k_coins_columns[] = {
     COL("txid","BLOB",1), COL("vout","INTEGER",2),
     COL("value","INTEGER",0), COL("script","BLOB",0),
@@ -97,7 +111,7 @@ static const struct canonical_column k_nullifiers_columns[] = {
 };
 #undef COL
 
-static const struct canonical_table k_canonical_tables[] = {
+static const struct canonical_table k_legacy_tables[] = {
     {"anchors", k_anchors_columns,
      sizeof(k_anchors_columns) / sizeof(k_anchors_columns[0]),
      "CHECK(pool IN(0,1))", "UNIQUE(pool,height)"},
@@ -117,6 +131,51 @@ static const struct canonical_table k_canonical_tables[] = {
      sizeof(k_source_receipt_columns) / sizeof(k_source_receipt_columns[0]),
      "CHECK(singleton=1)", NULL},
 };
+
+static const struct canonical_table k_composite_tables[] = {
+    {"anchors", k_anchors_columns,
+     sizeof(k_anchors_columns) / sizeof(k_anchors_columns[0]),
+     "CHECK(pool IN(0,1))", "UNIQUE(pool,height)"},
+    {"bundle_meta", k_bundle_meta_columns,
+     sizeof(k_bundle_meta_columns) / sizeof(k_bundle_meta_columns[0]),
+     "CHECK(singleton=1)", NULL},
+    {"bundle_proof", k_bundle_proof_columns,
+     sizeof(k_bundle_proof_columns) / sizeof(k_bundle_proof_columns[0]),
+     "UNIQUE", NULL},
+    {"coins", k_coins_columns,
+     sizeof(k_coins_columns) / sizeof(k_coins_columns[0]), "WITHOUT ROWID",
+     NULL},
+    {"nullifiers", k_nullifiers_columns,
+     sizeof(k_nullifiers_columns) / sizeof(k_nullifiers_columns[0]),
+     "CHECK(pool IN(0,1))", NULL},
+    {"proof_parent", k_proof_parent_columns,
+     sizeof(k_proof_parent_columns) / sizeof(k_proof_parent_columns[0]),
+     "CHECK(singleton=1)", "CHECK(base_height>=0)"},
+    {"proof_parent_component", k_proof_parent_component_columns,
+     sizeof(k_proof_parent_component_columns) /
+         sizeof(k_proof_parent_component_columns[0]),
+     "UNIQUE", "CHECK(ordinal>=0 AND ordinal<8)"},
+    {"source_receipt", k_source_receipt_columns,
+     sizeof(k_source_receipt_columns) / sizeof(k_source_receipt_columns[0]),
+     "CHECK(singleton=1)", NULL},
+};
+
+static bool canonical_table_present(sqlite3 *db, const char *name,
+                                    bool *present)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(
+            db, "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",
+            -1, &st, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC) == SQLITE_OK;
+    int rc = ok ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:read-only-introspection
+    *present = rc == SQLITE_ROW;
+    if (*present)
+        rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
 
 static bool canonical_table_columns(sqlite3 *db,
                                     const struct canonical_table *table)
@@ -153,6 +212,16 @@ static bool canonical_table_columns(sqlite3 *db,
 bool consensus_state_bundle_validate_canonical_schema(
     sqlite3 *db, struct consensus_state_install_result *result)
 {
+    bool composite = false;
+    if (!canonical_table_present(db, "proof_parent", &composite))
+        return schema_fail(result, "bundle schema lineage probe failed");
+    const struct canonical_table *tables =
+        composite ? k_composite_tables : k_legacy_tables;
+    size_t table_count = composite
+                             ? sizeof(k_composite_tables) /
+                                   sizeof(k_composite_tables[0])
+                             : sizeof(k_legacy_tables) /
+                                   sizeof(k_legacy_tables[0]);
     sqlite3_stmt *st = NULL;
     static const char sql[] =
         "SELECT type,name,sql FROM sqlite_schema "
@@ -160,10 +229,9 @@ bool consensus_state_bundle_validate_canonical_schema(
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return schema_fail(result, "bundle schema catalog unreadable");
     bool ok = true;
-    for (size_t i = 0;
-         i < sizeof(k_canonical_tables) / sizeof(k_canonical_tables[0]); i++) {
+    for (size_t i = 0; i < table_count; i++) {
         int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
-        const struct canonical_table *want = &k_canonical_tables[i];
+        const struct canonical_table *want = &tables[i];
         int definition_type = rc == SQLITE_ROW
             ? sqlite3_column_type(st, 2) : SQLITE_NULL;
         const char *definition = definition_type == SQLITE_TEXT

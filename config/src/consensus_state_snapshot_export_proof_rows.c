@@ -11,6 +11,7 @@
  * prove path is never quiet for more than ~500k rows at a time. */
 
 #include "consensus_state_snapshot_export_internal.h"
+#include "consensus_state_proof_prefix.h"
 
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
@@ -40,103 +41,19 @@ static void proof_u64(struct sha3_256_ctx *ctx, uint64_t value)
 
 bool consensus_export_prove_header_chain(sqlite3 *db, int32_t height,
                                          const uint8_t expected_hash[32],
-                                         uint8_t source_digest[32])
+                                         uint8_t source_digest[32],
+                                         struct consensus_state_bundle_proof_parent
+                                             *parent)
 {
     int64_t t0 = consensus_export_clock_ms();
     consensus_export_progress_emit(
         "prove_header_chain start height=%d rows=%lld", height,
         (long long)height + 1);
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT height,hash,parent_hash FROM header_admit_log "
-            "WHERE height BETWEEN 0 AND ? ORDER BY height", -1, &st,
-            NULL) != SQLITE_OK) {
-        LOG_WARN(EXPORT_PROOF_SUBSYS, "header proof prepare failed: %s",
-                 sqlite3_errmsg(db));
-        return false;
-    }
-    sqlite3_bind_int(st, 1, height);
-    struct sha3_256_ctx ctx;
-    sha3_256_init(&ctx);
-    static const char domain[] =
-        "zcl.consensus_state_bundle.v1/source-header-chain";
-    sha3_256_write(&ctx, (const uint8_t *)domain, sizeof(domain));
-
-    uint8_t prior[32] = {0};
-    int64_t expected_height = 0;
-    int64_t fail_height = -1;
-    bool ok = true;
-    int rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:progress-kv-kernel-store
-        int height_type = sqlite3_column_type(st, 0);
-        int hash_type = sqlite3_column_type(st, 1);
-        int parent_type = sqlite3_column_type(st, 2);
-        const void *hash = hash_type == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 1) : NULL;
-        const void *parent = parent_type == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 2) : NULL;
-        int parent_len = parent ? sqlite3_column_bytes(st, 2) : 0;
-        int64_t row_height = height_type == SQLITE_INTEGER
-            ? sqlite3_column_int64(st, 0) : -1;
-        bool genesis_parent = row_height == 0 &&
-                              parent_type == SQLITE_NULL;
-        bool linked_parent = row_height > 0 && parent_type == SQLITE_BLOB &&
-                             parent && parent_len == 32 &&
-                             memcmp(parent, prior, 32) == 0;
-        if (height_type != SQLITE_INTEGER ||
-            hash_type != SQLITE_BLOB || !hash ||
-            sqlite3_column_bytes(st, 1) != 32 ||
-            row_height != expected_height ||
-            (!genesis_parent && !linked_parent)) {
-            ok = false;
-            fail_height = row_height;
-            break;
-        }
-        proof_u64(&ctx, (uint64_t)row_height);
-        sha3_256_write(&ctx, hash, 32);
-        if (row_height > 0)
-            sha3_256_write(&ctx, parent, 32);
-        else {
-            uint8_t no_parent[32] = {0};
-            sha3_256_write(&ctx, no_parent, sizeof(no_parent));
-        }
-        memcpy(prior, hash, sizeof(prior));
-        expected_height++;
-        if (expected_height % 500000 == 0)
-            consensus_export_progress_emit(
-                "prove_header_chain: %lld/%lld rows, %llds elapsed",
-                (long long)expected_height, (long long)height + 1,
-                (long long)((consensus_export_clock_ms() - t0) / 1000));
-    }
-    bool tip_hash_mismatch = false;
-    if (rc != SQLITE_DONE || expected_height != (int64_t)height + 1 ||
-        memcmp(prior, expected_hash, 32) != 0) {
-        tip_hash_mismatch = rc == SQLITE_DONE &&
-            expected_height == (int64_t)height + 1;
-        ok = false;
-    }
-    sqlite3_finalize(st);
-    if (ok)
-        sha3_256_finalize(&ctx, source_digest);
-    else if (tip_hash_mismatch) {
-        char derived_hex[65], expected_hex[65];
-        for (int i = 0; i < 32; i++) {
-            snprintf(derived_hex + 2 * i, 3, "%02x", prior[i]);
-            snprintf(expected_hex + 2 * i, 3, "%02x", expected_hash[i]);
-        }
-        LOG_WARN(EXPORT_PROOF_SUBSYS,
-                 "header chain reaches height=%d but its tip hash disagrees "
-                 "derived=%s expected=%s",
-                 height, derived_hex, expected_hex);
-    } else
-        LOG_WARN(EXPORT_PROOF_SUBSYS,
-                 "header chain is incomplete or discontinuous rows_read=%lld "
-                 "required=%lld fail_height=%lld",
-                 (long long)expected_height, (long long)height + 1,
-                 (long long)fail_height);
+    bool ok = consensus_state_proof_header_digest(
+        db, height, expected_hash, source_digest, parent);
     consensus_export_progress_emit(
-        "prove_header_chain done rows=%lld ok=%d elapsed=%lldms",
-        (long long)expected_height, ok ? 1 : 0,
+        "prove_header_chain done height=%d ok=%d elapsed=%lldms", height,
+        ok ? 1 : 0,
         (long long)(consensus_export_clock_ms() - t0));
     return ok;
 }
@@ -145,7 +62,8 @@ bool consensus_export_prove_stage_rows(
     sqlite3 *db, const struct export_stage_proof *stage, int32_t height,
     uint64_t cursor, uint8_t validation_profile,
     const uint8_t source_epoch_digest[32],
-    struct consensus_state_bundle_proof_summary *summary)
+    struct consensus_state_bundle_proof_summary *summary,
+    struct consensus_state_bundle_proof_parent *parent, size_t ordinal)
 {
     int64_t t0 = consensus_export_clock_ms();
     consensus_export_progress_emit(
@@ -156,9 +74,20 @@ bool consensus_export_prove_stage_rows(
     const char *columns = stage->source_epoch_bound
         ? "height,ok,status,source_epoch_digest"
         : stage->profile_bound ? "height,ok,status" : "height,ok";
+    bool composed = parent && parent->present;
+    int64_t first_height = composed ? (int64_t)parent->base_height + 1 : 0;
+    if (composed && (ordinal == 0 ||
+                     ordinal >= CONSENSUS_STATE_BUNDLE_PROOF_COUNT ||
+                     height <= parent->base_height ||
+                     parent->validation_profile != validation_profile)) {
+        LOG_WARN(EXPORT_PROOF_SUBSYS,
+                 "stage proof parent boundary/profile mismatch stage=%s",
+                 stage->name);
+        return false;
+    }
     int n = snprintf(
         sql, sizeof(sql), "SELECT %s FROM %s "
-        "WHERE height BETWEEN 0 AND ? ORDER BY height", columns,
+        "WHERE height BETWEEN ? AND ? ORDER BY height", columns,
         stage->table);
     if (n <= 0 || (size_t)n >= sizeof(sql))
         LOG_FAIL(EXPORT_PROOF_SUBSYS, "stage proof SQL overflow");
@@ -168,7 +97,14 @@ bool consensus_export_prove_stage_rows(
                  stage->table, sqlite3_errmsg(db));
         return false;
     }
-    sqlite3_bind_int(st, 1, height);
+    bool bindings_ok = sqlite3_bind_int64(st, 1, first_height) == SQLITE_OK &&
+                       sqlite3_bind_int(st, 2, height) == SQLITE_OK;
+    if (!bindings_ok) {
+        sqlite3_finalize(st);
+        LOG_WARN(EXPORT_PROOF_SUBSYS, "stage proof bind failed stage=%s",
+                 stage->name);
+        return false;
+    }
     memset(summary, 0, sizeof(*summary));
     snprintf(summary->component, sizeof(summary->component), "%s",
              stage->name);
@@ -178,9 +114,18 @@ bool consensus_export_prove_stage_rows(
     summary->row_count = (uint64_t)height + 1;
     struct sha3_256_ctx component;
     sha3_256_init(&component);
-    static const char domain[] =
+    static const char full_domain[] =
         "zcl.consensus_state_bundle.v1/proof-component";
-    sha3_256_write(&component, (const uint8_t *)domain, sizeof(domain));
+    static const char suffix_domain[] =
+        "zcl.consensus_state_bundle.v1/proof-extension-suffix/component";
+    const char *domain = composed ? suffix_domain : full_domain;
+    size_t domain_len = composed ? sizeof(suffix_domain) : sizeof(full_domain);
+    sha3_256_write(&component, (const uint8_t *)domain, domain_len);
+    if (composed) {
+        proof_u64(&component, (uint64_t)parent->base_height);
+        proof_u64(&component, (uint64_t)height);
+        sha3_256_write(&component, parent->base_block_hash, 32);
+    }
     proof_u64(&component, (uint64_t)strlen(stage->name));
     sha3_256_write(&component, (const uint8_t *)stage->name,
                    strlen(stage->name));
@@ -188,7 +133,7 @@ bool consensus_export_prove_stage_rows(
     if (stage->source_epoch_bound)
         sha3_256_write(&component, source_epoch_digest, 32);
 
-    int64_t expected_height = 0;
+    int64_t expected_height = first_height;
     int64_t fail_height = -1;
     bool ok = true;
     int rc;
@@ -249,19 +194,27 @@ bool consensus_export_prove_stage_rows(
                  "stage proof is not a complete profile-bound ok=1 prefix "
                  "table=%s rows_read=%lld required=%lld fail_height=%lld "
                  "profile=%u",
-                 stage->table, (long long)expected_height,
-                 (long long)height + 1, (long long)fail_height,
+                 stage->table, (long long)(expected_height - first_height),
+                 (long long)height - first_height + 1,
+                 (long long)fail_height,
                  (unsigned)validation_profile);
         consensus_export_progress_emit(
             "prove_stage_rows(%s) done rows=%lld ok=0 elapsed=%lldms",
-            stage->name, (long long)expected_height,
+            stage->name, (long long)(expected_height - first_height),
             (long long)(consensus_export_clock_ms() - t0));
         return false;
     }
 
     if (!stage->hash_column) {
         proof_u64(&component, 0);
-        sha3_256_finalize(&component, summary->component_digest);
+        if (composed) {
+            sha3_256_finalize(&component, parent->suffix_digest[ordinal]);
+            if (!consensus_state_bundle_proof_extension_digest(
+                    parent, ordinal, summary->component_digest))
+                return false;
+        } else {
+            sha3_256_finalize(&component, summary->component_digest);
+        }
         consensus_export_progress_emit(
             "prove_stage_rows(%s) done rows=%lld ok=1 elapsed=%lldms",
             stage->name, (long long)expected_height,
@@ -274,7 +227,7 @@ bool consensus_export_prove_stage_rows(
                      "JOIN utxo_apply_delta d ON d.height=s.height "
                      "JOIN header_admit_log h ON h.height=s.height "
                      "AND h.hash=d.branch_hash "
-                     "WHERE s.height BETWEEN 0 AND ? "
+                     "WHERE s.height BETWEEN ? AND ? "
                      "AND typeof(s.ok)='integer' AND s.ok=1 "
                      "AND typeof(d.branch_hash)='blob' "
                      "AND length(d.branch_hash)=32");
@@ -282,7 +235,7 @@ bool consensus_export_prove_stage_rows(
         n = snprintf(sql, sizeof(sql),
                      "SELECT COUNT(*) FROM %s s JOIN header_admit_log h "
                      "ON h.height=s.height AND h.hash=s.%s "
-                     "WHERE s.height BETWEEN 0 AND ? "
+                     "WHERE s.height BETWEEN ? AND ? "
                      "AND typeof(s.ok)='integer' AND s.ok=1 "
                      "AND typeof(s.%s)='blob' AND length(s.%s)=32",
                      stage->table, stage->hash_column, stage->hash_column,
@@ -296,13 +249,20 @@ bool consensus_export_prove_stage_rows(
                  sqlite3_errmsg(db));
         return false;
     }
-    sqlite3_bind_int(st, 1, height);
+    bindings_ok = sqlite3_bind_int64(st, 1, first_height) == SQLITE_OK &&
+                  sqlite3_bind_int(st, 2, height) == SQLITE_OK;
+    if (!bindings_ok) {
+        sqlite3_finalize(st);
+        LOG_WARN(EXPORT_PROOF_SUBSYS, "stage hash bind failed stage=%s",
+                 stage->name);
+        return false;
+    }
     rc = sqlite3_step(st); // raw-sql-ok:progress-kv-kernel-store
     int count_type = rc == SQLITE_ROW ? sqlite3_column_type(st, 0) : SQLITE_NULL;
     int64_t hash_bound_count = rc == SQLITE_ROW && count_type == SQLITE_INTEGER
         ? sqlite3_column_int64(st, 0) : -1;
     ok = rc == SQLITE_ROW && count_type == SQLITE_INTEGER &&
-         hash_bound_count == (int64_t)height + 1;
+         hash_bound_count == (int64_t)height - first_height + 1;
     if (ok)
         ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
     sqlite3_finalize(st);
@@ -311,11 +271,17 @@ bool consensus_export_prove_stage_rows(
                  "stage rows are not bound to header hashes table=%s "
                  "hash_bound_count=%lld required=%lld",
                  stage->table, (long long)hash_bound_count,
-                 (long long)height + 1);
+                 (long long)height - first_height + 1);
     if (ok) {
-        summary->hash_bound_count = (uint64_t)hash_bound_count;
+        summary->hash_bound_count = (uint64_t)height + 1;
         proof_u64(&component, summary->hash_bound_count);
-        sha3_256_finalize(&component, summary->component_digest);
+        if (composed) {
+            sha3_256_finalize(&component, parent->suffix_digest[ordinal]);
+            ok = consensus_state_bundle_proof_extension_digest(
+                parent, ordinal, summary->component_digest);
+        } else {
+            sha3_256_finalize(&component, summary->component_digest);
+        }
     }
     consensus_export_progress_emit(
         "prove_stage_rows(%s) done rows=%lld ok=%d elapsed=%lldms",

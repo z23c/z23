@@ -24,6 +24,7 @@
 #include "sync/sync_state.h"
 #include "util/safe_alloc.h"
 #include "util/blocker.h"
+#include "util/thread_registry.h"
 #include "validation/main_state.h"
 
 #include <stdio.h>
@@ -404,7 +405,7 @@ static int test_process_block_msg_reducer_pending_stays_retryable(void)
 /* ── Lane 3 hardening: PEER_OFFENCE_UNREQUESTED wiring ─────────────
  *
  * process_block_msg() (msg_blocks.c) scores PEER_OFFENCE_UNREQUESTED
- * when dl_mark_received() finds no in-flight slot for the delivered
+ * when dl_mark_received() returns UINT32_MAX for no in-flight slot on the delivered
  * hash from ANY peer — a plain "block" message is only ever a getdata
  * response in this protocol (unsolicited fast-relay goes through
  * process_cmpctblock(), a different message entirely), so that is
@@ -527,6 +528,52 @@ static int test_process_block_msg_no_score_when_requested(void)
     return failures;
 }
 
+static int test_process_block_msg_no_score_when_requested_from_peer_zero(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: peer id zero remains a requested block, not the "
+         "not-found sentinel") {
+        peer_scoring_init();
+        dl_init(get_download_mgr());
+
+        struct block blk;
+        block_init(&blk);
+        blk.header.nVersion = 4;
+        blk.header.nTime = 1700000014u;
+        blk.header.nBits = 0x1f00ffffu;
+        blk.header.nNonce.data[0] = 25;
+
+        struct uint256 hash;
+        block_get_hash(&blk, &hash);
+        block_clear_seen(&hash);
+
+        struct p2p_node node;
+        unreq_setup_node(&node, 0);
+        ASSERT(dl_mark_requested(get_download_mgr(), &hash, 1, node.id));
+
+        struct byte_stream s;
+        stream_init(&s, 256);
+        ASSERT(block_serialize(&blk, &s));
+
+        int submit_calls = 0;
+        struct net_manager nm;
+        memset(&nm, 0, sizeof(nm));
+        struct msg_processor mp;
+        memset(&mp, 0, sizeof(mp));
+        mp.block_submit = submit_reducer_pending_block;
+        mp.block_submit_ctx = &submit_calls;
+        mp.net_mgr = &nm;
+
+        ASSERT(process_block_msg(&mp, &node, &s));
+        ASSERT(atomic_load(&node.misbehavior) == 0);
+
+        stream_free(&s);
+        block_free(&blk);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_process_block_msg_no_score_within_settle_grace(void)
 {
     int failures = 0;
@@ -575,6 +622,57 @@ static int test_process_block_msg_no_score_within_settle_grace(void)
         block_free(&blk);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int test_process_block_msg_no_score_during_shutdown(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: process_block_msg withholds unrequested scoring "
+         "during orderly shutdown") {
+        peer_scoring_init();
+        dl_init(get_download_mgr());
+        thread_registry_reset_for_test();
+        thread_registry_request_shutdown();
+
+        struct block blk;
+        block_init(&blk);
+        blk.header.nVersion = 4;
+        blk.header.nTime = 1700000013u;
+        blk.header.nBits = 0x1f00ffffu;
+        blk.header.nNonce.data[0] = 24;
+
+        struct uint256 hash;
+        block_get_hash(&blk, &hash);
+        block_clear_seen(&hash);
+
+        struct byte_stream s;
+        stream_init(&s, 256);
+        ASSERT(block_serialize(&blk, &s));
+
+        int submit_calls = 0;
+        struct net_manager nm;
+        memset(&nm, 0, sizeof(nm));
+        struct msg_processor mp;
+        memset(&mp, 0, sizeof(mp));
+        mp.block_submit = submit_reducer_pending_block;
+        mp.block_submit_ctx = &submit_calls;
+        mp.net_mgr = &nm;
+
+        struct p2p_node node;
+        unreq_setup_node(&node, 504);
+
+        ASSERT(process_block_msg(&mp, &node, &s));
+        ASSERT(atomic_load(&node.misbehavior) == 0);
+
+        thread_registry_reset_for_test();
+        stream_free(&s);
+        block_free(&blk);
+        PASS();
+    } _test_next:;
+    /* ASSERT can jump past the in-body cleanup.  Never leak the process-wide
+     * shutdown bit into later tests in this forked group. */
+    thread_registry_reset_for_test();
     return failures;
 }
 
@@ -948,7 +1046,9 @@ int test_msg_handlers(void)
     failures += test_process_block_msg_reducer_pending_stays_retryable();
     failures += test_process_block_msg_scores_unrequested();
     failures += test_process_block_msg_no_score_when_requested();
+    failures += test_process_block_msg_no_score_when_requested_from_peer_zero();
     failures += test_process_block_msg_no_score_within_settle_grace();
+    failures += test_process_block_msg_no_score_during_shutdown();
     failures += test_process_block_msg_queues_reducer_during_catchup();
     failures += test_msg_block_intake_full_stays_retryable();
     failures += test_msg_process_messages_yields_after_bounded_batch();

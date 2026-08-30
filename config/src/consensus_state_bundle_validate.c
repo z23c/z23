@@ -96,6 +96,17 @@ static bool copy_int64_exact(sqlite3_stmt *st, int column, int64_t *out)
     return true;
 }
 
+static const char *const k_proof_names[
+    CONSENSUS_STATE_BUNDLE_PROOF_COUNT] = {
+    "header_admit", "validate_headers", "body_fetch", "body_persist",
+    "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
+};
+
+static const bool k_proof_hash_bound[
+    CONSENSUS_STATE_BUNDLE_PROOF_COUNT] = {
+    true, true, true, false, true, true, true, false,
+};
+
 static bool read_manifest(sqlite3 *db,
                           struct consensus_state_bundle_manifest *m,
                           struct consensus_state_install_result *r)
@@ -326,13 +337,114 @@ static bool validate_bundle_proof(
     const struct consensus_state_source_receipt *receipt,
     struct consensus_state_install_result *result)
 {
-    static const char *const names[CONSENSUS_STATE_BUNDLE_PROOF_COUNT] = {
-        "header_admit", "validate_headers", "body_fetch", "body_persist",
-        "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
-    };
-    static const bool hash_bound[CONSENSUS_STATE_BUNDLE_PROOF_COUNT] = {
-        true, true, true, false, true, true, true, false,
-    };
+    struct consensus_state_bundle_proof_parent parent;
+    memset(&parent, 0, sizeof(parent));
+    sqlite3_stmt *parent_st = NULL;
+    static const char parent_sql[] =
+        "SELECT base_height,base_block_hash,validation_profile,"
+        "proof_manifest_digest,source_digest,artifact_digest "
+        "FROM proof_parent WHERE singleton=1";
+    int parent_prepare = sqlite3_prepare_v2(
+        db, parent_sql, -1, &parent_st, NULL);
+    if (parent_prepare == SQLITE_OK) {
+        int rc = sqlite3_step(parent_st); // raw-sql-ok:read-only-introspection
+        int64_t base_height = -1;
+        int64_t profile = -1;
+        bool parent_ok = rc == SQLITE_ROW &&
+            copy_int64_exact(parent_st, 0, &base_height) &&
+            base_height >= 0 && base_height < manifest->height &&
+            copy_blob32(parent_st, 1, parent.base_block_hash) &&
+            copy_int64_exact(parent_st, 2, &profile) &&
+            profile == manifest->validation_profile &&
+            copy_blob32(parent_st, 3, parent.proof_manifest_digest) &&
+            copy_blob32(parent_st, 4, parent.source_digest) &&
+            copy_blob32(parent_st, 5, parent.artifact_digest) &&
+            digest_nonzero(parent.base_block_hash) &&
+            digest_nonzero(parent.proof_manifest_digest) &&
+            digest_nonzero(parent.source_digest) &&
+            digest_nonzero(parent.artifact_digest);
+        if (parent_ok)
+            parent_ok = sqlite3_step(parent_st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+        sqlite3_finalize(parent_st);
+        if (!parent_ok)
+            return validation_fail(result, CONSENSUS_INSTALL_REFUSED,
+                                   "proof parent base is malformed");
+        parent.present = true;
+        parent.base_height = (int32_t)base_height;
+        parent.validation_profile = (uint8_t)profile;
+
+        static const char component_sql[] =
+            "SELECT ordinal,component,cursor,first_height,last_height,"
+            "row_count,hash_bound_count,component_digest,suffix_digest "
+            "FROM proof_parent_component ORDER BY ordinal";
+        if (sqlite3_prepare_v2(db, component_sql, -1, &parent_st, NULL) !=
+            SQLITE_OK)
+            return validation_fail(result, CONSENSUS_INSTALL_REFUSED,
+                                   "proof parent components are unavailable");
+        uint64_t parent_rows = (uint64_t)parent.base_height + 1u;
+        parent_ok = true;
+        for (size_t i = 0;
+             parent_ok && i < CONSENSUS_STATE_BUNDLE_PROOF_COUNT; i++) {
+            rc = sqlite3_step(parent_st); // raw-sql-ok:read-only-introspection
+            int64_t ordinal = -1, cursor = -1, first = -1, last = -1;
+            int64_t rows = -1, hashes = -1;
+            parent_ok = rc == SQLITE_ROW &&
+                copy_int64_exact(parent_st, 0, &ordinal) &&
+                ordinal == (int64_t)i &&
+                consensus_state_sqlite_text_equal(parent_st, 1,
+                                                  k_proof_names[i]) &&
+                copy_int64_exact(parent_st, 2, &cursor) && cursor >= 0 &&
+                copy_int64_exact(parent_st, 3, &first) && first == 0 &&
+                copy_int64_exact(parent_st, 4, &last) &&
+                last == parent.base_height &&
+                copy_int64_exact(parent_st, 5, &rows) && rows >= 0 &&
+                (uint64_t)rows == parent_rows &&
+                copy_int64_exact(parent_st, 6, &hashes) && hashes >= 0 &&
+                (uint64_t)hashes ==
+                    (k_proof_hash_bound[i] ? parent_rows : 0u) &&
+                copy_blob32(parent_st, 7,
+                            parent.components[i].component_digest) &&
+                copy_blob32(parent_st, 8, parent.suffix_digest[i]) &&
+                digest_nonzero(parent.components[i].component_digest) &&
+                digest_nonzero(parent.suffix_digest[i]);
+            uint64_t minimum =
+                i == CONSENSUS_STATE_BUNDLE_PROOF_COUNT - 1u
+                    ? (uint64_t)parent.base_height : parent_rows;
+            if (parent_ok)
+                parent_ok = (uint64_t)cursor >= minimum &&
+                    (i != 6u || (uint64_t)cursor == parent_rows) &&
+                    (i != 7u || (uint64_t)cursor <= minimum + 1u);
+            if (parent_ok) {
+                snprintf(parent.components[i].component,
+                         sizeof(parent.components[i].component), "%s",
+                         k_proof_names[i]);
+                parent.components[i].cursor = (uint64_t)cursor;
+                parent.components[i].first_height = 0;
+                parent.components[i].last_height = parent.base_height;
+                parent.components[i].row_count = parent_rows;
+                parent.components[i].hash_bound_count = (uint64_t)hashes;
+            }
+        }
+        if (parent_ok)
+            parent_ok = sqlite3_step(parent_st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+        sqlite3_finalize(parent_st);
+        uint8_t parent_manifest[32];
+        if (parent_ok) {
+            consensus_state_bundle_proof_manifest_digest(
+                parent.components, CONSENSUS_STATE_BUNDLE_PROOF_COUNT,
+                parent_manifest);
+            parent_ok = memcmp(parent_manifest,
+                               parent.proof_manifest_digest, 32) == 0;
+        }
+        if (!parent_ok)
+            return validation_fail(result, CONSENSUS_INSTALL_REFUSED,
+                                   "proof parent component lineage malformed");
+    } else {
+        const char *msg = sqlite3_errmsg(db);
+        if (!msg || strstr(msg, "no such table") == NULL)
+            return validation_fail(result, CONSENSUS_INSTALL_REFUSED,
+                                   "proof parent query failed");
+    }
     static const char sql[] =
         "SELECT ordinal,component,cursor,first_height,last_height,row_count,"
         "hash_bound_count,component_digest FROM bundle_proof ORDER BY ordinal";
@@ -351,20 +463,21 @@ static bool validate_bundle_proof(
         int64_t rows = -1, hashes = -1;
         if (rc != SQLITE_ROW ||
             !copy_int64_exact(st, 0, &ordinal) || ordinal != (int64_t)i ||
-            !consensus_state_sqlite_text_equal(st, 1, names[i]) ||
+            !consensus_state_sqlite_text_equal(st, 1, k_proof_names[i]) ||
             !copy_int64_exact(st, 2, &cursor) || cursor < 0 ||
             !copy_int64_exact(st, 3, &first) || first != 0 ||
             !copy_int64_exact(st, 4, &last) || last != manifest->height ||
             !copy_int64_exact(st, 5, &rows) || rows < 0 ||
             (uint64_t)rows != expected_rows ||
             !copy_int64_exact(st, 6, &hashes) || hashes < 0 ||
-            (uint64_t)hashes != (hash_bound[i] ? expected_rows : 0) ||
+            (uint64_t)hashes !=
+                (k_proof_hash_bound[i] ? expected_rows : 0) ||
             !copy_blob32(st, 7, proofs[i].component_digest)) {
             ok = false;
             break;
         }
         snprintf(proofs[i].component, sizeof(proofs[i].component), "%s",
-                 names[i]);
+                 k_proof_names[i]);
         proofs[i].cursor = (uint64_t)cursor;
         proofs[i].first_height = 0;
         proofs[i].last_height = manifest->height;
@@ -386,9 +499,19 @@ static bool validate_bundle_proof(
     sqlite3_finalize(st);
     uint8_t recomputed[32];
     if (ok) {
+        if (parent.present) {
+            for (size_t i = 0;
+                 ok && i < CONSENSUS_STATE_BUNDLE_PROOF_COUNT; i++) {
+                uint8_t extended[32];
+                ok = consensus_state_bundle_proof_extension_digest(
+                         &parent, i, extended) &&
+                     memcmp(extended, proofs[i].component_digest, 32) == 0;
+            }
+        }
         consensus_state_bundle_proof_manifest_digest(
             proofs, CONSENSUS_STATE_BUNDLE_PROOF_COUNT, recomputed);
-        ok = memcmp(recomputed, manifest->proof_manifest_digest, 32) == 0 &&
+        ok = ok &&
+             memcmp(recomputed, manifest->proof_manifest_digest, 32) == 0 &&
              memcmp(proofs[0].component_digest,
                     receipt->chain_corpus_digest, 32) == 0;
     }
