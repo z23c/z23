@@ -31,6 +31,14 @@ struct zcl_dev_proof_status {
 };
 
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state);
+/* Admit a completed cycle only when its schema, canonical action inputs, and
+ * one independently derived fixed-width root per selected proof dimension
+ * exactly match. Duplicate critical JSON keys are always inadmissible. */
+bool zcl_dev_proof_cycle_reuse_admissible(
+    const char *body, size_t body_len, const char *source_cas,
+    const char *proof_inputs_sha3,
+    const struct zcl_dev_proof_dimension
+        dimensions[ZCL_DEV_PROOF_DIMENSIONS]);
 bool zcl_dev_proof_resolve_pair(const char *repo_root,
                                 const char *requested_local,
                                 const char *requested_base,
