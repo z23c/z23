@@ -10541,6 +10541,7 @@ CAPABILITY_INVENTORY_SRCS = tools/gen_capability_inventory.c \
 	lib/codeindex/src/codeindex_inventory.c \
 	lib/codeindex/src/codeindex_inventory_scan.c \
 	lib/codeindex/src/codeindex_inventory_body.c \
+	lib/codeindex/src/codeindex_inventory_evidence.c \
 	lib/codeindex/src/codeindex_scan.c \
 	lib/codeindex/src/codeindex_scan_doc.c \
 	lib/base/src/safe_alloc.c lib/base/src/log_level.c lib/sha3/src/sha3.c

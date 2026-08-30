@@ -361,11 +361,19 @@ static void inv_scan_bodies(struct inv_scan *s, int file_index,
     if (!clean) { s->failed = true; return; }
     /* Preprocessor rows are declaration data, never function bodies. */
     size_t line_start = 0;
+    bool directive_continues = false;
     for (size_t i = 0; i <= len; i++) {
         if (i < len && src[i] != '\n') continue;
         size_t p = line_start;
         while (p < i && (src[p] == ' ' || src[p] == '\t')) p++;
-        if (p < i && src[p] == '#')
+        bool directive = directive_continues || (p < i && src[p] == '#');
+        size_t tail = i;
+        while (tail > line_start &&
+               (src[tail - 1] == ' ' || src[tail - 1] == '\t' ||
+                src[tail - 1] == '\r')) tail--;
+        directive_continues = directive && tail > line_start &&
+                              src[tail - 1] == '\\';
+        if (directive)
             for (size_t j = line_start; j < i; j++) clean[j] = ' ';
         line_start = i + 1;
     }
@@ -408,7 +416,7 @@ void inv_scan_includes_and_bodies(struct inv_scan *s, int file_index,
                                   const char *src, size_t len)
 {
     inv_scan_includes(s, file_index, src, len);
-    if (!s->failed && !s->files[file_index].is_header)
+    if (!s->failed)
         inv_scan_bodies(s, file_index, src, len);
 }
 
@@ -443,20 +451,22 @@ bool inv_read_registered_groups(struct inv_scan *s)
     bool ok = true;
     while (ok && fgets(line, sizeof(line), f)) {
         const char *prefix = NULL;
-        char *p = strstr(line, "ZCL_TEST_GROUP(");
-        if (p) { p += strlen("ZCL_TEST_GROUP("); prefix = "test_"; }
-        else {
-            p = strstr(line, "ZCL_SPEC_GROUP(");
-            if (p) { p += strlen("ZCL_SPEC_GROUP("); prefix = "spec_"; }
-        }
-        if (!p) continue;
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "ZCL_TEST_GROUP(", strlen("ZCL_TEST_GROUP(")) == 0) {
+            p += strlen("ZCL_TEST_GROUP("); prefix = "test_";
+        } else if (strncmp(p, "ZCL_SPEC_GROUP(",
+                           strlen("ZCL_SPEC_GROUP(")) == 0) {
+            p += strlen("ZCL_SPEC_GROUP("); prefix = "spec_";
+        } else continue;
         while (*p == ' ' || *p == '\t') p++;
         char name[128];
         size_t used = 0;
         while (inv_ident_char((unsigned char)*p) && used + 1 < sizeof(name))
             name[used++] = *p++;
         name[used] = '\0';
-        if (used) ok = inv_group_push(s, name, prefix);
+        while (*p == ' ' || *p == '\t') p++;
+        if (used && *p == ')') ok = inv_group_push(s, name, prefix);
     }
     if (ferror(f)) ok = false;
     fclose(f);

@@ -30,6 +30,7 @@ struct ci_inventory_symbol {
     char kind;
     char definition_path[256];
     int definition_line;
+    char definition_evidence[40];
     char declaration_path[256];
     int declaration_line;
     char signature[512];
@@ -69,6 +70,7 @@ struct ci_inventory_duplicate {
     int body_tokens;
     int body_lines;
     char evidence[96];
+    char proof_needed[160];
 };
 
 struct ci_inventory_invariant {
@@ -87,6 +89,14 @@ struct ci_inventory_invariant {
     char proof_needed[192];
 };
 
+struct ci_inventory_test_root_gap {
+    char group[128];
+    char root_symbol[160];
+    char reason[64];
+    char verdict[16];
+    char proof_needed[192];
+};
+
 struct ci_inventory_report {
     uint8_t source_root_sha3[32];
     int files_scanned;
@@ -97,7 +107,11 @@ struct ci_inventory_report {
     int registered_test_groups;
     int registered_test_roots_found;
     int registered_test_roots_missing;
+    int ambiguous_registered_test_roots;
     int unresolved_include_sites;
+    int ambiguous_symbol_use_sites;
+    int ambiguous_test_call_edges;
+    int unresolved_symbol_definitions;
     int scanner_partial_symbols;
 
     struct ci_inventory_capability *capabilities;
@@ -108,6 +122,8 @@ struct ci_inventory_report {
     int duplicate_count;
     struct ci_inventory_invariant *invariants;
     int invariant_count;
+    struct ci_inventory_test_root_gap *test_root_gaps;
+    int test_root_gap_count;
 };
 
 /* Analyze the maintained C23 source roots plus packages/ and examples/.

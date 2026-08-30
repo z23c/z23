@@ -47,7 +47,16 @@ static bool ci_fixture(void)
         "/** Must reject zero and return true only for valid even values. */\n"
         "bool demo_validate(int value);\n"
         "/** Must reject invalid values; this declaration is not proof. */\n"
-        "bool demo_stub(int value);\n#endif\n") &&
+        "bool demo_stub(int value);\n"
+        "/** Must validate the selected platform implementation. */\n"
+        "bool demo_platform(int value);\n"
+        "static inline int local_pick(int value) { return value + 1; }\n"
+        "int demo_use_local(int value);\n#endif\n") &&
+        ci_write(CI_FIX "/lib/demo/include/demo/other.h",
+        "/* purpose: Exercise a same-named, path-distinct inline. */\n"
+        "#ifndef OTHER_H\n#define OTHER_H\n#include <stdbool.h>\n"
+        "static inline int local_pick(int value) { return value - 1; }\n"
+        "int other_use_local(int value);\n#endif\n") &&
         ci_write(CI_FIX "/lib/demo/src/demo.c",
         "#include \"demo/demo.h\"\n"
         "bool demo_validate(int value)\n{\n"
@@ -56,6 +65,12 @@ static bool ci_fixture(void)
         "    return (value % 2) == 0;\n}\n"
         "bool demo_stub(int value)\n{\n"
         "    (void)value;\n    return true;\n}\n"
+        "#if defined(_WIN32)\n"
+        "bool demo_platform(int value) { (void)value; return true; }\n"
+        "#else\n"
+        "bool demo_platform(int value) { return value > 0; }\n"
+        "#endif\n"
+        "int demo_use_local(int value) { return local_pick(value); }\n"
         "static int alpha_one(int value)\n{\n"
         "    int result = first_call(value, 7);\n"
         "    if (result < 0) return result;\n"
@@ -64,11 +79,12 @@ static bool ci_fixture(void)
         "    if (result > value) result = second_call(result, 7);\n"
         "    return result + 7;\n}\n") &&
         ci_write(CI_FIX "/lib/demo/src/copy.c",
-        "#include <stdbool.h>\n"
+        "#include \"demo/other.h\"\n"
         "bool demo_validate_copy(int value)\n{\n"
         "    if (value <= 0) return false;\n"
         "    if (value > 1000) return false;\n"
         "    return (value % 2) == 0;\n}\n"
+        "int other_use_local(int value) { return local_pick(value); }\n"
         "static int alpha_two(int item)\n{\n"
         "    int answer = other_call(item, 9);\n"
         "    if (answer < 0) return answer;\n"
@@ -79,7 +95,7 @@ static bool ci_fixture(void)
         ci_write(CI_FIX "/lib/test/src/test_fixture.c",
         "#include \"demo/demo.h\"\n"
         "int test_code_inventory_fixture(void)\n{\n"
-        "    return demo_validate(2) ? 0 : 1;\n}\n") &&
+        "    return demo_validate(2) && demo_use_local(2) == 3 ? 0 : 1;\n}\n") &&
         ci_write(CI_FIX "/packages/zmini/include/zmini/zmini.h",
         "/* purpose: Tiny package fixture. */\n"
         "#ifndef ZMINI_H\n#define ZMINI_H\n"
@@ -88,7 +104,9 @@ static bool ci_fixture(void)
         "#include \"zmini/zmini.h\"\n"
         "int zmini_add(int a, int b) { return a + b; }\n") &&
         ci_write(CI_FIX "/tools/dev/test_group_catalog.def",
-        "ZCL_TEST_GROUP(code_inventory_fixture)\n");
+        "/* Include with ZCL_TEST_GROUP(name) and ZCL_SPEC_GROUP(name). */\n"
+        "ZCL_TEST_GROUP(code_inventory_fixture)\n"
+        "ZCL_TEST_GROUP(generated_fixture)\n");
 }
 
 static const struct ci_inventory_capability *ci_cap(
@@ -120,16 +138,24 @@ int test_code_inventory(void)
     struct ci_inventory_report *first = codeindex_inventory_analyze(CI_FIX);
     CI_ASSERT(first != NULL);
     if (!first) return 1;
-    CI_ASSERT(first->registered_test_groups == 1);
+    CI_ASSERT(first->registered_test_groups == 2);
     CI_ASSERT(first->registered_test_roots_found == 1);
-    CI_ASSERT(first->registered_test_roots_missing == 0);
+    CI_ASSERT(first->registered_test_roots_missing == 1);
+    CI_ASSERT(first->ambiguous_registered_test_roots == 0);
+    CI_ASSERT(first->test_root_gap_count == 1);
+    CI_ASSERT(first->test_root_gap_count == 1 &&
+              strcmp(first->test_root_gaps[0].group,
+                     "generated_fixture") == 0);
 
     const struct ci_inventory_capability *demo = ci_cap(
         first, "lib/demo/include/demo/demo.h");
     const struct ci_inventory_capability *package = ci_cap(
         first, "packages/zmini/include/zmini/zmini.h");
+    const struct ci_inventory_capability *other = ci_cap(
+        first, "lib/demo/include/demo/other.h");
     CI_ASSERT(demo != NULL);
     CI_ASSERT(package != NULL);
+    CI_ASSERT(other != NULL);
     CI_ASSERT(demo && strcmp(demo->include_token, "demo/demo.h") == 0);
     CI_ASSERT(demo && demo->production_use_files >= 1);
     CI_ASSERT(demo && demo->test_use_files >= 1);
@@ -138,6 +164,10 @@ int test_code_inventory(void)
     const struct ci_inventory_symbol *validate = ci_symbol(
         first, demo, "demo_validate");
     const struct ci_inventory_symbol *stub = ci_symbol(first, demo, "demo_stub");
+    const struct ci_inventory_symbol *demo_local = ci_symbol(
+        first, demo, "local_pick");
+    const struct ci_inventory_symbol *other_local = ci_symbol(
+        first, other, "local_pick");
     CI_ASSERT(validate != NULL);
     CI_ASSERT(validate && validate->test_evidence ==
               CI_INVENTORY_TEST_REGISTERED_REACHABLE);
@@ -149,8 +179,23 @@ int test_code_inventory(void)
                 stub->definition_path, stub->definition_line);
     CI_ASSERT(stub && stub->constant_return_body);
     CI_ASSERT(stub && strcmp(stub->constant_return_value, "true") == 0);
+    CI_ASSERT(demo_local != NULL);
+    CI_ASSERT(other_local != NULL);
+    CI_ASSERT(demo_local && strcmp(demo_local->definition_path,
+              "lib/demo/include/demo/demo.h") == 0);
+    CI_ASSERT(other_local && strcmp(other_local->definition_path,
+              "lib/demo/include/demo/other.h") == 0);
+    CI_ASSERT(demo_local && strcmp(demo_local->definition_evidence,
+              "declaration_is_definition") == 0);
+    CI_ASSERT(demo_local && demo_local->production_use_files == 1);
+    CI_ASSERT(other_local && other_local->production_use_files == 1);
+    CI_ASSERT(demo_local && demo_local->test_evidence ==
+              CI_INVENTORY_TEST_REGISTERED_REACHABLE);
+    CI_ASSERT(other_local && other_local->test_evidence !=
+              CI_INVENTORY_TEST_REGISTERED_REACHABLE);
+    CI_ASSERT(first->unresolved_include_sites == 2);
 
-    bool exact = false, shape = false, stub_gap = false;
+    bool exact = false, shape = false, stub_gap = false, platform_gap = false;
     for (int i = 0; i < first->duplicate_count; i++) {
         const struct ci_inventory_duplicate *d = &first->duplicates[i];
         if (d->kind == CI_INVENTORY_DUPLICATE_EXACT_BODY &&
@@ -162,15 +207,24 @@ int test_code_inventory(void)
             ((strcmp(d->symbol_a, "alpha_one") == 0 &&
               strcmp(d->symbol_b, "alpha_two") == 0) ||
              (strcmp(d->symbol_b, "alpha_one") == 0 &&
-              strcmp(d->symbol_a, "alpha_two") == 0))) shape = true;
+              strcmp(d->symbol_a, "alpha_two") == 0))) {
+            shape = true;
+            CI_ASSERT(d->proof_needed[0] != '\0');
+        }
     }
     for (int i = 0; i < first->invariant_count; i++)
         if (strcmp(first->invariants[i].symbol, "demo_stub") == 0 &&
             strcmp(first->invariants[i].verdict, "UNPROVEN") == 0)
             stub_gap = true;
+        else if (strcmp(first->invariants[i].symbol, "demo_platform") == 0 &&
+                 first->invariants[i].constant_return_body &&
+                 strcmp(first->invariants[i].constant_return_value,
+                        "true") == 0)
+            platform_gap = true;
     CI_ASSERT(exact);
     CI_ASSERT(shape);
     CI_ASSERT(stub_gap);
+    CI_ASSERT(platform_gap);
 
     struct ci_inventory_report *same = codeindex_inventory_analyze(CI_FIX);
     CI_ASSERT(same != NULL);

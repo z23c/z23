@@ -18,6 +18,7 @@ SOURCES=(
     lib/codeindex/src/codeindex_inventory.c
     lib/codeindex/src/codeindex_inventory_scan.c
     lib/codeindex/src/codeindex_inventory_body.c
+    lib/codeindex/src/codeindex_inventory_evidence.c
     lib/codeindex/src/codeindex_scan.c
     lib/codeindex/src/codeindex_scan_doc.c
     lib/base/src/safe_alloc.c
@@ -51,13 +52,56 @@ if ! "$TMP/gen_capability_inventory" "$TMP/expected.jsonl" . \
 fi
 
 meta="$(head -n 1 "$TMP/expected.jsonl")"
-capabilities="$(printf '%s\n' "$meta" | sed -n 's/.*"capabilities":\([0-9][0-9]*\).*/\1/p')"
-roots_found="$(printf '%s\n' "$meta" | sed -n 's/.*"registered_test_roots_found":\([0-9][0-9]*\).*/\1/p')"
-roots_missing="$(printf '%s\n' "$meta" | sed -n 's/.*"registered_test_roots_missing":\([0-9][0-9]*\).*/\1/p')"
-if [ "${capabilities:-0}" -lt 1000 ] || [ "${roots_found:-0}" -lt 500 ] ||
-   [ "${roots_missing:-1}" -ne 0 ]; then
-    echo "check_capability_inventory_generated: FATAL — census floor/refusal failed" >&2
-    echo "  capabilities=${capabilities:-missing} roots_found=${roots_found:-missing} roots_missing=${roots_missing:-missing}" >&2
+field() {
+    printf '%s\n' "$meta" | sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"
+}
+capabilities="$(field capabilities)"
+duplicates="$(field duplicates)"
+invariants="$(field untested_invariants)"
+registered_groups="$(field registered_test_groups)"
+roots_found="$(field registered_test_roots_found)"
+roots_missing="$(field registered_test_roots_missing)"
+roots_ambiguous="$(field ambiguous_registered_test_roots)"
+root_gaps="$(field test_root_gaps)"
+if [ "${capabilities:-0}" -lt 1000 ] || [ "${roots_found:-0}" -lt 500 ]; then
+    echo "check_capability_inventory_generated: FATAL — census floor failed" >&2
+    echo "  capabilities=${capabilities:-missing} roots_found=${roots_found:-missing}" >&2
+    exit 2
+fi
+
+git ls-files lib app core config domain ports adapters packages |
+    awk '/\/include\/.*\.h$/ && $0 !~ /^lib\/test\//' |
+    LC_ALL=C sort -u >"$TMP/tracked_headers"
+sed -n 's/^{"record":"capability","header":"\([^"]*\)".*/\1/p' \
+    "$TMP/expected.jsonl" | LC_ALL=C sort -u >"$TMP/report_headers"
+if ! diff -u "$TMP/tracked_headers" "$TMP/report_headers" \
+        >"$TMP/headers.diff"; then
+    echo "check_capability_inventory_generated: FATAL — public-header census is not exact" >&2
+    head -60 "$TMP/headers.diff" | sed 's/^/    /' >&2
+    exit 2
+fi
+
+catalog_groups="$(awk '
+    /^[[:space:]]*ZCL_TEST_GROUP\([[:alnum:]_]+\)[[:space:]]*$/ { n++ }
+    /^[[:space:]]*ZCL_SPEC_GROUP\([[:alnum:]_]+\)[[:space:]]*$/ { n++ }
+    END { print n + 0 }
+' tools/dev/test_group_catalog.def)"
+cap_rows="$(grep -c '^{"record":"capability"' \
+    "$TMP/expected.jsonl" || true)"
+dup_rows="$(grep -c '^{"record":"duplicate"' \
+    "$TMP/expected.jsonl" || true)"
+inv_rows="$(grep -c '^{"record":"untested_invariant"' \
+    "$TMP/expected.jsonl" || true)"
+gap_rows="$(grep -c '^{"record":"test_root_gap"' \
+    "$TMP/expected.jsonl" || true)"
+if [ "$capabilities" -ne "$cap_rows" ] || [ "$duplicates" -ne "$dup_rows" ] ||
+   [ "$invariants" -ne "$inv_rows" ] || [ "$registered_groups" -ne "$catalog_groups" ] ||
+   [ $((roots_found + roots_missing + roots_ambiguous)) -ne "$registered_groups" ] ||
+   [ "$root_gaps" -ne "$gap_rows" ] ||
+   [ "$gap_rows" -ne $((roots_missing + roots_ambiguous)) ]; then
+    echo "check_capability_inventory_generated: FATAL — report accounting is inconsistent" >&2
+    echo "  capabilities=$capabilities/$cap_rows duplicates=$duplicates/$dup_rows invariants=$invariants/$inv_rows" >&2
+    echo "  groups=$registered_groups/$catalog_groups roots=$roots_found+$roots_missing+$roots_ambiguous gaps=$root_gaps/$gap_rows" >&2
     exit 2
 fi
 

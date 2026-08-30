@@ -111,7 +111,8 @@ from a hash, signature, test, or reproduction receipt.
 - [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl) — generated
   public-header capability map: exposed symbols, verified direct-use counts,
   registered-test reachability, ranked duplicate candidates, and untested
-  declared invariants. Regenerate it with `make docs-capability-inventory`;
+  declared invariants. Scanner ambiguities are named `UNPROVEN` records rather
+  than silently assigned. Regenerate it with `make docs-capability-inventory`;
   never hand-edit it.
 - [`BUILD.md`](BUILD.md) — vendored dependencies, profiles, and reproducibility.
 - [`AI_SAFETY_GATES.md`](AI_SAFETY_GATES.md) — claim and evidence discipline.

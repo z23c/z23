@@ -11,7 +11,7 @@ ZCL_COMMAND_READY_READ(
     "How to edit and prove a change in this checkout",
     "The inner coding-agent loop: check the generated capability inventory, "
     "inspect with code impact/tests, then prove with t-fast ONLY, lint-fast, "
-    "and pre-push-ci at push. It reads no checkout "
+    "bare full lint plus pre-push-ci at push. It reads no checkout "
     "state and never runs a compiler, test, or live-node command.",
     ZCL_COMMAND_LIST_BUDGET,
     "code,guide,develop,proof,lint,t-fast,impact,agent",

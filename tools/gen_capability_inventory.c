@@ -45,8 +45,14 @@ static void render_symbol(FILE *out, const struct ci_inventory_symbol *symbol)
     fputs("{\"name\":", out); json_string(out, symbol->name);
     fprintf(out, ",\"kind\":\"%c\",\"definition\":{\"path\":", symbol->kind);
     json_string(out, symbol->definition_path);
-    fprintf(out, ",\"line\":%d},\"declaration\":{\"path\":",
+    fprintf(out, ",\"line\":%d},\"definition_evidence\":",
             symbol->definition_line);
+    json_string(out, symbol->definition_evidence);
+    fputs(",\"definition_proof_needed\":", out);
+    if (strcmp(symbol->definition_evidence, "unresolved_UNPROVEN") == 0)
+        json_string(out, "preprocess the exact build profile and bind this declaration to one emitted definition");
+    else fputs("null", out);
+    fputs(",\"declaration\":{\"path\":", out);
     json_string(out, symbol->declaration_path);
     fprintf(out, ",\"line\":%d},\"signature\":", symbol->declaration_line);
     json_string(out, symbol->signature);
@@ -57,6 +63,10 @@ static void render_symbol(FILE *out, const struct ci_inventory_symbol *symbol)
     json_string(out, codeindex_inventory_test_evidence_name(symbol->test_evidence));
     fputs(",\"registered_test_group\":", out);
     if (symbol->registered_test_group[0]) json_string(out, symbol->registered_test_group);
+    else fputs("null", out);
+    fputs(",\"test_proof_needed\":", out);
+    if (symbol->test_evidence != CI_INVENTORY_TEST_REGISTERED_REACHABLE)
+        json_string(out, "a canonical registered root with an unambiguous path-bound direct-call chain to this exact definition");
     else fputs("null", out);
     fprintf(out, ",\"constant_return_body\":%s,\"constant_return_value\":",
             symbol->constant_return_body ? "true" : "false");
@@ -104,6 +114,9 @@ static void render_duplicate(FILE *out, const struct ci_inventory_duplicate *d)
             d->line_b, d->body_tokens, d->body_lines,
             strcmp(d->symbol_a, d->symbol_b) != 0 ? "true" : "false");
     json_string(out, d->evidence);
+    fputs(",\"proof_needed\":", out);
+    if (d->proof_needed[0]) json_string(out, d->proof_needed);
+    else fputs("null", out);
     fputs("}\n", out);
 }
 
@@ -132,6 +145,18 @@ static void render_invariant(FILE *out, const struct ci_inventory_invariant *gap
     fputs("}\n", out);
 }
 
+static void render_test_root_gap(
+    FILE *out, const struct ci_inventory_test_root_gap *gap)
+{
+    fputs("{\"record\":\"test_root_gap\",\"group\":", out);
+    json_string(out, gap->group);
+    fputs(",\"root_symbol\":", out); json_string(out, gap->root_symbol);
+    fputs(",\"reason\":", out); json_string(out, gap->reason);
+    fputs(",\"verdict\":", out); json_string(out, gap->verdict);
+    fputs(",\"proof_needed\":", out); json_string(out, gap->proof_needed);
+    fputs("}\n", out);
+}
+
 static bool render_report(FILE *out, const struct ci_inventory_report *report)
 {
     char root[65];
@@ -143,28 +168,40 @@ static bool render_report(FILE *out, const struct ci_inventory_report *report)
         "\"maintained C23 public headers under lib/app/core/config/domain/ports/"
         "adapters/packages plus their sources, tests, tools, and examples; vendor and build output excluded\","
         "\"evidence_ceiling\":{\"purpose\":\"header prose is declared intent only and remains UNPROVEN\","
-        "\"uses\":\"verified direct calls or source include edges;"
-        " function pointers and preprocessor-generated calls remain UNPROVEN\","
-        "\"tests\":\"name-based direct-call reachability from canonical registered roots, not proof that every comment sentence is asserted\","
+        "\"uses\":\"path-disambiguated direct calls or source include edges;"
+        " function pointers, transitive-only includes, and unresolved names remain UNPROVEN\","
+        "\"tests\":\"path-bound direct-call reachability from canonical registered roots, not proof that every comment sentence is asserted\","
         "\"duplicates\":\"normalized equality is evidence; alpha-shape equality is an UNPROVEN candidate\"},"
         "\"files_scanned\":%d,\"production_files\":%d,\"test_files\":%d,"
         "\"capabilities\":%d,\"symbols_exposed\":%d,\"registered_test_groups\":%d,"
         "\"registered_test_roots_found\":%d,\"registered_test_roots_missing\":%d,"
+        "\"ambiguous_registered_test_roots\":%d,"
         "\"unresolved_include_sites\":%d,"
+        "\"ambiguous_symbol_use_sites\":%d,"
+        "\"ambiguous_test_call_edges\":%d,"
+        "\"unresolved_symbol_definitions\":%d,"
         "\"scanner_partial_symbols\":%d,\"duplicates\":%d,"
-        "\"untested_invariants\":%d}\n",
+        "\"untested_invariants\":%d,\"test_root_gaps\":%d}\n",
         root, report->files_scanned, report->production_files, report->test_files,
         report->capability_count, report->symbol_count,
         report->registered_test_groups, report->registered_test_roots_found,
-        report->registered_test_roots_missing, report->unresolved_include_sites,
+        report->registered_test_roots_missing,
+        report->ambiguous_registered_test_roots,
+        report->unresolved_include_sites,
+        report->ambiguous_symbol_use_sites,
+        report->ambiguous_test_call_edges,
+        report->unresolved_symbol_definitions,
         report->scanner_partial_symbols,
-        report->duplicate_count, report->invariant_count);
+        report->duplicate_count, report->invariant_count,
+        report->test_root_gap_count);
     for (int i = 0; i < report->capability_count; i++)
         render_capability(out, report, &report->capabilities[i]);
     for (int i = 0; i < report->duplicate_count; i++)
         render_duplicate(out, &report->duplicates[i]);
     for (int i = 0; i < report->invariant_count; i++)
         render_invariant(out, &report->invariants[i]);
+    for (int i = 0; i < report->test_root_gap_count; i++)
+        render_test_root_gap(out, &report->test_root_gaps[i]);
     return !ferror(out);
 }
 

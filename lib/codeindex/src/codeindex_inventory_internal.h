@@ -103,6 +103,12 @@ void inv_scan_includes_and_bodies(struct inv_scan *scan, int file_index,
                                   const char *src, size_t len);
 bool inv_read_registered_groups(struct inv_scan *scan);
 
+bool inv_count_uses(struct inv_scan *scan,
+                    struct ci_inventory_report *report,
+                    const int *cap_for_symbol);
+bool inv_registered_reachability(const struct inv_scan *scan,
+                                 struct ci_inventory_report *report);
+
 void inv_cpy(char *dst, size_t cap, const char *src);
 bool inv_is_test_path(const char *path);
 bool inv_is_public_header_path(const char *path);

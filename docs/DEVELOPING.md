@@ -77,7 +77,10 @@ capability census in [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl).
 It includes package public headers that the interactive code index does not,
 and records exposed symbols, verified direct-use file counts, registered-test
 reachability, ranked normalized duplicate bodies, and untested declared header
-invariants. Header prose and alpha-shape matches are explicitly `UNPROVEN`.
+invariants. Header prose and alpha-shape matches are explicitly `UNPROVEN`;
+definition, use, and registered-test call edges are path-bound, and every
+macro-generated or platform-ambiguous test root is emitted as a named
+`test_root_gap` with the evidence needed to resolve it.
 Regenerate the entire report from source with:
 
 ```bash

@@ -18,43 +18,9 @@
 #include <string.h>
 #include <strings.h>
 
-struct inv_sym_order { int index; const char *name; };
-struct inv_cap_order { int index; const char *token; };
 struct inv_body_order { int index; const struct inv_body *body; };
 struct inv_def_order { const char *name; const struct ci_symbol *symbol; };
 struct inv_body_name_order { const char *name; const struct inv_body *body; };
-struct inv_test_mark { char name[128]; char group[128]; bool reached; };
-
-static int inv_sym_order_cmp(const void *a, const void *b)
-{
-    const struct inv_sym_order *x = a, *y = b;
-    int c = strcmp(x->name, y->name);
-    return c ? c : (x->index > y->index) - (x->index < y->index);
-}
-
-static int inv_cap_order_cmp(const void *a, const void *b)
-{
-    const struct inv_cap_order *x = a, *y = b;
-    int c = strcmp(x->token, y->token);
-    return c ? c : (x->index > y->index) - (x->index < y->index);
-}
-
-static int inv_ref_cmp(const void *a, const void *b)
-{
-    const struct inv_ref *x = a, *y = b;
-    int c = strcmp(x->callee, y->callee);
-    if (c) return c;
-    if (x->file_index != y->file_index)
-        return (x->file_index > y->file_index) - (x->file_index < y->file_index);
-    if (x->line != y->line) return (x->line > y->line) - (x->line < y->line);
-    return strcmp(x->enclosing, y->enclosing);
-}
-
-static int inv_test_mark_cmp(const void *a, const void *b)
-{
-    return strcmp(((const struct inv_test_mark *)a)->name,
-                  ((const struct inv_test_mark *)b)->name);
-}
 
 static int inv_digest_cmp(const uint8_t a[32], const uint8_t b[32])
 {
@@ -132,7 +98,13 @@ static int inv_invariant_value_cmp(const void *a, const void *b)
         return (y->production_use_files > x->production_use_files) -
                (y->production_use_files < x->production_use_files);
     int c = strcmp(x->header, y->header);
-    return c ? c : strcmp(x->symbol, y->symbol);
+    if (c) return c;
+    c = strcmp(x->symbol, y->symbol);
+    if (c) return c;
+    c = strcmp(x->definition_path, y->definition_path);
+    if (c) return c;
+    return (x->definition_line > y->definition_line) -
+           (x->definition_line < y->definition_line);
 }
 
 static bool inv_header_guard_symbol(const struct ci_symbol *s)
@@ -183,15 +155,19 @@ static int inv_def_lower(const struct inv_def_order *defs, int count,
 }
 
 static const struct ci_symbol *inv_definition_for(
-    const struct inv_def_order *defs, int count, const char *name)
+    const struct inv_def_order *defs, int count,
+    const struct ci_symbol *declaration)
 {
+    if (declaration->def_path[0]) return declaration;
     const struct ci_symbol *best = NULL;
-    int at = inv_def_lower(defs, count, name);
-    for (; at < count && strcmp(defs[at].name, name) == 0; at++) {
+    int at = inv_def_lower(defs, count, declaration->name);
+    for (; at < count && strcmp(defs[at].name, declaration->name) == 0; at++) {
         const struct ci_symbol *s = defs[at].symbol;
-        if (!best || (best->kind == 't' && s->kind == 'T') ||
-            strcmp(s->def_path, best->def_path) < 0)
-            best = s;
+        if (s->kind != declaration->kind) continue;
+        if (!best) { best = s; continue; }
+        if (best->def_line != s->def_line ||
+            strcmp(best->def_path, s->def_path) != 0)
+            return NULL;
     }
     return best;
 }
@@ -212,7 +188,10 @@ static const struct inv_body *inv_body_for(
         if (definition_path && definition_path[0] &&
             strcmp(b->path, definition_path) == 0)
             return b;
-        if (!fallback) fallback = b;
+        if (!definition_path || !definition_path[0]) {
+            if (fallback) return NULL;
+            fallback = b;
+        }
     }
     return fallback;
 }
@@ -307,11 +286,19 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
             inv_cpy(dst->signature, sizeof(dst->signature), occ->symbol.signature);
             inv_cpy(dst->contract, sizeof(dst->contract), occ->symbol.doc);
             const struct ci_symbol *def = inv_definition_for(
-                defs, def_count, dst->name);
+                defs, def_count, &occ->symbol);
             if (def) {
                 inv_cpy(dst->definition_path, sizeof(dst->definition_path),
                         def->def_path);
                 dst->definition_line = def->def_line;
+                inv_cpy(dst->definition_evidence,
+                        sizeof(dst->definition_evidence),
+                        def == &occ->symbol ? "declaration_is_definition"
+                                            : "unique_name_and_kind");
+            } else {
+                inv_cpy(dst->definition_evidence,
+                        sizeof(dst->definition_evidence),
+                        "unresolved_UNPROVEN");
             }
             const struct inv_body *body = inv_body_for(
                 bodies, scan->body_count, dst->name, dst->definition_path);
@@ -323,8 +310,13 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
                     inv_cpy(dst->definition_path, sizeof(dst->definition_path),
                             body->path);
                     dst->definition_line = body->line;
+                    inv_cpy(dst->definition_evidence,
+                            sizeof(dst->definition_evidence),
+                            "unique_function_body");
                 }
             }
+            if (!dst->definition_path[0])
+                report->unresolved_symbol_definitions++;
             if (dst->kind == 'T' || dst->kind == 't') cap->function_count++;
             else if (dst->kind == 'S' || dst->kind == 'Y' || dst->kind == 'E')
                 cap->type_count++;
@@ -342,247 +334,6 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
     *out_cap_for_symbol = cap_for_symbol;
     free(defs);
     free(bodies);
-    return true;
-}
-
-static int inv_sym_lower(const struct inv_sym_order *order, int count,
-                         const char *name)
-{
-    int lo = 0, hi = count;
-    while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (strcmp(order[mid].name, name) < 0) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
-}
-
-static int inv_cap_exact(const struct inv_cap_order *order, int count,
-                         const char *token)
-{
-    int lo = 0, hi = count;
-    while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        int c = strcmp(order[mid].token, token);
-        if (c == 0) return order[mid].index;
-        if (c < 0) lo = mid + 1;
-        else hi = mid;
-    }
-    return -1;
-}
-
-static void inv_bit_set(uint8_t *bits, size_t stride, int cap, int file)
-{
-    size_t bit = (size_t)cap * stride * 8u + (size_t)file;
-    bits[bit / 8u] |= (uint8_t)(1u << (bit % 8u));
-}
-
-static bool inv_bit_get(const uint8_t *bits, size_t stride, int cap, int file)
-{
-    size_t bit = (size_t)cap * stride * 8u + (size_t)file;
-    return (bits[bit / 8u] & (uint8_t)(1u << (bit % 8u))) != 0;
-}
-
-static int inv_resolve_relative_header(const struct inv_scan *scan,
-                                       const struct inv_cap_order *order,
-                                       int cap_count, int file_index,
-                                       const char *token)
-{
-    int exact = inv_cap_exact(order, cap_count, token);
-    if (exact >= 0) return exact;
-    if (strchr(token, '/')) return -1;
-    char relative[512];
-    inv_cpy(relative, sizeof(relative), scan->files[file_index].path);
-    char *slash = strrchr(relative, '/');
-    if (!slash) return -1;
-    slash[1] = '\0';
-    size_t used = strlen(relative);
-    if (used + strlen(token) + 1 >= sizeof(relative)) return -1;
-    strcat(relative, token);
-    for (int i = 0; i < cap_count; i++)
-        if (strcmp(scan->files[file_index].path, relative) != 0 &&
-            strcmp(order[i].token, relative) == 0)
-            return order[i].index;
-    /* Headers commonly include a sibling by basename while their canonical
-     * token carries a namespace directory. Resolve only a UNIQUE suffix. */
-    int found = -1;
-    size_t tn = strlen(token);
-    for (int i = 0; i < cap_count; i++) {
-        const char *candidate = order[i].token;
-        size_t cn = strlen(candidate);
-        if (cn < tn || strcmp(candidate + cn - tn, token) != 0 ||
-            (cn > tn && candidate[cn - tn - 1] != '/')) continue;
-        if (found >= 0) return -1;
-        found = order[i].index;
-    }
-    return found;
-}
-
-static bool inv_count_uses(struct inv_scan *scan,
-                           struct ci_inventory_report *report,
-                           const int *cap_for_symbol)
-{
-    int ns = report->symbol_count, nc = report->capability_count;
-    struct inv_sym_order *symbols = zcl_malloc((size_t)ns * sizeof(*symbols),
-                                               "ci_inventory_symbol_order");
-    struct inv_cap_order *caps = zcl_malloc((size_t)nc * sizeof(*caps),
-                                            "ci_inventory_cap_order");
-    size_t stride = ((size_t)scan->file_count + 7u) / 8u;
-    uint8_t *cap_files = zcl_calloc((size_t)nc, stride,
-                                    "ci_inventory_cap_file_bits");
-    if ((ns && !symbols) || (nc && !caps) || (nc && stride && !cap_files)) {
-        free(symbols); free(caps); free(cap_files); return false;
-    }
-    for (int i = 0; i < ns; i++) {
-        symbols[i].index = i;
-        symbols[i].name = report->symbols[i].name;
-    }
-    for (int i = 0; i < nc; i++) {
-        caps[i].index = i;
-        caps[i].token = report->capabilities[i].include_token;
-    }
-    qsort(symbols, (size_t)ns, sizeof(*symbols), inv_sym_order_cmp);
-    qsort(caps, (size_t)nc, sizeof(*caps), inv_cap_order_cmp);
-    qsort(scan->refs, (size_t)scan->ref_count, sizeof(*scan->refs), inv_ref_cmp);
-
-    int ri = 0;
-    while (ri < scan->ref_count) {
-        int end = ri + 1;
-        while (end < scan->ref_count &&
-               strcmp(scan->refs[end].callee, scan->refs[ri].callee) == 0 &&
-               scan->refs[end].file_index == scan->refs[ri].file_index)
-            end++;
-        int at = inv_sym_lower(symbols, ns, scan->refs[ri].callee);
-        for (; at < ns && strcmp(symbols[at].name,
-                                 scan->refs[ri].callee) == 0; at++) {
-            int index = symbols[at].index;
-            struct ci_inventory_symbol *symbol = &report->symbols[index];
-            const struct inv_file *file = &scan->files[scan->refs[ri].file_index];
-            if (file->is_test) {
-                symbol->test_use_files++;
-                if (symbol->test_evidence == CI_INVENTORY_TEST_NONE)
-                    symbol->test_evidence = CI_INVENTORY_TEST_SOURCE_ONLY;
-            } else if (!file->is_example) {
-                symbol->production_use_files++;
-            }
-            if (!file->is_example)
-                inv_bit_set(cap_files, stride, cap_for_symbol[index],
-                            scan->refs[ri].file_index);
-        }
-        ri = end;
-    }
-
-    for (int i = 0; i < scan->include_count; i++) {
-        const struct inv_include *inc = &scan->includes[i];
-        int cap = inv_resolve_relative_header(scan, caps, nc, inc->file_index,
-                                              inc->token);
-        if (cap < 0) {
-            report->unresolved_include_sites++;
-            continue; /* system/third-party/ambiguous include */
-        }
-        if (!scan->files[inc->file_index].is_example)
-            inv_bit_set(cap_files, stride, cap, inc->file_index);
-    }
-    for (int cap = 0; cap < nc; cap++) {
-        for (int file = 0; file < scan->file_count; file++) {
-            if (!inv_bit_get(cap_files, stride, cap, file)) continue;
-            if (scan->files[file].is_test)
-                report->capabilities[cap].test_use_files++;
-            else if (!scan->files[file].is_example)
-                report->capabilities[cap].production_use_files++;
-        }
-    }
-    free(symbols); free(caps); free(cap_files);
-    return true;
-}
-
-static int inv_mark_lower(const struct inv_test_mark *marks, int count,
-                          const char *name)
-{
-    int lo = 0, hi = count;
-    while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (strcmp(marks[mid].name, name) < 0) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
-}
-
-static bool inv_registered_reachability(const struct inv_scan *scan,
-                                        struct ci_inventory_report *report)
-{
-    int cap = scan->body_count + report->symbol_count + scan->group_count;
-    struct inv_test_mark *marks = zcl_calloc((size_t)cap, sizeof(*marks),
-                                             "ci_inventory_test_marks");
-    if (cap && !marks) return false;
-    int count = 0;
-    for (int i = 0; i < scan->body_count; i++) {
-        inv_cpy(marks[count++].name, sizeof(marks[0].name), scan->bodies[i].name);
-    }
-    for (int i = 0; i < report->symbol_count; i++) {
-        inv_cpy(marks[count++].name, sizeof(marks[0].name), report->symbols[i].name);
-    }
-    for (int i = 0; i < scan->group_count; i++) {
-        inv_cpy(marks[count++].name, sizeof(marks[0].name), scan->groups[i].root_symbol);
-    }
-    qsort(marks, (size_t)count, sizeof(*marks), inv_test_mark_cmp);
-    int write = 0;
-    for (int i = 0; i < count; i++) {
-        if (write > 0 && strcmp(marks[write - 1].name, marks[i].name) == 0)
-            continue;
-        if (write != i) marks[write] = marks[i];
-        write++;
-    }
-    count = write;
-    for (int i = 0; i < scan->group_count; i++) {
-        int at = inv_mark_lower(marks, count, scan->groups[i].root_symbol);
-        if (at < count && strcmp(marks[at].name,
-                                 scan->groups[i].root_symbol) == 0) {
-            marks[at].reached = true;
-            inv_cpy(marks[at].group, sizeof(marks[at].group),
-                    scan->groups[i].name);
-            report->registered_test_roots_found++;
-        } else report->registered_test_roots_missing++;
-    }
-    bool changed;
-    int rounds = 0;
-    do {
-        changed = false;
-        for (int i = 0; i < scan->ref_count; i++) {
-            if (!scan->refs[i].enclosing[0]) continue;
-            int from = inv_mark_lower(marks, count, scan->refs[i].enclosing);
-            int to = inv_mark_lower(marks, count, scan->refs[i].callee);
-            if (from >= count || to >= count ||
-                strcmp(marks[from].name, scan->refs[i].enclosing) != 0 ||
-                strcmp(marks[to].name, scan->refs[i].callee) != 0 ||
-                !marks[from].reached || marks[to].reached)
-                continue;
-            marks[to].reached = true;
-            inv_cpy(marks[to].group, sizeof(marks[to].group), marks[from].group);
-            changed = true;
-        }
-        rounds++;
-    } while (changed && rounds <= count);
-
-    for (int i = 0; i < report->symbol_count; i++) {
-        struct ci_inventory_symbol *symbol = &report->symbols[i];
-        int at = inv_mark_lower(marks, count, symbol->name);
-        if (at >= count || strcmp(marks[at].name, symbol->name) != 0 ||
-            !marks[at].reached)
-            continue;
-        symbol->test_evidence = CI_INVENTORY_TEST_REGISTERED_REACHABLE;
-        inv_cpy(symbol->registered_test_group,
-                sizeof(symbol->registered_test_group), marks[at].group);
-    }
-    for (int c = 0; c < report->capability_count; c++) {
-        struct ci_inventory_capability *capability = &report->capabilities[c];
-        for (int i = capability->symbol_offset;
-             i < capability->symbol_offset + capability->symbol_count; i++)
-            if (report->symbols[i].test_evidence ==
-                CI_INVENTORY_TEST_REGISTERED_REACHABLE)
-                capability->registered_test_symbols++;
-    }
-    free(marks);
     return true;
 }
 
@@ -612,6 +363,9 @@ static bool inv_duplicate_push(struct ci_inventory_report *report,
             kind == CI_INVENTORY_DUPLICATE_EXACT_BODY
                 ? "identical comment/space-normalized token body"
                 : "UNPROVEN: identifiers/callees/literals reduced to roles");
+    if (kind == CI_INVENTORY_DUPLICATE_ALPHA_SHAPE)
+        inv_cpy(d->proof_needed, sizeof(d->proof_needed),
+                "differential tests over the shared input domain or reviewed semantic equivalence of callees, literals, effects, and errors");
     report->duplicate_count++;
     return true;
 }
@@ -621,7 +375,8 @@ static bool inv_body_in_scope(const struct inv_scan *scan,
                               int min_tokens, int min_lines)
 {
     const struct inv_file *f = &scan->files[body->file_index];
-    return !f->is_test && !f->is_example && body->token_count >= min_tokens &&
+    return !f->is_header && !f->is_test && !f->is_example &&
+        body->token_count >= min_tokens &&
         body->end_line - body->line + 1 >= min_lines;
 }
 
@@ -705,8 +460,18 @@ static bool inv_contract_like(const char *doc)
 
 static bool inv_invariant_push(struct ci_inventory_report *report,
                                const struct ci_inventory_capability *cap,
-                               const struct ci_inventory_symbol *symbol)
+                               const struct ci_inventory_symbol *symbol,
+                               const struct inv_body *variant)
 {
+    const char *path = variant ? variant->path : symbol->definition_path;
+    int line = variant ? variant->line : symbol->definition_line;
+    if (variant && strcmp(path, symbol->definition_path) == 0)
+        line = symbol->definition_line;
+    for (int i = 0; variant && i < report->invariant_count; i++)
+        if (report->invariants[i].definition_line == line &&
+            strcmp(report->invariants[i].symbol, symbol->name) == 0 &&
+            strcmp(report->invariants[i].definition_path, path) == 0)
+            return true;
     int n = report->invariant_count;
     void *p = zcl_realloc(report->invariants,
                           (size_t)(n + 1) * sizeof(*report->invariants),
@@ -717,28 +482,33 @@ static bool inv_invariant_push(struct ci_inventory_report *report,
     memset(gap, 0, sizeof(*gap));
     inv_cpy(gap->header, sizeof(gap->header), cap->header);
     inv_cpy(gap->symbol, sizeof(gap->symbol), symbol->name);
-    inv_cpy(gap->definition_path, sizeof(gap->definition_path),
-            symbol->definition_path);
-    gap->definition_line = symbol->definition_line;
+    inv_cpy(gap->definition_path, sizeof(gap->definition_path), path);
+    gap->definition_line = line;
     inv_cpy(gap->contract, sizeof(gap->contract), symbol->contract);
     gap->production_use_files = symbol->production_use_files;
     gap->test_use_files = symbol->test_use_files;
-    gap->test_evidence = symbol->test_evidence;
-    inv_cpy(gap->registered_test_group, sizeof(gap->registered_test_group),
-            symbol->registered_test_group);
-    gap->constant_return_body = symbol->constant_return_body;
+    gap->test_evidence = variant ? CI_INVENTORY_TEST_NONE
+                                 : symbol->test_evidence;
+    if (!variant)
+        inv_cpy(gap->registered_test_group,
+                sizeof(gap->registered_test_group),
+                symbol->registered_test_group);
+    gap->constant_return_body = variant ? true : symbol->constant_return_body;
     inv_cpy(gap->constant_return_value, sizeof(gap->constant_return_value),
-            symbol->constant_return_value);
+            variant ? variant->constant_value : symbol->constant_return_value);
     inv_cpy(gap->verdict, sizeof(gap->verdict), "UNPROVEN");
     inv_cpy(gap->proof_needed, sizeof(gap->proof_needed),
-            symbol->constant_return_body
-                ? "registered positive/negative test proving the constant result is intentional for every documented input class"
+            gap->constant_return_body
+                ? (variant
+                    ? "preprocess and run a registered positive/negative test reaching this exact definition variant and proving its constant result is intentional"
+                    : "registered positive/negative test proving the constant result is intentional for every documented input class")
                 : "registered test reaching this symbol and asserting the header claim with outcome-distinguishing cases");
     report->invariant_count++;
     return true;
 }
 
-static bool inv_derive_invariants(struct ci_inventory_report *report)
+static bool inv_derive_invariants(const struct inv_scan *scan,
+                                  struct ci_inventory_report *report)
 {
     for (int c = 0; c < report->capability_count; c++) {
         const struct ci_inventory_capability *cap = &report->capabilities[c];
@@ -750,7 +520,27 @@ static bool inv_derive_invariants(struct ci_inventory_report *report)
                 continue;
             if (!symbol->constant_return_body && !inv_contract_like(symbol->contract))
                 continue;
-            if (!inv_invariant_push(report, cap, symbol)) return false;
+            if (!inv_invariant_push(report, cap, symbol, NULL)) return false;
+            }
+        }
+    for (int c = 0; c < report->capability_count; c++) {
+        const struct ci_inventory_capability *cap = &report->capabilities[c];
+        for (int i = cap->symbol_offset; i < cap->symbol_offset + cap->symbol_count;
+             i++) {
+            const struct ci_inventory_symbol *symbol = &report->symbols[i];
+            if (symbol->kind != 'T' && symbol->kind != 't') continue;
+            for (int b = 0; b < scan->body_count; b++) {
+                const struct inv_body *body = &scan->bodies[b];
+                const struct inv_file *file = &scan->files[body->file_index];
+                if (!body->constant_return || file->is_header || file->is_test ||
+                    file->is_example || strcmp(body->name, symbol->name) != 0)
+                    continue;
+                if (symbol->test_evidence ==
+                        CI_INVENTORY_TEST_REGISTERED_REACHABLE &&
+                    strcmp(symbol->definition_path, body->path) == 0)
+                    continue;
+                if (!inv_invariant_push(report, cap, symbol, body)) return false;
+            }
         }
     }
     qsort(report->invariants, (size_t)report->invariant_count,
@@ -771,7 +561,7 @@ struct ci_inventory_report *codeindex_inventory_analyze(const char *root)
         !inv_count_uses(&scan, report, cap_for_symbol) ||
         !inv_registered_reachability(&scan, report) ||
         !inv_derive_duplicates(&scan, report) ||
-        !inv_derive_invariants(report)) {
+        !inv_derive_invariants(&scan, report)) {
         free(cap_for_symbol);
         inv_scan_release(&scan);
         codeindex_inventory_free(report);
@@ -796,5 +586,6 @@ void codeindex_inventory_free(struct ci_inventory_report *report)
     free(report->symbols);
     free(report->duplicates);
     free(report->invariants);
+    free(report->test_root_gaps);
     free(report);
 }
