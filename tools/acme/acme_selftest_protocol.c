@@ -18,6 +18,16 @@
  * produce a missing member or a 4 KB URL on demand.
  */
 
+#if !defined(_WIN32)
+/* mkdtemp is hidden under strict POSIX feature-test macros on Darwin. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#endif
+
 #include "acme_selftest.h"
 
 #include "acme_jws.h"

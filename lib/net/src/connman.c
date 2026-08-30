@@ -63,18 +63,11 @@ static pthread_t g_thread_open;
 static pthread_t g_thread_message;
 /* Shared with connman_dialer.c — see connman_internal.h. */
 _Atomic bool g_stop = false;
-
-/* Supervisor liveness for the 4 P2P threads. Root children (not
- * supervisor_register_in_domain(net,...)): lib/net cannot include the
- * app-side supervisors/domains.h without a lib-layering violation — see
- * util/thread_liveness.h. zcl_connman_sock wakes on a deterministic 50ms
- * poll() timeout, so it gets a REAL deadline; the other three legitimately
- * sit idle (DNS-seed sleep cadence, outbound-dialer backoff sleep, message
- * condvar wait) so they are liveness-only (no deadline, no progress gate) —
- * present on the tree, heartbeat when they do work, never falsely flagged
- * for a quiet cycle. g_open_liveness lives in connman_dialer.c (the file
- * that beats it); declared in connman_internal.h for the register/retire
- * calls below. */
+/* Supervisor liveness for the four P2P threads. These are root children
+ * because lib/net cannot depend on app-side supervisor domains. The socket
+ * poller has a real deadline; the three legitimately idle workers are
+ * liveness-only. g_open_liveness lives in connman_dialer.c and is shared
+ * through connman_internal.h for registration and retirement here. */
 static struct thread_liveness_child g_dns_seed_liveness = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_sock_liveness     = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_msg_liveness      = { .id = SUPERVISOR_INVALID_ID };

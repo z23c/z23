@@ -68,7 +68,7 @@ void zcl_native_handle_zcode_toolchain_show(
     }
     struct vcs_toolchain_capsule_v1 capsule;
     uint8_t root[32];
-    if (!vcs_toolchain_capsule_v1_capture_gcc(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
         !vcs_toolchain_capsule_v1_root(&capsule, root)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,

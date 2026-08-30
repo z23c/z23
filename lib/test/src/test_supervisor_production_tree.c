@@ -130,6 +130,7 @@ static bool spt_poll_int_ge(_Atomic int *v, int target, int timeout_ms)
     return atomic_load(v) >= target;
 }
 
+#ifndef __APPLE__
 /* Poll a child's supervisor-side restart_count.
  *
  * There is no happens-before edge between "the respawned worker ran" and "the
@@ -164,6 +165,22 @@ static bool spt_poll_blocker(const char *id, int timeout_ms)
         nanosleep(&ts, NULL);
     }
     return blocker_exists(id);
+}
+#endif /* !__APPLE__ */
+
+static bool spt_poll_worker_state(const char *child_name, int state,
+                                  int timeout_ms)
+{
+    for (int i = 0; i < timeout_ms; i++) {
+        struct supervisor_snapshot s;
+        int c = 0;
+        if (find_child_snapshot(child_name, &s, &c) >= 0 &&
+            s.worker_state == state)
+            return true;
+        struct timespec ts = { 0, 1000000L };  /* 1 ms */
+        nanosleep(&ts, NULL);
+    }
+    return false;
 }
 
 static const char *const k_staged_children[] = {
@@ -679,12 +696,23 @@ int test_supervisor_production_tree(void)
                   idx >= 0 && count == 1 &&
                   snap.restart_policy == SUPERVISOR_RESTART_PERMANENT);
 
-        /* Kill incarnation 1 only → the supervisor respawns a NEW thread. The
-         * incarnation counter advancing to 2 is the honest proof that a fresh
-         * worker thread actually ran (a new tid). We do NOT assert pthread_t
-         * inequality: glibc recycles the opaque pthread_t handle after a join,
-         * so an equal value does not mean the same thread. */
+        /* Kill incarnation 1. On Linux the supervisor respawns a NEW thread;
+         * on Darwin pthread_tryjoin_np is unavailable, so the restart contract
+         * intentionally fails closed (no respawn) and leaves the child EXITED.
+         * Both behaviours are honest and bounded. */
         atomic_store(&w.die_through, 1);
+#if defined(__APPLE__)
+        SPT_CHECK("Darwin: dead worker stays dead, no respawn",
+                  spt_poll_int_ge(&w.incarnations, 1, 2000));
+        SPT_CHECK("Darwin: child is left EXITED for the operator",
+                  spt_poll_worker_state("zcl_spt_restart",
+                                        SUPERVISOR_WORKER_EXITED, 2000));
+        idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
+        SPT_CHECK("Darwin: restart_count stays zero",
+                  idx >= 0 && snap.restart_count == 0);
+        SPT_CHECK("Darwin: no restart-storm blocker because no respawn attempted",
+                  !blocker_exists("thread_restart_storm_zcl_spt_restart"));
+#else
         SPT_CHECK("dead worker is respawned — a new worker thread (new tid) runs",
                   spt_poll_int_ge(&w.incarnations, 2, 2000));
         SPT_CHECK("restart_count advanced after the respawn",
@@ -713,6 +741,7 @@ int test_supervisor_production_tree(void)
         SPT_CHECK("storm sets the REPEATED_RESTART stall reason",
                   idx >= 0 &&
                   snap.stall_reason == SUPERVISOR_STALL_REPEATED_RESTART);
+#endif
 
         /* Graceful teardown: no more restarts, stop all incarnations, join. */
         thread_liveness_stop_begin(&rc);

@@ -130,12 +130,12 @@ make lint            # defensive-coding + doc-accuracy gates
 
 ### Platform capability boundary
 
-| Host | Public node | Development loop | Resident hot swap |
-| --- | --- | --- | --- |
-| Linux | Full node | Full native workflow | Eligible read-only C23 leaves |
-| WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow |
-| macOS arm64 | Native node | Build and focused tests; polling watcher only | Unavailable; rebuild/restart |
-| Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart |
+| Host | Public node | Development loop | Resident hot swap | Machine mesh |
+| --- | --- | --- | --- | --- |
+| Linux | Full node | Full native workflow | Eligible read-only C23 leaves | Noise transport + DHT identity |
+| WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow | Noise transport + DHT identity |
+| macOS arm64 | Native node; `make macos-acceptance` | Build and focused tests; native kqueue directory watcher | Unavailable; rebuild/restart | Noise transport works; DHT identity requires on-chain provisioning |
+| Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart | Not yet measured |
 
 Windows setup and the boundary between native MSYS2 and WSL2 are documented in
 [`WINDOWS.md`](WINDOWS.md). Never share `build/` or `vendor/lib/` between
@@ -144,21 +144,28 @@ native Windows and WSL.
 #### macOS
 
 The arm64 macOS build includes the node, wallet, P2P and RPC services,
-databases, and native cryptography. The following Linux-specific facilities
-currently report unavailable or refuse safely on macOS: Landlock/seccomp
-package confinement, signal-context self-backtraces, the inotify development
-watcher, and consensus snapshot export that requires `O_TMPFILE`. Intel macOS
-has not yet been measured.
+databases, and native cryptography. The authenticated Noise transport works
+natively and is armed with `-noisetransport`; private-machine mesh pairing then
+needs only a provisioned on-chain DHT identity (`zcode network delegate`), the
+same cross-platform prerequisite as Linux. The following Linux-specific
+facilities currently report unavailable or refuse safely on macOS:
+Landlock/seccomp package confinement, signal-context self-backtraces, native
+hot-swap activation, and consensus snapshot export that requires `O_TMPFILE`.
+The directory watcher now uses kqueue on macOS. `make macos-acceptance`
+validates the closed matrix in `config/platform/macos_capabilities.def`, derives
+its exact registered-test set from that matrix, and refuses any self-skip or
+unobserved eligible environment. Intel macOS has not yet been measured.
 
 Embedded full Tor is not in that list. It was, because the build pinned Darwin
 to the offline stub regardless of whether the Tor archives existed; that pin is
 gone, and `make tor-full` now points Tor's configure at this repository's
 vendored OpenSSL, libevent, and zlib rather than at the system trees macOS does
 not ship. The archives — not the host OS — select what the node links, on every
-host. This build path has **not yet been observed to complete on a Mac**: until
-someone runs `make tor-full` there and reports it, treat embedded Tor on macOS
-as untested rather than as either working or unavailable. The default Tor stub
-keeps ordinary node operation available but does not publish an onion service.
+host. This build path **has been observed to complete on an arm64 Mac** (`make tor-full`,
+~110 s, producing `vendor/tor/libtor.a` from vendored OpenSSL/libevent/zlib).
+Until it is measured on Intel macOS, treat embedded Tor there as untested. The
+default Tor stub keeps ordinary node operation available but does not publish an
+onion service.
 
 ### Your one obvious next action
 

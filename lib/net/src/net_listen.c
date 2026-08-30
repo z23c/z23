@@ -307,6 +307,12 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     int one = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
                (const char *)&one, sizeof(one));
+    if (platform_socket_set_p2p_buffers(sock) != 0) {
+        LOG_WARN("net",
+                 "accept_connection: failed to set P2P socket buffers, "
+                 "error=%d",
+                 platform_socket_last_error());
+    }
 
     /* The accepted socket is a NEW socket and does NOT inherit the listener's
      * non-blocking mode: POSIX accept(2) does not carry file status flags

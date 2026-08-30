@@ -26,6 +26,7 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "controllers/yardsale_controller.h"
 #include "crypto/ed25519.h"
@@ -408,11 +409,18 @@ int test_yardsale_wallet(void)
 
     /* Seller wallet: one token coin (YW_TOKEN_SUPPLY of its genesis
      * token) and one ordinary coin. Buyer wallet: one ordinary coin. */
-    struct wallet seller_w, buyer_w;
+    struct yw_wallet_pair {
+        struct wallet seller;
+        struct wallet buyer;
+    };
+    struct yw_wallet_pair *wallets = zcl_malloc(
+        sizeof(*wallets), "yardsale wallet fixtures");
+#define seller_w (wallets->seller)
+#define buyer_w (wallets->buyer)
     struct key_id seller_kid, buyer_kid;
     char addr[128];
     uint8_t token_txid[32], seller_zcl_txid[32], buyer_zcl_txid[32];
-    bool fixture =
+    bool fixture = wallets != NULL &&
         node_db_open(&ndb, ":memory:") &&
         yw_wallet_open(&seller_w, 0x5a, &seller_kid, addr, sizeof(addr)) &&
         yw_fund_token(&seller_w, &seller_kid, YW_TOKEN_SUPPLY, token_txid) &&
@@ -940,9 +948,12 @@ int test_yardsale_wallet(void)
     wallet_free(&buyer_w);
 
 done:
+    free(wallets);
     if (ndb.open)
         node_db_close(&ndb);
     yw_reset_all();
     wallet_set_coin_reservation_probe(NULL, NULL);
+#undef seller_w
+#undef buyer_w
     return failures;
 }

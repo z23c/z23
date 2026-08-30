@@ -25,7 +25,9 @@ on the current tree rather than trusted.
 | SHA-256 ARMv8 hardware tier | `build/bin/simd_bench` | 4.58x faster than generic; detected `sha256=ARMv8 SHA (hardware)` |
 | Quality-job guard/retention selftest | `bash tools/scripts/test_quality_job_guard.sh` | PASS after bash 3.2 / BSD tool fixes |
 | Regtest node boots and shuts down cleanly | Isolated `/tmp/zcl-mesh-id` node | PASS; RPC ready in ~2 s, graceful shutdown in ~5 s |
-| `ops mesh identity` capsule on macOS | `z23 ops mesh identity` against running regtest node | PASS; reports `platform.os=macos`, `architecture=aarch64`, live observation fields populated |
+| `ops mesh identity` capsule on macOS | `z23 ops mesh identity --datadir=/tmp/<fixture>` against running regtest node | PASS; reports `platform.os=macos`, `architecture=aarch64`, live observation fields populated |
+| Native kqueue directory watcher | `make -j t-fast ONLY=directory_watcher` | PASS; `lib/platform/src/directory_watcher.c` uses kqueue and recursively watches real subdirectories |
+| Embedded full Tor | `make tor-full` | PASS; builds `vendor/tor/libtor.a` from vendored OpenSSL/libevent/zlib, ~110 s, no source changes |
 
 ## What required fixes
 
@@ -42,31 +44,52 @@ on the current tree rather than trusted.
    - This blocks the MVP C7 full claim on macOS until the harness is ported to
      use `lsof`, `netstat`, or an equivalent macOS-native probe.
 
+## v2 transport verification
+
+The v2 Noise transport is implemented and works natively on arm64 macOS. It is
+disabled by default and armed with the `-v2transport` flag.
+
+Against an isolated regtest node started with `-v2transport`:
+
+- `transport.v2_enabled=true`
+- `transport.identity_loaded=true`
+- `transport.local_noise_fingerprint_sha3` populated
+- `authenticated_dht.disabled_reason` moved from `V2_TRANSPORT_DISABLED` to
+  `IDENTITY_MATERIAL_UNAVAILABLE`
+- Active blockers dropped from four to one: `AUTHENTICATED_DHT_INACTIVE`
+
+The remaining blocker is expected on a fresh regtest node: the authenticated DHT
+requires an on-chain-active operator identity provisioned through
+`z23 zcode network delegate --datadir=/tmp/<fixture>
+--input='{"seed_file":"/path/master.hex"}'`.
+That provisioning needs a ZID identity that is ACTIVE on-chain; a regtest node at
+height 0 has none.
+
 ## Open macOS agentic / P2P gaps
 
 | Area | Current state | Next step |
 |---|---|---|
-| Dev watcher | Polling-only (`tools/dev/watch-dev-lane.sh` falls back to 500 ms manifest poll because `lib/platform/src/directory_watcher.c` returns `ERROR` on Darwin) | Either accept polling latency (~1 s detect + 500 ms debounce) or implement a kqueue/FSEvents backend |
-| Resident hot swap | `ops mesh identity` reports `status=refused`, `refusal_stage=macos`; `lib/hotswap/src/hotswap_activate.c` has `__APPLE__` dlopen paths but activation is disabled | Decide whether to validate Mach-O imports / immutable-image staging, or keep the docs/table as "Unavailable" |
-| `make test-two-node-peer-tip` | Blocked by `ss(8)` dependency | Port port-probe preflight to macOS |
-| Embedded Tor | Build path no longer pinned to stub, but no Mac has been observed completing `make tor-full` | Run `make tor-full` and report whether it completes |
+| Dev watcher | Native kqueue backend landed in `lib/platform/src/directory_watcher.c`; `tools/dev/devloop_watch.c` still hard-codes inotify | Move `devloop_watch.c` onto the platform directory watcher so the dev loop gets sub-50 ms detection on macOS |
+| Resident hot swap | Mach-O probe/validation landed, but `zcl_hotswap_hotfork_visit_so()` still fails closed on Darwin because descriptor-bound A/B execution is unavailable | Implement immutable executable-image staging with ad-hoc signed bundle loading, or keep activation "Unavailable" |
+| `make test-two-node-peer-tip` | PASS on arm64 macOS after replacing the absent util-linux `setsid(1)` command with the in-tree C23 `process-group-exec` launcher | Keep the gate green as the sync path evolves |
+| Embedded Tor | PASS on arm64 macOS; `vendor/tor/libtor.a` builds from vendored deps | Update capability docs and remove from open-gap list |
 
 ## Mesh identity detail
 
-Against the isolated regtest node, `ops mesh identity` returned:
+Against the isolated regtest node **without `-v2transport`**, `ops mesh identity`
+returned:
 
 - `platform.os=macos`, `architecture=aarch64`, `environment_observed=true`
 - `build.binary_identity_available=true`, `installed_path_matches_running_image=true`
 - `hotswap.status=refused`, `refusal_stage=macos`, reason:
   "native macOS hot-swap is disabled pending validated Mach-O imports and
   immutable executable-image staging"
-- Active blockers for pairing: `NOISE_TRANSPORT_DISABLED`,
-  `NOISE_IDENTITY_UNAVAILABLE`, `AUTHENTICATED_DHT_INACTIVE`,
-  `REMOTE_STATUS_PROTOCOL_UNAVAILABLE`.
+- Active blockers for pairing: `V2_TRANSPORT_DISABLED`,
+  `NOISE_IDENTITY_UNAVAILABLE`, `AUTHENTICATED_DHT_INACTIVE`.
 
-The capsule works; actual private-mesh pairing is gated on enabling the Noise
-transport and an authenticated DHT identity, which is the same cross-platform
-prerequisite set the command reports on Linux.
+With `-v2transport` the first two blockers drop; the remaining
+`AUTHENTICATED_DHT_INACTIVE` blocker is the cross-platform requirement for a
+provisioned on-chain DHT identity, not a macOS defect.
 
 ## Mainnet sync observation
 
@@ -142,9 +165,9 @@ Verification plan:
 2. `make lint-fast` and focused boot-legacy tests must pass.
 3. Restart the durable LaunchAgent; boot log should report linked block files
    from `$HOME/Library/Application Support/Zclassic/blocks`.
-4. `z23 dumpstate body_coverage` should show the held ranges expanding past
-   the old 14k frontier, and `reducer_drive` should advance faster than the
-   P2P-only ~5 bps.
+4. `z23 dumpstate body_coverage --datadir=/tmp/<fixture>` should show the held
+   ranges expanding past the old 14k frontier, and `reducer_drive` should
+   advance faster than the P2P-only ~5 bps.
 
 Port conflict note: ZclWallet already binds mainnet P2P port 8033 on this
 host, so z23's `-listen` bind fails. For now outbound P2P works and the
@@ -152,3 +175,30 @@ legacy block-file link gives the fast path. To let this z23 node accept
 inbound connections, ZclWallet must be moved to a non-default port (e.g.
 8034) or stopped; that is an operator-host configuration choice, not a code
 change.
+
+## 2026-08-29 — kqueue watcher, tor-full, test pointer normalization, v2 naming cleanup
+
+Second macOS slice:
+
+- `lib/platform/src/directory_watcher.c` got a native kqueue backend that
+  recursively watches real subdirectories, drains events, and passes the
+  focused `directory_watcher` test. The watcher is no longer fail-closed on
+  Darwin.
+- `make tor-full` completed on the first arm64 Mac host in ~110 s, producing
+  `vendor/tor/libtor.a` from the vendored OpenSSL/libevent/zlib trees.
+- `lib/test/include/test/test_core.h` normalizes the pointer fallback printer
+  so NULL renders as `(nil)` on Darwin as well as glibc; this fixes the
+  `test_test_group_selector` pointer-message assertion on macOS.
+- Stale "v2 transport" strings were canonicalized to "Noise transport" and the
+  LaunchAgent template now documents the real `-noisetransport` flag.
+
+Remaining before macOS agentic parity is complete:
+
+1. Move `tools/dev/devloop_watch.c` off raw inotify and onto the platform
+   `directory_watcher_*` abstraction.
+2. Decide whether to land immutable Mach-O executable-image staging for dev
+   hot-swap activation, or keep the capability table honest about "Unavailable".
+
+The previously open `make test-two-node-peer-tip` item now passes end-to-end
+on macOS: B reached A at height 10, survived a kill-9/restart cycle on the
+same datadir, and re-reached peer tip 15.
