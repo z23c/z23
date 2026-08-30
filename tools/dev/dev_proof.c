@@ -1139,6 +1139,10 @@ static bool proof_worker(const struct proof_paths *paths,
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_LINT, lint);
         if (test->selected) {
+            if (setenv("ZCL_TESTCACHE_STORE_ROOT", paths->root, 1) != 0) {
+                proof_why(why, why_len, "test_cache_store_root_unavailable");
+                return false;
+            }
             if (snprintf(only, sizeof(only), "--exact=%s", groups) >=
                 (int)sizeof(only)) {
                 proof_why(why, why_len, "test_selection_invalid_or_truncated");

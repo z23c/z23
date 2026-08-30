@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 
 #define TC_FIX "test-tmp/tc_cache_fix"
+#define TC_STORE "test-tmp/tc_cache_store"
 
 #define TC_CHECK(name, expr) do {                                    \
     if (expr) { printf("  testcache: %s... OK\n", (name)); }         \
@@ -265,7 +266,10 @@ static void tc_env_restore(struct tc_envsave *s, const char *name)
 int test_testcache(void)
 {
     int failures = 0;
-    system("rm -rf " TC_FIX);
+    struct tc_envsave caller_store;
+    tc_env_capture(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
+    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
+    system("rm -rf " TC_FIX " " TC_STORE);
 
     /* ── Phase A: cacheable, miss, store, hit ── */
     uint8_t keyA[32];
@@ -294,6 +298,36 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+
+    /* ── Phase A2: receipt storage is independent from source inspection ── */
+    TC_CHECK("separate verdict store starts empty",
+             system("rm -rf " TC_STORE) == 0 &&
+             mkdir(TC_STORE, 0755) == 0 &&
+             setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        TC_CHECK("cache opens with a separate verdict store", tc != NULL);
+        if (tc) {
+            struct testcache_probe p;
+            testcache_probe_group(tc, "test_demo_entry", &p);
+            TC_CHECK("separate store does not borrow the source-local PASS",
+                     p.cacheable && !p.hit && have_keyA &&
+                     memcmp(keyA, p.key, sizeof(keyA)) == 0);
+            if (p.cacheable) testcache_store_pass(tc, p.key);
+            testcache_close(tc);
+        }
+    }
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        if (tc) {
+            struct testcache_probe p;
+            testcache_probe_group(tc, "test_demo_entry", &p);
+            TC_CHECK("separate verdict store persists its exact PASS",
+                     p.cacheable && p.hit);
+            testcache_close(tc);
+        }
+    }
+    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
 
     /* ── Phase B: SOUNDNESS — edit a CLOSURE-MEMBER body => key changes, miss ── */
     TC_CHECK("rewrite leaf body", write_fixture(TC_LEAF_B, TC_OTHER_A, TC_H_A));
@@ -726,7 +760,8 @@ int test_testcache(void)
              file_contains("Makefile",
                            "$(TEST_PARALLEL_REL_ACTIVE) --no-cache"));
 
-    system("rm -rf " TC_FIX);
+    system("rm -rf " TC_FIX " " TC_STORE);
+    tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
     printf("test_testcache: %d failure(s)\n", failures);
     return failures;
 }

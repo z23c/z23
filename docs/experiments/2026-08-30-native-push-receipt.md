@@ -79,6 +79,26 @@ definition ahead of the target preserved the no-nested-Make gate and produced a
 green 24-gate `lint-fast` run in 12.838 seconds; Equihash itself took 139
 milliseconds.
 
+At `2026-08-30T11:38:02-04:00` (`2026-08-30T15:38:02+00:00`), an exact proof
+after the Windows test-lane integration selected 152 runnable groups. It ran
+all 152 because the isolated generation could not see 122 valid PASS objects
+stored by the preceding generation. The run completed in 360.377 seconds with
+151 groups passing, zero skips, and one deterministic failure:
+`test_header_probe` remained blocked in `accept()` until the runner's
+300-second silence limit. The portability change had replaced
+shutdown-then-close with close alone. Restoring
+`platform_socket_shutdown_both()` made the exact group pass with a 21
+millisecond test body.
+
+The test cache now separates the immutable source/depfile root from the
+content-addressed PASS-object store. The proof broker points only the verdict
+store at the primary checkout while every closure and source byte remains read
+from the isolated generation. A three-group measurement with two cacheable
+groups first took 6.045 seconds end to end, stored two exact PASS objects, and
+ran all three groups. Repeating the same command took 0.569 seconds, reused both
+cacheable objects, ran only the deliberately uncacheable cache self-test, and
+reported complete accounting: two cached, one ran, zero failed, zero skipped.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
@@ -97,10 +117,19 @@ milliseconds.
 - A self-sealed aggregate is insufficient by itself. Selected dimensions now
   name fixed-width content-addressed child receipts, and the hook requires each
   child object to exist and match its exact accounting.
+- Isolated generations must share only content-addressed verdict objects, not
+  mutable source or include graphs. Keeping those roots separate changed the
+  measured three-group replay from zero of two cache hits to two of two.
+- Closing a listening socket from another thread is not a portable wakeup for
+  a blocking POSIX `accept()`; shutdown-before-close is required by the tested
+  lifecycle.
 
 ## Next experiment
 
 Give generated-output and remaining lint producers native content-keyed child
 receipt publication, then compare a cold audit with warm direct admission.
 Move compile-epoch session validation, depfile restoration, and hit batching
-into `zcc` and count process creation before and after.
+into `zcc` and count process creation before and after. Replace the three
+per-helper shell mutation scans with one native C23 observation shared across
+the already-open exact executables, then measure proof-start process count and
+latency again.
