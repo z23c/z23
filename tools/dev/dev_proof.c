@@ -531,6 +531,35 @@ static bool dependency_materialize(const char *source, const char *target)
     return closedir(dir) == 0 && ok;
 }
 
+static bool generation_gitlink_prepare(const struct proof_paths *paths,
+                                       const char *generation,
+                                       char *why, size_t why_len)
+{
+    char source[PATH_MAX], config[PATH_MAX + 32];
+    if (snprintf(source, sizeof(source), "%s/vendor/tor", paths->root) >=
+            (int)sizeof(source) ||
+        snprintf(config, sizeof(config), "submodule.vendor/tor.url=%s",
+                 source) >= (int)sizeof(config)) {
+        proof_why(why, why_len, "proof_generation_gitlink_path_invalid");
+        return false;
+    }
+    struct stat st;
+    if (lstat(source, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        proof_why(why, why_len, "proof_generation_gitlink_source_unavailable");
+        return false;
+    }
+    const char *argv[] = {
+        "git", "-c", "protocol.file.allow=always", "-c", config,
+        "submodule", "update", "--init", "--no-fetch", "--", "vendor/tor",
+        NULL};
+    char output[ZCL_DEVLOOP_OUTPUT_MAX];
+    if (!git_capture(generation, argv, output, sizeof(output))) {
+        proof_why(why, why_len, "proof_generation_gitlink_checkout_failed");
+        return false;
+    }
+    return true;
+}
+
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local, char generation[PATH_MAX],
                                char *why, size_t why_len)
@@ -578,6 +607,8 @@ static bool generation_prepare(const struct proof_paths *paths,
             return false;
         }
     }
+    if (!generation_gitlink_prepare(paths, generation, why, why_len))
+        return false;
     static const char *const dependencies[] = {
         "vendor/lib/libsecp256k1.a", "vendor/lib/libcrypto.a",
         "vendor/lib/libssl.a", "vendor/lib/libevent.a",
@@ -1062,8 +1093,12 @@ static bool proof_worker(const struct proof_paths *paths,
 
     struct dev_source_record source_before = {0}, source_after = {0};
     if (!zcl_dev_source_identity_capture(generation, &source_before, why,
-                                         why_len) ||
-        !zcl_dev_source_cas_capture(generation, &source_before) ||
+                                         why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "source_identity_capture_failed");
+        return false;
+    }
+    if (!zcl_dev_source_cas_capture(generation, &source_before) ||
         !source_before.cas_present) {
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
