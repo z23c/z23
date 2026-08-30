@@ -44,8 +44,11 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define SPB_EXTRA 24
 
@@ -245,3 +248,12 @@ int test_sandbox_process_budget(void)
            failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked sandbox-budget child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_sandbox_process_budget(void)
+{
+    printf("sandbox_process_budget: SKIP (Windows): forked sandbox-budget child lane\n");
+    return 0;
+}
+#endif

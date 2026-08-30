@@ -96,6 +96,10 @@ static struct wallet *alloc_wallet(void)
 {
     struct wallet *w = zcl_calloc(1, sizeof(struct wallet), "test_wallet");
     if (w) {
+        /* Production wallet_init() does this; a zeroed mutex is only valid
+         * on POSIX (PTHREAD_MUTEX_INITIALIZER), Windows CRITICAL_SECTION
+         * must be initialized before EnterCriticalSection. */
+        zcl_mutex_init(&w->cs);
         keystore_init(&w->keystore);
         sapling_keystore_init(&w->sapling_keys);
     }
@@ -106,6 +110,7 @@ static void free_wallet(struct wallet *w)
 {
     if (!w) return;
     keystore_free(&w->keystore);
+    zcl_mutex_destroy(&w->cs);
     free(w);
 }
 

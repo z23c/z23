@@ -70,6 +70,17 @@ static uint64_t thread_cpu_ns_now(void)
  *
  * Returns the lo/hi totals from the median-ratio sample. */
 #define CT_TIMING_BATCHES 9
+
+/* Windows per-thread CPU time (GetThreadTimes under mingw clock_gettime)
+ * advances in ~15.6 ms scheduler ticks: a short timed run can read as 0 ns,
+ * and a single tick boundary can skew one batch by ±100%. The gate bands are
+ * unchanged; on Windows the batches are simply made long enough that one
+ * tick sits well below the noise the gate already tolerates. */
+#if defined(_WIN32)
+#define CT_ITERS_SCALE 8
+#else
+#define CT_ITERS_SCALE 1
+#endif
 typedef uint64_t (*ct_run_fn)(void *);
 
 struct ct_timing_sample {
@@ -477,7 +488,7 @@ int test_sapling_crypto(void)
 
         struct jub_point R;
         const int WARMUP = 8;
-        const int ITERS = 200;
+        const int ITERS = 200 * CT_ITERS_SCALE;
         for (int i = 0; i < WARMUP; i++) jub_scalar_mul(&R, &P, lo_scalar);
 
         /* Symmetric paired CPU-time samples; see the helper contract above. */
@@ -972,7 +983,7 @@ int test_sapling_crypto(void)
         /* G1 scalar mul is the most expensive primitive, so this batch has the
          * smallest absolute time of the three gates; raise ITERS to 60 so the
          * per-batch signal dwarfs per-iteration jitter even under saturation. */
-        const int ITERS = 60;
+        const int ITERS = 60 * CT_ITERS_SCALE;
         for (int i = 0; i < WARMUP; i++) g1_scalar_mul(&R, &P, lo_scalar);
 
         /* Symmetric paired CPU-time samples; see the helper contract above. */
@@ -1232,7 +1243,7 @@ int test_sapling_crypto(void)
 
         uint8_t out[32];
         const int WARMUP = 32;
-        const int ITERS = 2000;
+        const int ITERS = 2000 * CT_ITERS_SCALE;
         for (int i = 0; i < WARMUP; i++) jubjub_to_scalar(lo_in, out);
 
         /* Symmetric paired CPU-time samples; see the helper contract above. */

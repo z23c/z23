@@ -40,15 +40,19 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#if !defined(_WIN32)
 #include <sched.h>
+#endif
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#endif
 
 #if !defined(__linux__)
 

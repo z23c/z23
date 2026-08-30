@@ -28,7 +28,9 @@
 #include "util/wal_checkpoint_stats.h"
 #include <pthread.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -227,6 +229,37 @@ static void test_db_service_async_free(void *ctx)
 
 int test_sqlite(void) {
     int failures = 0;
+
+#if defined(_WIN32)
+    /* Cross-process lease tests re-exec this binary with a role instead of
+     * fork() (Windows has no fork). The child body returns 0 when the
+     * refusal under test happened and 1 when it did not — the process exit
+     * code is the assertion the parent waits on. */
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        const char *child_db = getenv("ZCL_SQLITE_CHILD_DB");
+        if (!child_db || !child_db[0]) {
+            fprintf(stderr, "test_sqlite role '%s': ZCL_SQLITE_CHILD_DB "
+                    "unset\n", fork_role);
+            return 1;
+        }
+        if (strcmp(fork_role, "borrower") == 0) {
+            struct node_db borrowed = {0};
+            bool opened = node_db_open_existing_runtime(
+                &borrowed, child_db, "test.cross_process_borrower");
+            if (opened) node_db_close(&borrowed);
+            return opened ? 1 : 0;
+        }
+        if (strcmp(fork_role, "intruder") == 0) {
+            struct node_db intruder = {0};
+            bool opened = node_db_open(&intruder, child_db);
+            if (opened) node_db_close(&intruder);
+            return opened ? 1 : 0;
+        }
+        fprintf(stderr, "test_sqlite: unknown fork role '%s'\n", fork_role);
+        return 1;
+    }
+#endif
 
     /* DB open/close and schema creation */
     {
@@ -723,6 +756,19 @@ int test_sqlite(void) {
                 stat(wal_path, &wal_before) == 0 &&
                 stat(shm_path, &shm_before) == 0;
         }
+#if defined(_WIN32)
+        if (ok) {
+            char log_path[1064];
+            snprintf(log_path, sizeof(log_path), "%s/borrower.log", dir_path);
+            if (_putenv_s("ZCL_SQLITE_CHILD_DB", db_path) != 0)
+                ok = false;
+            void *hp = ok ? test_spawn_self_with_role(
+                "test_sqlite", "borrower", log_path) : NULL;
+            if (!hp || test_self_child_wait(hp) != 0)
+                ok = false;
+            _putenv_s("ZCL_SQLITE_CHILD_DB", "");
+        }
+#else
         pid_t child = ok ? fork() : -1;
         if (child == 0) {
             struct node_db borrowed = {0};
@@ -735,6 +781,7 @@ int test_sqlite(void) {
         if (child < 0 || waitpid(child, &status, 0) != child ||
             !WIFEXITED(status) || WEXITSTATUS(status) != 0)
             ok = false;
+#endif
         ok = ok && stat(wal_path, &wal_after) == 0 &&
             stat(shm_path, &shm_after) == 0 &&
             wal_before.st_dev == wal_after.st_dev &&
@@ -862,6 +909,26 @@ int test_sqlite(void) {
                 node_db_state_set_int(&canonical, "process_owner_test", 0) &&
                 stat(wal_path, &before) == 0;
         }
+#if defined(_WIN32)
+        void *hp = NULL;
+        if (ok) {
+            char log_path[1064];
+            snprintf(log_path, sizeof(log_path), "%s/intruder.log", dir_path);
+            if (_putenv_s("ZCL_SQLITE_CHILD_DB", db_path) == 0)
+                hp = test_spawn_self_with_role(
+                    "test_sqlite", "intruder", log_path);
+            ok = hp != NULL;
+        }
+        for (int64_t i = 1; ok && i <= 64; i++)
+            ok = node_db_state_set_int(
+                &canonical, "process_owner_test", i);
+        int child_exit = -1;
+        if (hp)
+            child_exit = test_self_child_wait(hp);
+        _putenv_s("ZCL_SQLITE_CHILD_DB", "");
+        int64_t read_back = 0;
+        ok = ok && child_exit == 0 &&
+#else
         pid_t child = ok ? fork() : -1;
         if (child == 0) {
             struct node_db intruder = {0};
@@ -878,6 +945,7 @@ int test_sqlite(void) {
             ok = waitpid(child, &status, 0) == child && ok;
         int64_t read_back = 0;
         ok = ok && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+#endif
             stat(wal_path, &after) == 0 &&
             before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
             node_db_state_get_int(&canonical, "process_owner_test",

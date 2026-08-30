@@ -11,6 +11,7 @@
 #include <string.h>
 #include <signal.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -648,3 +649,14 @@ int test_postmortem(void)
         printf("postmortem: failures=%d\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* The postmortem capsule machinery is POSIX fatal-signal based (sigaction
+ * handlers, fork-and-raise children, core dumps). AGENTS.md records
+ * signal-context self-backtraces as unavailable on the Windows lane. */
+int test_postmortem(void)
+{
+    printf("postmortem: SKIP (Windows): POSIX fatal-signal capsule lane "
+           "(sigaction + fork-and-raise) has no Windows analogue\n");
+    return 0;
+}
+#endif

@@ -8,8 +8,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define BDL_CHECK(name, expr) do {                                      \
     printf("boot_datadir_lock: %s... ", (name));                       \
@@ -430,3 +433,12 @@ int test_boot_datadir_lock(void)
     boot_error_reset_for_testing();
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked datadir-lock contention child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_boot_datadir_lock(void)
+{
+    printf("boot_datadir_lock: SKIP (Windows): forked datadir-lock contention child lane\n");
+    return 0;
+}
+#endif

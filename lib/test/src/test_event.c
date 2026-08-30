@@ -12,7 +12,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <sys/stat.h>
 #include <stdlib.h>
 #include "util/safe_alloc.h"
@@ -708,6 +710,13 @@ static int test_crash_handler_stderr_survives_exit(void)
 {
     int failures = 0;
 
+#if defined(_WIN32)
+    /* POSIX crash-handler lane: fork()+raise(SIGABRT) against sigaction
+     * handlers and backtrace_symbols_fd frames — AGENTS.md records
+     * signal-context self-backtraces as unavailable on Windows. */
+    printf("crash_handler: header + ≥3 backtrace frames reach stderr... "
+           "SKIP (Windows): POSIX fatal-signal backtrace lane\n");
+#else
     TEST("crash_handler: header + ≥3 backtrace frames reach stderr") {
         mkdir("./test-tmp", 0700);
         char path[256];
@@ -825,7 +834,7 @@ static int test_crash_handler_stderr_survives_exit(void)
         unlink(path2);
         PASS();
     } _test_next:;
-
+#endif
     return failures;
 }
 

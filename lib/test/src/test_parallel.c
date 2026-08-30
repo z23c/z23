@@ -38,6 +38,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
 #include "command/native_dev_hotswap.h"
 #include "config/command_catalog.h"
 #include "hotswap/hotswap.h"
@@ -61,8 +62,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/wait.h>
-#if !defined(_WIN32)
 #include <sys/resource.h>
 #endif
 #include <time.h>
@@ -108,11 +111,37 @@ static const size_t g_num_groups =
 
 /* ── Parent-side worker pool ───────────────────────────────────────*/
 
+/* One worker-process handle. POSIX: the fork()ed child's pid (0 = free slot).
+ * Windows: no fork() exists, so the parent re-execs THIS binary with
+ * --child-run=<idx> (see child_spawn and the --child-run dispatch in main)
+ * and the slot carries the child's process HANDLE (NULL = free slot). */
+#if defined(_WIN32)
+typedef HANDLE zcl_child_t;
+#define ZCL_CHILD_NONE NULL
+#else
+typedef pid_t zcl_child_t;
+#define ZCL_CHILD_NONE ((pid_t)0)
+#endif
+
 struct child_slot {
-    pid_t pid;           /* 0 if slot is free */
+    zcl_child_t pid;     /* ZCL_CHILD_NONE if slot is free */
     size_t group_idx;    /* index into g_groups for the running group */
     char out_path[128];  /* tempfile path for this child's stdout+stderr */
 };
+
+/* The reap accounting below is written against the waitpid() status word.
+ * On Windows the value the child arm stores IS the process exit code, so
+ * these shims map it onto the same shape: a child the watchdog killed exits
+ * with ZCL_WIN_KILL_EXIT (passed to TerminateProcess), which WIFSIGNALED maps
+ * onto the POSIX SIGKILL accounting; every other exit is WIFEXITED with the
+ * code verbatim (0 = pass, 1 = test failures, 2 = harness error). */
+#if defined(_WIN32)
+#define ZCL_WIN_KILL_EXIT ((DWORD)0x8000000Au)
+#define WIFEXITED(s)   ((int)(s) != (int)ZCL_WIN_KILL_EXIT)
+#define WEXITSTATUS(s) ((int)(s))
+#define WIFSIGNALED(s) ((int)(s) == (int)ZCL_WIN_KILL_EXIT)
+#define WTERMSIG(s)    9
+#endif
 
 struct group_result {
     int status;          /* -1 if not yet run, else wait-status from waitpid */
@@ -213,10 +242,19 @@ static void print_watchdog_kill(size_t idx, const char *name,
 
 static int get_nproc(void)
 {
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    DWORD n = si.dwNumberOfProcessors;
+    if (n < 1) return 1;
+    if (n > 1024) return 1024;
+    return (int)n;
+#else
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) return 1;
     if (n > 1024) return 1024;
     return (int)n;
+#endif
 }
 
 static bool activate_proof_contract(size_t idx)
@@ -305,17 +343,182 @@ static void child_run(size_t idx, const char *out_path,
     _exit(failures ? 1 : 0);
 }
 
+/* Spawn one group's worker. POSIX forks and the child runs child_run in
+ * place. Windows has no fork(), so the parent re-execs this same binary with
+ * --child-run=<idx> --child-out=<path>; the early dispatch in main() hands
+ * those arguments straight to child_run, which does its own stdout/stderr
+ * redirection exactly as the forked child does. Returns 0 and fills `out`,
+ * or -1 (already logged). */
+static int child_spawn(size_t idx, const char *out_path,
+                       bool activate_proof_contracts, zcl_child_t *out)
+{
+#if defined(_WIN32)
+    char exe[PATH_MAX];
+    DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof(exe));
+    if (n == 0 || n >= (DWORD)sizeof(exe)) {
+        fprintf(stderr, "test_parallel: GetModuleFileName failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    char cmd[PATH_MAX + 320];
+    int len = snprintf(cmd, sizeof(cmd),
+                       "\"%s\" --child-run=%zu --child-out=%s%s",
+                       exe, idx, out_path,
+                       activate_proof_contracts ? " --child-proof" : "");
+    if (len < 0 || (size_t)len >= sizeof(cmd)) {
+        fprintf(stderr, "test_parallel: child command line too long\n");
+        return -1;
+    }
+    STARTUPINFOA si;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof(pi));
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL,
+                        &si, &pi)) {
+        fprintf(stderr, "test_parallel: CreateProcess failed (%lu) for %s\n",
+                (unsigned long)GetLastError(), g_groups[idx].name);
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    *out = pi.hProcess;
+    return 0;
+#else
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("test_parallel: fork");
+        return -1;
+    }
+    if (pid == 0) {
+        child_run(idx, out_path, activate_proof_contracts);
+        _exit(2); /* unreachable */
+    }
+    *out = pid;
+    return 0;
+#endif
+}
+
+/* Non-blocking reap of one worker: 1 = exited (*status set), 0 = still
+ * running, -1 = harness error (already logged). */
+static int child_poll(zcl_child_t child, int *status)
+{
+#if defined(_WIN32)
+    DWORD wr = WaitForSingleObject(child, 0);
+    if (wr == WAIT_TIMEOUT) return 0;
+    if (wr != WAIT_OBJECT_0) {
+        fprintf(stderr, "test_parallel: WaitForSingleObject failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    DWORD code = 0;
+    if (!GetExitCodeProcess(child, &code)) {
+        fprintf(stderr, "test_parallel: GetExitCodeProcess failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    *status = (int)code;
+    return 1;
+#else
+    pid_t done = waitpid(child, status, WNOHANG);
+    if (done == 0) return 0;
+    if (done < 0) {
+        if (errno == EINTR) return 0;
+        perror("test_parallel: waitpid");
+        return -1;
+    }
+    return 1;
+#endif
+}
+
+/* Blocking reap, used only on the scheduler-teardown path. */
+static int child_wait(zcl_child_t child, int *status)
+{
+#if defined(_WIN32)
+    if (WaitForSingleObject(child, INFINITE) != WAIT_OBJECT_0) {
+        fprintf(stderr, "test_parallel: WaitForSingleObject failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    DWORD code = 0;
+    if (!GetExitCodeProcess(child, &code)) {
+        fprintf(stderr, "test_parallel: GetExitCodeProcess failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    *status = (int)code;
+    return 0;
+#else
+    while (waitpid(child, status, 0) < 0) {
+        if (errno == EINTR) continue;
+        perror("test_parallel: waitpid");
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+/* The watchdog's kill: SIGKILL on POSIX, TerminateProcess with the sentinel
+ * exit code on Windows so the reap accounting still reads "signaled". */
+static void child_kill(zcl_child_t child)
+{
+#if defined(_WIN32)
+    (void)TerminateProcess(child, ZCL_WIN_KILL_EXIT);
+#else
+    (void)kill(child, SIGKILL);
+#endif
+}
+
+static void child_close(zcl_child_t child)
+{
+#if defined(_WIN32)
+    CloseHandle(child);
+#else
+    (void)child;   /* a reaped pid_t needs no release */
+#endif
+}
+
+/* Reap one finished child from the slot set. Returns the slot index, -2 when
+ * no child has exited yet, -1 on harness error (already logged). */
+#if !defined(_WIN32)
+static int find_slot_by_pid(struct child_slot *slots, int jobs, pid_t pid);
+#endif
+static int reap_any(struct child_slot *slots, int jobs, int *status)
+{
+#if defined(_WIN32)
+    for (int i = 0; i < jobs; i++) {
+        if (slots[i].pid == ZCL_CHILD_NONE) continue;
+        int r = child_poll(slots[i].pid, status);
+        if (r == 1) return i;
+        if (r < 0) return -1;
+    }
+    return -2;
+#else
+    pid_t done = waitpid(-1, status, WNOHANG);
+    if (done == 0) return -2;
+    if (done < 0) {
+        if (errno == EINTR) return -2;
+        perror("test_parallel: waitpid");
+        return -1;
+    }
+    /* A reaped child that owns no slot (should not happen) is ignored, not
+     * fatal — the historic loop just continued. */
+    return find_slot_by_pid(slots, jobs, done);
+#endif
+}
+
+#if !defined(_WIN32)
 static int find_slot_by_pid(struct child_slot *slots, int jobs, pid_t pid)
 {
     for (int i = 0; i < jobs; i++)
         if (slots[i].pid == pid) return i;
     return -1;
 }
+#endif
 
 static int find_free_slot(struct child_slot *slots, int jobs)
 {
     for (int i = 0; i < jobs; i++)
-        if (slots[i].pid == 0) return i;
+        if (slots[i].pid == ZCL_CHILD_NONE) return i;
     return -1;
 }
 
@@ -329,7 +532,7 @@ static void ensure_tmp_dir(void)
 {
     struct stat st;
     if (stat("./test-tmp", &st) == 0) return;
-    if (mkdir("./test-tmp", 0755) != 0 && errno != EEXIST)
+    if (platform_directory_create("./test-tmp", 0755) != 0 && errno != EEXIST)
         perror("test_parallel: mkdir ./test-tmp");
 }
 
@@ -477,30 +680,29 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
     make_tempfile_path(out_path, sizeof(out_path), idx, parent_pid);
     results[idx].start = platform_time_wall_time_t();
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("test_parallel: exclusive fork");
+    zcl_child_t child = ZCL_CHILD_NONE;
+    if (child_spawn(idx, out_path, activate_proof_contracts, &child) != 0) {
         results[idx].status = 1;
         results[idx].signaled = 0;
         results[idx].exit_code = 2;
         return;
     }
-    if (pid == 0) {
-        child_run(idx, out_path, activate_proof_contracts);
-        _exit(2); /* unreachable */
-    }
-    if (verbose)
+    if (verbose) {
+#if defined(_WIN32)
+        printf("[exclusive] [%zu] %s handle=%p\n", idx, g_groups[idx].name,
+               (void *)child);
+#else
         printf("[exclusive] [%zu] %s pid=%d\n", idx, g_groups[idx].name,
-               (int)pid);
+               (int)child);
+#endif
+    }
 
     int status = 0;
     bool killed = false;
     for (;;) {
-        pid_t done = waitpid(pid, &status, WNOHANG);
-        if (done == pid) break;
-        if (done < 0 && errno == EINTR) continue;
-        if (done < 0) {
-            perror("test_parallel: exclusive waitpid");
+        int pr = child_poll(child, &status);
+        if (pr == 1) break;
+        if (pr < 0) {
             status = 1;
             break;
         }
@@ -512,12 +714,13 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
             results[idx].wedged = 1;
             print_watchdog_kill(idx, g_groups[idx].name, &results[idx], now,
                                 timeout_secs);
-            (void)kill(pid, SIGKILL);
+            child_kill(child);
             killed = true;
         }
         struct timespec ts = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
+    child_close(child);
 
     results[idx].status = status;
     if (WIFSIGNALED(status)) {
@@ -571,31 +774,31 @@ static bool run_parallel_phase(
                                sizeof(slots[slot].out_path),
                                next_idx, parent_pid);
             results[next_idx].start = platform_time_wall_time_t();
-            pid_t pid = fork();
-            if (pid < 0) {
-                perror("test_parallel: fork");
+            if (child_spawn(next_idx, slots[slot].out_path,
+                            activate_proof_contracts,
+                            &slots[slot].pid) != 0)
                 return false;
-            }
-            if (pid == 0) {
-                child_run(next_idx, slots[slot].out_path,
-                          activate_proof_contracts);
-                _exit(2);
-            }
-            slots[slot].pid = pid;
             slots[slot].group_idx = next_idx;
             if (verbose) {
                 const char *label = phase == POOL_PHASE_QUIET_LINT
                     ? "quiet" : "dispatch";
-                printf("[%-8s] [%zu/%zu] pid=%d %s\n",
-                       label, next_idx + 1, g_num_groups, pid,
+#if defined(_WIN32)
+                printf("[%-8s] [%zu/%zu] handle=%p %s\n",
+                       label, next_idx + 1, g_num_groups,
+                       (void *)slots[slot].pid,
                        g_groups[next_idx].name);
+#else
+                printf("[%-8s] [%zu/%zu] pid=%d %s\n",
+                       label, next_idx + 1, g_num_groups, slots[slot].pid,
+                       g_groups[next_idx].name);
+#endif
             }
             next_idx++;
         }
 
         time_t now_tick = platform_time_wall_time_t();
         for (int i = 0; i < jobs; i++) {
-            if (slots[i].pid == 0) continue;
+            if (slots[i].pid == ZCL_CHILD_NONE) continue;
             size_t idx = slots[i].group_idx;
             if (results[idx].wedged) continue;   /* already killed, awaiting reap */
             if (!group_watchdog_expired(&results[idx], slots[i].out_path,
@@ -606,26 +809,25 @@ static bool run_parallel_phase(
             results[idx].wedged = 1;
             print_watchdog_kill(idx, g_groups[idx].name, &results[idx],
                                 now_tick, timeout_secs);
-            (void)kill(slots[i].pid, SIGKILL);
+            child_kill(slots[i].pid);
         }
 
         int status = 0;
-        pid_t done = waitpid(-1, &status, WNOHANG);
-        if (done == 0) {
+        int slot = reap_any(slots, jobs, &status);
+        if (slot == -2) {
             struct timespec ts = {
                 .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000,
             };
             nanosleep(&ts, NULL);
             continue;
         }
-        if (done < 0) {
-            if (errno == EINTR) continue;
-            perror("test_parallel: waitpid");
-            return false;
+        if (slot < 0) {
+            if (slot == -1)
+                return false;
+            continue;   /* reaped a slot-less child; nothing to record */
         }
-        int slot = find_slot_by_pid(slots, jobs, done);
-        if (slot < 0) continue;
         size_t idx = slots[slot].group_idx;
+        child_close(slots[slot].pid);
         results[idx].status = status;
         if (WIFSIGNALED(status)) {
             results[idx].signaled = 1;
@@ -646,7 +848,7 @@ static bool run_parallel_phase(
                    results[idx].signaled ? "SIGNALED" :
                    (results[idx].exit_code == 0 ? "PASS" : "FAIL"),
                    results[idx].wall_seconds);
-        slots[slot].pid = 0;
+        slots[slot].pid = ZCL_CHILD_NONE;
         remaining--;
         (*reaped)++;
     }
@@ -688,11 +890,11 @@ static void write_test_timing_json(const struct group_result *results,
                                    const struct suite_verdict *v)
 {
     const char *dir = ".cache/test-timing";
-    if (mkdir(".cache", 0755) != 0 && errno != EEXIST) {
+    if (platform_directory_create(".cache", 0755) != 0 && errno != EEXIST) {
         perror("test_parallel: mkdir .cache");
         return;
     }
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    if (platform_directory_create(dir, 0755) != 0 && errno != EEXIST) {
         perror("test_parallel: mkdir .cache/test-timing");
         return;
     }
@@ -780,6 +982,11 @@ static void write_test_timing_json(const struct group_result *results,
     fclose(fp);
     free(order);
 
+#if defined(_WIN32)
+    /* Windows rename() refuses an existing target; the timing artifact is a
+     * best-effort cache, so replacing last run's file is correct. */
+    (void)remove(final_path);
+#endif
     if (rename(tmp_path, final_path) != 0)
         perror("test_parallel: rename timing artifact");
 }
@@ -972,6 +1179,68 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--metaverse-agent-confined") == 0)
             return agent_confined_mode_main(argc, argv);
     }
+#if defined(_WIN32)
+    /* Windows worker entry. The parent cannot fork(), so child_spawn()
+     * re-execs this binary with --child-run=<idx> --child-out=<path> per
+     * group. Dispatch before any suite setup: child_run does its own
+     * stdout/stderr redirection (same body the forked POSIX child runs), so
+     * nothing may print before it. */
+    {
+        long child_idx = -1;
+        const char *child_out = NULL;
+        bool child_proof = false;
+        for (int i = 1; i < argc; i++) {
+            if (strncmp(argv[i], "--child-run=", 12) == 0)
+                child_idx = strtol(argv[i] + 12, NULL, 10);
+            else if (strncmp(argv[i], "--child-out=", 12) == 0)
+                child_out = argv[i] + 12;
+            else if (strcmp(argv[i], "--child-proof") == 0)
+                child_proof = true;
+        }
+        if (child_idx >= 0) {
+            if (!child_out || (unsigned long)child_idx >=
+                              (unsigned long)g_num_groups) {
+                fprintf(stderr, "test_parallel: bad --child-run dispatch\n");
+                return 2;
+            }
+            child_run((size_t)child_idx, child_out, child_proof);
+            return 2; /* unreachable: child_run _exit()s */
+        }
+    }
+
+    /* Fork-role dispatch: tests with a cross-process leg (SQLite owner lease,
+     * kill -9 recovery, ...) re-exec this binary through
+     * test_spawn_self_with_role(), which sets ZCL_TEST_FORK_GROUP/_ROLE. Run
+     * the group DIRECTLY in this process — a second scheduler layer would put
+     * a proxy between the parent and the worker and break the hard-kill
+     * tests. The group entry branches on the role and runs only the child
+     * body. Same chain/ecc/event setup as child_run. */
+    {
+        const char *role = getenv("ZCL_TEST_FORK_ROLE");
+        const char *gname = getenv("ZCL_TEST_FORK_GROUP");
+        if (role && role[0]) {
+            if (!gname || !gname[0]) {
+                fprintf(stderr, "test_parallel: ZCL_TEST_FORK_ROLE without "
+                                "ZCL_TEST_FORK_GROUP\n");
+                return 2;
+            }
+            for (size_t i = 0; i < g_num_groups; i++) {
+                if (strcmp(g_groups[i].name, gname) != 0) continue;
+                chain_params_select(CHAIN_MAIN);
+                ecc_start();
+                ecc_verify_init();
+                event_log_init();
+                int failures = g_groups[i].fn();
+                ecc_verify_destroy();
+                ecc_stop();
+                return failures ? 1 : 0;
+            }
+            fprintf(stderr, "test_parallel: ZCL_TEST_FORK_GROUP names no "
+                            "registered group: %s\n", gname);
+            return 2;
+        }
+    }
+#endif
     if (argc == 2 && strcmp(argv[1], "--source-id") == 0) {
         printf("%s\n", zcl_build_source_id_sha256());
         return 0;
@@ -1357,9 +1626,11 @@ int main(int argc, char **argv)
             timeout_secs, verbose, activate_proof_contracts, &reaped);
     if (!phases_ok || reaped != g_num_groups) {
         for (int i = 0; i < jobs; i++) {
-            if (slots[i].pid <= 0) continue;
-            (void)kill(slots[i].pid, SIGKILL);
-            while (waitpid(slots[i].pid, NULL, 0) < 0 && errno == EINTR) {}
+            if (slots[i].pid == ZCL_CHILD_NONE) continue;
+            child_kill(slots[i].pid);
+            int st = 0;
+            (void)child_wait(slots[i].pid, &st);
+            child_close(slots[i].pid);
         }
         fprintf(stderr, "test_parallel: bounded phase scheduler failed\n");
         testcache_close(tc);

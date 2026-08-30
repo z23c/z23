@@ -58,7 +58,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #define LQ_CHECK(name, expr)                                            \
@@ -699,7 +701,7 @@ static int case_canonical_bytes(void)
 #define RACE_EACH 12
 #define RACE_WRITERS 4
 
-static void race_child(const char *path, const char *prefix)
+static int race_child_run(const char *path, const char *prefix)
 {
     struct zcl_chainlog_report rep;
     for (int i = 0; i < RACE_EACH; i++) {
@@ -707,17 +709,24 @@ static void race_child(const char *path, const char *prefix)
          * the two processes really do interleave at the file lock. */
         struct land_queue *q = land_queue_open(path, &rep);
         if (!q)
-            _exit(2);
+            return 2;
         char branch[64];
         snprintf(branch, sizeof branch, "%s/%d", prefix, i);
         if (submit_one(q, branch, k_head_a) == 0) {
             land_queue_close(q);
-            _exit(3);
+            return 3;
         }
         land_queue_close(q);
     }
-    _exit(0);
+    return 0;
 }
+
+#if !defined(_WIN32)
+static void race_child(const char *path, const char *prefix)
+{
+    _exit(race_child_run(path, prefix));
+}
+#endif
 
 static int case_two_submitters_race(void)
 {
@@ -737,9 +746,27 @@ static int case_two_submitters_race(void)
     }
     land_queue_close(seed);
 
-    pid_t kids[RACE_WRITERS];
     const char *prefixes[RACE_WRITERS] = { "lane/one", "lane/two",
                                            "lane/three", "lane/four" };
+#if defined(_WIN32)
+    void *kids[RACE_WRITERS] = {0};
+    char logs[RACE_WRITERS][704];
+    bool forked = setenv("ZCL_LAND_RACE_PATH", path, 1) == 0;
+    for (int k = 0; k < RACE_WRITERS; k++) {
+        snprintf(logs[k], sizeof logs[k], "%s/worker-%d.log", dir, k);
+        if (setenv("ZCL_LAND_RACE_PREFIX", prefixes[k], 1) != 0) {
+            forked = false;
+            continue;
+        }
+        kids[k] = test_spawn_self_with_role("test_land_queue", "race-writer",
+                                            logs[k]);
+        if (!kids[k])
+            forked = false;
+    }
+    (void)unsetenv("ZCL_LAND_RACE_PATH");
+    (void)unsetenv("ZCL_LAND_RACE_PREFIX");
+#else
+    pid_t kids[RACE_WRITERS];
     bool forked = true;
     for (int k = 0; k < RACE_WRITERS; k++) {
         kids[k] = fork();
@@ -748,16 +775,37 @@ static int case_two_submitters_race(void)
         if (kids[k] < 0)
             forked = false;
     }
+#endif
     LQ_CHECK("four submitter processes start at once", forked);
 
     int bad = 0;
     for (int k = 0; k < RACE_WRITERS; k++) {
+#if defined(_WIN32)
+        if (!kids[k])
+            continue;
+        int child_status = test_self_child_wait(kids[k]);
+        if (child_status != 0) {
+            printf("land_queue: worker %d exited %d", k, child_status);
+            FILE *worker_log = fopen(logs[k], "rb");
+            if (worker_log) {
+                char diagnostic[512];
+                size_t got = fread(diagnostic, 1, sizeof(diagnostic) - 1,
+                                   worker_log);
+                diagnostic[got] = '\0';
+                fclose(worker_log);
+                printf(": %s", diagnostic);
+            }
+            printf("\n");
+            bad++;
+        }
+#else
         if (kids[k] <= 0)
             continue;
         int status = 0;
         (void)waitpid(kids[k], &status, 0);
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
             bad++;
+#endif
     }
     LQ_CHECK("all four submitters finish cleanly", bad == 0);
 
@@ -1123,6 +1171,16 @@ static int case_surface(void)
 int test_land_queue(void);
 int test_land_queue(void)
 {
+#if defined(_WIN32)
+    const char *role = getenv("ZCL_TEST_FORK_ROLE");
+    if (role && strcmp(role, "race-writer") == 0) {
+        const char *path = getenv("ZCL_LAND_RACE_PATH");
+        const char *prefix = getenv("ZCL_LAND_RACE_PREFIX");
+        if (!path || !path[0] || !prefix || !prefix[0])
+            return 2;
+        return race_child_run(path, prefix);
+    }
+#endif
     int failures = 0;
     failures += case_submit_and_pending();
     failures += case_landing_needs_a_real_gate();

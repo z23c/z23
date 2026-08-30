@@ -69,6 +69,8 @@
 #include "vcs/package_public_shape.h"
 #include "vcs/package_store.h"
 
+#if !defined(_WIN32)
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1115,3 +1117,18 @@ done:
            failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");
     return failures;
 }
+
+#else /* _WIN32 */
+
+/* Every candidate build here runs the confined package verifier with
+ * --require-full-isolation, which refuses off Linux (no Landlock/seccomp;
+ * the Windows sandbox is unqualified). The fork+pipe drain plumbing has no
+ * Windows analogue either, so no case in this group can run. */
+int test_fastobj_carrier(void)
+{
+    printf("test_fastobj_carrier: SKIP (Windows): confined package builds "
+           "require Linux full isolation\n");
+    return 0;
+}
+
+#endif /* !_WIN32 */

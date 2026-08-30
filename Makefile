@@ -1099,6 +1099,13 @@ BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
 ZCL_DEV_LINKER ?= $(shell tools/dev/dev-linker-select.sh)
+# PE/COFF relocatable links are supported by the MinGW platform linker, while
+# lld-link rejects the ELF-style `-r` option.  Keep the measured fast linker
+# for executable links and use the platform linker for frozen restart bases.
+ZCL_RELOC_LINKER = $(ZCL_DEV_LINKER)
+ifneq ($(ZCL_HOST_WINDOWS),)
+ZCL_RELOC_LINKER =
+endif
 DEV_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
 	-Wno-deprecated-declarations $(ZCL_WARN_FORMAT_TRUNCATION) $(ZCL_WARN_MAYBE_UNINITIALIZED)
 DEV_HOT_CFLAGS = $(filter-out $(ZCL_DEV_OPT),$(DEV_CFLAGS)) $(ZCL_DEV_HOT_OPT)
@@ -2271,12 +2278,29 @@ TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
 # helpers as sequential test_zcl.
-TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
+# The strict-C23 Windows acceptance catalog (windows_acceptance.mk, included
+# above) is a set of standalone main()-bearing programs. Off Windows each is
+# an empty TU, but on a Windows host every one defines main and cannot join
+# the test_parallel_fast monolith — they build and run as individual
+# binaries via windows-acceptance.
+ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES = $(if $(ZCL_HOST_WINDOWS),\
+	$(filter lib/test/src/%,\
+	$(foreach t,$(ZCL_WINDOWS_ACCEPTANCE_TESTS),\
+	$(ZCL_WINDOWS_ACCEPTANCE_$(t)_SOURCES))),)
+TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c \
+	$(ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES), $(TEST_SRCS)) \
+	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
+# Windows test-lane compat shims (lib/test/include/test/windows_compat.h):
+# force-included into test-fast TUs on Windows hosts only. Test-only, never
+# production: where a POSIX capability genuinely does not exist the shim
+# fails the call (ENOSYS) instead of faking success.
+ZCL_TEST_WINDOWS_COMPAT_FLAGS = $(if $(ZCL_HOST_WINDOWS),-include test/windows_compat.h,)
 TEST_FAST_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
-	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) \
+	$(ZCL_TEST_WINDOWS_COMPAT_FLAGS)
 TEST_FAST_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
 TEST_FAST_EPOCH_COMPILE_FLAGS := $(strip $(TEST_FAST_CFLAGS) deps=-MD,-MP)
 TEST_FAST_EPOCH_LINK_FLAGS := $(strip $(TEST_FAST_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
@@ -2701,7 +2725,7 @@ $(TEST_RESTART_BASE_RELOC): $(TEST_PARALLEL_FAST_LINK_RSP) \
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_DEV_LINKER) -r -nostdlib -o "$$tmp" \
+	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" \
 	  "@$(TEST_PARALLEL_FAST_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
@@ -3788,9 +3812,17 @@ verify-change:
 # This deliberately does not replace `z23`, `make deploy`, or release
 # artifacts.
 HOTSWAP_ACTION_PLAN = $(BUILD_DIR)/hotswap/fast/flags.env
+DEV_PACKAGE_VERIFIER_TARGET = dev-package-verifier
+ifneq ($(ZCL_HOST_WINDOWS),)
+# The package verifier's safety claim depends on Linux child confinement.
+# Its release target already refuses on Windows; the ordinary Windows dev
+# node must not defeat that boundary by compiling the same POSIX-only helper
+# as an unconditional convenience prerequisite.
+DEV_PACKAGE_VERIFIER_TARGET =
+endif
 dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS) \
 	$(DEV_RESTART_PLAN) \
-	$(HOTSWAP_ACTION_PLAN) dev-package-verifier \
+	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
 
 # Temporary migration alias: build/bin/zclassic23-dev keeps resolving to
@@ -3836,7 +3868,7 @@ $(DEV_RESTART_BASE_RELOC): $(DEV_LINK_RSP) $(DEV_OBJS)
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_DEV_LINKER) -r -nostdlib -o "$$tmp" "@$(DEV_LINK_RSP)"; \
+	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" "@$(DEV_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
@@ -9919,7 +9951,8 @@ MUTATION_CAMPAIGN_BIN = $(BIN_DIR)/mutation-campaign
 MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
     tools/command/native_devagent.c lib/sha3/src/sha3.c \
     lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c \
-    lib/platform/src/clock.c lib/base/src/safe_alloc.c
+    lib/platform/src/clock.c lib/platform/src/directory_compat.c \
+    lib/base/src/safe_alloc.c
 .PHONY: mutation-campaign
 mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
 $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)

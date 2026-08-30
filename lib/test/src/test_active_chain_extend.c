@@ -272,34 +272,34 @@ int test_active_chain_extend(void)
          * would (correctly) trip the validation-pack label-splice check in
          * active_chain_move_window_tip. NULL pprev is scoped out and the
          * fill loop preserves the lower window identically. */
-        struct block_index *far = ace_insert(&ms, &far_hashes[0], pre_cap + 100,
+        struct block_index *far_blk = ace_insert(&ms, &far_hashes[0], pre_cap + 100,
                                              NULL,
                                              BLOCK_HAVE_DATA |
                                              BLOCK_VALID_SCRIPTS);
-        ok = ok && far &&
-             active_chain_move_window_tip(&ms.chain_active, far);
+        ok = ok && far_blk &&
+             active_chain_move_window_tip(&ms.chain_active, far_blk);
         ok = ok && ms.chain_active.chain != pre;          /* grew */
         ok = ok && ms.chain_active.capacity >= 2 * pre_cap; /* geometric */
         ok = ok && ms.chain_active.retired != NULL &&
              ms.chain_active.retired->arr == pre;         /* retired, not freed */
         ok = ok && pre[3] == b[3];      /* old array still live + intact */
-        ok = ok && active_chain_at(&ms.chain_active, far->nHeight) == far;
+        ok = ok && active_chain_at(&ms.chain_active, far_blk->nHeight) == far_blk;
         ok = ok && active_chain_at(&ms.chain_active, 3) == b[3];
 
         /* Second grow chains a second retired array; the first stays live. */
         struct block_index **mid = ms.chain_active.chain;
         int mid_cap = ms.chain_active.capacity;
-        struct block_index *far2 = ace_insert(&ms, &far_hashes[1],
+        struct block_index *far2_blk = ace_insert(&ms, &far_hashes[1],
                                               mid_cap + 100, NULL /* see above */,
                                               BLOCK_HAVE_DATA |
                                               BLOCK_VALID_SCRIPTS);
-        ok = ok && far2 &&
-             active_chain_move_window_tip(&ms.chain_active, far2);
+        ok = ok && far2_blk &&
+             active_chain_move_window_tip(&ms.chain_active, far2_blk);
         ok = ok && ms.chain_active.retired != NULL &&
              ms.chain_active.retired->arr == mid &&
              ms.chain_active.retired->next != NULL &&
              ms.chain_active.retired->next->arr == pre;
-        ok = ok && pre[3] == b[3] && mid[far->nHeight] == far;
+        ok = ok && pre[3] == b[3] && mid[far_blk->nHeight] == far_blk;
         ACE_CHECK("grow retires superseded chain[] (value-stable for readers)",
                   ok);
         main_state_free(&ms); /* frees both retired arrays */

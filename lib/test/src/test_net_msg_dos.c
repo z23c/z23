@@ -83,7 +83,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
+#include "platform/socket_compat.h"
 #include <unistd.h>
 
 #define DOS_CHECK(name, expr) do { \
@@ -439,8 +439,8 @@ int test_net_msg_dos(void)
          * socket_send_data() would legitimately close the connection,
          * which would make the "connection intact" assertion below a
          * false negative rather than a real signal. */
-        int sv[2];
-        bool have_sv = socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0;
+        platform_socket_t sv[2];
+        bool have_sv = platform_socket_pair(sv);
         DOS_CHECK("dispatch: socketpair created", have_sv);
         struct p2p_node *node = p2p_node_create(
             &nm, have_sv ? sv[0] : ZCL_INVALID_SOCKET, &addr,
@@ -507,7 +507,7 @@ int test_net_msg_dos(void)
             p2p_node_free(node);
         }
         if (have_sv)
-            close(sv[1]);
+            platform_socket_close(sv[1]);
     }
 
     /* ── E. duplicate/replayed `headers` batch: idempotent, no double
@@ -637,8 +637,8 @@ int test_net_msg_dos(void)
         net_addr_set_ipv4(&addr.svc.addr, ip4);
         addr.svc.port = 8033;
 
-        int sv[2];
-        bool have_sv = socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0;
+        platform_socket_t sv[2];
+        bool have_sv = platform_socket_pair(sv);
         DOS_CHECK("checksum: socketpair created", have_sv);
         struct p2p_node *node = p2p_node_create(
             &nm, have_sv ? sv[0] : ZCL_INVALID_SOCKET, &addr,
@@ -701,7 +701,7 @@ int test_net_msg_dos(void)
             p2p_node_free(node);
         }
         if (have_sv)
-            close(sv[1]);
+            platform_socket_close(sv[1]);
     }
 
     /* ── H. reject: oversized declared msg_type length -> the fields that

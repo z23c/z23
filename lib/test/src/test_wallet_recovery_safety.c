@@ -73,8 +73,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include "platform/time_compat.h"   /* platform_sleep_ms for the go-token poll */
+#endif
 
 #define WRS_CHECK(name, expr) do {                                     \
     printf("wallet_recovery_safety: %s... ", (name));                  \
@@ -289,7 +295,11 @@ static int t_restore_leaf_requires_an_explicit_datadir(void)
 /* ── case 2: two concurrent restores — exactly one may win ─────────── */
 
 /* One child: wait on the barrier, then commit `phrase` into `dir`.
- * _exit(0) on success, _exit(1) on any refusal. Never returns. */
+ * _exit(0) on success, _exit(1) on any refusal. Never returns.
+ * Windows has no fork()/pipe-fd inheritance; the child lane there is the
+ * re-exec'd role body in test_wallet_recovery_safety() below, which polls a
+ * go-token file instead of this barrier pipe. */
+#if !defined(_WIN32)
 static void wrs_child_restore(int barrier_fd, const char *dir,
                               const char *phrase)
 {
@@ -306,6 +316,7 @@ static void wrs_child_restore(int barrier_fd, const char *dir,
     fflush(stderr);
     _exit(r.ok ? 0 : 1);
 }
+#endif
 
 static int t_two_concurrent_restores_leave_one_wallet(void)
 {
@@ -322,6 +333,49 @@ static int t_two_concurrent_restores_leave_one_wallet(void)
               seeds_ok && memcmp(seed_a, seed_b, 32) != 0);
     if (!seeds_ok) { test_rm_rf(dir); return failures; }
 
+#if defined(_WIN32)
+    /* The barrier pipe cannot cross CreateProcess, so the release signal is
+     * a go-token file both children poll for (bounded, 60 s). */
+    char go_path[300];
+    snprintf(go_path, sizeof(go_path), "%s.go-token", dir);
+    unlink(go_path);
+    char log_a[300], log_b[300];
+    snprintf(log_a, sizeof(log_a), "%s.case2_a.log", dir);
+    snprintf(log_b, sizeof(log_b), "%s.case2_b.log", dir);
+    void *ha = NULL, *hb = NULL;
+    bool spawned = false;
+    fflush(stdout);
+    fflush(stderr);
+    if (_putenv_s("ZCL_WRS_DIR", dir) == 0 &&
+        _putenv_s("ZCL_WRS_GO", go_path) == 0) {
+        ha = test_spawn_self_with_role("test_wallet_recovery_safety",
+                                       "case2_a", log_a);
+        hb = test_spawn_self_with_role("test_wallet_recovery_safety",
+                                       "case2_b", log_b);
+        spawned = ha != NULL && hb != NULL;
+    }
+    WRS_CHECK("two concurrent recovery processes started", spawned);
+    if (!spawned) {
+        if (ha) { test_self_child_kill(ha); test_self_child_wait(ha); }
+        if (hb) { test_self_child_kill(hb); test_self_child_wait(hb); }
+        _putenv_s("ZCL_WRS_DIR", "");
+        _putenv_s("ZCL_WRS_GO", "");
+        test_rm_rf(dir);
+        return failures;
+    }
+
+    /* Release both at once. */
+    FILE *gof = fopen(go_path, "w");
+    if (gof) fclose(gof);
+    WRS_CHECK("both processes were released together", gof != NULL);
+
+    int sa = test_self_child_wait(ha);
+    int sb = test_self_child_wait(hb);
+    _putenv_s("ZCL_WRS_DIR", "");
+    _putenv_s("ZCL_WRS_GO", "");
+    bool ok_a = (sa == 0);
+    bool ok_b = (sb == 0);
+#else
     int barrier[2];
     if (pipe(barrier) != 0) {
         WRS_CHECK("barrier pipe created", false);
@@ -357,6 +411,7 @@ static int t_two_concurrent_restores_leave_one_wallet(void)
     waitpid(pb, &sb, 0);
     bool ok_a = WIFEXITED(sa) && WEXITSTATUS(sa) == 0;
     bool ok_b = WIFEXITED(sb) && WEXITSTATUS(sb) == 0;
+#endif
     printf("    phrase A ok=%d, phrase B ok=%d\n", (int)ok_a, (int)ok_b);
     wrs_list_dir("after", dir);
 
@@ -553,6 +608,42 @@ static int t_at_rest_policy_is_obeyed(void)
 int test_wallet_recovery_safety(void);
 int test_wallet_recovery_safety(void)
 {
+#if defined(_WIN32)
+    /* Windows has no fork(): case 2's concurrent restorers are this same
+     * binary re-exec'd with a role (see test_spawn_self_with_role). The
+     * go-token file replaces the barrier pipe, which cannot be inherited
+     * across CreateProcess. Returns 0 when the restore succeeded — the exit
+     * code is the parent's assertion input. */
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        const char *phrase = NULL;
+        if (strcmp(fork_role, "case2_a") == 0)
+            phrase = WRS_PHRASE_A;
+        else if (strcmp(fork_role, "case2_b") == 0)
+            phrase = WRS_PHRASE_B;
+        const char *dir = getenv("ZCL_WRS_DIR");
+        const char *go = getenv("ZCL_WRS_GO");
+        if (!phrase || !dir || !dir[0] || !go || !go[0]) {
+            fprintf(stderr, "wallet_recovery_safety role '%s': "
+                    "ZCL_WRS_DIR/ZCL_WRS_GO unset\n", fork_role);
+            return 1;
+        }
+        int waited_ms = 0;
+        while (access(go, 0) != 0 && waited_ms < 60000) {
+            platform_sleep_ms(2);
+            waited_ms += 2;
+        }
+        if (access(go, 0) != 0) {
+            fprintf(stderr, "wallet_recovery_safety role '%s': go token "
+                    "never appeared\n", fork_role);
+            return 1;
+        }
+        wrs_set_at_rest("case2-passphrase", NULL);
+        struct wallet_recovery_report rep;
+        struct zcl_result r = wrs_restore(dir, phrase, &rep);
+        return r.ok ? 0 : 1;
+    }
+#endif
     printf("\n=== recovery restore must not cost you the wallet you have ===\n");
     int failures = 0;
 

@@ -54,9 +54,12 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <signal.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define PM_SCRATCH_ROOT "./test-tmp"
 
@@ -872,3 +875,12 @@ int test_peer_memory(void)
 
     return failures + ZCL_TEST_SETUP_FAILURES();
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked memory-bound child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_peer_memory(void)
+{
+    printf("peer_memory: SKIP (Windows): forked memory-bound child lane\n");
+    return 0;
+}
+#endif
