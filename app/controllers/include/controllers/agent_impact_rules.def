@@ -2832,3 +2832,8 @@ AGENT_IMPACT_RULE("lib/receipt/src/*.c|lib/receipt/include/receipt/*.h|lib/test/
  * joins this rule; adding it now would claim a coverage relationship that
  * does not exist. */
 AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib/test/src/test_retrieval.c", "retrieval make_lint_gates")
+/* The durable hash-chained log. Rides its own group and the platform group:
+ * every byte it reads or writes goes through the lib/platform file seam, so a
+ * change to that seam's locking, truncation or fsync behaviour changes what
+ * this module's recovery rule actually does. */
+AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")

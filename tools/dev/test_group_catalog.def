@@ -672,6 +672,12 @@ ZCL_TEST_GROUP(retrieval)
  * The group exists for the refusals: only a PASS carrying a measured vector
  * publishes as a pass, an ineligible group produces no receipt at all rather
  * than an empty one, and belief is never read off the wire. */
+/* A durable hash-chained log. The group exists for the distinction the
+ * module is built around: an interrupted append leaves an uncommitted tail
+ * that recovery may discard, and an altered frame is refused and left
+ * exactly where it is. Confusing the two would either lose history or
+ * destroy the evidence that history was changed. */
+ZCL_TEST_GROUP(chainlog)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)

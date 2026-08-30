@@ -110,6 +110,12 @@ LIB_MODULE("astro")
 LIB_MODULE("presentation")
 LIB_MODULE("overlay")
 LIB_MODULE("platform")
+/* An append-only file whose history cannot be edited quietly: every frame
+ * is SHA3-linked to the one before it, seeded from the file header. It reads
+ * and writes only through the lib/platform file seam, so it ranks directly
+ * above it, and it holds no key material — a chain proves nothing was edited,
+ * never who wrote it. */
+LIB_MODULE("chainlog")
 LIB_MODULE("core")
 LIB_MODULE("crypto")
 LIB_MODULE("zid")
