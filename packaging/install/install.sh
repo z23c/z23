@@ -66,7 +66,10 @@ ORIGIN="${Z23_INSTALL_TEST_ORIGIN:-https://z23.sh}"
 die() { printf 'z23-install: REFUSE: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) os="$(uname -s)" ;; esac
-case "$(uname -m)" in x86_64|amd64) cpu=x86_64 ;; aarch64|arm64) cpu=aarch64 ;; *) cpu="$(uname -m)" ;; esac
+# Same rule as lib/install/src/front_door_platform.c: fold only the
+# amd64/x86_64 alias, and never rewrite arm64, which is what a Mac calls
+# itself and what build_release.sh names the Mac artifact.
+case "$(uname -m)" in x86_64|amd64) cpu=x86_64 ;; *) cpu="$(uname -m)" ;; esac
 PLATFORM="$os-$cpu"
 case "$PLATFORM" in
     linux-x86_64) WANT="$BOOT_LINUX_X86_64" ;;

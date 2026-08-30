@@ -2971,3 +2971,10 @@ AGENT_IMPACT_RULE("lib/storage/src/topology_store.c|lib/storage/include/storage/
  * Editing any vendored source, the compat shim, or the smoke test itself
  * selects the freebsd_sh group. */
 AGENT_IMPACT_RULE("vendor/freebsd-sh/*|vendor/freebsd-sh/bin/*|vendor/freebsd-sh/bin/sh/*|vendor/freebsd-sh/bin/sh/bltin/*|vendor/freebsd-sh/bin/kill/*|vendor/freebsd-sh/bin/test/*|vendor/freebsd-sh/usr.bin/*|vendor/freebsd-sh/usr.bin/printf/*|vendor/freebsd-sh/compat/*|vendor/freebsd-sh/compat/bin/*|vendor/patches/freebsd-sh-dirent-d-namlen.patch|lib/test/src/test_freebsd_sh.c", "freebsd_sh make_lint_gates")
+
+/* check_published_platforms.sh reads the fold table out of
+ * packaging/install/install.sh and the claim sets out of the two shims and
+ * front_door_platform.c, so a change to the gate is a change to what those
+ * files are allowed to say. It rides the same groups as the front door it
+ * measures. */
+AGENT_IMPACT_RULE("tools/lint/check_published_platforms.sh", "z23_front_door make_lint_gates")

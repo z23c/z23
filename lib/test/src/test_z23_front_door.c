@@ -264,10 +264,13 @@ static int case_platform(void)
              triple_is("Linux", "x86_64", "linux-x86_64"));
     FD_CHECK("Linux/amd64 is the same triple",
              triple_is("Linux", "amd64", "linux-x86_64"));
-    FD_CHECK("Darwin/arm64 is darwin-aarch64",
-             triple_is("Darwin", "arm64", "darwin-aarch64"));
-    FD_CHECK("Darwin/aarch64 is the same triple",
-             triple_is("Darwin", "aarch64", "darwin-aarch64"));
+    /* The Mac names itself what build_release.sh names the Mac artifact.
+     * These two lines used to assert the opposite, and that assertion was
+     * the bug: it froze a triple no publisher produces. */
+    FD_CHECK("Darwin/arm64 is darwin-arm64",
+             triple_is("Darwin", "arm64", "darwin-arm64"));
+    FD_CHECK("a Linux arm box keeps its own spelling, not the Mac's",
+             triple_is("Linux", "aarch64", "linux-aarch64"));
     /* An unrecognised machine is named, not guessed at: a wrong guess sends
      * the user to a 404 instead of telling them the truth. */
     FD_CHECK("an unknown kernel passes through verbatim",
@@ -277,8 +280,8 @@ static int case_platform(void)
 
     FD_CHECK("linux-x86_64 is published",
              fd_platform_published("linux-x86_64"));
-    FD_CHECK("darwin-aarch64 is NOT published — no runtime is built for it",
-             !fd_platform_published("darwin-aarch64"));
+    FD_CHECK("darwin-arm64 is NOT published — no runtime is built for it",
+             !fd_platform_published("darwin-arm64"));
     FD_CHECK("windows-x86_64 is NOT published",
              !fd_platform_published("windows-x86_64"));
     FD_CHECK("a prefix of a published triple is not published",

@@ -84,6 +84,33 @@ windows_claimed() {
         "$PP_INSTALL_PS1"
 }
 
+
+# install.sh: the cpu aliases the shim rewrites before it looks a platform up.
+# Read from the shim rather than restated here, so this gate cannot hold a
+# second copy of the fold table that drifts from the first. An arm is a FOLD
+# when the value it assigns is not the alternative itself: `amd64) cpu=x86_64`
+# folds amd64, while `x86_64) cpu=x86_64` is the identity and folds nothing.
+cpu_fold_sources() {
+    sed -n 's/^case "\$(uname -m)" in \(.*\) esac$/\1/p' "$PP_INSTALL_SH" \
+        | tr ';' '\n' \
+        | while IFS= read -r arm; do
+            case "$arm" in
+                *')'*cpu=*) ;;
+                *) continue ;;
+            esac
+            pattern="${arm%%)*}"
+            value="${arm#*cpu=}"
+            value="${value%% *}"
+            value="${value%\"}"; value="${value#\"}"
+            printf '%s\n' "$pattern" | tr -d ' ' | tr '|' '\n' \
+                | while IFS= read -r alt; do
+                    [ -n "$alt" ] || continue
+                    # The catch-all arm is a passthrough, not a fold.
+                    [ "$alt" = "*" ] && continue
+                    [ "$alt" = "$value" ] || printf '%s\n' "$alt"
+                done
+        done | sort -u
+}
 # front_door_platform.c: #define FD_PUBLISHED "linux-x86_64"
 runtime_claimed() {
     sed -n 's/^#define[[:space:]]\+FD_PUBLISHED[[:space:]]\+"\(.*\)".*$/\1/p' \
@@ -178,6 +205,31 @@ run_checks() {
         esac
     done < <(sed -n "/^[[:space:]]*['\"][a-z0-9][a-z0-9_.-]*['\"][[:space:]]*=[[:space:]]*['\"][0-9a-f]\{64\}['\"]/p" "$PP_INSTALL_PS1")
 
+    # 7. Every produced platform must be spelled the way a real machine will
+    #    name itself. The shims fold cpu aliases (amd64 -> x86_64) before they
+    #    look a platform up, so a produced platform whose cpu is a fold SOURCE
+    #    can never be matched by the machine it was built for: the shim
+    #    rewrites the name first and then finds nothing.
+    #
+    #    Not hypothetical. The shims folded arm64 -> aarch64 while the cutter
+    #    produced darwin-arm64, so publishing the Mac would have told every
+    #    Mac "no runtime is published for darwin-aarch64" while shipping
+    #    darwin-arm64 — a refusal naming a machine that does not exist, for a
+    #    machine we do ship.
+    #
+    #    Checks 1-6 all ask whether a claim EXCEEDS what is produced. This is
+    #    the other direction, and it is the one that was missing: whether what
+    #    is produced is REACHABLE by the machine it is for.
+    local folded cpu
+    folded="$(cpu_fold_sources)"
+    for plat in $produced_boot $produced_runtime; do
+        for cpu in $folded; do
+            if [ "${plat#*-}" = "$cpu" ]; then
+                fail "the cutter produces $plat, but install.sh rewrites the cpu '$cpu' before looking a platform up, so no machine can ever match it"
+            fi
+        done
+    done
+
     [ "$FAIL" -eq 0 ] || return 1
     return 0
 }
@@ -259,11 +311,23 @@ selftest() {
     probe fail "a non-sentinel digest checked into install.sh"
     cp -f -- "$PP_INSTALL_SH" "$tmp/install.sh"
 
+
+    # 7. The regression for the reachability direction: restore the arm64 fold
+    #    the shims used to carry. The cutter produces darwin-arm64, so folding
+    #    arm64 away makes that artifact unreachable by the only machines it is
+    #    for. This mutation is the tree as it stood before the fold was
+    #    removed, so this case is that bug, frozen.
+    sed -i 's@^case "$(uname -m)" in .*@case "$(uname -m)" in x86_64|amd64) cpu=x86_64 ;; aarch64|arm64) cpu=aarch64 ;; *) cpu="$(uname -m)" ;; esac@' \
+        "$tmp/install.sh"
+    probe fail "a cpu fold that makes a produced platform unreachable"
+    grep -q 'darwin-arm64' "$tmp/probe.err" \
+        || { printf 'selftest FAIL: the refusal must name the unreachable platform\n' >&2; exit 1; }
+    cp -f -- "$PP_INSTALL_SH" "$tmp/install.sh"
     # ...and everything is back to passing, so the mutations above were the
     # reason each case went red and not some residue of the one before.
     probe pass "the restored tree"
 
-    printf 'check-published-platforms: selftest PASS (6 mutations refused)\n'
+    printf 'check-published-platforms: selftest PASS (7 mutations refused)\n'
     trap - EXIT
     rm -rf "$tmp"
 }

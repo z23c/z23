@@ -56,7 +56,10 @@ $ErrorActionPreference = 'Stop'
 $BootZero = '0' * 64
 $BootPins = @{}
 $Origin = if ($env:Z23_INSTALL_TEST_ORIGIN) { $env:Z23_INSTALL_TEST_ORIGIN } else { 'https://z23.sh' }
-$arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'x86_64' } 'ARM64' { 'aarch64' } $null { 'unknown' } default { "$($env:PROCESSOR_ARCHITECTURE)".ToLowerInvariant() } }
+# Same rule as install.sh and lib/install/src/front_door_platform.c: fold only
+# the AMD64/x86_64 alias. ARM64 lowercases to arm64 through the default arm,
+# because arm64 is what the machine and the release cutter both call it.
+$arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'x86_64' } $null { 'unknown' } default { "$($env:PROCESSOR_ARCHITECTURE)".ToLowerInvariant() } }
 $platform = "windows-$arch"
 $touched = $false
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("z23-install-" + [guid]::NewGuid().ToString('N'))
