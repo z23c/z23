@@ -8,7 +8,12 @@
  * request it described and the property revision it observed. Ownership,
  * revocation (own and ancestral), budget, rate window, and expiry are all
  * re-read and re-decided here against current state, because every one of them
- * can change between plan and commit. See the public header. */
+ * can change between plan and commit. See the public header.
+ *
+ * It is also where the CUMULATIVE ceiling stops being a per-grant number. The
+ * pure rules hold one grant at a time and cannot see a parent's spending; this
+ * file holds the store, so the charge that a committed action puts on the
+ * whole lineage is applied here, all ancestors or none. */
 
 // one-result-type-ok:grant-decision — the COMMIT half of the same service; see
 // the same marker on property_grant_service.c. COMMIT returns
@@ -39,20 +44,69 @@ static const struct metaverse_receipt *last_receipt(const char *grant_id)
     return NULL;
 }
 
-/* Lock held. The stored receipt for (grant, idempotency_key), or NULL. An
- * EMPTY key never matches: collapsing every un-keyed commit onto one empty key
- * would make the first un-keyed action of a grant permanently replay the same
- * receipt for every later one. */
-static const struct metaverse_receipt *receipt_by_key(const char *grant_id,
-                                                      const char *key)
+/* True when a stored receipt records the SAME REQUEST the caller is making
+ * now. These five fields are what make two calls one operation; the clock, the
+ * height and the property revision are deliberately not compared, because
+ * those are facts the earlier commit OBSERVED rather than anything the caller
+ * asked for, and a retry one second later must still be a retry. */
+static bool receipt_matches_request(const struct metaverse_receipt *r,
+                                    const struct metaverse_action_request *req)
 {
-    if (!key || key[0] == '\0') return NULL;
+    return r->action == req->action && r->value_zat == req->value_zat &&
+           metaverse_property_id_equal(&r->property, &req->property) &&
+           strcmp(r->actor, req->actor) == 0 &&
+           strcmp(r->counterparty, req->counterparty) == 0;
+}
+
+/* What a (grant, idempotency_key) lookup found. A key that matches a receipt
+ * for a DIFFERENT request is its own answer and not a replay: handing back the
+ * stored receipt would report OK for a request that never ran, and running the
+ * new request would put two receipts under one key and destroy the only
+ * guarantee the key exists to give. */
+enum pg_replay_match {
+    PG_REPLAY_NONE = 0,
+    PG_REPLAY_SAME,
+    PG_REPLAY_DIFFERENT,
+};
+
+/* Lock held. Find the stored receipt for (grant, idempotency_key) and say
+ * whether it answers THIS request. An EMPTY key never matches: collapsing
+ * every un-keyed commit onto one empty key would make the first un-keyed
+ * action of a grant permanently replay the same receipt for every later one. */
+static enum pg_replay_match receipt_by_key(
+    const char *grant_id, const char *key,
+    const struct metaverse_action_request *req,
+    const struct metaverse_receipt **out)
+{
+    *out = NULL;
+    if (!key || key[0] == '\0') return PG_REPLAY_NONE;
     for (size_t i = 0; i < g_pg_store.receipt_count; i++) {
         const struct metaverse_receipt *r = &g_pg_store.receipts[i];
         if (strcmp(r->grant_id, grant_id) != 0) continue;
-        if (strcmp(r->idempotency_key, key) == 0) return r;
+        if (strcmp(r->idempotency_key, key) != 0) continue;
+        *out = r;
+        return receipt_matches_request(r, req) ? PG_REPLAY_SAME
+                                               : PG_REPLAY_DIFFERENT;
     }
-    return NULL;
+    return PG_REPLAY_NONE;
+}
+
+/* Lock held. What this grant can still actually move: its own remaining
+ * ceiling capped by every ancestor's, because a commit charges the whole
+ * lineage. Publishing the grant's own number alone would quote a child a
+ * budget its parent will refuse to fund. A missing ancestor is not a budget
+ * question — every decision path refuses on it first — but the number still
+ * has to be safe to publish, and 0 is the only safe one. */
+static int64_t effective_budget_remaining(const struct metaverse_grant *g)
+{
+    int64_t remaining = metaverse_grant_budget_remaining(g);
+    for (size_t i = 0; i < g->lineage_count; i++) {
+        const struct metaverse_grant *a = pg_find_grant(g->lineage[i].grant_id);
+        if (!a) return 0;
+        int64_t ancestor_remaining = metaverse_grant_budget_remaining(a);
+        if (ancestor_remaining < remaining) remaining = ancestor_remaining;
+    }
+    return remaining;
 }
 
 /* Lock held. Number of receipts already in this grant's chain. */
@@ -90,13 +144,30 @@ static enum property_grant_reason commit_attempt(
      * receipt, and charge nothing. Checking this before the
      * already-committed/expired guards is what makes a retry after a lost
      * response work at all. */
-    const struct metaverse_receipt *replay =
-        receipt_by_key(plan->grant_id, idempotency_key);
-    if (replay) {
+    const struct metaverse_receipt *replay = NULL;
+    enum pg_replay_match replay_match = receipt_by_key(
+        plan->grant_id, idempotency_key, &plan->request, &replay);
+    if (replay_match == PG_REPLAY_DIFFERENT) {
+        /* Copied out: everything the message names lives in the store, and the
+         * message is written after the unlock. */
+        uint64_t seq = replay->seq;
+        char reused_grant[METAVERSE_GRANT_ID_LEN + 1];
+        snprintf(reused_grant, sizeof(reused_grant), "%s", plan->grant_id);
+        pthread_mutex_unlock(&g_pg_store.lock);
+        LOG_WARN(PGC_LOG,
+                 "commit: idempotency key on plan %s already names receipt %llu "
+                 "of grant %s, and that receipt records a different request — "
+                 "replaying it would report success for an action nobody "
+                 "asked for, and running this one would put two receipts under "
+                 "one key",
+                 plan_id, (unsigned long long)seq, reused_grant);
+        return PROPERTY_GRANT_IDEMPOTENCY_KEY_REUSED;
+    }
+    if (replay_match == PG_REPLAY_SAME) {
         out->receipt = *replay;
         out->replayed = true;
         const struct metaverse_grant *g = pg_find_grant(plan->grant_id);
-        out->budget_remaining_zat = g ? metaverse_grant_budget_remaining(g) : 0;
+        out->budget_remaining_zat = g ? effective_budget_remaining(g) : 0;
         pthread_mutex_unlock(&g_pg_store.lock);
         return PROPERTY_GRANT_OK;
     }
@@ -235,6 +306,48 @@ static enum property_grant_reason commit_attempt(
         return PROPERTY_GRANT_SIGNING_KEY_UNAVAILABLE;
     }
 
+    /* ── THE LINEAGE, RESOLVED AND COPIED BEFORE ANYTHING MOVES ─────────────
+     *
+     * max_value_zat is a ceiling on everything that moves BENEATH a grant, and
+     * a delegated child is beneath its parent, so this commit charges every
+     * ancestor as well and is refused unless all of them can pay. Attenuation
+     * at delegation time cannot supply that bound — two children each declaring
+     * the parent's full remaining budget are each a legal attenuation, and
+     * twice the ceiling then moves — and reserving a child's DECLARED maximum
+     * at delegation time would be the opposite defect, charging the operator
+     * for money the child may never spend and making the revocation of an
+     * unused child a refund.
+     *
+     * DELIBERATELY ABOVE the mutate-and-restore window that begins on the next
+     * statement: resolving and copying the ancestors moves nothing, so the one
+     * refusal here needs no restore and must not sit inside a region whose
+     * every exit is required to have one. The lineage is at most
+     * METAVERSE_GRANT_MAX_DEPTH long, so this is a bounded copy under a lock
+     * that is already held.
+     *
+     * The records are re-resolved rather than reusing `anc`, whose element type
+     * is const: pg_collect_ancestors above has already proven every one of them
+     * is present, so the refusal here is a fail-closed backstop, not an
+     * expected path. */
+    struct metaverse_grant *lineage[METAVERSE_GRANT_MAX_DEPTH];
+    struct metaverse_grant lineage_before[METAVERSE_GRANT_MAX_DEPTH];
+    for (size_t i = 0; i < anc_count; i++) {
+        lineage[i] = pg_find_grant(g->lineage[i].grant_id);
+        if (!lineage[i]) {
+            char missing[METAVERSE_GRANT_ID_LEN + 1];
+            char acting[METAVERSE_GRANT_ID_LEN + 1];
+            snprintf(missing, sizeof(missing), "%s", g->lineage[i].grant_id);
+            snprintf(acting, sizeof(acting), "%s", g->grant_id);
+            pthread_mutex_unlock(&g_pg_store.lock);
+            LOG_ERROR(PGC_LOG,
+                      "commit: ancestor %s of grant %s vanished between the "
+                      "capability check and the debit",
+                      missing, acting);
+            return PROPERTY_GRANT_ANCESTOR_REVOKED;
+        }
+        lineage_before[i] = *lineage[i];
+    }
+
     /* ── THE WHOLE RECORD, BEFORE THE EFFECT ────────────────────────────────
      *
      * Everything from here to the receipt append either produces evidence or
@@ -250,6 +363,10 @@ static enum property_grant_reason commit_attempt(
      * restore is the exact inverse of any effect record_commit can have, this
      * one and every one added later, and cannot drift from the charge rule
      * because it does not restate it.
+     *
+     * The same is true one record over: once the lineage charge below has run,
+     * every ancestor has moved too, and each of them is restored from its own
+     * whole-record copy on every exit that mints no receipt.
      *
      * LOCK INVARIANT, and the whole-record restore depends on it: the mutation
      * and the restore are both inside ONE contiguous hold of g_pg_store.lock —
@@ -268,6 +385,19 @@ static enum property_grant_reason commit_attempt(
         LOG_ERROR(PGC_LOG,
                   "commit: grant %s passed the check but rejected the debit",
                   g->grant_id);
+        return PROPERTY_GRANT_BUDGET_EXCEEDED;
+    }
+
+    for (size_t i = 0; i < anc_count; i++) {
+        if (metaverse_grant_record_descendant_charge(lineage[i], &req))
+            continue;
+        for (size_t j = 0; j < i; j++) *lineage[j] = lineage_before[j];
+        *g = grant_before_effect;
+        pthread_mutex_unlock(&g_pg_store.lock);
+        LOG_WARN(PGC_LOG,
+                 "commit: grant %s may spend this, but its ancestor %s cannot "
+                 "— the cumulative ceiling binds the whole delegation subtree",
+                 grant_before_effect.grant_id, lineage_before[i].grant_id);
         return PROPERTY_GRANT_BUDGET_EXCEEDED;
     }
 
@@ -305,8 +435,13 @@ static enum property_grant_reason commit_attempt(
          * genuinely unmutated, the receipt array is untouched, and the plan is
          * still uncommitted, so there is nothing for a reader to have missed.
          * A bump here would be the opposite defect — telling every in-flight
-         * decision the world moved when it did not. */
+         * decision the world moved when it did not.
+         *
+         * The lineage is restored with it: by here every ancestor has taken
+         * this action's charge, and leaving any of them debited for a commit
+         * that minted no receipt is the same defect one record over. */
         *g = grant_before_effect;
+        for (size_t i = 0; i < anc_count; i++) *lineage[i] = lineage_before[i];
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_ERROR(PGC_LOG, "commit: could not seal receipt for grant %s",
                   g->grant_id);
@@ -319,7 +454,7 @@ static enum property_grant_reason commit_attempt(
 
     out->receipt = r;
     out->replayed = false;
-    out->budget_remaining_zat = metaverse_grant_budget_remaining(g);
+    out->budget_remaining_zat = effective_budget_remaining(g);
     /* The budget debit above is a mutation of the authority, so it moves the
      * store-wide generation: a decision computed over the pre-debit budget is
      * no longer a decision over current state. */

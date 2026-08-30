@@ -2745,6 +2745,21 @@ AGENT_IMPACT_RULE("lib/metaverse/include/metaverse/property_id.h|lib/test/src/te
  * test_metaverse_vocabulary(), which is where its assertions actually run. */
 AGENT_IMPACT_RULE("lib/test/src/test_metaverse_vocabulary_bits.c", "metaverse_vocabulary make_lint_gates")
 
+/* The property-grant authority — who may do what to which property, for how
+ * much. Three files that are one decision: the pure rules, the store/PLAN
+ * half of the service, and the COMMIT half (which shares one lock and one set
+ * of arrays with it through property_grant_store.h). They had NO rule at all,
+ * so a change to the cumulative budget or the idempotency contract mapped to
+ * no group and the push gate had to refuse for want of a mapping.
+ *
+ * The consumers ride it because they hold the other end: agent_broker_provider
+ * and agent_broker_catalog_seam decide over this service's snapshots
+ * (metaverse_broker_authority, metaverse_broker_idempotency), agent_broker_grant
+ * projects a session grant into a struct metaverse_grant and calls
+ * metaverse_grant_record_commit on it (metaverse_agent_broker), and both the
+ * vocabulary and catalog groups assert against these headers' types. */
+AGENT_IMPACT_RULE("lib/metaverse/src/property_grant.c|lib/metaverse/include/metaverse/property_grant.h|app/services/src/property_grant_service.c|app/services/src/property_grant_commit.c|app/services/src/property_grant_store.h|app/services/include/services/property_grant_service.h|lib/test/src/test_metaverse_grant.c", "metaverse_grant metaverse_broker_authority metaverse_broker_idempotency metaverse_agent_broker metaverse_vocabulary metaverse_catalog make_lint_gates")
+
 /* Metaverse telemetry: the .def is the field list and the filler is its
  * only writer, so neither can change alone without the other going stale. */
 AGENT_IMPACT_RULE("app/services/src/metaverse_telemetry_fill.c|lib/util/include/util/telemetry/metaverse_fields.def", "telemetry_metaverse metaverse_catalog make_lint_gates")
