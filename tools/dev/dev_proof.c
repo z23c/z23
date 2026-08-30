@@ -564,6 +564,10 @@ static bool generation_prepare(const struct proof_paths *paths,
         "vendor/lib/libz.a", "vendor/lib/libtor_stub.a",
         "vendor/include/openssl", "vendor/include/event2",
         "vendor/include/zlib.h", "vendor/include/zconf.h",
+        "vendor/tor/libtor.a",
+        "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+        "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+        "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
         "build/githooks", "build/bin/z23-git-hook",
     };
     char build_dir[PATH_MAX], bin_dir[PATH_MAX];
@@ -821,21 +825,20 @@ static bool environment_root(uint8_t out[32])
 
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
-                             const char *expected_source_cas,
+                             const struct dev_source_record *expected_source,
                              struct zcl_dev_proof_dimension *dimension)
 {
-    if (!paths || !artifact || !expected_source_cas || !dimension ||
-        dimension->selected == 0)
+    if (!paths || !artifact || !expected_source ||
+        !expected_source->source_id[0] || !dimension || dimension->selected == 0)
         return false;
     int fd = open(artifact, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
     struct dev_source_record source = {0};
     char why[160] = {0};
-    enum zcl_dev_source_admission admission = zcl_dev_executable_source_admit(
+    bool admitted = zcl_dev_executable_source_record_read(
         paths->root, fd, artifact, &source, why, sizeof(why));
     (void)close(fd);
-    if (admission <= ZCL_DEV_SOURCE_ADMISSION_STALE || !source.cas_present ||
-        strcmp(source.cas_root_sha3, expected_source_cas) != 0 ||
+    if (!admitted || strcmp(source.source_id, expected_source->source_id) != 0 ||
         !hash_file("zcl.dev_proof_executable_reuse.v1", artifact,
                    dimension->receipt_root))
         return false;
@@ -846,15 +849,15 @@ static bool executable_reuse(const struct proof_paths *paths,
 static bool admitted_executable_materialize(
     const struct proof_paths *paths, const char *generation,
     const char *source, const char *relative_target,
-    const char *expected_source_cas, char target[PATH_MAX])
+    const struct dev_source_record *expected_source, char target[PATH_MAX])
 {
     struct zcl_dev_proof_dimension artifact = {.selected = 1};
     int target_len = generation && relative_target && target
         ? snprintf(target, PATH_MAX, "%s/%s", generation, relative_target)
         : -1;
-    return paths && source && expected_source_cas && target &&
+    return paths && source && expected_source && target &&
         target_len > 0 && target_len < PATH_MAX &&
-        executable_reuse(paths, source, expected_source_cas, &artifact) &&
+        executable_reuse(paths, source, expected_source, &artifact) &&
         dependency_materialize(source, target);
 }
 
@@ -888,7 +891,7 @@ static bool test_binary_path(const struct proof_paths *paths,
 
 static bool test_helpers_prepare(
     const struct proof_paths *paths, const char *generation,
-    const char *runner_source, const char *expected_source_cas,
+    const char *runner_source, const struct dev_source_record *expected_source,
     char runner_target[PATH_MAX], uint8_t helper_root[32],
     char *why, size_t why_len)
 {
@@ -908,14 +911,14 @@ static bool test_helpers_prepare(
         nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
         !admitted_executable_materialize(
             paths, generation, runner_source, "build/bin/test_parallel_fast",
-            expected_source_cas, runner_target) ||
+            expected_source, runner_target) ||
         !admitted_executable_materialize(
             paths, generation, verifier_source,
-            "build/bin/zclassic23-package-verify-dev", expected_source_cas,
+            "build/bin/zclassic23-package-verify-dev", expected_source,
             verifier_target) ||
         !admitted_executable_materialize(
             paths, generation, node_source, "build/bin/zclassic23",
-            expected_source_cas,
+            expected_source,
             node_target)) {
         proof_why(why, why_len, "proof_test_helper_admission_failed");
         return false;
@@ -1035,7 +1038,9 @@ static bool proof_worker(const struct proof_paths *paths,
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
 
     struct dev_source_record source_before = {0}, source_after = {0};
-    if (!zcl_dev_source_cas_capture(generation, &source_before) ||
+    if (!zcl_dev_source_identity_capture(generation, &source_before, why,
+                                         why_len) ||
+        !zcl_dev_source_cas_capture(generation, &source_before) ||
         !source_before.cas_present) {
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
@@ -1123,7 +1128,7 @@ static bool proof_worker(const struct proof_paths *paths,
                                         "%s/build/bin/z23-dev", paths->root);
             if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
                 !executable_reuse(paths, artifact,
-                                  source_before.cas_root_sha3, compile)) {
+                                  &source_before, compile)) {
                 const char *argv[] = {"make", "--no-print-directory",
                                       "build-only", NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_COMPILE, argv,
@@ -1152,7 +1157,7 @@ static bool proof_worker(const struct proof_paths *paths,
             uint8_t helper_root[32];
             bool runner_reused = test_binary_path(paths, binary) &&
                 test_helpers_prepare(
-                    paths, generation, binary, source_before.cas_root_sha3,
+                    paths, generation, binary, &source_before,
                     generation_binary, helper_root, why, why_len);
             if (runner_reused) {
                 const char *argv[] = {generation_binary, only, "--cache",

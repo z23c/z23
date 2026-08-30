@@ -488,6 +488,9 @@ enum zcl_dev_source_admission {
 enum zcl_dev_source_admission zcl_dev_executable_source_admit(
     const char *repo_root, int executable_fd, const char *display_path,
     struct dev_source_record *out, char *why, size_t why_len);
+bool zcl_dev_executable_source_record_read(
+    const char *repo_root, int executable_fd, const char *display_path,
+    struct dev_source_record *out, char *why, size_t why_len);
 const char *zcl_dev_source_admission_name(
     enum zcl_dev_source_admission admission);
 

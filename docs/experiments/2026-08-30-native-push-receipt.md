@@ -99,6 +99,16 @@ ran all three groups. Repeating the same command took 0.569 seconds, reused both
 cacheable objects, ran only the deliberately uncacheable cache self-test, and
 reported complete accounting: two cached, one ran, zero failed, zero skipped.
 
+Three independent helper admissions then spent 25 to 30 seconds each proving
+the same mutation inventory. A scan that crossed its 30-second child timeout
+incorrectly converted an available exact executable into a `build-only`
+fallback. Helper admission now captures the isolated generation's complete
+byte identity once, reads each already-open executable's embedded source record
+directly, and compares the byte identity before hashing and hard-linking the
+artifact. The generation also materializes every linked Tor archive included
+by source identity. A stale helper now refuses admission without launching a
+compiler.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
@@ -123,13 +133,14 @@ reported complete accounting: two cached, one ran, zero failed, zero skipped.
 - Closing a listening socket from another thread is not a portable wakeup for
   a blocking POSIX `accept()`; shutdown-before-close is required by the tested
   lifecycle.
+- Exact helper byte identity is reusable across worktrees; ABA mutation tokens
+  are worktree-local and must not trigger one full inventory scan per helper.
 
 ## Next experiment
 
 Give generated-output and remaining lint producers native content-keyed child
 receipt publication, then compare a cold audit with warm direct admission.
 Move compile-epoch session validation, depfile restoration, and hit batching
-into `zcc` and count process creation before and after. Replace the three
-per-helper shell mutation scans with one native C23 observation shared across
-the already-open exact executables, then measure proof-start process count and
-latency again.
+into `zcc` and count process creation before and after. Port the remaining
+single full source-byte capture to C23, then measure proof-start process count
+and latency again.
