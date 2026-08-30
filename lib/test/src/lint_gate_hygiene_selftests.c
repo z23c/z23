@@ -27,7 +27,7 @@ int run_git_hooks_gate_with_file(const char *hook_path)
 {
     return run_gate_script_with_env2(
         GIT_HOOKS_SCRIPT_REL,
-        "ZCL_GIT_HOOKS_PATH_FOR_TEST", "tools/githooks",
+        "ZCL_GIT_HOOKS_PATH_FOR_TEST", "build/githooks",
         "ZCL_GIT_HOOK_FILE_FOR_TEST", hook_path);
 }
 
@@ -35,16 +35,16 @@ int run_git_hooks_gate_with_precommit_file(const char *hook_path)
 {
     return run_gate_script_with_env2(
         GIT_HOOKS_SCRIPT_REL,
-        "ZCL_GIT_HOOKS_PATH_FOR_TEST", "tools/githooks",
+        "ZCL_GIT_HOOKS_PATH_FOR_TEST", "build/githooks",
         "ZCL_GIT_HOOK_PRECOMMIT_FILE_FOR_TEST", hook_path);
 }
 
 int t_git_hooks_gate_enforces_tracked_pre_push(void)
 {
     int failures = 0;
-    TEST("[lint-gate] local pre-push hook gate enforces tools/githooks") {
+    TEST("[lint-gate] local pre-push hook gate enforces native worktree hooks") {
         ASSERT(run_git_hooks_gate_with_path(".git/hooks") != 0);
-        ASSERT(run_git_hooks_gate_with_path("tools/githooks") == 0);
+        ASSERT(run_git_hooks_gate_with_path("build/githooks") == 0);
         PASS();
     } _test_next:;
     return failures;

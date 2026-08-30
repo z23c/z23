@@ -14,14 +14,9 @@
 #
 #   1. vendor/lib/*.a  <- copied from the canonical checkout (idempotent:
 #      skipped when already byte-identical).
-#   2. git hooks        <- core.hooksPath is REPO-COMMON config (shared
-#      .git/config — see `git rev-parse --git-common-dir`), so it is
-#      normally already armed by whichever checkout ran `make install-hooks`
-#      first. The known worktree gotcha is a stray ABSOLUTE spelling of the
-#      same path (git config core.hooksPath resolved against the working
-#      worktree instead of the repo root by some other tool) — this step
-#      re-asserts the canonical relative spelling, which is a no-op when
-#      already correct and a repair otherwise.
+#   2. git hooks        <- builds and installs the native receipt hook into
+#      this worktree's build directory. Per-worktree Git config prevents one
+#      checkout from admitting another checkout's receipt or executable.
 #   3. link prerequisites <- sanity-checks vendor/include/ and every archive
 #      the Makefile's VENDOR_ARCHIVES list expects, so a missing/partial
 #      vendor/lib fails LOUD here instead of as an opaque linker error
@@ -82,19 +77,13 @@ else
 fi
 
 # -- Step 2: git hooks ---------------------------------------------------
-# core.hooksPath lives in the repo-common config, so this is usually
-# already set by whichever checkout ran it first; re-running is a no-op.
-if [[ -d tools/githooks ]]; then
-    before="$(git config --get core.hooksPath || true)"
-    git config core.hooksPath tools/githooks
-    chmod +x tools/githooks/* 2>/dev/null || true
-    if [[ "$before" == "tools/githooks" ]]; then
-        echo "[2/3] git hooks: already armed (core.hooksPath=tools/githooks) -- skipped"
-    else
-        echo "[2/3] git hooks: armed core.hooksPath=tools/githooks (was '${before:-<unset>}')"
-    fi
+before="$(git config --worktree --get core.hooksPath 2>/dev/null || true)"
+make --no-print-directory install-hooks
+after="$(git config --worktree --get core.hooksPath)"
+if [[ "$before" == "$after" ]]; then
+    echo "[2/3] git hooks: native checkout-local hooks already armed -- refreshed"
 else
-    echo "[2/3] git hooks: tools/githooks not present in this checkout -- skipped"
+    echo "[2/3] git hooks: native checkout-local hooks armed at $after"
 fi
 
 # -- Step 3: sanity-check link prerequisites -----------------------------

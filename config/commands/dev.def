@@ -214,6 +214,8 @@ ZCL_COMMAND_BRANCH("dev.change", "dev", "Classify and apply changes",
                    ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.loop", "dev", "Persistent save-to-verdict loop",
                    ZCL_COMMAND_LAYER_DEV)
+ZCL_COMMAND_BRANCH("dev.proof", "dev", "Exact local push-proof receipts",
+                   ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.test", "dev", "Focused proof selection",
                    ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.generation", "dev", "Generation provenance",
@@ -584,6 +586,65 @@ ZCL_COMMAND_DEV_COMMAND(
     ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_loop_stop,
     "watcher shutdown requires the dev-only executor",
     "z23-dev dev loop stop")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.proof.ensure", "dev.proof", "",
+    "Ensure background proof for one exact commit and remote base",
+    "Returns immediately after reusing or scheduling local verification for "
+    "the exact commit/base pair. The worker binds source, mutation, changed "
+    "set, impact policy, toolchain, build graph, generated-output, compile, "
+    "lint and test receipts; it grants no deployment or remote authority.", 0,
+    "dev,proof,ensure,receipt,push,background",
+    "zcl.dev_proof_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base,mode", "",
+    "z23-dev dev proof ensure",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_dev_proof_ensure,
+    "background proof scheduling requires the dev binary",
+    "z23-dev dev proof status")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.proof.status", "dev.proof", "",
+    "Read exact commit/base proof status",
+    "Validates the immutable local receipt seal and its complete generated, "
+    "compile, lint and test accounting. Missing, stale, incomplete and "
+    "tampered receipts remain explicit non-passing states.", 0,
+    "dev,proof,status,receipt,push",
+    "zcl.dev_proof_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base", "",
+    "z23-dev dev proof status",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_proof_status,
+    "proof receipt status requires the dev binary",
+    "z23-dev dev proof status")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.proof.wait", "dev.proof", "",
+    "Wait for one exact commit/base receipt",
+    "Schedules the exact local proof when it is missing, then waits without "
+    "running a push gate. A timeout or failed proof returns a typed refusal "
+    "with the same exact commit/base identity.", ZCL_COMMAND_LIST_BUDGET,
+    "dev,proof,wait,receipt,push",
+    "zcl.dev_proof_wait_input.v1", "zcl.dev_proof_status.v1",
+    "root,local_commit,remote_base,timeout_ms", "",
+    "z23-dev dev proof wait",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_proof_wait,
+    "proof receipt waiting requires the dev binary",
+    "z23-dev dev proof status")
 
 ZCL_COMMAND_READY_READ(
     "dev.test.plan", "dev.test", "", "Map changed files to mandatory proof groups",

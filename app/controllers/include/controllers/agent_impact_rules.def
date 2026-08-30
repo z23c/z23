@@ -10,7 +10,8 @@
 
 AGENT_IMPACT_RULE("lib/test/src/lint_gate_deploy_contracts.c", "make_lint_gates_shard_06 make_lint_gates_shard_07")
 AGENT_IMPACT_RULE("lib/test/src/lint_gate_operator_contracts.c", "make_lint_gates_shard_05")
-AGENT_IMPACT_RULE("lib/codeindex/include/codeindex/codeindex_inventory.h|lib/codeindex/src/codeindex_inventory*.c|lib/test/src/test_code_inventory.c|tools/gen_capability_inventory.c|tools/lint/check_capability_inventory_generated.sh|docs/CAPABILITY_INVENTORY.jsonl|tools/command/native_code_guide_command.c", "code_inventory command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("lib/codeindex/include/codeindex/codeindex_inventory.h|lib/codeindex/src/codeindex_inventory*.c|lib/test/src/test_code_inventory.c|tools/gen_capability_inventory.c|tools/lint/check_capability_inventory_generated.sh|tools/command/native_code_guide_command.c", "code_inventory command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("docs/CAPABILITY_INVENTORY.jsonl", "code_inventory")
 AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|src/main.c|tools/*|tools/scripts/*|tools/githooks/*|deploy/*.service|deploy/*.timer|deploy/examples/*.service|deploy/examples/*.timer|config/launchd/*|docs/AGENT_API.md|docs/BUILD.md|docs/CODEBASE_MAP.md|docs/HOW_THE_NODE_WORKS.md|docs/GETTING_STARTED.md|docs/work/fast-path.md|docs/RUNBOOK.md|lib/test/src/test_make_lint_gates.c|lib/test/src/lint_gate_*.c|lib/test/src/lint_gate_selftests.h", "make_lint_gates")
 AGENT_IMPACT_RULE(".grok/rules/*|.grok/skills/*/SKILL.md", "make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/include/controllers/agent_impact_rules.def", "code_impact impact_composition syncdiag_rpc test_group_selector make_lint_gates")

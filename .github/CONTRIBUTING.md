@@ -35,7 +35,7 @@ content-addressed. The durable statement of this is
 
 ```bash
 make vendor              # one-time: build the static third-party archives
-make install-hooks       # point core.hooksPath at tools/githooks
+make install-hooks       # install checkout-local native receipt hooks
 ```
 
 `make vendor` is the only step that needs the network: it fetches pinned source
@@ -44,9 +44,9 @@ tarballs, verifies them against pinned SHA-256 hashes, and compiles them into
 explicitly is just a way to get the long part over with first. Afterwards
 builds are offline.
 
-`make install-hooks` is optional but strongly recommended — see
-[What the git hooks do](#what-the-git-hooks-do) below. Without it you can still
-push, you just find out about a lint or test failure after the fact.
+`make install-hooks` is strongly recommended — see
+[What the git hooks do](#what-the-git-hooks-do) below. It starts verification
+after source-changing Git events and keeps build/test work out of push time.
 
 ## Build and test
 
@@ -109,19 +109,17 @@ Non-consensus changes never touch `core/`, and this gate will never bother you.
 
 ## What the git hooks do
 
-`make install-hooks` sets `core.hooksPath=tools/githooks`. Two hooks:
+`make install-hooks` builds one C23 hook executable and sets a checkout-local
+`core.hooksPath`. The installed hooks are:
 
-- **`pre-push` — the local CI gate.** Runs `make pre-push-ci`, writing verbose
-  output to `build/pre-push-ci.log` and printing only a summary. **It is scoped
-  to the files you are actually pushing**: the hook computes the changed-file
-  list from the ref update and passes it down, so what runs is a focused lint +
-  build + test selection for those files, not the full multi-minute suite. This
-  matters because people assume the opposite and then bypass the hook out of
-  habit. The full suite, fuzzing, and coverage run on background timers instead
-  (`make install-quality-linger`), so long-running evidence jobs never block a
-  push — only focused regressions do.
+- **`post-commit`, `post-merge`, and `post-checkout` — proof notifications.**
+  They enqueue exact local verification and return immediately.
 
-  Bypass one push with `git push --no-verify` or `ZCL_SKIP_PREPUSH=1 git push`.
+- **`pre-push` — receipt admission.** It parses Git's advertised ref tuple,
+  proves the remote base is an ancestor, and admits only a complete sealed
+  receipt for that exact local commit/base pair. It never runs a compiler,
+  test, lint, Make, or shell process. Missing or running evidence refuses
+  quickly and prints the exact `z23-dev dev proof wait` command.
 
 - **`pre-commit` — a lane guard, not a code check.** It refuses a commit only
   when the *main* checkout is sitting on a non-`main` branch, because
