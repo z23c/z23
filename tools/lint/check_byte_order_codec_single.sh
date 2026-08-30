@@ -105,6 +105,7 @@ if [ "${1:-}" = "--selftest" ]; then
 
     run_sandbox() {
         ZCL_BYTE_ORDER_SCAN_ROOTS="$tmp/app" \
+        ZCL_BYTE_ORDER_COVERAGE=0 \
         ZCL_BYTE_ORDER_FILE_FLOOR=1 \
         ZCL_BYTE_ORDER_BASELINE="$tmp/empty_baseline.txt" \
         ZCL_LINT_MODE=FAIL \
@@ -193,7 +194,35 @@ static void emit(uint8_t *p, uint64_t height)
     zcl_write_u64_le(p, height);
 }'
 
-    echo "[$GATE] SELFTEST PASS (shift-loop, reversed-operand, unrolled store, unrolled load and hand-rolled bswap all fail; bare shift, plain loop and canonical caller pass)"
+    # COVERAGE, three answers not two. The floor above is calibrated to
+    # detect "nothing happened"; these three prove the coverage check
+    # detects "less happened than should have", which no file count can.
+    # Each case re-invokes this gate for real against the true tree (no
+    # --selftest arg, so no recursion) and settles at the coverage check
+    # before the detectors run.
+    cov_case() { # $1=want-rc $2=msg  rest: VAR=VAL
+        local want="$1" msg="$2" rc=0
+        shift 2
+        env "$@" "$self" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne "$want" ]; then
+            echo "$GATE: SELFTEST FAILED — $msg (wanted exit $want, got $rc)" >&2
+            exit 2
+        fi
+    }
+    # (a) the complete scan clears its own expectation.
+    cov_case 0 "the complete scan did not pass its coverage expectation" \
+        ZCL_LINT_MODE=FAIL
+    # (b) a scan deliberately reduced below the expectation (one declared
+    #     root dropped) is UNPROVEN exit 2 — never 0, never 1. The floor
+    #     cannot see this: the reduced set still towers over 800.
+    cov_case 2 "a scan missing a whole declared root was not UNPROVEN" \
+        ZCL_BYTE_ORDER_SCAN_ROOTS="app config lib src" ZCL_BYTE_ORDER_FILE_FLOOR=1
+    # (c) a shortfall SMALLER than the recorded allowance is a stale
+    #     ratchet, exit 1 — an allowance that may only rise rusts shut.
+    cov_case 1 "an allowance above the true shortfall was silently tolerated" \
+        ZCL_BYTE_ORDER_COVERAGE_ALLOWANCE=1
+
+    echo "[$GATE] SELFTEST PASS (shift-loop, reversed-operand, unrolled store, unrolled load and hand-rolled bswap all fail; bare shift, plain loop and canonical caller pass; a full scan clears coverage, a scan short one declared root is UNPROVEN exit 2, a stale allowance is exit 1)"
     exit 0
 fi
 
@@ -212,6 +241,44 @@ collect_files() {
 mapfile -t scan_files < <(collect_files | sort)
 gate_require_scanned "${#scan_files[@]}" "${ZCL_BYTE_ORDER_FILE_FLOOR:-800}" "$GATE" \
     "no production .c/.h under: ${SCAN_ROOTS[*]}"
+
+# ── Coverage: did the scan reach everything it claims to cover? ──────────
+# The floor above answers "did the scan produce anything at all". It cannot
+# answer "did it produce everything it should have", and here the two are
+# nowhere near each other: the realized set is 3598 .c/.h files against a
+# floor of 800 — measured 2026-08-30, this gate could silently lose 2797
+# files, 78% of its own surface, and still report clean. That is not a floor
+# doing its job badly; it is a floor answering a different question.
+#
+# The expectation is derived from the git index, which knows nothing about
+# the find above — the two cannot fail together, which is the whole point of
+# an independent oracle. It is derived from SCAN_ROOTS_DEFAULT and the same
+# lib/base + lib/test carve-outs the find applies, never from the
+# (overridable) SCAN_ROOTS actually in use, so aiming this gate at a subset
+# reads as a shortfall rather than as a quiet redefinition of "covered".
+#
+# Scope, unchanged. lib/base is carved out because it DEFINES the canonical
+# codec this gate requires callers to use, lib/test because a fixture may
+# legitimately hand-roll one. Tracked sources outside SCAN_ROOTS_DEFAULT
+# (core/, domain/, adapters/, packages/, examples/) were never in this
+# gate's declared surface and are not added here — widening the roots is a
+# separate, riskier change needing its own clean-tree proof.
+#
+# Allowance 0, shrink-only: the find reaches every tracked file the oracle
+# names today (measured: expected 3598, scanned 3598, missing 0), so any
+# shortfall at all is UNPROVEN.
+BYTE_ORDER_COVERAGE_ALLOWANCE="${ZCL_BYTE_ORDER_COVERAGE_ALLOWANCE:-0}"
+if [ "${ZCL_BYTE_ORDER_COVERAGE:-1}" = "1" ]; then
+    cov_specs=()
+    for cov_root in $SCAN_ROOTS_DEFAULT; do
+        cov_specs+=("$cov_root/*.c" "$cov_root/*.h")
+    done
+    cov_specs+=(':!:lib/base/*' ':!:lib/test/*')
+    gate_require_git_coverage - "$BYTE_ORDER_COVERAGE_ALLOWANCE" "$GATE" \
+        ZCL_BYTE_ORDER_COVERAGE_ALLOWANCE \
+        "Re-run from a clean checkout. A named file that genuinely left this gate's surface belongs outside $SCAN_ROOTS_DEFAULT or in an explicit carve-out beside lib/base and lib/test — not in a raised allowance." \
+        -- "${cov_specs[@]}" < <(printf '%s\n' "${scan_files[@]}")
+fi
 
 # ── Detect ───────────────────────────────────────────────────────────────
 # One grep pass per pattern over the whole scan set (not one grep per file).
