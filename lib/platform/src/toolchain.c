@@ -47,6 +47,7 @@ static bool tc_copy_string(char *dst, size_t dst_cap, const char *src)
     return true;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
 static bool tc_query(platform_toolchain_query_fn query_fn, void *query_ctx,
                      const char *compiler, const char *arg,
                      char *out, size_t cap)
@@ -75,6 +76,7 @@ static bool tc_resolve_tool(const char *candidate, char *out, size_t cap)
 #endif
     return tc_copy_string(out, cap, candidate);
 }
+#endif
 
 #if defined(__APPLE__)
 static bool tc_macos_sdk_path(platform_toolchain_query_fn query_fn,

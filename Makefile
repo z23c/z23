@@ -2611,7 +2611,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2633,7 +2633,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -4948,13 +4948,16 @@ Z23_BOOTSTRAP_INCLUDES = -Ilib/base/include -Ilib/crypto/include \
 	-Itools/acme -Ivendor/include
 Z23_BOOTSTRAP_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(Z23_BOOTSTRAP_INCLUDES)
+Z23_BOOTSTRAP_BIN = $(BIN_DIR)/z23-bootstrap$(ZCL_HOST_EXEEXT)
 
 .PHONY: z23-bootstrap
-z23-bootstrap: $(BIN_DIR)/z23-bootstrap
-$(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
+z23-bootstrap: $(Z23_BOOTSTRAP_BIN)
+$(Z23_BOOTSTRAP_BIN): $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(Z23_BOOTSTRAP_CFLAGS) -o $@ $(Z23_BOOTSTRAP_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+		vendor/lib/libssl.a vendor/lib/libcrypto.a \
+		$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+		$(ZCL_PLATFORM_NODE_LIBS)
 
 # The front-door half of a release cut: package that bootstrap under
 # bootstrap/<triple>/ and write its SHA-256 into COPIES of the two shims, into
@@ -4963,7 +4966,7 @@ $(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 # check-published-platforms holds them to it. Serve the resulting directory at
 # the project domain root; nothing in this repository does that step yet.
 .PHONY: z23-front-door
-z23-front-door: $(BIN_DIR)/z23-bootstrap
+z23-front-door: $(Z23_BOOTSTRAP_BIN)
 	@bash packaging/release/build_release.sh --front-door
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
@@ -11007,7 +11010,7 @@ check-ship-remote-transaction: jsonq
 # quiet pass: the front door is the one program a stranger runs before
 # anything has been verified, and an unobserved gate over it is worse than no
 # gate at all.
-check-z23-release-install: $(BIN_DIR)/z23-bootstrap
+check-z23-release-install: $(Z23_BOOTSTRAP_BIN)
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
 	@bash packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
@@ -11812,7 +11815,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-bootstrap
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif

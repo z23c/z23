@@ -22,6 +22,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* The Windows CRT does not expose O_CLOEXEC. Its descriptors wrap
+ * non-inheritable handles unless inheritance is explicitly requested, so a
+ * zero-valued compatibility flag preserves the intended boundary. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
 #define ENGINE_SECRET_MIN 12
 #define ENGINE_REDACTED   "[REDACTED]"
 

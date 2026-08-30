@@ -181,14 +181,23 @@ if [[ "$VENDOR_TARGET_OS" == darwin ]]; then
     export MACOSX_DEPLOYMENT_TARGET
 fi
 
-# OpenSSL cannot probe a target it is not running on, so a cross build must
-# name its config target. Empty means "let Configure autodetect", which is the
-# host path and is left exactly as it was.
+# OpenSSL cannot infer a supported target from the MSYS2 host name even for a
+# native MinGW build, and it cannot probe any cross target. Name Windows
+# targets in both cases. Native Darwin and POSIX builds retain autodetection;
+# Darwin cross builds still name their target explicitly.
 OPENSSL_CONFIG_TARGET=""
-if [[ -n "$VENDOR_TARGET" ]]; then
+if [[ "$VENDOR_TARGET_OS" == windows ]]; then
     case "$VENDOR_TARGET_OS:$VENDOR_CC_MACHINE" in
         windows:x86_64-*) OPENSSL_CONFIG_TARGET="mingw64" ;;
         windows:i686-*|windows:i586-*) OPENSSL_CONFIG_TARGET="mingw" ;;
+        *)
+            printf '\033[31m[vendor] ERROR:\033[0m no OpenSSL config target known for native Windows compiler %s\n' \
+                "$VENDOR_CC_MACHINE" >&2
+            exit 1
+            ;;
+    esac
+elif [[ -n "$VENDOR_TARGET" ]]; then
+    case "$VENDOR_TARGET_OS:$VENDOR_CC_MACHINE" in
         darwin:x86_64-*) OPENSSL_CONFIG_TARGET="darwin64-x86_64-cc" ;;
         darwin:arm64-*|darwin:aarch64-*) OPENSSL_CONFIG_TARGET="darwin64-arm64-cc" ;;
         *)
@@ -254,7 +263,7 @@ PROVENANCE_CONTRACT_REV="vp3"
 RECIPE_TOR_STUB="tor-stub-r2"
 RECIPE_SQLITE="sqlite-r2"
 RECIPE_ZLIB="zlib-r2"
-RECIPE_OPENSSL="openssl-r4"
+RECIPE_OPENSSL="openssl-r5"
 # r6: the pinned secure-rng ABI patch grew a second hunk (it now unguards the
 # evutil_secure_rng_add_bytes DECLARATION in include/event2/util.h, not only its
 # definition in evutil_rand.c), and the recipe now stages event2/ headers. The
@@ -385,6 +394,9 @@ recipe_flags() {
     printf '%s' "$flags"
     if [[ -n "$VENDOR_TARGET" ]]; then
         printf '; target=%s' "$VENDOR_TARGET"
+    fi
+    if [[ "$group" == openssl && -n "$OPENSSL_CONFIG_TARGET" ]]; then
+        printf '; config_target=%s' "$OPENSSL_CONFIG_TARGET"
     fi
     if [[ "$VENDOR_TARGET_OS" == darwin ]]; then
         printf '; macosx_deployment_target=%s' "$MACOSX_DEPLOYMENT_TARGET"
@@ -593,10 +605,9 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
     # canonical /usr/local + /etc/ssl values are relocatable and operator-
     # agnostic. (Do NOT pass -DOPENSSLDIR etc — Configure already defines them
     # from --prefix/--openssldir, and a -D redefine errors the build.)
-    # $OPENSSL_CONFIG_TARGET is empty on a host build, and an unquoted empty
-    # expansion contributes no argument, so the host command line is exactly
-    # the one every existing stamp records. A cross build must NAME its target
-    # because Configure's autodetection probes the machine it runs on.
+    # $OPENSSL_CONFIG_TARGET is empty on native POSIX/Darwin builds. Windows
+    # and cross builds name the target because Configure cannot infer it from
+    # the execution environment.
     # shellcheck disable=SC2086
     ( cd "$d" \
         && export CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \

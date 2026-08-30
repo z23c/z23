@@ -12,6 +12,7 @@
 #include "base/safe_alloc.h"
 #include "controllers/shop_native_handler.h"
 #include "json/json.h"
+#include "platform/logical_cpu.h"
 #include "util/spawn.h"
 
 #include "dev/test_group_catalog.h"
@@ -381,7 +382,7 @@ int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms)
     if (!root || !target)
         return -1;
     char jobs[32];
-    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    long online = (long)platform_logical_cpu_count();
     (void)snprintf(jobs, sizeof(jobs), "-j%ld", online > 0 ? online : 1);
     const char *argv[] = { "make", "--no-print-directory", jobs, target, NULL };
     char *buf = zcl_malloc(DVA_CAPTURE_BYTES, "devagent.capture");
