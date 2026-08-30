@@ -54,6 +54,24 @@ static const struct engine_vendor k_engine_vendors[] = {
         .max_retries   = 3,
     },
     {
+        /* Added on 2026-08-30 to test the claim this table makes, not because
+         * the tree needs a third API vendor: a new OpenAI-compatible engine
+         * must cost ONE ROW and no change anywhere else. It cost one row.
+         * Nothing in the request builder, the decoder, the applier, or the
+         * verdict knows this vendor exists. */
+        .id            = "openai",
+        .display       = "OpenAI (HTTPS API)",
+        .url           = "https://api.openai.com/v1/chat/completions",
+        .default_model = "gpt-4.1-mini",
+        .key_env       = "OPENAI_API_KEY",
+        .key_file_rel  = ".config/zclassic23/engine/openai.key",
+        .program       = NULL,
+        .wire          = ENGINE_WIRE_OPENAI_CHAT,
+        .delivery      = ENGINE_DELIVERS_ENVELOPE,
+        .costs_money   = true,
+        .max_retries   = 3,
+    },
+    {
         /* The subscription-backed agent CLI this tree already dispatches by
          * hand (tools/dev/grok-unit.sh). It is behind the same interface as
          * the API engines on purpose: a caller picks an ENGINE, not a
