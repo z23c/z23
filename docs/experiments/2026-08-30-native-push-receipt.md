@@ -44,6 +44,12 @@ tracked source set and making the generated fact tool an explicit parent-Make
 prerequisite reduced the same warm gate to 46 milliseconds, with the same
 plant/trip/recover self-test and document comparison.
 
+The combined 30-file integration delta selected 50 distinct registered test
+groups. The previous 32-group storage bound refused the complete result as
+`path-group-cap`; the bounded planner and shared impact accumulator now retain
+64 distinct groups and continue to fail closed beyond that bound. The plan's
+wire renderer remains independently bounded and abridges only presentation.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
@@ -56,6 +62,9 @@ plant/trip/recover self-test and document comparison.
   not yet supported by measurement.
 - Exact input enumeration removed 16.688 seconds from the warm Equihash gate;
   native gate execution remains a separate parity task.
+- A coherent multi-component push can legitimately exceed 32 focused groups;
+  storage bounds must cover measured repository diffs without converting a
+  complete impact answer into a permanent refusal.
 - A self-sealed aggregate is insufficient by itself. Selected dimensions now
   name fixed-width content-addressed child receipts, and the hook requires each
   child object to exist and match its exact accounting.
