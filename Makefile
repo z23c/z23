@@ -115,7 +115,11 @@ ZCL_TEST_STACK_SETUP = :
 else ifeq ($(ZCL_HOST_OS),Darwin)
 CC = clang
 CXX = clang++
-ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
+ZCL_MACOS_DEPLOYMENT_TARGET := 14.0
+export MACOSX_DEPLOYMENT_TARGET := $(ZCL_MACOS_DEPLOYMENT_TARGET)
+ZCL_PLATFORM_CPPFLAGS = -mmacosx-version-min=$(ZCL_MACOS_DEPLOYMENT_TARGET) \
+	-DZCL_MACOS_DEPLOYMENT_TARGET=\"$(ZCL_MACOS_DEPLOYMENT_TARGET)\" \
+	-D_DARWIN_C_SOURCE \
 	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
 	-Dst_ctim=st_ctimespec -fblocks
 ZCL_LTO_FLAG = -flto=thin
@@ -4875,7 +4879,7 @@ ACME_WORKER_LIBS = $(ZCL_VENDOR_LIB)/libssl.a $(ZCL_VENDOR_LIB)/libcrypto.a \
 
 .PHONY: zclassic23-acme
 zclassic23-acme: $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
-$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
+$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(ACME_WORKER_CFLAGS) $(ACME_WORKER_LDFLAGS) -o $@ \
 		$(ACME_WORKER_SRCS) $(ACME_WORKER_LIBS)
@@ -4909,11 +4913,11 @@ Z23_BOOTSTRAP_INCLUDES = -Ilib/base/include -Ilib/crypto/include \
 	-Ilib/install/include -Ilib/platform/include -Ilib/util/include \
 	-Itools/acme -Ivendor/include
 Z23_BOOTSTRAP_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(Z23_BOOTSTRAP_INCLUDES)
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(Z23_BOOTSTRAP_INCLUDES)
 
 .PHONY: z23-bootstrap
 z23-bootstrap: $(BIN_DIR)/z23-bootstrap
-$(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) | $(NODE_VENDOR_LIBS)
+$(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(Z23_BOOTSTRAP_CFLAGS) -o $@ $(Z23_BOOTSTRAP_SRCS) \
 		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
