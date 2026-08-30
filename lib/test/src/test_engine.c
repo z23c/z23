@@ -49,7 +49,7 @@
  * <32 hex>.<16 alnum> shape the scrubber knows, which is exactly the point:
  * the test must exercise the same path a real key would take. */
 static const char k_planted_key[] =
-    "0123456789abcdef0123456789abcdef.AbCdEfGhIjKlMnOp";
+    "0123456789abcdef0123456789abcdef.AbCdEfGhIjKlMnOp"; /* api-key-example-ok */
 
 /* ── 1. the registry ─────────────────────────────────────────────────── */
 
@@ -537,8 +537,8 @@ static int case_secret(void)
     {
         char line[512];
         (void)snprintf(line, sizeof(line),
-                       "here is my key sk-abcdefghijklmnopqrstuvwxyz012345 and "
-                       "a header Bearer xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 ok");
+                       "here is my key sk-abcdefghijklmnopqrstuvwxyz012345 and " /* api-key-example-ok */
+                       "a header Bearer xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 ok"); /* api-key-example-ok */
         engine_redact_inplace(line);
         EN_CHECK("an sk- token this process never loaded is scrubbed",
                  strstr(line, "sk-abcdefghij") == NULL);
