@@ -335,6 +335,15 @@ enum metaverse_grant_verdict metaverse_grant_check_delegation(
 
 /* ── Commit effect ──────────────────────────────────────────────────────── */
 
+/* THE CHARGE RULE, stated once. Only a value that actually MOVES is charged: a
+ * quoted asking price is not exposure and must not consume the operator's
+ * ceiling. Both the acting grant's debit and the lineage debit below read it
+ * from here, so neither can drift from the other. */
+static int64_t charge_for(const struct metaverse_action_request *req)
+{
+    return metaverse_action_moves_value(req->action) ? req->value_zat : 0;
+}
+
 bool metaverse_grant_record_commit(struct metaverse_grant *g,
                                   const struct metaverse_action_request *req)
 {
@@ -345,10 +354,7 @@ bool metaverse_grant_record_commit(struct metaverse_grant *g,
     if (req->value_zat < 0)
         LOG_FAIL(GRANT_LOG, "record commit: negative value %lld",
                  (long long)req->value_zat);
-    /* Only a value that actually MOVES is charged. A quoted asking price is
-     * not exposure and must not consume the operator's ceiling. */
-    int64_t charge =
-        metaverse_action_moves_value(req->action) ? req->value_zat : 0;
+    int64_t charge = charge_for(req);
     if (charge > metaverse_grant_budget_remaining(g))
         LOG_FAIL(GRANT_LOG,
                  "record commit: value %lld over remaining budget %lld "
@@ -368,5 +374,33 @@ bool metaverse_grant_record_commit(struct metaverse_grant *g,
     }
 
     g->spent_zat += charge;
+    return true;
+}
+
+bool metaverse_grant_record_descendant_charge(
+    struct metaverse_grant *ancestor,
+    const struct metaverse_action_request *req)
+{
+    if (!ancestor || !req)
+        LOG_FAIL(GRANT_LOG, "lineage charge: NULL grant or request");
+    if (!metaverse_action_valid(req->action))
+        LOG_FAIL(GRANT_LOG, "lineage charge: request names no action");
+    if (req->value_zat < 0)
+        LOG_FAIL(GRANT_LOG, "lineage charge: negative value %lld",
+                 (long long)req->value_zat);
+
+    int64_t charge = charge_for(req);
+    if (charge > metaverse_grant_budget_remaining(ancestor))
+        LOG_FAIL(GRANT_LOG,
+                 "lineage charge: value %lld over ancestor %s remaining budget "
+                 "%lld",
+                 (long long)req->value_zat, ancestor->grant_id,
+                 (long long)metaverse_grant_budget_remaining(ancestor));
+
+    /* ONLY the budget. The rate window bounds how often THIS grant's holder
+     * may act, and a descendant's action is not this grant's action; charging
+     * it here would let a child's traffic exhaust its parent's liveness bound
+     * as a side effect of spending money. */
+    ancestor->spent_zat += charge;
     return true;
 }

@@ -396,6 +396,21 @@ assert green).
   baseline from 67 rows to 62: five of them were headers whose only SQL was
   in prose.
 
+- **Gate #11e: `check-cookbook`** (HARD, no baseline) — every recipe in
+  `config/cookbook.def` must still work, and `docs/COOKBOOK.md` must still be
+  what the registry generates. A written how-to rots: a recipe telling a
+  newcomer to run a command that no longer exists costs more than no recipe,
+  because they believe it and spend an hour. So a RUN recipe has its command
+  actually executed and its expected token required in the output, an ASK
+  recipe (for a command its own menu calls background latency) is checked to
+  still exist and report itself ready, and a READ recipe must cite a tracked
+  file that still contains the symbol it points at. The document is
+  regenerated and compared byte for byte, so the prose cannot drift from the
+  rows; `--fix` rewrites it. The tool set is CLOSED and arguments carrying
+  anything outside `[A-Za-z0-9_./= -]` are refused before execution — a gate
+  that runs whatever a string says is a gate that runs whatever anyone puts
+  in a `.def`.
+
 - **Gate #11d: `check-persona-resolves`** (HARD, no baseline) — every row in
   `lib/engine/include/engine/personas.def` must still point at things that
   exist. A persona is the one piece of prose this project keeps about a
@@ -1188,6 +1203,7 @@ add/remove a gate.
 - `check-model-sql-literals`
 - `check-model-validation`
 - `check-persona-resolves`
+- `check-cookbook`
 - `check-no-raw-clock-outside-platform`
 - `check-sysinit-ordering`
 - `check-sandbox-wired`

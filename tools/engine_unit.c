@@ -72,6 +72,7 @@
 #include "engine/engine.h"
 #include "engine/engine_err.h"
 #include "engine/engine_patch.h"
+#include "engine/engine_prompt.h"
 #include "engine/engine_secret.h"
 #include "engine/engine_verdict.h"
 #include "engine/engine_wire.h"
@@ -366,30 +367,10 @@ static size_t worktree_changed_files(const char *dir)
 
 /* The rules a unit must read before it writes C in this tree. Kept in one
  * place so the prompt and the parser cannot describe different contracts. */
-static const char *system_rules(void)
-{
-    return
-"You are writing C23 for the Z23 repository. Read these before you write.\n"
-"\n"
-"  - C23 only. No Python, no external dependencies, no new vendored library.\n"
-"  - Every allocation is checked. Use zcl_malloc(size, \"label\").\n"
-/* The macro names below are deliberately written without a following
- * parenthesis. check-log-macro-return-type scans the RAW line, string
- * literals included — it cannot tell prompt text from a call site, and it is
- * right not to try, because the day a lint gate starts parsing intent is the
- * day something walks past it. */
-"  - Every error return logs context. In a bool function use LOG_FAIL, which\n"
-"    returns false; in an int function LOG_ERR, which returns -1; in a\n"
-"    pointer function LOG_NULL, which returns NULL. They RETURN from the\n"
-"    enclosing function; they are not print statements.\n"
-"  - Never weaken an assertion, a threshold, a baseline, or a fail-closed\n"
-"    refusal to get a green result. An honest red is the correct answer, and\n"
-"    saying so is worth more than a change made to look busy.\n"
-"  - A test file that exists proves nothing. A test group must be registered\n"
-"    and must actually run.\n"
-"  - Do not record anything in version control and do not publish anything\n"
-"    to any remote. A person reads this work before either happens.\n";
-}
+/* The rules a unit is held to, and the decision about which wire carries
+ * them, live in lib/engine (engine/engine_prompt.h). They used to be a
+ * static here, and being a static here is how they went missing from every
+ * CLI dispatch: no test links this tool, so nothing could assert them. */
 
 
 /* ── the territory brief ──────────────────────────────────────────────────
@@ -402,10 +383,17 @@ static const char *system_rules(void)
  * It now has to name a real territory, and the unit carries that territory's
  * generated brief — what it owns, which registered groups its files route to,
  * how many of its public functions a registered test entry point actually
- * reaches, which lint gates bind it, and where its evidence is weakest. Every
+ * reaches, and where its evidence is weakest. Every
  * number is regenerated from the code index by `code territory NAME` on this
  * run. This harness computes none of it and stores none of it, so the brief
  * cannot go stale the way a written one does.
+ *
+ * It does NOT carry which lint gates bind the territory. That analysis is
+ * real — territory_brief_build() computes it — but it is wired into a
+ * different command, `code general`, which this path never calls. This
+ * comment claimed otherwise for as long as it existed, which meant a
+ * reviewer reading it believed the model had been told which gates apply to
+ * its change. It had not. Say what the command actually emits.
  *
  * It is fetched by RUNNING that command rather than by linking lib/territory,
  * and that is not laziness. lib/territory reaches the code index and
@@ -978,8 +966,13 @@ int main(int argc, char **argv)
             free(task);
             return fail_setup(why);
         }
-        engine_emit(stdout, "  territory:  %s (brief: %zu bytes)\n",
-                    o.territory, strlen(brief));
+        /* Say whether a stance was found. Silence here made "this territory
+         * has no authored stance" indistinguishable from "nobody looked",
+         * and most territories have none. */
+        const char *stance = persona_stance(o.territory);
+        engine_emit(stdout, "  territory:  %s (brief: %zu bytes, stance: %s)\n",
+                    o.territory, strlen(brief),
+                    stance ? "authored" : "none");
     }
 
     char *prompt = compose_prompt(&o, v, task, brief, NULL);
@@ -989,7 +982,30 @@ int main(int argc, char **argv)
         return 2;
 
     if (o.dry_run) {
-        engine_emit(stdout, "%s\n%s\n", system_rules(), prompt);
+        /* Print exactly what this vendor would be handed, not what an
+         * HTTP vendor would be handed. A preview that shows the rules while
+         * the delivery omits them is worse than no preview: it is the thing
+         * an operator checks in order to be reassured. */
+        char *shown = engine_prompt_compose(v->wire, prompt, NULL);
+        engine_emit(stdout, "%s\n", shown ? shown : prompt);
+        /* The preview ends with the same verdict the dispatch path
+         * applies, so an operator sees a refusal here rather than
+         * discovering it after paying for a run. */
+        struct engine_prompt_audit audit;
+        bool shaped = shown
+                      && engine_prompt_audit_text(v->wire, shown, &audit);
+        uint8_t shape[32];
+        engine_prompt_shape_sha3(shape);
+        engine_emit(stdout,
+                    "\n[prompt shape %02x%02x%02x%02x%02x%02x%02x%02x: "
+                    "%zu of %zu required section(s) present — %s]\n",
+                    shape[0], shape[1], shape[2], shape[3],
+                    shape[4], shape[5], shape[6], shape[7],
+                    shaped ? audit.present : (size_t)0,
+                    shaped ? audit.required : (size_t)0,
+                    shaped ? "would dispatch"
+                           : "WOULD BE REFUSED");
+        free(shown);
         free(prompt);
         return 0;
     }
@@ -1022,11 +1038,58 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* A CLI vendor reads this file and nothing else, so for a wire with no
+     * system channel of its own the rules have to be IN it. This is also the
+     * archived record of the dispatch, so it must be exactly what was
+     * delivered — an archive that differs from the delivery is an archive
+     * nobody can check a run against.
+     *
+     * A refusal here refuses the DISPATCH. Falling back to writing the
+     * prompt without the rules would be the original defect restored on an
+     * error path, which is where defects prefer to live. */
+    size_t delivered_len = 0;
+    char *delivered = engine_prompt_compose(v->wire, prompt, &delivered_len);
+    if (!delivered) {
+        free(prompt);
+        engine_secret_clear();
+        return fail_setup("the composed prompt could not be prepared for this "
+                          "engine; refusing to dispatch a partial one");
+    }
+
+    /* The prompt is checked against the declared shape before it is
+     * delivered. A prompt whose rules block, task, output protocol or
+     * judging section is missing is not a weaker prompt — it is a
+     * different job, and the work that comes back is evidence about
+     * something nobody asked for. Refusing costs one run; dispatching
+     * costs money and produces a receipt that means nothing. */
+    struct engine_prompt_audit audit;
+    if (!engine_prompt_audit_text(v->wire, delivered, &audit)) {
+        char why[256];
+        if (audit.missing)
+            snprintf(why, sizeof(why),
+                     "the composed prompt has no '%s' section",
+                     audit.missing);
+        else if (audit.misplaced)
+            snprintf(why, sizeof(why),
+                     "the composed prompt carries '%s' out of order",
+                     audit.misplaced);
+        else
+            snprintf(why, sizeof(why),
+                     "the composed prompt repeats '%s', which this "
+                     "engine already receives on its own channel",
+                     audit.repeated ? audit.repeated : "a section");
+        free(delivered);
+        free(prompt);
+        engine_secret_clear();
+        return fail_setup(why);
+    }
+
     char prompt_path[1024] = {0};
     if (o.state_dir && o.state_dir[0]
         && (size_t)snprintf(prompt_path, sizeof(prompt_path), "%s/prompt.txt",
                             o.state_dir) < sizeof(prompt_path))
-        (void)engine_emit_file(prompt_path, prompt, strlen(prompt));
+        (void)engine_emit_file(prompt_path, delivered, delivered_len);
+    free(delivered);
 
     /* Only an HTTP dialect has a request document. A CLI engine reads the
      * prompt from the file written above and a fixture reads a canned reply,
@@ -1039,7 +1102,7 @@ int main(int argc, char **argv)
         const struct engine_call call = {
             .vendor            = v,
             .model             = o.model,
-            .system_prompt     = system_rules(),
+            .system_prompt     = engine_system_rules(),
             .user_prompt       = prompt,
             .max_output_tokens = 32768,
         };

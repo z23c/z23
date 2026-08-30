@@ -2185,7 +2185,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves \
+        check-persona-resolves check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
@@ -3094,7 +3094,7 @@ worktree-gc:
 # tools/agent/gate-receipt.sh — this is EVIDENCE, not proof.
 .PHONY: gate-receipt check-claims agent-velocity agent-sha3
 
-AGENT_SHA3_SRCS := tools/agent/agent_sha3.c lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c
+AGENT_SHA3_SRCS := tools/agent/agent_sha3.c lib/sha3/src/sha3.c
 agent-sha3: $(BIN_DIR)/agent_sha3
 $(BIN_DIR)/agent_sha3: $(AGENT_SHA3_SRCS)
 	@mkdir -p $(dir $@)
@@ -9872,17 +9872,20 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	lib/engine/src/engine_registry.c \
 	lib/engine/src/engine_err.c \
 	lib/engine/src/engine_patch.c \
+	lib/engine/src/engine_prompt.c \
 	lib/engine/src/engine_secret.c \
 	lib/engine/src/engine_verdict.c \
 	lib/engine/src/engine_wire_request.c \
 	lib/engine/src/engine_wire_response.c \
 	lib/json/src/json.c \
+	lib/sha3/src/sha3.c \
 	lib/util/src/spawn.c \
 	lib/base/src/log_level.c \
 	lib/base/src/result.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
 ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
+	-Ilib/sha3/include \
 	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
 .PHONY: engine-unit
 engine-unit: $(ENGINE_UNIT_BIN)
@@ -10170,6 +10173,12 @@ check-model-sql-literals:
 # territory must still hold tracked C, and the file it cites as evidence must
 # still be tracked. There is no baseline — a row that stopped being true is
 # not a debt, it is a false statement.
+.PHONY: check-cookbook
+check-cookbook: $(ZCLASSIC23_DEV_BIN)
+	@echo "══ LINT: every cookbook recipe still works ══"
+	@./tools/lint/check_cookbook.sh --selftest
+	@./tools/lint/check_cookbook.sh
+
 check-persona-resolves:
 	@echo "══ LINT: every authored persona still resolves ══"
 	@./tools/lint/check_persona_resolves.sh --selftest
@@ -11627,6 +11636,7 @@ LINT_GATES := \
     check-model-ar-lifecycle \
     check-model-sql-literals \
     check-persona-resolves \
+    check-cookbook \
     check-long-functions \
     check-rpc-registrar \
     check-lag-slo-observable \
