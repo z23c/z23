@@ -612,6 +612,9 @@ ZCL_TEST_GROUP(seal_ratify)
 ZCL_TEST_GROUP(vcs_core)
 ZCL_TEST_GROUP(vcs_release)
 ZCL_TEST_GROUP(vcs_accept)
+/* The receiver's own re-derivation of a package capability claim: what a
+ * node that never met the publisher can check for itself. */
+ZCL_TEST_GROUP(package_capability_claim)
 ZCL_TEST_GROUP(zcode_store)
 ZCL_TEST_GROUP(zcode_publish)
 ZCL_TEST_GROUP(zcode_package_dev)
