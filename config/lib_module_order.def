@@ -140,3 +140,7 @@ LIB_MODULE("mining")
 LIB_MODULE("kernel")
 LIB_MODULE("hotswap")
 LIB_MODULE("codeindex")
+/* Reads the code index and reports one module's inventory, so it must rank
+ * above lib/codeindex. It references nothing else that is not already below
+ * codeindex (base, sha3), so last is also its lowest legal rank. */
+LIB_MODULE("territory")
