@@ -5,6 +5,7 @@
  * is transcript order and therefore stable evidence. */
 
 ZCL_TEST_GROUP(hex_codec)
+ZCL_TEST_GROUP(code_inventory)
 ZCL_TEST_GROUP(base_foundation)
 ZCL_TEST_GROUP(script_tail_poison)
 ZCL_TEST_GROUP(byte_order_codec)
@@ -43,6 +44,9 @@ ZCL_TEST_GROUP(shared_validators_zcl_address)
 ZCL_TEST_GROUP(script)
 ZCL_TEST_GROUP(net)
 ZCL_TEST_GROUP(netbase_split_host_port)
+/* The install front door's release-pin judgement (lib/install), which used to
+ * live twice in shell and PowerShell and so was proved by neither runner. */
+ZCL_TEST_GROUP(z23_front_door)
 ZCL_TEST_GROUP(acme_b64url)
 ZCL_TEST_GROUP(acme_challenge)
 ZCL_TEST_GROUP(acme_renewal)
@@ -58,6 +62,7 @@ ZCL_TEST_GROUP(accept_to_mempool)
 ZCL_TEST_GROUP(rpc)
 ZCL_TEST_GROUP(sqlite)
 ZCL_TEST_GROUP(activerecord)
+ZCL_TEST_GROUP(activerecord_query_builder)
 ZCL_TEST_GROUP(validation)
 ZCL_TEST_GROUP(sapling_lazy_init)
 ZCL_TEST_GROUP(sapling)
@@ -189,6 +194,7 @@ ZCL_TEST_GROUP(agent_copy_prove)
 ZCL_TEST_GROUP(agent_test)
 ZCL_TEST_GROUP(source_identity_authority)
 ZCL_TEST_GROUP(db_txn)
+ZCL_TEST_GROUP(model_fields)
 ZCL_TEST_GROUP(sync_service)
 ZCL_TEST_GROUP(node_db_catchup_service)
 ZCL_TEST_GROUP(catchup_lifecycle_service)
@@ -216,6 +222,7 @@ ZCL_TEST_GROUP(rom_manifest)
 ZCL_TEST_GROUP(rom_journal_resume)
 ZCL_TEST_GROUP(sync_trust_policy)
 ZCL_TEST_GROUP(code_capsule)
+ZCL_TEST_GROUP(code_have)
 ZCL_TEST_GROUP(code_impact)
 ZCL_TEST_GROUP(code_merkle)
 ZCL_TEST_GROUP(code_merkle_proof)
@@ -242,6 +249,8 @@ ZCL_TEST_GROUP(hotswap_rollback)
 ZCL_TEST_GROUP(dev_platform)
 ZCL_TEST_GROUP(impact_composition)
 ZCL_TEST_GROUP(dev_activation)
+ZCL_TEST_GROUP(devagent_surface)
+ZCL_TEST_GROUP(mutation_harness)
 ZCL_TEST_GROUP(command_registry_catalog)
 ZCL_TEST_GROUP(command_registry_latency)
 ZCL_TEST_GROUP(metaverse_agent_broker)
@@ -650,9 +659,25 @@ ZCL_TEST_GROUP(zcode_benchmark_exec)
 ZCL_TEST_GROUP(zcode_discovery_projection)
 ZCL_TEST_GROUP(vcs_devloop)
 ZCL_TEST_GROUP(codeindex)
+ZCL_TEST_GROUP(fingerprint)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)
 ZCL_TEST_GROUP(metaverse_catalog)
+ZCL_TEST_GROUP(node_character)
+/* A node's character with a birthday, in the fixed 128-byte form it travels
+ * in, and the rule a receiving node applies to it. The assertion the group
+ * exists for is that verify() accepts EXACTLY the self-consistent frames —
+ * driven against an independent oracle over every single-bit mutation — and
+ * that a claimed standing never becomes a believed one: a stranger recomputes
+ * form and chart, refuses any disagreement, and still believes zero energy
+ * however much the sheet claims. */
+ZCL_TEST_GROUP(node_character_wire)
+/* A role-playing character held as content-addressed property, whose six
+ * attributes are derived from a birth chart. The assertion the group exists
+ * for is that the attribute TOTAL is identical for every character over many
+ * thousands of seeds — the anti-grinding property, since the owner picks the
+ * birth moment — while the chart still decides a genuinely varying spread. */
+ZCL_TEST_GROUP(character_sheet)
 ZCL_TEST_GROUP(metaverse_site)
 ZCL_TEST_GROUP(site_routes)
 ZCL_TEST_GROUP(space)
@@ -1026,6 +1051,12 @@ ZCL_TEST_GROUP(replay_receipt_root)
  * of the watcher family sits behind #if defined(_WIN32). */
 ZCL_TEST_GROUP(directory_watcher)
 ZCL_TEST_GROUP(watcher_record)
+/* astro lane: lib/astro's exact fixed-grid arithmetic and the birth chart
+ * built on it. The determinism cases are the point — a chart another node
+ * recomputes must match bit for bit, so the group asserts that property by
+ * construction against a `double` control rather than against golden
+ * numbers. */
+ZCL_TEST_GROUP(astro)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)

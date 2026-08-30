@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 752 |
+| Registry entries (branches + leaves) | 757 |
 | Top-level roots | 12 |
-| Branches | 174 |
-| Leaves (dispatchable command paths) | 578 |
-| … `ready` (live handler in this build) | 522 |
+| Branches | 175 |
+| Leaves (dispatchable command paths) | 582 |
+| … `ready` (live handler in this build) | 526 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
-| Leaves with `effect=mutate` | 205 |
+| Leaves with `effect=mutate` | 206 |
 | Leaves with `effect=destructive` | 4 |
-| Leaves requiring **owner** authority | 116 |
+| Leaves requiring **owner** authority | 117 |
 
 Per source file:
 
@@ -96,8 +96,8 @@ Per source file:
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
-| `config/commands/dev.def` | 55 | 13 | 42 |
-| `config/commands/code.def` | 17 | 2 | 15 |
+| `config/commands/dev.def` | 59 | 14 | 45 |
+| `config/commands/code.def` | 18 | 2 | 16 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
 | `config/commands/zcode.def` | 245 | 58 | 187 |
@@ -752,6 +752,14 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `dev test background status` | planned | read / read / operator · instant/low | none | `zcl.dev_background_quality.v1` | `z23 dev test background status` | Read lint, sanitizer, replay, and reproducibility freshness — *native background-quality projection is not implemented* |
 
+#### `dev.agent` — Checkout questions answered without composing shell
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev agent ready` (aliases: `dev.agent.shippable`) | ready | read / read / operator · fast/low | none | `zcl.agent_ready.v1` | `z23 dev agent ready` | Can this checkout link real Tor and produce a shippable candidate |
+| `dev agent test` (aliases: `dev.agent.group`) | ready | read / read / operator · background/high | **`group`**, `exact`, `timeout_ms` | `zcl.agent_test_run.v1` | `z23 dev agent test --group=hex_codec` | Run one registered test group and report what actually RAN |
+| `dev agent mutate` (aliases: `dev.agent.mutation`) | ready | mutate / dev-mutation / **owner** · persistent/high | **`file`**, `line`, `group`, `restore` | `zcl.agent_mutation_check.v1` | `z23 dev agent mutate --file=lib/base/src/hex.c --line=42 --group=hex_codec` | Break one source line and prove a test group notices |
+
 ### `ops` — Node diagnostics
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
@@ -958,6 +966,7 @@ represented by its children's sections.
 | `code refs` | ready | read / read / public · fast/tiny | **`name`**, `limit` | `zcl.code_refs.v1` | `z23 code refs zcl_malloc` | List call sites and references to one symbol |
 | `code impact` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_impact.v1` | `z23 code impact lib/util/include/util/safe_alloc.h` | The reverse-dependency blast radius of one changed file |
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank N symbols by name, with a one-line context per hit |
+| `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Ask whether this checkout already does X, before building it |
 
 #### `code.provenance` — Attribute output back to the code that produced it
 
@@ -1649,6 +1658,9 @@ Every alias resolves through the same grammar as its canonical path
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
 | `dev.test.focused` | `dev.test.run` |
+| `dev.agent.shippable` | `dev.agent.ready` |
+| `dev.agent.group` | `dev.agent.test` |
+| `dev.agent.mutation` | `dev.agent.mutate` |
 | `zcode.create` | `zcode.package.dev.create` |
 | `zcode.use` | `zcode.package.dev.use` |
 | `zcode.improve` | `zcode.package.dev.improve` |

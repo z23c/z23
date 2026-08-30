@@ -9,8 +9,24 @@
 
 #include "models/tx_index.h"
 #include "models/block.h"
+#include "models/model_fields.h"
+#include "models/def/tx_index_fields.def"
 #include "util/log_macros.h"
 #include <string.h>
+
+/* ── Column mapping ───────────────────────────────────────────────
+ * Derived from models/def/tx_index_fields.def. The cached INSERT this
+ * binder fills is prepared in models/database.c from TX_INDEX_COLUMNS /
+ * TX_INDEX_VALUES in the same file, so the statement's column order and
+ * these bind positions have one source. */
+#define TX_INDEX_BY_TXID_COLUMNS  ZCL_MODEL_COLUMNS(TX_INDEX_BY_TXID_FIELDS)
+#define TX_INDEX_BY_BLOCK_COLUMNS ZCL_MODEL_COLUMNS(TX_INDEX_BY_BLOCK_FIELDS)
+
+ZCL_MODEL_BIND_FN(tx_index_bind, struct db_tx_index, TX_INDEX_FIELDS)
+ZCL_MODEL_READ_ROW_FN(tx_index_by_txid_read_row, struct db_tx_index,
+                      TX_INDEX_BY_TXID_FIELDS)
+ZCL_MODEL_READ_ROW_FN(tx_index_by_block_read_row, struct db_tx_index,
+                      TX_INDEX_BY_BLOCK_FIELDS)
 
 /* ── Callbacks ─────────────────────────────────────────────────── */
 
@@ -71,13 +87,7 @@ bool db_tx_save(struct node_db *ndb, const struct db_tx_index *t)
 
     sqlite3_stmt *s = ndb->stmt_tx_insert;
     sqlite3_reset(s);
-    AR_BIND_BLOB(s, 1, t->txid, 32);
-    AR_BIND_BLOB(s, 2, t->block_hash, 32);
-    AR_BIND_INT(s, 3, t->block_height);
-    AR_BIND_INT(s, 4, t->tx_index);
-    AR_BIND_INT(s, 5, t->file_num);
-    AR_BIND_INT(s, 6, t->file_pos);
-    AR_BIND_INT(s, 7, t->is_coinbase ? 1 : 0);
+    tx_index_bind(s, t);
 
     bool ok = AR_STEP_DONE(s);
     AR_FINISH_SAVE(cbs, t, ok);
@@ -100,8 +110,7 @@ bool db_tx_find(struct node_db *ndb, const uint8_t txid[32],
      * stmt_tx_find is intentionally left unused. */
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(ndb->db,
-            "SELECT block_hash,block_height,tx_index,"
-            "file_num,file_pos,is_coinbase"
+            "SELECT " TX_INDEX_BY_TXID_COLUMNS
             " FROM transactions WHERE txid=?",
             -1, &s, NULL) != SQLITE_OK || !s) {
         LOG_WARN("tx_index", "tx_find prepare failed: %s",
@@ -113,14 +122,8 @@ bool db_tx_find(struct node_db *ndb, const uint8_t txid[32],
         sqlite3_finalize(s);
         return false;
     }
-    memset(out, 0, sizeof(*out));
+    tx_index_by_txid_read_row(out, s);
     memcpy(out->txid, txid, 32);
-    AR_READ_BLOB(s, 0, out->block_hash, 32);
-    out->block_height = (int)AR_COL_INT(s, 1);
-    out->tx_index = (int)AR_COL_INT(s, 2);
-    out->file_num = (int)AR_COL_INT(s, 3);
-    out->file_pos = (int)AR_COL_INT(s, 4);
-    out->is_coinbase = AR_COL_INT(s, 5) != 0;
     sqlite3_finalize(s);
     return true;
 }
@@ -230,20 +233,14 @@ int db_tx_find_by_block(struct node_db *ndb, const uint8_t block_hash[32],
     if (!ndb->open) return 0;
     sqlite3_stmt *s = NULL;
     sqlite3_prepare_v2(ndb->db,
-        "SELECT txid,block_height,tx_index,file_num,file_pos,is_coinbase"
+        "SELECT " TX_INDEX_BY_BLOCK_COLUMNS
         " FROM transactions WHERE block_hash=? ORDER BY tx_index",
         -1, &s, NULL);
     AR_BIND_BLOB(s, 1, block_hash, 32);
     int count = 0;
     while (AR_STEP_ROW(s) && (size_t)count < max) {
-        memset(&out[count], 0, sizeof(out[count]));
-        AR_READ_BLOB(s, 0, out[count].txid, 32);
+        tx_index_by_block_read_row(&out[count], s);
         memcpy(out[count].block_hash, block_hash, 32);
-        out[count].block_height = (int)AR_COL_INT(s, 1);
-        out[count].tx_index = (int)AR_COL_INT(s, 2);
-        out[count].file_num = (int)AR_COL_INT(s, 3);
-        out[count].file_pos = (int)AR_COL_INT(s, 4);
-        out[count].is_coinbase = AR_COL_INT(s, 5) != 0;
         count++;
     }
     AR_FINALIZE(s);

@@ -1,0 +1,138 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * model_fields_tables.def — the fixed-arity walk tables for
+ * models/model_fields.h. Included by that header; never on its own.
+ *
+ * These are the only mechanical part of the field mechanism: a standard C23
+ * argument counter and two families of walkers, one that emits statements in
+ * list order and one that joins string literals with commas. They are boring
+ * on purpose, and they are kept out of model_fields.h so the readable part of
+ * that header stays readable.
+ */
+
+/* ── Argument counter (1..48 fields per list) ──────────────────────────
+ * Standard C23 NARG. The trailing 0 in the reverse sequence guarantees
+ * ZCL_MF_ARG_N always receives at least one variadic argument, so no
+ * empty-__VA_ARGS__ corner is relied on. A model that grows past 48
+ * fields fails to compile (ZCL_MF_SEQ_49 does not exist) — which is the
+ * correct answer: raise the table here, deliberately. */
+#define ZCL_MF_NARG(...)  ZCL_MF_NARG_(__VA_ARGS__, ZCL_MF_RSEQ())
+#define ZCL_MF_NARG_(...) ZCL_MF_ARG_N(__VA_ARGS__)
+#define ZCL_MF_ARG_N( \
+    _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, \
+    _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, \
+    _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, _41, \
+    _42, _43, _44, _45, _46, _47, _48, N, ...) N
+#define ZCL_MF_RSEQ() \
+    48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, \
+    32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, \
+    16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
+
+/* ── Statement sequence: `op tuple` for every field, in order ─────────
+ * Each op expands to one or more complete statements, so no separator
+ * is needed between them. */
+#define ZCL_MF_SEQ(op, ...) \
+    ZCL_MF_CAT(ZCL_MF_SEQ_, ZCL_MF_NARG(__VA_ARGS__))(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_1(op, a) op a
+#define ZCL_MF_SEQ_2(op, a, ...) op a ZCL_MF_SEQ_1(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_3(op, a, ...) op a ZCL_MF_SEQ_2(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_4(op, a, ...) op a ZCL_MF_SEQ_3(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_5(op, a, ...) op a ZCL_MF_SEQ_4(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_6(op, a, ...) op a ZCL_MF_SEQ_5(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_7(op, a, ...) op a ZCL_MF_SEQ_6(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_8(op, a, ...) op a ZCL_MF_SEQ_7(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_9(op, a, ...) op a ZCL_MF_SEQ_8(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_10(op, a, ...) op a ZCL_MF_SEQ_9(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_11(op, a, ...) op a ZCL_MF_SEQ_10(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_12(op, a, ...) op a ZCL_MF_SEQ_11(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_13(op, a, ...) op a ZCL_MF_SEQ_12(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_14(op, a, ...) op a ZCL_MF_SEQ_13(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_15(op, a, ...) op a ZCL_MF_SEQ_14(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_16(op, a, ...) op a ZCL_MF_SEQ_15(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_17(op, a, ...) op a ZCL_MF_SEQ_16(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_18(op, a, ...) op a ZCL_MF_SEQ_17(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_19(op, a, ...) op a ZCL_MF_SEQ_18(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_20(op, a, ...) op a ZCL_MF_SEQ_19(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_21(op, a, ...) op a ZCL_MF_SEQ_20(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_22(op, a, ...) op a ZCL_MF_SEQ_21(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_23(op, a, ...) op a ZCL_MF_SEQ_22(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_24(op, a, ...) op a ZCL_MF_SEQ_23(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_25(op, a, ...) op a ZCL_MF_SEQ_24(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_26(op, a, ...) op a ZCL_MF_SEQ_25(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_27(op, a, ...) op a ZCL_MF_SEQ_26(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_28(op, a, ...) op a ZCL_MF_SEQ_27(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_29(op, a, ...) op a ZCL_MF_SEQ_28(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_30(op, a, ...) op a ZCL_MF_SEQ_29(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_31(op, a, ...) op a ZCL_MF_SEQ_30(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_32(op, a, ...) op a ZCL_MF_SEQ_31(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_33(op, a, ...) op a ZCL_MF_SEQ_32(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_34(op, a, ...) op a ZCL_MF_SEQ_33(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_35(op, a, ...) op a ZCL_MF_SEQ_34(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_36(op, a, ...) op a ZCL_MF_SEQ_35(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_37(op, a, ...) op a ZCL_MF_SEQ_36(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_38(op, a, ...) op a ZCL_MF_SEQ_37(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_39(op, a, ...) op a ZCL_MF_SEQ_38(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_40(op, a, ...) op a ZCL_MF_SEQ_39(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_41(op, a, ...) op a ZCL_MF_SEQ_40(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_42(op, a, ...) op a ZCL_MF_SEQ_41(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_43(op, a, ...) op a ZCL_MF_SEQ_42(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_44(op, a, ...) op a ZCL_MF_SEQ_43(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_45(op, a, ...) op a ZCL_MF_SEQ_44(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_46(op, a, ...) op a ZCL_MF_SEQ_45(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_47(op, a, ...) op a ZCL_MF_SEQ_46(op, __VA_ARGS__)
+#define ZCL_MF_SEQ_48(op, a, ...) op a ZCL_MF_SEQ_47(op, __VA_ARGS__)
+
+/* ── String-literal join: `op tuple` separated by "," ────────────────
+ * Used for the SQL column list and the placeholder list. Adjacent string
+ * literals concatenate at translation phase 6, so the result is a single
+ * compile-time literal usable anywhere a SQL fragment is. */
+#define ZCL_MF_JOIN(op, ...) \
+    ZCL_MF_CAT(ZCL_MF_JOIN_, ZCL_MF_NARG(__VA_ARGS__))(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_1(op, a) op a
+#define ZCL_MF_JOIN_2(op, a, ...) op a "," ZCL_MF_JOIN_1(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_3(op, a, ...) op a "," ZCL_MF_JOIN_2(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_4(op, a, ...) op a "," ZCL_MF_JOIN_3(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_5(op, a, ...) op a "," ZCL_MF_JOIN_4(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_6(op, a, ...) op a "," ZCL_MF_JOIN_5(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_7(op, a, ...) op a "," ZCL_MF_JOIN_6(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_8(op, a, ...) op a "," ZCL_MF_JOIN_7(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_9(op, a, ...) op a "," ZCL_MF_JOIN_8(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_10(op, a, ...) op a "," ZCL_MF_JOIN_9(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_11(op, a, ...) op a "," ZCL_MF_JOIN_10(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_12(op, a, ...) op a "," ZCL_MF_JOIN_11(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_13(op, a, ...) op a "," ZCL_MF_JOIN_12(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_14(op, a, ...) op a "," ZCL_MF_JOIN_13(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_15(op, a, ...) op a "," ZCL_MF_JOIN_14(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_16(op, a, ...) op a "," ZCL_MF_JOIN_15(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_17(op, a, ...) op a "," ZCL_MF_JOIN_16(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_18(op, a, ...) op a "," ZCL_MF_JOIN_17(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_19(op, a, ...) op a "," ZCL_MF_JOIN_18(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_20(op, a, ...) op a "," ZCL_MF_JOIN_19(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_21(op, a, ...) op a "," ZCL_MF_JOIN_20(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_22(op, a, ...) op a "," ZCL_MF_JOIN_21(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_23(op, a, ...) op a "," ZCL_MF_JOIN_22(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_24(op, a, ...) op a "," ZCL_MF_JOIN_23(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_25(op, a, ...) op a "," ZCL_MF_JOIN_24(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_26(op, a, ...) op a "," ZCL_MF_JOIN_25(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_27(op, a, ...) op a "," ZCL_MF_JOIN_26(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_28(op, a, ...) op a "," ZCL_MF_JOIN_27(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_29(op, a, ...) op a "," ZCL_MF_JOIN_28(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_30(op, a, ...) op a "," ZCL_MF_JOIN_29(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_31(op, a, ...) op a "," ZCL_MF_JOIN_30(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_32(op, a, ...) op a "," ZCL_MF_JOIN_31(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_33(op, a, ...) op a "," ZCL_MF_JOIN_32(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_34(op, a, ...) op a "," ZCL_MF_JOIN_33(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_35(op, a, ...) op a "," ZCL_MF_JOIN_34(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_36(op, a, ...) op a "," ZCL_MF_JOIN_35(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_37(op, a, ...) op a "," ZCL_MF_JOIN_36(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_38(op, a, ...) op a "," ZCL_MF_JOIN_37(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_39(op, a, ...) op a "," ZCL_MF_JOIN_38(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_40(op, a, ...) op a "," ZCL_MF_JOIN_39(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_41(op, a, ...) op a "," ZCL_MF_JOIN_40(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_42(op, a, ...) op a "," ZCL_MF_JOIN_41(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_43(op, a, ...) op a "," ZCL_MF_JOIN_42(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_44(op, a, ...) op a "," ZCL_MF_JOIN_43(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_45(op, a, ...) op a "," ZCL_MF_JOIN_44(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_46(op, a, ...) op a "," ZCL_MF_JOIN_45(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_47(op, a, ...) op a "," ZCL_MF_JOIN_46(op, __VA_ARGS__)
+#define ZCL_MF_JOIN_48(op, a, ...) op a "," ZCL_MF_JOIN_47(op, __VA_ARGS__)

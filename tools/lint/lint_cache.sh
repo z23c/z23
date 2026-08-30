@@ -89,12 +89,13 @@ check-no-retired-agent-protocol check-scanner-immunity check-malloc
 check-hotswap-dev-only check-hotswap-eligible-scope check-hotswap-static-state
 check-hotswap-service-islands check-hotswap-swappable-shape check-stable-publish-contained check-raw-sqlite
 check-raw-malloc check-json-value-init check-blob-read-bounds check-byte-order-codec-single
+check-arm-symbol-single
 check-coins-lookup-nullcheck check-silent-errors-services
 check-silent-errors-controllers check-silent-errors-jobs
 check-silent-errors-conditions check-silent-errors-bool
 check-log-macro-return-type check-no-runtime-abort check-wallet-raw-prepare-log
 check-before-save-hooks check-pthread-create check-model-validation
-check-model-ar-lifecycle check-long-functions check-rpc-registrar
+check-model-ar-lifecycle check-model-sql-literals check-long-functions check-rpc-registrar
 check-lag-slo-observable check-lib-layering check-shape-include-direction
 check-accel-oracle-pinned check-domain-purity check-core-include-boundary check-supervisor-registration
 check-test-registration check-typed-blocker check-blocker-escape-registered
@@ -104,6 +105,7 @@ check-framework-filename-suffix check-no-raw-clock-outside-platform
 check-sysinit-ordering check-sandbox-wired check-no-shellouts
 check-no-writer-below-sealed-frontier check-peer-floor-single-source
 check-proc-self-shim check-no-raw-sqlite-in-controllers check-supervisor-domain
+check-model-column-drift
 check-thread-supervision check-file-purpose check-group-purpose
 check-no-orphan-placement check-file-size-ceiling check-operator-needed-sink
 check-condition-cooldown check-doc-accuracy check-doc-counts
@@ -128,6 +130,7 @@ check-c23-only
 check-no-python
 check-no-trust-state-ordering check-no-gnu-va-args check-no-warning-suppression
 check-result-discard
+check-published-platforms
 "
 
 # Why each never-cached gate can never be cached. A reason is MANDATORY —
@@ -143,6 +146,8 @@ lint_cache_never_reason() {
             echo "invokes clang/gcc over ~1174 translation units; skips or fails on the installed clang major version" ;;
         check-windows-platform-seam)
             echo "invokes x86_64-w64-mingw32-gcc over the platform seam; reports UNOBSERVED (not a pass) when mingw is absent from the box" ;;
+        check-windows-cross-syntax)
+            echo "invokes x86_64-w64-mingw32-gcc -fsyntax-only over every _WIN32 translation unit; reports SKIP (not a pass) when mingw is absent from the box" ;;
         check-api-reference-generated)
             echo "compiles and runs a C generator with cc" ;;
         check-describe-budget)

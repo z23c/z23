@@ -104,6 +104,7 @@ gate_command() {
         check-hotswap-dev-only)            echo './tools/lint/check_hotswap_dev_only.sh' ;;
         check-hotswap-eligible-scope)      echo 'tools/lint/check_hotswap_eligible_scope.sh' ;;
         check-hotswap-denied-leaves)       echo 'tools/lint/check_hotswap_denied_leaves.sh --selftest && tools/lint/check_hotswap_denied_leaves.sh' ;;
+        check-remote-command-classes)      echo './tools/lint/check_remote_command_classes.sh --selftest && ./tools/lint/check_remote_command_classes.sh' ;;
         check-hotswap-static-state)        echo 'tools/lint/check_hotswap_static_state.sh' ;;
         check-hotswap-service-islands)     echo 'tools/lint/check_hotswap_service_islands.sh' ;;
         check-hotswap-swappable-shape)     echo 'tools/lint/check_hotswap_swappable_shape.sh' ;;
@@ -118,6 +119,8 @@ gate_command() {
         check-blob-read-bounds)            echo 'bash tools/lint/check_blob_read_bounds.sh' ;;
         check-outparam-init-before-return) echo 'bash tools/lint/check_outparam_init_before_return.sh --selftest && bash tools/lint/check_outparam_init_before_return.sh' ;;
         check-byte-order-codec-single)     echo './tools/lint/check_byte_order_codec_single.sh --selftest && ./tools/lint/check_byte_order_codec_single.sh' ;;
+        check-arm-symbol-single)           echo './tools/lint/check_arm_symbol_single.sh --selftest && ./tools/lint/check_arm_symbol_single.sh' ;;
+        check-model-sql-literals)          echo './tools/lint/check_model_sql_literals.sh --selftest && ./tools/lint/check_model_sql_literals.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-zcode-package-standalone)    echo './tools/lint/check_zcode_package_standalone.sh' ;;
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;
@@ -160,11 +163,13 @@ gate_command() {
         check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh' ;;
         check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh' ;;
         check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
-        check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest' ;;
+        check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
+        check-published-platforms)         echo './tools/lint/check_published_platforms.sh --selftest && ./tools/lint/check_published_platforms.sh' ;;
         check-identity-parser-single)      echo './tools/lint/check_identity_parser_single.sh --selftest && ./tools/lint/check_identity_parser_single.sh' ;;
         check-source-identity-authority)   echo './tools/lint/check_source_identity_authority.sh --selftest && ./tools/lint/check_source_identity_authority.sh' ;;
         check-status-reason-single)        echo './tools/lint/check_status_reason_single.sh --selftest && ./tools/lint/check_status_reason_single.sh' ;;
         check-pipefail-status-pipe)        echo './tools/lint/check_pipefail_status_pipe.sh --selftest && ./tools/lint/check_pipefail_status_pipe.sh' ;;
+        check-discarded-status)            echo './tools/lint/check_discarded_status.sh --selftest && ./tools/lint/check_discarded_status.sh' ;;
         check-no-wallclock-assertion)      echo './tools/lint/check_no_wallclock_assertion.sh --selftest && ./tools/lint/check_no_wallclock_assertion.sh' ;;
         check-framework-shape)             echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/framework_shape_check.sh' ;;
         check-framework-filename-suffix)   echo './tools/lint/check_framework_filename_suffix.sh' ;;
@@ -185,6 +190,7 @@ gate_command() {
         check-peer-floor-single-source)    echo './tools/lint/check_peer_floor_single_source.sh' ;;
         check-proc-self-shim)              echo './tools/lint/check_proc_self_shim.sh' ;;
         check-no-raw-sqlite-in-controllers) echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_raw_sqlite_in_controllers.sh' ;;
+        check-model-column-drift)          echo './tools/lint/check_model_column_drift.sh --selftest && ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh' ;;
         check-supervisor-domain)           echo './tools/lint/check_supervisor_domain.sh' ;;
         check-thread-supervision)          echo './tools/lint/check_thread_supervision.sh' ;;
         check-file-purpose)                echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh' ;;
@@ -201,6 +207,8 @@ gate_command() {
         check-doc-claims)                  echo './tools/lint/check_doc_claims.sh' ;;
         check-error-doc-refs)              echo './tools/lint/check_error_doc_refs.sh' ;;
         check-api-reference-generated)     echo './tools/lint/check_api_reference_generated.sh' ;;
+        check-capability-inventory-generated) echo './tools/lint/check_capability_inventory_generated.sh --selftest && ./tools/lint/check_capability_inventory_generated.sh' ;;
+        check-generated-artifact-contradictions) echo './tools/lint/check_generated_artifact_contradictions.sh --selftest && ./tools/lint/check_generated_artifact_contradictions.sh' ;;
         check-describe-budget)             echo './tools/lint/check_describe_budget.sh --selftest && ./tools/lint/check_describe_budget.sh' ;;
         check-markdown-links)              echo './tools/lint/check_markdown_links.sh .' ;;
         check-doc-inline-paths)            echo './tools/lint/check_doc_inline_paths.sh' ;;
@@ -250,6 +258,7 @@ gate_command() {
         check-clang-portability)           echo './tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh' ;;
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
         check-windows-acceptance)          echo './tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh' ;;
+        check-windows-cross-syntax)        echo './tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh' ;;
         check-app-bundle-reproducible)     echo './tools/lint/check_app_bundle_reproducible.sh --selftest && ./tools/lint/check_app_bundle_reproducible.sh' ;;
         check-result-discard)              echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_result_discard.sh' ;;
         *) return 1 ;;

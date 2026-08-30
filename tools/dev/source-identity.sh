@@ -206,7 +206,21 @@ collect_gitlink()
             GITLINK_STATE["$prefix"]=uninitialized-empty
             return 0
         fi
-        fail "nonempty uninitialized gitlink would omit bytes: $prefix"
+        # Name the recovery command in the message itself. This refusal stops
+        # EVERY build (Makefile refuses to select a compile epoch without an
+        # exact source id), so it surfaces as `make test-parallel` dying in
+        # seconds having run no tests, or `make ship` reporting only that the
+        # suite did not pass. Without the fix on the line, each reader has to
+        # rediscover that a submodule with bytes but no .git is the cause.
+        fail "nonempty uninitialized gitlink would omit bytes: $prefix
+  This stops every build: the source id cannot be exact while a populated
+  submodule is unreadable, so no compile epoch can be selected.
+  Fix:      make worktree-prime
+            It initializes the submodule FIRST and copies the Tor archives
+            second. Doing those two in the other order converts this hard
+            failure into a silent stub-Tor build that only surfaces at ship
+            time, roughly 25 minutes in.
+  Why:      docs/AGENT_TRAPS.md, build-trap table, rows 1 and 2"
     fi
     top="$(git -C "$prefix" rev-parse --show-toplevel 2>/dev/null)" ||
         fail "could not resolve gitlink worktree: $prefix"

@@ -25,6 +25,7 @@ MAKEFILE="$ROOT/Makefile"
 
 # group <TAB> target <TAB> one-line description
 read -r -d '' ENTRIES <<'TABLE' || true
+first	doctor-env	C23 compiler, git, vendor/tor, stack: what this machine is missing
 first	doctor	what this host is still missing, with the exact install line
 first	setup	arm the git hooks and generate compile_commands.json (idempotent)
 first	z23	build the public node (bare make does the same; vendor setup is automatic)

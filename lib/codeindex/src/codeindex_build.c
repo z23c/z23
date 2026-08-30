@@ -473,7 +473,7 @@ static bool build_file_cb2(const char *relpath, const struct stat *file_st,
     if (b->err) return false;
 
     uint8_t sha[32];
-    char purpose[160] = "";
+    char purpose[CI_FILE_PURPOSE_MAX] = "";
     /* A registry is hashed and filed, never scanned: its `FOO(a, b)` rows are
      * macro data, and letting the C scanner read them would mint symbols and
      * call edges that do not exist. Include-graph node only (see

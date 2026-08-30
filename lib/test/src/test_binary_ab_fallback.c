@@ -4,6 +4,18 @@
  * and the shared native launch primitive used by `zcl-nodectl launch`.
  */
 
+/* This file calls realpath(), which <stdlib.h> declares only under
+ * __USE_MISC/__USE_XOPEN_EXTENDED, and the build's -D_POSIX_C_SOURCE=200809L
+ * sets neither. Without this the declaration reaches the TU only through the
+ * glibc fortify inline that -D_FORTIFY_SOURCE=2 pulls in WHEN OPTIMISATION IS
+ * ON — so this file compiled purely as a side effect of -O1 and above, and
+ * failed at -O0 with "implicit declaration of realpath", which C23 makes a
+ * hard error. Same for any -U_FORTIFY_SOURCE or non-glibc build. Matches
+ * lib/util/src/hw_profile.c and 24 other TUs. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 #include "services/binary_ab_fallback.h"
 #include "platform/clock.h"

@@ -197,6 +197,27 @@ site). The same gate ratchets that the plaintext model saves never return.
 | mempool_entry | Validate fee + size envelope | (none) |
 | tx_index | Validate txid + block height | (none) |
 
+### after_commit — for anything an observer can see
+
+`after_save` fires when the **statement** steps, not when the **transaction**
+commits. Saves do happen inside transactions
+(`app/services/src/blog_publication.c` wraps `db_blog_post_save` in
+`db_txn_begin`/`db_txn_commit`) and some `after_save` hooks have effects the
+database cannot take back — `wallet_tx_after_save` emits `EV_WALLET_TX_SAVED`
+and pushes a wallet projection. Put those together and an external observer
+can be told about a row a later `ROLLBACK` erases.
+
+`ar_register_after_commit(cbs, fn, sizeof(*record))`
+(`app/models/include/models/ar_after_commit.h`) queues a hook instead: it
+fires once, in registration order, after the **outermost** transaction
+commits, and not at all if the transaction rolls back. Outside a transaction
+it fires immediately after the statement succeeds. A queued hook is handed a
+copy of the record, which is why the size is mandatory; a save whose hook can
+neither fire nor be queued **returns false** rather than skipping an observer.
+`after_save` is unchanged — a model with no `after_commit` hook behaves
+exactly as before. Use `after_commit`, not `after_save`, for an emitted event,
+a pushed projection, or any other notification that leaves the process.
+
 ---
 
 ## 7. CI gates — the final enforcer
@@ -340,6 +361,29 @@ assert green).
   `AR_FINISH_SAVE` so `before_validate -> validate -> before_save -> SQL ->
   after_save` stays one mechanically enforced lifecycle. Impl:
   `tools/scripts/check_model_ar_lifecycle.sh`.
+
+- **Gate #11c: `check-model-sql-literals`** (RATCHET, shrink-only) — a model
+  file must not carry a hand-written SQL statement. Reads and writes build
+  one with `app/models/include/models/query_builder.h`: table and column
+  names come from the closed set in
+  `app/models/include/models/query_schema.def` and are passed as generated
+  enums, so there is no entry point that accepts an identifier as a string;
+  values arrive through `qb_value_*` / `qb_set_*` / `qb_where_*` / `qb_limit`,
+  each of which emits a `?` and pushes the value onto a bind list. An
+  out-of-range enum or a column belonging to another table fails the
+  statement CLOSED. Measured per FILE: a file is flagged when a string
+  literal's first non-space token is an uppercase `SELECT` / `INSERT` /
+  `UPDATE` / `DELETE` / `REPLACE` / `WITH` / DDL keyword. Files still holding
+  one are listed in `tools/lint/model_sql_literal_baseline.txt`; **the list
+  may only shrink**, and a stale row (its file no longer carries literal SQL)
+  is a FAILURE, so converting a model forces its row out and the row cannot
+  return without failing the gate. Migration and schema files are ordinary
+  rows — a query builder cannot express `CREATE TABLE` — so those are
+  expected to stay. The builder's own three files are excluded; flagging the
+  rail for the keywords it emits would make the gate unfixable. Impl:
+  `tools/lint/check_model_sql_literals.sh`, with a mandatory `--selftest`
+  that plants each statement shape, a stale row, and a converted-file
+  regression and requires a rejection on every one.
 
 - **Gate #12: `check-long-functions`** — flags any top-level function whose
   body spans >500 lines. Two tiers (a split Gate E1 no longer uses — E1 is
@@ -735,6 +779,21 @@ assert green).
   move reads behind projections/models, writes through the AR lifecycle.
   Override `// raw-controller-sql-ok`.
 
+- **`check-model-column-drift`** (RATCHET) —
+  `tools/lint/check_model_column_drift.sh`. A model in `app/models/src/` must
+  not hand-maintain the column indices of a multi-column row read: two or more
+  distinct literal indices in `AR_READ_*` / `AR_COL_*` is the shape where
+  inserting a column in the middle of the SQL column list silently shifts
+  every index below it, with no compiler error and no test failure unless a
+  test covers that exact field. Fix: declare the fields once in
+  `app/models/include/models/def/<model>_fields.def` and derive the column
+  string, read index and bind position through
+  `app/models/include/models/model_fields.h` (worked examples: `blog_post.c`,
+  `market_download.c`, `tx_index.c`). Baseline
+  `tools/lint/model_column_drift_baseline.txt` (may only shrink; a baselined
+  file that stops violating must lose its line). Per-line override
+  `// model-columns-ok: <reason>`.
+
 - **Gate #21: `check-supervisor-domain`** (FAIL) —
   `tools/lint/check_supervisor_domain.sh`. Production `supervisor_register(`
   calls under `app/`, `config/`, `lib/` must use
@@ -827,6 +886,7 @@ current green tree.
 | **E1: `check-file-size-ceiling`** | RATCHET | The file-size policy for every production `.c` (`app/`, `config/src/`, `lib/` excl. `lib/test/`, `domain/`, `src/`), in three bands: **800 lines is the advisory TARGET** (95% of the tree already meets it), **801..1500 is an ALLOWED buffer** — never fails, no baseline row, no churn — and **over 1500 FAILS**. 1500 is where a file stops fitting in one agent read, so past it every later reader works blind. Files already over 1500 are carried in `tools/lint/file_size_policy_baseline.txt` (`<path> <max-loc>`), which may only shrink: a row that grows fails, a row whose file drops to 1500 or fewer must be deleted, and nothing is ever added. No inline override; generated/tabular code is skipped via the tool's `ALLOWLIST`. Implemented as a C23 binary, `tools/file_size_policy.c`. |
 | **`check-hex-codec-single`** | RATCHET | Base-16 encode/decode lives only in `lib/base/include/base/hex.h` (`zcl_hex_encode`, `zcl_hex_decode`, `zcl_hex_decode_lower`, `zcl_hex_decode_n`, `zcl_hex_nibble`). Per-file shape detectors: a hex-digit table **plus** a high-nibble index (encoder), or nibble-ladder arithmetic / `sscanf("%2x")` (decoder). Baseline `tools/lint/hex_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because a known-answer fixture must not parse its vectors with the implementation under test. No inline override — the fix is to call the codec. `--selftest` plants a fresh encoder and decoder and requires the scan to reject them. |
 | **`check-byte-order-codec-single`** | RATCHET | Packing/unpacking a fixed-width 16/32/64-bit integer at a byte address lives only in `lib/base/include/base/serialize_le.h` (`zcl_write_u{16,32,64}_le` / `zcl_read_u{16,32,64}_le`, the `i32`/`i64` forms, and the `u32`/`u64` big-endian pair); `crypto/common.h`'s `ReadLE`/`WriteLE` forward to it. Per-file shape detectors: an indexed shift loop (`>> (8 * i)` in either operand order), an unrolled ladder (a shift by 24 or 56 **plus** a byte-array subscript on the same line — a bare `>> 24` is ordinary bit work and does not match), or a hand-rolled byte-swap mask. Baseline `tools/lint/byte_order_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because `test_byte_order_codec.c` deliberately keeps a verbatim copy of every replaced helper and asserts the canonical functions agree with it byte for byte; `core/` is excluded because it is byte-sealed. No inline override — the fix is to call the codec. `--selftest` plants each detected shape and requires rejection, plus innocent bit work and a canonical caller and requires acceptance. |
+| **`check-arm-symbol-single`** | RATCHET | A non-static function is DEFINED (has a body) only ONCE per translation unit. Since the C standard already forbids two unconditional definitions of one external symbol, any hit is necessarily two disjoint preprocessor arms (platform, feature flag, test-vs-release, ...) — a place two bodies can silently drift apart under one name. Found live 2026-08-29: `lib/net/src/file_service.c`'s `fs_parse_rom_request`/`_manifest_request`/`_list_request` had a full body in both its `#if defined(_WIN32)` and POSIX arms, and the two had drifted on exact-length vs. `>=`-length and on NULL-output handling — a Windows node and a Linux node could disagree about whether identical wire bytes were a valid request. Scans every production `.c` under `app config lib src tools` with a brace/paren-depth-tracking awk analyzer (not a compiler — see the gate's own header for its stated blind spots: function-generating macros, and a `static` keyword wrapped onto its own line above the signature). Baseline `tools/lint/arm_symbol_single_baseline.txt` (`<path>\t<function>`; may only shrink, and a row that no longer duplicates must be deleted) — most rows are reviewed, accepted platform-seam/SIMD-dispatch/test-arm pairs, not bugs; the gate makes them visible for that per-row human judgment rather than proving each one wrong. `--selftest` plants a cross-arm non-static duplicate (must fail) and a static duplicate, a function-generating-macro pair, and an `__attribute__`-prefixed function (must all pass). |
 | **`check-zcode-package-registry`** | HARD | Re-derives the content manifest, unsigned release/signing root, recipe, target-inclusive exact dependency lock, and API capsule roots for the nine real C23 Commons Alpha packages directly from their authoritative `lib/<module>` trees. The public alpha-fixture publisher, sequences, empty reward address, `zclassic-main`, exact roots, and closed dependency DAG are projected in `config/zcode_package_registry.def`. Drift, an unresolved dependency, or a selected package source/API change without regenerating the projection fails. Production source ownership remains the unique `LIB_MODULE` row checked independently by `check-lib-module-order`, so the monolith compiles each package module source exactly once. No baseline or override. |
 | **`check-zcode-package-standalone`** | HARD | Every registry package compiles from its OWN declared dependencies and nothing else. A package ships to a node that has only the packages its manifest names, so an include reaching outside that set makes it unbuildable there however well it builds inside this monolith, where every `-I` is already on the command line. For each `ZCODE_PACKAGE` in `config/zcode_package_registry.def` and `config/zcode_c23_commons_app.def`, every shipped source is compiled with `-I<pkg>/include` plus the include dir of each declared dependency, under the recipe's own quick profile read from `config/include/config/c23_commons_build_profile.h` so the gate cannot drift from the contract it mirrors. A manifest declaring `files[]` is honoured exactly. Include CLOSURE only: it does not link, run tests, or judge roots. Hollow scans (zero packages parsed, or zero sources compiled) exit 2. No baseline or override. |
 | **E2: `check-one-result-type`** | RATCHET | New `app/services/src/*.c` reference `struct zcl_result` (§2) instead of bare bool/int. File-granularity. Baseline `one_result_type_baseline.txt` (empty; 9 originals migrated). Override `// one-result-type-ok:<tag>` (pure table/registry helper). |
@@ -847,6 +907,8 @@ current green tree.
 | **`check-doc-inline-paths`** | RATCHET (`tools/lint/doc_inline_paths_baseline.txt`, shrink-only) | `check-markdown-links` gates Markdown LINK targets and explicitly excludes inline code — so a doc could say `` `domain/consensus/src/tx_structural.c:121` `` for months with lint green while the directory had moved to `core/`. A precise-looking dead path costs an agent more budget than a vague one, because it reads as verified. This gate resolves every backticked token in tracked `*.md` that contains a `/` and ends in `.c/.h/.cc/.def/.inc/.sh/.md/.txt/.tsv/.py/.json` (optionally `:LINE`), accepting a tracked path, a `/`-anchored suffix of one (so `util/log_macros.h` finds `lib/util/include/util/log_macros.h`), or a path relative to the doc's own directory. A second prong resolves MODULE DIRECTORIES: for any backticked token rooted at a top-level source directory, the first two components (`lib/consensus`, `app/events`) must be a tracked directory. A whole module that moves is invisible to a file-extension scan — `lib/consensus` and `domain/consensus` both survived the `core/` split in six docs with lint green — and a dead directory is the most expensive dead reference there is, because an agent greps it, finds nothing, and concludes the feature was deleted. Two components only: deeper shorthand (`lib/storage/chain_segment`) names a file stem, not a directory. Absolute paths, globs/brace expansions, external-URL link text, `vendor/` (submodule content absent until `make setup`), and `build/`/`.cache/`/`test-tmp/` are out of scope. Baseline keys omit the line number so a doc edit cannot churn them. Per-line override `<!-- doc-path-ok: <reason> -->` for a path that is deliberately absent (a deleted file cited for `git log` recovery, an upstream project's file in an attribution, a `X.c`-style recipe placeholder). Fails loud on an empty scan (`gate_require_scanned`). |
 | **`check-error-doc-refs`** | HARD | A remedy the operator cannot follow is worse than none: three wallet-path boot refusals in `config/src/boot.c` said "see WALLET_PERSISTENCE_RECOVERY.md", a file that had never existed — and they fire exactly when private keys are already on disk and the node refuses to write over them. Scans every string literal in a tracked `.c`/`.h` for a token ending in `.md` and resolves it against the repo root, or by basename under `docs/` / `docs/work/`. Comments are ignored (only literals reach an operator); literals carrying a printf conversion or a shell/SQL glob are skipped, since the gate cannot know what they expand to. Complements `check-markdown-links`, which only covers `.md`-to-`.md`. Per-line override `// error-doc-ref-ok:<reason>` for a genuinely runtime-created path. Hermetic `--selftest`. Zero violations, no baseline. |
 | **`check-api-reference-generated`** | HARD | `docs/API_REFERENCE.md` is GENERATED output — `tools/gen_api_reference.c` expands the same `ZCL_COMMAND_*` X-macros `config/src/command_catalog.c` uses over the same `config/commands/*.def` catalogs, so the C preprocessor (not a hand-rolled parser) reads the table, and editorial prose is copied through from the template `docs/API_REFERENCE.md.in` at `<!-- ZCL-GEN:… -->` markers. The page previously said of itself that every row was "transcribed directly" — by hand — and drifted accordingly: it still claimed 106 leaves across 41 branches long after the catalog had more than doubled, i.e. it named commands as `ready` that were `planned`. The gate compiles the generator (`-Werror`), regenerates into a temp file, and `diff`s; any difference fails and prints the drift. Fix with `make docs-api-reference`, never by editing the generated page. Fail-loud floors on the `.def` scan set and on the emitted entry count, so an emptied catalog exits 2 instead of reporting clean. Hermetic `--selftest` plants a hand edit and proves the gate trips. No baseline, no override. |
+| **`check-capability-inventory-generated`** | HARD | `docs/CAPABILITY_INVENTORY.jsonl` is GENERATED evidence, never authored findings. Its `zcl.generated_artifact.v1` header states its assertions, generator, exact regeneration command, and consumed arm-symbol artifact. The C23 generator rescans maintained public headers and packages, exposed symbols, direct call/include use sites, canonical registered-test reachability, normalized function bodies, and contract-like untested declarations; then the gate diffs every byte. The gate separately derives the exact tracked public-header set and canonical registry count, reconciles every record type to its metadata, and requires every unresolved or conditional test root to carry a named `test_root_gap`. Header prose, path-ambiguous calls, unresolved definitions, test-root gaps, and alpha-shape matches carry explicit `UNPROVEN` ceilings. A generated multi-arm baseline row suppresses the aggregate definition/constant answer and produces separately guarded `definition_arm` rows; it never hides the symbol. Fix with `make docs-capability-inventory`, never by editing the JSONL. Hermetic `--selftest` proves a planted row fails. No override. |
+| **`check-generated-artifact-contradictions`** | HARD | Generated evidence must compose instead of silently disagreeing. Each artifact carries its own `zcl.generated_artifact.v1` identity, asserted relation, generator, exact regeneration command, and consumed-artifact edge; there is no central registry. The capability inventory consumes `arm_symbol_single_baseline.txt` directly. Every exposed `<path>,<symbol>` on that generated multi-arm list must emit at least two separately scoped `definition_arm` rows, while the aggregate definition and aggregate constant-return answer remain `UNPROVEN`. An unscoped constant-stub claim for the same pair is a contradiction and fails. A missing, malformed, or stale input is also red and explicitly reported as `UNPROVEN`, never treated as an empty agreement set. The selftest proves compatible artifacts pass, absence is `UNPROVEN`, and an incompatible aggregate constant claim fails. No override. |
 | **`check-describe-budget`** | RATCHET (`tools/lint/describe_budget_baseline.txt`, shrink-only) | Every leaf's `discover describe` document must FIT `ZCL_COMMAND_SPEC_BUDGET`. `discover describe` is the only surface that renders a leaf's long-form `semantics` contract at all — `docs/API_REFERENCE.md` carries summaries and `discover help` a five-field child row — and an over-budget document renders as NOTHING: `zcl_command_registry_describe_json()` returns 0, the leaf keeps dispatching, help and search keep listing it, and its written contract is silently unreadable. `core.wallet.recovery.restore` shipped that way with a money-safety warning inside the invisible text, and the CLI reported it as `UNKNOWN_PATH` (it now reports `DESCRIBE_BUDGET`, the same shape as `nc_emit_menu`'s `MENU_BUDGET`). `tools/check_describe_budget.c` is a SECOND consumer of the same `.def` X-macro grammar and calls the REAL renderer on every leaf, so there is no size model to drift; it reports how many bytes to trim. Fix by TRIMMING `semantics`, never by raising the budget — raising it would also re-hide the baselined pre-existing overflow. Baseline entries carry a written reason and may only shrink; a baselined leaf that now fits also fails, so a fix cannot leave a stale exemption. Hermetic `--selftest` pads a leaf past the budget and proves the gate trips. |
 | **`check-no-uncited-victory`** | HARD | A progress claim without an external ledger line is not trustworthy — false "cured / at tip / fully synced" claims have repeatedly re-wedged without one. Splits the one live-state page `docs/HANDOFF.md` into blank-line paragraphs; a paragraph carrying a word-bounded VICTORY PHRASE (`at tip`, `at-tip`, `reaches tip`, `holds tip`, `fully synced`, `cured`, `unwedged`, `wedge cleared`/`closed`/`fixed`, `soak window open`/`running`, `proven live`, `live-proven`, `stable at tip`) FAILS unless the SAME paragraph carries a CITATION TOKEN (`uptime-ledger`, `slo-summary:`, `VERDICT=PASS`, `WALL_CLOCK_SECONDS`, `gap_vs_oracle`, a `ts=<digits>` stamp) or the explicit per-paragraph override `<!-- victory-ok: <reason> -->` (HISTORICAL narration only, never a current-state claim). Hollow-gate rule: `docs/HANDOFF.md` missing or < 10 lines FAILs. Hermetic `--selftest`. No baseline. |
 | **`check-doc-claims`** | HARD | Doc freshness, author-owned. Generalizes the two hardcoded rows in `check-doc-no-false-deleted` into an annotation any author can write: one HTML comment binds one prose assertion to one machine-checkable predicate — a path that must still exist or still be absent, a symbol that must still be present or absent under a `git` pathspec, or an existing `check-*` gate that must still pass or still FAIL. The gate names the file, the line, the claim text and the contradicting reality. The `gate-fails` form turns the existing `check-no-*` ratchets into freshness oracles: an item that says work is outstanding goes red the day the gate watching that work turns green — exactly the failure that cost three agents a re-run of commit `9b5add018`. Predicates resolve against the repo root wherever the document lives; annotations inside fenced code blocks are syntax documentation and are skipped. Fail-loud floors (`gate_require_scanned`) on both the tracked-`*.md` scan set and the parsed-claim count, and a self-check with known-good/known-bad fixtures runs BEFORE every tree scan, so "clean" is only printed after the evaluator has demonstrated it still fires. `--selftest`, `--list`. **Covers tracked `*.md` only** — out-of-repo plans (`~/.claude/plans/`) need the explicit `--scan <dir>` invocation, which `make lint` does not and cannot run. Syntax and worked example: the section below this table. No baseline. |
@@ -859,6 +921,7 @@ current green tree.
 | **`check-no-snapshot-struct-memcmp`** | HARD | No raw `memcmp`/`bcmp` over a `struct platform_positioned_file_snapshot` object. That struct (`lib/platform/include/platform/positioned_file.h`) is 64 bytes wide holding only 56 bytes of fields — two `uint32_t` nanosecond members sit in front of wider `int64_t`/`uint64_t` ones, so the compiler inserts 8 bytes of alignment padding it never has to initialize, and comparing the whole object by raw bytes can report an unchanged file as CHANGED. This landed three times — twenty test groups red the second time (commit `44c45f255`) — and the fix already exists: `platform_positioned_file_snapshot_equal()`. The gate is a text scan, not a type checker: per file, it collects identifiers declared on one line as a plain (non-pointer) `struct platform_positioned_file_snapshot <name>[, <name>...];`, then flags any `memcmp(`/`bcmp(` call in that SAME file naming one of those identifiers as its first or second argument. It deliberately cannot see a helper function doing the comparison elsewhere, a macro-wrapped `memcmp`, or a call whose argument list spans multiple lines — see the script's own header for the full, honest limitation list. |
 | **`check-windows-platform-seam`** | RATCHET | Windows portability of the platform seam: cross-compiles every `lib/platform/src` translation unit the node still links off-Linux with `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only` at the build's own `ZCL_PLATFORM_CPPFLAGS` Windows API floor (read from the Makefile, not copied here -- compiling at mingw's permissive default asks an easier question and produced a real false green), ratcheted against `tools/lint/windows_platform_seam_baseline.txt` (counts may only go DOWN; the baseline is currently EMPTY — the whole seam compiles). Exists because a Windows worker's first symptom of a broken seam was a failed build on somebody else's machine, days later; this asks the question on the Linux box that is already running `make lint`. The exempt set is deliberately **not** a second hand-kept list — `exempt_files()` parses the Makefile's own `ifeq ($(ZCL_HOST_OS),Linux)` branch, so a file the build itself drops off-Linux is exempt here for exactly as long as the build drops it, and re-enters this gate on the same commit that re-enables it. `SRC_FLOOR=8` guards the file glob, because a "clean" verdict over a directory that silently emptied is hollow, not honest. **UNOBSERVED contract:** with no mingw toolchain installed it prints `UNOBSERVED`, in that word, and exits 0 — an outside contributor is never blocked by a tool they do not have — but UNOBSERVED is not a pass and is not cached, so the next box that does have mingw still pays for the check. |
 | **`check-windows-acceptance`** | FAIL | Two steps over the platform-seam acceptance catalog (`lib/platform/tests/windows_acceptance.mk`), in this order. **1. Reconcile:** every acceptance program on disk -- in the directories the catalog itself keeps programs in, derived from its `_SOURCES` rows rather than typed into the gate -- must be a source in a `ZCL_WINDOWS_ACCEPTANCE_*_SOURCES` row, *or* the `int test_<name>(void)` entry point of a group registered in `tools/dev/test_group_catalog.def` (the suite then executes it natively, which is strictly better than a cross-link), *or* an entry in the gate's own EXEMPT table **with a written reason**. Anything else is exit 1 naming the file. An empty scan set, an unparseable catalog and an empty group registry are all hard failures: a broken glob must never read as clean. This step exists because two probe programs sat under `lib/platform/tests` read by nothing at all -- no catalog row, no Makefile rule, not in `lib/platform/zcode-package.json` -- while this gate printed a clean PASS, and because they were named `test_*.c` rather than `*_acceptance.c` a name-shaped scan would have walked past them too. **2. Compile:** then the original job -- cross-compiles the catalog for Windows with mingw at the product's own API floor, `$(ZCL_WINDOWS_API_FLOOR)`, shared with `ZCL_PLATFORM_CPPFLAGS` so the two cannot drift: they already had, because `217d3eb6e` raised the product to the Windows 10 baseline and left the catalog compiling against `0x0600`, grading a Windows the product does not ship. Compile, not execute: these are Windows binaries and this is a POSIX host, so the honest deliverable is a cross-link and it is labelled as one; `make windows-acceptance` additionally runs them under Wine and REFUSES rather than skipping when Wine is absent. **UNOBSERVED contract:** with no mingw toolchain the compile step prints `UNOBSERVED`, in that word, and exits 0 -- an outside contributor is never blocked by a cross-compiler they do not have -- but UNOBSERVED is not a pass and is not cached. The reconcile step needs no compiler and has already run by then. `--self-test` runs first on every invocation and plants an undeclared program in a throwaway fixture to prove the reconcile can go red. | `tools/lint/check_windows_acceptance.sh` |
+| **`check-windows-cross-syntax`** | RATCHET | Syntax-only mingw sweep of every `.c` under `lib/` `app/` `config/` `core/` `domain/` `ports/` whose text contains `_WIN32`. The acceptance catalog cross-links 98 of those files; gcc/clang on a POSIX host never take the `_WIN32` branch of the rest, so a Windows-only syntax error sat uncompiled on this box. `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only`, every directory named `include` (plus `-I.` and `-Itools`), parallel `xargs`. File set is self-maintaining. Missing `command/native_command.h` / `command/native_dev_hotswap.h` is skipped by header name; missing openssl headers are skipped the same way only while vendor openssl headers are unbuilt. Remaining survivors live in a shrink-only baseline next to the gate script. **SKIP contract:** with no mingw toolchain it prints `SKIP` and exits 0 — not a pass, not cached. `--self-test` plants a Windows-only undeclared identifier. |
 | **`check-app-bundle-reproducible`** | HARD | The macOS `.app` bundler is reproducible **and** its product actually launches. `tools/scripts/make_app_bundle.sh` wraps a built tool in the minimal launchable bundle and ad-hoc signs it, because arm64 macOS refuses to execute an unsigned binary at all — so "no signature" is not available and "whatever `codesign` did this time" is not reproducible. Two failures rot silently here and neither is visible by reading the script: `codesign` stamps a trusted timestamp unless it is disabled, and any input-dependent field drifting between runs makes two bundles of identical input differ; and a bundle whose signature does not verify is **SIGKILLed by the kernel**, so a smoke test that only checks an exit status cannot distinguish "ran and declined" from "never ran at all". The gate builds the subject tool twice byte-identically first (otherwise the comparison below would be over different inputs, and it says so rather than passing), then asserts the exact printed output *and* the exit status of the bundled executable. |
 | **`check-result-discard`** | RATCHET | Shrink-only ratchet over `(void)` casts that discard a `struct zcl_result`, baseline `tools/lint/result_discard_baseline.txt`. Exists because C23 lets an explicit cast suppress `[[nodiscard]]`: annotating the type (done — see `lib/util/include/util/result.h`) fences off NEW silent discards but cannot excavate the existing population, measured at 94 cast discards versus ~67 bare ones. Fix a site with `ZCL_IGNORE_RESULT(expr, "why the failure is safe to drop")`, which requires a non-empty reason at compile time via `static_assert` — the point being to make the discard *expressible* rather than merely tolerated. |
 | **`check-no-warning-suppression`** | HARD | A blanket warning suppression may not sit on a build surface unexplained. `-Wno-unused-result` and `-Wno-stringop-overflow` — in flag form, or as `#pragma GCC diagnostic ignored` — fail on any tracked makefile, `*.c`/`*.h`, or `*.sh` unless the line, or the line above it, carries `suppression-ok: <reason>` with a non-empty reason. `-Wno-unused-result` matters most: it is the SAME diagnostic GCC and Clang use to report `[[nodiscard]]`, so leaving it on silently voids the result-type discipline the repository is built around — a result type could be annotated and nothing would change. Both flags entered in the first commit as copy-forward defaults and had spread to seven compile rules; each now has one named definition (`ZCL_WARN_UNUSED_RESULT`, `ZCL_WARN_STRINGOP_OVERFLOW`) carrying the reason and the command to re-derive its blocking sites. `vendor/` (third-party recipes) and `.clangd` (editor diagnostics, never emitted code) are out of scope. Hermetic detector fixtures run BEFORE the tree scan on every invocation, so the gate cannot report clean while its matcher is broken, and an empty scan set exits 2. `--self-test`. No baseline. |
@@ -994,10 +1057,13 @@ add/remove a gate.
 - `check-accel-oracle-pinned`
 - `check-blob-read-bounds`
 - `check-byte-order-codec-single`
+- `check-arm-symbol-single`
 - `check-zcode-package-registry`
 - `check-zcode-package-standalone`
 - `check-package-anatomy`
 - `check-api-reference-generated`
+- `check-capability-inventory-generated`
+- `check-generated-artifact-contradictions`
 - `check-before-save-hooks`
 - `check-build-epoch-integrity`
 - `check-checkout-lock`
@@ -1029,11 +1095,13 @@ add/remove a gate.
 - `check-markdown-links`
 - `check-malloc`
 - `check-model-ar-lifecycle`
+- `check-model-sql-literals`
 - `check-model-validation`
 - `check-no-raw-clock-outside-platform`
 - `check-sysinit-ordering`
 - `check-sandbox-wired`
 - `check-no-raw-sqlite-in-controllers`
+- `check-model-column-drift`
 - `check-no-shellouts`
 - `check-no-writer-below-sealed-frontier`
 - `check-peer-floor-single-source`
@@ -1101,6 +1169,7 @@ add/remove a gate.
 - `check-source-identity-authority`
 - `check-status-reason-single`
 - `check-pipefail-status-pipe`
+- `check-discarded-status`
 - `check-no-wallclock-assertion`
 - `check-blocker-remedy`
 - `check-vendor-provenance`
@@ -1109,12 +1178,14 @@ add/remove a gate.
 - `check-stable-publish-contained`
 - `check-zclassicd-reach-allowlist`
 - `check-z23-release-install`
+- `check-published-platforms`
 - `check-no-csr-lock-on-finalize-drive`
 - `check-mint-skip-crypto-offline-only`
 - `check-wire-harness-security-gate`
 - `check-hotswap-dev-only`
 - `check-hotswap-eligible-scope`
 - `check-hotswap-denied-leaves`
+- `check-remote-command-classes`
 - `check-hotswap-static-state`
 - `check-hotswap-service-islands`
 - `check-hotswap-swappable-shape`
@@ -1135,6 +1206,7 @@ add/remove a gate.
 - `check-clang-portability`
 - `check-windows-platform-seam`
 - `check-windows-acceptance`
+- `check-windows-cross-syntax`
 - `check-app-bundle-reproducible`
 - `check-result-discard`
 - `check-c23-only`

@@ -308,6 +308,13 @@ void zcl_native_handle_code_refs(
 void zcl_native_handle_code_find(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.have — "does this checkout ALREADY DO X?" Ranks capabilities by
+ * concept (stemmed terms over symbol names, doc comments, file purposes,
+ * paths and groups), reports how many files actually CALL each one, and
+ * returns a verdict derived from those same numbers. */
+void zcl_native_handle_code_have(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.map — the whole-tree map: the 9 root groups (aggregate file counts +
  * purposes) and the 8 app/ shapes (direct file counts), plus a total. */
 void zcl_native_handle_code_map(
@@ -2232,6 +2239,23 @@ void zcl_native_handle_rom_fetch_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_rom_fetch_bundle(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* dev.agent.* — the checkout questions an agent asks most often, answered as
+ * one typed envelope so no agent has to compose shell. Deliberately NOT
+ * dev-build-only: an agent has the plain `z23` it just built, and a compat
+ * leaf redirecting to a second binary is the dead end this branch removes.
+ * Handlers in tools/command/native_devagent_command.c and
+ * native_devagent_mutate_command.c; they spawn only through lib/util spawn
+ * and link none of the dev-only devloop executors. */
+void zcl_native_handle_dev_agent_ready(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_test(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_mutate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 

@@ -61,6 +61,13 @@
 /* Leaf utilities and low-level building blocks. lib/base is the sink — the
  * logging / allocation / result vocabulary every other module speaks. */
 LIB_MODULE("base")
+/* The install front door's release-pin judgement. It references NOTHING
+ * in-tree — not even base — because the same objects are also linked into the
+ * standalone bootstrap binary that a stranger's machine runs before anything
+ * has been verified, and every edge added here is another translation unit
+ * that has to be honest in that context too. Ranked above base only so base
+ * keeps its documented place as the sink. */
+LIB_MODULE("install")
 /* Scalar FIPS-202 primitives depend only on base.  Crypto owns optional
  * batched acceleration and reaches down through sha3/sha3.h. */
 LIB_MODULE("sha3")
@@ -78,6 +85,14 @@ LIB_MODULE("json")
 /* Standalone Commons demo core depends on base, codec, and json. */
 LIB_MODULE("commons_demo")
 LIB_MODULE("encoding")
+/* Deterministic positional astronomy: one exact fixed-grid numeric type,
+ * CORDIC trigonometry over it, and birth-chart assembly. It is ranked with
+ * the leaf utilities because it references NOTHING — not even lib/base. That
+ * is deliberate rather than incidental: the module's whole claim is that a
+ * chart is a pure function of its input bits, and a dependency on logging,
+ * allocation or a clock would be a way for the answer to differ between two
+ * nodes. It links libc only, and not libm. */
+LIB_MODULE("astro")
 /* Bounded native bitmap windows. The public API is platform-neutral; the
  * vendored RGFW implementation is private to lib/presentation. */
 LIB_MODULE("presentation")
@@ -146,3 +161,4 @@ LIB_MODULE("mining")
 LIB_MODULE("kernel")
 LIB_MODULE("hotswap")
 LIB_MODULE("codeindex")
+LIB_MODULE("fingerprint")

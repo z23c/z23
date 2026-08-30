@@ -48,6 +48,7 @@ dev.loop.stop              exempt: verify-only dev loop, no live generation swap
 dev.generation.rollback    exempt: dev generation store, contained
 dev.generation.compact     exempt: dev generation store, contained
 dev.generation.activate    receipt:tools/command/native_dev_activation_command.c
+dev.agent.mutate           exempt: edits one line of one CHECKOUT source file and writes it back in the same call; installs no artifact, opens no datadir, and refuses any path outside the checkout
 ops.recovery.rebuild       exempt: refold reset, gated by copy-prove doctrine
 ops.mesh.pair.commit       exempt: node.db pairing AR write via mesh_pairing_service, no artifact install
 

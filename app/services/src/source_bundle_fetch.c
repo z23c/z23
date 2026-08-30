@@ -26,7 +26,9 @@
  * chunk_root before they are trusted as a download plan),
  * rom_fetch_download_verified_parallel (per-chunk content check before a
  * journal bit is set, round-robin failover across peers, durable resume,
- * atomic install) and rom_peer_note_bad_chunk (bounded local deprioritize).
+ * atomic install) and rom_peer_note_bad_chunk — which RECORDS the offence and
+ * logs it, but see sbf_note_substitution: nothing in production reads that
+ * list back, so it does not change who is asked next.
  * The serve side is the ordinary free-tier ROM path with its per-peer
  * concurrency and byte-rate caps. Nothing new was invented on the wire, and no
  * new listening port exists.
@@ -75,7 +77,11 @@
  * rather than truncating. */
 #define SBF_DIRECTORY_MAX 8192
 
-/* One exact immutable artifact several peers may all be offering. */
+/* One exact immutable artifact several peers may all be offering. Peers are
+ * grouped by the artifact's WHOLE advertised identity (see sbf_candidate_add)
+ * so that honest replicas of the same bundle become FAILOVER for a single
+ * download, while a genuinely different byte sequence claiming the same source
+ * root becomes a separate candidate that must be refused on its own. */
 struct sbf_candidate {
     struct rom_fetch_manifest manifest;
     struct rom_fetch_peer peers[SOURCE_BUNDLE_FETCH_MAX_PEERS];
@@ -262,7 +268,16 @@ static uint8_t *sbf_download_candidate(const struct sbf_candidate *c,
      * write it into a directory the caller owns. Deriving it from chunk_root
      * ourselves keeps concurrent candidates from colliding while keeping the
      * whole path caller-controlled; the ".stage" suffix keeps a scratch
-     * directory from ever classifying as a seedable ".zvsb". */
+     * directory from ever classifying as a seedable ".zvsb".
+     *
+     * The WHOLE 32 bytes, never a prefix. chunk_root here is a peer-chosen
+     * value: an attacker picks the bytes it advertises, so a truncated stem is
+     * a name an attacker can aim at. Two candidates in one call that landed on
+     * the same staging leaf would share a .part and a resume journal, which is
+     * exactly the poisoning sbf_staging_clear exists to prevent. At the full
+     * width the leaf is as collision-free as the content address itself.
+     * lib/test/src/test_source_bundle_fetch.c's planted-resume case derives
+     * this same name and must stay in step with it. */
     char stem[65];
     HexStr(c->manifest.chunk_root, 32, false, stem, sizeof(stem));
     char name[ROM_FETCH_NAME_MAX];
@@ -311,7 +326,16 @@ static uint8_t *sbf_download_candidate(const struct sbf_candidate *c,
 
 /* Score every peer that stood behind a candidate the root check refused. They
  * all advertised these exact bytes under a root the bytes do not carry, so the
- * offence is theirs jointly; the deprioritize list is bounded and expires. */
+ * offence is theirs jointly; the deprioritize list is bounded and expires.
+ *
+ * WHAT THIS DOES NOT DO, stated so nobody reads more into it. The list this
+ * writes (lib/net/src/rom_peer_scoring.c) is WRITE-ONLY in production:
+ * rom_peer_is_deprioritized() — whose own header calls it "query helper for
+ * the fetch scheduler" — is called by no production translation unit, only by
+ * the chaos harness and tests. So this records and logs the offence; it does
+ * NOT stop the same peer being asked first again on the very next call, and
+ * the per-chunk `poisoned` mask in rf_ver_acquire_chunk is scoped to one chunk
+ * of one download. Treat this as evidence, not as scheduling pressure. */
 static void sbf_note_substitution(const struct sbf_candidate *c)
 {
     for (size_t p = 0; p < c->npeers; p++)
@@ -404,7 +428,8 @@ enum source_bundle_fetch_result source_bundle_fetch(
             sbf_note_substitution(&cands[c]);
             LOG_WARN(SBF_SUBSYS, "candidate %zu of %zu delivered bytes that do "
                      "not rederive to the requested source root (%s) — "
-                     "discarded, peers deprioritized, continuing",
+                     "discarded, offence recorded against its peer(s), "
+                     "continuing",
                      c + 1u, ncands, vcs_source_bundle_result_string(vr));
             continue;
         }

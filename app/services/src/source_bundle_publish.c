@@ -164,13 +164,18 @@ static bool sbp_write_atomic(const char *staging, const char *final_path,
     return ok;
 }
 
-/* Count entries in the seeded directory the same bounded way rom_seed's own
- * sweep does, stopping one past the cap. The answer is only used to tell the
- * operator whether a FUTURE boot-time sweep is guaranteed to reach this
- * bundle; it never decides whether this call serves it. An unopenable
- * directory reports 0 entries, which is the honest "nothing is crowding it". */
-static unsigned sbp_seed_dir_entries(const char *dirpath)
+/* Count entries in one directory the same bounded way rom_seed's own sweep
+ * does, stopping one past the cap, and separately count the entries that
+ * CLASSIFY as an artifact — the ones that will contend for a registry slot.
+ * The answers are only used to tell the operator whether a FUTURE boot-time
+ * sweep is guaranteed to reach this bundle; they never decide whether this
+ * call serves it. An unopenable directory reports 0 of each, which is the
+ * honest "nothing here is crowding it". */
+static unsigned sbp_seed_dir_entries(const char *dirpath,
+                                     unsigned *artifacts_out)
 {
+    if (artifacts_out)
+        *artifacts_out = 0;
     DIR *d = opendir(dirpath);
     if (!d)
         return 0;
@@ -180,6 +185,9 @@ static unsigned sbp_seed_dir_entries(const char *dirpath)
         seen++;
         if (seen > ROM_SEED_SCAN_ENTRY_CAP)
             break;
+        if (artifacts_out &&
+            rom_seed_classify(e->d_name) != ROM_ARTIFACT_UNKNOWN)
+            (*artifacts_out)++;
     }
     closedir(d);
     return seen;
@@ -343,16 +351,35 @@ enum source_bundle_publish_result source_bundle_publish(
     report->num_chunks = offered.num_chunks;
     report->file_service_port = fs_port;
     report->republished = republished;
-    report->seed_directory_entries = sbp_seed_dir_entries(seed_dir);
+    /* A boot sweep is bounded TWICE, and the tighter bound is the registry,
+     * not the walk: rom_seed_scan_datadir() stops after
+     * ROM_SEED_SCAN_ENTRY_CAP entries per directory, but it also `break`s the
+     * moment the registry holds ROM_SEED_MAX_ARTIFACTS — three orders of
+     * magnitude sooner — and it fills those slots in arbitrary readdir order
+     * across the datadir root AND bundles/. So promising the sweep on entry
+     * count alone is a promise a synced node with a header seed and a full
+     * shelf of bundles cannot keep. Both directories are counted, and every
+     * classifying entry in either of them is a slot contender. */
+    unsigned seed_artifacts = 0, root_artifacts = 0;
+    report->seed_directory_entries =
+        sbp_seed_dir_entries(seed_dir, &seed_artifacts);
+    unsigned root_entries = sbp_seed_dir_entries(datadir, &root_artifacts);
     report->rescan_guaranteed =
-        report->seed_directory_entries <= ROM_SEED_MAX_ARTIFACTS;
+        report->seed_directory_entries <= ROM_SEED_SCAN_ENTRY_CAP &&
+        root_entries <= ROM_SEED_SCAN_ENTRY_CAP &&
+        (uint64_t)root_artifacts + (uint64_t)seed_artifacts <=
+            (uint64_t)ROM_SEED_MAX_ARTIFACTS;
     report->bundle = metrics;
     if (!report->rescan_guaranteed)
         LOG_WARN(SBP_SUBSYS,
-                 "'%s' is being offered now, but '%s' holds more than %u "
-                 "entries — the %u-slot registry may fill before reaching it, so "
-                 "re-run publish after a restart", relname, seed_dir,
-                 (unsigned)ROM_SEED_MAX_ARTIFACTS,
+                 "'%s' is being offered now, but a boot-time sweep of '%s' is "
+                 "not guaranteed to reach it (%u entries / %u artifacts here, "
+                 "%u entries / %u artifacts in the datadir root; the sweep "
+                 "walks at most %u entries per directory and registers at most "
+                 "%u artifacts in all) — re-run publish after a restart",
+                 relname, seed_dir, report->seed_directory_entries,
+                 seed_artifacts, root_entries, root_artifacts,
+                 (unsigned)ROM_SEED_SCAN_ENTRY_CAP,
                  (unsigned)ROM_SEED_MAX_ARTIFACTS);
     LOG_INFO(SBP_SUBSYS, "offering source root %s as '%s' on port %u",
              root_hex, relname, (unsigned)fs_port);
