@@ -1,16 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Prove canonical ZCODE task/candidate/policy/review/receipt wires. */
 
-/* realpath() reaches this TU only through the glibc fortify inline that
- * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
- * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
- * compiles by accident of optimisation and breaks at -O0, under
- * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
- * include: after them it does nothing. See lib/util/src/hw_profile.c. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "test/test_core.h"
 
 #include "test/public_shape_fixture.h"
@@ -2349,7 +2339,8 @@ static int test_zd_improve_command(void)
         char source_path[384], workspace[4096], candidate_workspace[4096];
         char base_true[4352], base_false[4352];
         test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "improve");
-        ASSERT(realpath(dir, workspace) != NULL);
+        ASSERT(platform_directory_canonical_real(dir, workspace,
+                                                 sizeof(workspace)));
         (void)snprintf(source_dir, sizeof(source_dir), "%s/src", workspace);
         ASSERT(platform_directory_create(source_dir, 0700) == 0);
         (void)snprintf(source_path, sizeof(source_path), "%s/widget.c",
@@ -2390,7 +2381,8 @@ static int test_zd_improve_command(void)
         ASSERT(zd_copy_executable("/usr/bin/false", base_false));
         test_make_tmpdir(candidate_dir, sizeof(candidate_dir), "zcode_dev",
                          "candidate");
-        ASSERT(realpath(candidate_dir, candidate_workspace) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            candidate_dir, candidate_workspace, sizeof(candidate_workspace)));
         char candidate_source_dir[4352], candidate_source_path[4608];
         char candidate_input_path[4352];
         char candidate_true[4352], candidate_false[4352];
@@ -5574,7 +5566,8 @@ static int test_zd_task_index(void)
     TEST("zcode_dev: task index is a rebuildable projection over CAS wires") {
         char dir[256], workspace[4096];
         test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "task_index");
-        ASSERT(realpath(dir, workspace) != NULL);
+        ASSERT(platform_directory_canonical_real(dir, workspace,
+                                                 sizeof(workspace)));
         ASSERT(vcs_object_store_init(workspace));
         struct vcs_zcode_proof_policy_v1 policy;
         zd_policy(&policy);

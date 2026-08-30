@@ -1,15 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
-/* realpath() is declared by <stdlib.h> only under
- * __USE_MISC/__USE_XOPEN_EXTENDED, which the build's
- * -D_POSIX_C_SOURCE=200809L does not set. Without this the declaration
- * arrives only via the glibc fortify inline that -D_FORTIFY_SOURCE=2 pulls in
- * at -O1 and above, so the file compiles by accident of optimisation and
- * fails at -O0. Matches lib/util/src/hw_profile.c and 24 other TUs. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "test/test_core.h"
 
 #include "dev_activation.h"
@@ -22,8 +12,10 @@
 #include "json/json.h"
 #include "keys/key.h"
 #include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
 #include "platform/time_compat.h"
 #include "platform/file_watch_compat.h"
+#include "platform/os_proc.h"
 #include "services/dev_reflex_policy_service.h"
 #include "sim/social_app_sim.h"
 #include "util/safe_alloc.h"
@@ -46,6 +38,15 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+
+static int dp_environment_unset(const char *name)
+{
+#if defined(_WIN32)
+    return platform_environment_set(name, "", 1);
+#else
+    return unsetenv(name);
+#endif
+}
 
 static int route_handler(const struct zcl_app_request_v1 *request,
                          struct zcl_app_mut_bytes *response,
@@ -683,7 +684,7 @@ static int test_core_refusal_cycle(void)
         test_make_tmpdir(dir, sizeof(dir), "core_refusal", "notoken");
         char *saved_home = getenv("HOME");
         saved_home = saved_home ? strdup(saved_home) : NULL;
-        setenv("HOME", dir, 1);
+        platform_environment_set("HOME", dir, 1);
 
         const char *core[] = { "core/consensus/src/check_block.c" };
         /* Publication containment precedes the Core-unseal boundary. */
@@ -703,10 +704,10 @@ static int test_core_refusal_cycle(void)
         json_free(&v);
 
         if (saved_home) {
-            setenv("HOME", saved_home, 1);
+            platform_environment_set("HOME", saved_home, 1);
             free(saved_home);
         } else {
-            unsetenv("HOME");
+            dp_environment_unset("HOME");
         }
         test_rm_rf_recursive(dir);
         PASS();
@@ -722,7 +723,7 @@ static int test_core_refusal_token(void)
         test_make_tmpdir(dir, sizeof(dir), "core_refusal", "token");
         char *saved_home = getenv("HOME");
         saved_home = saved_home ? strdup(saved_home) : NULL;
-        setenv("HOME", dir, 1);
+        platform_environment_set("HOME", dir, 1);
 
         /* Mint the one-shot token the owner ritual writes. */
         char tok[1024];
@@ -747,10 +748,10 @@ static int test_core_refusal_token(void)
         json_free(&v);
 
         if (saved_home) {
-            setenv("HOME", saved_home, 1);
+            platform_environment_set("HOME", saved_home, 1);
             free(saved_home);
         } else {
-            unsetenv("HOME");
+            dp_environment_unset("HOME");
         }
         test_rm_rf_recursive(dir);
         PASS();
@@ -1496,32 +1497,32 @@ static int test_native_activation_switch(void)
         char *saved = getenv("ZCL_DEV_NATIVE_ACTIVATION");
         saved = saved ? strdup(saved) : NULL;
 
-        unsetenv("ZCL_DEV_NATIVE_ACTIVATION");
+        dp_environment_unset("ZCL_DEV_NATIVE_ACTIVATION");
         ASSERT(!dev_activation_native_enabled());
 
-        setenv("ZCL_DEV_NATIVE_ACTIVATION", "", 1);
+        platform_environment_set("ZCL_DEV_NATIVE_ACTIVATION", "", 1);
         ASSERT(!dev_activation_native_enabled());
 
-        setenv("ZCL_DEV_NATIVE_ACTIVATION", "0", 1);
+        platform_environment_set("ZCL_DEV_NATIVE_ACTIVATION", "0", 1);
         ASSERT(!dev_activation_native_enabled());
 
-        setenv("ZCL_DEV_NATIVE_ACTIVATION", "nah", 1);
+        platform_environment_set("ZCL_DEV_NATIVE_ACTIVATION", "nah", 1);
         ASSERT(!dev_activation_native_enabled());
 
-        setenv("ZCL_DEV_NATIVE_ACTIVATION", "1", 1);
+        platform_environment_set("ZCL_DEV_NATIVE_ACTIVATION", "1", 1);
         ASSERT(dev_activation_native_enabled());
 
-        setenv("ZCL_DEV_NATIVE_ACTIVATION", "true", 1);
+        platform_environment_set("ZCL_DEV_NATIVE_ACTIVATION", "true", 1);
         ASSERT(dev_activation_native_enabled());
 
-        setenv("ZCL_DEV_NATIVE_ACTIVATION", "yes", 1);
+        platform_environment_set("ZCL_DEV_NATIVE_ACTIVATION", "yes", 1);
         ASSERT(dev_activation_native_enabled());
 
         if (saved) {
-            setenv("ZCL_DEV_NATIVE_ACTIVATION", saved, 1);
+            platform_environment_set("ZCL_DEV_NATIVE_ACTIVATION", saved, 1);
             free(saved);
         } else {
-            unsetenv("ZCL_DEV_NATIVE_ACTIVATION");
+            dp_environment_unset("ZCL_DEV_NATIVE_ACTIVATION");
         }
         PASS();
     } _test_next:;
@@ -1538,8 +1539,8 @@ static int test_native_activation_request_builder(void)
         saved_home = saved_home ? strdup(saved_home) : NULL;
         char *saved_gen_root = getenv("ZCL_DEV_GENERATION_ROOT");
         saved_gen_root = saved_gen_root ? strdup(saved_gen_root) : NULL;
-        unsetenv("ZCL_DEV_GENERATION_ROOT");
-        setenv("HOME", dir, 1);
+        dp_environment_unset("ZCL_DEV_GENERATION_ROOT");
+        platform_environment_set("HOME", dir, 1);
 
         struct dev_activation_cycle_request creq;
         ASSERT(dev_activation_request_from_cycle("/repo", "abc1234", &creq));
@@ -1560,10 +1561,10 @@ static int test_native_activation_request_builder(void)
 
         /* ZCL_DEV_GENERATION_ROOT overrides the default, same as
          * deploy-dev-lane.sh and native_dev_command.c:dev_generation_root(). */
-        setenv("ZCL_DEV_GENERATION_ROOT", "/custom/gen-root", 1);
+        platform_environment_set("ZCL_DEV_GENERATION_ROOT", "/custom/gen-root", 1);
         ASSERT(dev_activation_request_from_cycle("/repo", "abc1234", &creq));
         ASSERT(strcmp(creq.req.gen_root, "/custom/gen-root") == 0);
-        unsetenv("ZCL_DEV_GENERATION_ROOT");
+        dp_environment_unset("ZCL_DEV_GENERATION_ROOT");
 
         /* build_commit may be empty (the vcs.vcs.revert seam's use) but not
          * NULL; repo_root/out must not be NULL either. */
@@ -1573,20 +1574,20 @@ static int test_native_activation_request_builder(void)
         ASSERT(!dev_activation_request_from_cycle("/repo", NULL, &creq));
         ASSERT(!dev_activation_request_from_cycle("/repo", "abc1234", NULL));
 
-        unsetenv("HOME");
+        dp_environment_unset("HOME");
         ASSERT(!dev_activation_request_from_cycle("/repo", "abc1234", &creq));
 
         if (saved_home) {
-            setenv("HOME", saved_home, 1);
+            platform_environment_set("HOME", saved_home, 1);
             free(saved_home);
         } else {
-            unsetenv("HOME");
+            dp_environment_unset("HOME");
         }
         if (saved_gen_root) {
-            setenv("ZCL_DEV_GENERATION_ROOT", saved_gen_root, 1);
+            platform_environment_set("ZCL_DEV_GENERATION_ROOT", saved_gen_root, 1);
             free(saved_gen_root);
         } else {
-            unsetenv("ZCL_DEV_GENERATION_ROOT");
+            dp_environment_unset("ZCL_DEV_GENERATION_ROOT");
         }
         test_rm_rf_recursive(dir);
         PASS();
@@ -1728,7 +1729,7 @@ static bool run_failure_store_fixture(void)
         snprintf(repo2, sizeof(repo2), "%s/repo2", home) <= 0 ||
         snprintf(repo3, sizeof(repo3), "%s/repo3", home) <= 0 ||
         mkdir(repo1, 0700) != 0 || mkdir(repo2, 0700) != 0 ||
-        mkdir(repo3, 0700) != 0 || setenv("HOME", home, 1) != 0)
+        mkdir(repo3, 0700) != 0 || platform_environment_set("HOME", home, 1) != 0)
         goto cleanup;
 
 #define FS_REQUIRE(expr)                                                     \
@@ -2108,10 +2109,10 @@ static bool run_failure_store_fixture(void)
 
 cleanup:
     if (saved_home) {
-        (void)setenv("HOME", saved_home, 1);
+        (void)platform_environment_set("HOME", saved_home, 1);
         free(saved_home);
     } else
-        (void)unsetenv("HOME");
+        (void)dp_environment_unset("HOME");
     test_rm_rf_recursive(home);
 #undef FS_REQUIRE
     return ok;
@@ -2280,7 +2281,8 @@ static bool dp_hotswap_cache_fixture_init(const char *root,
                      "#define ZCL_ECONOMICS_FIXTURE 4\n"))
         return false;
     char canonical_root[PATH_MAX];
-    if (!realpath(root, canonical_root))
+    if (!platform_directory_canonical_real(root, canonical_root,
+                                           sizeof(canonical_root)))
         return false;
     char flags[PATH_MAX * 2];
     int n = snprintf(
@@ -2369,9 +2371,9 @@ static bool run_hotswap_artifact_cache_fixture(void)
         chmod(compiler_rel, 0700) != 0 ||
         !dp_hotswap_cache_fixture_init(root_a, compiler) ||
         !dp_hotswap_cache_fixture_init(root_b, compiler) ||
-        setenv("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0 ||
-        setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
-        setenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0)
+        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0)
         goto out;
 
     struct zcl_devloop_hotswap_build_receipt built = {0};
@@ -2415,7 +2417,7 @@ static bool run_hotswap_artifact_cache_fixture(void)
                 (unsigned long long)published_st.st_ino);
         goto out;
     }
-    if (unsetenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
+    if (dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
         goto out;
     stage = "same-worktree-cache-hit";
     if (!zcl_devloop_hotswap_build(root_a, owner, &hit, &process,
@@ -2467,10 +2469,10 @@ static bool run_hotswap_artifact_cache_fixture(void)
                      "int zcl_hotswap_fixture_owner(void) { return 13; }\n") ||
         unlink("test-tmp/dev_hotswap_cache_b/build/hotswap/fast/"
                "app_controllers_src_status_native_handlers.c.d") != 0 ||
-        setenv("ZCL_DEVLOOP_TEST_MUTATE_DEPS", "1", 1) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_MUTATE_DEPS", "1", 1) != 0 ||
         zcl_devloop_hotswap_build(root_b, owner, &mutated, &process,
                                   why, sizeof(why)) ||
-        unsetenv("ZCL_DEVLOOP_TEST_MUTATE_DEPS") != 0 ||
+        dp_environment_unset("ZCL_DEVLOOP_TEST_MUTATE_DEPS") != 0 ||
         mutated.compiler_processes != 2 || mutated.linker_processes != 0 ||
         strstr(why, "dependency closure size changed") == NULL)
         goto out;
@@ -2525,22 +2527,22 @@ static bool run_hotswap_artifact_cache_fixture(void)
     ok = true;
 
 out:
-    (void)unsetenv("ZCL_DEVLOOP_TEST_MUTATE_DEPS");
+    (void)dp_environment_unset("ZCL_DEVLOOP_TEST_MUTATE_DEPS");
     if (!ok)
         fprintf(stderr, "hotswap cache fixture failed at %s: %s\n", stage,
                 why[0] ? why : "no build reason");
     if (had_cache)
-        (void)setenv("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
+        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
     else
-        (void)unsetenv("ZCL_DEV_ARTIFACT_CACHE");
+        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
     if (had_process)
-        (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
     else
-        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
     if (had_force_copy)
-        (void)setenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", saved_force_copy, 1);
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", saved_force_copy, 1);
     else
-        (void)unsetenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
     test_rm_rf_recursive(root_a);
     test_rm_rf_recursive(root_b);
     test_rm_rf_recursive(cache_rel);
@@ -2682,7 +2684,7 @@ static bool run_resident_restart_fixture(void)
                      "build/test-obj/fixture/tools/dev/restart_fixture.o build/test-obj/fixture/tools/command/native_code_command.o build/test-obj/fixture/lib/util/src/clientversion.o build/test-obj/fixture/lib/base/src/other.o\n") ||
         !dp_mk_write(root, "build/test-obj/fixture/restart-base.o",
                      "frozen-test-base\n") ||
-        setenv("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0)
+        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0)
         goto out;
     int n = snprintf(
         plan, sizeof(plan),
@@ -2704,9 +2706,9 @@ static bool run_resident_restart_fixture(void)
         compiler);
     if (n <= 0 || n >= (int)sizeof(plan) ||
         !dp_mk_write(root, "build/dev-loop/restart.env", plan) ||
-        setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
-        setenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0 ||
-        setenv("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) != 0)
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) != 0)
         goto out;
 
     const char *changed[] = { "tools/dev/restart_fixture.c" };
@@ -2757,7 +2759,7 @@ static bool run_resident_restart_fixture(void)
         receipt.compiler_processes != 2 || !receipt.artifact_cache_hit ||
         receipt.linker_processes != 0 || receipt.probe_processes != 1)
         goto out;
-    if (unsetenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
+    if (dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
         goto out;
     char first_build_key[65], first_build_hash[65];
     (void)snprintf(first_build_key, sizeof(first_build_key), "%s",
@@ -2800,7 +2802,7 @@ static bool run_resident_restart_fixture(void)
 
     /* Born red: a real exact-group failure must not be collapsed into the
      * runner-accounting fallback. The next action needs the failing count. */
-    if (setenv("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "2", 1) != 0)
+    if (platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "2", 1) != 0)
         goto out;
     memset(&proof, 0, sizeof(proof));
     memset(&process, 0, sizeof(process));
@@ -2810,7 +2812,7 @@ static bool run_resident_restart_fixture(void)
         proof.groups_failed != 2 ||
         proof.immediate_proof_complete || proof.proof_complete)
         goto out;
-    if (setenv("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) != 0)
+    if (platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) != 0)
         goto out;
 
     /* The next edit for the same task executes the remembered RED before
@@ -2975,19 +2977,19 @@ static bool run_resident_restart_fixture(void)
     ok = true;
 
 out:
-    (void)unsetenv("ZCL_DEVLOOP_TEST_FAIL_GROUPS");
+    (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FAIL_GROUPS");
     if (had_cache)
-        (void)setenv("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
+        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
     else
-        (void)unsetenv("ZCL_DEV_ARTIFACT_CACHE");
+        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
     if (had_process)
-        (void)setenv("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
     else
-        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
     if (had_force_copy)
-        (void)setenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", saved_force_copy, 1);
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", saved_force_copy, 1);
     else
-        (void)unsetenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
     test_rm_rf_recursive(root);
     test_rm_rf_recursive(cache_rel);
     (void)unlink(compiler_rel);
@@ -3011,7 +3013,7 @@ static int test_resident_process_cancellation(void)
         const char *saved = getenv("ZCL_DEVLOOP_TEST_PROCESS");
         char *saved_copy = saved ? strdup(saved) : NULL;
         ASSERT(!saved || saved_copy);
-        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
 
         const char *argv[] = { "sleep", "30", NULL };
         struct zcl_devloop_process_result result = {0};
@@ -3026,10 +3028,10 @@ static int test_resident_process_cancellation(void)
         zcl_devloop_process_cancel_clear();
 
         if (saved_copy) {
-            ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", saved_copy, 1) == 0);
+            ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_copy, 1) == 0);
             free(saved_copy);
         } else {
-            ASSERT(unsetenv("ZCL_DEVLOOP_TEST_PROCESS") == 0);
+            ASSERT(dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS") == 0);
         }
         PASS();
     } _test_next:;
@@ -3062,7 +3064,7 @@ static int test_resident_process_supersession(void)
         const char *saved = getenv("ZCL_DEVLOOP_TEST_PROCESS");
         char *saved_copy = saved ? strdup(saved) : NULL;
         ASSERT(!saved || saved_copy);
-        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
 
         struct process_poll_fixture fixture = { .cancel_after = 2 };
         zcl_devloop_process_cancel_poll_set(cancel_after_poll, &fixture);
@@ -3110,8 +3112,8 @@ static int test_resident_process_supersession(void)
         bool gone = false;
         const struct timespec retry_delay = { .tv_nsec = 10000000L };
         for (int i = 0; i < 100; i++) {
-            errno = 0;
-            if (kill((pid_t)nested_pid, 0) != 0 && errno == ESRCH) {
+            if (os_proc_pid_liveness((uint64_t)nested_pid) ==
+                OS_PROC_LIVENESS_DEAD) {
                 gone = true;
                 break;
             }
@@ -3120,10 +3122,10 @@ static int test_resident_process_supersession(void)
         ASSERT(gone);
         ASSERT(unlink(pid_path) == 0);
         if (saved_copy) {
-            ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", saved_copy, 1) == 0);
+            ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_copy, 1) == 0);
             free(saved_copy);
         } else {
-            ASSERT(unsetenv("ZCL_DEVLOOP_TEST_PROCESS") == 0);
+            ASSERT(dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS") == 0);
         }
         PASS();
     } _test_next:;

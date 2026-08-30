@@ -4,21 +4,10 @@
  * and the shared native launch primitive used by `zcl-nodectl launch`.
  */
 
-/* This file calls realpath(), which <stdlib.h> declares only under
- * __USE_MISC/__USE_XOPEN_EXTENDED, and the build's -D_POSIX_C_SOURCE=200809L
- * sets neither. Without this the declaration reaches the TU only through the
- * glibc fortify inline that -D_FORTIFY_SOURCE=2 pulls in WHEN OPTIMISATION IS
- * ON — so this file compiled purely as a side effect of -O1 and above, and
- * failed at -O0 with "implicit declaration of realpath", which C23 makes a
- * hard error. Same for any -U_FORTIFY_SOURCE or non-glibc build. Matches
- * lib/util/src/hw_profile.c and 24 other TUs. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "test/test_core.h"
 #include "services/binary_ab_fallback.h"
 #include "platform/clock.h"
+#include "platform/directory_compat.h"
 #include "platform/os_binary_slots.h"
 #include "platform/os_proc.h"
 #include "platform/process_compat.h"
@@ -37,7 +26,9 @@
 #endif
 #include <unistd.h>
 
+#if !defined(_WIN32)
 extern char **environ;
+#endif
 
 #if defined(__APPLE__)
 #define AB_TRUE_PATH "/usr/bin/true"
@@ -85,11 +76,30 @@ static bool ab_pinned_bytes_equal(int fd, const char *expected)
     return strcmp(buf, expected) == 0;
 }
 
-/* ── the FIFO "promptness" checks: why they are no longer stopwatch-graded ──
+static bool ab_special_create(const char *path, mode_t mode)
+{
+#if defined(_WIN32)
+    (void)mode;
+    return platform_directory_create(path, 0700) == 0;
+#else
+    return mkfifo(path, mode) == 0;
+#endif
+}
+
+static bool ab_special_remove(const char *path)
+{
+#if defined(_WIN32)
+    return rmdir(path) == 0;
+#else
+    return unlink(path) == 0;
+#endif
+}
+
+/* ── non-regular-path promptness is not stopwatch-graded ──────────────────
  *
- * Section 9 below replaces streak/current/last-good with a FIFO that has no
- * writer, and proves os_binary_slots_prepare_launch() refuses it instead of
- * parking forever in open(). That property used to be graded
+ * Section 9 uses a writer-less FIFO on POSIX and a directory on Windows to
+ * prove os_binary_slots_prepare_launch() promptly refuses non-regular paths.
+ * The FIFO property used to be graded
  * `elapsed < 250 ms`, which flakes on a loaded box: 250 ms of scheduler delay
  * is ordinary on a 32-worker run, and it says nothing whatever about the
  * code. A 7200rpm-disk box measured under 2 MB/s — the honest worst case this
@@ -286,7 +296,8 @@ int test_binary_ab_fallback(void)
         return 1;
     }
     char resolved_dir[PATH_MAX];
-    if (!realpath(dir, resolved_dir)) {
+    if (!platform_directory_canonical_real(dir, resolved_dir,
+                                           sizeof(resolved_dir))) {
         printf("ab: realpath failed — cannot run seam tests\n");
         return 1;
     }
@@ -523,8 +534,8 @@ int test_binary_ab_fallback(void)
          * hypothetical infinite park in open() into a legible failure; the
          * elapsed time is printed and graded by nobody. */
         const unsigned hang_guard_secs = 30;
-        AB_CHECK("replace streak with FIFO", unlink(streak) == 0 &&
-                 mkfifo(streak, 0600) == 0);
+        AB_CHECK("replace streak with non-regular object",
+                 unlink(streak) == 0 && ab_special_create(streak, 0600));
         int64_t started = clock_now_monotonic_ns();
         struct os_binary_slots_launch fifo_launch;
         ab_hang_guard_arm(hang_guard_secs);
@@ -538,12 +549,12 @@ int test_binary_ab_fallback(void)
                  no_hang && fifo_ok && fifo_launch.fallback_active &&
                  fifo_launch.streak_corrupt);
         os_binary_slots_close_launch(&fifo_launch);
-        AB_CHECK("remove FIFO streak", unlink(streak) == 0);
+        AB_CHECK("remove non-regular streak", ab_special_remove(streak));
 
         AB_CHECK("seed streak before FIFO current",
                  ab_write_file(streak, "0\n", 0600) == 0);
-        AB_CHECK("replace current with FIFO", unlink(cur) == 0 &&
-                 mkfifo(cur, 0700) == 0);
+        AB_CHECK("replace current with non-regular object",
+                 unlink(cur) == 0 && ab_special_create(cur, 0700));
         started = clock_now_monotonic_ns();
         ab_hang_guard_arm(hang_guard_secs);
         bool promote_refused = !binary_ab_promote(dir, cur);
@@ -563,14 +574,14 @@ int test_binary_ab_fallback(void)
                  "(no park in open(): guard did not fire)",
                  no_hang && fifo_ok && fifo_launch.fallback_active);
         os_binary_slots_close_launch(&fifo_launch);
-        AB_CHECK("remove FIFO current", unlink(cur) == 0);
+        AB_CHECK("remove non-regular current", ab_special_remove(cur));
         AB_CHECK("restore regular current",
                  ab_write_file(cur, "CURRENT-AFTER-FIFO", 0755) == 0);
 
         AB_CHECK("seed threshold before FIFO last-good",
                  ab_write_file(streak, "3\n", 0600) == 0);
-        AB_CHECK("replace last-good with FIFO", unlink(lastgood) == 0 &&
-                 mkfifo(lastgood, 0700) == 0);
+        AB_CHECK("replace last-good with non-regular object",
+                 unlink(lastgood) == 0 && ab_special_create(lastgood, 0700));
         started = clock_now_monotonic_ns();
         ab_hang_guard_arm(hang_guard_secs);
         fifo_ok = os_binary_slots_prepare_launch(dir, cur, 3, &fifo_launch);
@@ -581,7 +592,8 @@ int test_binary_ab_fallback(void)
                  "(no park in open(): guard did not fire)",
                  no_hang && !fifo_ok && fifo_launch.executable_fd < 0);
         os_binary_slots_close_launch(&fifo_launch);
-        AB_CHECK("remove FIFO last-good", unlink(lastgood) == 0);
+        AB_CHECK("remove non-regular last-good",
+                 ab_special_remove(lastgood));
         AB_CHECK("restore regular last-good",
                  ab_write_file(lastgood, "LAST-GOOD-AFTER-FIFO", 0755) == 0);
 

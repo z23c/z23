@@ -372,6 +372,7 @@ AGENT_IMPACT_RULE("lib/vcs/src/package_reward.c|lib/vcs/src/package_reward_label
 AGENT_IMPACT_RULE("lib/storage/src/progress_store.c|lib/storage/src/progress_meta_store.c|lib/storage/include/storage/progress_store.h|lib/test/src/test_progress_store.c", "progress_store node_db_catchup_service reducer_forward_progress_gate make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_kill9_recovery.c", "kill9_recovery make_lint_gates")
 AGENT_IMPACT_RULE("config/include/config/boot_background_workers.h|config/src/boot_worker_supervisor.c|lib/test/src/test_chain_tip_watchdog_bounded_restart.c", "chain_tip_watchdog_bounded_restart supervisor make_lint_gates")
+AGENT_IMPACT_RULE("config/include/config/boot_background_workers.h|config/include/config/boot_internal.h|config/src/boot_background_workers.c|config/src/boot_frontend_services.c|config/src/boot_services.c|lib/kernel/include/kernel/service_kernel.h|lib/kernel/src/service_kernel.c|lib/test/src/test_payment_shutdown_owner.c", "payment_shutdown_owner service_kernel shutdown_stagewatch make_lint_gates")
 AGENT_IMPACT_RULE("config/include/config/db_service.h|config/src/db_service.c|config/src/runtime.c", "node_db_catchup_service snapshot_sync_service node_health_service make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/sticky_escalator.c|app/services/src/sticky_escalator_resnapshot.c|app/services/src/sticky_escalator_trigger.c|app/services/include/services/sticky_escalator.h|app/services/include/services/sticky_escalator_resnapshot.h|app/services/include/services/sticky_escalator_trigger.h|lib/test/src/test_sticky_escalator.c|lib/test/src/test_stall_totality_matrix.c|lib/test/src/test_boot_reindex_terminates.c|lib/test/src/test_always_sync_selfheal.c|docs/work/fail-safe-architecture.md", "sticky_escalator stall_totality_matrix boot_reindex_terminates always_sync_selfheal make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/recovery_coordinator.c|app/services/include/services/recovery_coordinator.h|lib/test/src/test_recovery_coordinator.c", "recovery_coordinator rpc always_sync_selfheal make_lint_gates")
@@ -2825,3 +2826,9 @@ AGENT_IMPACT_RULE("lib/engine/include/engine/personas.def|tools/lint/check_perso
  * module depends only on base and sha3, deliberately, so that a receipt can
  * be recomputed and compared by code holding no keys and no index. */
 AGENT_IMPACT_RULE("lib/receipt/src/*.c|lib/receipt/include/receipt/*.h|lib/test/src/test_receipt.c", "receipt make_lint_gates")
+/* Ranked retrieval. Rides its own group only: the module depends on base and
+ * libm and nothing else, and nothing depends on it yet — `code have` still
+ * answers by substring match. When that call site lands, the codeindex group
+ * joins this rule; adding it now would claim a coverage relationship that
+ * does not exist. */
+AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib/test/src/test_retrieval.c", "retrieval make_lint_gates")
