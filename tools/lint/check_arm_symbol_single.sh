@@ -246,6 +246,7 @@ AWK_EOF
 
 # ── --selftest ─────────────────────────────────────────────────────────
 if [ "${1:-}" = "--selftest" ]; then
+    self="$PWD/tools/lint/$GATE.sh"
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     analyzer="$tmp/$ANALYZER_NAME"
@@ -344,9 +345,38 @@ void sha256_transform_generic(uint32_t *state, const unsigned char *data)
     return p && n > 0;
 }'
 
+    # (6) COVERAGE, three answers not two. gate_require_scanned is calibrated
+    # to detect "nothing happened"; these prove the coverage check detects
+    # "less happened than should have", which no file-count floor can. Each
+    # case re-invokes this gate for real (no arg, so no recursion) and fails
+    # at the coverage check before the analyzer runs, so all three are cheap.
+    cov_case() { # $1=want-rc $2=msg  rest: VAR=VAL env assignments
+        local want="$1" msg="$2" rc=0
+        shift 2
+        env "$@" "$self" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne "$want" ]; then
+            echo "$GATE: SELFTEST FAILED — $msg (wanted exit $want, got $rc)" >&2
+            exit 2
+        fi
+    }
+    # 6a. the full, real scan clears its own expectation.
+    cov_case 0 "the complete scan did not pass its coverage expectation" \
+        ZCL_LINT_MODE=FAIL
+    # 6b. a scan set deliberately reduced below the expectation (one declared
+    #     root dropped) is UNPROVEN exit 2 — never 0, never 1. The old floor
+    #     could not see this: 3019 files still cleared a floor of 2500.
+    cov_case 2 "a scan missing a whole declared root was not UNPROVEN" \
+        ZCL_ARM_SYMBOL_SCAN_ROOTS="app config lib src" ZCL_ARM_SYMBOL_FILE_FLOOR=1
+    # 6c. a shortfall SMALLER than the recorded allowance is a stale ratchet,
+    #     exit 1 — an allowance that may only ever rise rusts shut.
+    cov_case 1 "an allowance above the true shortfall was silently tolerated" \
+        ZCL_ARM_SYMBOL_COVERAGE_ALLOWANCE=1
+
     echo "[$GATE] SELFTEST PASS (cross-arm non-static dup fails; static dup," \
          "macro-generated pair, __attribute__-prefixed fn and a clean" \
-         "singleton all pass)"
+         "singleton all pass; a full scan passes coverage, a scan short one" \
+         "declared root is UNPROVEN exit 2, and an allowance above the true" \
+         "shortfall is a stale-ratchet exit 1)"
     exit 0
 fi
 
@@ -362,6 +392,41 @@ collect_files() {
 mapfile -t scan_files < <(collect_files | sort)
 gate_require_scanned "${#scan_files[@]}" "${ZCL_ARM_SYMBOL_FILE_FLOOR:-2500}" "$GATE" \
     "no production .c under: ${SCAN_ROOTS[*]}"
+
+# ── Coverage: did the scan reach everything it claims to cover? ──────────
+# The floor above answers "did the scan produce anything at all". It cannot
+# answer "did it produce everything it should have": measured 2026-08-30 the
+# realized set is 3250 .c files, so a scan that silently lost 750 of them —
+# 23% of this gate's own surface — still cleared the 2500 floor and reported
+# clean. Cross-arm symbol parity is exactly the property a partial scan hides:
+# the two definitions of a name live in two #ifdef arms of ONE file, so
+# dropping that file drops the whole finding while the file COUNT stays large.
+#
+# The expectation is derived from the git index, which knows nothing about the
+# find above — the two cannot fail together. It is derived from
+# SCAN_ROOTS_DEFAULT, never from the (overridable) SCAN_ROOTS actually in use,
+# so pointing this gate at a subset reads as a shortfall rather than as a
+# quiet redefinition of what "covered" means.
+#
+# Scope, unchanged: SCAN_ROOTS_DEFAULT is app/config/lib/src/tools. Tracked .c
+# outside those roots (core/, domain/, adapters/, packages/, examples/ — 297
+# files on 2026-08-30) is OUT of this gate's declared surface and is NOT in
+# the expectation. Widening the roots is a separate, riskier change that must
+# be proven against a clean tree; a coverage check that fired on files the
+# gate never meant to read would only teach people to ignore it.
+#
+# Allowance 0, shrink-only: every tracked .c under those roots is reached by
+# the find today (measured: expected 3250, scanned 3250, missing 0). There is
+# no legitimate exemption, so any shortfall at all is UNPROVEN.
+ARM_COVERAGE_ALLOWANCE="${ZCL_ARM_SYMBOL_COVERAGE_ALLOWANCE:-0}"
+if [ "${ZCL_ARM_SYMBOL_COVERAGE:-1}" = "1" ]; then
+    cov_specs=()
+    for cov_root in $SCAN_ROOTS_DEFAULT; do cov_specs+=("$cov_root/*.c"); done
+    gate_require_git_coverage - "$ARM_COVERAGE_ALLOWANCE" "$GATE" \
+        ZCL_ARM_SYMBOL_COVERAGE_ALLOWANCE \
+        "Re-run from a clean checkout. If a listed file genuinely left this gate's scope, move it out of $SCAN_ROOTS_DEFAULT or record the exemption by lowering nothing and raising ZCL_ARM_SYMBOL_COVERAGE_ALLOWANCE only with the reason written down." \
+        -- "${cov_specs[@]}" < <(printf '%s\n' "${scan_files[@]}")
+fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-arm-symbol.XXXXXX")" || {
     echo "$GATE: FATAL — mktemp failed." >&2; exit 2; }
