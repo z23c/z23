@@ -235,6 +235,30 @@ bool connman_diag_dump_state_json(struct json_value *out, const char *key)
     json_push_kv(out, "reactor", &reactor);
     json_free(&reactor);
 
+    struct net_p2p_socket_buffer_stats socket_buffers;
+    net_get_p2p_socket_buffer_stats(&socket_buffers);
+    struct json_value socket_buffers_j = {0};
+    json_set_object(&socket_buffers_j);
+    json_push_kv_bool(&socket_buffers_j, "available",
+                      socket_buffers.fully_observed_total > 0);
+    json_push_kv_int(&socket_buffers_j, "requested_receive_bytes",
+                     socket_buffers.requested_receive_bytes);
+    json_push_kv_int(&socket_buffers_j, "requested_send_bytes",
+                     socket_buffers.requested_send_bytes);
+    json_push_kv_int(&socket_buffers_j, "minimum_actual_receive_bytes",
+                     socket_buffers.minimum_actual_receive_bytes);
+    json_push_kv_int(&socket_buffers_j, "minimum_actual_send_bytes",
+                     socket_buffers.minimum_actual_send_bytes);
+    json_push_kv_int(&socket_buffers_j, "attempts_total",
+                     (int64_t)socket_buffers.attempts_total);
+    json_push_kv_int(&socket_buffers_j, "fully_observed_total",
+                     (int64_t)socket_buffers.fully_observed_total);
+    json_push_kv_int(&socket_buffers_j, "degraded_total",
+                     (int64_t)socket_buffers.degraded_total);
+    json_push_kv_str(&socket_buffers_j, "authority", "getsockopt");
+    json_push_kv(out, "socket_buffers", &socket_buffers_j);
+    json_free(&socket_buffers_j);
+
     /* Noise transport advertisement census — observation only. The
      * default stays OFF; this is the evidence a future owner decision
      * about flipping it would need. See connman.h. */

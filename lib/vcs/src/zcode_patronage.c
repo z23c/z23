@@ -2,6 +2,7 @@
  * Purpose: canonical simulation-only ZC23 patronage intents. */
 #include "vcs/zcode_patronage.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "vcs/signed_evidence.h"
 
@@ -9,13 +10,6 @@
 
 static const uint8_t patronage_magic[8] =
     {'Z','C','P','A','T','R','\r','\n'};
-
-static bool patronage_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= value[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_patronage_error_string(
     enum vcs_zcode_patronage_error error)
@@ -73,14 +67,14 @@ static enum vcs_zcode_patronage_error patronage_fields(
         intent->target_root, intent->intended_recipient_binding_root,
     };
     for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++)
-        if (!patronage_nonzero(required[i])) return VCS_ZCODE_PATRONAGE_ROOT;
+        if (!zcl_bytes_any_set(required[i], 32)) return VCS_ZCODE_PATRONAGE_ROOT;
     if (intent->amount_atoms == 0) return VCS_ZCODE_PATRONAGE_AMOUNT;
     if (intent->sequence == 0) return VCS_ZCODE_PATRONAGE_SEQUENCE;
     if (intent->created_unix <= 0 ||
         intent->expires_unix <= intent->created_unix)
         return VCS_ZCODE_PATRONAGE_TIME;
-    bool task = patronage_nonzero(intent->task_root);
-    bool policy = patronage_nonzero(intent->proof_policy_root);
+    bool task = zcl_bytes_any_set(intent->task_root, 32);
+    bool policy = zcl_bytes_any_set(intent->proof_policy_root, 32);
     if (intent->mode == VCS_ZCODE_PATRONAGE_EXACT_TASK_COMMISSION) {
         if (intent->target_kind != VCS_ZCODE_PATRONAGE_TARGET_TASK ||
             !task || !policy || memcmp(intent->target_root,
@@ -101,7 +95,7 @@ static enum vcs_zcode_patronage_error patronage_fields(
     if (intent->mode == VCS_ZCODE_PATRONAGE_DIRECT_GIFT &&
         (intent->refund_height != 0 || intent->refund_unix != 0))
         return VCS_ZCODE_PATRONAGE_SHAPE;
-    if (signed_wire && !patronage_nonzero(intent->signature))
+    if (signed_wire && !zcl_bytes_any_set(intent->signature, 32))
         return VCS_ZCODE_PATRONAGE_SIGNATURE;
     return VCS_ZCODE_PATRONAGE_OK;
 }

@@ -130,7 +130,9 @@ void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
  * slot k of st_a[] is instance k, slot k of st_b[] is instance 2 + k.
  * Compiles into any arm64 baseline: the SHA3-extension EOR3 inside the
  * permutation is compile-time guarded, and the runtime probe
- * (keccak_x4_available) decides whether this lane is reached at all. */
+ * (keccak_x4_available) decides whether this lane may be selected explicitly.
+ * AUTO stays scalar on arm64: the native Apple-Silicon oracle measures this
+ * two-register-pair geometry below scalar on every tested message size. */
 void sha3_256_x4_neon(const uint8_t *const msgs[4], const size_t lens[4],
                       uint8_t out[4][32])
 {
@@ -211,19 +213,20 @@ void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
 
 /* ── Dispatch ──────────────────────────────────────────────────────────
  *
- * Default: use the vector lane this host has — AVX-512 on x86-64, NEON
- * (FEAT_SHA3 probed) on arm64. This is the genuine multi-stream win on both
- * (see the bench in the `sha3_256_x4` test group; flip
- * SHA3_256_X4_AVX512_DEFAULT_ENABLED / SHA3_256_X4_NEON_DEFAULT_ENABLED to 0
- * to ship scalar if a host measures a loss). The parity oracle / bench force a
- * path via sha3_256_x4_select_impl. One-time initialization and subsequent
- * selector overrides are atomically published, so concurrent first use is
- * valid ISO C. */
+ * Default: use AVX-512 on x86-64 where the registered oracle measures a win.
+ * Keep arm64 AUTO scalar: on Apple Silicon, two sequential 2-lane NEON
+ * permutations are about 0.55x four scalar permutations because 64-bit scalar
+ * rotates map to one instruction while ASIMD rotates expand and the 25-word
+ * vector state exhausts the register file. The NEON tier remains compiled,
+ * runtime-gated and explicitly selectable so its parity and future performance
+ * can be proved without imposing a regression on the public node. One-time
+ * initialization and selector overrides are atomically published, so
+ * concurrent first use is valid ISO C. */
 #ifndef SHA3_256_X4_AVX512_DEFAULT_ENABLED
 #define SHA3_256_X4_AVX512_DEFAULT_ENABLED 1
 #endif
 #ifndef SHA3_256_X4_NEON_DEFAULT_ENABLED
-#define SHA3_256_X4_NEON_DEFAULT_ENABLED 1
+#define SHA3_256_X4_NEON_DEFAULT_ENABLED 0
 #endif
 
 typedef void (*sha3_256_x4_fn)(const uint8_t *const[4], const size_t[4],

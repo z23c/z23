@@ -17,6 +17,7 @@
 #include "controllers/strong_params.h"
 #include "blockchain_controller_internal.h"
 
+#include "base/hex.h"
 #include "chain/chain.h"
 #include "core/serialize.h"
 #include "json/json.h"
@@ -41,16 +42,6 @@ static void segments_dir(char *buf, size_t buflen)
     char datadir[2048];
     GetDataDir(true, datadir, sizeof(datadir));
     snprintf(buf, buflen, "%s/segments", datadir);
-}
-
-static void hex32(const uint8_t *in, char out[65])
-{
-    static const char *h = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        out[i * 2]     = h[in[i] >> 4];
-        out[i * 2 + 1] = h[in[i] & 0xf];
-    }
-    out[64] = '\0';
 }
 
 /* Disk-backed body source: raw serialized bytes of the block at `height`,
@@ -183,7 +174,7 @@ bool rpc_verifysegments(const struct json_value *params, bool help,
         json_push_kv_int(result, "max_height", stt.max_height);
     }
     char root[65];
-    hex32(stt.manifest_root, root);
+    zcl_hex_encode(stt.manifest_root, 32, root);
     json_push_kv_str(result, "manifest_root", root);
     if (st != CSEG_OK) {
         json_push_kv_str(result, "error", err);
@@ -240,7 +231,7 @@ bool chain_segment_dump_state_json(struct json_value *out, const char *key)
         json_push_kv_int(out, "max_height", stt.max_height);
     }
     char root[65];
-    hex32(stt.manifest_root, root);
+    zcl_hex_encode(stt.manifest_root, 32, root);
     json_push_kv_str(out, "manifest_root", root);
     return true;
 }

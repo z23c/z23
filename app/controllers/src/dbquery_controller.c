@@ -13,6 +13,7 @@
  * a 100M-row table can still be expensive.
  */
 
+#include "base/hex.h"
 #include "platform/time_compat.h"
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"
@@ -303,12 +304,7 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
                     if (blen > 128) blen = 128;
                     const unsigned char *b = sqlite3_column_blob(stmt, c);
                     char hex[257];
-                    static const char hx[] = "0123456789abcdef";
-                    for (int k = 0; k < blen; k++) {
-                        hex[k * 2]     = hx[(b[k] >> 4) & 0xf];
-                        hex[k * 2 + 1] = hx[b[k] & 0xf];
-                    }
-                    hex[blen * 2] = '\0';
+                    zcl_hex_encode(b, (size_t)blen, hex);
                     json_set_str(&cell, hex);
                     break;
                 }

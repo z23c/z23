@@ -3,18 +3,11 @@
 
 #include "vcs/zcode_dev.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
 
 #include <string.h>
-
-static bool proof_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 enum vcs_zcode_dev_error vcs_zcode_proof_set_serialize(
     const uint8_t (*roots)[32], size_t count, uint8_t *out,
@@ -27,7 +20,7 @@ enum vcs_zcode_dev_error vcs_zcode_proof_set_serialize(
     size_t need = VCS_ZCODE_PROOF_SET_HEADER_BYTES + count * 32u;
     if (out_cap < need) return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
     for (size_t i = 0; i < count; i++) {
-        if (!proof_root_nonzero(roots[i])) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
         if (i > 0 && memcmp(roots[i - 1], roots[i], 32) >= 0)
             return VCS_ZCODE_DEV_ERR_POLICY;
     }

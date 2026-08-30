@@ -21,6 +21,7 @@
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_merkle.h"
 
+#include "base/hex.h"
 #include "base/serialize_le.h"
 
 #include "util/log_macros.h"
@@ -1234,14 +1235,7 @@ int ci_merkle_child_dirs(const struct ci_merkle *m, const char *dirpath,
 
 void ci_merkle_hex(const struct zcl_sha3_digest *d, char out[65])
 {
-    static const char hexd[] = "0123456789abcdef";
-    if (!out) return;
-    if (!d) { out[0] = '\0'; return; }
-    for (int i = 0; i < 32; i++) {
-        out[i * 2] = hexd[(d->bytes[i] >> 4) & 0xf];
-        out[i * 2 + 1] = hexd[d->bytes[i] & 0xf];
-    }
-    out[64] = '\0';
+    zcl_hex_encode(d ? d->bytes : NULL, 32, out);
 }
 
 /* ── inclusion proofs ──────────────────────────────────────────────────

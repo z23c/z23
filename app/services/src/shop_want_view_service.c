@@ -5,20 +5,13 @@
 
 #include "services/shop_want_view_service.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "hotswap/hotswap_service.h"
 #include "shop_want_view_internal.h"
 
 #include <stdio.h>
 #include <string.h>
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static const char *review_name(int review_state)
 {
@@ -44,7 +37,7 @@ static bool render(const struct shop_want_view_input_v1 *input,
     zcl_hex_encode(input->want_id, sizeof(input->want_id), out->want_id);
     zcl_hex_encode(input->buyer_pubkey, sizeof(input->buyer_pubkey),
                    out->buyer_pubkey);
-    out->spec_hash_present = bytes_nonzero(input->spec_hash,
+    out->spec_hash_present = zcl_bytes_any_set(input->spec_hash,
                                            sizeof(input->spec_hash));
     if (out->spec_hash_present)
         zcl_hex_encode(input->spec_hash, sizeof(input->spec_hash),

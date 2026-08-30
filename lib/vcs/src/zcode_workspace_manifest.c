@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_commons.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
@@ -22,17 +23,9 @@ static const char passport_signature_domain[] =
 static const char workspace_manifest_signature_domain[] =
     VCS_ZCODE_WORKSPACE_MANIFEST_V1_SIGNING_DOMAIN;
 
-static bool workspace_nonzero_n(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool workspace_zero(const uint8_t root[32])
 {
-    return !workspace_nonzero_n(root, 32);
+    return !zcl_bytes_any_set(root, 32);
 }
 
 static void workspace_hash_u16(struct sha3_256_ctx *sha, uint16_t value)
@@ -81,13 +74,13 @@ enum vcs_zcode_commons_error vcs_zcode_typed_asset_manifest_v1_validate(
         (asset->license != VCS_ZCODE_ASSET_LICENSE_CC0_1_0 &&
          asset->license != VCS_ZCODE_ASSET_LICENSE_CC_BY_4_0))
         return VCS_ZCODE_COMMONS_ENUM;
-    if (!workspace_nonzero_n(asset->format_root, 32) ||
-        !workspace_nonzero_n(asset->content_root, 32) ||
-        !workspace_nonzero_n(asset->signer_root, 32) ||
-        !workspace_nonzero_n(asset->signature, 64) || asset->byte_count == 0)
+    if (!zcl_bytes_any_set(asset->format_root, 32) ||
+        !zcl_bytes_any_set(asset->content_root, 32) ||
+        !zcl_bytes_any_set(asset->signer_root, 32) ||
+        !zcl_bytes_any_set(asset->signature, 64) || asset->byte_count == 0)
         return VCS_ZCODE_COMMONS_ROOT;
     if (asset->license == VCS_ZCODE_ASSET_LICENSE_CC_BY_4_0 &&
-        !workspace_nonzero_n(asset->attribution_root, 32))
+        !zcl_bytes_any_set(asset->attribution_root, 32))
         return VCS_ZCODE_COMMONS_POLICY;
     return VCS_ZCODE_COMMONS_OK;
 }
@@ -130,13 +123,13 @@ enum vcs_zcode_commons_error vcs_zcode_quality_profile_v1_validate(
     if ((profile->required_check_mask & VCS_ZCODE_QUALITY_UNIVERSAL_MASK) !=
         VCS_ZCODE_QUALITY_UNIVERSAL_MASK)
         return VCS_ZCODE_COMMONS_POLICY;
-    if (!workspace_nonzero_n(profile->universal_profile_root, 32))
+    if (!zcl_bytes_any_set(profile->universal_profile_root, 32))
         return VCS_ZCODE_COMMONS_ROOT;
     if (profile->field == VCS_ZCODE_QUALITY_UNIVERSAL) {
         if (profile->required_check_mask != VCS_ZCODE_QUALITY_UNIVERSAL_MASK ||
             !workspace_zero(profile->additive_rules_root))
             return VCS_ZCODE_COMMONS_POLICY;
-    } else if (!workspace_nonzero_n(profile->additive_rules_root, 32)) {
+    } else if (!zcl_bytes_any_set(profile->additive_rules_root, 32)) {
         return VCS_ZCODE_COMMONS_ROOT;
     }
     return VCS_ZCODE_COMMONS_OK;
@@ -180,9 +173,9 @@ static enum vcs_zcode_commons_error passport_shape(
         passport->quality_profiles_root, passport->signer_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!workspace_nonzero_n(roots[i], 32))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_COMMONS_ROOT;
-    if (require_signature && !workspace_nonzero_n(passport->signature, 64))
+    if (require_signature && !zcl_bytes_any_set(passport->signature, 64))
         return VCS_ZCODE_COMMONS_ROOT;
     return VCS_ZCODE_COMMONS_OK;
 }
@@ -358,10 +351,10 @@ enum vcs_zcode_commons_error vcs_zcode_workspace_entry_v1_validate(
     const struct vcs_zcode_workspace_entry_v1 *entry)
 {
     if (!entry) return VCS_ZCODE_COMMONS_NULL;
-    if (!workspace_nonzero_n(entry->module_release_root, 32) ||
-        !workspace_nonzero_n(entry->module_passport_root, 32) ||
-        !workspace_nonzero_n(entry->semantic_fingerprint_root, 32) ||
-        !workspace_nonzero_n(entry->source_assignment_root, 32) ||
+    if (!zcl_bytes_any_set(entry->module_release_root, 32) ||
+        !zcl_bytes_any_set(entry->module_passport_root, 32) ||
+        !zcl_bytes_any_set(entry->semantic_fingerprint_root, 32) ||
+        !zcl_bytes_any_set(entry->source_assignment_root, 32) ||
         entry->sequence == 0)
         return VCS_ZCODE_COMMONS_ROOT;
     return VCS_ZCODE_COMMONS_OK;
@@ -452,15 +445,15 @@ static enum vcs_zcode_commons_error workspace_manifest_shape(
          !workspace_zero(workspace->predecessor_workspace_root)) ||
         (workspace->sequence > 1 &&
          workspace_zero(workspace->predecessor_workspace_root)) ||
-        !workspace_nonzero_n(workspace->signer_root, 32) ||
+        !zcl_bytes_any_set(workspace->signer_root, 32) ||
         (require_signature &&
-         !workspace_nonzero_n(workspace->signature, 64)))
+         !zcl_bytes_any_set(workspace->signature, 64)))
         return VCS_ZCODE_COMMONS_ROOT;
     enum vcs_zcode_commons_error error =
         workspace_entries_validate(workspace);
     if (error != VCS_ZCODE_COMMONS_OK) return error;
     for (size_t i = 0; i < workspace->typed_asset_count; i++) {
-        if (!workspace_nonzero_n(workspace->typed_asset_roots[i], 32))
+        if (!zcl_bytes_any_set(workspace->typed_asset_roots[i], 32))
             return VCS_ZCODE_COMMONS_ROOT;
         if (i > 0 && memcmp(workspace->typed_asset_roots[i - 1u],
                             workspace->typed_asset_roots[i], 32) >= 0)
@@ -761,10 +754,10 @@ enum vcs_zcode_commons_error vcs_zcode_mission_v1_validate(
         return VCS_ZCODE_COMMONS_VERSION_ERROR;
     if (!workspace_flags(mission->schema_version, mission->flags))
         return VCS_ZCODE_COMMONS_FLAGS;
-    if (!workspace_nonzero_n(mission->publisher_binding_root, 32) ||
-        !workspace_nonzero_n(mission->subject_tags_root, 32) ||
-        !workspace_nonzero_n(mission->goal_text_root, 32) ||
-        !workspace_nonzero_n(mission->signature, 64) ||
+    if (!zcl_bytes_any_set(mission->publisher_binding_root, 32) ||
+        !zcl_bytes_any_set(mission->subject_tags_root, 32) ||
+        !zcl_bytes_any_set(mission->goal_text_root, 32) ||
+        !zcl_bytes_any_set(mission->signature, 64) ||
         mission->created_height == 0 || mission->created_mtp <= 0)
         return VCS_ZCODE_COMMONS_ROOT;
     return VCS_ZCODE_COMMONS_OK;
@@ -798,7 +791,7 @@ enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
         return VCS_ZCODE_COMMONS_VERSION_ERROR;
     if (!workspace_flags(split->schema_version, split->flags))
         return VCS_ZCODE_COMMONS_FLAGS;
-    if (!workspace_nonzero_n(split->claim_root, 32) ||
+    if (!zcl_bytes_any_set(split->claim_root, 32) ||
         split->total_award_atoms == 0 || split->entry_count == 0 ||
         split->entry_count > VCS_ZCODE_CONTRIBUTION_SPLIT_MAX)
         return VCS_ZCODE_COMMONS_LIMIT;
@@ -806,8 +799,8 @@ enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
     for (size_t i = 0; i < split->entry_count; i++) {
         const struct vcs_zcode_contribution_split_entry_v1 *entry =
             &split->entries[i];
-        if (!workspace_nonzero_n(entry->recipient_binding_root, 32) ||
-            !workspace_nonzero_n(entry->signature, 64) ||
+        if (!zcl_bytes_any_set(entry->recipient_binding_root, 32) ||
+            !zcl_bytes_any_set(entry->signature, 64) ||
             entry->award_atoms == 0)
             return VCS_ZCODE_COMMONS_ROOT;
         if (i > 0 && memcmp(

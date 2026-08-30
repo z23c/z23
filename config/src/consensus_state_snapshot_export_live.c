@@ -6,6 +6,7 @@
  * offline-mint entry lives there and both share the internal contract. */
 
 #include "config/consensus_state_snapshot_export.h"
+#include "base/bytes.h"
 #include "consensus_state_snapshot_export_internal.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
@@ -84,7 +85,7 @@ bool consensus_state_snapshot_export_from_progress_snapshot(
                                      "NULL request");
     if (request->expected_height < 0 ||
         request->expected_height >= INT32_MAX ||
-        !consensus_export_digest_nonzero(request->expected_block_hash))
+        !zcl_bytes_any_set(request->expected_block_hash, 32))
         return consensus_export_fail(result, CONSENSUS_EXPORT_REFUSED,
                                      "invalid expected source height/hash");
 

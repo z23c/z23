@@ -27,7 +27,6 @@ bool shf_required_id(const struct zcl_command_request *request,
 bool shf_optional_id(const struct zcl_command_request *request,
                      const char *key, uint8_t out[32],
                      struct zcl_command_reply *reply);
-bool shf_nonzero(const uint8_t value[32]);
 bool shf_open_readonly(const char *datadir, struct sqlite3 **db,
                        struct node_db *ndb,
                        struct zcl_command_reply *reply);

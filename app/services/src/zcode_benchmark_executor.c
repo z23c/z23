@@ -4,6 +4,7 @@
  *          actions only; confinement or refusal). */
 #include "services/zcode_benchmark_executor.h"
 #if !defined(_WIN32)
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -31,12 +32,6 @@ static const uint8_t result_v2_magic[8] = {'Z','C','B','E','N','2','\r','\n'};
 static bool exec_hex32(const char *hex, uint8_t out[32])
 {
     return hex && strlen(hex) == 64 && zcl_hex_decode_lower(hex, out, 32);
-}
-static bool exec_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
 }
 /* ── CAS load helpers (load raw + parse + rederived-root agreement) ──── */
 static bool exec_cas_load(const char *workspace, const uint8_t root[32],
@@ -512,7 +507,7 @@ struct zcl_result zcode_benchmark_executor_run(
 {
     if (!req || !req->workspace || !out || req->now <= 0 ||
         req->challenge_block_height == 0 ||
-        !exec_root_nonzero(req->challenge_block_hash) ||
+        !zcl_bytes_any_set(req->challenge_block_hash, 32) ||
         req->result_sequence == 0 || req->action_sequence == 0)
         return ZCL_ERR(-1, "executor-input-invalid");
     memset(out, 0, sizeof(*out));
@@ -528,7 +523,7 @@ struct zcl_result zcode_benchmark_executor_run(
     if (is_repro) {
         if (strcmp(kind, VCS_BUILD_ACTION_KIND_BENCHMARK_REPRODUCE_V1) != 0)
             return ZCL_ERR(-1, "executor-reproduction-kind-required");
-        if (!exec_root_nonzero(req->reproducer_pubkey) ||
+        if (!zcl_bytes_any_set(req->reproducer_pubkey, 32) ||
             req->reproduction_sequence == 0)
             return ZCL_ERR(-1, "executor-reproduction-input-invalid");
     } else if (strcmp(kind, VCS_BUILD_ACTION_KIND_BENCHMARK_V1) != 0) {
@@ -821,7 +816,7 @@ struct zcl_result zcode_benchmark_executor_run(
         memcpy(rep->study_root, ctx.study_root, 32);
         if (!exec_hex32(req->original_result_root_hex,
                         rep->original_result_root) ||
-            !exec_root_nonzero(rep->original_result_root)) {
+            !zcl_bytes_any_set(rep->original_result_root, 32)) {
             free(payload_wire);
             free(sorted);
             free(samples);

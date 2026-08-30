@@ -13,6 +13,75 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+
+static _Atomic int g_p2p_socket_requested_receive = 0;
+static _Atomic int g_p2p_socket_requested_send = 0;
+static _Atomic int g_p2p_socket_minimum_actual_receive = -1;
+static _Atomic int g_p2p_socket_minimum_actual_send = -1;
+static _Atomic uint64_t g_p2p_socket_attempts = 0;
+static _Atomic uint64_t g_p2p_socket_fully_observed = 0;
+static _Atomic uint64_t g_p2p_socket_degraded = 0;
+
+static void net_record_minimum_socket_grant(_Atomic int *slot, int value)
+{
+    int current = atomic_load_explicit(slot, memory_order_relaxed);
+    while ((current < 0 || value < current) &&
+           !atomic_compare_exchange_weak_explicit(
+               slot, &current, value, memory_order_relaxed,
+               memory_order_relaxed)) {
+        /* current is refreshed by the failed compare-exchange. */
+    }
+}
+
+bool net_configure_p2p_socket_buffers(zcl_socket_t sock)
+{
+    struct platform_socket_buffer_observation observation;
+    bool ok = platform_socket_configure_p2p_buffers(sock, &observation);
+
+    atomic_store_explicit(&g_p2p_socket_requested_receive,
+                          observation.requested_receive_bytes,
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_p2p_socket_requested_send,
+                          observation.requested_send_bytes,
+                          memory_order_relaxed);
+    if (observation.receive_observed)
+        net_record_minimum_socket_grant(
+            &g_p2p_socket_minimum_actual_receive,
+            observation.actual_receive_bytes);
+    if (observation.send_observed)
+        net_record_minimum_socket_grant(
+            &g_p2p_socket_minimum_actual_send,
+            observation.actual_send_bytes);
+    atomic_fetch_add_explicit(&g_p2p_socket_attempts, 1,
+                              memory_order_relaxed);
+    if (observation.receive_observed && observation.send_observed)
+        atomic_fetch_add_explicit(&g_p2p_socket_fully_observed, 1,
+                                  memory_order_relaxed);
+    if (!ok)
+        atomic_fetch_add_explicit(&g_p2p_socket_degraded, 1,
+                                  memory_order_relaxed);
+    return ok;
+}
+
+void net_get_p2p_socket_buffer_stats(struct net_p2p_socket_buffer_stats *out)
+{
+    if (!out) return;
+    out->requested_receive_bytes = atomic_load_explicit(
+        &g_p2p_socket_requested_receive, memory_order_relaxed);
+    out->requested_send_bytes = atomic_load_explicit(
+        &g_p2p_socket_requested_send, memory_order_relaxed);
+    out->minimum_actual_receive_bytes = atomic_load_explicit(
+        &g_p2p_socket_minimum_actual_receive, memory_order_relaxed);
+    out->minimum_actual_send_bytes = atomic_load_explicit(
+        &g_p2p_socket_minimum_actual_send, memory_order_relaxed);
+    out->attempts_total = atomic_load_explicit(
+        &g_p2p_socket_attempts, memory_order_relaxed);
+    out->fully_observed_total = atomic_load_explicit(
+        &g_p2p_socket_fully_observed, memory_order_relaxed);
+    out->degraded_total = atomic_load_explicit(
+        &g_p2p_socket_degraded, memory_order_relaxed);
+}
 
 void split_host_port(const char *in, char *host_out, size_t host_size,
                      int *port_out)
@@ -203,11 +272,10 @@ enum zcl_connect_start connect_socket_start(const struct net_service *addr,
     }
 
     (void)platform_socket_set_no_delay(sock, true);
-    if (platform_socket_set_p2p_buffers(sock) != 0) {
+    if (!net_configure_p2p_socket_buffers(sock)) {
         LOG_WARN("net",
-                 "connect_socket_start: failed to set P2P socket buffers, "
-                 "error=%d",
-                 platform_socket_last_error());
+                 "connect_socket_start: P2P socket buffer configuration or "
+                 "readback degraded");
     }
 
     if (platform_socket_connect(sock, (struct sockaddr *)&ss, len) ==

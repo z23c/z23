@@ -2,6 +2,7 @@
  * Purpose: rederive complete epoch issuance attribution from canonical CAS. */
 #include "vcs/zcode_epoch_creation.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "vcs/vcs_object.h"
@@ -12,13 +13,6 @@
 static bool epoch_verify_equal(const uint8_t a[32], const uint8_t b[32])
 {
     return memcmp(a, b, 32) == 0;
-}
-
-static bool epoch_verify_zero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any == 0;
 }
 
 static enum vcs_zcode_epoch_creation_error epoch_verify_context(
@@ -41,7 +35,7 @@ static enum vcs_zcode_epoch_creation_error epoch_verify_context(
                             context->expected_previous_epoch_creation_root))
         return VCS_ZCODE_EPOCH_CREATION_PREDECESSOR;
     if (set->epoch == 0 &&
-        !epoch_verify_zero(context->expected_previous_epoch_creation_root))
+        !zcl_bytes_all_zero(context->expected_previous_epoch_creation_root, 32))
         return VCS_ZCODE_EPOCH_CREATION_PREDECESSOR;
     if (set->actual_mint_atoms != context->observed_actual_mint_atoms)
         return VCS_ZCODE_EPOCH_CREATION_MINT;

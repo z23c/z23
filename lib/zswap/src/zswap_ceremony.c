@@ -7,6 +7,7 @@
 
 #include "zswap/zswap_ceremony.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "chain/chainparams.h"
 #include "keys/key_io.h"
@@ -23,14 +24,6 @@ static const uint8_t partial_magic[8] = {'Z','S','W','P','T','L','\r','\n'};
 #define ACCEPT_FIXED_BYTES (8u + 2u + 32u)
 #define PARTIAL_FIXED_BYTES (8u + 2u + 32u + 32u + 33u + 1u + \
                              ZSWAP_SIG_FIELD_BYTES)
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 const char *zswap_ceremony_error_string(enum zswap_ceremony_error error)
 {
@@ -158,7 +151,7 @@ enum zswap_ceremony_error zswap_accept_validate(
     if (!accept) return ZSWAP_CEREMONY_ERR_NULL;
     if (accept->schema_version != ZSWAP_ACCEPT_VERSION)
         return ZSWAP_CEREMONY_ERR_VERSION;
-    if (!bytes_nonzero(accept->quote_root, 32))
+    if (!zcl_bytes_any_set(accept->quote_root, 32))
         return ZSWAP_CEREMONY_ERR_ROOT_ZERO;
     if (zswap_buyer_accept_validate(&accept->buyer) != ZSWAP_ASSEMBLY_OK)
         return ZSWAP_CEREMONY_ERR_ACCEPT;
@@ -264,14 +257,14 @@ enum zswap_ceremony_error zswap_partial_validate(
     if (!partial) return ZSWAP_CEREMONY_ERR_NULL;
     if (partial->schema_version != ZSWAP_PARTIAL_VERSION)
         return ZSWAP_CEREMONY_ERR_VERSION;
-    if (!bytes_nonzero(partial->quote_root, 32) ||
-        !bytes_nonzero(partial->assembly_root, 32))
+    if (!zcl_bytes_any_set(partial->quote_root, 32) ||
+        !zcl_bytes_any_set(partial->assembly_root, 32))
         return ZSWAP_CEREMONY_ERR_ROOT_ZERO;
     if (zswap_seller_accept_validate(&partial->seller) != ZSWAP_ASSEMBLY_OK)
         return ZSWAP_CEREMONY_ERR_ACCEPT;
     if (partial->seller_pubkey[0] != 0x02 && partial->seller_pubkey[0] != 0x03)
         return ZSWAP_CEREMONY_ERR_PUBKEY;
-    if (!bytes_nonzero(partial->seller_pubkey + 1, 32))
+    if (!zcl_bytes_any_set(partial->seller_pubkey + 1, 32))
         return ZSWAP_CEREMONY_ERR_PUBKEY;
     if (partial->sig_len < ZSWAP_SIG_MIN_BYTES ||
         partial->sig_len > ZSWAP_SIG_FIELD_BYTES)

@@ -134,9 +134,9 @@ and rollback proof on each platform. A successful build is none of those.
 
 ## Building a release for another platform
 
-`packaging/release/build_release.sh` packages `linux-x86_64` and
-`windows-x86_64`. Neither is published yet; both are produced from this
-checkout and verified by an exact closed SHA256SUMS manifest.
+`packaging/release/build_release.sh` packages `linux-x86_64`,
+`darwin-arm64`, and `windows-x86_64`. None is published yet; each is produced
+from this checkout and verified by an exact closed SHA256SUMS manifest.
 
 ```text
 # linux-x86_64 (native)
@@ -174,19 +174,18 @@ its second stage (`install_z23.ps1`) does not exist.
 No Linux host can produce a Mach-O for this project. Cross-linking to Darwin
 needs the macOS SDK — its headers and `libSystem.tbd` — which Apple does not
 permit redistributing, so the SDK can only come off a Mac the operator owns.
-This is a licensing wall, not a missing feature, and the packager refuses
-Darwin rather than pretend otherwise.
+This is a licensing wall, not a missing feature, so the packager accepts
+Darwin only when it is running natively on qualified Apple hardware.
 
 The node itself already builds natively on macOS (see AGENTS.md, "Verified
-platform baseline": arm64, macOS 26.0.1, Apple Clang 17). What is missing is
-a *packaged release*. A worker on an Apple Silicon Mac can produce one by
-running the following, in order.
+platform baseline": arm64, macOS 26.0.1, Apple Clang 17). A worker on an
+Apple Silicon Mac can produce the measured runtime package by running the
+following, in order.
 
 ```bash
-# 0. Toolchain and the two build-time tools this repo shells out to.
+# 0. Toolchain and the one extra build-time tool this repo needs.
 xcode-select --install        # clang, ld, strip, otool, nm, make
-brew install cmake coreutils  # cmake: vendored libsecp256k1-darwin.a
-                              # coreutils: sha256sum(1) — see step 4
+brew install cmake            # vendored libsecp256k1-darwin.a
 
 # 1. Vendor archives for this Mac. Native, not cross: leave VENDOR_TARGET
 #    unset. Produces vendor/lib/libsecp256k1-darwin.a among the rest.
@@ -199,47 +198,32 @@ make tor-full
 # 3. The node and the workers.
 make -j"$(sysctl -n hw.ncpu)" z23 zclassic23-package-verify zclassic23-acme
 
-# 4. Package. THIS STEP DOES NOT WORK YET — see the four edits below.
+# 4. Package the measured thin Apple Silicon runtime.
 packaging/release/build_release.sh --platform darwin-arm64
 ```
 
-Step 4 needs four small edits to `packaging/release/build_release.sh`, each
-of which must be **proved on the Mac**, not written blind on Linux:
+The runtime cutter was proved natively on Apple Silicon on 2026-08-30. It
+uses `lipo -archs` as the Mach-O slice authority, accepts exactly thin arm64,
+uses Apple's `strip -S -x`, falls back to stock `shasum -a 256` and BSD
+`stat`, and retains the four-member runtime set. The verifier is deliberately
+present so it can inspect exact inputs and report capability; downloaded
+source execution still refuses without a qualified full-isolation worker.
 
-1. `platform_of_binary()` — it reads `objdump -f`. On macOS that is LLVM's
-   objdump and it prints `mach-o arm64` / `mach-o 64-bit x86-64`, not an ELF
-   or PE name. Add those two cases (or switch this function to
-   `lipo -archs`, which ships with the command line tools). Verify by
-   running the function against `build/bin/z23` and against a system binary.
-2. `platform_supported()` — add `darwin-arm64` (and `darwin-x86_64` only if
-   an Intel Mac actually ran the whole sequence; AGENTS.md records arm64 as
-   measured and Intel as unverified).
-3. `release_binaries()` — add a `darwin-*` set. It is the same four names as
-   Linux with no suffix: `z23 zclassic23 zclassic23-package-verify
-   zclassic23-acme`. Note that `zclassic23-package-verify` builds on macOS
-   but refuses confined operations at runtime, so decide deliberately whether
-   it belongs in a Darwin release rather than copying the Linux set.
-4. `platform_strip()` — Apple's `strip(1)` has no `--strip-unneeded`. The
-   Makefile already uses `strip -S -x` on Darwin; the packager must use the
-   same flags, so the strip invocation needs a per-platform argument list,
-   not only a per-platform tool name.
-
-Two further things the Mac worker will hit:
-
-- `tools/scripts/build_vendor.sh` and `build_release.sh` both call
-  `sha256sum(1)`, which macOS does not ship. `brew install coreutils` in
-  step 0 supplies it. (`shasum -a 256` is the built-in alternative; the
-  front-door installer already accepts either, these two scripts do not.)
-- `build_release.sh --selftest` uses `stat -c %i` to prove the
-  `z23`/`zclassic23` hardlink. BSD `stat` spells that `stat -f %i`.
+Every shipped source and vendor archive is built with a macOS 14.0 deployment
+floor. The cutter reads each executable's `LC_BUILD_VERSION` and refuses the
+set unless every member reports `minos 14.0`; it then applies the Mach-O
+dependency audit to all four executables. The node, package verifier, ACME
+worker, bootstrap helper, SQLite, secp256k1, OpenSSL, libevent, and embedded
+Tor have all been observed at that floor. The closed manifest verifies with
+stock macOS tools, and `z23`/`zclassic23` remain one hardlinked payload.
 
 The Linux-only audits are already correctly skipped: `ci_symbol_floor_gate.sh`
 is a glibc-symbol question and runs only for `linux-x86_64`, and
 `tools/scripts/check_c23_node_binary.sh` already carries a Mach-O branch that
 audits `otool -L` dependencies and weak-undefined symbols.
 
-Nothing about macOS may be added to `PUBLISHED_PLATFORMS` on the strength of
-a successful build. Publication needs the release installed on a fresh Mac,
+Runtime packaging does not add macOS to `PUBLISHED_PLATFORMS`. Publication
+still needs the release installed on a fresh Mac,
 the node started and stopped through its own launchd unit, and the exact
 running image qualified — the same bar the "Platform work" list above states.
 

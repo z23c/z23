@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_c23_corpus.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -10,14 +11,6 @@
 #include <string.h>
 
 static const uint8_t shard_magic[8] = {'Z','C','C','S','1',0,0,0};
-
-static bool nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
 
 size_t vcs_zcode_c23_corpus_shard_v1_wire_size(size_t entry_count)
 {
@@ -29,8 +22,8 @@ size_t vcs_zcode_c23_corpus_shard_v1_wire_size(size_t entry_count)
 static enum vcs_zcode_c23_error entry_validate(
     const struct vcs_zcode_c23_corpus_entry_v1 *entry)
 {
-    if (!nonzero(entry->semantic_lineage_root, 32) ||
-        !nonzero(entry->release_root, 32) || !entry->release_sequence)
+    if (!zcl_bytes_any_set(entry->semantic_lineage_root, 32) ||
+        !zcl_bytes_any_set(entry->release_root, 32) || !entry->release_sequence)
         return VCS_ZCODE_C23_ROOT;
     if (entry->flags & ~(VCS_ZCODE_C23_ENTRY_COUNTED |
                          VCS_ZCODE_C23_ENTRY_DURABLE))
@@ -48,16 +41,16 @@ static enum vcs_zcode_c23_error entry_validate(
             entry->source_assignment_root, entry->admission_root,
         };
         for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-            if (!nonzero(roots[i], 32)) return VCS_ZCODE_C23_ROOT;
+            if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_C23_ROOT;
         if (!total_loc || entry->exclusion_mask != 0 ||
             entry->evidence_mask != VCS_ZCODE_C23_EVIDENCE_REQUIRED_MASK)
             return VCS_ZCODE_C23_POLICY;
     } else if (total_loc != 0 || entry->exclusion_mask == 0 || durable) {
         return VCS_ZCODE_C23_POLICY;
     }
-    if (durable && !nonzero(entry->possession_root, 32))
+    if (durable && !zcl_bytes_any_set(entry->possession_root, 32))
         return VCS_ZCODE_C23_ROOT;
-    if (!durable && nonzero(entry->possession_root, 32))
+    if (!durable && zcl_bytes_any_set(entry->possession_root, 32))
         return VCS_ZCODE_C23_POLICY;
     return VCS_ZCODE_C23_OK;
 }
@@ -69,9 +62,9 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_shard_v1_validate(
     if (shard->schema_version != 1) return VCS_ZCODE_C23_VERSION;
     if (shard->flags != VCS_ZCODE_C23_CORPUS_REQUIRED_FLAGS)
         return VCS_ZCODE_C23_FLAGS;
-    if (!nonzero(shard->rules_root, 32) ||
-        !nonzero(shard->family_policy_root, 32) ||
-        !nonzero(shard->moderation_set_root, 32))
+    if (!zcl_bytes_any_set(shard->rules_root, 32) ||
+        !zcl_bytes_any_set(shard->family_policy_root, 32) ||
+        !zcl_bytes_any_set(shard->moderation_set_root, 32))
         return VCS_ZCODE_C23_ROOT;
     if (!shard->entries || shard->entry_count == 0 ||
         shard->entry_count > VCS_ZCODE_C23_SHARD_ENTRY_MAX)

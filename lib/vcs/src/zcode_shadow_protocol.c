@@ -2,6 +2,7 @@
  * Purpose: verify four linked Living Commons protocol shadow epochs. */
 #include "vcs/zcode_shadow_simulation.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "codec/cursor.h"
@@ -29,13 +30,6 @@ struct shadow_protocol_callbacks {
 static bool protocol_equal(const uint8_t a[32], const uint8_t b[32])
 {
     return memcmp(a, b, 32) == 0;
-}
-
-static bool protocol_zero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any == 0;
 }
 
 static bool protocol_load(const char *workspace, const uint8_t root[32],
@@ -181,8 +175,8 @@ vcs_zcode_shadow_protocol_verify_cas(
     for (size_t i = 0; i < VCS_ZCODE_SHADOW_PROTOCOL_EPOCHS; i++) {
         uint8_t *wire = NULL, observed[32];
         size_t wire_len = 0;
-        if (protocol_zero(input->epoch_roots[i]) ||
-            protocol_zero(input->fixture_branch_roots[i]) ||
+        if (zcl_bytes_all_zero(input->epoch_roots[i], 32) ||
+            zcl_bytes_all_zero(input->fixture_branch_roots[i], 32) ||
             !protocol_load(input->workspace, input->epoch_roots[i],
                            VCS_ZCODE_EPOCH_CREATION_MAX_WIRE_BYTES,
                            &wire, &wire_len) ||

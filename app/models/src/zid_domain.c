@@ -9,6 +9,7 @@
 
 #include "models/zid_domain.h"
 
+#include "base/hex.h"
 #include "config/runtime.h"
 #include "json/json.h"
 #include "models/model_text.h"
@@ -365,34 +366,24 @@ bool zid_domain_set_anchor(struct node_db *ndb, const char *domain_name,
 
 /* ── `z23 dumpstate zid_domains` ────────────────────────────── */
 
-static void zd_hex32(const uint8_t b[32], char out[65])
-{
-    static const char hex[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        out[2 * i] = hex[b[i] >> 4];
-        out[2 * i + 1] = hex[b[i] & 0x0f];
-    }
-    out[64] = '\0';
-}
-
 static void zd_push_domain(struct json_value *obj, const struct zid_domain *d)
 {
     json_set_object(obj);
     json_push_kv_str(obj, "domain_name", d->domain_name);
     json_push_kv_int(obj, "num_leaves", d->num_leaves);
     char hex[65];
-    zd_hex32(d->root, hex);
+    zcl_hex_encode(d->root, 32, hex);
     json_push_kv_str(obj, "root", hex);
     json_push_kv_bool(obj, "anchored", d->anchored);
     if (d->anchored) {
-        zd_hex32(d->anchored_txid, hex);
+        zcl_hex_encode(d->anchored_txid, 32, hex);
         json_push_kv_str(obj, "anchored_txid", hex);
     }
     json_push_kv_int(obj, "anchored_height", d->anchored_height);
     json_push_kv_int(obj, "updated_at", d->updated_at);
     json_push_kv_bool(obj, "has_owner", d->has_owner);
     if (d->has_owner) {
-        zd_hex32(d->owner_pubkey, hex);
+        zcl_hex_encode(d->owner_pubkey, 32, hex);
         json_push_kv_str(obj, "owner_pubkey", hex);
     }
 }

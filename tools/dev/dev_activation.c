@@ -16,6 +16,8 @@
 #include "dev_activation.h"
 #include "dev_activation_internal.h"
 
+#include "base/hex.h"
+
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
 #include "crypto/sha256.h"
@@ -114,16 +116,6 @@ void dev_activation_json_escape(const char *in, char *out, size_t out_sz)
     out[o] = 0;
 }
 
-void dev_activation_hex32(const uint8_t in[32], char out[65])
-{
-    static const char d[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; i++) {
-        out[2 * i] = d[(in[i] >> 4) & 0xf];
-        out[2 * i + 1] = d[in[i] & 0xf];
-    }
-    out[64] = 0;
-}
-
 bool dev_activation_sha256_file(const char *path, char out[65])
 {
     struct platform_positioned_file file;
@@ -160,7 +152,7 @@ bool dev_activation_sha256_file(const char *path, char out[65])
         LOG_FAIL("dev-activation", "sha256 read %s failed", path);
     unsigned char digest[32];
     sha256_finalize(&ctx, digest);
-    dev_activation_hex32(digest, out);
+    zcl_hex_encode(digest, 32, out);
     return true;
 }
 
@@ -1257,7 +1249,7 @@ int dev_activation_activate_generation(const uint8_t gen_sha256[32],
         return st;
     }
     /* Resolve the already-staged generation by sha — no build, no restage. */
-    dev_activation_hex32(gen_sha256, txn.candidate_sha_hex);
+    zcl_hex_encode(gen_sha256, 32, txn.candidate_sha_hex);
     snprintf(result->candidate_sha256, sizeof(result->candidate_sha256), "%s",
              txn.candidate_sha_hex);
     snprintf(txn.candidate_generation, sizeof(txn.candidate_generation),

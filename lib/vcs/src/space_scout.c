@@ -3,6 +3,7 @@
 
 #include "vcs/space_scout.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "base/safe_alloc.h"
@@ -25,33 +26,17 @@ static const char attestation_domain[] =
 static const char attestation_signature_domain[] =
     "zcl.space_scout.evidence_attestation.signature.v1";
 
-static bool nonzero32(const uint8_t value[32])
-{
-  uint8_t any = 0;
-  for (size_t i = 0; value && i < 32; i++)
-    any |= value[i];
-  return any != 0;
-}
-
-static bool zero_bytes(const void *value, size_t length)
-{
-  const uint8_t *bytes = value;
-  uint8_t any = 0;
-  for (size_t i = 0; bytes && i < length; i++)
-    any |= bytes[i];
-  return any == 0;
-}
-
 static bool roots_ordered(const uint8_t roots[][32], size_t count,
                           size_t capacity)
 {
   if (count > capacity)
     return false;
   for (size_t i = 0; i < count; i++)
-    if (!nonzero32(roots[i]) ||
+    if (!zcl_bytes_any_set(roots[i], 32) ||
         (i && memcmp(roots[i - 1], roots[i], 32) >= 0))
       return false;
-  return zero_bytes(roots + count, (capacity - count) * 32u);
+  return zcl_bytes_all_zero((const uint8_t *)(roots + count),
+                            (capacity - count) * 32u);
 }
 
 const char *vcs_space_scout_result_string(enum vcs_space_scout_result result)
@@ -103,7 +88,7 @@ enum vcs_space_scout_result vcs_space_scout_mission_validate(
   if (!mission)
     return VCS_SPACE_SCOUT_ERR_NULL;
   if (mission->schema_version != VCS_SPACE_SCOUT_MISSION_VERSION ||
-      !nonzero32(mission->network_genesis) || !mission->observation_unix ||
+      !zcl_bytes_any_set(mission->network_genesis, 32) || !mission->observation_unix ||
       !mission->start_count ||
       mission->start_count > VCS_SPACE_SCOUT_START_MAX ||
       mission->maximum_depth > VCS_SPACE_SCOUT_DEPTH_MAX ||
@@ -227,7 +212,7 @@ static enum vcs_space_scout_result map_shape(
   if (!map)
     return VCS_SPACE_SCOUT_ERR_NULL;
   if (map->schema_version != VCS_SPACE_SCOUT_MAP_VERSION ||
-      !nonzero32(map->mission_root) || !map->observation_unix ||
+      !zcl_bytes_any_set(map->mission_root, 32) || !map->observation_unix ||
       map->bytes_observed > VCS_SPACE_SCOUT_BYTES_MAX ||
       map->visit_count > VCS_SPACE_SCOUT_SPACES_MAX ||
       map->portal_count > VCS_SPACE_SCOUT_PORTALS_MAX ||
@@ -237,7 +222,7 @@ static enum vcs_space_scout_result map_shape(
     return VCS_SPACE_SCOUT_ERR_SHAPE;
   for (size_t i = 0; i < map->visit_count; i++) {
     const struct vcs_space_scout_visit_v1 *visit = &map->visits[i];
-    if (!nonzero32(visit->space_root) || !result_valid(visit->manifest_result) ||
+    if (!zcl_bytes_any_set(visit->space_root, 32) || !result_valid(visit->manifest_result) ||
         visit->depth > VCS_SPACE_SCOUT_DEPTH_MAX ||
         visit->service_count > VCS_SPACE_SERVICE_MAX ||
         (i && memcmp(map->visits[i - 1].space_root,
@@ -245,20 +230,20 @@ static enum vcs_space_scout_result map_shape(
         !roots_ordered(visit->service_roots, visit->service_count,
                        VCS_SPACE_SERVICE_MAX) ||
         (visit->manifest_result == VCS_SPACE_SCOUT_MANIFEST_VERIFIED) !=
-            nonzero32(visit->owner_zid) ||
+            zcl_bytes_any_set(visit->owner_zid, 32) ||
         (visit->manifest_result != VCS_SPACE_SCOUT_MANIFEST_VERIFIED &&
          visit->service_count != 0))
       return VCS_SPACE_SCOUT_ERR_ORDER;
   }
-  if (!zero_bytes(map->visits + map->visit_count,
-                  (VCS_SPACE_SCOUT_SPACES_MAX - map->visit_count) *
-                      sizeof(map->visits[0])) ||
-      !zero_bytes(map->portals + map->portal_count,
-                  (VCS_SPACE_SCOUT_PORTALS_MAX - map->portal_count) *
-                      sizeof(map->portals[0])) ||
-      !zero_bytes(map->failures + map->failure_count,
-                  (VCS_SPACE_SCOUT_SPACES_MAX - map->failure_count) *
-                      sizeof(map->failures[0])))
+  if (!zcl_bytes_all_zero((const uint8_t *)(map->visits + map->visit_count),
+                          (VCS_SPACE_SCOUT_SPACES_MAX - map->visit_count) *
+                              sizeof(map->visits[0])) ||
+      !zcl_bytes_all_zero((const uint8_t *)(map->portals + map->portal_count),
+                          (VCS_SPACE_SCOUT_PORTALS_MAX - map->portal_count) *
+                              sizeof(map->portals[0])) ||
+      !zcl_bytes_all_zero((const uint8_t *)(map->failures + map->failure_count),
+                          (VCS_SPACE_SCOUT_SPACES_MAX - map->failure_count) *
+                              sizeof(map->failures[0])))
     return VCS_SPACE_SCOUT_ERR_ORDER;
   for (size_t i = 0; i < map->portal_count; i++) {
     bool source_verified = false;
@@ -268,8 +253,8 @@ static enum vcs_space_scout_result map_shape(
           map->visits[j].manifest_result ==
               VCS_SPACE_SCOUT_MANIFEST_VERIFIED)
         source_verified = true;
-    if (!source_verified || !nonzero32(map->portals[i].from_root) ||
-        !nonzero32(map->portals[i].to_root) ||
+    if (!source_verified || !zcl_bytes_any_set(map->portals[i].from_root, 32) ||
+        !zcl_bytes_any_set(map->portals[i].to_root, 32) ||
         map->portals[i].result < VCS_SPACE_SCOUT_PORTAL_FOLLOWED ||
         map->portals[i].result > VCS_SPACE_SCOUT_PORTAL_TRUNCATED ||
         (i && memcmp(map->portals[i - 1].from_root,
@@ -281,7 +266,7 @@ static enum vcs_space_scout_result map_shape(
   }
   uint8_t denials = 0;
   for (size_t i = 0; i < map->failure_count; i++) {
-    if (!nonzero32(map->failures[i].space_root) ||
+    if (!zcl_bytes_any_set(map->failures[i].space_root, 32) ||
         !result_valid(map->failures[i].result) ||
         map->failures[i].result == VCS_SPACE_SCOUT_MANIFEST_VERIFIED ||
         (i && failure_compare(&map->failures[i - 1],
@@ -502,15 +487,15 @@ static enum vcs_space_scout_result attestation_shape(
   if (!attestation)
     return VCS_SPACE_SCOUT_ERR_NULL;
   if (attestation->schema_version != VCS_SPACE_SCOUT_ATTESTATION_VERSION ||
-      !nonzero32(attestation->mission_root) ||
-      !nonzero32(attestation->evidence_map_root) ||
+      !zcl_bytes_any_set(attestation->mission_root, 32) ||
+      !zcl_bytes_any_set(attestation->evidence_map_root, 32) ||
       !attestation->observation_unix)
     return VCS_SPACE_SCOUT_ERR_SHAPE;
   if (vcs_zcode_dht_delegation_verify(
           &attestation->observer_delegation, NULL, NULL, 0, NULL,
           attestation->observation_unix) != VCS_ZCODE_DHT_DELEGATION_OK)
     return VCS_SPACE_SCOUT_ERR_DELEGATION;
-  if (require_signature && zero_bytes(attestation->signature, 64))
+  if (require_signature && zcl_bytes_all_zero((const uint8_t *)attestation->signature, 64))
     return VCS_SPACE_SCOUT_ERR_SIGNATURE;
   return VCS_SPACE_SCOUT_OK;
 }

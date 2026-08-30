@@ -9,6 +9,7 @@
  */
 
 #include "controllers/shop_native_handler.h"
+#include "base/bytes.h"
 #include "controllers/shop_native_fulfill_internal.h"
 
 #include "base/cleanse.h"
@@ -84,7 +85,7 @@ static bool shf_verify_evidence(struct node_db *ndb, const char *datadir,
     const uint8_t *ids[3] = {f->build_receipt_id, f->fuzz_receipt_id,
                              f->bench_receipt_id};
     for (size_t i = 0; i < 3; i++) {
-        out->claimed[i] = shf_nonzero(ids[i]);
+        out->claimed[i] = zcl_bytes_any_set(ids[i], 32);
         if (!out->claimed[i]) continue;
         struct zcl_result receipt = shop_fulfill_receipt_verify(
             ndb, datadir, ids[i], (enum shop_fulfill_receipt_kind)i,

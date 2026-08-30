@@ -5,6 +5,7 @@
 
 #include "zcode_dht_service_internal.h"
 
+#include "base/bytes.h"
 #include "crypto/sha3.h"
 #include "vcs/package_store.h"
 #include "vcs/zcode_dht_record_store.h"
@@ -221,13 +222,6 @@ bool vcs_zcode_dht_storage_ack_plan_verified(
   return publication_build(service, spec, record_out, plan_token, true, NULL);
 }
 
-static bool publication_owner_group_is_zero(const uint8_t owner_group[32])
-{
-  uint8_t any = 0;
-  for (size_t i = 0; i < 32; i++) any |= owner_group[i];
-  return any == 0;
-}
-
 static bool publication_evidence_spec(
     const struct vcs_zcode_dht_service *service,
     const struct vcs_zcode_dht_publish_spec *spec,
@@ -237,7 +231,7 @@ static bool publication_evidence_spec(
   if (!service || !spec || !normalized || spec->kind != expected)
     return false;
   *normalized = *spec;
-  if (publication_owner_group_is_zero(normalized->owner_group)) {
+  if (zcl_bytes_all_zero(normalized->owner_group, 32)) {
     static const char domain[] = "zcl.zcode.owner-group.signer-lineage.v1";
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);

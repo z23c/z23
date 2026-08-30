@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_c23_corpus_census.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
@@ -14,14 +15,6 @@
 #include <string.h>
 
 #define CENSUS_LOG "vcs.census"
-
-static bool root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_corpus_census_file_reason_string(
     enum vcs_zcode_corpus_census_file_reason reason)
@@ -152,7 +145,7 @@ bool vcs_zcode_corpus_census_process_scope(
         GUARD_NOT_NULL(input->files, CENSUS_LOG, "input->files");
     if (!input->release_sequence)
         LOG_FAIL(CENSUS_LOG, "scope %s release_sequence is 0", input->name);
-    if (!root_nonzero(input->release_root))
+    if (!zcl_bytes_any_set(input->release_root, 32))
         LOG_FAIL(CENSUS_LOG, "scope %s release_root is all-zero",
                  input->name);
 
@@ -294,17 +287,17 @@ bool vcs_zcode_corpus_census_process_scope(
     /* Entry-level exclusions (the header names the canonical order). */
     uint32_t mask = 0;
     if (!vcs_package_release_license_allowed(input->license_spdx) ||
-        !root_nonzero(input->license_root))
+        !zcl_bytes_any_set(input->license_root, 32))
         mask |= VCS_ZCODE_C23_EXCLUDE_LICENSE;
-    if (!root_nonzero(input->source_assignment_root))
+    if (!zcl_bytes_any_set(input->source_assignment_root, 32))
         mask |= VCS_ZCODE_C23_EXCLUDE_UNASSIGNED;
     if (tests == 0 ||
         !(input->evidence_mask & VCS_ZCODE_C23_EVIDENCE_RECIPE))
         mask |= VCS_ZCODE_C23_EXCLUDE_INCOMPLETE;
     if (input->evidence_mask != VCS_ZCODE_C23_EVIDENCE_REQUIRED_MASK ||
-        !root_nonzero(input->passport_root) ||
-        !root_nonzero(input->proof_root) ||
-        !root_nonzero(input->admission_root))
+        !zcl_bytes_any_set(input->passport_root, 32) ||
+        !zcl_bytes_any_set(input->proof_root, 32) ||
+        !zcl_bytes_any_set(input->admission_root, 32))
         mask |= VCS_ZCODE_C23_EXCLUDE_REVIEW_REQUIRED;
     if (input->source_kind == VCS_ZCODE_SOURCE_MECHANICAL_GENERATION)
         mask |= VCS_ZCODE_C23_EXCLUDE_MECHANICAL;
@@ -334,7 +327,7 @@ bool vcs_zcode_corpus_census_process_scope(
         entry->production_loc = production;
         entry->test_loc = tests;
         entry->flags = VCS_ZCODE_C23_ENTRY_COUNTED;
-        if (root_nonzero(input->possession_root)) {
+        if (zcl_bytes_any_set(input->possession_root, 32)) {
             memcpy(entry->possession_root, input->possession_root, 32);
             entry->flags |= VCS_ZCODE_C23_ENTRY_DURABLE;
         }
@@ -351,7 +344,7 @@ bool vcs_zcode_corpus_census_process_scope(
                      input->name);
         }
         vcs_score_set_finalize(&census->claimed_units);
-    } else if (root_nonzero(input->possession_root)) {
+    } else if (zcl_bytes_any_set(input->possession_root, 32)) {
         out->possession_suppressed = true;
         LOG_WARN(CENSUS_LOG,
                  "scope %s excluded (mask 0x%x): suppressing possession "
@@ -415,8 +408,8 @@ enum vcs_zcode_c23_error vcs_zcode_corpus_census_assemble(
         LOG_RETURN(VCS_ZCODE_C23_SIZE, CENSUS_LOG,
                    "entry count %zu outside 1..%u", result_count,
                    VCS_ZCODE_C23_SHARD_ENTRY_MAX);
-    if (!root_nonzero(family_policy_root) ||
-        !root_nonzero(moderation_set_root))
+    if (!zcl_bytes_any_set(family_policy_root, 32) ||
+        !zcl_bytes_any_set(moderation_set_root, 32))
         LOG_RETURN(VCS_ZCODE_C23_ROOT, CENSUS_LOG,
                    "family/moderation root all-zero");
 

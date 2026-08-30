@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_patch.h"
 
+#include "base/bytes.h"
 #include "vcs_priv.h"
 
 #include "crypto/sha3.h"
@@ -17,13 +18,6 @@
 static const uint8_t patch_magic[8] = {
     'Z', 'C', 'P', 'A', 'T', 'C', 'H', '\n'
 };
-
-static bool bytes_zero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any == 0;
-}
 
 const char *vcs_zcode_patch_result_string(enum vcs_zcode_patch_result result)
 {
@@ -56,20 +50,20 @@ void vcs_zcode_patch_free(struct vcs_zcode_patch_v1 *patch)
 static bool descriptor_absent(uint32_t mode, uint64_t size,
                               const uint8_t blob[32])
 {
-    return mode == 0 && size == 0 && bytes_zero(blob, 32);
+    return mode == 0 && size == 0 && zcl_bytes_all_zero(blob, 32);
 }
 
 static bool descriptor_present(uint32_t mode, const uint8_t blob[32])
 {
-    return mode != 0 && !bytes_zero(blob, 32);
+    return mode != 0 && !zcl_bytes_all_zero(blob, 32);
 }
 
 enum vcs_zcode_patch_result vcs_zcode_patch_validate(
     const struct vcs_zcode_patch_v1 *patch)
 {
     if (!patch) return VCS_ZCODE_PATCH_NULL;
-    if (bytes_zero(patch->base_source_root, 32) ||
-        bytes_zero(patch->candidate_source_root, 32) ||
+    if (zcl_bytes_all_zero(patch->base_source_root, 32) ||
+        zcl_bytes_all_zero(patch->candidate_source_root, 32) ||
         memcmp(patch->base_source_root, patch->candidate_source_root, 32) == 0 ||
         patch->count == 0 || patch->count > VCS_ZCODE_PATCH_MAX_CHANGES ||
         !patch->changes)

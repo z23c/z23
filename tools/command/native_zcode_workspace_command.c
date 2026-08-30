@@ -3,6 +3,7 @@
 
 #include "command/native_command.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "hotswap/hotswap_service.h"
 #include "json/json.h"
@@ -366,13 +367,6 @@ struct workspace_manifest_job_binding {
     uint8_t existing_workspace_root[32];
 };
 
-static bool workspace_root_is_zero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any == 0;
-}
-
 static bool workspace_manifest_job_preflight(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply,
@@ -444,10 +438,10 @@ static bool workspace_manifest_job_preflight(
                passport.artifact_root, 32) == 0 &&
         memcmp(entry->module_release_root,
                release.artifact_root, 32) == 0;
-    bool parent_zero = workspace_root_is_zero(job.parent_workspace_root);
+    bool parent_zero = zcl_bytes_all_zero(job.parent_workspace_root, 32);
     valid = valid &&
         ((parent_zero && manifest->sequence == 1u &&
-          workspace_root_is_zero(manifest->predecessor_workspace_root)) ||
+          zcl_bytes_all_zero(manifest->predecessor_workspace_root, 32)) ||
          (!parent_zero && manifest->sequence > 1u &&
           memcmp(manifest->predecessor_workspace_root,
                  job.parent_workspace_root, 32) == 0));

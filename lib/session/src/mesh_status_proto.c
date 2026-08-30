@@ -3,6 +3,7 @@
 
 #include "session/mesh_status_proto.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -19,16 +20,6 @@ static const char receipt_signature_domain[] =
 static const char receipt_root_domain[] = "zcl.mesh.status.receipt.v1";
 
 #define RECEIPT_UNSIGNED_FIXED_BYTES 336u
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t count)
-{
-    if (!bytes)
-        return false;
-    uint8_t any = 0;
-    for (size_t i = 0; i < count; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static bool lifetime_valid(uint64_t issued, uint64_t expires)
 {
@@ -93,7 +84,7 @@ static enum mesh_status_proto_error request_shape(
         request->transcript_hash,
     };
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
-        if (!bytes_nonzero(critical[i], 32))
+        if (!zcl_bytes_any_set(critical[i], 32))
             return MESH_STATUS_PROTO_FIELD;
     if (request->connection_generation == 0)
         return MESH_STATUS_PROTO_FIELD;
@@ -252,7 +243,7 @@ static enum mesh_status_proto_error receipt_shape(
         receipt->responder_noise_static, receipt->transcript_hash,
     };
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
-        if (!bytes_nonzero(critical[i], 32))
+        if (!zcl_bytes_any_set(critical[i], 32))
             return MESH_STATUS_PROTO_FIELD;
     if (receipt->connection_generation == 0)
         return MESH_STATUS_PROTO_FIELD;
@@ -266,7 +257,7 @@ static enum mesh_status_proto_error receipt_shape(
     memory_cleanse(capsule_root, sizeof(capsule_root));
     if (!root_ok)
         return MESH_STATUS_PROTO_CAPSULE_ROOT;
-    if (require_signature && !bytes_nonzero(receipt->signature, 64))
+    if (require_signature && !zcl_bytes_any_set(receipt->signature, 64))
         return MESH_STATUS_PROTO_SIGNATURE;
     return MESH_STATUS_PROTO_OK;
 }

@@ -5,6 +5,7 @@
  * contract: config/consensus_state_snapshot_install.h. */
 
 #include "config/consensus_state_snapshot_install.h"
+#include "base/bytes.h"
 #include "consensus_state_snapshot_install_internal.h" /* lease + authority resolver */
 #include "jobs/reducer_frontier.h"       /* reducer_frontier_compute_hstar,
                                           * REDUCER_TRUSTED_BASE_*_KEY */
@@ -155,14 +156,6 @@ static bool activate_fail(struct consensus_state_activate_result *result,
     }
     LOG_WARN(ACTIVATE_SUBSYS, "%s", reason);
     return false;
-}
-
-static bool activate_digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= digest[i];
-    return any != 0;
 }
 
 /* Bind one source column into the destination statement, preserving type.
@@ -649,8 +642,8 @@ bool consensus_state_snapshot_install_activate(
      * digest + descriptor identity). This closes the ADMIT-to-activate rename
      * window, including replacement by another valid same-height/hash bundle. */
     uint8_t reopened_receipt_digest[32];
-    if (!activate_digest_nonzero(
-            request->expected_artifact_receipt_digest) ||
+    if (!zcl_bytes_any_set(
+            request->expected_artifact_receipt_digest, 32) ||
         !consensus_state_artifact_evidence_receipt_digest(
             evidence, reopened_receipt_digest) ||
         memcmp(reopened_receipt_digest,

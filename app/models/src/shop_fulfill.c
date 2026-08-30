@@ -3,6 +3,7 @@
 
 #include "models/shop_fulfill.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -18,14 +19,6 @@
 DEFINE_MODEL_CALLBACKS(shop_fulfill)
 
 static const uint8_t fulfill_magic[8] = {'Z','S','H','P','F','L','\r','\n'};
-
-static bool fulfill_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 const char *shop_fulfill_error_string(enum shop_fulfill_error error)
 {
@@ -54,15 +47,15 @@ enum shop_fulfill_error shop_fulfill_validate(
     if (!fulfill) return SHOP_FULFILL_ERR_NULL;
     if (fulfill->schema_version != SHOP_FULFILL_VERSION)
         return SHOP_FULFILL_ERR_VERSION;
-    if (!fulfill_nonzero(fulfill->want_id, 32))
+    if (!zcl_bytes_any_set(fulfill->want_id, 32))
         return SHOP_FULFILL_ERR_WANT_ZERO;
-    if (!fulfill_nonzero(fulfill->seller_pubkey, 32))
+    if (!zcl_bytes_any_set(fulfill->seller_pubkey, 32))
         return SHOP_FULFILL_ERR_PUBKEY_ZERO;
     if (fulfill->nonce == 0)
         return SHOP_FULFILL_ERR_NONCE;
-    if (!fulfill_nonzero(fulfill->artifact_root, 32))
+    if (!zcl_bytes_any_set(fulfill->artifact_root, 32))
         return SHOP_FULFILL_ERR_ARTIFACT_ZERO;
-    if (!fulfill_nonzero(fulfill->content_root, 32))
+    if (!zcl_bytes_any_set(fulfill->content_root, 32))
         return SHOP_FULFILL_ERR_CONTENT_ZERO;
     if (fulfill->issued_unix <= 0 ||
         fulfill->expires_unix <= fulfill->issued_unix)
@@ -70,7 +63,7 @@ enum shop_fulfill_error shop_fulfill_validate(
     if (fulfill->expires_unix - fulfill->issued_unix >
         SHOP_FULFILL_MAX_LIFETIME_SECS)
         return SHOP_FULFILL_ERR_LIFETIME;
-    if (!fulfill_nonzero(fulfill->seller_signature, 64))
+    if (!zcl_bytes_any_set(fulfill->seller_signature, 64))
         return SHOP_FULFILL_ERR_SIGNATURE;
     return SHOP_FULFILL_OK;
 }
@@ -210,7 +203,7 @@ bool db_shop_fulfill_validate(const struct shop_fulfill *row,
         ar_errors_add(errors, "row", "is NULL");
         return false;
     }
-    validates_custom(errors, fulfill_nonzero(row->fulfill_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(row->fulfill_id, 32),
                      "fulfill_id", "can't be all zero");
     uint8_t canonical_id[32];
     validates_custom(errors,

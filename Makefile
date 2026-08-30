@@ -115,7 +115,11 @@ ZCL_TEST_STACK_SETUP = :
 else ifeq ($(ZCL_HOST_OS),Darwin)
 CC = clang
 CXX = clang++
-ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
+ZCL_MACOS_DEPLOYMENT_TARGET := 14.0
+export MACOSX_DEPLOYMENT_TARGET := $(ZCL_MACOS_DEPLOYMENT_TARGET)
+ZCL_PLATFORM_CPPFLAGS = -mmacosx-version-min=$(ZCL_MACOS_DEPLOYMENT_TARGET) \
+	-DZCL_MACOS_DEPLOYMENT_TARGET=\"$(ZCL_MACOS_DEPLOYMENT_TARGET)\" \
+	-D_DARWIN_C_SOURCE \
 	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
 	-Dst_ctim=st_ctimespec -fblocks
 ZCL_LTO_FLAG = -flto=thin
@@ -2258,11 +2262,16 @@ TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c
 	$(MUTATION_LIB_SRCS)
 SPEC_SRCS = $(wildcard lib/test/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
+# The landing queue's two library translation units. land_main.c owns a
+# main() and is deliberately NOT here — the queue logic is what the test
+# group proves, and linking the CLI's entry point would collide with the
+# harness's own.
+TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
 # helpers as sequential test_zcl.
-TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
@@ -2605,7 +2614,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2627,7 +2636,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -3198,10 +3207,18 @@ check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 .PHONY: check-zcode-package-standalone
 check-zcode-package-standalone:
 	@tools/lint/check_zcode_package_standalone.sh
+.PHONY: check-package-capabilities
+check-package-capabilities:
+	@./tools/lint/check_package_capabilities.sh --selftest
+	@./tools/lint/check_package_capabilities.sh
 .PHONY: check-package-anatomy
 check-package-anatomy:
 	@./tools/lint/check_package_anatomy.sh --selftest
 	@./tools/lint/check_package_anatomy.sh
+.PHONY: check-capability-closure
+check-capability-closure:
+	@./tools/lint/check_capability_closure.sh --selftest
+	@./tools/lint/check_capability_closure.sh
 print-zcode-monolith-lib-sources:
 	@printf '%s\n' $(LIB_SRCS)
 $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
@@ -4884,9 +4901,38 @@ ACME_WORKER_LIBS = $(ZCL_VENDOR_LIB)/libssl.a $(ZCL_VENDOR_LIB)/libcrypto.a \
 	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
 
+# ── The landing queue ─────────────────────────────────────────────────────
+# `z23-land` is the command surface of tools/dev/land.sh and the batching
+# lander. Built STRAIGHT FROM SOURCE like the ACME worker rather than linked
+# against the node: it drives git and `make`, touches no consensus state, and
+# keeping it off the node's object graph is what stops a landing queue from
+# ever becoming reachable from a peer. Its whole dependency set is the
+# chainlog it writes receipts into, the hash that chains them, and the
+# platform file seam underneath both.
+LAND_SRCS = \
+	tools/land/land_main.c \
+	tools/land/land_queue.c \
+	tools/land/land_record.c \
+	lib/chainlog/src/chainlog.c \
+	lib/sha3/src/sha3.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/private_file.c \
+	lib/platform/src/private_acl_internal.c
+LAND_INCLUDES = -Ilib/base/include -Ilib/chainlog/include -Ilib/sha3/include \
+	-Ilib/platform/include -Itools/land
+LAND_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(LAND_INCLUDES)
+
+.PHONY: z23-land
+z23-land: $(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT)
+$(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT): $(LAND_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LAND_CFLAGS) -o $@ $(LAND_SRCS)
+
 .PHONY: zclassic23-acme
 zclassic23-acme: $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
-$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
+$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(ACME_WORKER_CFLAGS) $(ACME_WORKER_LDFLAGS) -o $@ \
 		$(ACME_WORKER_SRCS) $(ACME_WORKER_LIBS)
@@ -4920,14 +4966,17 @@ Z23_BOOTSTRAP_INCLUDES = -Ilib/base/include -Ilib/crypto/include \
 	-Ilib/install/include -Ilib/platform/include -Ilib/util/include \
 	-Itools/acme -Ivendor/include
 Z23_BOOTSTRAP_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(Z23_BOOTSTRAP_INCLUDES)
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(Z23_BOOTSTRAP_INCLUDES)
+Z23_BOOTSTRAP_BIN = $(BIN_DIR)/z23-bootstrap$(ZCL_HOST_EXEEXT)
 
 .PHONY: z23-bootstrap
-z23-bootstrap: $(BIN_DIR)/z23-bootstrap
-$(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) | $(NODE_VENDOR_LIBS)
+z23-bootstrap: $(Z23_BOOTSTRAP_BIN)
+$(Z23_BOOTSTRAP_BIN): $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(Z23_BOOTSTRAP_CFLAGS) -o $@ $(Z23_BOOTSTRAP_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+		vendor/lib/libssl.a vendor/lib/libcrypto.a \
+		$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+		$(ZCL_PLATFORM_NODE_LIBS)
 
 # The front-door half of a release cut: package that bootstrap under
 # bootstrap/<triple>/ and write its SHA-256 into COPIES of the two shims, into
@@ -4936,7 +4985,7 @@ $(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) | $(NODE_VENDOR_LIBS)
 # check-published-platforms holds them to it. Serve the resulting directory at
 # the project domain root; nothing in this repository does that step yet.
 .PHONY: z23-front-door
-z23-front-door: $(BIN_DIR)/z23-bootstrap
+z23-front-door: $(Z23_BOOTSTRAP_BIN)
 	@bash packaging/release/build_release.sh --front-door
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
@@ -9423,7 +9472,7 @@ $(COV_LEASE): FORCE
 	  "$(COV_EPOCH_COMPILE_FLAGS)" "$(COV_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))
 COV_LINK_RSP = $(COV_BUILD_DIR)/link-inputs.rsp
 
@@ -10666,6 +10715,23 @@ check-windows-cross-syntax:
 	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
 	@./tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh
 
+# A platform-only system header may not be included outside a conditional that
+# names that platform. Every gate above needs a cross-compiler; this one needs
+# nothing, because an unguarded <mach-o/fat.h> is a lexical fact. It closes the
+# class in all three directions (Apple, Win32, Linux) on whatever host is
+# running lint. Zero baseline: the tree is clean and stays clean.
+.PHONY: check-platform-header-guards
+check-platform-header-guards:
+	@./tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh
+
+# The STATIC half of tools/scripts/macos_acceptance.sh: the closed darwin-arm64
+# capability matrix must validate and every capability must name a REGISTERED
+# test group. The native leg (`make macos-acceptance`) needs a darwin-arm64
+# host and is reported UNOBSERVED here, never as a pass.
+.PHONY: check-macos-acceptance
+check-macos-acceptance:
+	@./tools/lint/check_macos_acceptance.sh --self-test && ./tools/lint/check_macos_acceptance.sh
+
 
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
@@ -11002,7 +11068,7 @@ check-ship-remote-transaction: jsonq
 # quiet pass: the front door is the one program a stranger runs before
 # anything has been verified, and an unobserved gate over it is worse than no
 # gate at all.
-check-z23-release-install: $(BIN_DIR)/z23-bootstrap
+check-z23-release-install: $(Z23_BOOTSTRAP_BIN)
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
 	@bash packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
@@ -11629,7 +11695,9 @@ LINT_GATES := \
     check-fortify-masked-decls \
     check-zcode-package-registry \
     check-zcode-package-standalone \
+    check-package-capabilities \
     check-package-anatomy \
+    check-capability-closure \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
     check-hotswap-denied-leaves \
@@ -11778,6 +11846,8 @@ LINT_GATES := \
     check-windows-platform-seam \
     check-windows-acceptance \
     check-windows-cross-syntax \
+    check-platform-header-guards \
+    check-macos-acceptance \
     check-result-discard \
     check-c23-only \
     check-no-python \
@@ -11805,7 +11875,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-bootstrap $(EQUIHASH_FACT_TOOL)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif

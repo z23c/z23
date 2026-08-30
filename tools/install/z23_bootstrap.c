@@ -43,6 +43,22 @@
 #include "platform/clock.h"
 #include "tls_client.h"
 
+#if defined(_WIN32)
+
+#include <stdio.h>
+
+static int bootstrap_main(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    fputs("z23-install: REFUSE: the native Windows bootstrap transport is "
+          "not qualified; use the source checkout's MSYS2 setup path\n",
+          stderr);
+    return 77;
+}
+
+#else
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -469,7 +485,7 @@ static bool have_on_path(const char *name)
     return false;
 }
 
-int main(int argc, char **argv)
+static int bootstrap_main(int argc, char **argv)
 {
     bool print_pin = false;
     /* The shim forwards argv verbatim, so this is the same one-argument
@@ -638,4 +654,11 @@ int main(int argc, char **argv)
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+}
+
+#endif
+
+int main(int argc, char **argv)
+{
+    return bootstrap_main(argc, argv);
 }

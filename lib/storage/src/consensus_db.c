@@ -12,6 +12,7 @@
 
 #include "storage/consensus_db.h"
 
+#include "base/hex.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
@@ -189,16 +190,6 @@ bool consensus_db_read_kernel_stats(sqlite3 *db,
     return true;
 }
 
-static void cdb_hex32(const uint8_t v[32], char out[65])
-{
-    static const char *hex = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        out[i * 2]     = hex[(v[i] >> 4) & 0xf];
-        out[i * 2 + 1] = hex[v[i] & 0xf];
-    }
-    out[64] = '\0';
-}
-
 bool consensus_db_kernel_stats_match(const struct consensus_db_kernel_stats *a,
                                      const struct consensus_db_kernel_stats *b,
                                      char *errbuf, size_t errcap)
@@ -208,8 +199,8 @@ bool consensus_db_kernel_stats_match(const struct consensus_db_kernel_stats *a,
 
     if (memcmp(a->coins_commit, b->coins_commit, 32) != 0) {
         char ha[65], hb[65];
-        cdb_hex32(a->coins_commit, ha);
-        cdb_hex32(b->coins_commit, hb);
+        zcl_hex_encode(a->coins_commit, 32, ha);
+        zcl_hex_encode(b->coins_commit, 32, hb);
         cdb_set_err(errbuf, errcap,
                     "consensus_db: coins sha3 commitment mismatch src=%s dst=%s",
                     ha, hb);

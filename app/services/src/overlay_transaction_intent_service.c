@@ -3,6 +3,7 @@
 
 #include "services/overlay_transaction_intent_service.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "core/serialize.h"
 #include "crypto/sha3.h"
@@ -29,13 +30,6 @@ struct oti_payload {
     int64_t actual_fee_zat;
 };
 
-static bool oti_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool oti_idempotency_valid(const char *key)
 {
     if (!key || !key[0] || strlen(key) > VAULT_INTENT_IDEMPOTENCY_MAX)
@@ -60,7 +54,7 @@ static struct zcl_result oti_runtime_validate(
     const struct overlay_intent_runtime *rt, bool planning, bool committing)
 {
     if (!rt || !rt->node_db || !rt->node_db->open || !rt->read_money ||
-        rt->tip_height < 0 || !oti_nonzero(rt->tip_hash, 32) ||
+        rt->tip_height < 0 || !zcl_bytes_any_set(rt->tip_hash, 32) ||
         rt->maximum_fee_zat <= 0 || rt->now_unix <= 0)
         return ZCL_ERR(-1, "overlay intent requires current custody and chain runtime");
     if (planning && !rt->prepare)
@@ -243,7 +237,7 @@ static void oti_view(const struct vault_intent_row *row,
              row->application_kind);
     snprintf(out->operation, sizeof(out->operation), "%s",
              payload->operation);
-    out->has_txid = oti_nonzero(payload->txid, 32);
+    out->has_txid = zcl_bytes_any_set(payload->txid, 32);
     memcpy(out->txid, payload->txid, 32);
     out->broadcast = row->state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
                      row->state <= VAULT_INTENT_REORGED;
@@ -303,7 +297,7 @@ struct zcl_result overlay_transaction_intent_plan(
     if (!prepared.ok || raw_len == 0 || input_count == 0 ||
         payload.actual_fee_zat < 0 ||
         payload.actual_fee_zat > rt->maximum_fee_zat ||
-        !oti_nonzero(payload.txid, 32)) {
+        !zcl_bytes_any_set(payload.txid, 32)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
         memory_cleanse(&payload, sizeof(payload));
         free(raw); free(inputs);

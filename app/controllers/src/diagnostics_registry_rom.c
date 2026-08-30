@@ -35,6 +35,7 @@
 #include "controllers/blockchain_controller.h"
 #include "controllers/chain_segment_controller.h"
 
+#include "base/hex.h"
 #include "chain/chain.h"
 #include "chain/checkpoints.h"
 #include "chain/utxo_root_ladder.h"
@@ -46,16 +47,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-
-static void rom_hex32(const uint8_t in[32], char out[65])
-{
-    static const char *h = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        out[i * 2]     = h[in[i] >> 4];
-        out[i * 2 + 1] = h[in[i] & 0xf];
-    }
-    out[64] = '\0';
-}
 
 bool rom_dump_state_json(struct json_value *out, const char *key)
 {
@@ -74,8 +65,8 @@ bool rom_dump_state_json(struct json_value *out, const char *key)
     if (cp) {
         char block_hash_hex[65];
         char sha3_hash_hex[65];
-        rom_hex32(cp->block_hash, block_hash_hex);
-        rom_hex32(cp->sha3_hash, sha3_hash_hex);
+        zcl_hex_encode(cp->block_hash, 32, block_hash_hex);
+        zcl_hex_encode(cp->sha3_hash, 32, sha3_hash_hex);
         json_push_kv_int(&checkpoint, "height", cp->height);
         json_push_kv_str(&checkpoint, "block_hash", block_hash_hex);
         json_push_kv_str(&checkpoint, "sha3_hash", sha3_hash_hex);

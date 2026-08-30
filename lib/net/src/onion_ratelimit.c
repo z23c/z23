@@ -14,6 +14,7 @@
  * consensus predicate. */
 
 #include "platform/time_compat.h"
+#include "base/hex.h"
 #include "net/onion_ratelimit.h"
 #include "net/site_routes.h"
 #include "net/puzzle.h"
@@ -363,16 +364,6 @@ static void onion_route_token(const char *route_key, uint8_t out[32])
     sha3_256((const unsigned char *)ctx, strlen(ctx), out);
 }
 
-static void hex32(const uint8_t in[32], char out[65])
-{
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; i++) {
-        out[i * 2]     = hex[(in[i] >> 4) & 0x0f];
-        out[i * 2 + 1] = hex[in[i] & 0x0f];
-    }
-    out[64] = '\0';
-}
-
 static void onion_fill_challenge(const char *route_key,
                                  struct onion_pow_challenge *out)
 {
@@ -383,8 +374,8 @@ static void onion_fill_challenge(const char *route_key,
     onion_puzzle_gate_ready();
     puzzle_gate_challenge(&g_onion_puzzle_gate, seed, &bits, &server_time);
     onion_route_token(route_key, token);
-    hex32(seed, out->seed_hex);
-    hex32(token, out->token_hex);
+    zcl_hex_encode(seed, 32, out->seed_hex);
+    zcl_hex_encode(token, 32, out->token_hex);
     out->bits = bits;
     out->server_time = server_time;
 }

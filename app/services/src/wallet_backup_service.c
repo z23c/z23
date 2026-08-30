@@ -17,8 +17,6 @@
  * one table to eight and this file passed the 800-line shape ceiling.
  */
 
-#include <limits.h>
-
 #include "base/result.h"
 #include "base/text_fit.h"
 #include "crypto/sha3.h"
@@ -638,14 +636,20 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
         char src_dir[1024];
         snprintf(src_dir, sizeof(src_dir), "%s", src_path);
         char *slash = strrchr(src_dir, '/');
+#if defined(_WIN32)
+        char *backslash = strrchr(src_dir, '\\');
+        if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
         if (slash) *slash = '\0';
         char src_real[WALLET_BACKUP_RECEIPT_PATH_MAX];
         char backup_real[WALLET_BACKUP_RECEIPT_PATH_MAX];
         const char *src_compare = platform_directory_canonical_real(
-            src_dir, src_real, sizeof(src_real)) ? src_real : src_dir;
+                                       src_dir, src_real, sizeof(src_real))
+            ? src_real : src_dir;
         const char *backup_compare = platform_directory_canonical_real(
-            cfg->backup_dir, backup_real, sizeof(backup_real))
-                ? backup_real : cfg->backup_dir;
+                                         cfg->backup_dir, backup_real,
+                                         sizeof(backup_real))
+            ? backup_real : cfg->backup_dir;
         if (strcmp(src_compare, backup_compare) == 0) {
             struct zcl_result r = ZCL_ERR(-21,
                 "start: refusing to back up into source dir %s", src_dir);

@@ -3,19 +3,12 @@
 
 #include "vcs/zcode_commons.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 
 #include <stdlib.h>
 #include <string.h>
-
-static bool family_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static void family_hash_u16(struct sha3_256_ctx *sha, uint16_t value)
 {
@@ -101,8 +94,8 @@ enum vcs_zcode_commons_error vcs_zcode_family_policy_v1_validate(
         policy->max_dependency_objects != 4096 ||
         policy->max_extracted_bytes != UINT64_C(64) * 1024u * 1024u)
         return VCS_ZCODE_COMMONS_LIMIT;
-    if (!family_nonzero(policy->profile_name_root) ||
-        !family_nonzero(policy->policy_text_root))
+    if (!zcl_bytes_any_set(policy->profile_name_root, 32) ||
+        !zcl_bytes_any_set(policy->policy_text_root, 32))
         return VCS_ZCODE_COMMONS_ROOT;
     return VCS_ZCODE_COMMONS_OK;
 }
@@ -165,13 +158,13 @@ enum vcs_zcode_commons_error vcs_zcode_classification_receipt_v1_validate(
         return VCS_ZCODE_COMMONS_VERSION_ERROR;
     if (receipt->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
         return VCS_ZCODE_COMMONS_FLAGS;
-    if (!family_nonzero(receipt->request_root) ||
-        !family_nonzero(receipt->content_root) ||
-        !family_nonzero(receipt->policy_root) ||
-        !family_nonzero(receipt->classifier_manifest_root) ||
-        !family_nonzero(receipt->operator_group_root) ||
-        !family_nonzero(receipt->model_family_root) ||
-        !family_nonzero(receipt->signature))
+    if (!zcl_bytes_any_set(receipt->request_root, 32) ||
+        !zcl_bytes_any_set(receipt->content_root, 32) ||
+        !zcl_bytes_any_set(receipt->policy_root, 32) ||
+        !zcl_bytes_any_set(receipt->classifier_manifest_root, 32) ||
+        !zcl_bytes_any_set(receipt->operator_group_root, 32) ||
+        !zcl_bytes_any_set(receipt->model_family_root, 32) ||
+        !zcl_bytes_any_set(receipt->signature, 32))
         return VCS_ZCODE_COMMONS_ROOT;
     if (receipt->audience > VCS_ZCODE_AUDIENCE_UNKNOWN ||
         receipt->behavior > VCS_ZCODE_BEHAVIOR_UNKNOWN)
@@ -285,7 +278,7 @@ enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
     if ((!services && service_count > 0) || !future_block_hash || !out)
         return VCS_ZCODE_COMMONS_NULL;
     if (service_count > VCS_ZCODE_MODERATION_MAX_SERVICES ||
-        !family_nonzero(future_block_hash))
+        !zcl_bytes_any_set(future_block_hash, 32))
         return VCS_ZCODE_COMMONS_LIMIT;
     struct family_panel_candidate candidates[
         VCS_ZCODE_MODERATION_MAX_SERVICES];
@@ -293,9 +286,9 @@ enum vcs_zcode_commons_error vcs_zcode_classification_panel_v1_select(
     for (size_t i = 0; i < service_count; i++) {
         const struct vcs_zcode_moderation_service_v1 *service = &services[i];
         if (!service->eligible || service->related_to_publisher ||
-            !family_nonzero(service->zid_root) ||
-            !family_nonzero(service->operator_group_root) ||
-            !family_nonzero(service->model_family_root))
+            !zcl_bytes_any_set(service->zid_root, 32) ||
+            !zcl_bytes_any_set(service->operator_group_root, 32) ||
+            !zcl_bytes_any_set(service->model_family_root, 32))
             continue;
         struct sha3_256_ctx sha;
         static const char domain[] = VCS_ZCODE_CLASSIFICATION_PANEL_V1_DOMAIN;
