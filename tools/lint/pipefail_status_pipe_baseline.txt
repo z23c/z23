@@ -1,7 +1,7 @@
 # check_pipefail_status_pipe baseline — scripts still deciding something on the exit
-# status of a `printf | grep -q` / `echo | grep -q` pipeline while
-# pipefail is set. Under pipefail a MATCH can report printf's SIGPIPE
-# 141 instead of grep's 0, so the decision can silently invert.
+# status of a `… | grep -q` pipeline (any producer) while
+# pipefail is set. Under pipefail a MATCH can report the producer's
+# SIGPIPE 141 instead of grep's 0, so the decision can silently invert.
 #
 # Format: <path> <count>.  COUNTS MAY ONLY SHRINK.
 #
@@ -10,9 +10,9 @@
 # test the STRING. For a REGEX needle, where str_contains (fixed-needle
 # only) does not apply, feed grep a here-string instead:
 #     grep -qE "$RE" <<<"$haystack"
-# which is not a pipeline, so nothing can invert. Then lower or delete the
-# number here. Adding a row for a NEW file is not a fix — a file with no
-# row may carry ZERO.
+# which is not a pipeline, so nothing can invert. Then lower or delete
+# the number here. Adding a row for a NEW file is not a fix — a file
+# with no row may carry ZERO.
 #
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_pipefail_status_pipe.sh
 deploy/migrate-role-names-selftest.sh 3
@@ -21,13 +21,18 @@ tools/agent_fast_ci.sh 11
 tools/deploy_guard.sh 2
 tools/dev/agent-dev-status.sh 4
 tools/dev/agent-doctor.sh 1
+tools/dev/build-epoch-key.sh 1
 tools/dev/deploy-dev-lane.sh 12
 tools/dev/hotswap-module-fast.sh 2
+tools/dev/recover-dev-lane-selftest.sh 1
+tools/dev/zcode_adapter_benchmark.sh 1
+tools/dev/zcode_dht_acceptance.sh 1
 tools/lint/check_hotswap_eligible_scope.sh 1
 tools/lint/check_no_stale_pinned_facts.sh 1
 tools/lint/check_release_no_dev_symbols.sh 1
 tools/lint/check_silent_error_returns.sh 1
 tools/lint/check_thread_supervision.sh 1
+tools/lint/gate_doc_no_false_deleted.sh 1
 tools/lint/selftest_scanner_immunity.sh 1
 tools/mvp_gate.sh 6
 tools/scripts/check_condition_cooldown.sh 1
@@ -48,6 +53,7 @@ tools/scripts/ci_install_linger_gate.sh 1
 tools/scripts/cold_start_to_tip_probe.sh 3
 tools/scripts/cold_start_to_tip_stopwatch.sh 3
 tools/scripts/intervention_ledger.sh 14
+tools/scripts/lane_health.sh 1
 tools/scripts/lane_recover.sh 1
 tools/scripts/mvp_scoreboard.sh 2
 tools/scripts/network_disruption_recovery_stopwatch.sh 3
@@ -56,6 +62,7 @@ tools/scripts/promotion_receipt.sh 8
 tools/scripts/slo_hold_judge.sh 13
 tools/scripts/soak_evidence.sh 4
 tools/scripts/stopwatch_skip_class.sh 1
+tools/scripts/two_node_peer_tip.sh 3
 tools/scripts/worktree_gc.sh 3
-tools/scripts/zcl_intervene.sh 2
 tools/scripts/zcl-portfwd-setup.sh 1
+tools/scripts/zcl_intervene.sh 2
