@@ -487,6 +487,84 @@ int test_stale_validate_headers_repair_condition(void)
         teardown_condition_case(dir, &ms);
     }
 
+    /* validate_headers is allowed to run ahead of the executable body/fold
+     * frontier. A repairable row in that future region is not actionable yet:
+     * the P2P repair authority intentionally accepts at most H*+1. Before this
+     * guard repair_target_height selected the far-ahead scan anyway, so the
+     * remedy refused its own target as missing best-header authority, raised
+     * header_repair_no_source with healthy peers, and eventually paged while H*
+     * was still climbing. Hold the future row inert until H* reaches it. */
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("scan_above_hstar_next", dir,
+                                       sizeof(dir), &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 10, 1);
+        ok = ok && seed_poison_rows(
+            db, 5, "'no-header-solution-backfill-required'", 0);
+        stale_validate_headers_repair_test_set_hstar_override(1);
+
+        ok = ok && stale_validate_headers_repair_test_repair_target(db) == -1;
+        condition_engine_tick();
+
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 0;
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && !blocker_exists("header_repair_no_source");
+        ok = ok && row_exists(db, "validate_headers_log", 5);
+        SVHR_CHECK("repairable scan above H*+1 stays inert until it becomes "
+                   "actionable (no false no-source episode or page)", ok);
+        teardown_condition_case(dir, &ms);
+    }
+
+    /* A successful validate_headers recheck resolves this condition's exact
+     * invariant even when a separate downstream stage still pins H*. Before
+     * this witness split, the condition kept retrying mode=NONE and paged an
+     * operator for the unrelated downstream stall. Merely caching the repair
+     * header is covered above and remains insufficient; this fixture flips the
+     * durable verdict to ok=1, as only the unchanged validator does in
+     * production. */
+    {
+        char dir[256];
+        struct main_state ms;
+        struct block_index blocks[2];
+        struct uint256 hashes[2];
+        bool ok = setup_condition_case("validated_recheck_clears", dir,
+                                       sizeof(dir), &ms, blocks, hashes);
+        sqlite3 *db = progress_store_db();
+        ok = ok && seed_cursors(db, 5, 1);
+        ok = ok && exec_sql(db,
+            "INSERT OR REPLACE INTO validate_headers_log"
+            "(height,hash,ok,fail_reason,validated_at) "
+            "VALUES(2,zeroblob(32),0,"
+            "'no-header-solution-backfill-required',1)");
+
+        condition_engine_tick();
+        ok = ok && condition_engine_get_active_count() == 1;
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+
+        ok = ok && exec_sql(db,
+            "UPDATE validate_headers_log SET ok=1, fail_reason=NULL "
+            "WHERE height=2");
+        ok = ok && stage_repair_header_solution_poison_mode(db, 2) ==
+                     STAGE_REPAIR_POISON_NONE;
+
+        stale_validate_headers_repair_test_clear_backoff();
+        condition_engine_tick();
+
+        struct condition_runtime_snapshot snap;
+        bool got = condition_engine_get_registered_snapshot(
+            "stale_validate_headers_repair", &snap);
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && stale_validate_headers_repair_test_remedy_calls() == 1;
+        ok = ok && got && !snap.operator_needed_emitted;
+        SVHR_CHECK("independent validate recheck clears the header condition "
+                   "while downstream H* remains pinned (no false page)", ok);
+        teardown_condition_case(dir, &ms);
+    }
+
     {
         char dir[256];
         struct main_state ms;

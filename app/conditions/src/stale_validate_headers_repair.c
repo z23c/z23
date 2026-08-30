@@ -9,6 +9,7 @@
 #include "services/header_probe.h"
 #include "services/sync_monitor.h"
 #include "net/connman.h"
+#include "net/header_serve_repair.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
@@ -142,11 +143,12 @@ void stale_validate_headers_repair_test_set_peer_count(int n)
 
 /* LANE D / #3b + Detective A2 — file-scope forward declaration; defined after
  * the remedy. Oracle-independent P2P re-fetch of the exact best-header
- * ancestor at `height`: clears BLOCK_HAVE_DATA on that hash-bound block_index
- * entry AND actively enqueues a getdata via the existing download-manager
- * machinery. Returns the count of connected peers available to serve the
- * re-fetch (0 => missing input), or -1 if the best-header authority is absent
- * or no longer agrees with `expected_hash`. */
+ * ancestor at `height`: arms the existing bounded header-only getheaders
+ * repair first, then clears BLOCK_HAVE_DATA on that hash-bound block_index
+ * entry and actively enqueues a full-block getdata as the durable fallback.
+ * Returns the count of connected peers available to serve the re-fetch (0 =>
+ * missing input), or -1 if the best-header authority is absent or no longer
+ * agrees with `expected_hash`. */
 static int cure_request_peer_refetch(int height,
                                      const struct uint256 *expected_hash);
 
@@ -266,9 +268,16 @@ static int repair_target_height(sqlite3 *db)
     if (hstar_mode != STAGE_REPAIR_POISON_NONE)
         return hstar_target;
 
-    if (have_scan)
-        return scan;
-    return hstar_target;
+    /* validate_headers may run far ahead of the body/fold frontier and record
+     * repairable rows there. They are real future work, but they are not an
+     * actionable H* repair yet: best_header_target_locked deliberately admits
+     * only an active-window height or the direct child H*+1. Selecting a scan
+     * above H*+1 therefore manufactures a contradiction — the remedy refuses
+     * its own target as "no best-header authority", names a false no-source
+     * blocker despite connected peers, and can page while H* is still climbing.
+     * Rows at/below H*+1 were handled above. Leave later rows inert until the
+     * frontier reaches them; the condition's next poll will re-evaluate them. */
+    return -1; // raw-return-ok:no-actionable-frontier-poison
 }
 
 #ifdef ZCL_TESTING
@@ -382,15 +391,18 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
         }
 
         /* Step 2 — P2P FALLBACK (oracle-independent, the zclassicd oracle is
-         * being retired). Actively re-request the canonical block for `target`
-         * from connected peers via the EXISTING getdata machinery. The arriving
-         * block is re-validated by check_block (PoW/Equihash) on ingest and its
-         * solution is saved hash-bound into header_solution_repair
-         * (reducer_cache_ingested_solution); validate_headers then INDEPENDENTLY
-         * re-verifies the replacement before H* can advance — the detective
-         * never swaps a page for an unverified one. The solution arrives async,
-         * so this tick only fires the request and defers; the "solution
-         * present" branch above attributes + completes on a later tick. */
+         * being retired). Ask for the canonical HEADER first through the
+         * existing bounded getheaders repair, then keep canonical full-block
+         * getdata as the durable fallback. A headers message already carries
+         * nSolution; downloading the whole body just to recover those bytes
+         * made a snapshot node validate far ahead, log every missing solution
+         * as ok=0, then crawl through the backlog in body-sized recheck bursts.
+         * The header-only path hash-binds and independently verifies
+         * PoW/Equihash before restoring the index bytes. The full-block path
+         * still re-validates with check_block and saves hash-bound into
+         * header_solution_repair. In both cases validate_headers independently
+         * re-verifies before H* advances. Both arrive asynchronously, so this
+         * tick fires the requests and defers. */
         int refetch = cure_request_peer_refetch(target, canon);
         /* -1 is "not asked" (best-header authority absent/disagrees), NOT
          * "zero peers".
@@ -478,16 +490,17 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
 }
 
 /* LANE D / #3b + Detective A2 — oracle-independent P2P re-fetch of the
- * canonical best-header block at `height`. Two coordinated steps, both through
- * EXISTING
- * machinery (Law: one way in — no second header/body fetch stack):
- *   1. Drop BLOCK_HAVE_DATA on the canonical block_index entry and re-emit the
+ * canonical best-header block at `height`. Three coordinated steps, all
+ * through EXISTING machinery (Law: one way in — no second fetch stack):
+ *   1. Arm header_serve_repair for the exact canonical entry. Its normal peer
+ *      send loop requests a bounded getheaders span and its normal headers
+ *      handler full-verifies each candidate before restoring nSolution.
+ *   2. Drop BLOCK_HAVE_DATA on the canonical block_index entry and re-emit the
  *      header event, so the cleared re-fetch state persists across restarts
  *      (same discipline as body_persist_stage.c:requeue_body_for_refetch).
- *   2. ACTIVELY enqueue a getdata for that exact block via
+ *   3. ACTIVELY enqueue a getdata for that exact block via
  *      sync_monitor_queue_best_header_body → dl_queue_priority →
- *      the
- *      download-manager getdata loop, rather than passively waiting for a
+ *      the download-manager getdata loop, rather than passively waiting for a
  *      background scan to notice the cleared bit.
  * Returns the count of connected peers available to serve the re-fetch (0 =>
  * missing input; the caller names a typed blocker), or -1 if the exact
@@ -559,6 +572,13 @@ static int cure_request_peer_refetch(int height,
         cleared_have_data = true;
     }
     zcl_mutex_unlock(&ms->cs_main);
+
+    /* Cheap path first: the standard headers wire already carries the exact
+     * Equihash solution validate_headers is missing. Arm only after the
+     * best-header hash was rechecked under cs_main. block_index entries live
+     * for the process lifetime, so `bi` remains stable after unlock;
+     * header_serve_repair takes cs_main itself to repeat the authority check. */
+    header_serve_repair_arm(ms, bi);
 
     if (cleared_have_data) {
         block_index_emit_header_event(bi, "stale_validate_headers_repair",
@@ -659,18 +679,22 @@ static bool witness_stale_validate_headers_repair(int64_t target_at_detect)
      * own captured frontier height. */
     (void)target_at_detect;
 
-    /* SOLE success predicate: the durable reducer frontier advanced PAST the
-     * frontier captured at detect time. Anything less is NOT cleared.
+    /* A validate-header poison has a narrower honest success predicate than a
+     * downstream poison: its exact failed row must have been replaced by the
+     * unchanged validate_headers verifier. This condition's validate-mode
+     * remedy never deletes or rewinds that row; merely receiving/caching a
+     * repair header also leaves its poison mode unchanged. Therefore a
+     * transition from the captured validate poison to NONE is durable evidence
+     * that the independent recheck accepted it, and this condition must clear
+     * even when a DIFFERENT downstream stage still holds H*. Otherwise the
+     * already-repaired header condition keeps spending attempts and falsely
+     * pages itself for the downstream stall.
      *
-     * The old witness also returned true the instant the poison rows were
-     * deleted or a repair header became available — but the destructive
-     * rewind itself deletes those rows / writes that header WITHOUT moving
-     * the tip, so it could self-certify "cleared" on every ~5s tick while
-     * the tip stayed frozen (the Law-7 lie). Those shortcuts are gone:
-     * reducer_frontier_compute_hstar reads the provable reducer prefix, which
-     * the rewind cannot fake by leaving a higher served-tip anchor behind, so
-     * a non-advancing remedy now leaves the witness false, accrues
-     * attempts, trips max_attempts, and pages EV_OPERATOR_NEEDED. */
+     * DOWNSTREAM_STALE remains governed solely by reducer-frontier movement.
+     * Its remedy is destructive and can delete poison rows without moving the
+     * tip, so row disappearance cannot self-certify success there. The H*
+     * witness below preserves the Law-7 guard: a non-advancing downstream
+     * remedy accrues attempts and pages. */
     int target = atomic_load(&g_target_at_detect);
     if (target < 0)
         return false;
@@ -678,6 +702,14 @@ static bool witness_stale_validate_headers_repair(int64_t target_at_detect)
     sqlite3 *db = progress_store_db();
     if (!db)
         return false;
+
+    enum stage_repair_header_solution_poison mode_at_detect =
+        (enum stage_repair_header_solution_poison)
+            atomic_load(&g_mode_at_detect);
+    if (validate_repairable_mode(mode_at_detect) &&
+        stage_repair_header_solution_poison_mode(db, target) ==
+            STAGE_REPAIR_POISON_NONE)
+        return true;
 
     int hstar_at_detect = atomic_load(&g_hstar_at_detect);
     if (hstar_at_detect >= 0 && target <= hstar_at_detect) {
