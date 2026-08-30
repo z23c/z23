@@ -20,8 +20,8 @@
 # The script has two modes and only one of them needs an Apple machine:
 #
 #   --check   Pure text. It reads config/platform/macos_capabilities.def and
-#             asserts: the capability SET has not drifted from the closed list
-#             of 12; every row carries one of the three legal states
+#             asserts: the capability SET has not drifted from the validator's
+#             closed list; every row carries one of the three legal states
 #             (available / degraded / unavailable); every row carries a typed
 #             reason code; and every evidence group a row names is a group
 #             REGISTERED in tools/dev/test_group_catalog.def. Nothing here
@@ -71,8 +71,8 @@ GATE="check-macos-acceptance"
 ACCEPT="tools/scripts/macos_acceptance.sh"
 MATRIX="config/platform/macos_capabilities.def"
 CATALOG="tools/dev/test_group_catalog.def"
-# The matrix names 21 distinct groups today. The floor is only an anti-hollow
-# guard: a matrix that derives NO evidence groups must never read as clean.
+# The floor is only an anti-hollow guard: a matrix that derives almost no
+# evidence groups must never read as clean.
 GROUP_FLOOR=10
 
 check_root() {

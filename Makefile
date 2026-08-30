@@ -668,10 +668,12 @@ LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
 	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
+	lib/platform/src/os_sandbox_terminal_worker.c \
 	lib/util/src/self_backtrace_stub.c \
 	lib/vcs/src/vcs_devloop.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
+	lib/platform/src/os_sandbox_terminal_worker.c \
 	lib/util/src/self_backtrace.c \
 	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 endif
@@ -1605,6 +1607,7 @@ check-vendor-provenance:
 	@sha256sum --check vendor/qrcodegen/SHA256SUMS
 	@sha256sum --check vendor/typography/SHA256SUMS
 	@sha256sum --check vendor/x11/SHA256SUMS
+	@sha256sum --check vendor/freebsd-sh/SHA256SUMS
 
 # Reusable native presentation package. This deliberately has a tiny source
 # closure: twelve project TUs plus pinned RGFW headers, with no node/app objects.
@@ -2217,7 +2220,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         fuzz-ci-leaks \
         soak-smoke soak-7day soak-ci test-crash-bootstrap \
         test-reindex-smoke test-reindex-killmid \
-        test-two-node-peer-tip test-science-acceptance test-market-acceptance \
+        test-two-node-peer-tip test-noise-transport-interop test-science-acceptance test-market-acceptance \
         test-market-moderation-acceptance \
         chaos chaos-clean \
         replay-canary-anchor replay-canary-genesis \
@@ -5292,6 +5295,145 @@ $(BIN_DIR)/zcl-portfwd: tools/zcl_portfwd.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -o $@ $<
 
+# ── fbsh: vendored FreeBSD /bin/sh (ash lineage) ─────────────────────
+# vendor/freebsd-sh holds FreeBSD releng/14.2 bin/sh byte-identical
+# (provenance: vendor/freebsd-sh/SOURCE and
+# vendor/provenance/freebsd-sh.manifest). The upstream build generates
+# builtins.[ch], nodes.[ch], syntax.[ch], and token.h from
+# bin/sh/{builtins.def,nodetypes,nodes.c.pat} via the byte-identical host
+# tools mkbuiltins/mktokens (shell) and mknodes/mksyntax (C); those run
+# here exactly as vendor/freebsd-sh/bin/sh/Makefile does, into
+# build/fbsh/gen. glibc gaps are shimmed, never patched: compat/compat.h
+# is force-included into every upstream TU, compat/compat.c supplies
+# strlcpy and setmode/getmode (the umask builtin), and compat/bin/mktemp
+# covers the `mktemp -t ka` BSD form GNU coreutils rejects, so the
+# codegen scripts run unmodified. -DNO_HISTORY drops the libedit
+# dependency (no interactive line editing; scripts and -c are fully
+# functional). Warnings are off for the vendored TUs — third-party
+# source we do not edit (same rule as the vendored sqlite3 TU above);
+# the compat layer itself builds with the strict project flags.
+.PHONY: fbsh
+fbsh: $(BIN_DIR)/fbsh
+
+FBSH_SRC_DIR := vendor/freebsd-sh
+FBSH_BUILD_DIR := build/fbsh
+FBSH_GEN_DIR := $(FBSH_BUILD_DIR)/gen
+FBSH_OBJ_DIR := $(FBSH_BUILD_DIR)/obj
+FBSH_SH_DIR := $(FBSH_SRC_DIR)/bin/sh
+
+FBSH_GEN_HDRS := $(FBSH_GEN_DIR)/token.h $(FBSH_GEN_DIR)/builtins.h \
+	$(FBSH_GEN_DIR)/nodes.h $(FBSH_GEN_DIR)/syntax.h
+
+# SHSRCS from vendor/freebsd-sh/bin/sh/Makefile, with the four sources
+# bmake finds through .PATH spelled at their real vendored locations
+# (bltin/echo.c, bin/kill, bin/test, usr.bin/printf).
+FBSH_UPSTREAM_SRCS := \
+	$(FBSH_SH_DIR)/alias.c $(FBSH_SH_DIR)/arith_yacc.c \
+	$(FBSH_SH_DIR)/arith_yylex.c $(FBSH_SH_DIR)/cd.c \
+	$(FBSH_SH_DIR)/bltin/echo.c $(FBSH_SH_DIR)/error.c \
+	$(FBSH_SH_DIR)/eval.c $(FBSH_SH_DIR)/exec.c \
+	$(FBSH_SH_DIR)/histedit.c $(FBSH_SH_DIR)/input.c \
+	$(FBSH_SH_DIR)/jobs.c $(FBSH_SRC_DIR)/bin/kill/kill.c \
+	$(FBSH_SH_DIR)/mail.c $(FBSH_SH_DIR)/main.c $(FBSH_SH_DIR)/memalloc.c \
+	$(FBSH_SH_DIR)/miscbltin.c $(FBSH_SH_DIR)/mystring.c \
+	$(FBSH_SH_DIR)/options.c $(FBSH_SH_DIR)/output.c \
+	$(FBSH_SH_DIR)/parser.c $(FBSH_SRC_DIR)/usr.bin/printf/printf.c \
+	$(FBSH_SH_DIR)/redir.c $(FBSH_SH_DIR)/show.c \
+	$(FBSH_SRC_DIR)/bin/test/test.c $(FBSH_SH_DIR)/trap.c \
+	$(FBSH_SH_DIR)/var.c
+
+# expand.c reads dp->d_namlen, a BSD struct dirent member glibc does not
+# have (the one portability delta that cannot be header-shimmed: a struct
+# member access). The tracked file stays byte-identical; the build emits
+# a one-token-patched copy into the gen dir. The delta is documented as a
+# unified diff in vendor/patches/freebsd-sh-dirent-d-namlen.patch, and the
+# recipe fails loudly if upstream ever changes the context so the patch
+# cannot silently become a no-op. namlen is strlen(d_name) on FreeBSD by
+# definition, so semantics are unchanged.
+FBSH_PATCHED_SRCS := $(FBSH_GEN_DIR)/expand.c
+
+$(FBSH_GEN_DIR)/expand.c: $(FBSH_SH_DIR)/expand.c \
+	    vendor/patches/freebsd-sh-dirent-d-namlen.patch
+	@mkdir -p $(FBSH_GEN_DIR)
+	@set -eu; tmp="$@.tmp"; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	sed 's/dp->d_namlen/strlen(dp->d_name)/' $< > "$$tmp"; \
+	grep -qF 'namlen = strlen(dp->d_name);' "$$tmp"; \
+	! grep -qF 'd_namlen' "$$tmp"; \
+	mv -f "$$tmp" $@; \
+	trap - EXIT HUP INT TERM
+
+FBSH_GEN_SRCS := $(FBSH_GEN_DIR)/builtins.c $(FBSH_GEN_DIR)/nodes.c \
+	$(FBSH_GEN_DIR)/syntax.c
+
+FBSH_CPPFLAGS := -DSHELL -DNO_HISTORY -I$(FBSH_GEN_DIR) -I$(FBSH_SH_DIR) \
+	-I$(FBSH_SRC_DIR)/compat \
+	-include $(CURDIR)/$(FBSH_SRC_DIR)/compat/compat.h
+FBSH_VENDOR_CFLAGS := -std=c23 -O2 -w $(FBSH_CPPFLAGS)
+
+FBSH_OBJS := $(addprefix $(FBSH_OBJ_DIR)/,$(addsuffix .o, \
+	$(basename $(notdir $(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) \
+	$(FBSH_GEN_SRCS))))) \
+	$(FBSH_OBJ_DIR)/compat.o
+
+# Codegen, mirroring vendor/freebsd-sh/bin/sh/Makefile. mkbuiltins and
+# mktokens write to the current directory; the mktemp shim directory is
+# prepended to PATH for exactly these two invocations. mknodes/mksyntax
+# are host tools compiled from byte-identical upstream C.
+$(FBSH_GEN_DIR)/token.h: $(FBSH_SH_DIR)/mktokens
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && PATH='$(CURDIR)/$(FBSH_SRC_DIR)/compat/bin':$$PATH \
+	    sh '$(CURDIR)/$(FBSH_SH_DIR)/mktokens'
+
+$(FBSH_GEN_DIR)/builtins.c $(FBSH_GEN_DIR)/builtins.h: $(FBSH_GEN_DIR)/.builtins.stamp
+$(FBSH_GEN_DIR)/.builtins.stamp: $(FBSH_SH_DIR)/mkbuiltins \
+	    $(FBSH_SH_DIR)/builtins.def $(FBSH_SH_DIR)/shell.h
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && PATH='$(CURDIR)/$(FBSH_SRC_DIR)/compat/bin':$$PATH \
+	    sh '$(CURDIR)/$(FBSH_SH_DIR)/mkbuiltins' '$(CURDIR)/$(FBSH_SH_DIR)'
+	@touch $@
+
+$(FBSH_BUILD_DIR)/mknodes: $(FBSH_SH_DIR)/mknodes.c $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) $(FBSH_VENDOR_CFLAGS) -o $@ $<
+
+$(FBSH_BUILD_DIR)/mksyntax: $(FBSH_SH_DIR)/mksyntax.c $(FBSH_SH_DIR)/parser.h \
+	    $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) $(FBSH_VENDOR_CFLAGS) -o $@ $<
+
+$(FBSH_GEN_DIR)/nodes.c $(FBSH_GEN_DIR)/nodes.h: $(FBSH_GEN_DIR)/.nodes.stamp
+$(FBSH_GEN_DIR)/.nodes.stamp: $(FBSH_BUILD_DIR)/mknodes $(FBSH_SH_DIR)/nodetypes \
+	    $(FBSH_SH_DIR)/nodes.c.pat
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && '$(CURDIR)/$(FBSH_BUILD_DIR)/mknodes' \
+	    '$(CURDIR)/$(FBSH_SH_DIR)/nodetypes' '$(CURDIR)/$(FBSH_SH_DIR)/nodes.c.pat'
+	@touch $@
+
+$(FBSH_GEN_DIR)/syntax.c $(FBSH_GEN_DIR)/syntax.h: $(FBSH_GEN_DIR)/.syntax.stamp
+$(FBSH_GEN_DIR)/.syntax.stamp: $(FBSH_BUILD_DIR)/mksyntax $(FBSH_GEN_DIR)/token.h
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && '$(CURDIR)/$(FBSH_BUILD_DIR)/mksyntax'
+	@touch $@
+
+define FBSH_COMPILE_RULE
+$(FBSH_OBJ_DIR)/$(notdir $(basename $(1))).o: $(1) $$(FBSH_GEN_HDRS) \
+	    $$(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $$(@D)
+	$$(CC) $$(FBSH_VENDOR_CFLAGS) -c -o $$@ $$<
+endef
+$(foreach s,$(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) $(FBSH_GEN_SRCS),\
+	$(eval $(call FBSH_COMPILE_RULE,$(s))))
+
+$(FBSH_OBJ_DIR)/compat.o: $(FBSH_SRC_DIR)/compat/compat.c \
+	    $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -I$(FBSH_SRC_DIR)/compat -c -o $@ $<
+
+$(BIN_DIR)/fbsh: $(FBSH_OBJS)
+	@mkdir -p $(@D)
+	$(CC) -std=c23 -O2 -static -o $@ $(FBSH_OBJS)
+
 # gen_sha3_windows: one-shot tool that queries a fully-synced reference
 # node and overwrites lib/chain/{include/chain,src}/sha3_windows.{h,c}
 # with SHA3-256 commitments over 1000-block windows. Standalone build:
@@ -6575,6 +6717,24 @@ test-reindex-killmid: zclassic23 zcl-rpc
 # harnesses; the script itself sets -euo pipefail.
 test-two-node-peer-tip: zclassic23 zcl-rpc process-group-exec
 	@bash tools/scripts/two_node_peer_tip.sh
+
+# Noise transport two-node/three-node interop acceptance: the evidence
+# artifact for the owner's -noisetransport default-flip decision. Real
+# isolated regtest daemons prove S1 noise->plaintext outbound stays
+# plaintext, S2 plaintext->noise inbound takes NOISE_PLAINTEXT_FALLBACK,
+# S3 noise<->noise rides the one controlled capability-learning reconnect
+# into an established Noise XX session with send/recv frames flowing, and
+# S4 a mixed plaintext+noise 3-node swarm reaches tip consensus. Every
+# assertion reads the operator surface (dumpstate transport per-peer
+# mode/state/frame counters + the dumpstate connman noisetransport
+# census), never logs. DELIBERATELY opt-in (NOT in `make ci`) — it spawns
+# real nodes. Process ownership/cleanup via tools/dev/node_lifecycle.sh;
+# P2P listeners that a redialed upgrade must reach use reachable-policy
+# ports (9033/18033/20028), RPC/FS/HTTPS disjoint 392xx/393xx/394xx quads.
+.PHONY: test-noise-transport-interop
+test-noise-transport-interop: zclassic23 zcl-rpc jsonq \
+	tools/arena-product-journey-c23
+	@bash tools/dev/noise_transport_interop.sh
 
 # ZCODE science-slice v1 acceptance proof: two disjoint isolated regtest
 # nodes (39xxx quads, loopback only, B connect-only to A). Preregister a
@@ -10305,7 +10465,7 @@ check-persona-resolves:
 # a `// long-function-ok:<tag>` override marker explaining WHY.
 check-long-functions:
 	@echo "══ LINT: long function cap (500 lines) ══"
-	@./tools/scripts/check_long_functions.sh
+	@./tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh
 
 # Wave 9a: every register_*_rpc_commands callsite uses rpc_table_must_append.
 # rpc_table_append returns false silently on registration failure (duplicate
@@ -10393,7 +10553,7 @@ check-domain-purity:
 # opt-in adoption of the supervisor primitive over Rounds 6-8.
 check-supervisor-registration:
 	@echo "══ LINT: supervisor registration ══"
-	@./tools/scripts/check_supervisor_registration.sh
+	@./tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh
 
 # Test-registration drift guard. A test entry point (test_<name>.c defining
 # int test_<name>(void)) that is in NEITHER the canonical test group catalog
@@ -10794,7 +10954,7 @@ check-model-column-drift:
 
 check-supervisor-domain:
 	@echo "→ Gate #21: supervisor_domain"
-	@./tools/lint/check_supervisor_domain.sh
+	@./tools/lint/check_supervisor_domain.sh --selftest && ./tools/lint/check_supervisor_domain.sh
 
 # Gate #23: universal thread supervision (RATCHET). Every long-running thread
 # spawned via thread_registry_spawn must be on the supervisor liveness tree
@@ -10803,7 +10963,7 @@ check-supervisor-domain:
 # baselined in tools/lint/thread_supervision_baseline.txt (shrink-only).
 check-thread-supervision:
 	@echo "→ Gate #23: thread_supervision"
-	@./tools/lint/check_thread_supervision.sh
+	@./tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh
 
 # Gate P1 (docs/work/palace-design.md §3) — every indexed .c/.h under the
 # codeindex roots has a DERIVABLE one-line purpose (a substantive top-of-file
@@ -10971,7 +11131,7 @@ check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
 # the real body has landed. docs/, vendor/, and test paths narrate history on
 # purpose and are excluded. See tools/scripts/check_no_dev_history_in_contracts.sh.
 check-no-dev-history-in-contracts:
-	@./tools/scripts/check_no_dev_history_in_contracts.sh
+	@./tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh
 
 # Funded transaction receipts and isolated recipient-wallet manifests are
 # private local state. Tracked baselines may contain reproducible simnet and

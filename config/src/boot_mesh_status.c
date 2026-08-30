@@ -11,10 +11,12 @@
 #include "boot_mesh_status_internal.h"
 
 #include "config/boot_internal.h"
+#include "config/boot_zcode_dht.h"
 #include "config/boot_zcode_dht_access.h"
 #include "config/runtime.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "controllers/diagnostics_controller.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
@@ -32,6 +34,7 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Receipts are valid at most this long after observation; bounded well under
@@ -248,10 +251,18 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
     if (live_count != 1)
         return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
 
+    /* Pairing ids are per-side: each node derives its row id from the
+     * PEER's master+noise identity, so the id a request carries names the
+     * requester's own row and can never name ours. The only row that can
+     * authorize this session is the one the live delegation (already
+     * matched to the session's remote static) points at — derive its id. */
     char pairing_id[MESH_PAIRING_ID_HEX + 1];
-    zcl_hex_encode(request->pairing_id, 32, pairing_id);
+    if (!mesh_pairing_id_derive(network_genesis, live->doc.master_pubkey,
+                                live->noise_static_pubkey, pairing_id))
+        return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
     enum mesh_pairing_reason authorized = mesh_pairing_service_authorize_status(
-        ndb, pairing_id, live, session->remote_static, (int64_t)now_unix);
+        ndb, network_genesis, pairing_id, live, session->remote_static,
+        (int64_t)now_unix);
     if (authorized != MESH_PAIRING_OK)
         return mesh_status_from_pairing_reason(authorized);
     /* The pairing row carries the receipt's revocation-generation evidence.
@@ -367,6 +378,43 @@ bool boot_mesh_status_receipt_accept(
 
 /* ── Responder lane ──────────────────────────────────────────────────── */
 
+/* Snapshot connected peers under cs_nodes, then return the first whose
+ * established Noise session names the paired Noise static. Caller releases
+ * the returned reference. Never dials. Shared with the mesh terminal lane
+ * (declared in the internal header). */
+struct p2p_node *boot_mesh_find_session_peer(
+    struct net_manager *nm, const uint8_t peer_noise[32],
+    struct noise_transport_snapshot *session_out)
+{
+    struct p2p_node *candidates[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
+    size_t count = 0;
+    zcl_mutex_lock(&nm->cs_nodes);
+    for (size_t i = 0;
+         i < nm->num_nodes && count < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++) {
+        struct p2p_node *node = nm->nodes[i];
+        if (!boot_zcode_dht_peer_ready(node))
+            continue;
+        candidates[count++] = node;
+        p2p_node_add_ref(node);
+    }
+    zcl_mutex_unlock(&nm->cs_nodes);
+    struct p2p_node *found = NULL;
+    for (size_t i = 0; i < count; i++) {
+        struct noise_transport_snapshot snapshot;
+        memset(&snapshot, 0, sizeof(snapshot));
+        if (!found && candidates[i]->transport &&
+            noise_transport_snapshot(candidates[i]->transport, &snapshot) &&
+            snapshot.established &&
+            memcmp(snapshot.remote_static, peer_noise, 32) == 0) {
+            found = candidates[i];
+            *session_out = snapshot;
+        } else {
+            p2p_node_release(candidates[i]);
+        }
+    }
+    return found;
+}
+
 struct mesh_delegation_collect {
     struct vcs_zcode_dht_delegation matched[2];
     size_t matched_count;
@@ -390,8 +438,10 @@ static void mesh_collect_delegation(struct vcs_zcode_dht_service *service,
  * master (which must be ACTIVE in the local ZID projection) and the online
  * key the receipt is signed with. Any inconsistency fails closed: the codec
  * refuses to sign zeroed identity fields, so there is no honest receipt to
- * emit and the request is dropped after logging. */
-static bool mesh_local_identity(struct node_db *ndb, const char *datadir,
+ * emit and the request is dropped after logging. Shared with the mesh
+ * terminal lane (declared in the internal header) so fail-closed identity
+ * can never drift between the two lanes. */
+bool boot_mesh_local_identity(struct node_db *ndb, const char *datadir,
                                 uint8_t master_out[32],
                                 uint8_t online_pub_out[32],
                                 uint8_t online_seed_out[32])
@@ -430,6 +480,75 @@ static bool mesh_local_identity(struct node_db *ndb, const char *datadir,
     }
     memcpy(master_out, local.doc.master_pubkey, 32);
     return true;
+}
+
+/* ── Shared peer-delegation lookup (both requester lanes) ────────────── */
+
+struct mesh_peer_delegation_collect {
+    struct vcs_zcode_dht_delegation *held;
+    size_t held_max;
+    struct vcs_zcode_dht_delegation best;
+    uint8_t genesis[32];
+    uint8_t master[32];
+    uint8_t noise_static[32];
+    bool found;
+    bool ambiguous;
+};
+
+/* Runs under the DHT service lock: memory copies only. The greatest sequence
+ * for the exact paired identity wins; two different online keys at that same
+ * sequence are ambiguous and fail closed. */
+static void mesh_collect_peer_delegation(struct vcs_zcode_dht_service *service,
+                                         void *opaque)
+{
+    struct mesh_peer_delegation_collect *collect = opaque;
+    if (!service || !collect || !collect->held)
+        return;
+    size_t count = vcs_zcode_dht_service_delegations(
+        service, collect->held, collect->held_max);
+    for (size_t i = 0; i < count; i++) {
+        struct vcs_zcode_dht_delegation *candidate = &collect->held[i];
+        if (memcmp(candidate->network_genesis, collect->genesis, 32) != 0 ||
+            memcmp(candidate->doc.master_pubkey, collect->master, 32) != 0 ||
+            memcmp(candidate->noise_static_pubkey,
+                   collect->noise_static, 32) != 0)
+            continue;
+        if (!collect->found ||
+            candidate->doc.seq > collect->best.doc.seq) {
+            collect->best = *candidate;
+            collect->found = true;
+            collect->ambiguous = false;
+        } else if (candidate->doc.seq == collect->best.doc.seq &&
+                   memcmp(candidate->online_pubkey,
+                          collect->best.online_pubkey, 32) != 0) {
+            collect->ambiguous = true;
+        }
+    }
+}
+
+bool boot_mesh_peer_delegation(const struct db_mesh_pairing *row,
+                               struct vcs_zcode_dht_delegation *out)
+{
+    struct mesh_peer_delegation_collect collect;
+    memset(&collect, 0, sizeof(collect));
+    collect.held = zcl_malloc(
+        VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS * sizeof(*collect.held),
+        "mesh_status.peer_delegations");
+    if (!collect.held) {
+        LOG_ERROR("net.mesh_status", "peer delegation alloc failed");
+        return false;
+    }
+    collect.held_max = VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS;
+    memcpy(collect.genesis, row->network_genesis, 32);
+    memcpy(collect.master, row->peer_master_pubkey, 32);
+    memcpy(collect.noise_static, row->peer_noise_pubkey, 32);
+    bool available = boot_zcode_dht_service_apply(
+        mesh_collect_peer_delegation, &collect);
+    bool found = available && collect.found && !collect.ambiguous;
+    if (found)
+        *out = collect.best;
+    free(collect.held);
+    return found;
 }
 
 /* Render the redacted machine-identity capsule. Oversize output is replaced
@@ -547,8 +666,8 @@ static void mesh_respond(struct msg_processor *mp, struct p2p_node *node,
         genesis, now, &revocation_generation);
 
     uint8_t master[32], online_pub[32], online_seed[32];
-    if (!mesh_local_identity(ndb, svc->datadir, master, online_pub,
-                             online_seed))
+    if (!boot_mesh_local_identity(ndb, svc->datadir, master, online_pub,
+                                  online_seed))
         return; /* context logged inside; no honest receipt exists */
 
     uint8_t capsule[MESH_STATUS_CAPSULE_MAX];

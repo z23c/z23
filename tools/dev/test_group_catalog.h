@@ -45,9 +45,10 @@ bool zcl_test_group_source_is_semantic_leaf(const char *path);
 bool zcl_test_group_resolve_exact(
     const char *id, char out[ZCL_TEST_GROUP_FULL_MAX]);
 
-/* True when `full_id` belongs to the validated plan ID's preserved legacy
- * family (substring union plus declared semantic families). The exact primary
- * must exist or this returns false. */
+/* True when `full_id` belongs to the validated plan ID. A canonical full
+ * test or spec plan ID selects only itself; a legacy prefixless ID preserves
+ * its substring union plus declared semantic families. The exact primary must
+ * exist or this returns false. */
 bool zcl_test_group_plan_selects(const char *plan_id, const char *full_id);
 
 /* Expand plan IDs to a deterministic, deduplicated exact execution set in

@@ -359,7 +359,8 @@ enum boot_mesh_pairing_plan_result boot_mesh_pairing_plan(
 
 enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
     const char *selector, const uint8_t expected_fingerprint[32],
-    int64_t days, bool days_given, struct db_mesh_pairing *out,
+    int64_t days, bool days_given, bool grant_terminal,
+    struct db_mesh_pairing *out,
     enum mesh_pairing_reason *service_reason_out)
 {
     if (service_reason_out)
@@ -388,9 +389,24 @@ enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
         LOG_ERROR("net.mesh_pairing", "commit: wall clock unavailable");
         return MESH_PAIR_COMMIT_UNAVAILABLE;
     }
+    /* Status-read is the base grant; terminal-exec joins only on explicit
+     * operator opt-in at this commit. The record is insert-only, so this is
+     * the one moment the mask can ever carry the terminal bit. */
+    uint64_t capability_mask = MESH_PAIRING_CAP_STATUS_READ;
+    if (grant_terminal)
+        capability_mask |= MESH_PAIRING_CAP_TERMINAL_EXEC;
+    /* This node's own compiled genesis, via the same accessor the DHT
+     * service authenticates delegations with — never a node.db row, which
+     * locally-mining nodes do not persist for height 0. */
+    uint8_t network_genesis[32];
+    if (!boot_zcode_dht_network_genesis(network_genesis)) {
+        LOG_ERROR("net.mesh_pairing",
+                  "commit: local network genesis unavailable");
+        return MESH_PAIR_COMMIT_UNAVAILABLE;
+    }
     enum mesh_pairing_reason reason = mesh_pairing_service_accept(
-        ndb, &delegation, expected_fingerprint, session.remote_static,
-        session.established, MESH_PAIRING_CAP_STATUS_READ, now,
+        ndb, network_genesis, &delegation, expected_fingerprint,
+        session.remote_static, session.established, capability_mask, now,
         boot_mesh_pairing_expiry(now, days), out);
     if (reason != MESH_PAIRING_OK) {
         if (service_reason_out)

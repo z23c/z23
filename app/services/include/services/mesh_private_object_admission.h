@@ -45,7 +45,8 @@ const char *mesh_private_object_admission_reason_string(
  * transfer id. Expected policy refusals return ZCL_OK with a non-success
  * reason; infrastructure failure returns a non-ok zcl_result. */
 struct zcl_result mesh_private_object_admit_offer(
-    struct node_db *ndb, const struct mesh_private_object_offer_v1 *offer,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const struct mesh_private_object_offer_v1 *offer,
     const struct noise_transport_snapshot *session,
     const struct vcs_zcode_dht_delegation *source_delegation,
     const uint8_t local_master_pubkey[32],

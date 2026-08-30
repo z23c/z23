@@ -472,6 +472,20 @@ static int test_registry_exact_resolution(void)
         ASSERT(strstr(out, "test_api\n") != NULL);
         ASSERT(strstr(out, "test_native_api_contract\n") != NULL);
 
+        rc = capture_command(
+            "tools/dev/test-group-list.sh --resolve-proof test_api 2>&1",
+            out, sizeof(out));
+        ASSERT(rc == 0);
+        ASSERT(strcmp(out, "test_api\n") == 0);
+
+        /* A legacy prefixless ID may itself begin with "test_". It is exact
+         * only when that literal full ID exists in the registry. */
+        rc = capture_command(
+            "tools/dev/test-group-list.sh --resolve-proof "
+            "test_group_selector 2>&1", out, sizeof(out));
+        ASSERT(rc == 0);
+        ASSERT(strcmp(out, "test_test_group_selector\n") == 0);
+
         /* Coverage migration is lossless: a legacy family selector becomes
          * exact full IDs, but only after its exact primary is admitted. */
         rc = capture_command(
@@ -514,6 +528,13 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_resolve_exact("test_api", full));
         ASSERT(strcmp(full, "test_api") == 0);
         ASSERT(!zcl_test_group_resolve_exact("api_missing", full));
+        ASSERT(zcl_test_group_plan_selects("test_api", "test_api"));
+        ASSERT(!zcl_test_group_plan_selects("test_api",
+                                            "test_native_api_contract"));
+        ASSERT(zcl_test_group_plan_selects("api",
+                                           "test_native_api_contract"));
+        ASSERT(zcl_test_group_plan_selects("test_group_selector",
+                                           "test_test_group_selector"));
 
         const char *ids[] = { "api", "stage_repair", "oracle_policy" };
         char expanded[16][ZCL_TEST_GROUP_FULL_MAX];
@@ -539,6 +560,14 @@ static int test_native_catalog_resolution(void)
         }
         ASSERT(saw_api && saw_native_api && saw_stage_coin);
         ASSERT(saw_groth && saw_zclassicd && saw_quorum);
+
+        const char *exact_ids[] = { "test_api" };
+        truncated = true;
+        ASSERT(zcl_test_group_expand_plan(
+                   exact_ids, 1, expanded,
+                   sizeof(expanded) / sizeof(expanded[0]), &truncated) == 1);
+        ASSERT(!truncated);
+        ASSERT(strcmp(expanded[0], "test_api") == 0);
 
         char one[1][ZCL_TEST_GROUP_FULL_MAX];
         truncated = false;

@@ -120,7 +120,8 @@ static bool admission_delegation_authority_failure(
 }
 
 struct zcl_result mesh_private_object_admit_offer(
-    struct node_db *ndb, const struct mesh_private_object_offer_v1 *offer,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const struct mesh_private_object_offer_v1 *offer,
     const struct noise_transport_snapshot *session,
     const struct vcs_zcode_dht_delegation *source_delegation,
     const uint8_t local_master_pubkey[32],
@@ -131,9 +132,9 @@ struct zcl_result mesh_private_object_admit_offer(
         return ZCL_ERR(-1, "private-object admission requires output");
     memset(out, 0, sizeof(*out));
     out->reason = MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT;
-    if (!ndb || !ndb->open || !offer || !session || !source_delegation ||
-        !local_master_pubkey || !local_noise_static || now_unix == 0 ||
-        now_unix > (uint64_t)INT64_MAX)
+    if (!ndb || !ndb->open || !network_genesis || !offer || !session ||
+        !source_delegation || !local_master_pubkey || !local_noise_static ||
+        now_unix == 0 || now_unix > (uint64_t)INT64_MAX)
         return ZCL_ERR(-1, "private-object admission context unavailable");
     if (mesh_private_object_offer_v1_validate(offer) !=
         MESH_PRIVATE_OBJECT_PROTO_OK)
@@ -155,7 +156,7 @@ struct zcl_result mesh_private_object_admit_offer(
             out, MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID);
     enum mesh_pairing_reason delegated =
         mesh_pairing_service_authorize_delegation(
-            ndb, pairing_id, source_delegation,
+            ndb, network_genesis, pairing_id, source_delegation,
             offer->source_noise_static, (int64_t)now_unix);
     if (delegated != MESH_PAIRING_OK)
         return admission_refuse(

@@ -50,7 +50,7 @@ static bool mesh_seed_block(struct node_db *ndb, int height,
 
 static bool mesh_fixture(struct node_db *ndb, const char *path,
                          struct vcs_zcode_dht_delegation *delegation,
-                         uint8_t fingerprint[32])
+                         uint8_t fingerprint[32], uint8_t out_genesis[32])
 {
     if (!node_db_open(ndb, path))
         return false;
@@ -61,8 +61,7 @@ static bool mesh_fixture(struct node_db *ndb, const char *path,
     mesh_fill32(online, 0x44);
     mesh_fill32(noise, 0x55);
     mesh_fill32(seed, 0x66);
-    if (!mesh_seed_block(ndb, 0, genesis) ||
-        !mesh_seed_block(ndb, ZCL_FINALITY_DEPTH, beacon) ||
+    if (!mesh_seed_block(ndb, ZCL_FINALITY_DEPTH, beacon) ||
         !mesh_seed_block(ndb, 2 * ZCL_FINALITY_DEPTH, tip) ||
         vcs_zcode_dht_delegation_sign(
             delegation, genesis, online, noise, ZCL_FINALITY_DEPTH, beacon,
@@ -78,6 +77,9 @@ static bool mesh_fixture(struct node_db *ndb, const char *path,
              ZID_IDENTITY_STATUS_ACTIVE);
     snprintf(identity.source, sizeof(identity.source), "%s",
              ZID_IDENTITY_SOURCE_ZID_OVERLAY);
+    /* No genesis row is seeded: a locally-mining node never persists one,
+     * and the authority must bind the caller-supplied genesis instead. */
+    memcpy(out_genesis, genesis, 32);
     return db_zid_identity_save(ndb, &identity);
 }
 
@@ -139,24 +141,35 @@ int test_mesh_pairing(void)
     struct node_db ndb = {0};
     struct vcs_zcode_dht_delegation delegation;
     uint8_t fingerprint[32];
+    uint8_t genesis[32];
 
     TEST("mesh pairing: explicit Noise-bound acceptance is durable") {
-        ASSERT(mesh_fixture(&ndb, path, &delegation, fingerprint));
+        ASSERT(mesh_fixture(&ndb, path, &delegation, fingerprint, genesis));
         struct db_mesh_pairing row;
         uint8_t wrong[32];
         mesh_fill32(wrong, 0x99);
         ASSERT_EQ(mesh_pairing_service_accept(
-                      &ndb, &delegation, wrong,
+                      &ndb, genesis, &delegation, wrong,
                       delegation.noise_static_pubkey, true,
                       MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &row),
                   MESH_PAIRING_FINGERPRINT_MISMATCH);
         ASSERT_EQ(db_mesh_pairing_list(&ndb, &row, 1), 0);
         ASSERT_EQ(mesh_pairing_service_accept(
-                      &ndb, &delegation, fingerprint, wrong, true,
+                      &ndb, genesis, &delegation, fingerprint, wrong, true,
                       MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &row),
                   MESH_PAIRING_SESSION_MISMATCH);
+        /* A delegation bound to a foreign network never pairs, even with an
+         * exact fingerprint — and no genesis row needs to exist to say so. */
+        uint8_t foreign[32];
+        mesh_fill32(foreign, 0xde);
         ASSERT_EQ(mesh_pairing_service_accept(
-                      &ndb, &delegation, fingerprint,
+                      &ndb, foreign, &delegation, fingerprint,
+                      delegation.noise_static_pubkey, true,
+                      MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &row),
+                  MESH_PAIRING_NETWORK_MISMATCH);
+        ASSERT_EQ(db_mesh_pairing_list(&ndb, &row, 1), 0);
+        ASSERT_EQ(mesh_pairing_service_accept(
+                      &ndb, genesis, &delegation, fingerprint,
                       delegation.noise_static_pubkey, true,
                       MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &row),
                   MESH_PAIRING_OK);
@@ -172,7 +185,7 @@ int test_mesh_pairing(void)
         ASSERT_EQ(counts.active, 0);
         ASSERT_EQ(counts.expired, 1);
         ASSERT_EQ(mesh_pairing_service_authorize_status(
-                      &ndb, row.pairing_id, &delegation,
+                      &ndb, genesis, row.pairing_id, &delegation,
                       delegation.noise_static_pubkey, 2500),
                   MESH_PAIRING_OK);
         node_db_close(&ndb);
@@ -358,12 +371,12 @@ int test_mesh_pairing(void)
         ASSERT_EQ(counts.expired, 0);
         ASSERT_EQ(counts.revoked, 1);
         ASSERT_EQ(mesh_pairing_service_authorize_status(
-                      &ndb, row.pairing_id, &delegation,
+                      &ndb, genesis, row.pairing_id, &delegation,
                       delegation.noise_static_pubkey, 2800),
                   MESH_PAIRING_ALREADY_REVOKED);
         struct db_mesh_pairing refused;
         ASSERT_EQ(mesh_pairing_service_accept(
-                      &ndb, &delegation, fingerprint,
+                      &ndb, genesis, &delegation, fingerprint,
                       delegation.noise_static_pubkey, true,
                       MESH_PAIRING_CAP_STATUS_READ, 2000, 3000, &refused),
                   MESH_PAIRING_ALREADY_REVOKED);

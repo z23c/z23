@@ -772,6 +772,25 @@ static int test_mint_anchor_progress_resume(void)
     return failures;
 }
 
+/* Nanosecond identity of two stat results, platform-split at file scope —
+ * preprocessing directives may not sit inside a macro argument list, so the
+ * MSC_CHECK call above goes through this helper. UCRT struct stat carries
+ * second-resolution times only. */
+#if defined(_WIN32)
+static bool msc_stat_times_equal(const struct stat *a, const struct stat *b)
+{
+    return a->st_mtime==b->st_mtime&&a->st_ctime==b->st_ctime;
+}
+#else
+static bool msc_stat_times_equal(const struct stat *a, const struct stat *b)
+{
+    return a->st_mtim.tv_sec==b->st_mtim.tv_sec&&
+           a->st_mtim.tv_nsec==b->st_mtim.tv_nsec&&
+           a->st_ctim.tv_sec==b->st_ctim.tv_sec&&
+           a->st_ctim.tv_nsec==b->st_ctim.tv_nsec;
+}
+#endif
+
 static int test_mint_anchor_lane_containment(void)
 {
     int failures = 0;
@@ -920,21 +939,11 @@ static int test_mint_anchor_lane_containment(void)
     bool stat_before=lstat(progress_path,&before)==0;
     MSC_CHECK("producer lane: earliest preflight refuses producer datadir",
               stat_before&&!boot_mint_anchor_normal_boot_preflight(dir));
-    bool stat_after=lstat(progress_path,&after)==0;
-#if defined(_WIN32)
-    bool timestamps_same=stat_after&&before.st_mtime==after.st_mtime&&
-                         before.st_ctime==after.st_ctime;
-#else
-    bool timestamps_same=stat_after&&
-                         before.st_mtim.tv_sec==after.st_mtim.tv_sec&&
-                         before.st_mtim.tv_nsec==after.st_mtim.tv_nsec&&
-                         before.st_ctim.tv_sec==after.st_ctim.tv_sec&&
-                         before.st_ctim.tv_nsec==after.st_ctim.tv_nsec;
-#endif
     MSC_CHECK("producer lane: preflight is read-only and precedes node/wallet",
-              stat_after&&before.st_dev==after.st_dev&&
-              before.st_ino==after.st_ino&&before.st_size==after.st_size&&
-              before.st_mode==after.st_mode&&timestamps_same&&
+              lstat(progress_path,&after)==0&&
+              before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&
+              before.st_size==after.st_size&&before.st_mode==after.st_mode&&
+              msc_stat_times_equal(&before,&after)&&
               access(node_path,F_OK)!=0&&access(wallet_path,F_OK)!=0);
     test_cleanup_tmpdir(dir);
     return failures;
