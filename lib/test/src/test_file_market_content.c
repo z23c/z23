@@ -36,6 +36,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32) && !defined(O_CLOEXEC)
+/* mingw's <fcntl.h> ships no O_CLOEXEC and no close-on-exec emulation. This
+ * file exercises fork-free, single-process fixture I/O only; the flag is a
+ * hygiene no-op here regardless of platform, so a zero fallback keeps the
+ * open() calls below syntactically valid on Windows without touching the
+ * value POSIX platforms see. */
+#define O_CLOEXEC 0
+#endif
+
 #define CONTENT_CHECK(label, condition) do {                         \
     printf("file_market content: %s... ", (label));                 \
     if (condition) printf("OK\n");                                  \
@@ -338,7 +347,11 @@ int file_market_content_tests(void)
 
     /* An in-place rewrite that restores its old mtime with utimensat(2)
      * must still refuse: ctime cannot be set backwards, so the key misses,
-     * the bytes are re-hashed, and the registration digest disagrees. */
+     * the bytes are re-hashed, and the registration digest disagrees.
+     * st_atim/st_mtim and AT_FDCWD/utimensat(2) are POSIX-only (no Windows
+     * struct stat member or call has this shape), so this sub-test is not
+     * exercised on Windows, only kept syntactically valid there. */
+#if !defined(_WIN32)
     struct stat before_rewrite;
     bool captured = stat(filepath, &before_rewrite) == 0;
     int rewrite_fd = open(filepath, O_WRONLY | O_CLOEXEC);
@@ -356,6 +369,7 @@ int file_market_content_tests(void)
         &ndb, offer.offer_id, 0, &loaded);
     CONTENT_CHECK("mtime-frozen rewrite cannot ride the digest table",
                   clock_frozen && !load_result.ok && loaded.data == NULL);
+#endif /* !defined(_WIN32) */
 
     int mutate_fd = open(filepath, O_WRONLY | O_CLOEXEC);
     uint8_t changed = (uint8_t)(payload[0] ^ 0xffu);

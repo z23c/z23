@@ -48,6 +48,15 @@
 #include "util/safe_alloc.h"
 #include "test/setup_result.h"
 
+#if defined(_WIN32) && !defined(O_CLOEXEC)
+/* mingw's <fcntl.h> ships no O_CLOEXEC and no close-on-exec emulation. The
+ * one open() below that wants it is single-process tamper-fixture I/O; the
+ * flag is a hygiene no-op here regardless of platform, so a zero fallback
+ * keeps that call syntactically valid on Windows without touching the value
+ * POSIX platforms see. */
+#define O_CLOEXEC 0
+#endif
+
 /* ── Event observer ────────────────────────────────────────── */
 
 static _Atomic int g_wb_ok;
