@@ -190,18 +190,63 @@ scan_counts() {
             }
             return out
         }
-        function mentions(s, id) {
-            return (s ~ ("(^|[^A-Za-z0-9_])" id "([^A-Za-z0-9_]|$)"))
+        # ── TWO INDEXES PER LINE, NOT ONE REGEX PER KNOWN SYMBOL ───────────
+        # Every predicate below asks a line the same two questions: is
+        # identifier X mentioned here, and is X CALLED here. Asking them by
+        # building one dynamic regex per accumulated symbol costs
+        # O(symbols) regex matches per line per fixpoint pass, and the symbol
+        # sets grow as the fixpoint runs, so the scan degrades as it learns.
+        # Measured on this tree that was 97 percent of the whole `make lint`
+        # wall time. Both questions are answered instead from two strings
+        # built once from the text being asked about:
+        #   tokstr(s)  -> " tok tok tok "   every maximal [A-Za-z0-9_] run
+        #   callstr(s) -> " name name "     every such run that is immediately
+        #                                   followed by optional blanks and `(`
+        # Membership in those sets is EXACTLY what the old regexes tested:
+        #   `(^|[^A-Za-z0-9_])id([^A-Za-z0-9_]|$)` matches iff id is one of the
+        #   maximal word runs of s, because a word run cannot carry a word
+        #   boundary inside itself;
+        #   `(^|[^A-Za-z0-9_])id[ \t]*\(` matches iff id is the maximal word
+        #   run immediately preceding a `(`.
+        # Every identifier in play is [A-Za-z_][A-Za-z0-9_]*, so no name can
+        # smuggle a regex metacharacter into either string.
+        function tokstr(s) {
+            gsub(/[^A-Za-z0-9_]+/, " ", s)
+            return " " s " "
+        }
+        function callstr(s,   n, i, t, out, A) {
+            if (index(s, "(") == 0) return " "
+            gsub(/[ \t]+\(/, "(", s)
+            n = split(s, A, /\(/)
+            out = " "
+            for (i = 1; i < n; i++) {
+                t = A[i]
+                if (match(t, /[A-Za-z0-9_]+$/))
+                    out = out substr(t, RSTART, RLENGTH) " "
+            }
+            return out
         }
         # Does this text READ a clock (call a reader, or name a variable
         # holding a single reading)?
-        function is_clocky(s,   k) {
-            for (k in readers)
-                if (s ~ ("(^|[^A-Za-z0-9_])" k "[ \t]*\\(")) return 1
+        # `toks`/`calls` are the caller-supplied indexes for `s`; empty means
+        # "not computed yet", and neither index is ever legitimately empty
+        # because both are blank-padded.
+        function is_clocky(s, toks, calls,   n, i, p, A) {
+            if (calls == "") calls = callstr(s)
+            n = split(calls, A, " ")
+            for (i = 1; i <= n; i++)
+                if (A[i] in readers) return 1
             # time(NULL) only — bare `time` is too common a word.
-            if (s ~ /(^|[^A-Za-z0-9_])time[ \t]*\([ \t]*(NULL|0)[ \t]*\)/) return 1
-            for (k in stamp) if (!(k in ambiguous) && mentions(s, k)) return 1
-            for (k in taint) if (!(k in ambiguous) && mentions(s, k)) return 1
+            if (index(calls, " time ") > 0 &&
+                s ~ /(^|[^A-Za-z0-9_])time[ \t]*\([ \t]*(NULL|0)[ \t]*\)/) return 1
+            if (toks == "") toks = tokstr(s)
+            n = split(toks, A, " ")
+            for (i = 1; i <= n; i++) {
+                p = A[i]
+                if (p in ambiguous) continue
+                if (p in stamp) return 1
+                if (p in taint) return 1
+            }
             return 0
         }
         # ── The load-sensitive shape is an INTERVAL, not a timestamp ────────
@@ -214,31 +259,48 @@ scan_counts() {
         # counting bare timestamps too reported 31 files / ~350 sites, almost
         # all of them the good idiom — precision is the whole point of a gate
         # nobody is allowed to silence.)
-        function is_interval(s,   k) {
-            for (k in taint) if (!(k in ambiguous) && mentions(s, k)) return 1
-            if (s ~ /(^|[^A-Za-z0-9_])difftime[ \t]*\(/) return 1
+        function is_interval(s, toks, calls,   n, i, p, A) {
+            if (toks == "") toks = tokstr(s)
+            n = split(toks, A, " ")
+            for (i = 1; i <= n; i++) {
+                p = A[i]
+                if (!(p in ambiguous) && (p in taint)) return 1
+            }
+            if (calls == "") calls = callstr(s)
+            if (index(calls, " difftime ") > 0) return 1
             if (index(s, "-") == 0) return 0
-            return is_clocky(s)
+            return is_clocky(s, toks, calls)
         }
         # Record every identifier this line binds from a clocky expression:
         #   TYPE name = <clocky>;          -> name
         #   name = <clocky>;               -> name
         #   reader(..., &name)             -> name  (out-parameter form)
         # Returns 1 if anything new was added.
-        function harvest(s,   added, lhs, rhs, k, m, rest, id) {
+        function harvest(s, toks, calls,   added, lhs, rhs, k, m, rest, id,
+                         n, i, A, seen, rtoks, rcalls, clocky) {
             added = 0
-            # out-parameter form: any reader call taking &ident
-            for (k in readers) {
-                rest = s
-                while (match(rest, ("(^|[^A-Za-z0-9_])" k "[ \t]*\\([^)]*&[ \t]*[A-Za-z_][A-Za-z0-9_]*"))) {
-                    m = substr(rest, RSTART, RLENGTH)
-                    if (match(m, /&[ \t]*[A-Za-z_][A-Za-z0-9_]*$/)) {
-                        id = substr(m, RSTART + 1, RLENGTH - 1)
-                        gsub(/[ \t]/, "", id)
-                        # A single reading -> a STAMP, not yet an interval.
-                        if (id != "" && !(id in stamp)) { stamp[id] = 1; added = 1 }
+            # out-parameter form: any reader call taking &ident. The pattern
+            # needs a literal `&` AND a call of the reader, so a line missing
+            # either cannot match it — checked first, so the common line pays
+            # one index() and builds no regex at all.
+            if (index(s, "&") > 0) {
+                if (calls == "") calls = callstr(s)
+                n = split(calls, A, " ")
+                for (i = 1; i <= n; i++) {
+                    k = A[i]
+                    if (!(k in readers) || (k in seen)) continue
+                    seen[k] = 1
+                    rest = s
+                    while (match(rest, ("(^|[^A-Za-z0-9_])" k "[ \t]*\\([^)]*&[ \t]*[A-Za-z_][A-Za-z0-9_]*"))) {
+                        m = substr(rest, RSTART, RLENGTH)
+                        if (match(m, /&[ \t]*[A-Za-z_][A-Za-z0-9_]*$/)) {
+                            id = substr(m, RSTART + 1, RLENGTH - 1)
+                            gsub(/[ \t]/, "", id)
+                            # A single reading -> a STAMP, not yet an interval.
+                            if (id != "" && !(id in stamp)) { stamp[id] = 1; added = 1 }
+                        }
+                        rest = substr(rest, RSTART + RLENGTH)
                     }
-                    rest = substr(rest, RSTART + RLENGTH)
                 }
             }
             # DECLARATION form only: `int64_t elapsed = <clocky>;`. Deliberately
@@ -252,14 +314,22 @@ scan_counts() {
             if (match(s, /^[ \t]*(static[ \t]+)?(const[ \t]+)?(unsigned[ \t]+)?(int64_t|uint64_t|int32_t|uint32_t|long long|long|int|double|float|time_t|clock_t|suseconds_t)[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*=/)) {
                 lhs = substr(s, RSTART, RLENGTH)
                 rhs = substr(s, RSTART + RLENGTH)
-                if (substr(rhs, 1, 1) != "=" && is_clocky(rhs)) {
+                # The right-hand side is a SUBSTRING of the line, so it needs
+                # indexes of its own; they are built only for the ~2 percent of
+                # lines that are declarations at all.
+                clocky = 0
+                if (substr(rhs, 1, 1) != "=") {
+                    rtoks = tokstr(rhs); rcalls = callstr(rhs)
+                    clocky = is_clocky(rhs, rtoks, rcalls)
+                }
+                if (clocky) {
                     if (match(lhs, /[A-Za-z_][A-Za-z0-9_]*[ \t]*=$/)) {
                         id = substr(lhs, RSTART, RLENGTH)
                         sub(/[ \t]*=$/, "", id)
                         if (id != "") {
                             # An INTERVAL initializer taints; a bare reading is
                             # only a stamp. See is_interval().
-                            if (is_interval(rhs)) {
+                            if (is_interval(rhs, rtoks, rcalls)) {
                                 if (!(id in taint)) { taint[id] = 1; added = 1 }
                             } else if (!(id in stamp)) {
                                 stamp[id] = 1; added = 1
@@ -327,7 +397,12 @@ scan_counts() {
                 curfn = ""
                 for (i = 0; i < nlines; i++) {
                     note_funcdef(line[i])
-                    if (curfn != "" && is_clocky(line[i]) && !(curfn in readers)) {
+                    # `curfn in readers` is tested BEFORE is_clocky() rather
+                    # than after: is_clocky() has no side effects, so the
+                    # promotion decision is unchanged, and an already-promoted
+                    # helper stops being re-examined on every later pass.
+                    if (curfn != "" && !(curfn in readers) &&
+                        is_clocky(line[i])) {
                         readers[curfn] = 1; changed = 1
                     }
                     if (harvest(line[i])) changed = 1

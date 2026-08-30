@@ -652,6 +652,19 @@ int syncdiag_cases_operator(void)
          * absent just because the node is idle). The discovered-peer section
          * must explicitly name the shared scheduler and handshake gate. */
         ok = ok && json_get(&cm_result2, "reactor") != NULL;
+        const struct json_value *socket_buffers = json_get(
+            &cm_result2, "socket_buffers");
+        ok = ok && socket_buffers && socket_buffers->type == JSON_OBJ &&
+            json_get(socket_buffers, "available") &&
+            json_get(socket_buffers, "requested_receive_bytes") &&
+            json_get(socket_buffers, "requested_send_bytes") &&
+            json_get(socket_buffers, "minimum_actual_receive_bytes") &&
+            json_get(socket_buffers, "minimum_actual_send_bytes") &&
+            json_get(socket_buffers, "attempts_total") &&
+            json_get(socket_buffers, "fully_observed_total") &&
+            json_get(socket_buffers, "degraded_total") &&
+            strcmp(json_get_str(json_get(socket_buffers, "authority")),
+                   "getsockopt") == 0;
         ok = ok && json_get(&cm_result2, "message_cycle") != NULL;
         ok = ok && json_get(&cm_result2, "floor") != NULL;
         const struct json_value *am_sum = json_get(&cm_result2,

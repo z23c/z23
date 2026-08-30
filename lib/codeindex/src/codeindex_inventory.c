@@ -9,14 +9,38 @@
 
 #include "codeindex_inventory_internal.h"
 
+#include "base/checked.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+
+bool inv_report_array_grow(void **arr, int *cap, int count,
+                           size_t elem_size, const char *label)
+{
+    if (count < *cap) return true;
+    int new_cap = *cap ? *cap : 8;
+    while (new_cap <= count) {
+        if (new_cap > INT_MAX / 2)
+            LOG_FAIL("codeindex.inventory",
+                     "report array '%s' capacity overflow", label);
+        new_cap *= 2;
+    }
+    size_t bytes;
+    if (!zcl_size_mul((size_t)new_cap, elem_size, &bytes))
+        LOG_FAIL("codeindex.inventory",
+                 "report array '%s' byte-size overflow", label);
+    void *p = zcl_realloc(*arr, bytes, label);
+    if (!p) return false;
+    *arr = p;
+    *cap = new_cap;
+    return true;
+}
 
 struct inv_body_order { int index; const struct inv_body *body; };
 struct inv_def_order { const char *name; const struct ci_symbol *symbol; };
@@ -220,15 +244,43 @@ static bool inv_occurrence_is_baselined_arm(
     return false;
 }
 
-static int inv_multi_arm_definition_count(const struct inv_scan *scan,
-                                          const char *name, char kind)
+/* Sorted index over the baselined-arm occurrences, keyed by (kind, name), so
+ * inv_multi_arm_definition_count can look up a symbol's arm count in
+ * O(log n + matches) instead of rescanning every occurrence for every
+ * function symbol -- the scan is O(symbols * occurrences) otherwise. */
+struct inv_arm_key { char kind; const char *name; };
+
+static int inv_arm_key_cmp(const void *a, const void *b)
 {
+    const struct inv_arm_key *x = a, *y = b;
+    if (x->kind != y->kind) return (x->kind > y->kind) - (x->kind < y->kind);
+    return strcmp(x->name, y->name);
+}
+
+static int inv_arm_key_lower(const struct inv_arm_key *keys, int count,
+                             char kind, const char *name)
+{
+    int lo = 0, hi = count;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = keys[mid].kind != kind
+            ? (keys[mid].kind > kind) - (keys[mid].kind < kind)
+            : strcmp(keys[mid].name, name);
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+static int inv_multi_arm_definition_count(const struct inv_arm_key *keys,
+                                          int key_count, const char *name,
+                                          char kind)
+{
+    int at = inv_arm_key_lower(keys, key_count, kind, name);
     int count = 0;
-    for (int i = 0; i < scan->occurrence_count; i++)
-        if (scan->occurrences[i].symbol.kind == kind &&
-            strcmp(scan->occurrences[i].symbol.name, name) == 0 &&
-            inv_occurrence_is_baselined_arm(scan, &scan->occurrences[i]))
-            count++;
+    for (; at < key_count && keys[at].kind == kind &&
+           strcmp(keys[at].name, name) == 0; at++)
+        count++;
     return count;
 }
 
@@ -259,10 +311,14 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
     struct inv_body_name_order *bodies = zcl_malloc(
         (size_t)scan->body_count * sizeof(*bodies),
         "ci_inventory_body_name_order");
+    struct inv_arm_key *arm_keys = zcl_malloc(
+        (size_t)scan->occurrence_count * sizeof(*arm_keys),
+        "ci_inventory_arm_keys");
     if ((caps && !report->capabilities) || (symbols && !report->symbols) ||
         (symbols && !cap_for_symbol) || (scan->occurrence_count && !defs) ||
-        (scan->body_count && !bodies)) {
-        free(cap_for_symbol); free(defs); free(bodies);
+        (scan->body_count && !bodies) ||
+        (scan->occurrence_count && !arm_keys)) {
+        free(cap_for_symbol); free(defs); free(bodies); free(arm_keys);
         return false;
     }
     int def_count = 0;
@@ -275,9 +331,17 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
         bodies[i].name = scan->bodies[i].name;
         bodies[i].body = &scan->bodies[i];
     }
+    int arm_key_count = 0;
+    for (int i = 0; i < scan->occurrence_count; i++)
+        if (inv_occurrence_is_baselined_arm(scan, &scan->occurrences[i])) {
+            arm_keys[arm_key_count].kind = scan->occurrences[i].symbol.kind;
+            arm_keys[arm_key_count++].name = scan->occurrences[i].symbol.name;
+        }
     qsort(defs, (size_t)def_count, sizeof(*defs), inv_def_order_cmp);
     qsort(bodies, (size_t)scan->body_count, sizeof(*bodies),
           inv_body_name_order_cmp);
+    qsort(arm_keys, (size_t)arm_key_count, sizeof(*arm_keys),
+          inv_arm_key_cmp);
 
     int ci = 0, si = 0, occ_begin = 0;
     for (int fi = 0; fi < scan->file_count; fi++) {
@@ -323,8 +387,8 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
             inv_cpy(dst->contract, sizeof(dst->contract), occ->symbol.doc);
             dst->definition_arm_count =
                 (dst->kind == 'T' || dst->kind == 't')
-                    ? inv_multi_arm_definition_count(scan, dst->name,
-                                                     dst->kind)
+                    ? inv_multi_arm_definition_count(arm_keys, arm_key_count,
+                                                     dst->name, dst->kind)
                     : 0;
             dst->multi_arm_definition = dst->definition_arm_count > 0;
             const struct ci_symbol *def = dst->multi_arm_definition ? NULL :
@@ -382,6 +446,7 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
     *out_cap_for_symbol = cap_for_symbol;
     free(defs);
     free(bodies);
+    free(arm_keys);
     return true;
 }
 
@@ -391,11 +456,11 @@ static bool inv_duplicate_push(struct ci_inventory_report *report,
                                const struct inv_body *b)
 {
     int n = report->duplicate_count;
-    void *p = zcl_realloc(report->duplicates,
-                          (size_t)(n + 1) * sizeof(*report->duplicates),
-                          "ci_inventory_duplicates");
-    if (!p) return false;
-    report->duplicates = p;
+    if (!inv_report_array_grow((void **)&report->duplicates,
+                               &report->duplicate_cap, n,
+                               sizeof(*report->duplicates),
+                               "ci_inventory_duplicates"))
+        return false;
     struct ci_inventory_duplicate *d = &report->duplicates[n];
     memset(d, 0, sizeof(*d));
     d->kind = kind;
@@ -521,11 +586,11 @@ static bool inv_invariant_push(struct ci_inventory_report *report,
             strcmp(report->invariants[i].definition_path, path) == 0)
             return true;
     int n = report->invariant_count;
-    void *p = zcl_realloc(report->invariants,
-                          (size_t)(n + 1) * sizeof(*report->invariants),
-                          "ci_inventory_invariants");
-    if (!p) return false;
-    report->invariants = p;
+    if (!inv_report_array_grow((void **)&report->invariants,
+                               &report->invariant_cap, n,
+                               sizeof(*report->invariants),
+                               "ci_inventory_invariants"))
+        return false;
     struct ci_inventory_invariant *gap = &report->invariants[n];
     memset(gap, 0, sizeof(*gap));
     inv_cpy(gap->header, sizeof(gap->header), cap->header);
@@ -572,6 +637,33 @@ static bool inv_invariant_push(struct ci_inventory_report *report,
     return true;
 }
 
+/* Sorted index over the constant-return, non-header/non-test/non-example
+ * bodies, keyed by name, so the shadow-definition scan below can look up a
+ * symbol's candidate bodies in O(log n + matches) instead of rescanning
+ * every body in the codebase for every function symbol -- same O(symbols *
+ * bodies) shape as the multi-arm scan fixed above. Dedup inside
+ * inv_invariant_push and the final qsort by (symbol, definition_path,
+ * definition_line) make push order immaterial to the emitted set. */
+struct inv_const_body_order { const char *name; const struct inv_body *body; };
+
+static int inv_const_body_order_cmp(const void *a, const void *b)
+{
+    const struct inv_const_body_order *x = a, *y = b;
+    return strcmp(x->name, y->name);
+}
+
+static int inv_const_body_lower(const struct inv_const_body_order *order,
+                                int count, const char *name)
+{
+    int lo = 0, hi = count;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (strcmp(order[mid].name, name) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
 static bool inv_derive_invariants(const struct inv_scan *scan,
                                   struct ci_inventory_report *report)
 {
@@ -588,26 +680,45 @@ static bool inv_derive_invariants(const struct inv_scan *scan,
             if (!inv_invariant_push(report, cap, symbol, NULL)) return false;
             }
         }
+    struct inv_const_body_order *const_bodies = zcl_malloc(
+        (size_t)scan->body_count * sizeof(*const_bodies),
+        "ci_inventory_const_bodies");
+    if (scan->body_count && !const_bodies) return false;
+    int const_body_count = 0;
+    for (int b = 0; b < scan->body_count; b++) {
+        const struct inv_body *body = &scan->bodies[b];
+        const struct inv_file *file = &scan->files[body->file_index];
+        if (!body->constant_return || file->is_header || file->is_test ||
+            file->is_example)
+            continue;
+        const_bodies[const_body_count].name = body->name;
+        const_bodies[const_body_count++].body = body;
+    }
+    qsort(const_bodies, (size_t)const_body_count, sizeof(*const_bodies),
+          inv_const_body_order_cmp);
     for (int c = 0; c < report->capability_count; c++) {
         const struct ci_inventory_capability *cap = &report->capabilities[c];
         for (int i = cap->symbol_offset; i < cap->symbol_offset + cap->symbol_count;
              i++) {
             const struct ci_inventory_symbol *symbol = &report->symbols[i];
             if (symbol->kind != 'T' && symbol->kind != 't') continue;
-            for (int b = 0; b < scan->body_count; b++) {
-                const struct inv_body *body = &scan->bodies[b];
-                const struct inv_file *file = &scan->files[body->file_index];
-                if (!body->constant_return || file->is_header || file->is_test ||
-                    file->is_example || strcmp(body->name, symbol->name) != 0)
-                    continue;
+            int at = inv_const_body_lower(const_bodies, const_body_count,
+                                          symbol->name);
+            for (; at < const_body_count &&
+                   strcmp(const_bodies[at].name, symbol->name) == 0; at++) {
+                const struct inv_body *body = const_bodies[at].body;
                 if (symbol->test_evidence ==
                         CI_INVENTORY_TEST_REGISTERED_REACHABLE &&
                     strcmp(symbol->definition_path, body->path) == 0)
                     continue;
-                if (!inv_invariant_push(report, cap, symbol, body)) return false;
+                if (!inv_invariant_push(report, cap, symbol, body)) {
+                    free(const_bodies);
+                    return false;
+                }
             }
         }
     }
+    free(const_bodies);
     qsort(report->invariants, (size_t)report->invariant_count,
           sizeof(*report->invariants), inv_invariant_value_cmp);
     return true;
@@ -621,11 +732,11 @@ static bool inv_definition_arm_push(
     const struct inv_body *body)
 {
     int n = report->definition_arm_count;
-    void *p = zcl_realloc(report->definition_arms,
-                          (size_t)(n + 1) * sizeof(*report->definition_arms),
-                          "ci_inventory_definition_arms");
-    if (!p) return false;
-    report->definition_arms = p;
+    if (!inv_report_array_grow((void **)&report->definition_arms,
+                               &report->definition_arm_cap, n,
+                               sizeof(*report->definition_arms),
+                               "ci_inventory_definition_arms"))
+        return false;
     struct ci_inventory_definition_arm *arm = &report->definition_arms[n];
     memset(arm, 0, sizeof(*arm));
     inv_cpy(arm->header, sizeof(arm->header), cap->header);

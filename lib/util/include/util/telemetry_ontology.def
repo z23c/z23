@@ -493,6 +493,51 @@ TELEMETRY_FIELD("connman", "reactor.configured_listen_sockets",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
     "how many listening sockets are configured; 0 means no inbound connection "
     "can ever be accepted", "", "")
+TELEMETRY_FIELD("connman", "socket_buffers.available",
+    TFU_BOOL, TFR_INFO, NULL, 0, TFS_INFO,
+    "whether at least one P2P socket has completed receive and send buffer "
+    "getsockopt readback; false before the first dial or accept is normal",
+    "", "")
+TELEMETRY_FIELD("connman", "socket_buffers.requested_receive_bytes",
+    TFU_BYTES, TFR_INFO, NULL, 0, TFS_INFO,
+    "receive-buffer bytes requested for each P2P socket on this platform; "
+    "zero means the Linux TCP auto-tuner remains authoritative", "", "")
+TELEMETRY_FIELD("connman", "socket_buffers.requested_send_bytes",
+    TFU_BYTES, TFR_INFO, NULL, 0, TFS_INFO,
+    "send-buffer bytes requested for each P2P socket on this platform; zero "
+    "means the Linux TCP auto-tuner remains authoritative", "", "")
+TELEMETRY_FIELD("connman", "socket_buffers.minimum_actual_receive_bytes",
+    TFU_BYTES, TFR_INFO, NULL, 0, TFS_INFO,
+    "smallest receive-buffer grant read back with getsockopt across P2P "
+    "sockets since boot, or -1 before any successful readback", "", "")
+TELEMETRY_FIELD("connman", "socket_buffers.minimum_actual_send_bytes",
+    TFU_BYTES, TFR_INFO, NULL, 0, TFS_INFO,
+    "smallest send-buffer grant read back with getsockopt across P2P sockets "
+    "since boot, or -1 before any successful readback", "", "")
+TELEMETRY_FIELD("connman", "socket_buffers.attempts_total",
+    TFU_COUNT_TOTAL, TFR_INFO, NULL, 0, TFS_INFO,
+    "P2P sockets whose platform buffer configuration was attempted since "
+    "boot, including both inbound accepts and outbound dials", "", "")
+TELEMETRY_FIELD("connman", "socket_buffers.fully_observed_total",
+    TFU_COUNT_TOTAL, TFR_MIN_RATIO_OF, "socket_buffers.attempts_total", 1000,
+    TFS_WARN,
+    "P2P socket attempts for which both receive and send grants were read "
+    "back from the kernel",
+    "below attempts_total means diagnostics could not observe one or both "
+    "kernel grants, so the reported minimums do not cover every live attempt",
+    "z23 dumpstate connman (socket_buffers.degraded_total and minimum grants)")
+TELEMETRY_FIELD("connman", "socket_buffers.degraded_total",
+    TFU_COUNT_TOTAL, TFR_EXPECT_ZERO, NULL, 0, TFS_WARN,
+    "P2P sockets where a requested buffer was denied or either kernel grant "
+    "could not be read back",
+    "nonzero means at least one peer socket may be using a smaller platform "
+    "default or has an unobservable grant; this is local kernel configuration, "
+    "not evidence that the peer misbehaved",
+    "z23 dumpstate connman (socket_buffers.requested_* and minimum_actual_*)")
+TELEMETRY_FIELD("connman", "socket_buffers.authority",
+    TFU_ENUM, TFR_INFO, NULL, 0, TFS_INFO,
+    "the operating-system interface that supplied the actual grant values; "
+    "currently always getsockopt", "", "")
 TELEMETRY_FIELD("connman", "noisetransport.advertising_now",
     TFU_GAUGE, TFR_INFO, NULL, 0, TFS_INFO,
     "connected peers advertising the Noise encrypted transport right now; "
