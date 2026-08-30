@@ -8,20 +8,24 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "0123bdd3b00e5c0cabb8cfabf4a79836ebfd71aec96ffa5e5042f66f5f937b81",
+      "root": "e1d052395dd4bfcfe29e1d9b6c13d4ae8c7032f3bb8deaf305cc6d6714ab4146",
       "name": "zclassic23/base",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "fd76b268be8caf8014cc820eadf663daaa7d2c6f7232710512d49f436e6985c9",
+      "root": "d3f2c8ab2e3484e7fd61ffe71ae2d81eb17087942b469c3e6d8348d78cc78759",
       "name": "zclassic23/codec",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "0ff8f0dfdc426e092cbfce9ae12da3ce1d2559af2116132dd45a9489c2eb0c94",
+      "root": "14d3e982d5cfe5e4600b39ca2c8cca880f4941e678d9bb8159ec1310de3c866d",
       "name": "zclassic23/sha3",
       "semver": "0.1.0-dev.1"
     }
+  ],
+  "capabilities": [
+    "CAP_FS_READ",
+    "CAP_FS_WRITE"
   ],
   "files": [
     "LICENSE",

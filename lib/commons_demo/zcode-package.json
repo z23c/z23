@@ -8,21 +8,22 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "0123bdd3b00e5c0cabb8cfabf4a79836ebfd71aec96ffa5e5042f66f5f937b81",
+      "root": "e1d052395dd4bfcfe29e1d9b6c13d4ae8c7032f3bb8deaf305cc6d6714ab4146",
       "name": "zclassic23/base",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "fd76b268be8caf8014cc820eadf663daaa7d2c6f7232710512d49f436e6985c9",
+      "root": "d3f2c8ab2e3484e7fd61ffe71ae2d81eb17087942b469c3e6d8348d78cc78759",
       "name": "zclassic23/codec",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "ac69ec0b8590de393c22f4f360688a394cae25c9919adae8a5d28bfed761a884",
+      "root": "5983757581acc23896084cf0b54b3e6a2e158bb40e515323f630ae56accdc406",
       "name": "zclassic23/json",
       "semver": "0.1.0-alpha.1"
     }
   ],
+  "capabilities": [],
   "files": [
     "LICENSE",
     "app/main.c",
