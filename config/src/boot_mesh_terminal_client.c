@@ -11,6 +11,7 @@
 // the wire. Drop/refusal logging happens here at the request edge.
 
 #include "config/boot_mesh_terminal.h"
+#include "config/boot_zcode_dht.h"
 #include "boot_mesh_status_internal.h"
 #include "boot_mesh_terminal_internal.h"
 
@@ -318,10 +319,12 @@ enum boot_mesh_terminal_open_result boot_mesh_terminal_client_open(
     /* Pre-flight the exact authority the responder will re-verify: the
      * peer's greatest-seq held delegation must support this pairing. */
     struct vcs_zcode_dht_delegation responder_delegation;
+    uint8_t network_genesis[32];
     if (!boot_mesh_peer_delegation(&row, &responder_delegation) ||
+        !boot_zcode_dht_network_genesis(network_genesis) ||
         mesh_pairing_service_authorize_terminal(
-            ndb, pairing_id_hex, &responder_delegation, session.remote_static,
-            now) != MESH_PAIRING_OK) {
+            ndb, network_genesis, pairing_id_hex, &responder_delegation,
+            session.remote_static, now) != MESH_PAIRING_OK) {
         p2p_node_release(peer);
         return MESH_TERMINAL_OPEN_PEER_IDENTITY_UNAVAILABLE;
     }

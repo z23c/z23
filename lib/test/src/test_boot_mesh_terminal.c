@@ -140,6 +140,20 @@ int test_boot_mesh_terminal(void)
                   MESH_TERMINAL_RECEIPT_OK);
         ASSERT_EQ(rg, UINT64_C(0));
 
+        /* Pairing ids are per-side: the open's pairing_id names the
+         * requester's own row, which the responder does not hold. The
+         * decision keys the row the live delegation names, so a garbage
+         * claim must not flip the verdict — this is the two-node shape,
+         * where the two sides' ids legitimately differ. */
+        uint8_t requester_side_claim[32];
+        mesh_term_fill32(requester_side_claim, 0x77);
+        memcpy(open.pairing_id, requester_side_claim, 32);
+        ASSERT_EQ(boot_mesh_terminal_decide(&f.ndb, &open,
+                                            &f.term_peer.res_snap,
+                                            &f.term_peer.delegation, 1,
+                                            f.genesis, TERM_WIRE_NOW, &rg),
+                  MESH_TERMINAL_RECEIPT_OK);
+
         uint8_t capsule[MESH_TERMINAL_CAPSULE_MAX];
         size_t capsule_len = 0;
         ASSERT(boot_mesh_terminal_render_grant_capsule(capsule,
@@ -453,16 +467,23 @@ int test_boot_mesh_terminal(void)
     TEST("boot mesh terminal: a revoked, stripped, or expired pairing "
          "fails the mid-session authority check by name") {
         /* The term pairing was accepted above with the terminal-exec
-         * capability and the fixture's 2000..3000 validity window. */
+         * capability and the fixture's 2000..3000 validity window. The
+         * check derives the responder's own row id from the open's
+         * requester identity — the open's pairing_id names the
+         * requester-side row and is never the lookup key. */
         uint8_t pairing_id[32];
         ASSERT(zcl_hex_decode_lower(f.term_peer.pairing.pairing_id,
                                     pairing_id, 32));
+        struct mesh_terminal_open_v1 open;
+        mesh_term_compose_open(&f, &f.term_peer, pairing_id,
+                               TERM_WIRE_NOW - 10, TERM_WIRE_NOW + 20,
+                               MESH_TERMINAL_CAP_TERMINAL_EXEC, &open);
         enum mesh_terminal_close_reason reason = MESH_TERMINAL_CLOSE_INTERNAL;
-        ASSERT(!boot_mesh_terminal_pairing_lost(&f.ndb, pairing_id, 2500,
+        ASSERT(!boot_mesh_terminal_pairing_lost(&f.ndb, &open, 2500,
                                                 &reason));
 
         /* Past the pairing's expiry: named EXPIRED, not REVOKED. */
-        ASSERT(boot_mesh_terminal_pairing_lost(&f.ndb, pairing_id, 3001,
+        ASSERT(boot_mesh_terminal_pairing_lost(&f.ndb, &open, 3001,
                                                &reason));
         ASSERT_EQ(reason, MESH_TERMINAL_CLOSE_EXPIRED);
 
@@ -471,19 +492,20 @@ int test_boot_mesh_terminal(void)
                                               f.term_peer.pairing.pairing_id,
                                               2500),
                   MESH_PAIRING_OK);
-        ASSERT(boot_mesh_terminal_pairing_lost(&f.ndb, pairing_id, 2500,
+        ASSERT(boot_mesh_terminal_pairing_lost(&f.ndb, &open, 2500,
                                                &reason));
         ASSERT_EQ(reason, MESH_TERMINAL_CLOSE_REVOKED);
 
-        /* A vanished row cannot keep a terminal alive either. */
-        uint8_t unknown[32];
-        mesh_term_fill32(unknown, 0xEE);
-        ASSERT(boot_mesh_terminal_pairing_lost(&f.ndb, unknown, 2500,
+        /* A requester identity no row was ever accepted for cannot keep
+         * a terminal alive either. */
+        struct mesh_terminal_open_v1 unknown = open;
+        mesh_term_fill32(unknown.requester_master_pubkey, 0xEE);
+        ASSERT(boot_mesh_terminal_pairing_lost(&f.ndb, &unknown, 2500,
                                                &reason));
         ASSERT_EQ(reason, MESH_TERMINAL_CLOSE_REVOKED);
 
         /* Fail closed: an unreadable db refuses the authority question. */
-        ASSERT(boot_mesh_terminal_pairing_lost(NULL, pairing_id, 2500,
+        ASSERT(boot_mesh_terminal_pairing_lost(NULL, &open, 2500,
                                                &reason));
         ASSERT_EQ(reason, MESH_TERMINAL_CLOSE_REVOKED);
         PASS();

@@ -250,10 +250,18 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
     if (live_count != 1)
         return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
 
+    /* Pairing ids are per-side: each node derives its row id from the
+     * PEER's master+noise identity, so the id a request carries names the
+     * requester's own row and can never name ours. The only row that can
+     * authorize this session is the one the live delegation (already
+     * matched to the session's remote static) points at — derive its id. */
     char pairing_id[MESH_PAIRING_ID_HEX + 1];
-    zcl_hex_encode(request->pairing_id, 32, pairing_id);
+    if (!mesh_pairing_id_derive(network_genesis, live->doc.master_pubkey,
+                                live->noise_static_pubkey, pairing_id))
+        return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
     enum mesh_pairing_reason authorized = mesh_pairing_service_authorize_status(
-        ndb, pairing_id, live, session->remote_static, (int64_t)now_unix);
+        ndb, network_genesis, pairing_id, live, session->remote_static,
+        (int64_t)now_unix);
     if (authorized != MESH_PAIRING_OK)
         return mesh_status_from_pairing_reason(authorized);
     /* The pairing row carries the receipt's revocation-generation evidence.
