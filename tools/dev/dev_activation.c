@@ -45,6 +45,15 @@
 
 /* ── small utilities ─────────────────────────────────────────────────── */
 
+static const char *dev_activation_executable_name(void)
+{
+#if defined(_WIN32)
+    return "zclassic23-dev.exe";
+#else
+    return "zclassic23-dev";
+#endif
+}
+
 bool dev_activation_join(char *out, size_t out_sz, const char *a, const char *b)
 {
     int n = snprintf(out, out_sz, "%s/%s", a, b);
@@ -318,13 +327,8 @@ bool dev_activation_link_generation(const struct dev_activation_txn *txn,
     if (!dev_valid_generation_id(generation))
         LOG_FAIL("dev-activation", "invalid generation id: %s", generation);
     char bin[PATH_MAX];
-    int m = snprintf(bin, sizeof(bin),
-#if defined(_WIN32)
-                     "%s/%s/zclassic23-dev.exe",
-#else
-                     "%s/%s/zclassic23-dev",
-#endif
-                     txn->gen_root, generation);
+    int m = snprintf(bin, sizeof(bin), "%s/%s/%s", txn->gen_root,
+                     generation, dev_activation_executable_name());
     if (m <= 0 || (size_t)m >= sizeof(bin))
         LOG_FAIL("dev-activation", "generation bin path overflow");
 #if defined(_WIN32)
@@ -1259,11 +1263,8 @@ int dev_activation_activate_generation(const uint8_t gen_sha256[32],
     dev_activation_join(txn.candidate_dir, sizeof(txn.candidate_dir), txn.gen_root,
              txn.candidate_generation);
     int candidate_n = snprintf(txn.candidate_bin, sizeof(txn.candidate_bin),
-#if defined(_WIN32)
-             "%s/zclassic23-dev.exe", txn.candidate_dir);
-#else
-             "%s/zclassic23-dev", txn.candidate_dir);
-#endif
+                               "%s/%s", txn.candidate_dir,
+                               dev_activation_executable_name());
     if (candidate_n <= 0 ||
         (size_t)candidate_n >= sizeof(txn.candidate_bin)) {
         dev_set_status(result, "stage_failed", "stage_failed",
