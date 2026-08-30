@@ -10,6 +10,8 @@
 #ifndef ZCL_CODEINDEX_INVENTORY_H
 #define ZCL_CODEINDEX_INVENTORY_H
 
+#include "codeindex/codeindex.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -49,7 +51,7 @@ struct ci_inventory_capability {
     char header[256];
     char include_token[256];
     char group[64];
-    char purpose[160];
+    char purpose[CI_FILE_PURPOSE_MAX];
     int symbol_offset;
     int symbol_count;
     int function_count;

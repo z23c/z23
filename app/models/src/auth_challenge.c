@@ -6,6 +6,7 @@
 
 #include "util/log_macros.h"
 #include "models/auth_challenge.h"
+#include "models/query_builder.h"
 #include "config/runtime.h"
 #include "json/json.h"
 #include <string.h>
@@ -46,37 +47,40 @@ bool db_auth_challenge_validate(const struct db_auth_challenge *c,
 bool db_auth_challenge_save(struct node_db *ndb,
                             const struct db_auth_challenge *c)
 {
-    sqlite3_stmt *s = NULL;
     struct ar_callbacks *cbs;
     if (!ndb || !ndb->open || !c) {
         LOG_FAIL("model", "db_auth_challenge_save: bad args");
         return false;
     }
     cbs = db_auth_challenge_callbacks();
-    AR_ADHOC_SAVE(ndb, s,
-        "INSERT OR REPLACE INTO auth_challenges "
-        "(nonce_hex,address,issued_at,expires_at,consumed) "
-        "VALUES (?,?,?,?,?)",
-        cbs, "auth_challenge", c, db_auth_challenge_validate,
-        AR_BIND_TEXT(s, 1, c->nonce_hex);
-        AR_BIND_TEXT(s, 2, c->address);
-        AR_BIND_INT(s, 3, c->issued_at);
-        AR_BIND_INT(s, 4, c->expires_at);
-        AR_BIND_INT(s, 5, c->consumed ? 1 : 0));
+    struct qb q;
+    qb_insert(&q, QB_T_auth_challenges, QB_INSERT_OR_REPLACE);
+    qb_value_text(&q, QB_C_auth_challenges_nonce_hex, c->nonce_hex);
+    qb_value_text(&q, QB_C_auth_challenges_address, c->address);
+    qb_value_int(&q, QB_C_auth_challenges_issued_at, c->issued_at);
+    qb_value_int(&q, QB_C_auth_challenges_expires_at, c->expires_at);
+    qb_value_int(&q, QB_C_auth_challenges_consumed, c->consumed ? 1 : 0);
+    /* ar-lifecycle-ok:qb-adhoc-save-expands-to-AR_BEGIN_SAVE-and-AR_FINISH_SAVE */
+    QB_ADHOC_SAVE(ndb, &q, s, cbs, "auth_challenge", c,
+                  db_auth_challenge_validate);
 }
 
 bool db_auth_challenge_find(struct node_db *ndb, const char *nonce_hex,
                             struct db_auth_challenge *out)
 {
-    sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open || !nonce_hex || !out) {
         LOG_FAIL("model", "db_auth_challenge_find: bad args");
         return false;
     }
-    AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT nonce_hex,address,issued_at,expires_at,consumed "
-        "FROM auth_challenges WHERE nonce_hex=?",
-        AR_BIND_TEXT(s, 1, nonce_hex),
+    struct qb q;
+    qb_select(&q, QB_T_auth_challenges);
+    qb_select_column(&q, QB_C_auth_challenges_nonce_hex);
+    qb_select_column(&q, QB_C_auth_challenges_address);
+    qb_select_column(&q, QB_C_auth_challenges_issued_at);
+    qb_select_column(&q, QB_C_auth_challenges_expires_at);
+    qb_select_column(&q, QB_C_auth_challenges_consumed);
+    qb_where_text(&q, QB_C_auth_challenges_nonce_hex, QB_EQ, nonce_hex);
+    QB_QUERY_ONE_BOOL(ndb, &q, s,
         AR_READ_STR(s, 0, out->nonce_hex, sizeof(out->nonce_hex));
         AR_READ_STR(s, 1, out->address, sizeof(out->address));
         out->issued_at = AR_COL_INT(s, 2);
@@ -87,17 +91,18 @@ bool db_auth_challenge_find(struct node_db *ndb, const char *nonce_hex,
 bool db_auth_challenge_consume(struct node_db *ndb, const char *nonce_hex,
                                const char *address, int64_t now)
 {
-    sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open || !nonce_hex || !address) {
         LOG_FAIL("model", "db_auth_challenge_consume: bad args");
         return false;
     }
-    AR_EXEC_CHANGED_BOOL(ndb, s,
-        "UPDATE auth_challenges SET consumed=1 "
-        "WHERE nonce_hex=? AND address=? AND consumed=0 AND expires_at>?",
-        AR_BIND_TEXT(s, 1, nonce_hex);
-        AR_BIND_TEXT(s, 2, address);
-        AR_BIND_INT(s, 3, now));
+    struct qb q;
+    qb_update(&q, QB_T_auth_challenges);
+    qb_set_int(&q, QB_C_auth_challenges_consumed, 1);
+    qb_where_text(&q, QB_C_auth_challenges_nonce_hex, QB_EQ, nonce_hex);
+    qb_where_text(&q, QB_C_auth_challenges_address, QB_EQ, address);
+    qb_where_int(&q, QB_C_auth_challenges_consumed, QB_EQ, 0);
+    qb_where_int(&q, QB_C_auth_challenges_expires_at, QB_GT, now);
+    QB_EXEC_CHANGED_BOOL(ndb, &q, s);
 }
 
 int db_auth_challenge_reap(struct node_db *ndb, int64_t cutoff)
@@ -105,14 +110,16 @@ int db_auth_challenge_reap(struct node_db *ndb, int64_t cutoff)
     sqlite3_stmt *s = NULL;
     if (!ndb || !ndb->open)
         return 0;
-    if (sqlite3_prepare_v2(ndb->db,
-            "DELETE FROM auth_challenges "
-            "WHERE issued_at < ? OR consumed=1",
-            -1, &s, NULL) != SQLITE_OK || !s) {
-        LOG_WARN("model", "db_auth_challenge_reap: prepare failed");
+    struct qb q;
+    qb_delete(&q, QB_T_auth_challenges);
+    qb_group_begin(&q, QB_OR);
+    qb_where_int(&q, QB_C_auth_challenges_issued_at, QB_LT, cutoff);
+    qb_where_int(&q, QB_C_auth_challenges_consumed, QB_EQ, 1);
+    qb_group_end(&q);
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("model", "db_auth_challenge_reap: %s", qb_error(&q));
         return 0;
     }
-    AR_BIND_INT(s, 1, cutoff);
     int removed = 0;
     if (AR_STEP_DONE(s))
         removed = sqlite3_changes(ndb->db);
@@ -124,8 +131,11 @@ int db_auth_challenge_pending_count(struct node_db *ndb)
 {
     if (!ndb || !ndb->open)
         return 0;
-    AR_QUERY_COUNT_SQL(ndb,
-        "SELECT COUNT(*) FROM auth_challenges WHERE consumed=0");
+    struct qb q;
+    qb_select(&q, QB_T_auth_challenges);
+    qb_select_count_star(&q);
+    qb_where_int(&q, QB_C_auth_challenges_consumed, QB_EQ, 0);
+    QB_QUERY_COUNT(ndb, &q, s);
 }
 
 bool auth_challenge_dump_state_json(struct json_value *out, const char *key)

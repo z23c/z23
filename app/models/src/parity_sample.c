@@ -4,6 +4,7 @@
  * consensus-parity comparison history written by legacy_mirror_sync. */
 
 #include "models/parity_sample.h"
+#include "models/query_builder.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 
@@ -28,8 +29,6 @@ bool db_parity_sample_validate(const struct db_parity_sample *s,
 bool db_parity_sample_save(struct node_db *ndb,
                            const struct db_parity_sample *s)
 {
-    sqlite3_stmt *stmt = NULL;
-
     if (!ndb || !ndb->open || !s) {
         LOG_FAIL("model", "db_parity_sample_save: bad args");
     }
@@ -37,52 +36,69 @@ bool db_parity_sample_save(struct node_db *ndb,
         ((struct db_parity_sample *)s)->ts =
             (int64_t)platform_time_wall_unix();
 
-    AR_ADHOC_SAVE(ndb, stmt,
-        "INSERT INTO parity_samples "
-        "(ts,our_height,oracle_height,heights_equal_at,hash_equal,"
-        "oracle_reachable) VALUES (?,?,?,?,?,?)",
-        db_parity_sample_callbacks(), "parity_sample", s,
-        db_parity_sample_validate,
-        AR_BIND_INT(stmt, 1, s->ts);
-        AR_BIND_INT(stmt, 2, s->our_height);
-        AR_BIND_INT(stmt, 3, s->oracle_height);
-        AR_BIND_INT(stmt, 4, s->heights_equal_at);
-        AR_BIND_INT(stmt, 5, s->hash_equal);
-        AR_BIND_INT(stmt, 6, s->oracle_reachable));
+    struct qb q;
+    qb_insert(&q, QB_T_parity_samples, QB_INSERT_PLAIN);
+    qb_value_int(&q, QB_C_parity_samples_ts, s->ts);
+    qb_value_int(&q, QB_C_parity_samples_our_height, s->our_height);
+    qb_value_int(&q, QB_C_parity_samples_oracle_height, s->oracle_height);
+    qb_value_int(&q, QB_C_parity_samples_heights_equal_at,
+                 s->heights_equal_at);
+    qb_value_int(&q, QB_C_parity_samples_hash_equal, s->hash_equal);
+    qb_value_int(&q, QB_C_parity_samples_oracle_reachable,
+                 s->oracle_reachable);
+    /* ar-lifecycle-ok:qb-adhoc-save-expands-to-AR_BEGIN_SAVE-and-AR_FINISH_SAVE */
+    QB_ADHOC_SAVE(ndb, &q, stmt, db_parity_sample_callbacks(),
+                  "parity_sample", s, db_parity_sample_validate);
 }
 
 bool db_parity_sample_prune(struct node_db *ndb, int keep_rows)
 {
-    sqlite3_stmt *stmt = NULL;
     if (!ndb || !ndb->open) {
         LOG_FAIL("model", "db_parity_sample_prune: bad args");
     }
     if (keep_rows < 0)
         keep_rows = 0;
-    AR_EXEC_BOOL(ndb, stmt,
-        "DELETE FROM parity_samples WHERE id NOT IN "
-        "(SELECT id FROM parity_samples ORDER BY id DESC LIMIT ?)",
-        AR_BIND_INT(stmt, 1, keep_rows));
+
+    /* Keep the newest keep_rows ids, delete the rest. The inner SELECT is
+     * itself built, so its LIMIT is a bound parameter too. */
+    struct qb keep;
+    qb_select(&keep, QB_T_parity_samples);
+    qb_select_column(&keep, QB_C_parity_samples_id);
+    qb_order_by(&keep, QB_C_parity_samples_id, QB_DESC);
+    qb_limit(&keep, keep_rows);
+
+    struct qb q;
+    qb_delete(&q, QB_T_parity_samples);
+    qb_where_in_select(&q, QB_C_parity_samples_id, true, &keep);
+    QB_EXEC_BOOL(ndb, &q, stmt);
 }
 
 int db_parity_sample_count(struct node_db *ndb)
 {
     if (!ndb || !ndb->open)
         return 0;
-    AR_QUERY_COUNT_SQL(ndb, "SELECT COUNT(*) FROM parity_samples");
+    struct qb q;
+    qb_select(&q, QB_T_parity_samples);
+    qb_select_count_star(&q);
+    QB_QUERY_COUNT(ndb, &q, stmt);
 }
 
 int db_parity_sample_recent(struct node_db *ndb,
                             struct db_parity_sample *out, size_t max)
 {
-    sqlite3_stmt *stmt = NULL;
     if (!ndb || !ndb->open || !out || max == 0)
         return 0;
-    AR_QUERY_LIST(ndb, stmt,
-        "SELECT ts,our_height,oracle_height,heights_equal_at,hash_equal,"
-        "oracle_reachable FROM parity_samples ORDER BY id DESC LIMIT ?",
-        out, max,
-        AR_BIND_INT(stmt, 1, (int)max),
+    struct qb q;
+    qb_select(&q, QB_T_parity_samples);
+    qb_select_column(&q, QB_C_parity_samples_ts);
+    qb_select_column(&q, QB_C_parity_samples_our_height);
+    qb_select_column(&q, QB_C_parity_samples_oracle_height);
+    qb_select_column(&q, QB_C_parity_samples_heights_equal_at);
+    qb_select_column(&q, QB_C_parity_samples_hash_equal);
+    qb_select_column(&q, QB_C_parity_samples_oracle_reachable);
+    qb_order_by(&q, QB_C_parity_samples_id, QB_DESC);
+    qb_limit(&q, (int64_t)max);
+    QB_QUERY_LIST(ndb, &q, stmt, out, max,
         out[count].ts = AR_COL_INT(stmt, 0);
         out[count].our_height = AR_COL_INT(stmt, 1);
         out[count].oracle_height = AR_COL_INT(stmt, 2);

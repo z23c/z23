@@ -16,6 +16,7 @@
  * at-rest representation. */
 
 #include "models/zswap_ad.h"
+#include "models/query_builder.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
@@ -24,6 +25,15 @@
 #include <string.h>
 
 DEFINE_MODEL_CALLBACKS(zswap_ad)
+
+/* The read projection, in row_to_zswap_ad() order. */
+static const enum qb_column k_zswap_ad_cols[] = {
+    QB_C_zswap_ads_quote_root,      QB_C_zswap_ads_wire,
+    QB_C_zswap_ads_first_seen_unix, QB_C_zswap_ads_last_seen_unix,
+    QB_C_zswap_ads_seen_count,
+};
+#define K_ZSWAP_AD_NCOLS \
+    (sizeof(k_zswap_ad_cols) / sizeof(k_zswap_ad_cols[0]))
 
 static bool bytes_nonzero_local(const uint8_t *bytes, size_t len)
 {
@@ -82,30 +92,31 @@ bool db_zswap_ad_save(struct node_db *ndb,
         LOG_FAIL("zswap", "db_zswap_ad_save: quote re-encode failed");
 
     struct ar_callbacks *cbs = db_zswap_ad_callbacks();
-    sqlite3_stmt *s = NULL;
     /* Upsert on the dedup id: a fresh ad inserts; a byte-identical
      * re-gossip bumps last_seen_unix/seen_count in place and keeps
      * first_seen_unix — the same dedup-on-root rule as the live cache. */
-    AR_ADHOC_SAVE(ndb, s,
-        "INSERT INTO zswap_ads"
-        "(quote_root,wire,seller_pubkey,token_id,token_amount,zcl_amount,"
-        "issued_unix,expires_unix,first_seen_unix,last_seen_unix,seen_count)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?)"
-        " ON CONFLICT(quote_root) DO UPDATE SET"
-        " last_seen_unix=excluded.last_seen_unix,"
-        " seen_count=zswap_ads.seen_count+1",
-        cbs, "zswap_ad", ad, db_zswap_ad_validate,
-        AR_BIND_BLOB(s, 1, ad->quote_root, 32);
-        AR_BIND_BLOB(s, 2, wire, ZSWAP_QUOTE_WIRE_BYTES);
-        AR_BIND_BLOB(s, 3, ad->quote.seller_pubkey, 32);
-        AR_BIND_BLOB(s, 4, ad->quote.token_id, 32);
-        AR_BIND_INT(s, 5, (int64_t)ad->quote.token_amount);
-        AR_BIND_INT(s, 6, (int64_t)ad->quote.zcl_amount);
-        AR_BIND_INT(s, 7, ad->quote.issued_unix);
-        AR_BIND_INT(s, 8, ad->quote.expires_unix);
-        AR_BIND_INT(s, 9, ad->first_seen_unix);
-        AR_BIND_INT(s, 10, ad->last_seen_unix);
-        AR_BIND_INT(s, 11, (int64_t)ad->seen_count));
+    static const enum qb_column k_conflict[] = { QB_C_zswap_ads_quote_root };
+    struct qb q;
+    qb_insert(&q, QB_T_zswap_ads, QB_INSERT_PLAIN);
+    qb_value_blob(&q, QB_C_zswap_ads_quote_root, ad->quote_root, 32);
+    qb_value_blob(&q, QB_C_zswap_ads_wire, wire, ZSWAP_QUOTE_WIRE_BYTES);
+    qb_value_blob(&q, QB_C_zswap_ads_seller_pubkey, ad->quote.seller_pubkey,
+                  32);
+    qb_value_blob(&q, QB_C_zswap_ads_token_id, ad->quote.token_id, 32);
+    qb_value_int(&q, QB_C_zswap_ads_token_amount,
+                 (int64_t)ad->quote.token_amount);
+    qb_value_int(&q, QB_C_zswap_ads_zcl_amount,
+                 (int64_t)ad->quote.zcl_amount);
+    qb_value_int(&q, QB_C_zswap_ads_issued_unix, ad->quote.issued_unix);
+    qb_value_int(&q, QB_C_zswap_ads_expires_unix, ad->quote.expires_unix);
+    qb_value_int(&q, QB_C_zswap_ads_first_seen_unix, ad->first_seen_unix);
+    qb_value_int(&q, QB_C_zswap_ads_last_seen_unix, ad->last_seen_unix);
+    qb_value_int(&q, QB_C_zswap_ads_seen_count, (int64_t)ad->seen_count);
+    qb_on_conflict_do_update(&q, k_conflict, 1);
+    qb_conflict_set_excluded(&q, QB_C_zswap_ads_last_seen_unix);
+    qb_conflict_set_increment(&q, QB_C_zswap_ads_seen_count, 1);
+    /* ar-lifecycle-ok:qb-adhoc-save-expands-to-AR_BEGIN_SAVE-and-AR_FINISH_SAVE */
+    QB_ADHOC_SAVE(ndb, &q, s, cbs, "zswap_ad", ad, db_zswap_ad_validate);
 }
 
 /* Rebuild the record from the stored wire (single source of truth for the
@@ -138,11 +149,11 @@ bool db_zswap_ad_find(struct node_db *ndb,
     if (!quote_root) LOG_FAIL("zswap", "db_zswap_ad_find: quote_root is NULL");
     if (!out) LOG_FAIL("zswap", "db_zswap_ad_find: out is NULL");
 
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT quote_root,wire,first_seen_unix,last_seen_unix,seen_count"
-        " FROM zswap_ads WHERE quote_root=?",
-        AR_BIND_BLOB(s, 1, quote_root, 32),
+    struct qb q;
+    qb_select(&q, QB_T_zswap_ads);
+    qb_select_columns(&q, k_zswap_ad_cols, K_ZSWAP_AD_NCOLS);
+    qb_where_blob(&q, QB_C_zswap_ads_quote_root, QB_EQ, quote_root, 32);
+    QB_QUERY_ONE_BOOL(ndb, &q, s,
         if (!row_to_zswap_ad(s, out)) { AR_FINALIZE(s); return false; });
 }
 
@@ -150,10 +161,13 @@ int db_zswap_ad_prune_expired(struct node_db *ndb, int64_t now_unix)
 {
     if (!ndb || !ndb->open) return 0;
 
+    struct qb q;
+    qb_delete(&q, QB_T_zswap_ads);
+    qb_where_int(&q, QB_C_zswap_ads_expires_unix, QB_LE, now_unix);
     sqlite3_stmt *s = NULL;
-    AR_PREPARE_RET(ndb, s,
-        "DELETE FROM zswap_ads WHERE expires_unix <= ?", 0);
-    AR_BIND_INT(s, 1, now_unix);
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_RETURN(0, "zswap", "db_zswap_ad_prune_expired: %s",
+                   qb_error(&q));
     bool ok = false;
     AR_FINALIZE_STEP_DONE(s, ok);
     return ok ? sqlite3_changes(ndb->db) : 0;
@@ -191,15 +205,17 @@ int db_zswap_ad_best_for_token(struct node_db *ndb,
      * explicit reclamation path. Unit-price ordering is integer-only, so it
      * runs in C (SQLite integers are 64-bit and a cross product overflows). */
     struct zswap_yardsale_ad match[ZSWAP_YARDSALE_QUERY_CAP];
+    struct qb q;
+    qb_select(&q, QB_T_zswap_ads);
+    qb_select_columns(&q, k_zswap_ad_cols, K_ZSWAP_AD_NCOLS);
+    qb_where_blob(&q, QB_C_zswap_ads_token_id, QB_EQ, token_id, 32);
+    qb_where_int(&q, QB_C_zswap_ads_expires_unix, QB_GT, now_unix);
+    qb_order_by(&q, QB_C_zswap_ads_last_seen_unix, QB_DESC);
+    qb_limit(&q, (int64_t)ZSWAP_YARDSALE_QUERY_CAP);
     sqlite3_stmt *s = NULL;
-    AR_PREPARE_RET(ndb, s,
-        "SELECT quote_root,wire,first_seen_unix,last_seen_unix,seen_count"
-        " FROM zswap_ads WHERE token_id=? AND expires_unix>?"
-        " ORDER BY last_seen_unix DESC LIMIT ?",
-        0);
-    AR_BIND_BLOB(s, 1, token_id, 32);
-    AR_BIND_INT(s, 2, now_unix);
-    AR_BIND_INT(s, 3, (int)ZSWAP_YARDSALE_QUERY_CAP);
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_RETURN(0, "zswap", "db_zswap_ad_best_for_token: %s",
+                   qb_error(&q));
     size_t n = 0;
     while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW &&
            n < ZSWAP_YARDSALE_QUERY_CAP) {
@@ -224,14 +240,15 @@ int db_zswap_ad_list_live(struct node_db *ndb,
     /* Same filtering/ordering contract as db_zswap_ad_best_for_token,
      * minus the token filter — the whole yard on one page. */
     struct zswap_yardsale_ad match[ZSWAP_YARDSALE_QUERY_CAP];
+    struct qb q;
+    qb_select(&q, QB_T_zswap_ads);
+    qb_select_columns(&q, k_zswap_ad_cols, K_ZSWAP_AD_NCOLS);
+    qb_where_int(&q, QB_C_zswap_ads_expires_unix, QB_GT, now_unix);
+    qb_order_by(&q, QB_C_zswap_ads_last_seen_unix, QB_DESC);
+    qb_limit(&q, (int64_t)ZSWAP_YARDSALE_QUERY_CAP);
     sqlite3_stmt *s = NULL;
-    AR_PREPARE_RET(ndb, s,
-        "SELECT quote_root,wire,first_seen_unix,last_seen_unix,seen_count"
-        " FROM zswap_ads WHERE expires_unix>?"
-        " ORDER BY last_seen_unix DESC LIMIT ?",
-        0);
-    AR_BIND_INT(s, 1, now_unix);
-    AR_BIND_INT(s, 2, (int)ZSWAP_YARDSALE_QUERY_CAP);
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_RETURN(0, "zswap", "db_zswap_ad_list_live: %s", qb_error(&q));
     size_t n = 0;
     while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW &&
            n < ZSWAP_YARDSALE_QUERY_CAP) {

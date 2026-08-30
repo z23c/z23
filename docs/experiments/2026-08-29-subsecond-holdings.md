@@ -33,8 +33,19 @@ or false zero.
 
 The legacy RPC transport now accepts an explicit 1–60000 ms send/receive
 budget while its existing API retains the five-second compatibility default.
-This is a prerequisite for a foreground-independent legacy observation cache;
-the current change does not claim a complete legacy ZSLP inventory.
+`vault list` uses that transport through a 250 ms observer and reports the
+co-located legacy wallet in an aggregation-excluded section. Exact decimal
+strings are converted to zatoshis without floating point; malformed,
+overflowing, or internally inconsistent results fail closed.
+
+At `2026-08-29T21:52:15-04:00`
+(`2026-08-30T01:52:15+00:00` UTC), 100 warm calls through the integrated
+observer completed with 90.000 ms median, 99.000 ms p99 and maximum, and
+90.790 ms mean process wall latency. The command's own measured work for a
+sample call was 7 ms. That call reported legacy transparent 999662 zatoshis,
+shielded 1970000 zatoshis, and total 2969662 zatoshis; canonical Z23 custody
+remained zero and separate. This change does not claim a complete legacy ZSLP
+inventory.
 
 ## Verification
 
@@ -44,4 +55,3 @@ the current change does not claim a complete legacy ZSLP inventory.
 - `make -j16 t-fast ONLY=test_rpc`: 7/7 PASS, 0 skips
 - `make lint-fast`: 23 gates PASS
 - `make check-api-reference-generated`: PASS
-

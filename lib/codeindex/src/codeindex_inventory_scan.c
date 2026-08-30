@@ -446,7 +446,7 @@ bool inv_scan_all(struct inv_scan *s, uint8_t source_root[32])
         inv_sha_u64(&sha, (uint64_t)len);
         if (len) sha3_256_write(&sha, (const unsigned char *)src, len);
 
-        char group[64], purpose[320] = "";
+        char group[64], purpose[CI_FILE_PURPOSE_MAX] = "";
         inv_group_for_path(s->paths[i].path, group);
         bool is_header = strlen(s->paths[i].path) >= 2 &&
             strcmp(s->paths[i].path + strlen(s->paths[i].path) - 2, ".h") == 0;
