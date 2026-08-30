@@ -63,6 +63,8 @@ roots_found="$(field registered_test_roots_found)"
 roots_missing="$(field registered_test_roots_missing)"
 roots_ambiguous="$(field ambiguous_registered_test_roots)"
 root_gaps="$(field test_root_gaps)"
+multi_arm_symbols="$(field multi_arm_symbols)"
+definition_arms="$(field definition_arms)"
 if [ "${capabilities:-0}" -lt 1000 ] || [ "${roots_found:-0}" -lt 500 ]; then
     echo "check_capability_inventory_generated: FATAL — census floor failed" >&2
     echo "  capabilities=${capabilities:-missing} roots_found=${roots_found:-missing}" >&2
@@ -94,16 +96,35 @@ inv_rows="$(grep -c '^{"record":"untested_invariant"' \
     "$TMP/expected.jsonl" || true)"
 gap_rows="$(grep -c '^{"record":"test_root_gap"' \
     "$TMP/expected.jsonl" || true)"
+multi_rows="$(grep -c '^{"record":"multi_arm_symbol"' \
+    "$TMP/expected.jsonl" || true)"
+arm_rows="$(grep -c '^{"record":"definition_arm"' \
+    "$TMP/expected.jsonl" || true)"
 if [ "$capabilities" -ne "$cap_rows" ] || [ "$duplicates" -ne "$dup_rows" ] ||
    [ "$invariants" -ne "$inv_rows" ] || [ "$registered_groups" -ne "$catalog_groups" ] ||
+   [ "$multi_arm_symbols" -ne "$multi_rows" ] ||
+   [ "$definition_arms" -ne "$arm_rows" ] ||
    [ $((roots_found + roots_missing + roots_ambiguous)) -ne "$registered_groups" ] ||
    [ "$root_gaps" -ne "$gap_rows" ] ||
    [ "$gap_rows" -ne $((roots_missing + roots_ambiguous)) ]; then
     echo "check_capability_inventory_generated: FATAL — report accounting is inconsistent" >&2
     echo "  capabilities=$capabilities/$cap_rows duplicates=$duplicates/$dup_rows invariants=$invariants/$inv_rows" >&2
+    echo "  multi_arm_symbols=$multi_arm_symbols/$multi_rows definition_arms=$definition_arms/$arm_rows" >&2
     echo "  groups=$registered_groups/$catalog_groups roots=$roots_found+$roots_missing+$roots_ambiguous gaps=$root_gaps/$gap_rows" >&2
     exit 2
 fi
+
+for claim in \
+    '"generated_artifact_schema":"zcl.generated_artifact.v1"' \
+    '"artifact_id":"zcl.code_capability_inventory.v1"' \
+    '"generated_by":"tools/gen_capability_inventory.c"' \
+    '"regenerate":"make docs-capability-inventory"' \
+    '"artifact_id":"zcl.arm_symbol_single_baseline.v1"'; do
+    if ! grep -Fq "$claim" <<<"$meta"; then
+        echo "check_capability_inventory_generated: FATAL — generated artifact header lacks $claim" >&2
+        exit 2
+    fi
+done
 
 compare_doc() {
     local candidate="$1"

@@ -17,11 +17,6 @@
 # cannot express CREATE TABLE, so those are expected to stay.
 #
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_model_sql_literals.sh
-app/models/include/models/activerecord.h
-app/models/include/models/db_txn.h
-app/models/include/models/explorer_index.h
-app/models/include/models/schema_migration.h
-app/models/include/models/utxo.h
 app/models/src/agent_session.c
 app/models/src/block.c
 app/models/src/block_projection.c

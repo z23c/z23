@@ -14,6 +14,17 @@
  * be recovered from.
  */
 
+/* realpath() reaches this TU only through the glibc fortify inline that
+ * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
+ * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
+ * compiles by accident of optimisation and breaks at -O0, under
+ * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
+ * include: after them it does nothing. See lib/util/src/hw_profile.c. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
+#include "platform/directory_compat.h"
 #include "test/test_core.h"
 #include "json/json.h"
 
@@ -36,6 +47,15 @@
 #include <utime.h>
 #include "util/safe_alloc.h"
 #include "test/setup_result.h"
+
+#if defined(_WIN32) && !defined(O_CLOEXEC)
+/* mingw's <fcntl.h> ships no O_CLOEXEC and no close-on-exec emulation. The
+ * one open() below that wants it is single-process tamper-fixture I/O; the
+ * flag is a hygiene no-op here regardless of platform, so a zero fallback
+ * keeps that call syntactically valid on Windows without touching the value
+ * POSIX platforms see. */
+#define O_CLOEXEC 0
+#endif
 
 /* ── Event observer ────────────────────────────────────────── */
 
@@ -84,13 +104,13 @@ static bool wb_fixture_init(struct wb_fixture *f, const char *tag)
              "/tmp/zcl_wb_test_%d_%s_src", (int)getpid(), tag);
     snprintf(f->backup_dir, sizeof(f->backup_dir),
              "/tmp/zcl_wb_test_%d_%s_dst", (int)getpid(), tag);
-    mkdir(f->datadir, 0755);
+    platform_directory_create(f->datadir, 0755);
     /* backup_dir reaches platform_private_directory_ensure (via
      * wallet_backup_run_once / wallet_backup_start -> wbs_ensure_backup_dir),
      * which requires the directory to be exactly 0700 and refuses rather than
      * narrowing a wider one. mkdir's mode argument is masked by the process
      * umask, so state the mode a second time instead of hoping for it. */
-    mkdir(f->backup_dir, 0700);
+    platform_directory_create(f->backup_dir, 0700);
     chmod(f->backup_dir, 0700);
     snprintf(f->dbpath, sizeof(f->dbpath), "%s/node.db", f->datadir);
     return node_db_open(&f->ndb, f->dbpath);
@@ -750,7 +770,7 @@ static bool wb_read_blob(const char *path, uint8_t **out, size_t *outlen)
 static const char *wb_enc_ensure_scratch(void)
 {
     static char dir[512];
-    mkdir(WB_ENC_SCRATCH_REL, 0755);
+    platform_directory_create(WB_ENC_SCRATCH_REL, 0755);
     if (dir[0])
         return dir;
     char cwd[384];
@@ -1026,7 +1046,7 @@ static int t_rotation_counts_enc(void)
     char dir[256];
     snprintf(dir, sizeof(dir), "%s/wbenc_%d_rotate", scratch,
              (int)getpid());
-    mkdir(dir, 0700);
+    platform_directory_create(dir, 0700);
 
     /* One real encrypted file, copied under five backup names with
      * strictly increasing mtimes (set explicitly — no sleeps). */

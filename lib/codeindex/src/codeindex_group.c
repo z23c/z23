@@ -153,6 +153,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/crypto") == 0) return "hash/cipher/PoW primitives and batched SHA3 acceleration: SHA-2, Blake2, ChaCha20-Poly1305, Ed25519, Equihash";
     if (strcmp(group, "lib/crypto_registry") == 0) return "singleton catalog of pluggable cryptographic verifier implementations";
     if (strcmp(group, "lib/encoding") == 0) return "string encoding helpers: money strings, hex/bin string encodings";
+    if (strcmp(group, "lib/engine") == 0) return "engine-dispatch harness (pure half): vendor registry, request document, hardened response decoder, file envelope, key holder + redactor, and the gate-derived verdict";
     if (strcmp(group, "lib/event") == 0) return "the in-process publish/subscribe event bus that decouples subsystems";
     if (strcmp(group, "lib/fingerprint") == 0) return "behavioral fingerprints: fail-closed purity judgement, signature-derived call harnesses, shape-seeded input corpora";
     if (strcmp(group, "lib/framework") == 0) return "app-shape platform glue: app_platform bootstrap + the typed-blocker condition contract";
@@ -190,6 +191,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/zdir") == 0) return "ZCL Directory (ZDIR) on-chain node directory overlay — .onion peer discovery folded from block history";
     if (strcmp(group, "lib/zid") == 0) return "sovereign identity Phase 1: signed identity documents + blinded record keys (ed25519/SHA3, pure codec)";
     if (strcmp(group, "lib/codeindex") == 0) return "the in-binary source-code navigator index: scan, store, query, the `code` CLI";
+    if (strcmp(group, "lib/territory") == 0) return "generated per-module scorecard: what a module owns, what proves it (routed vs actually reached), what it depends on, where it is weak";
     if (strcmp(group, "lib/metaverse") == 0) return "sovereign digital property: property identity, action vocabulary, read-only per-kind catalog adapters, the pure grant/delegation rule evaluator, signed hash-chained receipts";
 
     /* domain/<ctx> — one line per bounded context in k_domain_contexts[] above. */

@@ -1,3 +1,8 @@
+# z23-generated-artifact: zcl.generated_artifact.v1
+# artifact-id: zcl.arm_symbol_single_baseline.v1
+# asserts: multi_arm_definition(path,symbol)
+# generated-by: tools/lint/check_arm_symbol_single.sh
+# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh
 # check_arm_symbol_single baseline — <path>\t<function> pairs where a non-static
 # function is DEFINED more than once in one translation unit
 # (necessarily in disjoint preprocessor arms — see the header
@@ -14,7 +19,6 @@
 # real per-arm implementation is intentional and has no
 # external caller relying on a single symbol. Adding a row is
 # not a fix.
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh
 app/views/src/wallet_gui.c	wallet_gui_main
 config/src/boot_auto_install_bundle.c	boot_autodetect_consensus_bundle
 config/src/boot_auto_install_bundle.c	boot_auto_install_clear_failed_marker

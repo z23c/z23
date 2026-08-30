@@ -9687,6 +9687,20 @@ check-arm-symbol-single:
 	@./tools/lint/check_arm_symbol_single.sh --selftest
 	@./tools/lint/check_arm_symbol_single.sh
 
+# A .c file may not call a POSIX/GNU function whose declaration reaches it
+# ONLY through a glibc fortify inline — i.e. only when optimisation is on.
+# Found live 2026-08-30: realpath() is declared under __USE_MISC, which
+# -D_POSIX_C_SOURCE=200809L does not set, so 17 TUs compiled purely as a
+# side effect of -O1+ enabling _FORTIFY_SOURCE, and were hard C23 errors at
+# -O0 and on any non-glibc libc. The gate re-MEASURES the masked set against
+# the live toolchain on every run rather than hardcoding a list, because
+# which functions are masked is a property of the compiler and libc, not of
+# this tree. Baseline is empty by design and must stay empty.
+check-fortify-masked-decls:
+	@echo "══ LINT: no declaration that depends on optimisation ══"
+	@./tools/lint/check_fortify_masked_decls.sh --selftest
+	@./tools/lint/check_fortify_masked_decls.sh
+
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"
 	@tools/scripts/check_coins_lookup_nullcheck.sh
@@ -9765,6 +9779,50 @@ $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
 	    -Ilib/platform/include -Ilib/util/include \
 	    -o $@ $(MUTATION_CAMPAIGN_SRCS) -lpthread
+# ── The engine unit dispatcher ──────────────────────────────────────────────
+# `engine_unit` sends ONE scoped unit of work to a model, applies the result in
+# an isolated worktree, and judges it by running the gate. The law it is built
+# on is in lib/engine/include/engine/engine.h: the model proposes, the gate
+# decides. It is the C23 successor to tools/dev/grok-unit.sh.
+#
+# Like $(BIN_DIR)/zclassic23-acme above, this is compiled STRAIGHT FROM SOURCE
+# to an executable with no intermediate object files, and for the same reason:
+# it links tools/acme/tls_client.c, and lib/test/src/test_cold_join_sovereign.c
+# P2 asserts that no Z23 object under build/*obj*/epochs carries an undefined
+# reference to a TLS-client or trust-store entry point. Nothing compiled here
+# can ever appear in a scanned epoch tree, which keeps P2 green honestly rather
+# than by exemption.
+#
+# lib/engine itself carries no transport at all — it is pure logic, is a normal
+# lib module, and is linked into the node like any other. That split is the
+# whole reason this program can exist without weakening the node's claim that
+# it consults no certificate authority.
+ENGINE_UNIT_BIN = $(BIN_DIR)/zclassic23-engine-unit
+ENGINE_UNIT_SRCS = tools/engine_unit.c \
+	tools/acme/tls_client.c \
+	lib/engine/src/engine_registry.c \
+	lib/engine/src/engine_err.c \
+	lib/engine/src/engine_patch.c \
+	lib/engine/src/engine_secret.c \
+	lib/engine/src/engine_verdict.c \
+	lib/engine/src/engine_wire_request.c \
+	lib/engine/src/engine_wire_response.c \
+	lib/json/src/json.c \
+	lib/util/src/spawn.c \
+	lib/base/src/log_level.c \
+	lib/base/src/result.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
+ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
+	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+.PHONY: engine-unit
+engine-unit: $(ENGINE_UNIT_BIN)
+$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ENGINE_UNIT_INCLUDES) \
+	    -o $@ $(ENGINE_UNIT_SRCS) \
+	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
@@ -10260,6 +10318,15 @@ check-peer-floor-single-source:
 check-no-shellouts:
 	@echo "→ Gate: no_shellouts (os-substrate Rung 0)"
 	@./tools/lint/check_no_shellouts.sh
+
+# No API credential is committed. tools/engine_unit.c dispatches work to a paid
+# API, so this tree now has a reason to hold a key near it; a key in a tracked
+# file is spent the moment it lands. HARD (FAIL), no baseline — a committed
+# credential is not something to ratchet down over time. Proven to actually
+# fail by lib/test/src/test_engine.c, which plants one in a fixture tree.
+check-no-api-keys:
+	@echo "→ Gate: no_api_keys (no committed credential)"
+	@./tools/lint/check_no_api_keys.sh
 
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
 # every saved finding under lib/test/fuzz_seeds/ has a live fuzz binary behind
@@ -11050,6 +11117,11 @@ check-capability-inventory-generated:
 	@./tools/lint/check_capability_inventory_generated.sh --selftest
 	@./tools/lint/check_capability_inventory_generated.sh
 
+check-generated-artifact-contradictions:
+	@echo "══ LINT: generated artifacts cannot contradict each other ══"
+	@./tools/lint/check_generated_artifact_contradictions.sh --selftest
+	@./tools/lint/check_generated_artifact_contradictions.sh
+
 
 # docs/EQUIHASH_PARAMS.md is GENERATED by tools/equihash_params_fact.c, which
 # LINKS the real chainparams and upgrade tables and prints what consensus
@@ -11432,6 +11504,7 @@ LINT_GATES := \
     check-malloc \
     check-byte-order-codec-single \
     check-arm-symbol-single \
+    check-fortify-masked-decls \
     check-zcode-package-registry \
     check-zcode-package-standalone \
     check-package-anatomy \
@@ -11509,6 +11582,7 @@ LINT_GATES := \
     check-sysinit-ordering \
     check-sandbox-wired \
     check-no-shellouts \
+    check-no-api-keys \
     check-no-writer-below-sealed-frontier \
     check-peer-floor-single-source \
     check-proc-self-shim \
@@ -11531,6 +11605,7 @@ LINT_GATES := \
     check-error-doc-refs \
     check-api-reference-generated \
     check-capability-inventory-generated \
+    check-generated-artifact-contradictions \
     check-describe-budget \
     check-markdown-links \
     check-doc-inline-paths \
@@ -11604,7 +11679,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-bootstrap
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
