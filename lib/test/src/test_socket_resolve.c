@@ -10,6 +10,7 @@
  * broke. */
 #include "test/test_core.h"
 
+#include "net/netbase.h"
 #include "platform/socket_compat.h"
 
 #include <string.h>
@@ -47,5 +48,37 @@ int test_socket_resolve(void)
         printf("FAIL (step %d)\n", rc);
         failures++;
     }
+
+    TEST("socket buffers: report the kernel grant after P2P configuration") {
+        platform_socket_t pair[2];
+        struct net_p2p_socket_buffer_stats before = {0};
+        struct net_p2p_socket_buffer_stats after = {0};
+        ASSERT(platform_socket_pair(pair));
+        net_get_p2p_socket_buffer_stats(&before);
+        ASSERT(net_configure_p2p_socket_buffers(pair[0]));
+        net_get_p2p_socket_buffer_stats(&after);
+        ASSERT_EQ(after.attempts_total, before.attempts_total + 1);
+        ASSERT_EQ(after.fully_observed_total,
+                  before.fully_observed_total + 1);
+        ASSERT_EQ(after.degraded_total, before.degraded_total);
+        ASSERT(after.minimum_actual_receive_bytes > 0);
+        ASSERT(after.minimum_actual_send_bytes > 0);
+#if defined(__linux__)
+        ASSERT_EQ(after.requested_receive_bytes, 0);
+        ASSERT_EQ(after.requested_send_bytes, 0);
+#else
+        ASSERT_EQ(after.requested_receive_bytes,
+                  PLATFORM_P2P_SOCKET_BUFFER_SIZE);
+        ASSERT_EQ(after.requested_send_bytes,
+                  PLATFORM_P2P_SOCKET_BUFFER_SIZE);
+#endif
+        ASSERT_EQ(platform_socket_close(pair[0]), 0);
+        ASSERT_EQ(platform_socket_close(pair[1]), 0);
+        printf("request=%d actual_rx_min=%d actual_tx_min=%d ",
+               after.requested_receive_bytes,
+               after.minimum_actual_receive_bytes,
+               after.minimum_actual_send_bytes);
+        PASS();
+    } _test_next:;
     return failures;
 }

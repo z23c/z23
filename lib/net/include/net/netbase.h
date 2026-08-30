@@ -26,6 +26,23 @@ typedef SOCKET zcl_socket_t;
 
 #define DEFAULT_CONNECT_TIMEOUT 5000
 
+/* Process-wide observation of what the host kernel actually grants P2P
+ * sockets.  Requested bytes are policy; actual bytes are getsockopt facts.
+ * No consensus or peer behavior branches on this diagnostic snapshot. */
+struct net_p2p_socket_buffer_stats {
+    int requested_receive_bytes;
+    int requested_send_bytes;
+    int minimum_actual_receive_bytes;
+    int minimum_actual_send_bytes;
+    uint64_t attempts_total;
+    uint64_t fully_observed_total;
+    uint64_t degraded_total;
+};
+
+bool net_configure_p2p_socket_buffers(zcl_socket_t sock);
+void net_get_p2p_socket_buffer_stats(
+    struct net_p2p_socket_buffer_stats *out);
+
 bool lookup_host(const char *name, struct net_addr *results,
                  size_t max_results, size_t *num_results,
                  bool allow_lookup);

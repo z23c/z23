@@ -66,9 +66,9 @@ with the command in the cell rather than trusting the prose.
 |---|---|---|---|---|---|---|
 | BLAKE2b, Equihash batch — `lib/crypto/src/blake2b_avx2.c` | AVX-512F 8-way + AVX2 4-way (`target("avx512f")`, `target("avx2")`) | `simd_cpu_words_probe` + `simd_avx2_usable` / `simd_avx512f_usable`, two-layer cap/use atomics | **NEON 4-way** (this lane) | **one-time KAT** — `blake2b_neon_kat()` drives four Equihash-shaped fixed vectors through the NEON compress and the portable sequential path; any divergent bit → scalar for the life of the process | `test_blake2b_batch_parity` (all tiers vs the sequential reference, both batch entry points, contiguous + strided + repeated indices, plus teeth) | `make bench-simd` — the Equihash BLAKE2b row; `CRYPTOPERF equihash-200-9` |
 | BLAKE2b scalar — `lib/crypto/src/blake2b.c` | portable (the frozen reference) | n/a — single tier | identical portable file | n/a | the RFC 7693 vectors inside `test_crypto`; every batch-oracle leg above pins the vector tiers *to this file* | `CRYPTOPERF blake2b`; `tools/crypto_perf_baseline.csv` row `blake2b` |
-| SHA-256 — `lib/crypto/src/sha256.c` | SHA-NI, `target("sha,sse4.1")` | CPUID leaf 7 EBX[29] **plus a KAT self-test** (`detect_sha_ni`) | none today; **lane in flight**: FEAT_SHA256 (`vsha256hq`/`vsha256su*`), which — like SHA-NI — needs no OS-state probe, so its gate should be the same KAT shape | (in flight) KAT: FEAT_SHA256 transform vs the portable transform on fixed blocks | `test_sha256_isa_parity` | `make bench-simd` — the SHA-256 row; `CRYPTOPERF sha256`; CSV row `sha256` |
-| SHA-3 / Keccak x4 — `lib/crypto/src/keccak_x4.c`, `keccak_x4_internal.h`, `sha3_avx512.c`, `sha3_256_x4.c` | AVX-512F+VL+DQ (`target("avx512f,avx512vl,avx512dq")`): `vprolq` rotations + `vpternlogd` theta/chi | `keccak_x4_available()` → `simd_host_has_avx512_dq_vl()`, plus per-call-site default-enable macros and `sha3_*_x4_select_impl` force hooks | scalar x4 today; **lane in flight**: a NEON x4 lane. Honest marker: NEON has **no** `vprolq` and **no** `vpternlogd` — theta/chi expand to 2–3 baseline NEON ops each, so the tier is a real rewrite, not a port | (in flight) same shape: probe-or-KAT + the scalar x4 fallback it already has | `test_sha3_256_x4`, `test_sha3_512_x4` (plus `test_sha3_windows`, `test_sha3_stream`, `test_sha3_sidecar_io` for the primitive) | `make bench-simd` — the two SHA3 x4 rows; `CRYPTOPERF sha3-256`; CSV row `sha3-256` |
-| CRC32C — `lib/util/src/crc32c.c` (not under `lib/crypto`, listed because it carries a hardware tier) | SSE4.2 `_mm_crc32_u64`, `target("sse4.2")` | `__builtin_cpu_supports("sse4.2")` under `pthread_once`, **plus a KAT** comparing `crc32c_hw` against the software table across a spread of lengths | software table today; **lane in flight**: FEAT_CRC32 (`crc32cx`, compile-time `__ARM_FEATURE_CRC32`, runtime check via a probe function or AT_HWCAP) | (in flight) KAT, exactly the existing `crc32c_init_once` shape, falling back to the same software table | no dedicated crc32c group — coverage lives inside `test_event_log` (`run_crc32c_dispatch`, which also prints the sw/active/hw comparison). An arm64 CRC32C lane that adds no oracle is repeating the gap, not closing it | inline in `test_event_log` only; no `simd_bench` primitive |
+| SHA-256 — `lib/crypto/src/sha256.c` | SHA-NI, `target("sha,sse4.1")` | CPUID leaf 7 EBX[29] **plus a KAT self-test** (`detect_sha_ni`) | FEAT_SHA256 (`vsha256hq`/`vsha256su*`) | macOS `hw.optional.arm.FEAT_SHA256` plus a one-time transform KAT; any mismatch stays portable | `test_sha256_isa_parity`, plus `test_arm_hw_tiers` for OS-advertised reachability | `make bench-simd` — the SHA-256 row; `CRYPTOPERF sha256`; CSV row `sha256` |
+| SHA-3 / Keccak x4 — `lib/crypto/src/keccak_x4.c`, `keccak_x4_internal.h`, `sha3_avx512.c`, `sha3_256_x4.c` | AVX-512F+VL+DQ (`target("avx512f,avx512vl,avx512dq")`): `vprolq` rotations + `vpternlogd` theta/chi | `keccak_x4_available()` → `simd_host_has_avx512_dq_vl()`, plus per-call-site default-enable macros and `sha3_*_x4_select_impl` force hooks | verified NEON x4 lane, explicitly selectable; **AUTO is scalar on arm64** because the Apple-Silicon oracle measures NEON at about 0.55x scalar | macOS `hw.optional.arm.FEAT_SHA3`; forced-vector parity against the scalar reference before promotion | `test_sha3_256_x4`, `test_sha3_512_x4` assert parity and that AUTO refuses the slower arm64 tier | the two oracle groups print scalar-vs-NEON throughput; scalar remains the shipped arm64 winner |
+| CRC32C — `lib/util/src/crc32c.c` (not under `lib/crypto`, listed because it carries a hardware tier) | SSE4.2 `_mm_crc32_u64`, `target("sse4.2")` | `__builtin_cpu_supports("sse4.2")` under `pthread_once`, **plus a KAT** comparing `crc32c_hw` against the software table across a spread of lengths | FEAT_CRC32 (`crc32cx`) | macOS `hw.optional.arm.FEAT_CRC32` plus the same one-time hardware-vs-table KAT | `test_arm_hw_tiers` proves OS-advertised reachability and parity; `test_event_log` proves storage framing through active/software paths | inline in `test_event_log`; implementation is reported by `zcl_crc32c_impl_name()` |
 | BN254 Fq Montgomery — `lib/sapling/src/bn254.c`, `bn254_accel.c`, `mont_adx.h` | BMI2+ADX inline asm (`MULX`+`ADCX`+`ADOX`), `target("bmi2,adx")` — the asm exists because the `_addcarry*` intrinsics collapse the two carry chains | CPUID leaf 7 EBX[8]/EBX[19], dispatch through `g_bn_fq_mont_mul` | **portable `unsigned __int128` CIOS** — see §3; **no clean NEON equivalent** (marker below) | none needed — portable is the fallback tier and the dispatch table just points at it | `test_bn254_accel`, plus `test_mont_adx_honest` (checks the implementation string against what is actually compiled) | `make bench-simd` — the BN254 Fq latency/throughput rows |
 | BLS12-381 Fr / Fp Montgomery — `lib/sapling/src/fr.c`, `fr_avx512.c`, `mont_adx.h` | same BMI2+ADX tier; AVX-512 IFMA is *probed* (`simd_avx512_ifma_usable`) but deliberately unimplemented — the reporter string says so | CPUID leaf 7 EBX[8]/EBX[19] + IFMA probe, dispatch through `g_fr_mont_mul` / `g_fp_mont_mul` | portable `__int128` CIOS; **no clean NEON equivalent** (§3) | none needed | `test_fr_mont_parity`, `test_fr_accel`, `test_mont_adx_honest` | `make bench-simd` — the Fr and Fp latency/throughput rows; `CRYPTOPERF bls12-381-fp-mul` |
 | Equihash verifier — `lib/crypto/src/equihash.c` | inherits the BLAKE2b batch tiers; no intrinsics of its own | inherits | inherits the NEON 4-way tier through the same two call sites | inherits the NEON KAT | `test_blake2b_batch_parity` is the oracle for the hashing; consensus-side pins in `test_equihash_blake2b_state_seal`, `test_domain_consensus_equihash` | the `simd_bench` Equihash row *is* the verifier's hash-generation cost |
@@ -118,20 +118,20 @@ point of this document.
 - **The Equihash solver.** Its cost is bucket/cache behavior, not arithmetic
   width; SIMD does not map onto it cleanly on either arch.
 
-## 4. Lanes in flight at the time of writing
+## 4. Landed arm64 lanes and re-derivation
 
-These rows are deliberately written as "in flight" rather than as facts,
-because the lanes are concurrent with this document and prose about another
-lane's diff rots on merge. Re-derive each instead of trusting this list:
+These paths are code, not promises. Re-derive each instead of trusting this
+list, and keep measured-slower implementations available for proof without
+making them the automatic default:
 
-- **SHA-256 FEAT_SHA256** — target file `lib/crypto/src/sha256.c`. Re-derive:
+- **SHA-256 FEAT_SHA256** — `lib/crypto/src/sha256.c`. Re-derive:
   `git grep -n "vsha256hq\|__ARM_FEATURE_SHA" -- lib/crypto/src/sha256.c`.
-- **CRC32C FEAT_CRC32** — target file `lib/util/src/crc32c.c`. Re-derive:
+- **CRC32C FEAT_CRC32** — `lib/util/src/crc32c.c`. Re-derive:
   `git grep -n "crc32cx\|__ARM_FEATURE_CRC32" -- lib/util/src/crc32c.c`.
-- **SHA3/Keccak x4 NEON** — target files `lib/crypto/src/keccak_x4*.c`,
+- **SHA3/Keccak x4 NEON** — `lib/crypto/src/keccak_x4*.c`,
   `lib/crypto/src/sha3_*x4*.c`. Re-derive:
   `git grep -ln "arm_neon" -- lib/crypto/src`.
-- **BLAKE2b NEON 4-way** — landed by this lane in `lib/crypto/src/blake2b_avx2.c`.
+- **BLAKE2b NEON 4-way** — `lib/crypto/src/blake2b_avx2.c`.
 
 The tree-wide re-derivation for "what arm64 SIMD exists at all" is:
 

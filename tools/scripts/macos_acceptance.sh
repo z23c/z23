@@ -45,7 +45,7 @@ validate() {
     local rows expected actual registered id state reason groups group
     rows="$(matrix_rows)"
     [ -n "$rows" ] || die "capability matrix yielded no rows"
-    expected='hot_activation kqueue launchd node noise package_execution release_packaging resident_confinement snapshot_export tor wallet'
+    expected='arm_acceleration hot_activation kqueue launchd node noise package_execution release_packaging resident_confinement snapshot_export tor wallet'
     actual="$(printf '%s\n' "$rows" | awk -F',' '{gsub(/[[:space:]]/, "", $1); print $1}' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
     [ "$actual" = "$expected" ] || die "capability set drift: expected '$expected'; observed '$actual'"
     registered="$(registered_groups)"

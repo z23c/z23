@@ -21,7 +21,7 @@
 #
 #   --check   Pure text. It reads config/platform/macos_capabilities.def and
 #             asserts: the capability SET has not drifted from the closed list
-#             of 11; every row carries one of the three legal states
+#             of 12; every row carries one of the three legal states
 #             (available / degraded / unavailable); every row carries a typed
 #             reason code; and every evidence group a row names is a group
 #             REGISTERED in tools/dev/test_group_catalog.def. Nothing here
@@ -31,7 +31,7 @@
 #             promotes an `unavailable` row to `available` while renaming it.
 #             THAT is the gate, and it is a real one.
 #
-#   --run     Builds and executes the 21 exact test groups the matrix derives,
+#   --run     Builds and executes the exact test groups the matrix derives,
 #             natively, and refuses unless `uname -s` is Darwin and `uname -m`
 #             is arm64. It cannot run here and this gate does not pretend to.
 #
@@ -43,7 +43,7 @@
 # what it prints.
 #
 # ── WHY NOT RUN --run WHEN THE HOST *IS* DARWIN ─────────────────────────────
-# Deliberate. --run builds and executes 21 test groups; `make lint` is the
+# Deliberate. --run builds and executes the derived test groups; `make lint` is the
 # static pass and must stay seconds, not minutes. On an Apple host the native
 # leg is `make macos-acceptance`, and this gate names that command in its
 # UNOBSERVED line rather than silently doing something a lint run should not.
@@ -135,7 +135,7 @@ check_root() {
     echo "  darwin-arm64) did NOT run here; this host is ${host_os}/${host_arch}."
     if [ "$host_os" = "Darwin" ] && [ "$host_arch" = "arm64" ]; then
         echo "  This host CAN run it, and lint deliberately does not: it builds and"
-        echo "  executes 21 test groups. Run 'make macos-acceptance'."
+        echo "  executes the derived test groups. Run 'make macos-acceptance'."
     else
         echo "  UNOBSERVED is not a pass. It is a leg no machine in this run could"
         echo "  observe. Run 'make macos-acceptance' on a darwin-arm64 host to"
