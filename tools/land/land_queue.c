@@ -42,6 +42,7 @@ const char *land_status_label(enum land_status s)
     case LAND_ERR_NO_GATE_RUN:      return "no-gate-run";
     case LAND_ERR_GATE_NOT_GREEN:   return "gate-not-green";
     case LAND_ERR_GATE_NOT_STRESSED:return "gate-skipped-groups";
+    case LAND_ERR_GATE_UNIDENTIFIED:return "gate-tree-unidentified";
     }
     return "unknown";
 }
@@ -123,6 +124,12 @@ enum land_status land_queue_check_landable(const struct land_queue *q,
         return LAND_ERR_GATE_NOT_GREEN;
     if (!row->run.stress)
         return LAND_ERR_GATE_NOT_STRESSED;
+    /* An all-zero gate identity is the value "nobody can say which tree this
+     * was". A landing behind one is a pass no second machine can check, so
+     * it is refused here rather than published as something it is not. */
+    static const uint8_t no_gate[LAND_GATE_ID_BYTES] = { 0 };
+    if (memcmp(row->run.gate_id, no_gate, LAND_GATE_ID_BYTES) == 0)
+        return LAND_ERR_GATE_UNIDENTIFIED;
     return LAND_OK;
 }
 
@@ -142,6 +149,24 @@ static bool apply_submit(struct land_queue *q, uint64_t seq,
     return true;
 }
 
+/* "How far down the queue am I, and how big is the batch I am in" — the
+ * answer to "why is it not done yet". Derived, never stored, so it can never
+ * disagree with the frames. O(n) over a queue that is at most a few hundred
+ * entries deep, and it runs only when something actually changed. */
+static void refresh_positions(struct land_queue *q)
+{
+    uint32_t ahead = 0;
+    for (size_t i = 0; i < q->entry_count; i++) {
+        struct land_entry *e = &q->entries[i];
+        if (e->state == LAND_STATE_QUEUED) {
+            e->ahead = ahead;
+            ahead++;
+        } else {
+            e->ahead = 0;
+        }
+    }
+}
+
 static bool apply_gate_run(struct land_queue *q, uint64_t seq,
                            const struct land_gate_run *g)
 {
@@ -156,6 +181,9 @@ static bool apply_gate_run(struct land_queue *q, uint64_t seq,
             continue; /* a member naming nothing is caught by the writer */
         e->gate_runs++;
         e->gate_run_seq = seq;
+        e->batch_size = g->member_count;
+        memcpy(e->gate_id, g->gate_id, LAND_GATE_ID_BYTES);
+        e->gate_stress = g->stress;
         /* A settled submission is not dragged back into GATING by a later
          * batch that happened to re-include it. */
         if (e->state == LAND_STATE_QUEUED)
@@ -176,6 +204,21 @@ static void apply_verdict(struct land_queue *q, const struct land_verdict *v)
         e->landing_backed =
             land_queue_check_landable(q, v->submit_seq, v->gate_run_seq) ==
             LAND_OK;
+
+    /* The verdict's content address. Taken from the gate run the verdict
+     * NAMES rather than from whatever ran most recently, so the digest is
+     * about the run that actually decided this submission. A verdict with no
+     * gate run behind it (a merge conflict, an abandoned batch) still gets a
+     * digest, over an all-zero gate identity — which is the honest value: it
+     * says "nothing gated this", and it will never match a digest produced
+     * by a run that did. */
+    const struct gate_row *row =
+        v->gate_run_seq ? gate_by_seq(q, v->gate_run_seq) : NULL;
+    static const uint8_t no_gate[LAND_GATE_ID_BYTES] = { 0 };
+    land_verdict_digest(v->head, v->integration,
+                        row ? row->run.gate_id : no_gate, v->state,
+                        row ? row->run.stress : false, e->digest);
+    e->has_digest = true;
 }
 
 /* ── open / replay / close ────────────────────────────────────────────── */
@@ -239,6 +282,7 @@ struct land_queue *land_queue_open(const char *path,
             return NULL;
         }
     }
+    refresh_positions(q);
     return q;
 }
 
@@ -335,6 +379,7 @@ enum land_status land_queue_submit(struct land_queue *q,
         return LAND_ERR_LOG;
     if (!apply_submit(q, seq, s))
         return LAND_ERR_LOG; /* durable on disk; only the replay ran short */
+    refresh_positions(q);
     if (out_seq)
         *out_seq = seq;
     return LAND_OK;
@@ -361,6 +406,7 @@ enum land_status land_queue_gate_run(struct land_queue *q,
         return LAND_ERR_LOG;
     if (!apply_gate_run(q, seq, g))
         return LAND_ERR_LOG;
+    refresh_positions(q);
     if (out_seq)
         *out_seq = seq;
     return LAND_OK;
@@ -398,6 +444,7 @@ enum land_status land_queue_verdict(struct land_queue *q,
         ZCL_CHAINLOG_OK)
         return LAND_ERR_LOG;
     apply_verdict(q, v);
+    refresh_positions(q);
     if (out_seq)
         *out_seq = seq;
     return LAND_OK;

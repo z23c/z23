@@ -19,11 +19,28 @@
 # ---------------------
 # A batch failure must never refuse innocent work and must never land guilty
 # work, so a red batch is bisected: gate the halves, recurse, and a member
-# that gates red ALONE is the culprit and is refused with the gate's own
-# output. Everything that gates green in a smaller batch lands. Worst case is
-# one bad submission out of N costing about 2*log2(N)+1 gate runs instead of
-# N — still cheaper than the serial world, and the innocent submissions land
+# that gates red ALONE is the candidate culprit. Everything that gates green
+# in a smaller batch lands. Worst case is one bad submission out of N costing
+# about 2*log2(N)+1 gate runs instead of N, and the innocent submissions land
 # without their authors doing anything.
+#
+# AND THEN A CONTROL, WHICH THE FIRST REAL RUN PROVED IS NOT OPTIONAL.
+# Measured here: a batch of three bisected correctly, gated one member alone,
+# and that run went red on test_make_lint_gates_realroot — a group with
+# nothing to do with that member's one-line comment, failing under the load
+# of three concurrent gate runs on this box. The member was refused for a
+# stranger's flake.
+#
+# Bisection is attribution, and attribution over a gate that is not perfectly
+# deterministic turns "find the culprit" into "blame whoever was in the room".
+# So before any refusal, the base is gated BY ITSELF over the same file list,
+# which selects the same groups and leaves the merged change as the only
+# variable:
+#   base green -> the red is attributable; refuse the submission.
+#   base red   -> the tree was already broken; nothing queued is at fault,
+#                 and the receipt says so instead of blaming an author.
+# This never weakens the landing rule — a landing still needs a green,
+# stress-enabled, identified run over the exact tree.
 #
 # WHAT IT WILL NOT DO
 # -------------------
@@ -134,15 +151,68 @@ preflight() {
         die "$LAND_WORKTREE is not a git worktree"
 }
 
+# The commit a batch is built on.
+#
+# NOT simply $LAND_BASE. Once something has landed, THAT is the base: a
+# bisect that landed one submission and then gated the next group against the
+# original base would prove a tree nobody is going to publish, and worse, the
+# ready branch would be force-moved to the second group's integration and the
+# first landing would silently vanish from it. Measured: after demo-a landed,
+# `land/ready` held demo-a; a subsequent green group built from $LAND_BASE
+# would have replaced it.
+#
+# So the ready branch advances the base, and every gate run proves exactly
+# the tree it produces. The ancestry check is what keeps that honest: if the
+# operator has published and $LAND_BASE has moved past the ready branch, the
+# ready branch is stale and the base wins.
 base_sha() {
-    git -C "$LAND_WORKTREE" rev-parse --verify "$LAND_BASE^{commit}" 2>/dev/null
+    local base ready
+    base="$(git -C "$LAND_WORKTREE" rev-parse --verify "$LAND_BASE^{commit}" \
+        2>/dev/null)" || return 1
+    [ -n "$base" ] || return 1
+    ready="$(git -C "$LAND_WORKTREE" rev-parse --verify \
+        "$LAND_READY_REF^{commit}" 2>/dev/null)" || ready=""
+    if [ -n "$ready" ] && [ "$ready" != "$base" ] &&
+       git -C "$LAND_WORKTREE" merge-base --is-ancestor "$base" "$ready" \
+           2>/dev/null; then
+        printf '%s\n' "$ready"
+        return 0
+    fi
+    printf '%s\n' "$base"
+}
+
+# WHICH TREE THE GATE PROVED, as a value rather than as this machine's word
+# for it. tools/dev/source-identity.sh is this repository's own answer to
+# "what exactly is this checkout", and it is what makes a verdict portable: a
+# second machine that gates the same commits computes the same identity and
+# therefore the same verdict digest, so the two receipts are comparable
+# without either machine trusting the other.
+#
+# Prints nothing and fails when it cannot capture a clean identity. The queue
+# then REFUSES to land behind it — see land_queue.h — because a pass nobody
+# else can check is the receipt this whole design exists to remove.
+capture_gate_id() {
+    local record id clean mutation extra
+    record="$(cd "$LAND_WORKTREE" && \
+        ./tools/dev/source-identity.sh capture-record 2>/dev/null)" || return 1
+    read -r id clean mutation extra <<< "$record"
+    [ -z "${extra:-}" ] || return 1
+    [ "${clean:-0}" = 1 ] || return 1
+    [ -n "${mutation:-}" ] || return 1
+    [ "${#id}" -eq 64 ] || return 1
+    case "$id" in
+        *[!0-9a-f]*) return 1 ;;
+    esac
+    printf '%s\n' "$id"
 }
 
 # ── receipts ──────────────────────────────────────────────────────────────
 
-record_gate_run() {  # record_gate_run <outcome> <integration-sha> <csv-members>
-    "$LAND_BIN" gate-run --queue "$LAND_QUEUE" --outcome "$1" \
-        --integration "$2" --stress "$GATE_STRESS" --members "$3"
+record_gate_run() {  # record_gate_run <outcome> <integration> <csv> <gate-id>
+    local -a args=(gate-run --queue "$LAND_QUEUE" --outcome "$1"
+                   --integration "$2" --stress "$GATE_STRESS" --members "$3")
+    [ -n "${4:-}" ] && args+=(--gate-id "$4")
+    "$LAND_BIN" "${args[@]}"
 }
 
 record_verdict() {  # record_verdict <seq> <state> <gate-run-seq> <integ> <reason>
@@ -171,6 +241,7 @@ record_verdict() {  # record_verdict <seq> <state> <gate-run-seq> <integ> <reaso
 
 MERGED_SEQS=()
 INTEGRATION_SHA=""
+GATE_ID=""
 
 build_integration() {  # build_integration <seq:head:branch>...
     local base entry seq head branch
@@ -210,6 +281,14 @@ build_integration() {  # build_integration <seq:head:branch>...
         return 1
     fi
     INTEGRATION_SHA="$(git -C "$LAND_WORKTREE" rev-parse HEAD)" || return 1
+    # Captured HERE, over the merged tree, before the gate runs and before
+    # the build writes anything: this is the identity of exactly what is
+    # about to be proved.
+    GATE_ID="$(capture_gate_id)" || {
+        GATE_ID=""
+        say "WARNING: could not identify the gated tree; the queue will "\
+"refuse to land behind this run"
+    }
     return 0
 }
 
@@ -221,18 +300,33 @@ build_integration() {  # build_integration <seq:head:branch>...
 
 GATE_OUTCOME=""
 GATE_LOG=""
+GATE_CHANGED=""
 
-run_gate() {  # run_gate <label>
-    local label="$1" rc out changed
-    GATE_LOG="$LAND_LOG_DIR/gate_${label}_$(now).log"
+run_gate() {  # run_gate <label> [changed-file-list]
+    local label="$1" reuse="${2:-}" rc out changed stamp
+    stamp="$(now)"
+    GATE_LOG="$LAND_LOG_DIR/gate_${label}_${stamp}.log"
 
     # Hand the gate the batch's own changed set explicitly. Without it the
     # gate falls back to the working tree — which is clean after a merge —
     # and a clean tree maps to zero groups. That is the exact shape that once
     # printed PASS having executed nothing.
-    changed="$LAND_LOG_DIR/changed_${label}_$(now).txt"
-    git -C "$LAND_WORKTREE" diff --name-only "$(base_sha)" HEAD > "$changed" ||
-        { say "cannot compute the batch changed set"; GATE_OUTCOME=red; return; }
+    #
+    # A caller may pass a list to REUSE. That is how the control run works:
+    # gating the base against the same file list selects the same groups, so
+    # the only variable between the two runs is the merged change itself.
+    if [ -n "$reuse" ] && [ -s "$reuse" ]; then
+        changed="$reuse"
+    else
+        changed="$LAND_LOG_DIR/changed_${label}_${stamp}.txt"
+        git -C "$LAND_WORKTREE" diff --name-only "$(base_sha)" HEAD \
+            > "$changed" || {
+            say "cannot compute the batch changed set"
+            GATE_OUTCOME=red
+            return
+        }
+    fi
+    GATE_CHANGED="$changed"
     if [ ! -s "$changed" ]; then
         # Nothing changed relative to base. Gating an empty diff would return
         # a green that proves nothing, so refuse to call it a pass.
@@ -289,16 +383,95 @@ run_gate() {  # run_gate <label>
 
 # ── the failing detail a refusal has to carry ─────────────────────────────
 
+# A refusal has to tell its author what to fix, so the NAMED failure is
+# preferred over the summary. Measured on the first real run: the summary
+# line "SOME TESTS FAILED — 1/15 groups failed" was recorded as the reason,
+# which tells the author nothing at all. The named group and the failing
+# assertion are what is actually actionable, so they are tried first and the
+# summary is only the fallback.
 gate_failure_reason() {
-    local first
-    first="$(grep -a -m1 -E 'FIRST-ERROR|^FAIL:|FAILED|focused receipt invalid|unmapped code changes' \
+    local named group
+    group="$(grep -a -m1 -E '^=+ [a-z0-9_]+ \(FAIL' "$GATE_LOG" 2>/dev/null |
+        sed -E 's/^=+ //; s/ \(FAIL.*//')"
+    named="$(grep -a -m1 -E 'FAIL at [^ ]+:[0-9]+|focused receipt invalid|unmapped code changes|^FAIL:' \
         "$GATE_LOG" 2>/dev/null)"
-    if [ -z "$first" ]; then
-        first="$(tail -n 3 "$GATE_LOG" 2>/dev/null | tr '\n' ' ')"
+    if [ -z "$named" ]; then
+        named="$(grep -a -m1 -E 'FIRST-ERROR|FAILED' "$GATE_LOG" 2>/dev/null)"
     fi
+    if [ -z "$named" ]; then
+        named="$(tail -n 3 "$GATE_LOG" 2>/dev/null | tr '\n' ' ')"
+    fi
+    [ -n "$group" ] && named="group=$group $named"
     # One line, bounded, no control characters: it goes into a canonical
     # record whose encoder refuses anything else.
-    printf '%s' "$first" | tr -d '\000-\037\177' | cut -c1-400
+    printf '%s' "$named" | tr -d '\000-\037\177' | cut -c1-400
+}
+
+# ── the control ───────────────────────────────────────────────────────────
+#
+# WHY THIS EXISTS, measured on the first real run of this lander. A batch of
+# three went red and bisected correctly. It then gated land/demo-b alone,
+# that run went red on test_make_lint_gates_realroot — a group with nothing
+# to do with demo-b's one-line comment, failing under the load of three
+# concurrent gate runs — and demo-b was refused for a stranger's flake.
+#
+# That is the failure mode a bisecting lander is uniquely exposed to. It
+# attributes a red run to whatever happened to be inside it, and a gate that
+# is not perfectly deterministic turns "find the culprit" into "blame the
+# nearest submission". Refusing an agent's work for a flake is exactly the
+# outcome the batching was supposed to prevent.
+#
+# So a refusal now needs a CONTROL: the base gated by ITSELF, with nothing
+# merged into it. Once per drain cycle, cached, because the base does not
+# change underneath a cycle.
+#
+#   base GREEN -> the red is attributable to what was merged. Proceed.
+#   base RED   -> the tree was already broken. NOTHING in this batch is at
+#                 fault, and refusing any of it would be a lie. The cycle
+#                 stops and says so.
+#
+# This never weakens the landing rule: a landing still requires a green,
+# stress-enabled, identified run over the exact tree. It only stops the
+# lander from converting "everything is broken" into "your change is bad".
+CONTROL_VERDICT=""   # "", "green" or "red" — cached for the drain cycle
+CONTROL_REASON=""
+
+control_base_is_green() {  # control_base_is_green <changed-file-list>
+    local base changed="${1:-}"
+    if [ -n "$CONTROL_VERDICT" ]; then
+        [ "$CONTROL_VERDICT" = green ]
+        return $?
+    fi
+    if [ -z "$changed" ] || [ ! -s "$changed" ]; then
+        # With no file list there is no matched control: the two runs would
+        # select different groups and the comparison would mean nothing.
+        # Say so rather than inventing a verdict.
+        CONTROL_VERDICT=red
+        CONTROL_REASON="no changed-file list to run a matched control against"
+        return 1
+    fi
+    base="$(base_sha)" || { CONTROL_VERDICT=red; return 1; }
+    say "control: gating the base ${base:0:12} over the SAME file list, so "\
+"the only difference between the two runs is the merged change"
+
+    git -C "$LAND_WORKTREE" merge --abort >/dev/null 2>&1 || true
+    git -C "$LAND_WORKTREE" checkout --detach "$base" >/dev/null 2>&1 || {
+        CONTROL_VERDICT=red
+        CONTROL_REASON="could not check out the base to run the control"
+        return 1
+    }
+    git -C "$LAND_WORKTREE" reset --hard "$base" >/dev/null 2>&1 || true
+
+    run_gate control "$changed"
+    if [ "$GATE_OUTCOME" = green ]; then
+        CONTROL_VERDICT=green
+        say "control: the base is GREEN — a red batch is attributable"
+        return 0
+    fi
+    CONTROL_VERDICT=red
+    CONTROL_REASON="$(gate_failure_reason)"
+    say "control: the base itself is RED — nothing queued is at fault"
+    return 1
 }
 
 # ── the ready branch ──────────────────────────────────────────────────────
@@ -349,7 +522,8 @@ process_group() {  # process_group <seq:head:branch>...
         attempt=$((attempt + 1))
         run_gate "$label"
 
-        grseq="$(record_gate_run "$GATE_OUTCOME" "$INTEGRATION_SHA" "$csv")"
+        grseq="$(record_gate_run "$GATE_OUTCOME" "$INTEGRATION_SHA" "$csv" \
+            "$GATE_ID")"
         if [ -z "$grseq" ]; then
             say "could not record the gate run; refusing to settle anything"
             return 1
@@ -369,9 +543,24 @@ process_group() {  # process_group <seq:head:branch>...
         red)
             if [ "$n" -eq 1 ]; then
                 seq="${merged_entries[0]%%:*}"
+                local why member_changed
+                why="$(gate_failure_reason)"
+                member_changed="$GATE_CHANGED"
+                # THE ATTRIBUTION CHECK. Red alone is necessary and not
+                # sufficient: if the base is red too, this submission is not
+                # what broke anything, and saying it was would be a lie the
+                # author cannot argue with.
+                if ! control_base_is_green "$member_changed"; then
+                    record_verdict "$seq" refused "$grseq" "" \
+                        "not this change: the base is itself red — $CONTROL_REASON" ||
+                        true
+                    say "NOT ATTRIBUTABLE seq=$seq — the base is red; the "\
+"queue is blocked until someone fixes it"
+                    return 0
+                fi
                 record_verdict "$seq" refused "$grseq" "" \
-                    "gate red alone: $(gate_failure_reason)" || true
-                say "REFUSED seq=$seq — red when gated by itself"
+                    "gate red alone (base green): $why" || true
+                say "REFUSED seq=$seq — red when gated by itself, base green"
                 return 0
             fi
             # Bisect. Neither half inherits the other's verdict: the whole
@@ -410,6 +599,11 @@ process_group() {  # process_group <seq:head:branch>...
 
 drain_once() {
     local pending count
+    # The control is cached for a cycle, not for the process: a base that was
+    # red an hour ago may have been fixed, and a lander that remembered the
+    # old answer would keep refusing work on a tree that is now sound.
+    CONTROL_VERDICT=""
+    CONTROL_REASON=""
     pending="$("$LAND_BIN" pending --queue "$LAND_QUEUE")" || {
         say "cannot read the queue"
         return 1

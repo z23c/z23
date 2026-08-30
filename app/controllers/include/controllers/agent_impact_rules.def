@@ -2868,7 +2868,7 @@ AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/te
  * means. The shell entry points and the unit are listed with the C: a lander
  * whose service file drifts from the script it starts is a queue nobody
  * drains, and the impact rule is the only thing that would notice. */
-AGENT_IMPACT_RULE("tools/land/*.c|tools/land/*.h|lib/test/src/test_land_queue.c|tools/dev/land.sh|tools/dev/land_lander.sh|deploy/zclassic23-lander.service", "land_queue chainlog make_lint_gates")
+AGENT_IMPACT_RULE("tools/land/*.c|tools/land/*.h|lib/test/src/test_land_queue.c|tools/dev/land.sh|tools/dev/land_lander.sh|tools/dev/land_bench.sh|deploy/zclassic23-lander.service", "land_queue chainlog make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
  * because the ratchet it guards is the whole point — the recorded set of

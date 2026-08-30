@@ -97,6 +97,51 @@ void land_sha_format(const uint8_t in[LAND_SHA_BYTES],
     zcl_hex_encode(in, LAND_SHA_BYTES, out);
 }
 
+bool land_id32_parse(const char *hex, uint8_t out[32])
+{
+    if (!out)
+        return false;
+    return zcl_hex_decode_lower(hex, out, 32);
+}
+
+void land_id32_format(const uint8_t in[32], char out[65])
+{
+    zcl_hex_encode(in, 32, out);
+}
+
+/* ── the content address of a verdict ─────────────────────────────────
+ * A fixed 100-byte preimage, laid out in land_record.h. Fixed-size on
+ * purpose: with no variable-length field there is no length prefix to get
+ * wrong and no way for two different inputs to produce the same byte string,
+ * so the digest is a function of the four facts and nothing else. */
+
+#define LAND_DIGEST_DOMAIN "z23.land.verdict.v1"
+#define LAND_DIGEST_PREIMAGE 100u
+
+void land_verdict_digest(const uint8_t head[LAND_SHA_BYTES],
+                         const uint8_t integration[LAND_SHA_BYTES],
+                         const uint8_t gate_id[LAND_GATE_ID_BYTES],
+                         enum land_state state, bool stress,
+                         uint8_t out[LAND_DIGEST_BYTES])
+{
+    if (!out)
+        return;
+    uint8_t pre[LAND_DIGEST_PREIMAGE];
+    memset(pre, 0, sizeof pre);
+    /* 20 bytes of domain, NUL-padded: the string is 19 characters, so the
+     * final byte is the terminator and the field is exactly full. */
+    memcpy(pre, LAND_DIGEST_DOMAIN, sizeof LAND_DIGEST_DOMAIN);
+    if (head)
+        memcpy(pre + 20, head, LAND_SHA_BYTES);
+    if (integration)
+        memcpy(pre + 40, integration, LAND_SHA_BYTES);
+    if (gate_id)
+        memcpy(pre + 60, gate_id, LAND_GATE_ID_BYTES);
+    zcl_write_u32_be(pre + 92, (uint32_t)state);
+    zcl_write_u32_be(pre + 96, stress ? 1u : 0u);
+    zcl_sha3_256(pre, sizeof pre, out);
+}
+
 void land_stream_id(uint8_t out[32])
 {
     /* Derived from a name rather than a magic constant so the binding is
@@ -208,14 +253,15 @@ bool land_submit_decode(const uint8_t *buf, size_t len,
 
 /* ── GATE_RUN ─────────────────────────────────────────────────────────── */
 
-#define GATE_FIXED 40u
+#define GATE_FIXED 72u
 /*  0 u32 version
  *  4 u32 outcome
  *  8 u32 stress (0 or 1)
  * 12 u32 member_count
  * 16 u8[20] integration head
  * 36 u32 reserved (must be zero)
- * 40 u64 member_seq[member_count]
+ * 40 u8[32] gate_id — the source identity of the tree the gate ran over
+ * 72 u64 member_seq[member_count]
  */
 
 size_t land_gate_run_encode(const struct land_gate_run *in, uint8_t *buf,
@@ -240,6 +286,7 @@ size_t land_gate_run_encode(const struct land_gate_run *in, uint8_t *buf,
     zcl_write_u32_be(buf + 8, in->stress ? 1u : 0u);
     zcl_write_u32_be(buf + 12, in->member_count);
     memcpy(buf + 16, in->integration, LAND_SHA_BYTES);
+    memcpy(buf + 40, in->gate_id, LAND_GATE_ID_BYTES);
     for (uint32_t i = 0; i < in->member_count; i++)
         zcl_write_u64_be(buf + GATE_FIXED + (size_t)i * 8u, in->member_seq[i]);
     return total;
@@ -271,6 +318,7 @@ bool land_gate_run_decode(const uint8_t *buf, size_t len,
     out->stress = stress == 1u;
     out->member_count = n;
     memcpy(out->integration, buf + 16, LAND_SHA_BYTES);
+    memcpy(out->gate_id, buf + 40, LAND_GATE_ID_BYTES);
     for (uint32_t i = 0; i < n; i++) {
         out->member_seq[i] =
             zcl_read_u64_be(buf + GATE_FIXED + (size_t)i * 8u);

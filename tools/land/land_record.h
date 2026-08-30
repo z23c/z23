@@ -77,6 +77,10 @@
 #define LAND_SHA_BYTES     20
 #define LAND_SHA_HEX       40
 #define LAND_MEMBERS_MAX   256
+#define LAND_GATE_ID_BYTES 32
+#define LAND_GATE_ID_HEX   64
+#define LAND_DIGEST_BYTES  32
+#define LAND_DIGEST_HEX    64
 
 /* Where a submission is. QUEUED and GATING are live; the rest are final. */
 enum land_state {
@@ -113,6 +117,16 @@ struct land_gate_run {
      * justify a landing. */
     bool stress;
     uint8_t integration[LAND_SHA_BYTES];
+    /* WHICH GATE RAN, as a value rather than as a machine's word for it.
+     * This is the source identity of the tree the gate executed over
+     * (tools/dev/source-identity.sh capture-record). It is what makes a
+     * verdict portable: a second machine that runs the same gate over the
+     * same integration commit with the same source identity computes the
+     * SAME verdict digest, so the two receipts are comparable byte for byte
+     * without either machine trusting the other. All zero when the runner
+     * could not capture one, which — like a missing gate run — can never
+     * back a landing. */
+    uint8_t gate_id[LAND_GATE_ID_BYTES];
     uint32_t member_count;
     uint64_t member_seq[LAND_MEMBERS_MAX];
 };
@@ -155,6 +169,42 @@ bool land_verdict_decode(const uint8_t *buf, size_t len,
 bool land_sha_parse(const char *hex, uint8_t out[LAND_SHA_BYTES]);
 void land_sha_format(const uint8_t in[LAND_SHA_BYTES],
                      char out[LAND_SHA_HEX + 1]);
+/* The same, for the 32-byte gate identity and verdict digest. */
+bool land_id32_parse(const char *hex, uint8_t out[32]);
+void land_id32_format(const uint8_t in[32], char out[65]);
+
+/* THE CONTENT ADDRESS OF A VERDICT.
+ *
+ * SHA3-256 over a fixed 100-byte preimage:
+ *
+ *   "z23.land.verdict.v1\0"  20   domain separation, so this digest can
+ *                                 never collide with another use of SHA3
+ *   head                     20   the submitted commit
+ *   integration              20   the commit the gate actually proved
+ *   gate_id                  32   the source identity of the gating tree
+ *   state                     4   LANDED / REFUSED / TIMEOUT, big-endian
+ *   stress                    4   1 when the run had its groups enabled
+ *
+ * There is no branch NAME in it and no timestamp, on purpose: a branch name
+ * is what one machine happened to call the commit, and the commit is the
+ * thing. Two machines that gate the same tree therefore produce the SAME
+ * digest, which is what makes a verdict something a receiver can check
+ * rather than something it has to be told.
+ *
+ * WHAT IT PROVES AND WHAT IT DOES NOT. Recomputing this digest from the four
+ * public facts proves a claimed verdict is well-formed and bound to an exact
+ * (submitted commit, integration commit, gating tree) triple — so it cannot
+ * be lifted onto a different tree, and an independent run either agrees
+ * byte-for-byte or visibly does not. It is not a signature and it is not a
+ * proof that the gate passed: a hash cannot manufacture trust, and this
+ * module holds no keys. A receiver that needs authorship signs this digest
+ * with lib/zid; a receiver that needs certainty runs the gate itself and
+ * compares. Both are cheap BECAUSE the digest is the comparison. */
+void land_verdict_digest(const uint8_t head[LAND_SHA_BYTES],
+                         const uint8_t integration[LAND_SHA_BYTES],
+                         const uint8_t gate_id[LAND_GATE_ID_BYTES],
+                         enum land_state state, bool stress,
+                         uint8_t out[LAND_DIGEST_BYTES]);
 
 /* The 32-byte chainlog stream id for a landing queue. Binds a queue log to
  * this purpose: opening it as any other stream is a STREAM_MISMATCH. */

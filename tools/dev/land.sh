@@ -30,14 +30,30 @@
 # produces a gated, ready integration branch; a person publishes it with one
 # command, in seconds. The 20 minutes an agent loses is gone either way.
 #
+# WHEN THE QUEUE IS NOT THERE
+# ---------------------------
+# A queue that can stop four machines from landing anything is worse than the
+# 20 minutes it replaced. So an unreachable queue is never a block and never
+# a silent "nothing is pending": it exits 3 and names the fallback, which is
+# the old path, run deliberately:
+#
+#   ./tools/dev/land.sh gate-local     # ZCL_STRESS_TESTS=1 make pre-push-ci
+#
+# Degraded, never blocked. The queue is a convenience over a thing every
+# machine can still do by itself, which is also why it is not an authority:
+# what it hands back is a receipt anyone can check (see `z23-land digest`),
+# not a permission anyone has to trust.
+#
 # Usage:
 #   land.sh submit --branch NAME [--note TEXT] [--head SHA]
 #   land.sh status [--branch NAME]
 #   land.sh metrics
 #   land.sh verify
+#   land.sh gate-local
 #   land.sh queue-path
 #
-# Exit: 0 done, 1 refused with a reason, 2 usage or environment.
+# Exit: 0 done, 1 refused with a reason, 2 usage or environment,
+#       3 the queue is unreachable — gate locally instead.
 
 set -uo pipefail
 
@@ -71,6 +87,22 @@ usage() {
     exit 2
 }
 
+# The gate an agent runs when it decides not to use the queue — or when the
+# queue is not there. ZCL_STRESS_TESTS=1 is not optional: without it four
+# groups self-skip and `make pre-push-ci` refuses its own receipt with
+# reason=self_skips. A run that skipped its groups is not a pass.
+LOCAL_GATE='ZCL_STRESS_TESTS=1 make pre-push-ci'
+
+# Distinguishes "the queue said no" from "I could not reach the queue". The
+# second must never be reported as an empty queue and must never block.
+queue_unreachable() {
+    printf 'land: cannot reach the queue at %s\n' "$LAND_QUEUE" >&2
+    printf 'land: this is not a block. Gate locally instead:\n' >&2
+    printf 'land:   ./tools/dev/land.sh gate-local\n' >&2
+    printf 'land: (that is %s, run here, ~15-25 min)\n' "$LOCAL_GATE" >&2
+    exit 3
+}
+
 CMD="${1:-}"
 [ -n "$CMD" ] || usage
 shift || true
@@ -87,12 +119,22 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-mkdir -p "$LAND_STATE_DIR" || die "cannot create $LAND_STATE_DIR"
+mkdir -p "$LAND_STATE_DIR" 2>/dev/null || true
 
 case "$CMD" in
 queue-path)
     printf '%s\n' "$LAND_QUEUE"
     exit 0
+    ;;
+
+gate-local)
+    # The degraded path, chosen on purpose. This is the ONLY thing here that
+    # blocks, and it blocks because the caller asked it to.
+    printf 'land: gating locally — %s\n' "$LOCAL_GATE"
+    printf 'land: this is the slow path (~15-25 min). The queue exists so\n'
+    printf '      that you do not normally run it.\n'
+    ZCL_STRESS_TESTS=1 make -C "$ROOT" pre-push-ci
+    exit $?
     ;;
 
 submit)
@@ -119,6 +161,10 @@ submit)
     seq="$("$LAND_BIN" submit --queue "$LAND_QUEUE" --branch "$BRANCH" \
         --head "$HEAD_SHA" --submitter "$submitter" --note "$NOTE")"
     rc=$?
+    # rc 2 from z23-land is "I could not open the queue". That is the one
+    # failure that must not look like a refusal: the work is fine, the queue
+    # is not there, and the agent has somewhere else to go.
+    [ "$rc" -eq 2 ] && queue_unreachable
     if [ "$rc" -ne 0 ] || [ -z "$seq" ]; then
         exit "${rc:-1}"
     fi
@@ -133,25 +179,34 @@ submit)
     ;;
 
 status)
+    # A local read of a local file: no gate, no build, no network, and no
+    # polling loop hidden inside it. Asking "is it done yet" costs one file
+    # read, which is why asking is allowed to be a habit.
     require_bin
     if [ -n "$BRANCH" ]; then
         "$LAND_BIN" status --queue "$LAND_QUEUE" --branch "$BRANCH"
     else
         "$LAND_BIN" status --queue "$LAND_QUEUE"
     fi
-    exit $?
+    rc=$?
+    [ "$rc" -eq 2 ] && queue_unreachable
+    exit "$rc"
     ;;
 
 metrics)
     require_bin
     "$LAND_BIN" metrics --queue "$LAND_QUEUE" --timing "$LAND_TIMING"
-    exit $?
+    rc=$?
+    [ "$rc" -eq 2 ] && queue_unreachable
+    exit "$rc"
     ;;
 
 verify)
     require_bin
     "$LAND_BIN" verify --queue "$LAND_QUEUE"
-    exit $?
+    rc=$?
+    [ "$rc" -eq 2 ] && queue_unreachable
+    exit "$rc"
     ;;
 
 *)

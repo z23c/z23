@@ -48,12 +48,16 @@ static int usage(void)
         "  status   --queue P [--branch B]\n"
         "  pending  --queue P            (TSV: seq, branch, head, submitter)\n"
         "  gate-run --queue P --outcome green|red|timeout --integration SHA\n"
-        "           --stress 0|1 --members SEQ[,SEQ...]\n"
+        "           --stress 0|1 --gate-id HEX64 --members SEQ[,SEQ...]\n"
         "  verdict  --queue P --seq N --state landed|refused|timeout\n"
         "           [--gate-run N] [--integration SHA] [--reason T]\n"
         "  metrics  --queue P [--timing F]\n"
         "  verify   --queue P\n"
-        "  timing   --timing F --mark queued|settled --seq N --at UNIX\n",
+        "  timing   --timing F --mark queued|settled --seq N --at UNIX\n"
+        "  digest   --head SHA --integration SHA --gate-id HEX64\n"
+        "           --state landed|refused|timeout --stress 0|1\n"
+        "           (needs no queue: recompute a verdict's content address\n"
+        "            from the four public facts and compare)\n",
         stderr);
     return 2;
 }
@@ -77,6 +81,7 @@ struct args {
     const char *seq;
     const char *gate_run;
     const char *at;
+    const char *gate_id;
 };
 
 static bool parse_args(int argc, char **argv, struct args *a)
@@ -101,6 +106,7 @@ static bool parse_args(int argc, char **argv, struct args *a)
         { "--seq",         offsetof(struct args, seq) },
         { "--gate-run",    offsetof(struct args, gate_run) },
         { "--at",          offsetof(struct args, at) },
+        { "--gate-id",     offsetof(struct args, gate_id) },
     };
     memset(a, 0, sizeof *a);
     for (int i = 0; i < argc; i++) {
@@ -215,6 +221,23 @@ static void print_entry(const struct land_entry *e)
            e->submit.branch, head, e->submit.submitter, e->gate_runs);
     if (e->submit.note[0])
         printf("    note: %s\n", e->submit.note);
+
+    /* A status that can only say "pending" makes the asker think, and making
+     * the asker think is the cost this whole thing exists to remove. Every
+     * live state says what it is waiting on and what will end the wait. */
+    if (e->state == LAND_STATE_QUEUED) {
+        if (e->ahead == 0)
+            printf("    waiting on: the lander's next batch — nothing ahead "
+                   "of it\n");
+        else
+            printf("    waiting on: the lander's next batch — %u submission"
+                   "%s ahead of it\n", e->ahead, e->ahead == 1 ? "" : "s");
+    } else if (e->state == LAND_STATE_GATING) {
+        printf("    waiting on: gate run %llu, proving %u submission%s at "
+               "once\n", (unsigned long long)e->gate_run_seq, e->batch_size,
+               e->batch_size == 1 ? "" : "s");
+    }
+
     if (e->has_verdict) {
         printf("    verdict: %s", land_state_label(e->verdict.state));
         if (e->verdict.gate_run_seq)
@@ -228,6 +251,16 @@ static void print_entry(const struct land_entry *e)
         printf("\n");
         if (e->verdict.reason[0])
             printf("    reason: %s\n", e->verdict.reason);
+    }
+    if (e->has_digest) {
+        /* The content address, printed beside the facts it is computed from,
+         * so a reader on another machine can recompute it with
+         * `z23-land digest` and never has to take this machine's word. */
+        char dg[LAND_DIGEST_HEX + 1], gid[LAND_GATE_ID_HEX + 1];
+        land_id32_format(e->digest, dg);
+        land_id32_format(e->gate_id, gid);
+        printf("    digest: %s\n", dg);
+        printf("    gate-id: %s stress=%d\n", gid, e->gate_stress ? 1 : 0);
     }
     if (!e->landing_backed)
         printf("    ** UNBACKED LANDING: this log claims a landing with no "
@@ -304,6 +337,17 @@ static int cmd_gate_run(const struct args *a)
     }
     if (!land_sha_parse(a->integration, g.integration)) {
         fputs("z23-land gate-run: --integration must be 40 lowercase hex "
+              "digits\n", stderr);
+        return 2;
+    }
+    /* The gating tree's identity. Optional in the argument list and all-zero
+     * when absent, because a runner that cannot capture one must still be
+     * able to record HONESTLY what it did. An all-zero identity is not a
+     * blank to be filled in later: it is the value "nobody can say which
+     * tree this was", and it produces a verdict digest that will never match
+     * one from a run that could say. */
+    if (a->gate_id && !land_id32_parse(a->gate_id, g.gate_id)) {
+        fputs("z23-land gate-run: --gate-id must be 64 lowercase hex "
               "digits\n", stderr);
         return 2;
     }
@@ -434,6 +478,69 @@ static int cmd_timing(const struct args *a)
     return rc;
 }
 
+/* ── the decentralised half ───────────────────────────────────────────
+ * `digest` takes NO queue. That is the point: a machine that receives a
+ * claimed verdict — over the mesh, in a message, in a file — recomputes the
+ * content address from the four public facts and compares it, without the
+ * queue, without the network, and without trusting whoever sent it. A
+ * verdict that does not reproduce is a verdict about some other tree.
+ *
+ * It is also why the queue is not a coordinator anyone has to trust: what it
+ * hands out is checkable, so a second lander on a second box produces the
+ * identical digest for the identical work, and neither is the authority. */
+static int cmd_digest(const struct args *a)
+{
+    uint8_t head[LAND_SHA_BYTES], integ[LAND_SHA_BYTES];
+    uint8_t gate_id[LAND_GATE_ID_BYTES];
+    enum land_state state;
+    bool stress;
+
+    memset(head, 0, sizeof head);
+    memset(integ, 0, sizeof integ);
+    memset(gate_id, 0, sizeof gate_id);
+
+    if (!a->head || !a->state || !a->stress) {
+        fputs("z23-land digest: --head, --state and --stress are required\n",
+              stderr);
+        return 2;
+    }
+    if (!land_sha_parse(a->head, head)) {
+        fputs("z23-land digest: --head must be 40 lowercase hex digits\n",
+              stderr);
+        return 2;
+    }
+    if (a->integration && !land_sha_parse(a->integration, integ)) {
+        fputs("z23-land digest: --integration must be 40 lowercase hex "
+              "digits\n", stderr);
+        return 2;
+    }
+    if (a->gate_id && !land_id32_parse(a->gate_id, gate_id)) {
+        fputs("z23-land digest: --gate-id must be 64 lowercase hex digits\n",
+              stderr);
+        return 2;
+    }
+    if (!land_state_parse(a->state, &state)) {
+        fputs("z23-land digest: --state must be landed, refused or timeout\n",
+              stderr);
+        return 2;
+    }
+    if (strcmp(a->stress, "1") == 0)
+        stress = true;
+    else if (strcmp(a->stress, "0") == 0)
+        stress = false;
+    else {
+        fputs("z23-land digest: --stress must be 0 or 1\n", stderr);
+        return 2;
+    }
+
+    uint8_t out[LAND_DIGEST_BYTES];
+    land_verdict_digest(head, integ, gate_id, state, stress, out);
+    char hex[LAND_DIGEST_HEX + 1];
+    land_id32_format(out, hex);
+    printf("%s\n", hex);
+    return 0;
+}
+
 static int cmp_u64(const void *x, const void *y)
 {
     uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y;
@@ -562,5 +669,6 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "metrics") == 0)  return cmd_metrics(&a);
     if (strcmp(cmd, "verify") == 0)   return cmd_verify(&a);
     if (strcmp(cmd, "timing") == 0)   return cmd_timing(&a);
+    if (strcmp(cmd, "digest") == 0)   return cmd_digest(&a);
     return usage();
 }

@@ -8,11 +8,11 @@
  * path:
  *
  *  1. A LANDING CANNOT BE FABRICATED. "The gate did not run" and "the gate
- *     passed" are different facts. Four cases here try to land work through
- *     the four different ways that distinction could be lost — no gate run at
+ *     passed" are different facts. Five attempts here try to land work
+ *     through the five ways that distinction could be lost — no gate run at
  *     all, a gate run that never contained this submission, a gate run that
- *     was red, and a gate run that skipped its groups — and each must be a
- *     refusal, by name.
+ *     was red, a gate run that skipped its groups, and a gate run that
+ *     cannot say which tree it proved — and each must be a refusal, by name.
  *
  *  2. A BAD BATCH REFUSES ONLY THE CULPRIT. A batch failure that refused
  *     everyone would be worse than no batching: an agent's work would be
@@ -31,9 +31,25 @@
  *     bytes. Without that, two honest recorders would chain the same history
  *     differently and the chain would prove nothing about content.
  *
- *  5. TWO SUBMITTERS DO NOT CORRUPT IT. Two real processes append
+ *  5. FOUR SUBMITTERS DO NOT CORRUPT IT AND DO NOT CONVOY. Four real
+ *     processes — one per machine in the fleet this was built for — append
  *     concurrently to one queue file; afterwards the chain must verify and
- *     every submission must be present exactly once.
+ *     every submission must be present exactly once, with no gap.
+ *
+ *  6. SUBMITTING NEVER WAITS FOR A GATE. The property asserted is the
+ *     load-independent one — one submit writes exactly ONE frame and its
+ *     cost does not grow with queue depth or with a gate run being
+ *     outstanding. Deliberately NOT a stopwatch:
+ *     tools/lint/check_no_wallclock_assertion.sh forbids grading a test on a
+ *     measured interval, and it is right to — this fleet keeps 7200rpm boxes
+ *     on purpose, and a millisecond bound would grade the machine rather
+ *     than the code. The latency itself is measured and reported by
+ *     tools/dev/land_bench.sh, where a number is data instead of a verdict.
+ *
+ *  7. A VERDICT IS CHECKABLE BY WHOEVER RECEIVES IT. Its content address is
+ *     computed from four public facts — submitted commit, integration
+ *     commit, gating tree identity, verdict — so a second machine
+ *     recomputes it without this queue and without trusting this machine.
  */
 
 #include "test/test_core.h"
@@ -83,6 +99,10 @@ static uint64_t submit_one(struct land_queue *q, const char *branch,
     return seq;
 }
 
+/* A gating tree's identity, as source-identity.sh would report one. */
+static const char *const k_gate_id =
+    "3333333333333333333333333333333333333333333333333333333333333333";
+
 /* Record one gate run over `n` submissions and hand back its seq. */
 static uint64_t gate_over(struct land_queue *q, enum land_gate_outcome outcome,
                           bool stress, const uint64_t *seqs, uint32_t n)
@@ -92,6 +112,7 @@ static uint64_t gate_over(struct land_queue *q, enum land_gate_outcome outcome,
     g.outcome = outcome;
     g.stress = stress;
     (void)land_sha_parse(k_integ, g.integration);
+    (void)land_id32_parse(k_gate_id, g.gate_id);
     g.member_count = n;
     for (uint32_t i = 0; i < n; i++)
         g.member_seq[i] = seqs[i];
@@ -224,7 +245,26 @@ static int case_landing_needs_a_real_gate(void)
              settle(q, a, LAND_STATE_LANDED, gr_soft) ==
                  LAND_ERR_GATE_NOT_STRESSED);
 
-    LQ_CHECK("after four attempts nothing has landed",
+    /* (v) Green, stressed, containing it — but the runner could not say
+     * WHICH tree it gated. That is a pass no second machine can check, and a
+     * receipt nobody can check is the thing this design exists to remove. */
+    struct land_gate_run anon;
+    memset(&anon, 0, sizeof anon);
+    anon.outcome = LAND_GATE_GREEN;
+    anon.stress = true;
+    (void)land_sha_parse(k_integ, anon.integration);
+    /* gate_id deliberately left all zero */
+    anon.member_count = 2;
+    anon.member_seq[0] = a;
+    anon.member_seq[1] = b;
+    uint64_t gr_anon = 0;
+    LQ_CHECK("an unidentified gate run still records honestly",
+             land_queue_gate_run(q, &anon, &gr_anon) == LAND_OK);
+    LQ_CHECK("but LANDED behind an unidentifiable tree is refused",
+             settle(q, a, LAND_STATE_LANDED, gr_anon) ==
+                 LAND_ERR_GATE_UNIDENTIFIED);
+
+    LQ_CHECK("after five attempts nothing has landed",
              state_of(q, a) != LAND_STATE_LANDED);
 
     /* Refusing ungated work is always sound, so it needs no backing. */
@@ -646,13 +686,18 @@ static int case_canonical_bytes(void)
     return failures;
 }
 
-/* ── 8. two submitters racing ──────────────────────────────────────────
- * Two real processes, not two threads: the lock that makes this safe is a
+/* ── 8. four submitters racing, which is the real fleet ────────────────
+ * Four real processes, not four threads: the lock that makes this safe is a
  * whole-file lock in lib/platform, and a thread test would never touch it.
+ * Four because that is how many machines are actually submitting.
+ *
  * Each child appends its own submissions to one queue file; afterwards the
- * chain must verify and every submission must be present exactly once. */
+ * chain must verify and every submission must be present exactly once, with
+ * dense sequence numbers. A gap would mean one writer's frame landed on top
+ * of another's — the convoy's worst failure, silent loss rather than delay. */
 
 #define RACE_EACH 12
+#define RACE_WRITERS 4
 
 static void race_child(const char *path, const char *prefix)
 {
@@ -692,20 +737,21 @@ static int case_two_submitters_race(void)
     }
     land_queue_close(seed);
 
-    pid_t kids[2];
-    const char *prefixes[2] = { "lane/one", "lane/two" };
+    pid_t kids[RACE_WRITERS];
+    const char *prefixes[RACE_WRITERS] = { "lane/one", "lane/two",
+                                           "lane/three", "lane/four" };
     bool forked = true;
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < RACE_WRITERS; k++) {
         kids[k] = fork();
         if (kids[k] == 0)
             race_child(path, prefixes[k]);
         if (kids[k] < 0)
             forked = false;
     }
-    LQ_CHECK("two submitter processes start", forked);
+    LQ_CHECK("four submitter processes start at once", forked);
 
     int bad = 0;
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < RACE_WRITERS; k++) {
         if (kids[k] <= 0)
             continue;
         int status = 0;
@@ -713,7 +759,7 @@ static int case_two_submitters_race(void)
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
             bad++;
     }
-    LQ_CHECK("both submitters finish cleanly", bad == 0);
+    LQ_CHECK("all four submitters finish cleanly", bad == 0);
 
     uint8_t stream[32];
     land_stream_id(stream);
@@ -727,9 +773,9 @@ static int case_two_submitters_race(void)
     if (q) {
         LQ_CHECK("with nothing torn", rrep.torn_bytes == 0);
         LQ_CHECK("every submission is present exactly once",
-                 land_queue_count(q) == (size_t)(2 * RACE_EACH));
+                 land_queue_count(q) == (size_t)(RACE_WRITERS * RACE_EACH));
         int found = 0;
-        for (int k = 0; k < 2; k++) {
+        for (int k = 0; k < RACE_WRITERS; k++) {
             for (int i = 0; i < RACE_EACH; i++) {
                 char branch[64];
                 snprintf(branch, sizeof branch, "%s/%d", prefixes[k], i);
@@ -737,7 +783,7 @@ static int case_two_submitters_race(void)
                     found++;
             }
         }
-        LQ_CHECK("and each is findable by name", found == 2 * RACE_EACH);
+        LQ_CHECK("and each is findable by name", found == RACE_WRITERS * RACE_EACH);
 
         /* Dense, gap-free sequence numbers across both writers. A gap would
          * mean an interleaved append had overwritten someone else's frame. */
@@ -753,7 +799,283 @@ static int case_two_submitters_race(void)
     return failures;
 }
 
-/* ── 9. surface: refusals are named, and nothing crashes on NULL ───────── */
+/* ── 9. submit costs the same whether the queue is empty or deep ───────
+ *
+ * WHY THIS IS THE RIGHT ASSERTION AND A STOPWATCH IS NOT. The promise is
+ * that submitting never waits for a gate run, and the obvious test — submit,
+ * time it, assert under N milliseconds — is exactly what
+ * tools/lint/check_no_wallclock_assertion.sh forbids, for this project's own
+ * reason: a duration bound grades the MACHINE, and this fleet deliberately
+ * includes 7200rpm boxes. A submit that takes 900 ms on an honest slow disk
+ * is not a bug, and a test that calls it one teaches everybody to ignore red.
+ *
+ * The load-independent property underneath the promise is what is asserted
+ * instead: ONE submit writes exactly ONE frame, does no gate, and its cost
+ * does not grow with how much is already queued or being gated. Latency is
+ * measured and reported separately (tools/dev/land_bench.sh), where a number
+ * is data rather than a verdict. */
+
+static int case_submit_cost_is_flat(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "land", "flat");
+    char path[640];
+    snprintf(path, sizeof path, "%s/queue.chainlog", dir);
+
+    struct zcl_chainlog_report rep;
+    struct land_queue *q = land_queue_open(path, &rep);
+    if (!q) {
+        LQ_CHECK("the queue opens", false);
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
+
+    /* A submit into an empty queue: exactly one frame. */
+    uint64_t first = submit_one(q, "lane/first", k_head_a);
+    LQ_CHECK("the first submission is frame 1", first == 1);
+
+    /* Fill the queue up, and put some of it inside an outstanding gate run
+     * so the deep case is the realistic one: a lander is mid-gate and four
+     * more agents want to submit. */
+    enum { DEEP = 200 };
+    bool all_ok = true;
+    uint64_t members[64];
+    for (int i = 0; i < DEEP; i++) {
+        char branch[64];
+        snprintf(branch, sizeof branch, "lane/bulk-%d", i);
+        uint64_t s = submit_one(q, branch, k_head_b);
+        all_ok = all_ok && s == (uint64_t)(i + 2);
+        if (i < 64)
+            members[i] = s;
+    }
+    LQ_CHECK("a deep queue fills with dense sequence numbers", all_ok);
+    uint64_t gr = gate_over(q, LAND_GATE_GREEN, true, members, 64);
+    LQ_CHECK("a gate run over 64 of them is outstanding", gr != 0);
+
+    /* Now the measurement that matters: a submit while all of that is in
+     * flight still writes exactly one frame and lands at the very next
+     * sequence number. Nothing about it scales with the 200 entries or waits
+     * for the outstanding run. */
+    size_t entries_before = land_queue_count(q);
+    uint64_t deep = submit_one(q, "lane/deep", k_head_a);
+    LQ_CHECK("a submit into a deep queue with a gate run outstanding "
+             "succeeds", deep != 0);
+    LQ_CHECK("and adds exactly one entry",
+             land_queue_count(q) == entries_before + 1);
+    LQ_CHECK("and exactly one frame — no fan-out with queue depth",
+             deep == (uint64_t)(DEEP + 2 /* submissions */ + 1 /* gate run */));
+    LQ_CHECK("and it is QUEUED, not blocked behind the running gate",
+             state_of(q, deep) == LAND_STATE_QUEUED);
+
+    land_queue_close(q);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* ── 10. status says what it is waiting on ────────────────────────────
+ * "PENDING" makes the asker think. Every live state has to name the one
+ * thing that will end the wait. */
+
+static int case_status_says_what_it_waits_on(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "land", "waiting");
+    char path[640];
+    snprintf(path, sizeof path, "%s/queue.chainlog", dir);
+
+    struct zcl_chainlog_report rep;
+    struct land_queue *q = land_queue_open(path, &rep);
+    if (!q) {
+        LQ_CHECK("the queue opens", false);
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
+
+    uint64_t a = submit_one(q, "lane/a", k_head_a);
+    uint64_t b = submit_one(q, "lane/b", k_head_b);
+    uint64_t c = submit_one(q, "lane/c", k_head_a);
+
+    LQ_CHECK("the head of the queue has nothing ahead of it",
+             land_queue_find_seq(q, a)->ahead == 0);
+    LQ_CHECK("and the ones behind it say how many",
+             land_queue_find_seq(q, b)->ahead == 1 &&
+                 land_queue_find_seq(q, c)->ahead == 2);
+
+    uint64_t two[] = { a, b };
+    uint64_t gr = gate_over(q, LAND_GATE_GREEN, true, two, 2);
+    LQ_CHECK("a submission inside a batch names the run it is in",
+             land_queue_find_seq(q, a)->gate_run_seq == gr &&
+                 land_queue_find_seq(q, a)->state == LAND_STATE_GATING);
+    LQ_CHECK("and how many submissions that run is proving at once",
+             land_queue_find_seq(q, a)->batch_size == 2 &&
+                 land_queue_find_seq(q, b)->batch_size == 2);
+    LQ_CHECK("the one still queued moved up as the others left the queue",
+             land_queue_find_seq(q, c)->ahead == 0 &&
+                 land_queue_find_seq(q, c)->state == LAND_STATE_QUEUED);
+
+    (void)settle(q, a, LAND_STATE_LANDED, gr);
+    LQ_CHECK("a settled submission is waiting on nothing",
+             land_queue_find_seq(q, a)->ahead == 0 &&
+                 land_queue_find_seq(q, a)->state == LAND_STATE_LANDED);
+
+    land_queue_close(q);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* ── 11. a verdict is checkable by whoever receives it ─────────────────
+ *
+ * The digest is what stops the queue being a coordinator everyone has to
+ * trust: it is computed from four public facts, so a second machine
+ * recomputes it without the queue, without the network, and without taking
+ * this machine's word for anything. */
+
+static int case_verdict_digest(void)
+{
+    int failures = 0;
+    uint8_t head[LAND_SHA_BYTES], integ[LAND_SHA_BYTES];
+    uint8_t gate_id[LAND_GATE_ID_BYTES], other_id[LAND_GATE_ID_BYTES];
+    (void)land_sha_parse(k_head_a, head);
+    (void)land_sha_parse(k_integ, integ);
+    (void)land_id32_parse(k_gate_id, gate_id);
+    memset(other_id, 0x7E, sizeof other_id);
+
+    uint8_t d1[LAND_DIGEST_BYTES], d2[LAND_DIGEST_BYTES];
+    land_verdict_digest(head, integ, gate_id, LAND_STATE_LANDED, true, d1);
+    land_verdict_digest(head, integ, gate_id, LAND_STATE_LANDED, true, d2);
+    LQ_CHECK("the same four facts give the same digest",
+             memcmp(d1, d2, LAND_DIGEST_BYTES) == 0);
+
+    /* Every input is load-bearing. A field that did not change the digest
+     * would be a field an attacker could change without the receiver
+     * noticing. */
+    uint8_t other_head[LAND_SHA_BYTES];
+    (void)land_sha_parse(k_head_b, other_head);
+    land_verdict_digest(other_head, integ, gate_id, LAND_STATE_LANDED, true, d2);
+    LQ_CHECK("a different submitted commit gives a different digest",
+             memcmp(d1, d2, LAND_DIGEST_BYTES) != 0);
+
+    uint8_t other_integ[LAND_SHA_BYTES];
+    memset(other_integ, 0x11, sizeof other_integ);
+    land_verdict_digest(head, other_integ, gate_id, LAND_STATE_LANDED, true, d2);
+    LQ_CHECK("a different integration commit gives a different digest",
+             memcmp(d1, d2, LAND_DIGEST_BYTES) != 0);
+
+    land_verdict_digest(head, integ, other_id, LAND_STATE_LANDED, true, d2);
+    LQ_CHECK("a different gating tree gives a different digest",
+             memcmp(d1, d2, LAND_DIGEST_BYTES) != 0);
+
+    land_verdict_digest(head, integ, gate_id, LAND_STATE_REFUSED, true, d2);
+    LQ_CHECK("a different verdict gives a different digest",
+             memcmp(d1, d2, LAND_DIGEST_BYTES) != 0);
+
+    land_verdict_digest(head, integ, gate_id, LAND_STATE_LANDED, false, d2);
+    LQ_CHECK("a run that skipped its groups gives a different digest",
+             memcmp(d1, d2, LAND_DIGEST_BYTES) != 0);
+
+    /* The digest a queue publishes must be the one an outsider recomputes.
+     * If these two ever disagreed, the published receipt would be
+     * uncheckable and the whole decentralised half would be decoration. */
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "land", "digest");
+    char path[640];
+    snprintf(path, sizeof path, "%s/queue.chainlog", dir);
+    struct zcl_chainlog_report rep;
+    struct land_queue *q = land_queue_open(path, &rep);
+    if (!q) {
+        LQ_CHECK("the queue opens", false);
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
+    uint64_t a = submit_one(q, "lane/checkable", k_head_a);
+    uint64_t only_a[] = { a };
+    uint64_t gr = gate_over(q, LAND_GATE_GREEN, true, only_a, 1);
+    LQ_CHECK("the submission lands", settle(q, a, LAND_STATE_LANDED, gr) ==
+                                         LAND_OK);
+    const struct land_entry *e = land_queue_find_seq(q, a);
+    LQ_CHECK("a settled submission publishes a digest", e && e->has_digest);
+    if (e) {
+        LQ_CHECK("and carries the gating tree's identity beside it",
+                 memcmp(e->gate_id, gate_id, LAND_GATE_ID_BYTES) == 0 &&
+                     e->gate_stress);
+        /* Recompute it the way a stranger would: from the four facts only. */
+        uint8_t outside[LAND_DIGEST_BYTES];
+        land_verdict_digest(e->submit.head, e->verdict.integration,
+                            e->gate_id, e->state, e->gate_stress, outside);
+        LQ_CHECK("and a receiver recomputes exactly it from the public facts",
+                 memcmp(outside, e->digest, LAND_DIGEST_BYTES) == 0);
+        /* And a receiver that is told the wrong tree does NOT reproduce it,
+         * which is the half that makes the check worth running. */
+        land_verdict_digest(e->submit.head, e->verdict.integration, other_id,
+                            e->state, e->gate_stress, outside);
+        LQ_CHECK("a verdict cannot be replayed onto another tree",
+                 memcmp(outside, e->digest, LAND_DIGEST_BYTES) != 0);
+    }
+
+    /* A verdict nothing gated still gets a digest — over an all-zero gate
+     * identity, so it can never be confused with a gated one. */
+    uint64_t b = submit_one(q, "lane/ungated", k_head_b);
+    LQ_CHECK("an ungated refusal records", settle(q, b, LAND_STATE_REFUSED, 0) ==
+                                               LAND_OK);
+    const struct land_entry *eb = land_queue_find_seq(q, b);
+    if (eb) {
+        uint8_t zero_id[LAND_GATE_ID_BYTES];
+        memset(zero_id, 0, sizeof zero_id);
+        uint8_t expect[LAND_DIGEST_BYTES];
+        land_verdict_digest(eb->submit.head, eb->verdict.integration, zero_id,
+                            LAND_STATE_REFUSED, false, expect);
+        LQ_CHECK("and its digest names 'nothing gated this'",
+                 eb->has_digest &&
+                     memcmp(eb->digest, expect, LAND_DIGEST_BYTES) == 0);
+    }
+
+    land_queue_close(q);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* ── 12. an unreachable queue refuses; it never looks empty ────────────
+ *
+ * The failure mode when the queue cannot be reached must be that the agent
+ * falls back to gating locally — degraded, never blocked, and never told
+ * "there is nothing queued" when the truth is "I could not look". */
+
+static int case_unreachable_queue(void)
+{
+    int failures = 0;
+    struct zcl_chainlog_report rep;
+    memset(&rep, 0, sizeof rep);
+
+    /* A path whose parent does not exist. Opening it must fail loudly. */
+    struct land_queue *q =
+        land_queue_open("/nonexistent-directory-for-land/queue.chainlog", &rep);
+    LQ_CHECK("an unreachable queue refuses to open", q == NULL);
+    LQ_CHECK("and says why, rather than reporting an empty queue",
+             rep.status != ZCL_CHAINLOG_OK);
+    if (q)
+        land_queue_close(q);
+
+    /* And the refusal is distinguishable from a real, empty queue — the two
+     * must never be the same answer. */
+    char dir[512];
+    test_make_tmpdir(dir, sizeof dir, "land", "empty");
+    char path[640];
+    snprintf(path, sizeof path, "%s/queue.chainlog", dir);
+    struct zcl_chainlog_report erep;
+    struct land_queue *empty = land_queue_open(path, &erep);
+    LQ_CHECK("a real but empty queue opens", empty != NULL);
+    LQ_CHECK("with an OK status and no entries",
+             empty && erep.status == ZCL_CHAINLOG_OK &&
+                 land_queue_count(empty) == 0);
+    if (empty)
+        land_queue_close(empty);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* ── 13. surface: refusals are named, and nothing crashes on NULL ─────── */
 
 static int case_surface(void)
 {
@@ -810,6 +1132,10 @@ int test_land_queue(void)
     failures += case_chain_verifies();
     failures += case_canonical_bytes();
     failures += case_two_submitters_race();
+    failures += case_submit_cost_is_flat();
+    failures += case_status_says_what_it_waits_on();
+    failures += case_verdict_digest();
+    failures += case_unreachable_queue();
     failures += case_surface();
     printf("land_queue: %d failure(s)\n", failures);
     return failures;

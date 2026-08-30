@@ -58,7 +58,8 @@ enum land_status {
     LAND_ERR_ALREADY_FINAL,     /* a second verdict for a settled submission */
     LAND_ERR_NO_GATE_RUN,       /* LANDED, but no gate run contains it */
     LAND_ERR_GATE_NOT_GREEN,    /* LANDED, but that gate run was red */
-    LAND_ERR_GATE_NOT_STRESSED  /* LANDED, but that run skipped its groups */
+    LAND_ERR_GATE_NOT_STRESSED, /* LANDED, but that run skipped its groups */
+    LAND_ERR_GATE_UNIDENTIFIED  /* LANDED, but nobody can say WHICH tree */
 };
 
 const char *land_status_label(enum land_status s);
@@ -71,6 +72,31 @@ struct land_entry {
     uint32_t gate_runs;            /* how many runs it has been through */
     bool has_verdict;
     struct land_verdict verdict;   /* meaningful only when has_verdict */
+
+    /* WHAT IT IS WAITING ON. A queue that can only say PENDING makes the
+     * asker think, and making the asker think is the cost this whole thing
+     * exists to remove. So every live state carries the one number that
+     * answers "why is it not done yet":
+     *   QUEUED  -> `ahead` submissions the lander will take before it
+     *   GATING  -> it is inside gate run `gate_run_seq`, which is proving
+     *              `batch_size` submissions at once
+     * Both are derived from the log by replay, so reading them costs a file
+     * read and no gate, no build, and no network. */
+    uint32_t ahead;
+    uint32_t batch_size;
+
+    /* The gating tree's identity and whether its groups were enabled,
+     * carried from the most recent gate run that contained this submission.
+     * These are what make the verdict digest below reproducible. */
+    uint8_t gate_id[LAND_GATE_ID_BYTES];
+    bool gate_stress;
+
+    /* The content address of the verdict — see land_verdict_digest(). Set
+     * only once a verdict exists, because there is no digest for a decision
+     * nobody has made. A receiver on another machine recomputes this from
+     * (head, integration, gate_id, state, stress) and compares. */
+    bool has_digest;
+    uint8_t digest[LAND_DIGEST_BYTES];
     /* False when a LANDED verdict in the log is NOT backed by a green,
      * stress-enabled gate run naming this submission. The writer refuses to
      * create one; this exists so an auditor reading a log written by
@@ -125,9 +151,17 @@ enum land_status land_queue_gate_run(struct land_queue *q,
 
 /* Record a verdict. THE FAIL-CLOSED SEAM: a LANDED verdict is refused unless
  * v->gate_run_seq names a gate run that (a) exists, (b) was GREEN, (c) ran
- * with the stress groups enabled, and (d) listed v->submit_seq as a member.
- * REFUSED and TIMEOUT carry no such requirement — refusing work that was
- * never gated is always sound, landing it never is. */
+ * with the stress groups enabled, (d) listed v->submit_seq as a member, and
+ * (e) carries a non-zero gate identity.
+ *
+ * (e) is there for the receiver, not for the runner. A landing whose gating
+ * tree cannot be named produces a verdict digest nobody else can reproduce,
+ * which is precisely the "trust me, it passed" receipt this design exists to
+ * remove. Refusing an unidentifiable pass costs one resubmission; accepting
+ * one costs the property that makes a verdict worth sending anywhere.
+ *
+ * REFUSED and TIMEOUT carry none of these requirements — refusing work that
+ * was never gated is always sound, landing it never is. */
 enum land_status land_queue_verdict(struct land_queue *q,
                                     const struct land_verdict *v,
                                     uint64_t *out_seq);
