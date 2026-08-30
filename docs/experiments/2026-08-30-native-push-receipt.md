@@ -61,6 +61,12 @@ registry correctly refused to serialize; wait replies no longer prescribe the
 same active wait leaf, and a 900,000 millisecond proof timeout is accepted only
 for this command. The resulting typed failure serialized in 87 microseconds.
 
+The first isolated compile refused because archive and include dependencies
+were symlinked into the generation, which exact source identity intentionally
+forbids. The broker now hard-links regular dependency files and recursively
+materializes real include directories; it does not weaken source capture or
+follow mutable dependency symlinks.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.

@@ -15,6 +15,7 @@
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -454,12 +455,44 @@ static bool worktree_exact(const char *root, const char *local,
     return true;
 }
 
-static bool dependency_link(const char *source, const char *target)
+static bool dependency_materialize(const char *source, const char *target)
 {
-    struct stat st;
-    if (lstat(target, &st) == 0) return true;
-    return errno == ENOENT && access(source, R_OK) == 0 &&
-           symlink(source, target) == 0;
+    struct stat source_st, target_st;
+    if (lstat(source, &source_st) != 0) return false;
+    bool target_exists = lstat(target, &target_st) == 0;
+    if (target_exists && S_ISLNK(target_st.st_mode)) {
+        if (unlink(target) != 0) return false;
+        target_exists = false;
+    }
+    if (S_ISREG(source_st.st_mode)) {
+        if (target_exists && S_ISREG(target_st.st_mode) &&
+            source_st.st_dev == target_st.st_dev &&
+            source_st.st_ino == target_st.st_ino)
+            return true;
+        if (target_exists && unlink(target) != 0) return false;
+        return link(source, target) == 0;
+    }
+    if (!S_ISDIR(source_st.st_mode) ||
+        (target_exists && !S_ISDIR(target_st.st_mode)) ||
+        (!target_exists && mkdir(target, 0700) != 0))
+        return false;
+    DIR *dir = opendir(source);
+    if (!dir) return false;
+    bool ok = true;
+    for (struct dirent *entry = readdir(dir); ok && entry;
+         entry = readdir(dir)) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        char child_source[PATH_MAX], child_target[PATH_MAX];
+        if (snprintf(child_source, sizeof(child_source), "%s/%s", source,
+                     entry->d_name) >= (int)sizeof(child_source) ||
+            snprintf(child_target, sizeof(child_target), "%s/%s", target,
+                     entry->d_name) >= (int)sizeof(child_target) ||
+            !dependency_materialize(child_source, child_target))
+            ok = false;
+    }
+    return closedir(dir) == 0 && ok;
 }
 
 static bool generation_prepare(const struct proof_paths *paths,
@@ -518,7 +551,7 @@ static bool generation_prepare(const struct proof_paths *paths,
                      dependencies[i]) >= (int)sizeof(source) ||
             snprintf(target, sizeof(target), "%s/%s", generation,
                      dependencies[i]) >= (int)sizeof(target) ||
-            !dependency_link(source, target)) {
+            !dependency_materialize(source, target)) {
             proof_why(why, why_len, "proof_generation_dependency_unavailable");
             return false;
         }
