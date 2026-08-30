@@ -73,6 +73,12 @@ lost Make's successful exit status. Proof workers now establish the default
 `SIGCHLD` disposition before launching children and retain exact nonzero exit
 codes in failure evidence.
 
+The subsequent warm proof reached `lint-fast` and exposed that its Equihash
+tool prerequisite expanded before `EQUIHASH_FACT_TOOL` was defined. Moving the
+definition ahead of the target preserved the no-nested-Make gate and produced a
+green 24-gate `lint-fast` run in 12.838 seconds; Equihash itself took 139
+milliseconds.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.

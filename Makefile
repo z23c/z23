@@ -4467,6 +4467,13 @@ syntax-check: $(VIEW_GEN_HEADERS)
 # the stray-source guard (~5 s) dominates, so the set stays ~6-8 s wall under
 # the parallel driver. Same ZCL_LINT_SERIAL=1 fallback as lint.
 # Run full `make lint` at sub-wave boundaries / before commit.
+EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
+EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
+    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
+    core/params/src/upgrades.c core/consensus/src/upgrades.c \
+    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
+    lib/base/src/log_level.c lib/base/src/result.c
+
 LINT_FAST_GATES := \
     check-no-stray-untracked-source \
     check-no-stray-root-files \
@@ -11248,13 +11255,6 @@ check-generated-artifact-contradictions:
 # height-selected 192,7 since Bubbles, and a reader who believes the flat
 # claim sizes a solution buffer wrongly. Fix a failure with
 # `make docs-equihash-params`, never by editing the generated page.
-EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
-EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
-    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
-    core/params/src/upgrades.c core/consensus/src/upgrades.c \
-    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
-    lib/base/src/log_level.c lib/base/src/result.c
-
 $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
