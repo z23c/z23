@@ -1,0 +1,127 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * THE CLASSES OF THING A TRANSLATION UNIT CAN REACH FOR.
+ *
+ * WHY THIS FILE EXISTS. You cannot decide whether a billion lines of C are
+ * malicious. Deciding a non-trivial behavioural property of an arbitrary
+ * program is undecidable, so any classifier that tries has misses, and a
+ * classifier with misses is not a safety property, it is a hope. This file
+ * belongs to a design that asks a decidable question instead: not "is this
+ * code bad", but "what can this code reach". The second question the compiler
+ * has already answered. Every external entry point a translation unit calls
+ * appears as an undefined symbol in its object file, and `nm -u` reads them
+ * out. There is no judgement in that step and no model in it either.
+ *
+ * The measurement that motivated the design, taken on this tree: of 2016
+ * objects carrying any undefined symbol, 34 can reach the network, 16 can
+ * spawn a process and 4 can load a shared object. Ninety-eight percent of the
+ * codebase is incapable of opening a socket. Not reviewed and believed to be
+ * incapable. Incapable, because the symbol is not there, and anyone can check
+ * that in the time it takes to run nm.
+ *
+ * WHAT A CLASS IS. A class names a kind of REACH, never a kind of intent.
+ * NETWORK is not "code that talks to the internet for a bad reason"; it is
+ * "code from which a socket entry point is reachable at link time". A row says
+ * what the linker can see, so two people reading it cannot disagree.
+ *
+ * THE DEFAULT IS THE EMPTY SET. A source file with no row in
+ * config/module_capabilities.def declares nothing, and nothing is enforced
+ * positively: if it references an entry point in any class here, the build
+ * fails. That is the property the whole design rests on. A new file added by
+ * anyone, reviewed by no one, cannot acquire the ability to open a socket
+ * without a human writing a line that says so.
+ *
+ * CAP_NONE IS NOT A CLASS AND HAS NO ROW. Its absence is what makes the table
+ * closed. An external symbol that appears in no row of
+ * config/capability_symbols.def is not "harmless by default" — it is a build
+ * failure until somebody classifies it. That is the only arrangement that
+ * survives growth: at a billion lines nobody will notice the day a module
+ * starts calling a libc entry point that did not exist when the gate was
+ * written, so the gate has to notice instead. It costs one row per new libc
+ * call across the entire project, because this table is sized by the platform
+ * libraries and not by the codebase. The live count is derived by
+ * check-capability-closure; a tree a thousand times larger would have a
+ * comparable boundary vocabulary.
+ *
+ * WHAT THIS DOES NOT CATCH, stated here so nobody has to discover it later:
+ *
+ *   - REACH, NOT LOGIC. A file that legitimately declares CAP_WALLET can still
+ *     do the wrong thing with the wallet. Confinement shrinks the surface that
+ *     needs human judgement from every file to the few that declared
+ *     something; it does not remove the judgement. The point is that the small
+ *     set is nameable and the large one never was.
+ *   - A HAND-ROLLED SYSCALL. Undefined symbols prove a file does not CALL OUT
+ *     to an entry point. A file that issues a raw syscall, or inline assembly,
+ *     reaches the kernel with no symbol to see. That hole is closed at source
+ *     level by check-capability-closure, not here.
+ *   - CODE THAT ARRIVES LATER. A shared object loaded at runtime was never
+ *     scanned by anything. CAP_DYNLOAD is therefore the sharpest row in this
+ *     file: a hot-swapped worker inherits the capability set of the host that
+ *     loaded it and never its own claim, because its own claim is a string
+ *     that arrived with the code it describes.
+ *
+ * Ordering is alphabetical by id and carries no meaning. The gate reads ids,
+ * never indices, so a row inserted in the middle changes nothing.
+ */
+
+/* ZCL_CAPABILITY_CLASS(id, harm, why)
+ *
+ *   id    the enum suffix, CAP_<ID>
+ *   harm  what an attacker gets if code in this class is hostile, in one line
+ *   why   what makes this a boundary worth a declaration rather than noise
+ */
+
+ZCL_CAPABILITY_CLASS(NETWORK,
+    "sends this machine's data to an address the operator never chose",
+    "The only class that can move a secret off the box. Every other class "
+    "needs this one to turn a local read into a disclosure, which is why it "
+    "is worth declaring even for code that merely dials a known peer.")
+
+ZCL_CAPABILITY_CLASS(PROCESS,
+    "runs a program of the attacker's choosing with this process's privileges",
+    "A spawn is a total escape: whatever confinement the rest of this table "
+    "buys ends at the exec, because the child inherits none of it. Sixteen "
+    "objects in this tree can do it and every one of them is a build, boot or "
+    "sandbox tool that has to.")
+
+ZCL_CAPABILITY_CLASS(DYNLOAD,
+    "executes code that no build, no gate and no reviewer ever saw",
+    "The one class whose subject is absent at check time. Everything else "
+    "here is a statement about bytes that exist; this is a statement about "
+    "bytes that will exist. It is held to a stricter rule for that reason.")
+
+ZCL_CAPABILITY_CLASS(FS_WRITE,
+    "alters or destroys files belonging to the operator",
+    "Separated from reading because the failures are not comparable. A bad "
+    "read leaks; a bad write is not recoverable by re-running anything.")
+
+ZCL_CAPABILITY_CLASS(FS_READ,
+    "reads files the operator did not intend this program to open",
+    "Broad and mostly benign, and declared anyway: it is the first half of "
+    "every exfiltration, and a file that reads nothing is a fact worth being "
+    "able to state about most of the tree.")
+
+ZCL_CAPABILITY_CLASS(WALLET,
+    "reaches spending material",
+    "The one class where a single mistake is unrecoverable and no later gate "
+    "can undo it. Named separately from FS_READ even though the key sits in a "
+    "file, because 'this code can read a file' and 'this code can read the "
+    "key' are not the same sentence and must not compress into one.")
+
+ZCL_CAPABILITY_CLASS(RANDOM,
+    "controls values the protocol assumes no one can predict",
+    "Not a leak but a weakening, and an invisible one: output from a broken "
+    "generator looks exactly like output from a working one. Declared so the "
+    "set of files that can influence it stays small enough to audit by eye.")
+
+ZCL_CAPABILITY_CLASS(CLOCK,
+    "shifts decisions that are graded against a measured interval",
+    "Included because this project already learned it: a wall-clock reading "
+    "inside an assertion turns a loaded machine into a red build, which is "
+    "why check-no-wallclock-assertion exists. Same reach, same table.")
+
+ZCL_CAPABILITY_CLASS(PRIVILEGE,
+    "changes who this process is, or what it is allowed to do",
+    "setuid, capset, chroot and the sandbox entry points. Rare, and it should "
+    "stay rare: the set of files that can widen their own authority is the "
+    "set an auditor reads first.")

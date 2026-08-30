@@ -40,6 +40,8 @@
 #include "base/safe_alloc.h"
 #include "command/native_devagent.h"
 #include "platform/clock.h"
+#include "platform/directory_compat.h"
+#include "platform/path_compat.h"
 #include "sha3/sha3.h"
 
 #include <errno.h>
@@ -733,8 +735,16 @@ static int mut_compile(const struct mut_ctx *c)
         !mut_argv_push(&a, c->subject_c, strlen(c->subject_c)))
         goto fail;
     (void)unlink(c->object);
+    char *diagnostic = NULL;
+    size_t diagnostic_len = 0;
     int rc = zcl_mut_spawn(c->cfg->root, a.argv, c->cfg->build_timeout_ms,
-                           NULL, NULL);
+                           &diagnostic, &diagnostic_len);
+    if (rc != 0) {
+        int shown = diagnostic_len > 2000u ? 2000 : (int)diagnostic_len;
+        fprintf(stderr, "mutation: compile failed rc=%d: %.*s\n", rc, shown,
+                diagnostic ? diagnostic : "(no compiler diagnostic)");
+    }
+    free(diagnostic);
     zcl_mut_argv_free(&a);
     return rc;
 fail:
@@ -760,8 +770,16 @@ static int mut_link(const struct mut_ctx *c)
             return -1;
         }
     }
+    char *diagnostic = NULL;
+    size_t diagnostic_len = 0;
     int rc = zcl_mut_spawn(c->cfg->root, a.argv, c->cfg->build_timeout_ms,
-                           NULL, NULL);
+                           &diagnostic, &diagnostic_len);
+    if (rc != 0) {
+        int shown = diagnostic_len > 2000u ? 2000 : (int)diagnostic_len;
+        fprintf(stderr, "mutation: link failed rc=%d: %.*s\n", rc, shown,
+                diagnostic ? diagnostic : "(no compiler diagnostic)");
+    }
+    free(diagnostic);
     zcl_mut_argv_free(&a);
     return rc;
 }
@@ -888,8 +906,13 @@ static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
                        "scratch paths do not fit under %s", cfg->work_dir);
         return false;
     }
-    (void)mkdir(cfg->work_dir, 0755);
-    (void)mkdir(c->cache_dir, 0755);
+    if (!platform_directory_ensure(cfg->work_dir, 0755) ||
+        !platform_directory_ensure(c->cache_dir, 0755)) {
+        (void)snprintf(rep->error, sizeof rep->error,
+                       "cannot create mutation scratch directories under %.180s",
+                       cfg->work_dir);
+        return false;
+    }
     (void)snprintf(c->runner_arg, sizeof c->runner_arg,
                    cfg->runner_arg_fmt ? cfg->runner_arg_fmt : "--exact=%s",
                    cfg->group);
@@ -899,9 +922,15 @@ static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
     if (c->plan->rsp[0]) {
         char rsp_path[PATH_MAX];
         const char *p = c->plan->rsp;
-        if (p[0] == '/')
-            (void)snprintf(rsp_path, sizeof rsp_path, "%s", p);
-        else if (!mut_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
+        if (platform_path_is_absolute(p)) {
+            size_t path_len = strlen(p);
+            if (path_len >= sizeof rsp_path) {
+                (void)snprintf(rep->error, sizeof rep->error,
+                               "absolute response path is too long");
+                return false;
+            }
+            memcpy(rsp_path, p, path_len + 1u);
+        } else if (!mut_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
             (void)snprintf(rep->error, sizeof rep->error, "rsp path too long");
             return false;
         }
@@ -933,6 +962,13 @@ static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
         memcpy(swapped + head + strlen(c->object), rsp + head + objn,
                rlen - head - objn);
         swapped[need - 1] = '\0';
+#if defined(_WIN32)
+        /* GCC response files use backslash as an escape character even when
+         * the driver is native Windows.  Convert path separators before the
+         * file is parsed or C:\\Users becomes the relative C:Users token. */
+        for (size_t i = 0; i + 1u < need; i++)
+            if (swapped[i] == '\\') swapped[i] = '/';
+#endif
         bool ok = zcl_mut_write_file(c->rsp, swapped, need - 1);
         free(swapped);
         free(rsp);

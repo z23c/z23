@@ -176,15 +176,19 @@ static void sha3_512_x4_neon(const uint8_t key[32], const uint8_t nonce[32],
 
 /* ── Runtime dispatch ─────────────────────────────────────────────
  *
- * Selected once at first use. AVX-512 is the shipped default: measured 1.65x
- * the scalar lane on this host class (Zen 4), and unlike the single-stream
- * permutation the geometry is lane-parallel with no cross-lane gather. Set
- * SHA3_512_X4_AVX512_DEFAULT_ENABLED to 0 to ship scalar if a host measures a
- * loss. The parity oracle / bench force a path via sha3_512_x4_select_impl.
- * One-time initialization and subsequent selector overrides are atomically
- * published, so concurrent first use is valid ISO C. */
+ * Selected once at first use. AVX-512 is the x86 shipped default: measured
+ * 1.65x the scalar lane on this host class (Zen 4), and unlike the
+ * single-stream permutation the geometry is lane-parallel with no cross-lane
+ * gather. arm64 AUTO stays scalar: the registered Apple-Silicon oracle
+ * measures the two-pair NEON lane at about 0.55x scalar. NEON remains available
+ * to the explicit selector for differential proof and future tuning. The
+ * selector overrides are atomically published, so concurrent first use is
+ * valid ISO C. */
 #ifndef SHA3_512_X4_AVX512_DEFAULT_ENABLED
 #define SHA3_512_X4_AVX512_DEFAULT_ENABLED 1
+#endif
+#ifndef SHA3_512_X4_NEON_DEFAULT_ENABLED
+#define SHA3_512_X4_NEON_DEFAULT_ENABLED 0
 #endif
 
 typedef void (*sha3_512_x4_fn)(const uint8_t[32], const uint8_t[32],
@@ -203,7 +207,7 @@ static void x4_init_default(void)
         atomic_store_explicit(&g_x4, sha3_512_x4_scalar,
                               memory_order_release);
 #elif defined(__aarch64__)
-    if (keccak_x4_available())
+    if (SHA3_512_X4_NEON_DEFAULT_ENABLED && keccak_x4_available())
         atomic_store_explicit(&g_x4, sha3_512_x4_neon,
                               memory_order_release);
     else

@@ -7,7 +7,8 @@
  *   - level classification walks NOMINAL -> ELEVATED -> HIGH -> CRITICAL as
  *     the os_proc_mem override's usage/denominator ratio crosses the
  *     default 50/75/90 thresholds
- *   - denominator priority: cgroup_high > cgroup_max > sys_total
+ *   - denominator priority: cgroup_high > cgroup_max > system availability
+ *   - host-wide pressure outranks a low process RSS when availability exists
  *   - registered sinks fire at HIGH and CRITICAL, NOT at NOMINAL/ELEVATED
  *   - shrink_calls / last_shrink_unix bookkeeping increments correctly
  *   - dump_state_json reports the current level + sink stats
@@ -91,6 +92,30 @@ int test_mem_pressure(void)
         mem_pressure_poll_tick();
         MP_CHECK("dropping back to 10% -> NOMINAL again",
                  mem_pressure_current() == MEM_NOMINAL);
+    }
+
+    /* ── host availability captures pressure outside this process ───── */
+    {
+        set_override(10, -1, -1, -1, 1000, 100); /* host is 90% used */
+        mem_pressure_poll_tick();
+        MP_CHECK("host-wide pressure outranks this process's low RSS",
+                 mem_pressure_current() == MEM_CRITICAL);
+
+        struct json_value out;
+        json_init(&out);
+        json_set_object(&out);
+        MP_CHECK("host-wide pressure dump succeeds",
+                 mem_pressure_dump_state_json(&out, NULL));
+        const struct json_value *basis = json_get(&out, "denominator_basis");
+        MP_CHECK("host-wide pressure reports system_available basis",
+                 basis &&
+                 strcmp(json_get_str(basis), "system_available") == 0);
+        json_free(&out);
+
+        set_override(800, -1, -1, -1, 1000, -1);
+        mem_pressure_poll_tick();
+        MP_CHECK("RSS fallback remains active when availability is unknown",
+                 mem_pressure_current() == MEM_HIGH);
     }
 
     /* ── denominator priority: cgroup_high beats cgroup_max/sys_total ── */

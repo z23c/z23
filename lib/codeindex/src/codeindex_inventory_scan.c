@@ -165,6 +165,7 @@ static bool inv_path_push(struct inv_scan *s, const char *path,
     row->inode = (uint64_t)st->st_ino;
     return true;
 }
+#endif
 
 static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 {

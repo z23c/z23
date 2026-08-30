@@ -3,6 +3,7 @@
 
 #include "services/zcode_lane_service.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "crypto/sha3.h"
 #include "hotswap/hotswap_service.h"
@@ -18,13 +19,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static bool lane_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static bool lane_load_raw(const char *workspace, const char *hex,
                           uint8_t **wire, size_t *wire_len, uint8_t root[32])
@@ -153,15 +147,15 @@ static bool lane_row_matches_receipt(
     zcl_hex_encode(receipt->proof_policy_root, 32, hex);
     if (strcmp(hex, row->proof_policy_root_sha3) != 0) return false;
     zcl_hex_encode(receipt->proof_set_root, 32, hex);
-    if ((lane_root_nonzero(receipt->proof_set_root) &&
+    if ((zcl_bytes_any_set(receipt->proof_set_root, 32) &&
          strcmp(hex, row->proof_set_root_sha3) != 0) ||
-        (!lane_root_nonzero(receipt->proof_set_root) &&
+        (!zcl_bytes_any_set(receipt->proof_set_root, 32) &&
          row->proof_set_root_sha3[0]))
         return false;
     zcl_hex_encode(receipt->prior_receipt_root, 32, hex);
-    if ((lane_root_nonzero(receipt->prior_receipt_root) &&
+    if ((zcl_bytes_any_set(receipt->prior_receipt_root, 32) &&
          strcmp(hex, row->prior_receipt_root_sha3) != 0) ||
-        (!lane_root_nonzero(receipt->prior_receipt_root) &&
+        (!zcl_bytes_any_set(receipt->prior_receipt_root, 32) &&
          row->prior_receipt_root_sha3[0]))
         return false;
     zcl_hex_encode(receipt->signer_pubkey, 32, hex);

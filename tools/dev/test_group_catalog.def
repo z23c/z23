@@ -144,6 +144,8 @@ ZCL_TEST_GROUP(mesh_capability_grant)
 ZCL_TEST_GROUP(mesh_capability_proto)
 ZCL_TEST_GROUP(mesh_pairing_controller)
 ZCL_TEST_GROUP(mesh_status_proto)
+/* mesh terminal open/receipt/data/resize/close wire codec and receipt proof */
+ZCL_TEST_GROUP(mesh_terminal_proto)
 ZCL_TEST_GROUP(mesh_private_object_proto)
 ZCL_TEST_GROUP(mesh_private_object_crypto)
 ZCL_TEST_GROUP(mesh_private_object_grant_pipeline)
@@ -536,6 +538,14 @@ ZCL_TEST_GROUP(os_proc)
 ZCL_TEST_GROUP(os_sandbox)
 ZCL_TEST_GROUP(sandbox_process_budget)
 ZCL_TEST_GROUP(os_sandbox_hotswap_interaction)
+/* terminal worker cage: attacks against os_sandbox_terminal_worker_profile */
+ZCL_TEST_GROUP(terminal_worker_sandbox)
+/* live confined terminal worker: PTY pump, budgets, named endings */
+ZCL_TEST_GROUP(mesh_terminal_worker)
+/* mesh terminal wire: ZMTERM responder decision, receipts, session table */
+ZCL_TEST_GROUP(boot_mesh_terminal)
+/* mesh terminal requester: receipt binding, DATA sequence/FIFO, watchdogs */
+ZCL_TEST_GROUP(mesh_terminal_client)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)
@@ -612,6 +622,9 @@ ZCL_TEST_GROUP(seal_ratify)
 ZCL_TEST_GROUP(vcs_core)
 ZCL_TEST_GROUP(vcs_release)
 ZCL_TEST_GROUP(vcs_accept)
+/* The receiver's own re-derivation of a package capability claim: what a
+ * node that never met the publisher can check for itself. */
+ZCL_TEST_GROUP(package_capability_claim)
 ZCL_TEST_GROUP(zcode_store)
 ZCL_TEST_GROUP(zcode_publish)
 ZCL_TEST_GROUP(zcode_package_dev)
@@ -686,6 +699,23 @@ ZCL_TEST_GROUP(chainlog)
  * boundary a fiction, so the encoding is asserted directly rather than
  * inferred from a rendered number. */
 ZCL_TEST_GROUP(kpi)
+/* The claim register. The group exists for one refusal and one derivation:
+ * a claim that does not say how it could be shown wrong is refused by the
+ * field that is missing, and a claim's status is COMPUTED from its trials
+ * with no path by which a caller could assert it. The lopsided-but-untested
+ * case is the load-bearing one — a huge-looking effect on three trials is
+ * still UNTESTED, and skipping that check is how a register of measurements
+ * becomes a register of impressions. */
+ZCL_TEST_GROUP(science)
+/* The batching landing queue. The group exists for one distinction and one
+ * guarantee. The distinction: "the gate did not run" and "the gate passed"
+ * are different facts, so four cases try to fabricate a landing through the
+ * four ways that could collapse — no gate run, a run that did not contain
+ * this submission, a red run, and a run that skipped its groups — and each
+ * must refuse by name. The guarantee: a red batch refuses ONLY the culprit,
+ * because a batch that rejected an agent's work over a stranger's bug would
+ * be worse than not batching at all. */
+ZCL_TEST_GROUP(land_queue)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)
@@ -1085,6 +1115,10 @@ ZCL_TEST_GROUP(watcher_record)
  * construction against a `double` control rather than against golden
  * numbers. */
 ZCL_TEST_GROUP(astro)
+/* vendored FreeBSD /bin/sh smoke acceptance: execs build/bin/fbsh (a
+ * standalone `make fbsh` artifact, deliberately not a prerequisite of
+ * the test binaries) and skips when it is absent. */
+ZCL_TEST_GROUP(freebsd_sh)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)

@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_family_admission.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -14,17 +15,9 @@ static const uint8_t admission_magic[8] = {'Z','C','A','D','M','1',0,0};
 static const char admission_signature_domain[] =
     "zcl.zcode.commons_admission.signature.v1";
 
-static bool admission_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool admission_zero(const uint8_t *bytes, size_t count)
 {
-    return !admission_nonzero(bytes, count);
+    return !zcl_bytes_any_set(bytes, count);
 }
 
 const char *vcs_zcode_family_admission_error_string(
@@ -75,18 +68,18 @@ static enum vcs_zcode_family_admission_error admission_shape(
         admission->expires_height < admission->decided_height ||
         admission->expires_mtp < admission->decided_mtp)
         return VCS_ZCODE_FAMILY_ADMISSION_TIME;
-    if (!admission_nonzero(admission->content_root, 32) ||
-        !admission_nonzero(admission->dependency_closure_root, 32) ||
-        !admission_nonzero(admission->family_policy_root, 32) ||
-        !admission_nonzero(admission->moderation_set_root, 32) ||
-        !admission_nonzero(admission->panel_root, 32) ||
-        !admission_nonzero(admission->evidence_root, 32) ||
-        !admission_nonzero(admission->signer_pubkey, 32))
+    if (!zcl_bytes_any_set(admission->content_root, 32) ||
+        !zcl_bytes_any_set(admission->dependency_closure_root, 32) ||
+        !zcl_bytes_any_set(admission->family_policy_root, 32) ||
+        !zcl_bytes_any_set(admission->moderation_set_root, 32) ||
+        !zcl_bytes_any_set(admission->panel_root, 32) ||
+        !zcl_bytes_any_set(admission->evidence_root, 32) ||
+        !zcl_bytes_any_set(admission->signer_pubkey, 32))
         return VCS_ZCODE_FAMILY_ADMISSION_ROOT;
     if ((admission->sequence == 1 &&
          !admission_zero(admission->predecessor_admission_root, 32)) ||
         (admission->sequence > 1 &&
-         !admission_nonzero(admission->predecessor_admission_root, 32)))
+         !zcl_bytes_any_set(admission->predecessor_admission_root, 32)))
         return VCS_ZCODE_FAMILY_ADMISSION_CHAIN;
     if (admission_pass_state(admission->state)) {
         uint16_t expected = (uint16_t)(VCS_ZCODE_ADMISSION_SELF_SCREENED +
@@ -96,7 +89,7 @@ static enum vcs_zcode_family_admission_error admission_shape(
             return VCS_ZCODE_FAMILY_ADMISSION_CHAIN;
     }
     if (require_signature &&
-        !admission_nonzero(admission->signature, 64))
+        !zcl_bytes_any_set(admission->signature, 64))
         return VCS_ZCODE_FAMILY_ADMISSION_SIGNATURE;
     return VCS_ZCODE_FAMILY_ADMISSION_OK;
 }

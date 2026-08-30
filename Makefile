@@ -115,7 +115,11 @@ ZCL_TEST_STACK_SETUP = :
 else ifeq ($(ZCL_HOST_OS),Darwin)
 CC = clang
 CXX = clang++
-ZCL_PLATFORM_CPPFLAGS = -D_DARWIN_C_SOURCE \
+ZCL_MACOS_DEPLOYMENT_TARGET := 14.0
+export MACOSX_DEPLOYMENT_TARGET := $(ZCL_MACOS_DEPLOYMENT_TARGET)
+ZCL_PLATFORM_CPPFLAGS = -mmacosx-version-min=$(ZCL_MACOS_DEPLOYMENT_TARGET) \
+	-DZCL_MACOS_DEPLOYMENT_TARGET=\"$(ZCL_MACOS_DEPLOYMENT_TARGET)\" \
+	-D_DARWIN_C_SOURCE \
 	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
 	-Dst_ctim=st_ctimespec -fblocks
 ZCL_LTO_FLAG = -flto=thin
@@ -664,10 +668,12 @@ LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
 	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
+	lib/platform/src/os_sandbox_terminal_worker.c \
 	lib/util/src/self_backtrace_stub.c \
 	lib/vcs/src/vcs_devloop.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
+	lib/platform/src/os_sandbox_terminal_worker.c \
 	lib/util/src/self_backtrace.c \
 	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 endif
@@ -761,6 +767,7 @@ DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
 	tools/dev/hotswap_verify_so.c \
 	tools/dev/mutation_campaign.c \
 	tools/dev/windows_headless_run.c \
+	tools/dev/z23_git_hook.c \
 	tools/dev/z23_doctor.c
 # The mutation harness proper (operators + campaign core) has no main() and
 # is proved by the registered `mutation_harness` group, so it is linked into
@@ -773,7 +780,8 @@ DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/devloop_watch.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/devloop_baseline.c tools/dev/dev_failure_store.c \
-	tools/dev/dev_source_identity.c $(MUTATION_LIB_SRCS)
+	tools/dev/dev_source_identity.c tools/dev/dev_proof.c \
+	tools/dev/dev_proof_receipt.c $(MUTATION_LIB_SRCS)
 DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 
 # The stable public Core -> App ABI is lib/framework/include/zclassic23/app.h,
@@ -1093,6 +1101,13 @@ BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
 ZCL_DEV_LINKER ?= $(shell tools/dev/dev-linker-select.sh)
+# PE/COFF relocatable links are supported by the MinGW platform linker, while
+# lld-link rejects the ELF-style `-r` option.  Keep the measured fast linker
+# for executable links and use the platform linker for frozen restart bases.
+ZCL_RELOC_LINKER = $(ZCL_DEV_LINKER)
+ifneq ($(ZCL_HOST_WINDOWS),)
+ZCL_RELOC_LINKER =
+endif
 DEV_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
 	-Wno-deprecated-declarations $(ZCL_WARN_FORMAT_TRUNCATION) $(ZCL_WARN_MAYBE_UNINITIALIZED)
 DEV_HOT_CFLAGS = $(filter-out $(ZCL_DEV_OPT),$(DEV_CFLAGS)) $(ZCL_DEV_HOT_OPT)
@@ -1592,6 +1607,7 @@ check-vendor-provenance:
 	@sha256sum --check vendor/qrcodegen/SHA256SUMS
 	@sha256sum --check vendor/typography/SHA256SUMS
 	@sha256sum --check vendor/x11/SHA256SUMS
+	@sha256sum --check vendor/freebsd-sh/SHA256SUMS
 
 # Reusable native presentation package. This deliberately has a tiny source
 # closure: twelve project TUs plus pinned RGFW headers, with no node/app objects.
@@ -2176,7 +2192,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         install-replay-canary replay-canary-linger-status \
         coverage coverage-clean ci audit release \
         bench bench-crypto-verify bench-regress \
-	lint check-build-epoch-integrity check-checkout-lock check-malloc check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol \
+	lint check-build-epoch-integrity check-checkout-lock check-malloc check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol check-dev-proof-native-fast-path \
         check-coins-lookup-nullcheck check-observability-pairing \
         check-silent-errors-services check-silent-errors-controllers \
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
@@ -2204,7 +2220,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         fuzz-ci-leaks \
         soak-smoke soak-7day soak-ci test-crash-bootstrap \
         test-reindex-smoke test-reindex-killmid \
-        test-two-node-peer-tip test-science-acceptance test-market-acceptance \
+        test-two-node-peer-tip test-noise-transport-interop test-science-acceptance test-market-acceptance \
         test-market-moderation-acceptance \
         chaos chaos-clean \
         replay-canary-anchor replay-canary-genesis \
@@ -2252,9 +2268,15 @@ TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
 	tools/dev/dev_source_identity.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
+	tools/dev/dev_proof.c tools/dev/dev_proof_receipt.c \
 	$(MUTATION_LIB_SRCS)
 SPEC_SRCS = $(wildcard lib/test/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
+# The landing queue's two library translation units. land_main.c owns a
+# main() and is deliberately NOT here — the queue logic is what the test
+# group proves, and linking the CLI's entry point would collide with the
+# harness's own.
+TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
@@ -2269,7 +2291,8 @@ ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES = $(if $(ZCL_HOST_WINDOWS),\
 	$(foreach t,$(ZCL_WINDOWS_ACCEPTANCE_TESTS),\
 	$(ZCL_WINDOWS_ACCEPTANCE_$(t)_SOURCES))),)
 TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c \
-	$(ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES), $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+	$(ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES), $(TEST_SRCS)) \
+	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
@@ -2618,7 +2641,7 @@ $(TEST_PARALLEL_BIN): $(TEST_PARALLEL_REL_CANDIDATE) FORCE
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_PROFILE)" \
 	  "$(TEST_REL_EPOCH_COMPILE_FLAGS)" "$(TEST_REL_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_REL_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_REL_OBJS) $(TEST_PARALLEL_REL_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2640,7 +2663,7 @@ $(TEST_PARALLEL_FAST_BIN): $(TEST_PARALLEL_FAST_CANDIDATE) FORCE
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
 
-$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme
+$(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(TEST_PARALLEL_FAST_OBJS) $(TEST_PARALLEL_FAST_LINK_RSP) | $(VENDOR_LIBS) $(ZCL_NODECTL_DEP) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -2705,7 +2728,7 @@ $(TEST_RESTART_BASE_RELOC): $(TEST_PARALLEL_FAST_LINK_RSP) \
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_DEV_LINKER) -r -nostdlib -o "$$tmp" \
+	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" \
 	  "@$(TEST_PARALLEL_FAST_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
@@ -3211,10 +3234,18 @@ check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 .PHONY: check-zcode-package-standalone
 check-zcode-package-standalone:
 	@tools/lint/check_zcode_package_standalone.sh
+.PHONY: check-package-capabilities
+check-package-capabilities:
+	@./tools/lint/check_package_capabilities.sh --selftest
+	@./tools/lint/check_package_capabilities.sh
 .PHONY: check-package-anatomy
 check-package-anatomy:
 	@./tools/lint/check_package_anatomy.sh --selftest
 	@./tools/lint/check_package_anatomy.sh
+.PHONY: check-capability-closure
+check-capability-closure:
+	@./tools/lint/check_capability_closure.sh --selftest
+	@./tools/lint/check_capability_closure.sh
 print-zcode-monolith-lib-sources:
 	@printf '%s\n' $(LIB_SRCS)
 $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
@@ -3784,9 +3815,17 @@ verify-change:
 # This deliberately does not replace `z23`, `make deploy`, or release
 # artifacts.
 HOTSWAP_ACTION_PLAN = $(BUILD_DIR)/hotswap/fast/flags.env
+DEV_PACKAGE_VERIFIER_TARGET = dev-package-verifier
+ifneq ($(ZCL_HOST_WINDOWS),)
+# The package verifier's safety claim depends on Linux child confinement.
+# Its release target already refuses on Windows; the ordinary Windows dev
+# node must not defeat that boundary by compiling the same POSIX-only helper
+# as an unconditional convenience prerequisite.
+DEV_PACKAGE_VERIFIER_TARGET =
+endif
 dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS) \
 	$(DEV_RESTART_PLAN) \
-	$(HOTSWAP_ACTION_PLAN) dev-package-verifier \
+	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
 
 # Temporary migration alias: build/bin/zclassic23-dev keeps resolving to
@@ -3832,7 +3871,7 @@ $(DEV_RESTART_BASE_RELOC): $(DEV_LINK_RSP) $(DEV_OBJS)
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_DEV_LINKER) -r -nostdlib -o "$$tmp" "@$(DEV_LINK_RSP)"; \
+	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" "@$(DEV_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
@@ -4480,6 +4519,13 @@ syntax-check: $(VIEW_GEN_HEADERS)
 # the stray-source guard (~5 s) dominates, so the set stays ~6-8 s wall under
 # the parallel driver. Same ZCL_LINT_SERIAL=1 fallback as lint.
 # Run full `make lint` at sub-wave boundaries / before commit.
+EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
+EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
+    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
+    core/params/src/upgrades.c core/consensus/src/upgrades.c \
+    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
+    lib/base/src/log_level.c lib/base/src/result.c
+
 LINT_FAST_GATES := \
     check-no-stray-untracked-source \
     check-no-stray-root-files \
@@ -4497,6 +4543,7 @@ LINT_FAST_GATES := \
     check-log-macro-return-type \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-dev-proof-native-fast-path \
     check-equihash-params \
     check-framework-shape \
     check-supervisor-registration \
@@ -4509,7 +4556,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast:
+lint-fast: $(EQUIHASH_FACT_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
@@ -4889,9 +4936,38 @@ ACME_WORKER_LIBS = $(ZCL_VENDOR_LIB)/libssl.a $(ZCL_VENDOR_LIB)/libcrypto.a \
 	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
 
+# ── The landing queue ─────────────────────────────────────────────────────
+# `z23-land` is the command surface of tools/dev/land.sh and the batching
+# lander. Built STRAIGHT FROM SOURCE like the ACME worker rather than linked
+# against the node: it drives git and `make`, touches no consensus state, and
+# keeping it off the node's object graph is what stops a landing queue from
+# ever becoming reachable from a peer. Its whole dependency set is the
+# chainlog it writes receipts into, the hash that chains them, and the
+# platform file seam underneath both.
+LAND_SRCS = \
+	tools/land/land_main.c \
+	tools/land/land_queue.c \
+	tools/land/land_record.c \
+	lib/chainlog/src/chainlog.c \
+	lib/sha3/src/sha3.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/private_file.c \
+	lib/platform/src/private_acl_internal.c
+LAND_INCLUDES = -Ilib/base/include -Ilib/chainlog/include -Ilib/sha3/include \
+	-Ilib/platform/include -Itools/land
+LAND_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(LAND_INCLUDES)
+
+.PHONY: z23-land
+z23-land: $(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT)
+$(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT): $(LAND_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LAND_CFLAGS) -o $@ $(LAND_SRCS)
+
 .PHONY: zclassic23-acme
 zclassic23-acme: $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
-$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) | $(NODE_VENDOR_LIBS)
+$(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(ACME_WORKER_CFLAGS) $(ACME_WORKER_LDFLAGS) -o $@ \
 		$(ACME_WORKER_SRCS) $(ACME_WORKER_LIBS)
@@ -4925,14 +5001,17 @@ Z23_BOOTSTRAP_INCLUDES = -Ilib/base/include -Ilib/crypto/include \
 	-Ilib/install/include -Ilib/platform/include -Ilib/util/include \
 	-Itools/acme -Ivendor/include
 Z23_BOOTSTRAP_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(Z23_BOOTSTRAP_INCLUDES)
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(Z23_BOOTSTRAP_INCLUDES)
+Z23_BOOTSTRAP_BIN = $(BIN_DIR)/z23-bootstrap$(ZCL_HOST_EXEEXT)
 
 .PHONY: z23-bootstrap
-z23-bootstrap: $(BIN_DIR)/z23-bootstrap
-$(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) | $(NODE_VENDOR_LIBS)
+z23-bootstrap: $(Z23_BOOTSTRAP_BIN)
+$(Z23_BOOTSTRAP_BIN): $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(Z23_BOOTSTRAP_CFLAGS) -o $@ $(Z23_BOOTSTRAP_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+		vendor/lib/libssl.a vendor/lib/libcrypto.a \
+		$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+		$(ZCL_PLATFORM_NODE_LIBS)
 
 # The front-door half of a release cut: package that bootstrap under
 # bootstrap/<triple>/ and write its SHA-256 into COPIES of the two shims, into
@@ -4941,7 +5020,7 @@ $(BIN_DIR)/z23-bootstrap: $(Z23_BOOTSTRAP_SRCS) | $(NODE_VENDOR_LIBS)
 # check-published-platforms holds them to it. Serve the resulting directory at
 # the project domain root; nothing in this repository does that step yet.
 .PHONY: z23-front-door
-z23-front-door: $(BIN_DIR)/z23-bootstrap
+z23-front-door: $(Z23_BOOTSTRAP_BIN)
 	@bash packaging/release/build_release.sh --front-door
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
@@ -5215,6 +5294,145 @@ zcl-portfwd: $(BIN_DIR)/zcl-portfwd
 $(BIN_DIR)/zcl-portfwd: tools/zcl_portfwd.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -o $@ $<
+
+# ── fbsh: vendored FreeBSD /bin/sh (ash lineage) ─────────────────────
+# vendor/freebsd-sh holds FreeBSD releng/14.2 bin/sh byte-identical
+# (provenance: vendor/freebsd-sh/SOURCE and
+# vendor/provenance/freebsd-sh.manifest). The upstream build generates
+# builtins.[ch], nodes.[ch], syntax.[ch], and token.h from
+# bin/sh/{builtins.def,nodetypes,nodes.c.pat} via the byte-identical host
+# tools mkbuiltins/mktokens (shell) and mknodes/mksyntax (C); those run
+# here exactly as vendor/freebsd-sh/bin/sh/Makefile does, into
+# build/fbsh/gen. glibc gaps are shimmed, never patched: compat/compat.h
+# is force-included into every upstream TU, compat/compat.c supplies
+# strlcpy and setmode/getmode (the umask builtin), and compat/bin/mktemp
+# covers the `mktemp -t ka` BSD form GNU coreutils rejects, so the
+# codegen scripts run unmodified. -DNO_HISTORY drops the libedit
+# dependency (no interactive line editing; scripts and -c are fully
+# functional). Warnings are off for the vendored TUs — third-party
+# source we do not edit (same rule as the vendored sqlite3 TU above);
+# the compat layer itself builds with the strict project flags.
+.PHONY: fbsh
+fbsh: $(BIN_DIR)/fbsh
+
+FBSH_SRC_DIR := vendor/freebsd-sh
+FBSH_BUILD_DIR := build/fbsh
+FBSH_GEN_DIR := $(FBSH_BUILD_DIR)/gen
+FBSH_OBJ_DIR := $(FBSH_BUILD_DIR)/obj
+FBSH_SH_DIR := $(FBSH_SRC_DIR)/bin/sh
+
+FBSH_GEN_HDRS := $(FBSH_GEN_DIR)/token.h $(FBSH_GEN_DIR)/builtins.h \
+	$(FBSH_GEN_DIR)/nodes.h $(FBSH_GEN_DIR)/syntax.h
+
+# SHSRCS from vendor/freebsd-sh/bin/sh/Makefile, with the four sources
+# bmake finds through .PATH spelled at their real vendored locations
+# (bltin/echo.c, bin/kill, bin/test, usr.bin/printf).
+FBSH_UPSTREAM_SRCS := \
+	$(FBSH_SH_DIR)/alias.c $(FBSH_SH_DIR)/arith_yacc.c \
+	$(FBSH_SH_DIR)/arith_yylex.c $(FBSH_SH_DIR)/cd.c \
+	$(FBSH_SH_DIR)/bltin/echo.c $(FBSH_SH_DIR)/error.c \
+	$(FBSH_SH_DIR)/eval.c $(FBSH_SH_DIR)/exec.c \
+	$(FBSH_SH_DIR)/histedit.c $(FBSH_SH_DIR)/input.c \
+	$(FBSH_SH_DIR)/jobs.c $(FBSH_SRC_DIR)/bin/kill/kill.c \
+	$(FBSH_SH_DIR)/mail.c $(FBSH_SH_DIR)/main.c $(FBSH_SH_DIR)/memalloc.c \
+	$(FBSH_SH_DIR)/miscbltin.c $(FBSH_SH_DIR)/mystring.c \
+	$(FBSH_SH_DIR)/options.c $(FBSH_SH_DIR)/output.c \
+	$(FBSH_SH_DIR)/parser.c $(FBSH_SRC_DIR)/usr.bin/printf/printf.c \
+	$(FBSH_SH_DIR)/redir.c $(FBSH_SH_DIR)/show.c \
+	$(FBSH_SRC_DIR)/bin/test/test.c $(FBSH_SH_DIR)/trap.c \
+	$(FBSH_SH_DIR)/var.c
+
+# expand.c reads dp->d_namlen, a BSD struct dirent member glibc does not
+# have (the one portability delta that cannot be header-shimmed: a struct
+# member access). The tracked file stays byte-identical; the build emits
+# a one-token-patched copy into the gen dir. The delta is documented as a
+# unified diff in vendor/patches/freebsd-sh-dirent-d-namlen.patch, and the
+# recipe fails loudly if upstream ever changes the context so the patch
+# cannot silently become a no-op. namlen is strlen(d_name) on FreeBSD by
+# definition, so semantics are unchanged.
+FBSH_PATCHED_SRCS := $(FBSH_GEN_DIR)/expand.c
+
+$(FBSH_GEN_DIR)/expand.c: $(FBSH_SH_DIR)/expand.c \
+	    vendor/patches/freebsd-sh-dirent-d-namlen.patch
+	@mkdir -p $(FBSH_GEN_DIR)
+	@set -eu; tmp="$@.tmp"; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	sed 's/dp->d_namlen/strlen(dp->d_name)/' $< > "$$tmp"; \
+	grep -qF 'namlen = strlen(dp->d_name);' "$$tmp"; \
+	! grep -qF 'd_namlen' "$$tmp"; \
+	mv -f "$$tmp" $@; \
+	trap - EXIT HUP INT TERM
+
+FBSH_GEN_SRCS := $(FBSH_GEN_DIR)/builtins.c $(FBSH_GEN_DIR)/nodes.c \
+	$(FBSH_GEN_DIR)/syntax.c
+
+FBSH_CPPFLAGS := -DSHELL -DNO_HISTORY -I$(FBSH_GEN_DIR) -I$(FBSH_SH_DIR) \
+	-I$(FBSH_SRC_DIR)/compat \
+	-include $(CURDIR)/$(FBSH_SRC_DIR)/compat/compat.h
+FBSH_VENDOR_CFLAGS := -std=c23 -O2 -w $(FBSH_CPPFLAGS)
+
+FBSH_OBJS := $(addprefix $(FBSH_OBJ_DIR)/,$(addsuffix .o, \
+	$(basename $(notdir $(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) \
+	$(FBSH_GEN_SRCS))))) \
+	$(FBSH_OBJ_DIR)/compat.o
+
+# Codegen, mirroring vendor/freebsd-sh/bin/sh/Makefile. mkbuiltins and
+# mktokens write to the current directory; the mktemp shim directory is
+# prepended to PATH for exactly these two invocations. mknodes/mksyntax
+# are host tools compiled from byte-identical upstream C.
+$(FBSH_GEN_DIR)/token.h: $(FBSH_SH_DIR)/mktokens
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && PATH='$(CURDIR)/$(FBSH_SRC_DIR)/compat/bin':$$PATH \
+	    sh '$(CURDIR)/$(FBSH_SH_DIR)/mktokens'
+
+$(FBSH_GEN_DIR)/builtins.c $(FBSH_GEN_DIR)/builtins.h: $(FBSH_GEN_DIR)/.builtins.stamp
+$(FBSH_GEN_DIR)/.builtins.stamp: $(FBSH_SH_DIR)/mkbuiltins \
+	    $(FBSH_SH_DIR)/builtins.def $(FBSH_SH_DIR)/shell.h
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && PATH='$(CURDIR)/$(FBSH_SRC_DIR)/compat/bin':$$PATH \
+	    sh '$(CURDIR)/$(FBSH_SH_DIR)/mkbuiltins' '$(CURDIR)/$(FBSH_SH_DIR)'
+	@touch $@
+
+$(FBSH_BUILD_DIR)/mknodes: $(FBSH_SH_DIR)/mknodes.c $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) $(FBSH_VENDOR_CFLAGS) -o $@ $<
+
+$(FBSH_BUILD_DIR)/mksyntax: $(FBSH_SH_DIR)/mksyntax.c $(FBSH_SH_DIR)/parser.h \
+	    $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) $(FBSH_VENDOR_CFLAGS) -o $@ $<
+
+$(FBSH_GEN_DIR)/nodes.c $(FBSH_GEN_DIR)/nodes.h: $(FBSH_GEN_DIR)/.nodes.stamp
+$(FBSH_GEN_DIR)/.nodes.stamp: $(FBSH_BUILD_DIR)/mknodes $(FBSH_SH_DIR)/nodetypes \
+	    $(FBSH_SH_DIR)/nodes.c.pat
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && '$(CURDIR)/$(FBSH_BUILD_DIR)/mknodes' \
+	    '$(CURDIR)/$(FBSH_SH_DIR)/nodetypes' '$(CURDIR)/$(FBSH_SH_DIR)/nodes.c.pat'
+	@touch $@
+
+$(FBSH_GEN_DIR)/syntax.c $(FBSH_GEN_DIR)/syntax.h: $(FBSH_GEN_DIR)/.syntax.stamp
+$(FBSH_GEN_DIR)/.syntax.stamp: $(FBSH_BUILD_DIR)/mksyntax $(FBSH_GEN_DIR)/token.h
+	@mkdir -p $(FBSH_GEN_DIR)
+	cd $(FBSH_GEN_DIR) && '$(CURDIR)/$(FBSH_BUILD_DIR)/mksyntax'
+	@touch $@
+
+define FBSH_COMPILE_RULE
+$(FBSH_OBJ_DIR)/$(notdir $(basename $(1))).o: $(1) $$(FBSH_GEN_HDRS) \
+	    $$(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $$(@D)
+	$$(CC) $$(FBSH_VENDOR_CFLAGS) -c -o $$@ $$<
+endef
+$(foreach s,$(FBSH_UPSTREAM_SRCS) $(FBSH_PATCHED_SRCS) $(FBSH_GEN_SRCS),\
+	$(eval $(call FBSH_COMPILE_RULE,$(s))))
+
+$(FBSH_OBJ_DIR)/compat.o: $(FBSH_SRC_DIR)/compat/compat.c \
+	    $(FBSH_SRC_DIR)/compat/compat.h
+	@mkdir -p $(@D)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -I$(FBSH_SRC_DIR)/compat -c -o $@ $<
+
+$(BIN_DIR)/fbsh: $(FBSH_OBJS)
+	@mkdir -p $(@D)
+	$(CC) -std=c23 -O2 -static -o $@ $(FBSH_OBJS)
 
 # gen_sha3_windows: one-shot tool that queries a fully-synced reference
 # node and overwrites lib/chain/{include/chain,src}/sha3_windows.{h,c}
@@ -6499,6 +6717,24 @@ test-reindex-killmid: zclassic23 zcl-rpc
 # harnesses; the script itself sets -euo pipefail.
 test-two-node-peer-tip: zclassic23 zcl-rpc process-group-exec
 	@bash tools/scripts/two_node_peer_tip.sh
+
+# Noise transport two-node/three-node interop acceptance: the evidence
+# artifact for the owner's -noisetransport default-flip decision. Real
+# isolated regtest daemons prove S1 noise->plaintext outbound stays
+# plaintext, S2 plaintext->noise inbound takes NOISE_PLAINTEXT_FALLBACK,
+# S3 noise<->noise rides the one controlled capability-learning reconnect
+# into an established Noise XX session with send/recv frames flowing, and
+# S4 a mixed plaintext+noise 3-node swarm reaches tip consensus. Every
+# assertion reads the operator surface (dumpstate transport per-peer
+# mode/state/frame counters + the dumpstate connman noisetransport
+# census), never logs. DELIBERATELY opt-in (NOT in `make ci`) — it spawns
+# real nodes. Process ownership/cleanup via tools/dev/node_lifecycle.sh;
+# P2P listeners that a redialed upgrade must reach use reachable-policy
+# ports (9033/18033/20028), RPC/FS/HTTPS disjoint 392xx/393xx/394xx quads.
+.PHONY: test-noise-transport-interop
+test-noise-transport-interop: zclassic23 zcl-rpc jsonq \
+	tools/arena-product-journey-c23
+	@bash tools/dev/noise_transport_interop.sh
 
 # ZCODE science-slice v1 acceptance proof: two disjoint isolated regtest
 # nodes (39xxx quads, loopback only, B connect-only to A). Preregister a
@@ -9279,21 +9515,43 @@ replay-canary-linger-status:
 release:
 	@./tools/release.sh
 
-# Install the tracked git hooks (shared across all worktrees via core.hooksPath).
-# pre-push runs the bounded LOCAL CI gate (`make pre-push-ci`): strict
-# compile, lint-fast, and mapped focused tests for the files being pushed.
-# Unmapped code fails closed. Full-suite/fuzz/coverage proof work runs
-# through the linger timers installed by `make install-quality-linger`.
-.PHONY: install-hooks
-install-hooks:
-	@git config core.hooksPath tools/githooks
-	@chmod +x tools/githooks/* 2>/dev/null || true
-	@echo "Installed git hooks: core.hooksPath=tools/githooks"
-	@echo "  pre-push -> runs 'make pre-push-ci' before every push to origin"
+# The installed hook directory is checkout-local. Each worktree therefore
+# admits receipts produced by its own exact source and build state while the
+# repository-common config continues to share objects and refs safely.
+GIT_HOOK_BIN = $(BIN_DIR)/z23-git-hook
+GIT_HOOK_DIR = $(abspath $(BUILD_DIR)/githooks)
+GIT_HOOK_SRCS = tools/dev/z23_git_hook.c tools/dev/dev_proof_receipt.c \
+	lib/sha3/src/sha3.c
+GIT_HOOK_CFLAGS = -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
+	$(ZCL_WARN_EXTRA_GATES) $(HARDEN_CFLAGS) -D_POSIX_C_SOURCE=200809L \
+	-Itools/dev -Ilib/base/include -Ilib/sha3/include
+
+.PHONY: git-hook git-hook-selftest install-hooks
+git-hook: $(GIT_HOOK_BIN)
+
+$(GIT_HOOK_BIN): $(GIT_HOOK_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) $(HARDEN_LDFLAGS)
+
+git-hook-selftest: $(GIT_HOOK_BIN)
+	@$(GIT_HOOK_BIN) --selftest
+
+install-hooks: $(GIT_HOOK_BIN)
+	@mkdir -p $(GIT_HOOK_DIR)
+	@install -m 0755 tools/githooks/pre-commit $(GIT_HOOK_DIR)/pre-commit
+	@install -m 0755 $(GIT_HOOK_BIN) $(GIT_HOOK_DIR)/z23-git-hook
+	@for hook in pre-push post-commit post-merge post-checkout; do \
+		ln -sfn z23-git-hook $(GIT_HOOK_DIR)/$$hook; \
+	done
+	@git config extensions.worktreeConfig true
+	@git config --unset-all core.hooksPath 2>/dev/null || true
+	@git config --worktree core.hooksPath $(GIT_HOOK_DIR)
+	@echo "Installed native git hooks: core.hooksPath=$(GIT_HOOK_DIR)"
+	@echo "  pre-push -> admits one immutable exact commit/base receipt"
+	@echo "  post-commit/post-merge/post-checkout -> schedule proof and return"
 	@echo "  pre-commit -> refuses non-main-branch commits in the MAIN checkout"
 	@echo "                (lane work goes in a worktree; ZCL_LANE_COMMIT_OK=1 overrides)"
 	@echo "  full-suite/fuzz/coverage -> make install-quality-linger"
-	@echo "  bypass one push: git push --no-verify   (or ZCL_SKIP_PREPUSH=1)"
 
 .PHONY: check-git-hooks-installed
 check-git-hooks-installed:
@@ -9406,7 +9664,7 @@ $(COV_LEASE): FORCE
 	  "$(COV_EPOCH_COMPILE_FLAGS)" "$(COV_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))
 COV_LINK_RSP = $(COV_BUILD_DIR)/link-inputs.rsp
 
@@ -9853,13 +10111,14 @@ MUTATION_CAMPAIGN_BIN = $(BIN_DIR)/mutation-campaign
 MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
     tools/command/native_devagent.c lib/sha3/src/sha3.c \
     lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c \
-    lib/platform/src/clock.c lib/base/src/safe_alloc.c
+    lib/platform/src/clock.c lib/platform/src/directory_compat.c \
+    lib/base/src/safe_alloc.c
 .PHONY: mutation-campaign
 mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
 $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Itools -Itools/dev -Ilib/base/include -Ilib/sha3/include \
 	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
 	    -Ilib/platform/include -Ilib/util/include \
@@ -10206,7 +10465,7 @@ check-persona-resolves:
 # a `// long-function-ok:<tag>` override marker explaining WHY.
 check-long-functions:
 	@echo "══ LINT: long function cap (500 lines) ══"
-	@./tools/scripts/check_long_functions.sh
+	@./tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh
 
 # Wave 9a: every register_*_rpc_commands callsite uses rpc_table_must_append.
 # rpc_table_append returns false silently on registration failure (duplicate
@@ -10294,7 +10553,7 @@ check-domain-purity:
 # opt-in adoption of the supervisor primitive over Rounds 6-8.
 check-supervisor-registration:
 	@echo "══ LINT: supervisor registration ══"
-	@./tools/scripts/check_supervisor_registration.sh
+	@./tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh
 
 # Test-registration drift guard. A test entry point (test_<name>.c defining
 # int test_<name>(void)) that is in NEITHER the canonical test group catalog
@@ -10649,6 +10908,23 @@ check-windows-cross-syntax:
 	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
 	@./tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh
 
+# A platform-only system header may not be included outside a conditional that
+# names that platform. Every gate above needs a cross-compiler; this one needs
+# nothing, because an unguarded <mach-o/fat.h> is a lexical fact. It closes the
+# class in all three directions (Apple, Win32, Linux) on whatever host is
+# running lint. Zero baseline: the tree is clean and stays clean.
+.PHONY: check-platform-header-guards
+check-platform-header-guards:
+	@./tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh
+
+# The STATIC half of tools/scripts/macos_acceptance.sh: the closed darwin-arm64
+# capability matrix must validate and every capability must name a REGISTERED
+# test group. The native leg (`make macos-acceptance`) needs a darwin-arm64
+# host and is reported UNOBSERVED here, never as a pass.
+.PHONY: check-macos-acceptance
+check-macos-acceptance:
+	@./tools/lint/check_macos_acceptance.sh --self-test && ./tools/lint/check_macos_acceptance.sh
+
 
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
@@ -10678,7 +10954,7 @@ check-model-column-drift:
 
 check-supervisor-domain:
 	@echo "→ Gate #21: supervisor_domain"
-	@./tools/lint/check_supervisor_domain.sh
+	@./tools/lint/check_supervisor_domain.sh --selftest && ./tools/lint/check_supervisor_domain.sh
 
 # Gate #23: universal thread supervision (RATCHET). Every long-running thread
 # spawned via thread_registry_spawn must be on the supervisor liveness tree
@@ -10687,7 +10963,7 @@ check-supervisor-domain:
 # baselined in tools/lint/thread_supervision_baseline.txt (shrink-only).
 check-thread-supervision:
 	@echo "→ Gate #23: thread_supervision"
-	@./tools/lint/check_thread_supervision.sh
+	@./tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh
 
 # Gate P1 (docs/work/palace-design.md §3) — every indexed .c/.h under the
 # codeindex roots has a DERIVABLE one-line purpose (a substantive top-of-file
@@ -10855,7 +11131,7 @@ check-file-size-ceiling: $(FILE_SIZE_POLICY_BIN)
 # the real body has landed. docs/, vendor/, and test paths narrate history on
 # purpose and are excluded. See tools/scripts/check_no_dev_history_in_contracts.sh.
 check-no-dev-history-in-contracts:
-	@./tools/scripts/check_no_dev_history_in_contracts.sh
+	@./tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh
 
 # Funded transaction receipts and isolated recipient-wallet manifests are
 # private local state. Tracked baselines may contain reproducible simnet and
@@ -10985,7 +11261,7 @@ check-ship-remote-transaction: jsonq
 # quiet pass: the front door is the one program a stranger runs before
 # anything has been verified, and an unobserved gate over it is worse than no
 # gate at all.
-check-z23-release-install: $(BIN_DIR)/z23-bootstrap
+check-z23-release-install: $(Z23_BOOTSTRAP_BIN)
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
 	@bash packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
@@ -11209,7 +11485,8 @@ $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
 	lib/codeindex/include/codeindex/codeindex_inventory.h \
 	lib/codeindex/src/codeindex_inventory_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror \
+	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -O2 -Wall -Wextra -Werror \
 	    -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
 	    -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
 	    -Ilib/crypto/include -Ilib/platform/include \
@@ -11238,13 +11515,6 @@ check-generated-artifact-contradictions:
 # height-selected 192,7 since Bubbles, and a reader who believes the flat
 # claim sizes a solution buffer wrongly. Fix a failure with
 # `make docs-equihash-params`, never by editing the generated page.
-EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
-EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
-    core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
-    core/params/src/upgrades.c core/consensus/src/upgrades.c \
-    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
-    lib/base/src/log_level.c lib/base/src/result.c
-
 $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
@@ -11271,7 +11541,7 @@ equihash-facts-check: check-equihash-params
 # Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and
 # diffs; the other half scans prose for a flat "Equihash 200,9" claim about
 # what the chain IS, which is what was wrong across nine files.
-check-equihash-params:
+check-equihash-params: $(EQUIHASH_FACT_TOOL)
 	@echo "══ LINT: Equihash parameters are height-selected, and said so ══"
 	@./tools/lint/check_equihash_params.sh --selftest
 	@./tools/lint/check_equihash_params.sh
@@ -11527,6 +11797,10 @@ check-zcc-cache:
 	@echo "══ LINT: compile cache serves correct bytes ══"
 	@./tools/lint/check_zcc_cache.sh
 
+check-dev-proof-native-fast-path:
+	@echo "══ LINT: native push admission has no shell or build authority ══"
+	@./tools/lint/check_dev_proof_native_fast_path.sh
+
 # A build whose objects do not repeat cannot be shown to anyone. GCC seeds
 # itself from the object's output name, and every object here is written into
 # a fresh mktemp staging directory, so the shipped profile's -flto objects did
@@ -11615,7 +11889,9 @@ LINT_GATES := \
     check-fortify-masked-decls \
     check-zcode-package-registry \
     check-zcode-package-standalone \
+    check-package-capabilities \
     check-package-anatomy \
+    check-capability-closure \
     check-hotswap-dev-only \
     check-hotswap-eligible-scope \
     check-hotswap-denied-leaves \
@@ -11643,6 +11919,7 @@ LINT_GATES := \
     check-no-runtime-abort \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-dev-proof-native-fast-path \
     check-tu-random-seed \
     check-outparam-init-before-return \
     check-equihash-params \
@@ -11763,6 +12040,8 @@ LINT_GATES := \
     check-windows-platform-seam \
     check-windows-acceptance \
     check-windows-cross-syntax \
+    check-platform-header-guards \
+    check-macos-acceptance \
     check-result-discard \
     check-c23-only \
     check-no-python \
@@ -11790,7 +12069,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-bootstrap
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif

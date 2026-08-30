@@ -72,19 +72,19 @@ static bool one_group_sink(void *ctx, const struct zcl_det_group_digest *g)
 static bool digest_of(const struct fixture *f, struct zcl_det_group_digest *out)
 {
 #if defined(_WIN32)
-    /* No fmemopen on Windows: stage the transcript through a real temp file
-     * (the scanner only needs a readable FILE*). */
+    /* MinGW's UCRT has no fmemopen().  Exercise the same scanner with the
+     * exact fixture bytes through an anonymous test stream instead. */
     FILE *in = tmpfile();
     if (!in) return false;
-    if (f->len && fwrite(f->text, 1, f->len, in) != f->len) {
+    if (fwrite(f->text, 1, f->len, in) != f->len || fflush(in) != 0 ||
+        fseek(in, 0, SEEK_SET) != 0) {
         fclose(in);
         return false;
     }
-    rewind(in);
 #else
     FILE *in = fmemopen((void *)f->text, f->len, "r");
-#endif
     if (!in) return false;
+#endif
     struct one_group o;
     memset(&o, 0, sizeof(o));
     struct zcl_det_scan_stats stats;

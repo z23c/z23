@@ -101,25 +101,20 @@ struct wb_fixture {
 static bool wb_fixture_init(struct wb_fixture *f, const char *tag)
 {
     memset(f, 0, sizeof(*f));
-    snprintf(f->datadir,    sizeof(f->datadir),
+    char datadir[256], backup_dir[256];
+    snprintf(datadir, sizeof(datadir),
              "/tmp/zcl_wb_test_%d_%s_src", (int)getpid(), tag);
-    snprintf(f->backup_dir, sizeof(f->backup_dir),
+    snprintf(backup_dir, sizeof(backup_dir),
              "/tmp/zcl_wb_test_%d_%s_dst", (int)getpid(), tag);
+    if (!test_abs_path(datadir, f->datadir, sizeof(f->datadir)) ||
+        !test_abs_path(backup_dir, f->backup_dir, sizeof(f->backup_dir)))
+        return false;
     platform_directory_create(f->datadir, 0755);
-    /* backup_dir reaches platform_private_directory_ensure (via
-     * wallet_backup_run_once / wallet_backup_start -> wbs_ensure_backup_dir),
-     * which requires the directory to be exactly 0700 and refuses rather than
-     * narrowing a wider one. mkdir's mode argument is masked by the process
-     * umask, so state the mode a second time instead of hoping for it. */
-#if defined(_WIN32)
-    /* No mode bits on Windows: private means a current-SID-only protected
-     * DACL, which only the private-directory creation path installs. A plain
-     * create leaves inherited ACLs that the ensure step rightly refuses. */
-    if (!platform_private_directory_create(f->backup_dir)) return false;
-#else
-    platform_directory_create(f->backup_dir, 0700);
-    chmod(f->backup_dir, 0700);
-#endif
+    /* Build the fixture through the same owner-private platform seam the
+     * service validates.  A plain Windows mkdir inherits the parent DACL and
+     * must correctly be refused as a backup destination. */
+    if (!platform_private_directory_ensure(f->backup_dir))
+        return false;
     snprintf(f->dbpath, sizeof(f->dbpath), "%s/node.db", f->datadir);
     return node_db_open(&f->ndb, f->dbpath);
 }

@@ -22,6 +22,8 @@
 #include "services/dev_reflex_policy_service.h"
 #include "hotswap/hotfork_capsule.h"
 #include "platform/os_sandbox.h"
+#include "platform/directory_compat.h"
+#include "platform/path_compat.h"
 #include "platform/time_compat.h"
 #include "platform/pipe_compat.h"
 #include "util/safe_alloc.h"
@@ -44,6 +46,15 @@
 #endif
 #include <windows.h>
 #include <io.h>
+#ifndef O_CLOEXEC
+#define O_CLOEXEC _O_NOINHERIT
+#endif
+#ifndef O_NOFOLLOW
+/* Existing inputs are reparse-checked by hs_regular().  Newly created cache
+ * leaves use O_EXCL or live below a component-validated cache directory. */
+#define O_NOFOLLOW 0
+#endif
+#define fsync(fd) _commit(fd)
 #else
 #include <sys/file.h>
 #include <sys/syscall.h>
@@ -207,9 +218,18 @@ bool zcl_devloop_hotswap_response_error(
 static bool hs_regular(const char *path, struct stat *out)
 {
     struct stat st;
+#if defined(_WIN32)
+    DWORD attributes = path ? GetFileAttributesA(path) : INVALID_FILE_ATTRIBUTES;
+    if (!path || attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY |
+                       FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return false;
+#else
     if (!path || lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
         S_ISLNK(st.st_mode))
         return false;
+#endif
     if (out)
         *out = st;
     return true;
@@ -531,6 +551,25 @@ static bool hs_sha256_file(const char *path, char out[65])
 static bool hs_mkdirs(const char *path)
 {
     char tmp[PATH_MAX];
+#if defined(_WIN32)
+    if (!platform_path_is_absolute(path) || strlen(path) >= sizeof(tmp) ||
+        strstr(path, ".."))
+        return false;
+    (void)snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp; *p; ++p)
+        if (*p == '\\') *p = '/';
+    char *start = tmp + 3; /* drive-qualified roots are the supported cache */
+    if (!(tmp[0] && tmp[1] == ':' && tmp[2] == '/'))
+        return false;
+    for (char *p = start; *p; ++p) {
+        if (*p != '/') continue;
+        *p = 0;
+        bool ok = platform_directory_ensure(tmp, 0700);
+        *p = '/';
+        if (!ok) return false;
+    }
+    return platform_directory_ensure(tmp, 0700);
+#else
     struct stat st;
     if (!path || path[0] != '/' || strlen(path) >= sizeof(tmp))
         return false;
@@ -551,19 +590,24 @@ static bool hs_mkdirs(const char *path)
          !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)))
         return false;
     return chmod(tmp, 0700) == 0;
+#endif
 }
 
 static bool hs_cache_root_for(const char *lane, char out[PATH_MAX])
 {
     const char *configured = getenv("ZCL_DEV_ARTIFACT_CACHE");
+#if defined(_WIN32)
+    const char *home = getenv("USERPROFILE");
+#else
     const char *home = getenv("HOME");
+#endif
     int n;
     if (configured && configured[0]) {
-        if (configured[0] != '/' || strstr(configured, ".."))
+        if (!platform_path_is_absolute(configured) || strstr(configured, ".."))
             return false;
         n = snprintf(out, PATH_MAX, "%s/%s", configured, lane);
     } else {
-        if (!home || home[0] != '/')
+        if (!platform_path_is_absolute(home))
             return false;
         n = snprintf(out, PATH_MAX,
                      "%s/.cache/zclassic23/dev-artifacts/%s", home, lane);
@@ -1273,7 +1317,7 @@ bool zcl_devloop_hotswap_build(
     memset(receipt, 0, sizeof(*receipt));
     memset(process, 0, sizeof(*process));
     char root[PATH_MAX], source_path[PATH_MAX];
-    if (!realpath(repo_root, root) ||
+    if (!platform_directory_canonical_real(repo_root, root, sizeof(root)) ||
         snprintf(source_path, sizeof(source_path), "%s/%s", root, owner) >=
             (int)sizeof(source_path) || !hs_regular(source_path, NULL)) {
         hs_why(why, why_len, "source path is not a regular checkout file");
@@ -3295,7 +3339,8 @@ static bool hs_hotfork_build(
     memset(receipt, 0, sizeof(*receipt));
     memset(process, 0, sizeof(*process));
     char root[PATH_MAX], source_path[PATH_MAX];
-    if (!repo_root || !def || !realpath(repo_root, root) ||
+    if (!repo_root || !def ||
+        !platform_directory_canonical_real(repo_root, root, sizeof(root)) ||
         strpbrk(root, "\"\\") ||
         snprintf(source_path, sizeof(source_path), "%s/%s", root,
                  def->source_tu) >= (int)sizeof(source_path) ||

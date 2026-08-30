@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "crypto/ed25519.h"
 #include "session/mesh_private_object_proto.h"
 
@@ -12,15 +13,6 @@ static void fill32(uint8_t out[32], uint8_t first)
 {
     for (size_t i = 0; i < 32; i++)
         out[i] = (uint8_t)(first + i);
-}
-
-static bool all_zero(const void *bytes, size_t count)
-{
-    const uint8_t *p = bytes;
-    uint8_t any = 0;
-    for (size_t i = 0; i < count; i++)
-        any |= p[i];
-    return any == 0;
 }
 
 static bool make_offer(struct mesh_private_object_offer_v1 *offer,
@@ -114,7 +106,7 @@ static int roundtrip_and_root(void)
                   MESH_PRIVATE_OBJECT_PROTO_OK);
         ASSERT_EQ(mesh_private_object_offer_v1_root(&decoded, decoded_root),
                   MESH_PRIVATE_OBJECT_PROTO_OK);
-        ASSERT(!all_zero(root, sizeof(root)));
+        ASSERT(!zcl_bytes_all_zero((const uint8_t *)root, sizeof(root)));
         ASSERT(memcmp(root, decoded_root, sizeof(root)) == 0);
     } TEST_END
     return failures;
@@ -136,7 +128,7 @@ static int strict_wire_and_signature(void)
         ASSERT_EQ(mesh_private_object_offer_v1_decode(&decoded, wire,
                                                        sizeof(wire) - 2),
                   MESH_PRIVATE_OBJECT_PROTO_SIZE);
-        ASSERT(all_zero(&decoded, sizeof(decoded)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
         ASSERT_EQ(mesh_private_object_offer_v1_decode(&decoded, wire,
                                                        sizeof(wire)),
                   MESH_PRIVATE_OBJECT_PROTO_SIZE);
@@ -149,7 +141,7 @@ static int strict_wire_and_signature(void)
         ASSERT_EQ(mesh_private_object_offer_v1_decode(&decoded, wire,
                                                        sizeof(wire) - 1),
                   MESH_PRIVATE_OBJECT_PROTO_SIGNATURE);
-        ASSERT(all_zero(&decoded, sizeof(decoded)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&decoded, sizeof(decoded)));
 
         trial = offer;
         trial.ciphertext_root[0] ^= 1;
@@ -162,7 +154,7 @@ static int strict_wire_and_signature(void)
         trial = offer;
         ASSERT_EQ(mesh_private_object_offer_v1_sign(&trial, other_seed),
                   MESH_PRIVATE_OBJECT_PROTO_KEY_MISMATCH);
-        ASSERT(all_zero(trial.signature, sizeof(trial.signature)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)trial.signature, sizeof(trial.signature)));
     } TEST_END
     return failures;
 }

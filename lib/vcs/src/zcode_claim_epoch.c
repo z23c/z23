@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_claim_epoch.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -13,14 +14,6 @@
 
 static const uint8_t claim_epoch_magic[8] =
     {'Z','C','C','E','P','2',0,0};
-
-static bool claim_epoch_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_claim_epoch_error_string(
     enum vcs_zcode_claim_epoch_error error)
@@ -90,12 +83,12 @@ enum vcs_zcode_claim_epoch_error vcs_zcode_claim_epoch_validate(
         proposal->lineage_cap_atoms != proposal->recipient_cap_atoms ||
         proposal->first_category >= VCS_ZCODE_COMMONS_CATEGORY_COUNT)
         return VCS_ZCODE_CLAIM_EPOCH_SELECTION;
-    if (!claim_epoch_nonzero(proposal->policy_root) ||
-        !claim_epoch_nonzero(proposal->claim_projection_root) ||
-        !claim_epoch_nonzero(proposal->epoch_selection_root))
+    if (!zcl_bytes_any_set(proposal->policy_root, 32) ||
+        !zcl_bytes_any_set(proposal->claim_projection_root, 32) ||
+        !zcl_bytes_any_set(proposal->epoch_selection_root, 32))
         return VCS_ZCODE_CLAIM_EPOCH_ROOT;
     for (size_t i = 0; i < proposal->selected_count; i++) {
-        if (!claim_epoch_nonzero(proposal->selected_claim_roots[i]))
+        if (!zcl_bytes_any_set(proposal->selected_claim_roots[i], 32))
             return VCS_ZCODE_CLAIM_EPOCH_ROOT;
         for (size_t j = 0; j < i; j++)
             if (memcmp(proposal->selected_claim_roots[i],

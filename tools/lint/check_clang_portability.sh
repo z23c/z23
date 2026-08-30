@@ -117,7 +117,9 @@ cd "$ROOT"
 . tools/lint/gate_lib.sh
 
 CC_BIN="${ZCL_CC:-clang}"
-MAKEFILE="Makefile"
+# Overridable so --self-test can aim the parse at a deliberately truncated
+# copy and prove the coverage check below catches a layer that fell out.
+MAKEFILE="${ZCL_CLANG_PORTABILITY_MAKEFILE:-Makefile}"
 
 # Known floor for the scan set. The node's release source set is ~1174 TUs;
 # anything under this means the Makefile variable parse below broke or a
@@ -323,6 +325,50 @@ SRC_COUNT="$(wc -l < "$SRC_LIST")"
 gate_require_scanned "$SRC_COUNT" "$SRC_FLOOR" check-clang-portability \
     "parsed APP_DIRS/LIB_MODULES/CORE_CONTEXTS from $MAKEFILE — a variable rename there empties this scan"
 
+# ── Coverage: did the scan reach every source it claims to cover? ────────
+# SRC_FLOOR above answers "did the parse produce anything at all". It cannot
+# answer "did it produce everything": measured 2026-08-30 the realized set is
+# 2069 sources against a floor of 900, so this gate could silently lose 1169
+# of them — 56% of its own surface — and still report clean. The header above
+# is explicit that this scan set is derived from the Makefile so a new module
+# is covered the day it is added; nothing until now PROVED that derivation
+# still enumerates everything, and LIB_MODULES has already once been one
+# refactor away from collapsing this scan (see the note beside the parse).
+#
+# The expectation is derived from the git index and a structural rule about
+# where a compiled source lives — deliberately NOT from the Makefile, so the
+# oracle and the scan cannot fail together. A layer list that silently loses
+# a module now names the dropped files instead of shrinking a count.
+#
+# The git pathspec is a superset (git's `*` crosses `/`), so the shape filter
+# below narrows it to exactly the depth this gate's `find -maxdepth 1`
+# reaches. `/_` mirrors the build's own ephemeral-source filter.
+#
+# lib/test is excluded because config/lib_module_order.def says so in as many
+# words: "Not listed here: lib/test (the test runner is not part of the
+# production link order)". It is not a lib module, this gate never compiled
+# it, and pulling its 1040 sources in here would be a scope change wearing a
+# coverage check's clothes.
+#
+# Allowance 0, shrink-only: the Makefile-derived scan reaches every source
+# the oracle names today, both directions empty (expected 2069, scanned 2069,
+# missing 0), so any shortfall at all is UNPROVEN.
+CLANG_COVERAGE_ALLOWANCE="${ZCL_CLANG_PORTABILITY_COVERAGE_ALLOWANCE:-0}"
+if [ "${ZCL_CLANG_PORTABILITY_COVERAGE:-1}" = "1" ]; then
+    gate_git_oracle "$WORK/oracle.raw" check-clang-portability \
+        'app/*/src/*.c' 'lib/*/src/*.c' 'core/*/src/*.c' 'domain/*/src/*.c' \
+        'application/*/src/*.c' 'config/src/*.c' \
+        'adapters/outbound/persistence/src/*.c' \
+        'tools/dev/*.c' 'tools/command/*.c' 'src/*.c' ':!:lib/test/*'
+    grep -vF '/_' "$WORK/oracle.raw" \
+        | grep -E '^(app|lib|core|domain|application)/[^/]+/src/[^/]+\.c$|^config/src/[^/]+\.c$|^adapters/outbound/persistence/src/[^/]+\.c$|^tools/(dev|command)/[^/]+\.c$|^src/[^/]+\.c$' \
+        > "$WORK/oracle.txt" || true
+    gate_require_coverage "$SRC_LIST" "$WORK/oracle.txt" \
+        "$CLANG_COVERAGE_ALLOWANCE" check-clang-portability \
+        ZCL_CLANG_PORTABILITY_COVERAGE_ALLOWANCE \
+        "A named file is a compiled source this gate never reached. Check that its layer still appears in APP_DIRS/LIB_MODULES/CORE_CONTEXTS/DOMAIN_CONTEXTS/APPLICATION_CONTEXTS as $MAKEFILE and config/lib_module_order.def define them — a layer that drops out of those lists drops out of this gate silently."
+fi
+
 # ── Self-test: prove the flag set actually rejects a violation ────────────
 if [ "${1:-}" = "--self-test" ]; then
     probe="$WORK/probe.c"
@@ -356,7 +402,39 @@ PROBE
         echo "  The gate would false-fail every contributor."
         exit 1
     fi
-    echo "  OK: --self-test — flag set trips on a violation, passes clean code"
+    # COVERAGE, three answers not two. Cheap: all three settle before the
+    # 2069-TU compile loop. The interesting case is the one no file-count
+    # floor can reach — a whole layer falling out of the Makefile parse
+    # while the count stays far above SRC_FLOOR.
+    cov_self="$PWD/tools/lint/check_clang_portability.sh"
+    cov_case() { # $1=want-rc $2=msg  rest: VAR=VAL
+        local want="$1" msg="$2" rc=0
+        shift 2
+        env "$@" "$cov_self" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne "$want" ]; then
+            echo "FAIL: --self-test — $msg (wanted exit $want, got $rc)"
+            exit 1
+        fi
+    }
+    # (a) a layer emptied in the Makefile parse. CORE_CONTEXTS holds 30 of
+    #     the 2069 sources, so the scan drops to 2039 — still more than
+    #     DOUBLE SRC_FLOOR=900. The floor sees nothing; coverage names all
+    #     30 and returns UNPROVEN, exit 2.
+    cov_short="$WORK/Makefile.core_contexts_emptied"
+    sed 's/^CORE_CONTEXTS[[:space:]]*[:+]\{0,1\}=.*/CORE_CONTEXTS =/' \
+        "$MAKEFILE" > "$cov_short"
+    cov_case 2 "a whole layer dropped from the Makefile parse was not UNPROVEN" \
+        ZCL_CLANG_PORTABILITY_MAKEFILE="$cov_short"
+    # (b) a shortfall SMALLER than the recorded allowance is a stale
+    #     ratchet, exit 1 — an allowance that may only rise rusts shut.
+    cov_case 1 "an allowance above the true shortfall was silently tolerated" \
+        ZCL_CLANG_PORTABILITY_COVERAGE_ALLOWANCE=1
+    # (c) the pass case needs no separate run: reaching this line at all
+    #     means the real scan set above already cleared its expectation.
+
+    echo "  OK: --self-test — flag set trips on a violation, passes clean code;"
+    echo "      a layer emptied from the Makefile parse is UNPROVEN exit 2 (not"
+    echo "      clean, and invisible to SRC_FLOOR), a stale allowance is exit 1"
     exit 0
 fi
 
@@ -500,7 +578,7 @@ print_diags_for() {
     while read -r f; do
         [ -n "$f" ] || continue
         gate_grep -E "^${f//./\\.}:" "$SITES" | sed 's/^/    /' >&2 || true
-    done < <(printf '%s' "$list" | sed 's/^  //; s/:.*//')
+    done < <(printf '%s\n' "$list" | sed 's/^  //; s/:.*//')
 }
 
 if [ -n "${regressions//[[:space:]]/}" ]; then

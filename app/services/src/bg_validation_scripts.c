@@ -20,6 +20,7 @@
 #include "primitives/transaction.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include "util/thread_qos.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -53,6 +54,13 @@ struct worker_ctx {
 static void *worker_thread(void *arg)
 {
     struct worker_ctx *w = arg;
+
+    /* This is sovereignty verification, never the active reducer/network/RPC
+     * path. Apply the calling-thread controls even though Darwin workers are
+     * also born with a background-QoS attribute below: Linux I/O priority has
+     * no pthread attribute, and the duplicate Darwin call is idempotent. */
+    (void)zcl_thread_qos_background();
+
     w->result = true;
     for (size_t i = 0; i < w->count; i++) {
         if (!verify_script_item(&w->items[w->start + i])) {
@@ -105,6 +113,25 @@ bool bg_validation_verify_scripts_parallel(struct script_check_item *items,
     size_t remainder = count % (size_t)nthreads;
     size_t offset = 0;
 
+    pthread_attr_t background_attr;
+    bool background_attr_ready = false;
+    int attr_rc = pthread_attr_init(&background_attr);
+    if (attr_rc == 0) {
+        background_attr_ready =
+            zcl_thread_qos_background_attr(&background_attr);
+        if (!background_attr_ready) {
+            int destroy_rc = pthread_attr_destroy(&background_attr);
+            if (destroy_rc != 0)
+                LOG_WARN("bg.validation",
+                         "pthread_attr_destroy after QoS refusal failed: %d",
+                         destroy_rc);
+        }
+    } else {
+        LOG_WARN("bg.validation",
+                 "pthread_attr_init failed (%d); worker will apply background "
+                 "QoS on entry", attr_rc);
+    }
+
     for (int t = 0; t < nthreads; t++) {
         workers[t].items = items;
         workers[t].start = offset;
@@ -112,7 +139,9 @@ bool bg_validation_verify_scripts_parallel(struct script_check_item *items,
         workers[t].result = true;
         offset += workers[t].count;
         /* raw-pthread-ok: short-burst-joined-immediately */
-        int rc = pthread_create(&threads[t], NULL, worker_thread, &workers[t]);
+        int rc = pthread_create(&threads[t],
+                                background_attr_ready ? &background_attr : NULL,
+                                worker_thread, &workers[t]);
         if (rc != 0) {
             /* Thread did not start. Two failure modes must NOT happen here:
              * (1) leaving workers[t].result == true for an unrun range would
@@ -128,6 +157,14 @@ bool bg_validation_verify_scripts_parallel(struct script_check_item *items,
         } else {
             created[t] = true;
         }
+    }
+
+    if (background_attr_ready) {
+        int destroy_rc = pthread_attr_destroy(&background_attr);
+        if (destroy_rc != 0)
+            LOG_WARN("bg.validation",
+                     "pthread_attr_destroy after worker creation failed: %d",
+                     destroy_rc);
     }
 
     bool all_ok = true;

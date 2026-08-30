@@ -1,0 +1,47 @@
+[Unit]
+Description=Z23 Batching Landing Lander
+# A long-running user service with linger, which is this tree's shape for a
+# critical pipeline. Not a timer: the whole value is that a submission is
+# picked up on the next poll instead of waiting for a cron edge, and that one
+# gate run settles the entire batch that accumulated meanwhile.
+#
+# It does NOT publish, and it must never be given a unit that could. See
+# tools/lint/check_no_unattended_publish.sh: publishing is a deliberate act a
+# person performs, never a side effect of a background loop. The lander gates,
+# merges, bisects and records, and leaves a ready integration branch behind.
+
+[Service]
+Type=simple
+WorkingDirectory=%h/github/zclassic23
+ExecStart=%h/github/zclassic23/tools/dev/land_lander.sh
+
+# The lander runs the real push gate, which is 15-25 minutes. A restart in the
+# middle of one is not a crash to recover from quickly: the batch it was
+# proving is gone and every member goes back to QUEUED for the next cycle, so
+# the restart delay is deliberately generous.
+Restart=always
+RestartSec=60
+
+# Its own worktree, its own base, its own ready branch. Nothing here points at
+# a node datadir and nothing here needs one.
+Environment=ZCL_LAND_BASE=main
+Environment=ZCL_LAND_READY_REF=land/ready
+Environment=ZCL_LAND_BATCH_MAX=16
+Environment=ZCL_LAND_GATE_TIMEOUT_S=2700
+Environment=ZCL_LAND_MAX_ATTEMPTS=2
+Environment=ZCL_LAND_INTERVAL_S=30
+
+# The gate is CPU-heavy and this box also serves. Yield to everything that
+# matters more; a batch that takes longer costs nobody their afternoon,
+# because nobody is waiting on it.
+Nice=10
+CPUWeight=30
+IOWeight=30
+MemoryHigh=16G
+TasksMax=2048
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

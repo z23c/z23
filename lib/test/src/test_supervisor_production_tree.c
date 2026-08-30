@@ -168,6 +168,10 @@ static bool spt_poll_blocker(const char *id, int timeout_ms)
 }
 #endif /* !__APPLE__ */
 
+#if defined(__APPLE__)
+/* Only the Darwin branch of the restart contract polls for a worker state;
+ * on Linux this would be an unused static and -Werror rejects the build.
+ * Mirrors the !__APPLE__ guard on blocker_poll_exists above. */
 static bool spt_poll_worker_state(const char *child_name, int state,
                                   int timeout_ms)
 {
@@ -182,6 +186,7 @@ static bool spt_poll_worker_state(const char *child_name, int state,
     }
     return false;
 }
+#endif /* __APPLE__ */
 
 static const char *const k_staged_children[] = {
     "staged.header_admit",

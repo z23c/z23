@@ -32,6 +32,7 @@
 
 #include "vcs/moderation_attestation.h"
 
+#include "base/bytes.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -45,14 +46,6 @@ struct zcl_moderation_composition {
     size_t count;
     uint8_t root[32];
 };
-
-static bool compose_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
 
 /* Canonical order: signer, then sequence, then the statement's own root.
  * Total and deterministic, so grouping and the composition root do not depend
@@ -148,7 +141,7 @@ static void compose_signer(
     out->stated =
         (enum zcl_moderation_verdict_v1)winner->attestation.verdict;
     out->trusted = compose_is_trusted(policy, out->signer_pubkey);
-    out->self = compose_nonzero(policy->self_pubkey, 32) &&
+    out->self = zcl_bytes_any_set(policy->self_pubkey, 32) &&
                 memcmp(policy->self_pubkey, out->signer_pubkey, 32) == 0;
     /* Distinct statements at the same top sequence: the signer contradicts
      * itself. The reader does not pick a winner for it -- the signer's
@@ -315,7 +308,7 @@ static enum zcl_moderation_error compose_policy_validate(
     const struct zcl_moderation_local_policy_v1 *policy)
 {
     if (!policy) return ZCL_MODERATION_NULL;
-    if (!compose_nonzero(policy->profile_root, 32)) return ZCL_MODERATION_ROOT;
+    if (!zcl_bytes_any_set(policy->profile_root, 32)) return ZCL_MODERATION_ROOT;
     if (policy->trusted_count > ZCL_MODERATION_MAX_TRUSTED)
         return ZCL_MODERATION_LIMIT;
     if (policy->trusted_count > 0 && !policy->trusted)
@@ -340,7 +333,7 @@ enum zcl_moderation_error zcl_moderation_compose_v1(
         return ZCL_MODERATION_NULL;
     enum zcl_moderation_error error = compose_policy_validate(policy);
     if (error != ZCL_MODERATION_OK) return error;
-    if (!compose_nonzero(content_root, 32)) return ZCL_MODERATION_ROOT;
+    if (!zcl_bytes_any_set(content_root, 32)) return ZCL_MODERATION_ROOT;
     if (source_count > ZCL_MODERATION_MAX_ATTESTATIONS)
         return ZCL_MODERATION_LIMIT;
 

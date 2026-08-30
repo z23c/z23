@@ -10,6 +10,7 @@
 
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "crypto/ed25519.h"
 #include "zswap/zswap_quote.h"
 
@@ -54,13 +55,6 @@ static bool zsq_kat_pin(const char *name, const char *expect, const char *got)
         return false;
     }
     return strcmp(expect, got) == 0;
-}
-
-static bool zsq_all_zero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any == 0;
 }
 
 static void zsq_fixture_net(uint8_t net[32])
@@ -195,7 +189,7 @@ static int t_roundtrip(void)
     ZSQ_CHECK("roundtrip: error zeroes output",
               zswap_quote_decode(wire, 10u, &back) ==
                   ZSWAP_QUOTE_ERR_WIRE_SIZE &&
-              zsq_all_zero((const uint8_t *)&back, sizeof(back)));
+              zcl_bytes_all_zero((const uint8_t *)&back, sizeof(back)));
     ZSQ_CHECK("roundtrip: NULL rejected",
               zswap_quote_decode(NULL, sizeof(wire), &back) ==
                   ZSWAP_QUOTE_ERR_NULL &&

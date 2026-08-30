@@ -357,7 +357,7 @@ if [ -n "${regressions//[[:space:]]/}" ]; then
     while read -r f; do
         [ -n "$f" ] || continue
         gate_grep -E "^${f//./\\.}:" "$SITES" | sed 's/^/    /' >&2 || true
-    done < <(printf '%s' "$regressions" | sed 's/^  //; s/:.*//')
+    done < <(printf '%s\n' "$regressions" | sed 's/^  //; s/:.*//')
     echo "" >&2
     echo "  Reproduce one file:" >&2
     echo "    $CC_BIN ${WARN_FLAGS[*]} ${INC_FLAGS[*]} <file.c>" >&2

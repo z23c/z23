@@ -45,7 +45,46 @@ cd "$(dirname "$0")/../.."
 # Scan roots + baseline are overridable so the lint-gate self-test can point
 # the gate at a planted fixture dir / empty baseline (and prove the
 # non-empty-scan floor + trip/pass behavior) without touching the live tree.
-read -r -a ROOTS <<< "${ZCL_THREADSUP_SCAN_ROOTS:-app lib config}"
+THREADSUP_ROOTS_DEFAULT="app lib config"
+read -r -a ROOTS <<< "${ZCL_THREADSUP_SCAN_ROOTS:-$THREADSUP_ROOTS_DEFAULT}"
+
+# ── --selftest: the coverage check, exercised on every `make lint` ──────────
+# Three answers, not two. Each case re-invokes this gate for real with
+# ZCL_THREADSUP_COVERAGE_ONLY=1, so it stops the moment the coverage verdict is
+# in and the umbrella never pays for a second full per-file grep pass (the
+# real, complete run follows immediately in the same `--selftest && <gate>`
+# command).
+if [ "${1:-}" = "--selftest" ]; then
+    self="$PWD/tools/lint/check_thread_supervision.sh"
+    cov_case() { # $1=want-rc $2=msg  rest: VAR=VAL env assignments
+        local want="$1" msg="$2" rc=0
+        shift 2
+        env "$@" "$self" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne "$want" ]; then
+            echo "check_thread_supervision: SELFTEST FAILED — $msg (wanted exit $want, got $rc)" >&2
+            exit 2
+        fi
+    }
+    # (1) the full, real scan clears its own expectation.
+    cov_case 0 "the complete scan did not pass its coverage expectation" \
+        ZCL_LINT_PRODUCTION_SCAN=1 ZCL_THREADSUP_COVERAGE_ONLY=1
+    # (2) a scan set deliberately reduced below the expectation (the config/
+    #     root dropped) is UNPROVEN exit 2 — never 0, never 1. The old floor of
+    #     1 could not see this: ~1900 files still cleared it.
+    cov_case 2 "a scan missing a whole declared root was not UNPROVEN" \
+        ZCL_LINT_PRODUCTION_SCAN=1 ZCL_THREADSUP_COVERAGE_ONLY=1 \
+        ZCL_THREADSUP_SCAN_ROOTS="app lib"
+    # (3) a shortfall SMALLER than the recorded allowance is a stale ratchet,
+    #     exit 1 — an allowance that may only ever rise rusts shut.
+    cov_case 1 "an allowance above the true shortfall was silently tolerated" \
+        ZCL_LINT_PRODUCTION_SCAN=1 ZCL_THREADSUP_COVERAGE_ONLY=1 \
+        ZCL_THREADSUP_COVERAGE_ALLOWANCE=1
+    echo "[check_thread_supervision] SELFTEST PASS (a full scan passes coverage," \
+         "a scan short one declared root is UNPROVEN exit 2, and an allowance" \
+         "above the true shortfall is a stale-ratchet exit 1)"
+    exit 0
+fi
+
 BASELINE="${ZCL_THREADSUP_BASELINE:-tools/lint/thread_supervision_baseline.txt}"
 [ -f "$BASELINE" ] || touch "$BASELINE"
 
@@ -69,6 +108,68 @@ mapfile -t files < <(find "${ROOTS[@]}" -type f -name '*.c' 2>/dev/null \
     | sort)
 gate_require_scanned "${#files[@]}" 1 check_thread_supervision \
     "no *.c under: ${ROOTS[*]} — was a production dir renamed/moved?"
+
+# ── Coverage: did the scan reach everything it claims to cover? ─────────────
+# The floor above answers "did the scan produce anything at all" — and it was
+# set to 1, i.e. this gate reported clean off a single file. Measured
+# 2026-08-30 the realized scan is 1929 .c files, so the floor was 0.05% of the
+# surface: a scan that silently lost 1928 of 1929 files still passed, and this
+# gate's whole subject is a per-file grep — dropping a file drops its spawn
+# sites entirely while the file COUNT stays large. This asks the right
+# question: did the scan reach every file an INDEPENDENT oracle — the git
+# index, which knows nothing about the find/grep pipeline above, so the two
+# cannot fail together — says it should have?
+#
+# Derived from THREADSUP_ROOTS_DEFAULT, never from the (overridable) ROOTS
+# actually in use, so pointing this gate at a subset reads as a shortfall
+# rather than as a quiet redefinition of what "covered" means.
+#
+# Scope, unchanged: the expectation carries the SAME declared exclusions the
+# find pipeline applies — */test/*, anything named *fuzz* (case-insensitively,
+# matching the `grep -v -i fuzz`), */vendor/*, and the two seam files
+# (thread_registry.c, supervisor.c — the supervisor thread is the root and
+# cannot supervise itself). A coverage check that fired on files this gate
+# deliberately never reads would only teach people to ignore it.
+#
+# Allowance 0, shrink-only: measured expected 1929, scanned 1929, missing 0.
+THREADSUP_COVERAGE_ALLOWANCE="${ZCL_THREADSUP_COVERAGE_ALLOWANCE:-0}"
+if [ "${ZCL_THREADSUP_COVERAGE:-1}" = "1" ]; then
+    threadsup_cov_specs=()
+    for threadsup_cov_root in $THREADSUP_ROOTS_DEFAULT; do
+        threadsup_cov_specs+=("$threadsup_cov_root/*.c")
+    done
+    # Per-root non-emptiness. KNOWN LIMIT of any git-oracle coverage check
+    # over hardcoded roots: the oracle is independent of the gate's FIND, not
+    # of its ROOT LIST. A renamed root empties the find and the pathspec
+    # together, so the shortfall cancels out and reads as clean. Ask git
+    # directly, root by root, and refuse to grade if one has gone silent.
+    for threadsup_cov_root in $THREADSUP_ROOTS_DEFAULT; do
+        if [ -z "$(git ls-files --cached -- "$threadsup_cov_root/*.c" 2>/dev/null || true)" ]; then
+            echo "check_thread_supervision: UNPROVEN — declared scan root" >&2
+            echo "  '$threadsup_cov_root' tracks no *.c at all. A renamed/emptied" >&2
+            echo "  root removes its surface from BOTH the find and the" >&2
+            echo "  expectation, so the shortfall cancels and reads clean." >&2
+            echo "  Refusing to grade. Fix THREADSUP_ROOTS_DEFAULT, or drop the" >&2
+            echo "  root if the code is genuinely gone." >&2
+            exit 2
+        fi
+    done
+    threadsup_cov_specs+=(
+        ':(exclude)*/test/*'
+        ':(exclude,icase)*fuzz*'
+        ':(exclude)*/vendor/*'
+        ':(exclude)lib/util/src/thread_registry.c'
+        ':(exclude)lib/util/src/supervisor.c'
+    )
+    gate_require_git_coverage - "$THREADSUP_COVERAGE_ALLOWANCE" check_thread_supervision \
+        ZCL_THREADSUP_COVERAGE_ALLOWANCE \
+        "Re-run from a clean checkout. If a listed file genuinely left this gate's scope, move it out of $THREADSUP_ROOTS_DEFAULT or add its exclusion to BOTH the find pipeline and the pathspec list above — raising ZCL_THREADSUP_COVERAGE_ALLOWANCE is a last resort and needs the reason written down." \
+        -- "${threadsup_cov_specs[@]}" < <(printf '%s\n' "${files[@]}")
+fi
+if [ "${ZCL_THREADSUP_COVERAGE_ONLY:-0}" = "1" ]; then
+    echo "check_thread_supervision: coverage-only PASS (${#files[@]} files reached)"
+    exit 0
+fi
 
 # Load baseline: "name  disposition  justification…". First token = thread name.
 declare -A baseline

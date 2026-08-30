@@ -122,6 +122,16 @@ bool inv_registered_reachability(const struct inv_scan *scan,
 void inv_cpy(char *dst, size_t cap, const char *src);
 bool inv_is_test_path(const char *path);
 bool inv_is_public_header_path(const char *path);
+
+/* Doubling-capacity growth for a report append-array.  `*arr`/`*cap` track
+ * the allocation, `count` is the number of elements already used (the next
+ * append lands at index `count`).  Ensures `count < *cap` on return, growing
+ * by repeated doubling from an 8-element floor instead of the caller
+ * realloc()ing to exactly count+1 every push -- that pattern makes D appends
+ * cost O(D^2).  Returns false, leaving `*arr`/`*cap` unchanged, on overflow
+ * or allocation failure. */
+bool inv_report_array_grow(void **arr, int *cap, int count,
+                           size_t elem_size, const char *label);
 void inv_group_for_path(const char *path, char out[64]);
 
 #endif /* ZCL_CODEINDEX_INVENTORY_INTERNAL_H */

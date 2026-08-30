@@ -87,7 +87,7 @@ keeps the `_stub` variants).
 | Header | Purpose | Darwin primitive | Linux primitive |
 |---|---|---|---|
 | `rng.h` (+ `lib/platform/src/rng.c:76-79`) | injectable entropy | `arc4random_buf(out, len)` | `getrandom(2)` loop, `/dev/urandom` fallback |
-| `thread_compat.h` | bounded thread join | `pthread_join()`; deadline discarded | `pthread_timedjoin_np()` |
+| `thread_compat.h` | bounded thread join | cancel-safe short-lived join waiter; timeout leaves the target joinable for the final owner drain | `pthread_timedjoin_np()` |
 | `path_compat.h` | one identity string per path | `realpath()`, including the parent of a not-yet-created path | verbatim copy |
 | `fd_path.h` | fd → path | root `/dev/fd`; dirfd children need `fcntl(fd, F_GETPATH)` **plus** a `fstat`/`stat` inode recheck | `/proc/self/fd/<fd>[/<leaf>]` |
 | `process_compat.h` | pinned-file exec, env clear | `F_GETPATH` + inode compare, `ESTALE` on mismatch, then `execve()`; env via `_NSGetEnviron()` | `fexecve()`; `clearenv()` |
@@ -108,13 +108,14 @@ Read `lib/platform/src/os_sandbox_stub.c:2` as the governing sentence:
 
 Two behavioral notes worth memorizing:
 
-- **Bounded joins do not bound on Darwin.** `platform_thread_join_until`
-  ignores its deadline off-Linux (`thread_compat.h`), so the caller cannot
-  distinguish "finished in time" from "blocked past the deadline". Every
-  direct `pthread_timedjoin_np` call site must be Linux-gated — the only one
-  left is `app/services/src/bg_validation_service.c:679-692`; everywhere else
-  the calls already went through this seam (`lib/net/src/connman.c:2611-2631`).
-  A new call site without that gate will not build here.
+- **Bounded joins now bound on Darwin.** `platform_thread_join_until`
+  delegates the blocking `pthread_join()` to a short-lived waiter and waits on
+  an absolute deadline. On timeout it cancels and reaps only that waiter;
+  POSIX cancellation leaves the target thread joinable, so the subsystem or
+  final process watchdog retains ownership. The registered `thread_registry`
+  group proves timeout followed by a successful final reap, and the standalone
+  primitive acceptance proves the short-deadline path directly. Direct
+  `pthread_timedjoin_np` call sites must still be Linux-gated.
 - **Host quirk priced into the API:** Darwin implements `flock()` through
   fcntl, so lease locks and SQLite byte-range locks share one kernel lock
   space. The owner lease therefore locks a *different inode* per host

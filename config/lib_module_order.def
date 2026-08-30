@@ -122,6 +122,16 @@ LIB_MODULE("platform")
  * above it, and it holds no key material — a chain proves nothing was edited,
  * never who wrote it. */
 LIB_MODULE("chainlog")
+/* The claim register: what actually makes a model produce good, proven C23,
+ * recorded so that a claim cannot be entered without saying how it could be
+ * shown wrong. It references base and sha3 (low), engine for the verdict
+ * enum it counts (rank above), and chainlog for durability — so directly
+ * above chainlog is its LOWEST legal rank, not merely a convenient one. It
+ * is not part of lib/metaverse: metaverse models sovereign digital property
+ * (identity, grants, receipts) and reaches none of engine or chainlog, and
+ * folding a development-process register into it would raise metaverse's
+ * dependency set to carry something that shares no type with it. */
+LIB_MODULE("science")
 LIB_MODULE("core")
 LIB_MODULE("crypto")
 LIB_MODULE("zid")

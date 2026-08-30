@@ -2,17 +2,9 @@
  * purpose: Iterative Kademlia shortlist and fair lookup scheduling. */
 
 #include "zcode_dht_service_internal.h"
+#include "base/bytes.h"
 
 #include <string.h>
-
-static bool node_id_nonzero(const uint8_t id[32]) {
-  uint8_t any = 0;
-  if (!id)
-    return false;
-  for (size_t i = 0; i < 32; i++)
-    any |= id[i];
-  return any != 0;
-}
 
 static uint32_t active_query_count(const struct vcs_zcode_dht_service *s) {
   uint32_t count = 0;
@@ -99,7 +91,7 @@ struct service_peer *vcs_zcode_dht_lookup_peer_for_node(
 bool vcs_zcode_dht_lookup_insert(
     struct service_lookup *l, const uint8_t id[32],
     enum vcs_zcode_dht_candidate_state state, uint64_t peer_id) {
-  if (!l || !node_id_nonzero(id))
+  if (!l || !zcl_bytes_any_set(id, 32))
     return false;
   int existing = vcs_zcode_dht_lookup_candidate_index(l, id);
   if (existing >= 0) {
@@ -289,7 +281,7 @@ bool vcs_zcode_dht_service_lookup_begin(struct vcs_zcode_dht_service *s,
                                         const uint8_t target[32],
                                         struct vcs_zcode_dht_time now,
                                         uint64_t *id_out) {
-  if (!s || !s->enabled || !node_id_nonzero(target) || !id_out)
+  if (!s || !s->enabled || !zcl_bytes_any_set(target, 32) || !id_out)
     return false;
   struct service_lookup *lookup = NULL;
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++)

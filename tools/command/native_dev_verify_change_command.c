@@ -6,6 +6,7 @@
 
 #define _GNU_SOURCE
 #include "command/native_command.h"
+#include "command/native_dev_proof_command.h"
 
 #include "devloop.h"
 #include "json/json.h"
@@ -43,6 +44,11 @@ void zcl_native_handle_dev_verify_change(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
+    if (request && request->spec && request->spec->path &&
+        strncmp(request->spec->path, "dev.proof.", 10) == 0) {
+        zcl_native_dev_proof_dispatch(request, reply);
+        return;
+    }
 #ifndef ZCL_DEV_BUILD
     (void)request;
     zcl_command_reply_fail(

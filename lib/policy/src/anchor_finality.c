@@ -25,6 +25,7 @@
 
 #include "policy/anchor_finality.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "json/json.h"
 #include "validation/checkpoint.h"
@@ -285,17 +286,6 @@ double anchor_influence_weight_for(const struct anchor_influence_set *set,
     return rec->effective_mult;
 }
 
-static void hex32(char out[ANCHOR_FINALITY_KEY_LEN * 2 + 1],
-                  const uint8_t key[ANCHOR_FINALITY_KEY_LEN])
-{
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < ANCHOR_FINALITY_KEY_LEN; i++) {
-        out[i * 2]     = digits[(key[i] >> 4) & 0x0f];
-        out[i * 2 + 1] = digits[key[i] & 0x0f];
-    }
-    out[ANCHOR_FINALITY_KEY_LEN * 2] = '\0';
-}
-
 bool anchor_influence_set_dump_json(const struct anchor_influence_set *set,
                                     struct json_value *out)
 {
@@ -329,7 +319,7 @@ bool anchor_influence_set_dump_json(const struct anchor_influence_set *set,
             influencing++;
 
         char keyhex[ANCHOR_FINALITY_KEY_LEN * 2 + 1];
-        hex32(keyhex, rec->key);
+        zcl_hex_encode(rec->key, ANCHOR_FINALITY_KEY_LEN, keyhex);
 
         struct json_value row;
         json_init(&row);

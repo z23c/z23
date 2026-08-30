@@ -151,15 +151,33 @@ bool test_abs_path(const char *path, char *abs, size_t n)
 {
     if (!path || !abs || n == 0)
         return false;
+#if defined(_WIN32)
+    /* A leading slash is rooted only in POSIX/MSYS pathname syntax; native
+     * Win32 APIs require either a drive-qualified path or a UNC path. */
+    if (((path[0] == '\\' || path[0] == '/') &&
+         (path[1] == '\\' || path[1] == '/')) ||
+        (path[0] && path[1] == ':' &&
+         (path[2] == '\\' || path[2] == '/'))) {
+        snprintf(abs, n, "%s", path);
+        return strlen(path) < n;
+    }
+#else
     if (path[0] == '/') {
         snprintf(abs, n, "%s", path);
-        return true;
+        return strlen(path) < n;
     }
+#endif
     char cwd[1024];
     if (!getcwd(cwd, sizeof(cwd))) {
         snprintf(abs, n, "%s", path);
         return false;
     }
+#if defined(_WIN32)
+    if (path[0] == '/' && cwd[0] && cwd[1] == ':') {
+        int w = snprintf(abs, n, "%c:%s", cwd[0], path);
+        return w > 0 && (size_t)w < n;
+    }
+#endif
     int w = snprintf(abs, n, "%s/%s", cwd, path);
     return w > 0 && (size_t)w < n;
 }

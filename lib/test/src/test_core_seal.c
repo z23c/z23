@@ -384,7 +384,7 @@ static void test_merkle_dialect(void)
     spec_node_digest("core/params", kids, 2, want);
     CS_CHECK("node digest matches the documented preimage",
              memcmp(got, want, HSZ) == 0);
-    hex_of(got, HSZ, hex);
+    zcl_hex_encode(got, HSZ, hex);
     CS_CHECK("node digest matches its pin",
              strcmp(hex,
                     "de0f860b50a8e20b3ce2a4d3f3fac965aa5721219d09ad346dff24a2"
@@ -407,7 +407,7 @@ static void test_merkle_dialect(void)
     /* the empty root node still has a digest, and it is not zero. */
     unsigned char rootnode[HSZ];
     node_digest("", NULL, 0, rootnode);
-    hex_of(rootnode, HSZ, hex);
+    zcl_hex_encode(rootnode, HSZ, hex);
     CS_CHECK("the empty root node matches its pin",
              strcmp(hex,
                     "fbd6e9e54ffa7facdaed86b4b73a28d64efaaf07b6ae88a31be48e28"
@@ -433,7 +433,7 @@ static void test_root_is_frozen(void)
     unsigned char root[HSZ];
     char hex[HEXSZ];
     compute_root(e, 2, root);
-    hex_of(root, HSZ, hex);
+    zcl_hex_encode(root, HSZ, hex);
     CS_CHECK("ROOT's preimage is unchanged (path || NUL || digest, sorted)",
              strcmp(hex,
                     "9d4e33a2ff1de7ece0cf87ef538eaac081ad9588477b3d06aee017b6"

@@ -98,6 +98,7 @@
 #include "vcs/package_release.h"
 
 #include "base/hex.h"
+#include "util/clientversion.h"
 #include "config/c23_commons_build_profile.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -1878,8 +1879,8 @@ static bool pv_emit_dep_plan(const char *plan_path, const char *package_name,
             while (*p == ' ') p++;
             if (*p == '-') p++;
             if (strncmp(p, "march=", 6) == 0) {
-                march = p + 6;
-                char *space = strchr(march, ' ');
+                char *march_value = p + 6;
+                char *space = strchr(march_value, ' ');
                 if (space) {
                     *space = '\0';
                     char *tune = space + 1;
@@ -1888,6 +1889,7 @@ static bool pv_emit_dep_plan(const char *plan_path, const char *package_name,
                     if (strncmp(tune, "mtune=", 6) == 0)
                         mtune = tune + 6;
                 }
+                march = march_value;
             }
         }
         ok = ok && json_push_kv_str(&tc, "compiler_id", cc_id) &&
@@ -3077,6 +3079,11 @@ static int pv_zbuild_fuzz_mode(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--source-record") == 0) {
+        printf("%s 1 %s\n", zcl_build_source_id_sha256(),
+               zcl_build_source_mutation_sha256());
+        return 0;
+    }
     for (int i = 1; i < argc; i++)
         if (strncmp(argv[i], "--zbuild-fuzz-input=", 20) == 0)
             return pv_zbuild_fuzz_mode(argc, argv);

@@ -1,0 +1,14 @@
+schema=zclassic23.committed-vendor-manifest.v1
+component=freebsd-bin-sh
+source_status=source-vendored-byte-identical
+source_url=https://github.com/freebsd/freebsd-src
+source_branch=releng/14.2
+source_revision=16a79708d089423ec0c3d32f25e7ca97ae58e97b
+license=BSD-3-Clause
+fetched=2026-08-30
+archive=none
+integrity_record=vendor/freebsd-sh/SHA256SUMS
+build=make fbsh -> build/bin/fbsh (standalone; not linked into z23)
+build_time_patch=vendor/patches/freebsd-sh-dirent-d-namlen.patch
+compat_layer=vendor/freebsd-sh/compat (Apache-2.0, this repository)
+note=Source-only vendoring: no prebuilt archive is committed or linked. Upstream files under vendor/freebsd-sh/bin and vendor/freebsd-sh/usr.bin are byte-identical to the named revision; all Linux adaptation lives in compat/ or runs at build time.

@@ -45,7 +45,7 @@ validate() {
     local rows expected actual registered id state reason groups group
     rows="$(matrix_rows)"
     [ -n "$rows" ] || die "capability matrix yielded no rows"
-    expected='hot_activation kqueue launchd node noise package_execution release_packaging resident_confinement snapshot_export tor wallet'
+    expected='arm_acceleration hot_activation kqueue launchd node noise package_execution release_packaging resident_confinement scheduler_qos snapshot_export tor wallet'
     actual="$(printf '%s\n' "$rows" | awk -F',' '{gsub(/[[:space:]]/, "", $1); print $1}' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
     [ "$actual" = "$expected" ] || die "capability set drift: expected '$expected'; observed '$actual'"
     registered="$(registered_groups)"
@@ -61,7 +61,13 @@ validate() {
         [ -n "$groups" ] || die "$id has no refusal/availability evidence group"
         while IFS= read -r group; do
             grep -Fqx "$group" <<< "$registered" || die "$id names unregistered group '$group'"
-        done < <(printf '%s' "$groups" | tr ',' '\n')
+        # printf '%s' emits no trailing newline, so `tr ',' '\n'` leaves the
+        # LAST group as an unterminated partial line and `read` returns
+        # non-zero without running the body for it. Until check-macos-acceptance
+        # started running this script, that silently skipped the last evidence
+        # group of every row — and validated NOTHING at all for the rows that
+        # name exactly one group (tor, release_packaging, snapshot_export).
+        done < <(printf '%s\n' "$groups" | tr ',' '\n')
     done <<< "$rows"
 }
 

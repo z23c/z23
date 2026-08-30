@@ -2,6 +2,7 @@
  * Purpose: canonical dual-signed c23.seed.v1 credential and maturity gate. */
 #include "vcs/zcode_seed.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "codec/cursor.h"
 #include "crypto/ed25519.h"
@@ -34,14 +35,6 @@ static const uint8_t seed_half_order[32] = {
     0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d,
     0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
 };
-
-static bool seed_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 static bool seed_pubkey_valid(const uint8_t pubkey[33])
 {
@@ -103,8 +96,8 @@ static enum vcs_c23_seed_error seed_fields(
         seed->challenge_opening_hash,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!seed_nonzero(roots[i], 32)) return VCS_C23_SEED_ERR_ROOT;
-    if (!seed_nonzero(seed->zid_pubkey, 32) ||
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_C23_SEED_ERR_ROOT;
+    if (!zcl_bytes_any_set(seed->zid_pubkey, 32) ||
         !seed_pubkey_valid(seed->zcl_pubkey))
         return VCS_C23_SEED_ERR_PUBKEY;
     if (memcmp(seed->compiler_capsule_roots[0],
@@ -118,9 +111,9 @@ static enum vcs_c23_seed_error seed_fields(
         return VCS_C23_SEED_ERR_TIME;
     if (seed->sequence == 0) return VCS_C23_SEED_ERR_SEQUENCE;
     if (require_signatures) {
-        if (!seed_nonzero(seed->zid_signature,
+        if (!zcl_bytes_any_set(seed->zid_signature,
                           sizeof(seed->zid_signature)) ||
-            !seed_nonzero(seed->zcl_signature,
+            !zcl_bytes_any_set(seed->zcl_signature,
                           sizeof(seed->zcl_signature)) ||
             !seed_signature_low_s(seed->zcl_signature))
             return VCS_C23_SEED_ERR_SIGNATURE;

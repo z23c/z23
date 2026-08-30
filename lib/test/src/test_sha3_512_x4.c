@@ -103,6 +103,16 @@ int test_sha3_512_x4(void)
            SHA3_VEC_NAME,
            have_vec ? "YES" : "no (parity runs scalar-vs-scalar)");
 
+#if defined(__aarch64__)
+    printf("sha3_512_x4: AUTO refuses the measured-slower NEON tier... ");
+    if (sha3_512_x4_select_impl(SHA3_IMPL_AUTO) == SHA3_IMPL_SCALAR)
+        printf("OK (scalar)\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+#endif
+
     /* ── 1. Contract: both lanes == 4x independent one-shot sha3_512 ──── */
     printf("sha3_512_x4: matches 4x one-shot sha3_512(key||nonce||le64(ctr))... ");
     {

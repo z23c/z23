@@ -103,13 +103,15 @@ static void compute_fingerprint(char out[17])
     bool rot_known = false;
     bool rot = hw_profile_datadir_rotational(&rot_known);
 
-    char buf[192];
+    char buf[224];
     int n = snprintf(buf, sizeof(buf),
-                     "%d|%d|%lld|%d%d%d%d%d%d%d%d%d|%d|%d",
+                     "%d|%d|%lld|%d%d%d%d%d%d%d%d%d|%d%d%d%d%d|%d|%d",
                      online, physical, (long long)ram,
                      isa->avx2, isa->avx512f, isa->avx512vl, isa->avx512bw,
                      isa->avx512dq, isa->vpclmulqdq, isa->vaes, isa->gfni,
-                     isa->sha_ni, rot_known ? 1 : 0, rot ? 1 : 0);
+                     isa->sha_ni, isa->arm_neon, isa->arm_sha256,
+                     isa->arm_sha3, isa->arm_crc32, isa->arm_aes,
+                     rot_known ? 1 : 0, rot ? 1 : 0);
     if (n < 0) n = 0;
     if ((size_t)n > sizeof(buf)) n = (int)sizeof(buf);
 

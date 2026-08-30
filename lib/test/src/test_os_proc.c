@@ -71,8 +71,14 @@ int test_os_proc(void)
                      mem.cgroup_max == -1 || mem.cgroup_max > 0);
         OSPROC_CHECK("sys_total_bytes is sane (>0, <can't-exist)",
                      mem.sys_total_bytes > 0);
+        OSPROC_CHECK("sys_avail_bytes is -1 or non-negative",
+                     mem.sys_avail_bytes >= -1);
         OSPROC_CHECK("sys_avail_bytes <= sys_total_bytes",
                      mem.sys_avail_bytes <= mem.sys_total_bytes);
+#if defined(__APPLE__)
+        OSPROC_CHECK("Darwin publishes reclaimable host memory",
+                     mem.sys_avail_bytes >= 0);
+#endif
     }
 
     /* ── uptime ───────────────────────────────────────────────────── */

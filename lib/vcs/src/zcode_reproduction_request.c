@@ -2,6 +2,7 @@
  * Purpose: canonical simulation-only portable reproduction challenges. */
 #include "vcs/zcode_reproduction_request.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
 #include "vcs/package_build.h"
@@ -12,13 +13,6 @@
 static const uint8_t reproduction_magic[8] = {
     'Z', 'C', 'R', 'E', 'P', 'R', 'Q', '\n'
 };
-
-static bool reproduction_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_reproduction_error_string(
     enum vcs_zcode_reproduction_error error)
@@ -70,7 +64,7 @@ enum vcs_zcode_reproduction_error vcs_zcode_reproduction_request_validate(
         request->requester_contributor_binding_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!reproduction_nonzero(roots[i]))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_REPRODUCTION_ROOT;
     uint8_t expected_action[32];
     vcs_zcode_score_action_root(VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION,

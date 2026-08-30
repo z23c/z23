@@ -14,6 +14,36 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* True only for a fully qualified filesystem path.  A single leading slash
+ * or backslash is drive-relative on Win32 and therefore is not an authority
+ * boundary.  Device namespaces are refused; callers use ordinary drive or
+ * UNC paths and let the Windows platform layer add any long-path prefix. */
+static inline bool platform_path_is_absolute(const char *path)
+{
+    if (!path || !path[0]) return false;
+#if defined(_WIN32)
+    bool drive = ((path[0] >= 'A' && path[0] <= 'Z') ||
+                  (path[0] >= 'a' && path[0] <= 'z')) &&
+                 path[1] == ':' &&
+                 (path[2] == '\\' || path[2] == '/');
+    if (drive) return true;
+    if (!((path[0] == '\\' || path[0] == '/') &&
+          (path[1] == '\\' || path[1] == '/')))
+        return false;
+    const char *server = path + 2;
+    if (!server[0] || server[0] == '?' || server[0] == '.') return false;
+    const char *separator = server;
+    while (*separator && *separator != '\\' && *separator != '/')
+        ++separator;
+    if (separator == server || !separator[0]) return false;
+    const char *share = separator + 1;
+    if (!share[0] || share[0] == '\\' || share[0] == '/') return false;
+    return true;
+#else
+    return path[0] == '/';
+#endif
+}
+
 /* Darwin exposes /tmp through /private/tmp. Normalize an existing path, or
  * the parent of a not-yet-created path, so process-local ownership registries
  * do not treat those spellings as different resources. */

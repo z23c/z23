@@ -26,10 +26,6 @@
 #include <sched.h>
 #endif
 
-#ifdef HAVE_SYS_PRCTL_H
-#include <sys/prctl.h>
-#endif
-
 struct arg_entry g_args[MAX_ARGS];
 int g_nargs = 0;
 

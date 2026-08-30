@@ -15,6 +15,7 @@
 
 #include "services/agent_session_service.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "config/runtime.h"
@@ -56,17 +57,6 @@ static bool ass_refuse(const char *token, const char *detail, char *why,
      * so anything after it is dead code. */
     ass_why(why, why_cap, token);
     LOG_FAIL(ASS_TAG, "%s: %s", token, detail ? detail : "");
-}
-
-static void ass_hex_lower(const uint8_t *raw, size_t n,
-                          char out[AGENT_SESSION_ID_MAX + 1])
-{
-    static const char k_hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < n; i++) {
-        out[i * 2] = k_hex[raw[i] >> 4];
-        out[i * 2 + 1] = k_hex[raw[i] & 0x0f];
-    }
-    out[n * 2] = '\0';
 }
 
 bool agent_session_service_mint(const struct agent_session_mint_request *req,
@@ -117,7 +107,7 @@ bool agent_session_service_mint(const struct agent_session_mint_request *req,
             return ass_refuse("RNG_FAILED",
                               "could not draw a 128-bit session id",
                               why, why_cap);
-        ass_hex_lower(raw, sizeof(raw), sid);
+        zcl_hex_encode(raw, sizeof(raw), sid);
 
         struct db_agent_session existing;
         if (agent_session_find(ndb, sid, &existing))

@@ -3,6 +3,7 @@
 
 #include "config/consensus_state_producer_receipt.h"
 
+#include "base/bytes.h"
 #include "storage/consensus_db.h"    /* consensus_db_kernel_store_path */
 #include "storage/consensus_state_bundle_codec.h"
 #include "storage/cure_progress_read.h"
@@ -147,14 +148,6 @@ static void status_hex32(const uint8_t bytes[32], char out[65])
         out[i * 2 + 1] = hex[bytes[i] & 0x0f];
     }
     out[64] = '\0';
-}
-
-static bool status_bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
 }
 
 static bool pkv_rate_window_is_current(
@@ -329,13 +322,13 @@ static enum pkv_read_result pkv_read_final_receipt(
         memcpy(receipt.producer_commit, commit, (size_t)commit_len);
         receipt.producer_commit[commit_len] = '\0';
         receipt.fold_cursor = sqlite3_column_int64(st, 10);
-        fields_ok = status_bytes_nonzero(receipt.source_epoch_digest, 32) &&
-            status_bytes_nonzero(receipt.source_tree_root, 32) &&
-            status_bytes_nonzero(receipt.running_binary_digest, 32) &&
-            status_bytes_nonzero(receipt.toolchain_digest, 32) &&
-            status_bytes_nonzero(receipt.build_inputs_digest, 32) &&
-            status_bytes_nonzero(receipt.chain_corpus_digest, 32) &&
-            status_bytes_nonzero(receipt.receipt_digest, 32) &&
+        fields_ok = zcl_bytes_any_set(receipt.source_epoch_digest, 32) &&
+            zcl_bytes_any_set(receipt.source_tree_root, 32) &&
+            zcl_bytes_any_set(receipt.running_binary_digest, 32) &&
+            zcl_bytes_any_set(receipt.toolchain_digest, 32) &&
+            zcl_bytes_any_set(receipt.build_inputs_digest, 32) &&
+            zcl_bytes_any_set(receipt.chain_corpus_digest, 32) &&
+            zcl_bytes_any_set(receipt.receipt_digest, 32) &&
             (out->validation_profile < 0 ||
              out->validation_profile == receipt.validation_profile);
     }
@@ -467,10 +460,10 @@ static bool pkv_read_session_identity(sqlite3 *db,
         memset(&claim, 0, sizeof(claim));
         bool claim_ok = schema_ok && root && epoch && toolchain &&
                         build_inputs && clean_ok && profile_ok &&
-                        commit_ok && status_bytes_nonzero(root, 32) &&
-                        status_bytes_nonzero(epoch, 32) &&
-                        status_bytes_nonzero(toolchain, 32) &&
-                        status_bytes_nonzero(build_inputs, 32);
+                        commit_ok && zcl_bytes_any_set(root, 32) &&
+                        zcl_bytes_any_set(epoch, 32) &&
+                        zcl_bytes_any_set(toolchain, 32) &&
+                        zcl_bytes_any_set(build_inputs, 32);
         if (claim_ok) {
             claim.schema_version = version;
             memcpy(claim.source_tree_root, root, 32);

@@ -21,7 +21,12 @@ test -x "$bin" || { echo "c23-node: missing executable: $bin" >&2; exit 1; }
 # simply empty and the host-keyed Darwin branch below still applies.
 bin_format=""
 if command -v objdump >/dev/null 2>&1; then
-    bin_format="$(objdump -f "$bin" 2>/dev/null | sed -n 's/^.*file format //p' | head -1)"
+    # Apple LLVM objdump recognizes Mach-O and prints its format, but exits 1
+    # after doing so.  This probe is only a cross-format hint; Darwin still
+    # grades the artifact below with otool and nm.  Preserve any emitted
+    # format while preventing that tool quirk from aborting under pipefail.
+    bin_format="$(objdump -f "$bin" 2>/dev/null |
+        sed -n 's/^.*file format //p' | head -1 || true)"
 fi
 
 if [[ "$(uname -s 2>/dev/null)" == Darwin && "$bin_format" != pei-* ]]; then

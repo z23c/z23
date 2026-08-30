@@ -20,9 +20,9 @@
  *
  * Each arm keeps the platform it had in the combined file: Windows reads the
  * process working set and the global memory status, Darwin reads
- * proc_pid_rusage plus Mach task_info and sysctl hw.memsize, and every other
- * host reads /proc/self/status, cgroup v2 and /proc/meminfo. Nothing here is
- * persisted or a consensus predicate.
+ * proc_pid_rusage plus Mach task_info, sysctl hw.memsize, and reclaimable
+ * HOST_VM_INFO64 pages, and every other host reads /proc/self/status, cgroup
+ * v2 and /proc/meminfo. Nothing here is persisted or a consensus predicate.
  */
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
@@ -45,11 +45,41 @@
 #if defined(__APPLE__)
 #include <libproc.h>
 #include <mach/mach.h>
+#include <mach/mach_host.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #endif
 
 #define OS_PROC_CGROUP_ROOT "/sys/fs/cgroup"
+
+#if defined(__APPLE__)
+static int64_t os_proc_darwin_available_bytes(int64_t total_bytes)
+{
+    mach_port_t host = mach_host_self();
+    vm_statistics64_data_t stats;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    vm_size_t page_size = 0;
+    kern_return_t stats_rc = host_statistics64(
+        host, HOST_VM_INFO64, (host_info64_t)&stats, &count);
+    kern_return_t page_rc = host_page_size(host, &page_size);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (stats_rc != KERN_SUCCESS || page_rc != KERN_SUCCESS ||
+        page_size == 0)
+        return -1;
+
+    /* XNU accounts speculative pages inside free_count already. Adding
+     * speculative_count again would overstate reclaimable memory and delay
+     * subordinate-work admission under real unified-memory pressure. */
+    uint64_t pages = (uint64_t)stats.free_count +
+                     (uint64_t)stats.inactive_count;
+    if (pages > (uint64_t)INT64_MAX / (uint64_t)page_size)
+        return -1;
+    int64_t available = (int64_t)(pages * (uint64_t)page_size);
+    if (total_bytes > 0 && available > total_bytes)
+        available = total_bytes;
+    return available;
+}
+#endif
 
 /* ── Test override seam (mirrors platform/clock.h, platform/rng.h) ──── */
 
@@ -263,7 +293,8 @@ bool os_proc_mem_read(struct os_proc_mem *out)
     size_t total_size = sizeof(total);
     out->sys_total_bytes = sysctlbyname("hw.memsize", &total, &total_size,
                                        NULL, 0) == 0 ? (int64_t)total : -1;
-    out->sys_avail_bytes = -1;
+    out->sys_avail_bytes =
+        os_proc_darwin_available_bytes(out->sys_total_bytes);
     return true;
 #else
     out->rss_bytes = os_proc_status_field_bytes("/proc/self/status", "VmRSS:");

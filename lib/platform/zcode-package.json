@@ -7,6 +7,14 @@
   "include_dir": "include",
   "source_dir": "src",
   "dependencies": [],
+  "capabilities": [
+    "CAP_CLOCK",
+    "CAP_DYNLOAD",
+    "CAP_FS_READ",
+    "CAP_FS_WRITE",
+    "CAP_PRIVILEGE",
+    "CAP_PROCESS"
+  ],
   "files": [
     "LICENSE",
     "include/platform/os_binary_slots.h",

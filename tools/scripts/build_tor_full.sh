@@ -19,6 +19,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOR_DIR="$ROOT/vendor/tor"
 HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
+if [ "$HOST_OS" = "Darwin" ]; then
+    MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+    [ "$MACOSX_DEPLOYMENT_TARGET" = "14.0" ] || {
+        echo "tor-full: Darwin requires MACOSX_DEPLOYMENT_TARGET=14.0" >&2
+        exit 2
+    }
+    export MACOSX_DEPLOYMENT_TARGET
+fi
 
 cd "$ROOT"
 if [ ! -e "$TOR_DIR/.git" ]; then
@@ -87,6 +95,12 @@ configure_opts=(
     --disable-zstd
     --disable-libscrypt
 )
+if [ "$HOST_OS" = "Darwin" ]; then
+    # Keep this in config.status's argument record. A checkout configured
+    # before the floor existed is then reconfigured and its objects rebuild,
+    # rather than an old host-default libtor.a being silently reused.
+    configure_opts+=("CFLAGS=-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET")
+fi
 
 case "$HOST_OS" in
 Darwin|MINGW*|MSYS*)

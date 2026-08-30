@@ -94,6 +94,16 @@ int test_sha3_256_x4(void)
     printf("sha3_256_x4: %s 4-lane Keccak available on host... %s\n", SHA3_VEC_NAME,
            have_vec ? "YES" : "no (parity runs scalar-vs-scalar)");
 
+#if defined(__aarch64__)
+    printf("sha3_256_x4: AUTO refuses the measured-slower NEON tier... ");
+    if (sha3_256_x4_select_impl(SHA3_IMPL_AUTO) == SHA3_IMPL_SCALAR)
+        printf("OK (scalar)\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+#endif
+
     /* ── 1. FIPS-202 known-answer vectors through the batch path ─────── */
     struct { const char *msg; size_t msglen; const char *h256; } kat[] = {
         { "", 0, "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a" },

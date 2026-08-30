@@ -4247,15 +4247,10 @@ void zcl_native_handle_dev_vcs_revert(
      * the hex form is computed lazily per-branch below, never over an
      * unwritten buffer. */
     char new_hex[65];
-    static const char hexd[] = "0123456789abcdef";
 
     switch (rc) {
     case VCS_OK:
-        for (int i = 0; i < 32; i++) {
-            new_hex[2 * i] = hexd[(new_commit[i] >> 4) & 0xf];
-            new_hex[2 * i + 1] = hexd[new_commit[i] & 0xf];
-        }
-        new_hex[64] = '\0';
+        zcl_hex_encode(new_commit, 32, new_hex);
         (void)json_push_kv_str(&reply->data, "to", to_hex);
         (void)json_push_kv_str(&reply->data, "forward_commit", new_hex);
         (void)json_push_kv_bool(&reply->data, "relink_generation",
@@ -4263,11 +4258,7 @@ void zcl_native_handle_dev_vcs_revert(
         (void)json_push_kv_str(&reply->data, "status", "reverted");
         return;
     case VCS_EPARTIAL:
-        for (int i = 0; i < 32; i++) {
-            new_hex[2 * i] = hexd[(new_commit[i] >> 4) & 0xf];
-            new_hex[2 * i + 1] = hexd[new_commit[i] & 0xf];
-        }
-        new_hex[64] = '\0';
+        zcl_hex_encode(new_commit, 32, new_hex);
         (void)json_push_kv_str(&reply->data, "to", to_hex);
         (void)json_push_kv_str(&reply->data, "forward_commit", new_hex);
         zcl_command_reply_fail(

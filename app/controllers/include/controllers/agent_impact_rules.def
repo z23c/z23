@@ -10,8 +10,16 @@
 
 AGENT_IMPACT_RULE("lib/test/src/lint_gate_deploy_contracts.c", "make_lint_gates_shard_06 make_lint_gates_shard_07")
 AGENT_IMPACT_RULE("lib/test/src/lint_gate_operator_contracts.c", "make_lint_gates_shard_05")
+AGENT_IMPACT_RULE("lib/codeindex/include/codeindex/codeindex_inventory.h|lib/codeindex/src/codeindex_inventory*.c|lib/test/src/test_code_inventory.c|tools/gen_capability_inventory.c|tools/lint/check_capability_inventory_generated.sh|tools/command/native_code_guide_command.c", "code_inventory command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("docs/CAPABILITY_INVENTORY.jsonl", "code_inventory")
 AGENT_IMPACT_RULE("lib/codeindex/include/codeindex/codeindex_inventory.h|lib/codeindex/src/codeindex_inventory*.c|lib/test/src/test_code_inventory.c|tools/gen_capability_inventory.c|tools/lint/check_capability_inventory_generated.sh|docs/CAPABILITY_INVENTORY.jsonl|tools/command/native_code_guide_command.c", "code_inventory command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("config/capability_classes.def|config/capability_symbols.def|config/module_capabilities.def|config/module_capabilities_windows.def|tools/lint/check_capability_closure.sh|tools/lint/check_package_capabilities.sh|tools/lint/zcode_pkg_sources.sh|lib/base/zcode-package.json|lib/sha3/zcode-package.json|lib/codec/zcode-package.json|lib/json/zcode-package.json|lib/encoding/zcode-package.json|lib/presentation/zcode-package.json|lib/platform/zcode-package.json|lib/crypto/zcode-package.json|lib/vcs/zcode-package.json|lib/commons_demo/zcode-package.json", "package_capability_claim make_lint_gates")
+/* The RECEIVER half of the same subject: the two tables above are what this
+ * unit is handed, so a change to either must run the group that re-derives a
+ * claim against them, not only the shell gate that derives it in-tree. */
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/package_verify_capabilities.h|lib/vcs/src/package_verify_capabilities.c|lib/test/src/test_package_capability_claim.c", "package_capability_claim vcs_core make_lint_gates")
 AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|src/main.c|tools/*|tools/scripts/*|tools/githooks/*|deploy/*.service|deploy/*.timer|deploy/examples/*.service|deploy/examples/*.timer|config/launchd/*|docs/AGENT_API.md|docs/BUILD.md|docs/CODEBASE_MAP.md|docs/HOW_THE_NODE_WORKS.md|docs/GETTING_STARTED.md|docs/work/fast-path.md|docs/RUNBOOK.md|lib/test/src/test_make_lint_gates.c|lib/test/src/lint_gate_*.c|lib/test/src/lint_gate_selftests.h", "make_lint_gates")
+AGENT_IMPACT_RULE("packaging/release/build_release.sh|packaging/release/AGENT_CARD.md|docs/work/BOOTSTRAP_PLAN.md", "make_lint_gates")
 AGENT_IMPACT_RULE(".grok/rules/*|.grok/skills/*/SKILL.md", "make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/include/controllers/agent_impact_rules.def", "code_impact impact_composition syncdiag_rpc test_group_selector make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/https_frontdoor.c|lib/net/include/net/https_frontdoor.h|lib/net/src/https_server.c|lib/net/include/net/https_server.h|lib/test/src/test_path_check.c", "path_check blog dev_platform db_migration_idempotent schema_migration models net make_lint_gates")
@@ -36,25 +44,32 @@ AGENT_IMPACT_RULE("app/controllers/src/store_controller.c|app/controllers/src/st
 AGENT_IMPACT_RULE("app/controllers/src/store_native_handlers.c|app/models/src/store_blob.c|app/models/include/models/store_blob.h|lib/test/src/test_store_listing.c", "store_listing store store_e2e_gate command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("docs/HANDOFF.md", "make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/explorer_*.c|app/controllers/src/explorer_*.h|app/controllers/include/controllers/explorer_*.h|app/views/src/explorer_*.c|app/views/src/explorer_*.css|app/views/include/views/explorer_*.h|lib/test/src/test_explorer*.c", "explorer")
-AGENT_IMPACT_RULE("lib/keys/src/key_io.c|lib/keys/include/keys/key_io.h|lib/test/src/test_test_key_io_codec.c", "test_key_io_codec keys key_hostile_wif make_lint_gates")
+AGENT_IMPACT_RULE("lib/keys/src/key_io.c|lib/keys/include/keys/key_io.h|lib/test/src/test_test_key_io_codec.c", "test_key_io_codec test_test_key_io_codec keys key_hostile_wif make_lint_gates")
 AGENT_IMPACT_RULE("lib/keys/src/pubkey.c|lib/keys/include/keys/pubkey.h|lib/wallet/src/hd_keychain.c|domain/encoding/src/base58.c|domain/encoding/include/domain/encoding/base58.h|lib/crypto/src/equihash.c|lib/crypto/include/crypto/equihash.h|lib/mining/src/miner.c|lib/mining/src/gen.c|lib/test/src/test_keys_hostile_derive.c", "keys_hostile_derive keys key_hostile_wif encoding wallet merkle_tree crypto make_lint_gates")
 AGENT_IMPACT_RULE("app/models/src/shared_validators.c|app/models/include/models/shared_validators.h|lib/test/src/test_shared_validators_zcl_address.c", "shared_validators_zcl_address models make_lint_gates")
-AGENT_IMPACT_RULE("lib/encoding/src/utilstrencodings.c|lib/encoding/include/encoding/utilstrencodings.h|lib/encoding/src/utilmoneystr.c|lib/encoding/include/encoding/utilmoneystr.h|lib/test/src/test_encoding.c|lib/test/src/test_test_str_money_codecs.c", "test_str_money_codecs encoding make_lint_gates")
+AGENT_IMPACT_RULE("lib/encoding/src/utilstrencodings.c|lib/encoding/include/encoding/utilstrencodings.h|lib/encoding/src/utilmoneystr.c|lib/encoding/include/encoding/utilmoneystr.h|lib/test/src/test_encoding.c|lib/test/src/test_test_str_money_codecs.c", "test_str_money_codecs test_test_str_money_codecs encoding make_lint_gates")
 /* The one hex codec: header-only, so every caller re-compiles, but the
  * behaviour under test is entirely in the header and its own group. */
 AGENT_IMPACT_RULE("lib/base/include/base/hex.h|lib/test/src/test_hex_codec.c|tools/lint/check_hex_codec_single.sh|tools/lint/hex_codec_baseline.txt", "hex_codec make_lint_gates")
 /* The one byte-order codec. crypto/common.h forwards to it, so its own
  * seven callers ride the same group; the behaviour is all in the header. */
 AGENT_IMPACT_RULE("lib/base/include/base/serialize_le.h|lib/crypto/include/crypto/common.h|lib/test/src/test_byte_order_codec.c|tools/lint/check_byte_order_codec_single.sh|tools/lint/byte_order_codec_baseline.txt", "byte_order_codec make_lint_gates")
+/* The one branchless all-zero/any-set byte test, which replaced 119 private
+ * copies. Header-only like hex.h and serialize_le.h, so every caller
+ * re-compiles, but the behaviour under test lives entirely in the header and
+ * is proven by the polarity checks in the base_foundation group. Its callers
+ * are spread across most of the tree; they are covered by their own rules,
+ * and a change HERE is a change to the predicate itself. */
+AGENT_IMPACT_RULE("lib/base/include/base/bytes.h", "base_foundation make_lint_gates")
 /* Self-hosted foundation packages.  Scalar SHA3 is consensus-facing even
  * though its source authority now sits below lib/crypto. */
-AGENT_IMPACT_RULE("lib/base/include/base/checked.h|lib/base/include/base/cleanse.h|lib/base/src/cleanse.c|lib/support/include/support/cleanse.h|lib/base/tests/*|lib/base/examples/*|lib/base/zcode-package.json|lib/base/LICENSE|lib/base/NOTICE", "base_foundation key_scrub byte_order_codec hex_codec make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_base_foundation.c|lib/base/include/base/checked.h|lib/base/include/base/cleanse.h|lib/base/src/cleanse.c|lib/support/include/support/cleanse.h|lib/base/tests/*|lib/base/examples/*|lib/base/zcode-package.json|lib/base/LICENSE|lib/base/NOTICE", "base_foundation key_scrub byte_order_codec hex_codec make_lint_gates")
 AGENT_IMPACT_RULE("lib/sha3/include/sha3/sha3.h|lib/sha3/src/sha3.c|lib/sha3/tests/*|lib/sha3/examples/*|lib/sha3/zcode-package.json|lib/sha3/LICENSE|lib/crypto/include/crypto/sha3.h", "sha3_stream sha3_256_x4 sha3_512_x4 mmb mmr utxo_commitment consensus_parity make_lint_gates")
-AGENT_IMPACT_RULE("lib/crypto/src/sha3_256_x4.c|lib/crypto/src/sha3_avx512.c|lib/test/src/test_sha3_512_x4.c", "sha3_256_x4 sha3_512_x4 crypto file_market make_lint_gates")
+AGENT_IMPACT_RULE("lib/crypto/src/sha3_256_x4.c|lib/crypto/src/sha3_avx512.c|lib/test/src/test_sha3_256_x4.c|lib/test/src/test_sha3_512_x4.c", "sha3_256_x4 sha3_512_x4 crypto file_market make_lint_gates")
 AGENT_IMPACT_RULE("lib/crypto/include/crypto/blake2b.h|lib/test/src/test_blake2b_batch_parity.c", "blake2b_batch_parity crypto crypto_perf_selftest make_lint_gates")
 AGENT_IMPACT_RULE("lib/codec/include/codec/cursor.h|lib/codec/src/cursor.c|lib/codec/tests/*|lib/codec/examples/*|lib/codec/zcode-package.json|lib/codec/LICENSE|lib/codec/README.md", "codec_cursor byte_order_codec make_lint_gates")
 AGENT_IMPACT_RULE("app/views/src/format_helpers.c|app/views/include/views/format_helpers.h|lib/test/src/test_format_helpers_codec.c", "format_helpers_codec explorer make_lint_gates")
-AGENT_IMPACT_RULE("lib/util/src/png_writer.c|lib/util/include/util/png_writer.h|lib/test/src/test_test_png_writer.c", "test_png_writer make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/png_writer.c|lib/util/include/util/png_writer.h|lib/test/src/test_test_png_writer.c", "test_png_writer test_test_png_writer make_lint_gates")
 AGENT_IMPACT_RULE("lib/encoding/src/qr.c|lib/encoding/src/qrcodegen_backend.c|lib/encoding/include/encoding/qr.h|lib/presentation/src/*|lib/presentation/include/presentation/*|lib/presentation/examples/*|vendor/typography/*|app/views/src/qr_popup.c|app/views/include/views/qr_popup.h|app/views/src/ui_present*.c|app/views/include/views/ui_present*.h|tools/command/native_qr_command.c|tools/command/native_presentation*.c|lib/test/src/test_qr.c|config/commands/app_features.def", "qr spawn cli_argv_strict command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_presentation_publication_status_command.c|config/src/boot_zcode_package_rpc.c|config/src/boot_zcode_package_import.c", "qr zcode_fetch zcode_dht_service command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|lib/test/src/test_clientversion_format.c", "clientversion_format encoding make_lint_gates")
@@ -103,6 +118,7 @@ AGENT_IMPACT_RULE("lib/crypto/src/x25519_safe.c|lib/crypto/include/crypto/x25519
 AGENT_IMPACT_RULE("lib/vcs/src/zcode_dht_identity.c|lib/vcs/include/vcs/zcode_dht_identity.h|tools/command/native_zcode_network_command.c|config/commands/zcode.def|lib/test/src/test_zcode_dht_delegation.c", "zcode_dht_delegation command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_zcode_dht*.c|config/include/config/boot_zcode_dht*.h|config/src/boot_zcode_swarm.c|config/src/boot_endpoint_records.c|app/controllers/include/controllers/diagnostics_dumpers_zcode.def", "zcode_dht_service command_registry_catalog syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/noise_transport.c|lib/net/include/net/noise_transport.h|lib/net/src/v2_identity.c|lib/net/include/net/v2_identity.h|lib/net/src/noise_upgrade.c|lib/net/src/net_listen.c|lib/net/src/msg_version.c|lib/net/include/net/connman.h|lib/net/include/net/net.h|lib/test/src/test_noise_transport_parity.c|lib/test/src/test_connman_addnode_fallback.c", "noise_transport_parity connman_addnode_fallback noise_xx_handshake session_transport net make_lint_gates")
+AGENT_IMPACT_RULE("tools/dev/noise_transport_interop.sh", "noise_transport_parity connman_addnode_fallback net make_lint_gates")
 AGENT_IMPACT_RULE("app/models/src/mesh_pairing.c|app/models/include/models/mesh_pairing.h|app/services/src/mesh_pairing_service.c|app/services/include/services/mesh_pairing_service.h|app/controllers/src/mesh_pairing_controller.c|app/controllers/include/controllers/mesh_pairing_controller.h|lib/test/src/test_mesh_pairing.c|lib/test/src/test_mesh_pairing_controller.c|app/models/src/database_schema.c|app/models/src/database_migrate_features_v67_up.c|app/models/include/models/database.h|config/commands/ops.def|tools/command/native_mesh_command.c|tools/command/native_command.h|config/src/boot_services.c", "mesh_pairing mesh_pairing_controller command_registry_catalog native_api_contract rpc db_migration_idempotent models make_lint_gates")
 
 AGENT_IMPACT_RULE("lib/net/src/peer_lifecycle.c|lib/net/src/peer_lifecycle_incident_score.c|lib/net/src/peer_lifecycle_internal.h|lib/net/src/peer_identity.c|lib/net/include/net/peer_identity.h|lib/net/src/msg_version.c|lib/net/src/protocol.c|app/controllers/src/network_controller.c|app/controllers/src/network_onion_controller.c|lib/test/src/test_peer_lifecycle.c|lib/test/src/test_peer_identity_hostkey.c", "peer_lifecycle peer_identity_hostkey syncdiag_rpc node_health_service explorer")
@@ -474,10 +490,11 @@ AGENT_IMPACT_RULE("app/services/src/yardsale_wallet_service.c|app/services/src/y
 AGENT_IMPACT_RULE("lib/znam/src/znam.c|lib/zslp/src/slp.c|lib/overlay/src/overlay_codec.c|lib/overlay/include/overlay/overlay_codec.h|lib/script/include/script/op_return_push.h|app/controllers/src/blog_controller.c|lib/test/src/test_overlay_parse_parity.c", "overlay_parse_parity make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/zmsg.c|lib/net/include/net/zmsg.h|app/models/src/zmsg.c|app/models/include/models/zmsg.h|app/controllers/src/messaging_controller.c|app/jobs/src/tip_finalize_post_step.c|lib/test/src/test_simnet_zmsg_onchain.c", "protocols simnet_zmsg_onchain test_zmsg_memo_codec models make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/messaging_controller.c|app/controllers/include/controllers/messaging_controller.h|app/controllers/src/app_native_handlers.c|lib/test/src/test_api_msg_routes.c|lib/test/src/test_command_registry_catalog.c", "api command_registry_catalog make_lint_gates")
-AGENT_IMPACT_RULE("lib/test/src/test_test_zmsg_memo_codec.c", "test_zmsg_memo_codec make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_test_zmsg_memo_codec.c", "test_zmsg_memo_codec test_test_zmsg_memo_codec make_lint_gates")
 AGENT_IMPACT_RULE("lib/zid/src/zpay.c|lib/zid/include/zid/zpay.h|tools/command/native_zpay_command.c|lib/test/src/test_zpay.c", "zpay command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("lib/session/src/zses.c|lib/session/include/session/zses.h|tools/command/native_zses_command.c|config/commands/zses.def|lib/test/src/test_zses.c|tools/scripts/session_drill.sh", "zses command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("lib/session/src/mesh_status_proto.c|lib/session/include/session/mesh_status_proto.h|lib/test/src/test_mesh_status_proto.c|tools/fuzz/fuzz_mesh_status_proto.c|lib/test/fuzz_seeds/mesh_status_proto/*", "mesh_status_proto crypto mesh_pairing make_lint_gates")
+AGENT_IMPACT_RULE("lib/session/src/mesh_terminal_proto.c|lib/session/include/session/mesh_terminal_proto.h|lib/test/src/test_mesh_terminal_proto.c", "mesh_terminal_proto crypto mesh_pairing make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_mesh_status.c|config/src/boot_mesh_status_requester.c|config/src/boot_mesh_status_internal.h|config/src/boot_mesh_status_rpc.c|config/include/config/boot_mesh_status.h|app/models/src/mesh_machine_observation.c|app/models/include/models/mesh_machine_observation.h|lib/test/src/test_mesh_status_wire.c|tools/command/native_mesh_command.c|app/controllers/src/diagnostics_machine_identity.c", "mesh_status_wire mesh_status_proto mesh_pairing syncdiag_rpc command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_mesh_route.c|config/include/config/boot_mesh_route.h|config/src/boot_zcode_dht_reachability.c|config/include/config/boot_zcode_dht_reachability.h|lib/test/src/test_mesh_route.c", "mesh_route mesh_status_wire connman_addnode_fallback make_lint_gates")
 AGENT_IMPACT_RULE("config/src/boot_mesh_pairing.c|config/src/boot_mesh_pairing_rpc.c|config/include/config/boot_mesh_pairing.h|config/src/boot_frontend_services.c|lib/test/src/test_mesh_pairing.c|app/services/src/mesh_pairing_service.c|app/models/src/mesh_pairing.c", "mesh_pairing mesh_status_wire command_registry_catalog native_api_contract make_lint_gates")
@@ -507,10 +524,11 @@ AGENT_IMPACT_RULE("lib/rpc/include/rpc/client.h|lib/rpc/src/client.c|src/cli.c|s
 AGENT_IMPACT_RULE("lib/test/src/test_rpc.c", "rpc")
 AGENT_IMPACT_RULE("lib/rpc/include/rpc/*port.h|lib/rpc/src/legacy_chain_*.c|app/services/src/header_probe.c|app/services/src/utxo_parity_service.c|app/services/src/utxo_reference_source_*.c|app/services/src/zclassicd_oracle_service.c|app/services/src/legacy_mirror_sync_internal.h", "rpc syncdiag_rpc parity_slice oracle_policy mirror_divergence_locator make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_sqlite.c", "sqlite make_lint_gates")
-AGENT_IMPACT_RULE("lib/test/src/test.c|lib/test/src/test_helpers.c|lib/test/include/test/test_helpers.h|lib/test/include/test/test_core.h|lib/test/include/test/block_fixtures.h|lib/test/include/test/wallet_view_fixture.h|lib/test/include/test/test_group_selector.h|lib/test/src/test_test_group_selector.c|lib/test/src/test_parallel.c|tools/dev/test-group-list.sh|tools/dev/test_group_catalog.c|tools/dev/test_group_catalog.h|tools/dev/test_group_catalog.def|tools/dev/test_proof_contracts.def|tools/dev/test_proof_families.def|tools/dev/test_semantic_leaves.def|tools/scripts/check_test_registration.sh|tools/lint/check_accel_oracle_pinned.sh|tools/agent_fast_ci.sh", "test_group_selector boot_shutdown_marker make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test.c|lib/test/src/test_helpers.c|lib/test/include/test/test_helpers.h|lib/test/include/test/block_fixtures.h|lib/test/include/test/wallet_view_fixture.h|lib/test/include/test/test_group_selector.h|lib/test/src/test_test_group_selector.c|lib/test/src/test_parallel.c|tools/dev/test-group-list.sh|tools/dev/test_group_catalog.c|tools/dev/test_group_catalog.h|tools/dev/test_group_catalog.def|tools/dev/test_proof_contracts.def|tools/dev/test_proof_families.def|tools/dev/test_semantic_leaves.def|tools/scripts/check_test_registration.sh|tools/lint/check_accel_oracle_pinned.sh|tools/agent_fast_ci.sh", "test_group_selector test_test_group_selector boot_shutdown_marker make_lint_gates")
 /* Native changed-file planning and exact execution: implementation, public
  * shape, registry handler, and the adversarial proof of dimension honesty. */
 AGENT_IMPACT_RULE("tools/dev/devloop_plan.c|tools/dev/devloop.h|tools/dev/devloop_cli.c|tools/dev/devloop_process.c|tools/dev/dev_source_identity.c|tools/dev/native-dev-failure-selftest.sh|tools/command/native_dev_command.c|tools/command/native_dev_activation_command.c|config/commands/dev.def|lib/test/src/test_impact_composition.c", "impact_composition dev_platform native_api_contract command_registry_catalog test_group_selector make_lint_gates")
+AGENT_IMPACT_RULE("tools/dev/dev_proof.c|tools/dev/dev_proof.h|tools/dev/dev_proof_receipt.c|tools/dev/dev_proof_receipt.h|tools/dev/z23_git_hook.c|tools/command/native_dev_proof_command.c|tools/command/native_dev_proof_command.h|tools/command/native_dev_verify_change_command.c", "dev_platform native_api_contract command_registry_catalog make_lint_gates")
 AGENT_IMPACT_RULE("app/models/include/models/build_fabric.h|app/models/src/build_fabric.c|app/models/src/database_migrate_features_v30_up.c|lib/test/src/test_build_fabric.c", "build_fabric db_migration_idempotent make_lint_gates")
 AGENT_IMPACT_RULE("app/services/include/services/build_fabric_service.h|app/services/src/build_fabric_service.c|app/services/src/build_fabric_admission.c|app/services/src/build_fabric_evidence.c|app/services/src/build_fabric_evidence_parse.c|app/services/src/build_fabric_release.c|lib/vcs/include/vcs/build_release_qualification.h|lib/vcs/src/build_release_qualification.c|app/services/include/services/build_fabric_package_executor.h|app/services/src/build_fabric_package_executor.c", "build_fabric make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/build_execution_observation.h|lib/vcs/src/build_execution_observation.c|app/services/include/services/build_fabric_worker.h|app/services/src/build_fabric_worker.c|app/services/src/build_fabric_worker_identity.c|app/services/include/services/build_fabric_worker_evidence.h|app/services/src/build_fabric_worker_evidence.c|app/services/include/services/build_fabric_runtime.h|app/services/src/build_fabric_runtime.c|tools/command/native_build_command.c|tools/package_verify.c|config/include/config/c23_commons_build_profile.h|app/models/src/database_migrate_features_v67_up.c", "build_fabric db_migration_idempotent zcode_package_registry make_lint_gates")
@@ -566,7 +584,7 @@ AGENT_IMPACT_RULE("app/services/src/bg_validation_proofs.c|app/services/include/
  * the authority(coins)-vs-projection(utxos) SHA3 audit + bg_validation's
  * always-on sampled re-verify. Observational only; no consensus predicate. */
 AGENT_IMPACT_RULE("app/services/src/authority_projection_audit.c|app/services/include/services/authority_projection_audit.h", "integrity make_lint_gates")
-AGENT_IMPACT_RULE("app/services/src/bg_validation_service.c|app/services/src/bg_validation_init.c|app/services/src/bg_validation_body_repair.c|app/services/src/bg_validation_internal.h|app/services/src/bg_validation_dump.c|app/services/src/bg_validation_authority.c|app/services/include/services/bg_validation_service.h|app/services/include/services/bg_validation_authority.h|adapters/outbound/persistence/src/bg_validation_store_sqlite.c|adapters/outbound/persistence/include/adapters/outbound/persistence/bg_validation_store_sqlite.h|ports/include/ports/bg_validation_store_port.h|lib/test/src/test_bg_validation_reverify.c|lib/test/src/test_bg_validation_store_port.c|docs/SYNC.md", "bg_validation_reverify bg_validation_store_port have_data_unreadable body_fetch_missing_have_data_condition integrity make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/bg_validation_service.c|app/services/src/bg_validation_init.c|app/services/src/bg_validation_body_repair.c|app/services/src/bg_validation_scripts.c|app/services/src/bg_validation_internal.h|app/services/src/bg_validation_dump.c|app/services/src/bg_validation_authority.c|app/services/include/services/bg_validation_service.h|app/services/include/services/bg_validation_authority.h|adapters/outbound/persistence/src/bg_validation_store_sqlite.c|adapters/outbound/persistence/include/adapters/outbound/persistence/bg_validation_store_sqlite.h|ports/include/ports/bg_validation_store_port.h|lib/test/src/test_bg_validation_reverify.c|lib/test/src/test_bg_validation_store_port.c|docs/SYNC.md", "bg_validation_reverify bg_validation_store_port have_data_unreadable body_fetch_missing_have_data_condition integrity thread_qos make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_verify_bench_selftest.c|lib/test/include/test/verify_bench_fixture.h", "verify_bench_selftest make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_crypto_perf_selftest.c|tools/crypto_perf_baseline.csv|tools/scripts/check_crypto_perf.sh", "crypto_perf_selftest make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_simnet_doublespend.c", "simnet_doublespend make_lint_gates")
@@ -599,7 +617,7 @@ AGENT_IMPACT_RULE("lib/sim/src/simnet_sapling.c|lib/sim/include/sim/simnet_sapli
  * z_sendmany calls sovereignty_guard_allow("wallet_spend", ...) to refuse a
  * spend while the tip is release_assisted (borrowed shielded history, not
  * self-folded) — include sovereignty_guard. */
-AGENT_IMPACT_RULE("app/controllers/src/wallet_shielded_controller.c|app/controllers/src/wallet_shielded_send.c|app/controllers/src/wallet_shielded_send_shielded.c", "wallet shielded_payment_gate sovereignty_guard make_lint_gates")
+AGENT_IMPACT_RULE("app/controllers/src/wallet_shielded_keys.c|app/controllers/src/wallet_shielded_controller.c|app/controllers/src/wallet_shielded_send.c|app/controllers/src/wallet_shielded_send_shielded.c", "wallet shielded_payment_gate sovereignty_guard make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/vault_intent_controller.c|app/controllers/src/vault_intent_common.c|app/controllers/src/vault_intent_private.c|app/controllers/src/vault_intent_publish.c|app/controllers/include/controllers/vault_intent_controller.h|app/controllers/include/controllers/vault_intent_private.h|app/controllers/include/controllers/vault_intent_publish.h", "transaction_intent wallet_funds_safety shielded_payment_gate command_registry_catalog command_input_bounds make_lint_gates")
 /* The operational-vs-sovereign trust split (coins_kv_is_proven_authority vs
  * coins_kv_contains_refold_marker): the shared guard + dumper, and its two
@@ -684,7 +702,7 @@ AGENT_IMPACT_RULE("app/controllers/src/agent_test_controller.c|app/controllers/i
  * durable locator, chain/note reconciliation, and P2P composition wiring. */
 AGENT_IMPACT_RULE("lib/net/include/net/file_market.h|lib/net/include/net/file_market_delivery.h|lib/net/include/net/onion_v3_address.h|lib/net/src/file_market.c|lib/net/src/file_market_offer.c|lib/net/src/file_market_payment.c|lib/net/src/file_market_delivery.c|lib/net/src/file_market_delivery_client.c|lib/net/include/net/file_market_delivery_internal.h|lib/net/src/file_market_delivery_onion.c|lib/net/src/file_service_private_chunk.c|lib/net/src/onion_v3_address.c|lib/net/src/file_service.c|lib/net/src/msgprocessor.c|lib/net/include/net/msgprocessor.h|app/models/src/file_offer.c|app/models/include/models/file_offer.h|app/models/src/market_payment_claim.c|app/models/include/models/market_payment_claim.h|app/services/src/file_market_payment_service.c|app/services/include/services/file_market_payment_service.h|app/services/src/market_purchase_view_service.c|app/services/include/services/market_purchase_view_service.h|config/src/boot_msg_callbacks.c|config/include/config/boot_msg_callbacks.h|config/src/boot_services.c|lib/test/src/test_file_market.c|lib/test/src/test_file_market_payment.c|lib/test/src/test_file_market_delivery.c|lib/test/src/test_hotswap_service_registry.c", "file_market hotswap_service_registry db_migration_idempotent make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/include/net/file_market.h|lib/net/include/net/file_market_delivery.h|lib/net/include/net/file_market_delivery_internal.h|lib/net/include/net/onion_v3_address.h|lib/net/src/file_market.c|lib/net/src/file_market_offer.c|lib/net/src/file_market_payment.c|lib/net/src/file_market_delivery.c|lib/net/src/file_market_delivery_client.c|lib/net/src/file_market_delivery_onion.c|lib/net/src/file_service_private_chunk.c|lib/net/src/onion_v3_address.c|lib/net/src/file_service.c|lib/net/src/msgprocessor.c|lib/net/include/net/msgprocessor.h|app/models/src/file_offer.c|app/models/include/models/file_offer.h|app/models/src/market_payment_claim.c|app/models/include/models/market_payment_claim.h|app/services/src/file_market_payment_service.c|app/services/include/services/file_market_payment_service.h|app/services/src/market_purchase_view_service.c|app/services/include/services/market_purchase_view_service.h|config/src/boot_msg_callbacks.c|config/include/config/boot_msg_callbacks.h|config/src/boot_services.c|lib/test/src/test_file_market.c|lib/test/src/test_file_market_payment.c|lib/test/src/test_file_market_delivery.c|lib/test/src/test_hotswap_service_registry.c", "file_market hotswap_service_registry db_migration_idempotent make_lint_gates")
-AGENT_IMPACT_RULE("app/controllers/src/market_purchase_native_handler.c|app/services/src/file_market_purchase_retrieval_service.c|app/services/include/services/file_market_purchase_service.h|lib/test/src/test_file_market_purchase.c", "file_market rpc_timeout rpc_frontdoor_slots native_api_contract test_group_selector make_lint_gates")
+AGENT_IMPACT_RULE("app/controllers/src/market_purchase_native_handler.c|app/services/src/file_market_purchase_retrieval_service.c|app/services/src/file_market_purchase_service.c|app/services/include/services/file_market_purchase_service.h|lib/test/src/test_file_market_purchase.c", "file_market rpc_timeout rpc_frontdoor_slots native_api_contract test_group_selector make_lint_gates")
 /* Marketplace moderation keeps policy/state/enforcement static and swaps only
  * pure profile, visibility, and bounded presentation calculations. */
 AGENT_IMPACT_RULE("app/services/src/market_moderation_service.c|app/services/include/services/market_moderation_service.h|app/services/src/market_moderation_view_service.c|app/services/src/market_moderation_view_internal.h|app/services/include/services/market_moderation_view_service.h|app/controllers/src/market_moderation_native_handler.c|lib/test/src/test_file_market_moderation.c", "file_market_moderation hotswap_service_registry command_registry_catalog make_lint_gates")
@@ -874,7 +892,11 @@ AGENT_IMPACT_RULE("lib/util/include/util/blocker.h|lib/util/src/blocker.c|lib/te
 /* CPU topology organ (wf/organ-cpu-topology, 2026-07-13): sysfs-derived
  * physical core / L3 cache domain discovery + advisory pin_thread. */
 AGENT_IMPACT_RULE("lib/util/src/cpu_topology.c|lib/util/include/util/cpu_topology.h|lib/test/src/test_cpu_topology.c", "cpu_topology make_lint_gates")
-AGENT_IMPACT_RULE("lib/util/src/hw_profile.c|lib/util/include/util/hw_profile.h|lib/test/src/test_hw_profile.c", "hw_profile cpu_topology make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/hw_profile.c|lib/util/include/util/hw_profile.h|lib/test/src/test_hw_profile.c", "hw_profile hw_bench arm_hw_tiers cpu_topology make_lint_gates")
+/* Hardware benchmark cache identity binds the complete native profile. A
+ * fingerprint change must exercise cache invalidation and pure batch sizing,
+ * not fall through to lint alone. */
+AGENT_IMPACT_RULE("lib/util/src/hw_bench.c|lib/util/include/util/hw_bench.h|lib/test/src/test_hw_bench.c", "hw_bench hw_profile make_lint_gates")
 
 /* os-substrate Rung 0 (lane L2): no-shell process-spawn primitives. */
 AGENT_IMPACT_RULE("lib/util/include/util/spawn.h|lib/util/src/spawn.c|lib/test/src/test_spawn.c", "spawn make_lint_gates")
@@ -961,6 +983,22 @@ AGENT_IMPACT_RULE("config/src/boot_legacy_blocks.c|config/include/config/boot_le
  * seccomp-bpf deny-list, rlimits, userns helpers, and the enter() profile
  * composer. Parity-safe; not yet wired into boot. */
 AGENT_IMPACT_RULE("lib/platform/src/os_sandbox_linux.c|lib/platform/include/platform/os_sandbox.h|lib/test/src/test_os_sandbox.c", "os_sandbox make_lint_gates")
+/* Mesh terminal worker cage (P0-terminal lane): the terminal-worker profile
+ * (session deny-set minus the fork/exec family, per-terminal Landlock grant,
+ * rlimits, W^X) and the attack acceptance that must beat it — /etc/shadow,
+ * sockets, exec outside the grant, W^X, ptrace, budget overruns, and the
+ * granted fbsh running (and failing to escape) inside. */
+AGENT_IMPACT_RULE("lib/test/src/test_terminal_worker_sandbox.c|lib/platform/src/os_sandbox_linux.c|lib/platform/src/os_sandbox_terminal_worker.c|lib/platform/include/platform/os_sandbox.h", "terminal_worker_sandbox os_sandbox make_lint_gates")
+/* Confined terminal worker (P0-terminal lane): the PTY worker engine that
+ * spawns the granted shell inside the cage, pumps both directions under
+ * hard byte budgets, and ends every session with a named close reason and
+ * a census-verified process-group kill. */
+AGENT_IMPACT_RULE("lib/session/src/mesh_terminal_worker.c|lib/session/include/session/mesh_terminal_worker.h|lib/test/src/test_mesh_terminal_worker.c", "mesh_terminal_worker terminal_worker_sandbox os_sandbox make_lint_gates")
+/* Mesh terminal serving lane (ZMTERM on zpkgswm): the pairing-bound OPEN
+ * responder and bounded session table, the shared mesh identity/session-peer
+ * helpers it reuses, and the receipt/decision surface it exports. */
+AGENT_IMPACT_RULE("config/src/boot_mesh_terminal.c|config/include/config/boot_mesh_terminal.h|lib/test/src/test_boot_mesh_terminal.c", "boot_mesh_terminal mesh_status_wire mesh_terminal_proto make_lint_gates")
+AGENT_IMPACT_RULE("config/src/boot_mesh_terminal_client.c|config/src/boot_mesh_terminal_rpc.c|config/src/boot_mesh_terminal_internal.h|config/src/boot_mesh_status.c|config/src/boot_mesh_status_internal.h|config/src/boot_mesh_status_requester.c|lib/test/src/mesh_term_fixture.c|lib/test/include/test/mesh_term_fixture.h|lib/test/src/test_mesh_terminal_client.c", "mesh_terminal_client boot_mesh_terminal mesh_status_wire make_lint_gates")
 /* -confine strict node confinement (seccomp ALLOW-list + Landlock, applied at
  * the SERVICES_RUNNING boundary): the allow-set + installer in os_sandbox, its
  * boot wiring, the -confine flag, the named blocker binding, and the
@@ -991,7 +1029,7 @@ AGENT_IMPACT_RULE("lib/util/src/thread_profile.c|lib/util/include/util/thread_pr
 
 /* Blog reference App: one MVC/ActiveRecord slice from opaque Core wallet
  * signing through ZNAM ownership and reorg-aware full-node anchor evidence. */
-AGENT_IMPACT_RULE("apps/blog/*|app/models/src/app_event.c|app/models/include/models/app_event.h|app/models/src/blog_post.c|app/models/include/models/blog_post.h|app/services/src/blog_publication.c|app/services/include/services/blog_publication_service.h|app/controllers/src/blog_post_controller.c|app/controllers/include/controllers/blog_post_controller.h|app/views/src/blog_post_view.c|app/views/include/views/blog_post_view.h|lib/test/src/test_blog.c|lib/framework/src/app_platform.c|lib/framework/include/framework/app_platform.h|lib/test/src/test_dev_platform.c|app/models/src/database_migrate_features.c|app/models/include/models/database.h|lib/net/src/onion_service.c|lib/net/src/https_server.c", "blog dev_platform db_migration_idempotent schema_migration models net make_lint_gates")
+AGENT_IMPACT_RULE("apps/blog/*|app/models/src/app_event.c|app/models/include/models/app_event.h|app/models/src/blog_post.c|app/models/include/models/blog_post.h|app/services/src/blog_anchor_transaction_service.c|app/services/src/blog_publication.c|app/services/include/services/blog_publication_service.h|app/controllers/src/blog_post_controller.c|app/controllers/include/controllers/blog_post_controller.h|app/views/src/blog_post_view.c|app/views/include/views/blog_post_view.h|lib/test/src/test_blog.c|lib/framework/src/app_platform.c|lib/framework/include/framework/app_platform.h|lib/test/src/test_dev_platform.c|app/models/src/database_migrate_features.c|app/models/include/models/database.h|lib/net/src/onion_service.c|lib/net/src/https_server.c", "blog dev_platform db_migration_idempotent schema_migration models net make_lint_gates")
 
 /* OP_RETURN catalog (op_return_index) — a rebuildable projection over
  * every OP_RETURN output ever seen (ZNAM/ZSLP/ZANC/unknown lokad tags),
@@ -1095,7 +1133,7 @@ AGENT_IMPACT_RULE("packages/zslot/*", "make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/shop_native_reputation.c|app/services/src/shop_reputation_view_service.c|app/services/include/services/shop_reputation_view_service.h|lib/test/src/test_shop_reputation.c", "shop_reputation hotswap_service_registry command_registry_catalog make_lint_gates")
 /* Slice E: signed seller claims over open wants, with read-only content.v2
  * byte proof and optional build-fabric receipt re-verification. */
-AGENT_IMPACT_RULE("app/controllers/src/shop_native_fulfill.c|app/controllers/src/shop_native_fulfill_support.c|app/controllers/src/shop_native_want.c|app/controllers/include/controllers/shop_native_handler.h|app/controllers/include/controllers/shop_native_fulfill_internal.h|app/models/src/shop_fulfill.c|app/models/include/models/shop_fulfill.h|app/services/src/shop_fulfill_evidence_service.c|app/services/include/services/shop_fulfill_evidence_service.h|app/models/src/database_migrate_features_v49_up.c|app/models/src/database_migrate_features_v67_up.c|app/models/src/database_validators.c|app/models/include/models/database.h|app/models/include/models/database_internal.h|config/commands/app_features.def|config/commands/store.def|tools/command/native_command.h|lib/kernel/include/kernel/command_registry.h|lib/test/src/test_shop_want.c|lib/test/src/test_shop_fulfill.c|lib/test/src/test_zcode_benchmark_exec.c|lib/test/src/test_db_validators.c", "shop_fulfill zcode_benchmark_exec shop_want db_validators db_migration_idempotent schema_migration command_registry_catalog native_api_contract read_leaf_no_datadir_write make_lint_gates")
+AGENT_IMPACT_RULE("app/controllers/src/shop_native_fulfill.c|app/controllers/src/shop_native_fulfill_support.c|app/controllers/src/shop_native_want.c|app/controllers/include/controllers/shop_native_handler.h|app/controllers/include/controllers/shop_native_fulfill_internal.h|app/models/src/shop_fulfill.c|app/models/include/models/shop_fulfill.h|app/services/src/shop_fulfill_evidence_service.c|app/services/src/shop_want_view_service.c|app/services/include/services/shop_fulfill_evidence_service.h|app/models/src/database_migrate_features_v49_up.c|app/models/src/database_migrate_features_v67_up.c|app/models/src/database_validators.c|app/models/include/models/database.h|app/models/include/models/database_internal.h|config/commands/app_features.def|config/commands/store.def|tools/command/native_command.h|lib/kernel/include/kernel/command_registry.h|lib/test/src/test_shop_want.c|lib/test/src/test_shop_fulfill.c|lib/test/src/test_zcode_benchmark_exec.c|lib/test/src/test_db_validators.c", "shop_fulfill zcode_benchmark_exec shop_want db_validators db_migration_idempotent schema_migration command_registry_catalog native_api_contract read_leaf_no_datadir_write make_lint_gates")
 AGENT_IMPACT_RULE("app/controllers/src/shop_native_handler.c|app/services/src/shop_status_view_service.c|app/services/include/services/shop_status_view_service.h|lib/test/src/test_shop.c", "shop hotswap_service_registry command_registry_catalog make_lint_gates")
 /* Family policy presentation is live; immutable policy derivation and every
  * admission/enforcement decision remain resident static authority. */
@@ -1124,7 +1162,7 @@ AGENT_IMPACT_RULE("app/services/src/package_lifecycle*.c|app/services/src/packag
 AGENT_IMPACT_RULE("tools/command/native_zcode_swarm_command.c|tools/command/native_zcode_join.c|tools/command/native_zcode_join.h|tools/command/native_command.h|config/commands/zcode.def|lib/test/src/test_zcode_fetch.c|docs/C23_COMMONS_QUICKSTART.md", "zcode_fetch command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_score_receipt.h|lib/vcs/src/zcode_score_receipt.c|tools/command/native_zcode_score_command.c|lib/test/src/test_zcode_score_receipt.c|config/commands/zcode.def", "zcode_score_receipt command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_shadow*.h|lib/vcs/src/zcode_shadow*.c|lib/vcs/include/vcs/zcode_reproduction*.h|lib/vcs/src/zcode_reproduction*.c|lib/test/src/test_zcode_shadow*.c|tools/command/native_zcode_reproduction_command.c|tools/fuzz/fuzz_zcode_commons.c", "zcode_shadow_policy zcode_score_receipt command_registry_catalog native_api_contract make_lint_gates")
-AGENT_IMPACT_RULE("config/zcode_package_registry.def|config/zcode_c23_commons_app.def|tools/zcode_package_registry_check.c|tools/scripts/zcode_registry_rederive.sh|lib/test/src/test_zcode_package_registry.c|lib/base/zcode-package.json|lib/sha3/zcode-package.json|lib/codec/zcode-package.json|lib/json/zcode-package.json|lib/encoding/zcode-package.json|lib/presentation/zcode-package.json|lib/platform/zcode-package.json|lib/crypto/zcode-package.json|lib/vcs/zcode-package.json|lib/commons_demo/zcode-package.json", "zcode_package_registry zcode_package_dev zcode_swarm_net make_lint_gates")
+AGENT_IMPACT_RULE("config/zcode_package_registry.def|config/zcode_c23_commons_app.def|tools/zcode_package_registry_check.c|tools/scripts/zcode_registry_rederive.sh|tools/lint/check_zcode_package_registry.sh|lib/test/src/test_zcode_package_registry.c|lib/base/zcode-package.json|lib/sha3/zcode-package.json|lib/codec/zcode-package.json|lib/json/zcode-package.json|lib/encoding/zcode-package.json|lib/presentation/zcode-package.json|lib/platform/zcode-package.json|lib/crypto/zcode-package.json|lib/vcs/zcode-package.json|lib/commons_demo/zcode-package.json", "zcode_package_registry zcode_package_dev zcode_swarm_net make_lint_gates")
 /* The registry def is a projection of the ten packaged libraries' CONTENT:
  * a bytes-only edit to any packaged source moves its derived roots exactly
  * like a manifest change does, so it must re-derive through the same proof
@@ -1371,6 +1409,12 @@ AGENT_IMPACT_RULE("deploy/*.env.example|deploy/examples/*.env.example", "make_li
  * the gate trips the same group that proves it. */
 AGENT_IMPACT_RULE("tools/lint/check_no_unattended_publish.sh", "make_lint_gates")
 AGENT_IMPACT_RULE("tools/lint/check_standalone_tools_link.sh", "make_lint_gates")
+/* [lane: platform-header-guards] Both gates are pure text over the tree, so
+ * the lint umbrella is the whole of their coverage; each carries its own
+ * --self-test, which the umbrella runs first on every invocation, so an edit
+ * that hollows either one trips the same group that proves it. */
+AGENT_IMPACT_RULE("tools/lint/check_platform_header_guards.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/check_macos_acceptance.sh", "make_lint_gates")
 /* [lane: public-docs-truth] docs/ARCHITECTURE_DIAGRAMS.md, ARCH_QUEST_BOARD.md,
  * and DEVELOPING.md carried no impact rule at all — a change to any of them
  * could reach the push gate having run zero test groups, the exact
@@ -1465,7 +1509,8 @@ AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|l
  *     allowlist.
  * Mapped so an edit to any of them re-runs the groups that would notice a
  * regression, instead of reaching the push gate having run nothing. */
-AGENT_IMPACT_RULE("tools/lint/check_no_wallclock_assertion.sh|tools/lint/wallclock_assertion_allowlist.txt|tools/scripts/fresh-boot-weld-prove.sh|tools/scripts/fresh-boot-weld-prove-selftest.sh|lib/test/src/lint_gate_helpers.c|lib/test/src/lint_gate_selftests.h|lib/test/src/lint_gate_hygiene_selftests.c|lib/test/src/test_parallel.c|lib/test/src/test_binary_ab_fallback.c|lib/test/src/test_self_backtrace.c|lib/test/src/test_onion_bootstrap.c|tools/dev/build-epoch-selftest.sh|tools/dev/checkout-lock-selftest.sh", "make_lint_gates binary_ab_fallback self_backtrace onion_bootstrap")
+AGENT_IMPACT_RULE("tools/lint/check_no_wallclock_assertion.sh|tools/lint/wallclock_assertion_allowlist.txt|tools/scripts/fresh-boot-weld-prove.sh|tools/scripts/fresh-boot-weld-prove-selftest.sh|lib/test/src/lint_gate_helpers.c|lib/test/src/lint_gate_selftests.h|lib/test/src/lint_gate_hygiene_selftests.c|lib/test/src/test_parallel.c|lib/test/src/test_binary_ab_fallback.c|lib/test/src/test_self_backtrace.c|tools/dev/build-epoch-selftest.sh|tools/dev/checkout-lock-selftest.sh", "make_lint_gates binary_ab_fallback self_backtrace")
+AGENT_IMPACT_RULE("lib/test/src/test_onion_bootstrap.c", "make_lint_gates onion_bootstrap")
 /* LANE reproducible-build: the flag that makes a compile repeat, the gate that
  * keeps it wired, and the end-to-end proof that a second builder gets the same
  * bytes. They move together because each one is half of the same claim: a node
@@ -1755,7 +1800,12 @@ AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progr
 
 /* Native macOS compatibility surfaces share the platform contract groups.
  * The rules stay exact so unrelated future platform files fail closed. */
-AGENT_IMPACT_RULE("lib/base/include/base/compiler.h|lib/crypto/src/blake2b_avx2.c|lib/platform/include/platform/allocator_compat.h|lib/platform/include/platform/barrier.h|lib/platform/include/platform/device_compat.h|lib/platform/include/platform/fd_path.h|lib/platform/include/platform/file_advice.h|lib/platform/include/platform/file_sync.h|lib/platform/include/platform/file_watch_compat.h|lib/platform/include/platform/path_compat.h|lib/platform/include/platform/pipe_compat.h|lib/platform/include/platform/process_compat.h|lib/platform/include/platform/rename_compat.h|lib/platform/include/platform/socket_compat.h|lib/platform/include/platform/system_memory.h|lib/platform/include/platform/thread_compat.h|lib/platform/src/os_sandbox_stub.c|lib/platform/src/rng.c|lib/util/src/self_backtrace_stub.c|lib/util/src/thread_qos.c", "dev_platform os_proc os_sandbox self_backtrace thread_qos hw_profile crypto crypto_perf_selftest make_lint_gates")
+AGENT_IMPACT_RULE("lib/base/include/base/compiler.h|lib/crypto/src/blake2b_avx2.c|lib/platform/include/platform/allocator_compat.h|lib/platform/include/platform/barrier.h|lib/platform/include/platform/device_compat.h|lib/platform/include/platform/fd_path.h|lib/platform/include/platform/file_advice.h|lib/platform/include/platform/file_sync.h|lib/platform/include/platform/file_watch_compat.h|lib/platform/include/platform/path_compat.h|lib/platform/include/platform/pipe_compat.h|lib/platform/include/platform/process_compat.h|lib/platform/include/platform/rename_compat.h|lib/platform/include/platform/socket_compat.h|lib/platform/include/platform/system_memory.h|lib/platform/include/platform/thread_compat.h|lib/platform/src/os_sandbox_stub.c|lib/platform/src/rng.c|lib/util/src/self_backtrace_stub.c|lib/util/include/util/thread_qos.h|lib/util/src/thread_qos.c", "dev_platform os_proc os_sandbox self_backtrace thread_qos hw_profile crypto crypto_perf_selftest socket_resolve make_lint_gates")
+/* The timed-join seam is shared by shutdown owners across config, net,
+ * services, and util. Route every directly affected lifecycle family so a
+ * platform-only edit cannot green on its primitive test while a caller's
+ * ownership or final-drain contract silently regresses. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/thread_compat.h", "thread_registry supervisor shutdown_stagewatch peer_strategy_worker file_controller file_service_pow_gate tor download gap_fill_frontier_window connman_addnode_fallback make_lint_gates")
 
 /* Reverted platform storage shims remain explicit changed paths until every
  * clone has integrated their additive reverts. Keep their deleted names and
@@ -2809,6 +2859,8 @@ AGENT_IMPACT_RULE("app/models/include/models/query_schema.def|app/models/include
  * the toolchain changes and not only when this tree does; that is why it
  * rides make_lint_gates rather than any subject group. */
 AGENT_IMPACT_RULE("tools/lint/check_fortify_masked_decls.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/check_no_snapshot_struct_memcmp.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("packaging/install/install_selftest.sh|tools/scripts/deploy_z23_release.sh", "make_lint_gates")
 
 /* One comment/string stripper, shared by check_fortify_masked_decls and
  * check_model_sql_literals. Both are text scanners whose verdict changes
@@ -2836,7 +2888,7 @@ AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src
  * changes which availability/refusal evidence the public aggregate claims,
  * so a matrix or runner edit must execute the same exact groups as
  * `make macos-acceptance`; no hand-maintained smaller shadow is accepted. */
-AGENT_IMPACT_RULE("config/platform/macos_capabilities.def|tools/scripts/macos_acceptance.sh", "binary_ab_fallback boot_shutdown_marker_persistence confine dev_activation directory_watcher fast_sync_coins_export net noise_nk_handshake noise_transport_parity noise_xx_handshake os_sandbox rpc sandbox_process_budget service_state service_state_driver tor wallet wallet_backup watcher_record z23_front_door zcode_verify make_lint_gates")
+AGENT_IMPACT_RULE("config/platform/macos_capabilities.def|tools/scripts/macos_acceptance.sh|tools/lint/check_macos_acceptance.sh", "test_arm_hw_tiers test_sha256_isa_parity test_blake2b_batch_parity test_sha3_256_x4 test_sha3_512_x4 test_encoding test_hw_profile test_binary_ab_fallback test_boot_shutdown_marker_persistence test_confine test_dev_activation test_directory_watcher test_fast_sync_coins_export test_net test_noise_nk_handshake test_noise_transport_parity test_noise_xx_handshake test_os_sandbox test_rpc test_sandbox_process_budget test_service_state test_service_state_driver test_thread_qos test_tor test_wallet test_wallet_backup test_watcher_record test_z23_front_door test_zcode_verify make_lint_gates")
 /* Authored personas. personas.def is prose, so nothing it says can be proven
  * by running code — which is exactly why it needs a gate rather than a test.
  * check_persona_resolves.sh is that gate, and it rides make_lint_gates. The
@@ -2871,6 +2923,29 @@ AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/te
  * group because one of the numbers it reports is the Makefile's own gate list,
  * so a change to how that list is written changes what this module measures. */
 AGENT_IMPACT_RULE("lib/kpi/src/*.c|lib/kpi/include/kpi/*.h|lib/test/src/test_kpi.c", "kpi make_lint_gates")
+/* The claim register. Rides its own group and the chainlog group: every claim
+ * and every trial is a chainlog frame, so a change to that log's recovery or
+ * verification rule changes what "these trials survived a reopen" proves.
+ * It does NOT ride the engine group — it reads enum engine_verdict and calls
+ * engine_verdict_is_pass(), which is a compile-time coupling the build
+ * catches, not a behavioural one this group could observe. */
+AGENT_IMPACT_RULE("lib/science/src/*.c|lib/science/include/science/*.h|lib/test/src/test_science.c", "science chainlog make_lint_gates")
+/* The corpus command surface: the honest distance-to-100M report. It rides
+ * the `science` group because every number it renders comes from
+ * lib/science/science_corpus.c, and the registry groups because it is a
+ * READY_READ code.* leaf — dispatched four times per suite run by the
+ * read-latency contract, so a slow walk here shows up there. */
+AGENT_IMPACT_RULE("tools/command/native_code_corpus_command.c", "science command_registry_catalog command_registry_latency native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog land_queue dev_platform make_lint_gates")
+/* The batching landing queue: its canonical bytes, its replay, its CLI, the
+ * developer front door and the lander that drives them. It rides the chainlog
+ * group as well as its own because the queue HAS no state outside that log —
+ * every state a caller can observe is replayed from it, so a change to the
+ * chainlog's recovery, locking or ordering rules changes what a receipt
+ * means. The shell entry points and the unit are listed with the C: a lander
+ * whose service file drifts from the script it starts is a queue nobody
+ * drains, and the impact rule is the only thing that would notice. */
+AGENT_IMPACT_RULE("tools/land/*.c|tools/land/*.h|lib/test/src/test_land_queue.c|tools/dev/land.sh|tools/dev/land_lander.sh|tools/dev/land_bench.sh|deploy/zclassic23-lander.service", "land_queue chainlog make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
  * because the ratchet it guards is the whole point — the recorded set of
@@ -2883,3 +2958,17 @@ AGENT_IMPACT_RULE("lib/determinism/src/*.c|lib/determinism/include/determinism/*
  * gate IS the coverage, and it runs the recipes rather than reading about
  * them. */
 AGENT_IMPACT_RULE("config/cookbook.def|tools/lint/check_cookbook.sh|docs/COOKBOOK.md", "make_lint_gates")
+
+/* These five carried no rule until a tree-wide hex-codec consolidation
+ * touched them and the push gate refused. A file with no rule is not one CI
+ * fails on — it is one CI never runs, so the absence was the more expensive
+ * state. Each maps to the group that already tests it; wallet_shielded_keys.c
+ * has no group of its own and joined the wallet_shielded family rule above. */
+AGENT_IMPACT_RULE("app/services/src/agent_session_service.c|app/services/include/services/agent_session_service.h|lib/test/src/test_agent_session.c", "agent_session make_lint_gates")
+AGENT_IMPACT_RULE("app/services/src/seed_integrity_gate.c|app/services/include/services/seed_integrity_gate.h|lib/test/src/test_seed_integrity_gate.c", "seed_integrity_gate make_lint_gates")
+AGENT_IMPACT_RULE("lib/policy/src/anchor_finality.c|lib/policy/include/policy/anchor_finality.h|lib/test/src/test_anchor_finality.c", "anchor_finality make_lint_gates")
+AGENT_IMPACT_RULE("lib/storage/src/topology_store.c|lib/storage/include/storage/topology_store.h|lib/test/src/test_topology_store.c", "topology_store make_lint_gates")
+/* Vendored FreeBSD /bin/sh (vendor/freebsd-sh) and its smoke acceptance.
+ * Editing any vendored source, the compat shim, or the smoke test itself
+ * selects the freebsd_sh group. */
+AGENT_IMPACT_RULE("vendor/freebsd-sh/*|vendor/freebsd-sh/bin/*|vendor/freebsd-sh/bin/sh/*|vendor/freebsd-sh/bin/sh/bltin/*|vendor/freebsd-sh/bin/kill/*|vendor/freebsd-sh/bin/test/*|vendor/freebsd-sh/usr.bin/*|vendor/freebsd-sh/usr.bin/printf/*|vendor/freebsd-sh/compat/*|vendor/freebsd-sh/compat/bin/*|vendor/patches/freebsd-sh-dirent-d-namlen.patch|lib/test/src/test_freebsd_sh.c", "freebsd_sh make_lint_gates")

@@ -7,6 +7,12 @@
  * artifact.  No code from the artifact runs; no dlopen/dlsym is performed.
  */
 
+/* macOS-only: every header below lives in the Apple SDK, so on any other
+ * host this file must compile to nothing. Without the guard a Linux build
+ * that enumerates this directory fails at `mach-o/fat.h`, which is what a
+ * platform-specific translation unit with no platform guard always does. */
+#if defined(__APPLE__)
+
 #include "hotswap/hotswap_macho_probe.h"
 
 #include "util/safe_alloc.h"
@@ -660,3 +666,11 @@ void hotswap_macho_pinned_path(int fd, char buf[64])
 {
     (void)snprintf(buf, 64, "/dev/fd/%d", fd);
 }
+
+#else /* !__APPLE__ */
+
+/* Not macOS: the probe has nothing to read and nothing to declare. ISO C
+ * forbids an empty translation unit under -Wpedantic -Werror. */
+typedef int hotswap_macho_probe_not_on_this_platform;
+
+#endif /* __APPLE__ */

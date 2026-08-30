@@ -13,7 +13,13 @@
 
 #define MESH_PAIRING_ID_HEX 64
 #define MESH_PAIRING_CAP_STATUS_READ UINT64_C(1)
-#define MESH_PAIRING_CAP_KNOWN MESH_PAIRING_CAP_STATUS_READ
+/* Confined interactive terminal (fbsh PTY worker) on the paired machine. */
+#define MESH_PAIRING_CAP_TERMINAL_EXEC UINT64_C(2)
+/* MESH_PAIRING_CAP_HOST_EXEC (UINT64_C(4)) is RESERVED for a future
+ * capability-gated host-exec grant; it is deliberately not implemented and
+ * stays outside the known set, so no accept path can record it. */
+#define MESH_PAIRING_CAP_KNOWN \
+    (MESH_PAIRING_CAP_STATUS_READ | MESH_PAIRING_CAP_TERMINAL_EXEC)
 
 struct db_mesh_pairing {
     char pairing_id[MESH_PAIRING_ID_HEX + 1];

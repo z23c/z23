@@ -15,6 +15,7 @@
 // bool exports (network_monitor_get_view + test helpers) are pure readiness
 // predicates, not fallible operations.
 
+#include "base/hex.h"
 #include "platform/socket_compat.h"
 #include "services/network_monitor.h"
 #include "services/sync_monitor.h"
@@ -289,13 +290,7 @@ static void nm_group_key_of(const struct p2p_node *node, nm_group_key_t out)
     size_t len = net_addr_get_group(&node->addr.svc.addr, g, sizeof(g));
     if (len == 0 || len > sizeof(g))
         return;
-    static const char hex[] = "0123456789abcdef";
-    size_t o = 0;
-    for (size_t i = 0; i < len && o + 2 < (size_t)NM_GROUP_KEY_MAX; i++) {
-        out[o++] = hex[(g[i] >> 4) & 0xf];
-        out[o++] = hex[g[i] & 0xf];
-    }
-    out[o] = '\0';
+    zcl_hex_encode(g, len, out);
 }
 
 /* Snapshot current peers into obs[] (bounded), with each peer's address-group

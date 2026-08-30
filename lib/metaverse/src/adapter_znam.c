@@ -13,6 +13,7 @@
 
 #include "metaverse_priv.h"
 
+#include "base/bytes.h"
 #include "metaverse/property_adapter.h"
 
 #include <stdio.h>
@@ -21,14 +22,6 @@
 #define MV_ZNAM_ACTIONS_PRESENT                                              \
     (METAVERSE_ACTION_UPDATE_POINTER | METAVERSE_ACTION_LIST_FOR_SALE |      \
      METAVERSE_ACTION_SELL | METAVERSE_ACTION_TRANSFER)
-
-static bool bytes_nonzero(const uint8_t *p, size_t n)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < n; i++)
-        any |= p[i];
-    return any != 0;
-}
 
 static bool znam_ready(const struct metaverse_adapter_ctx *ctx, char *reason,
                        size_t reason_cap)
@@ -75,7 +68,7 @@ static void znam_fill(const struct metaverse_adapter_ctx *ctx,
      * state when present.  It is not called a revision number: ZNAM stores
      * no monotonic revision counter, and inventing one from a height would
      * become a second truth. */
-    if (bytes_nonzero(record->last_update_root,
+    if (zcl_bytes_any_set(record->last_update_root,
                       sizeof(record->last_update_root))) {
         out->has_descriptor_root = true;
         memcpy(out->descriptor_root, record->last_update_root,
