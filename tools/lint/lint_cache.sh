@@ -89,19 +89,20 @@ check-no-retired-agent-protocol check-scanner-immunity check-malloc
 check-hotswap-dev-only check-hotswap-eligible-scope check-hotswap-static-state
 check-hotswap-service-islands check-hotswap-swappable-shape check-stable-publish-contained check-raw-sqlite
 check-raw-malloc check-json-value-init check-blob-read-bounds check-byte-order-codec-single
+check-arm-symbol-single
 check-coins-lookup-nullcheck check-silent-errors-services
 check-silent-errors-controllers check-silent-errors-jobs
 check-silent-errors-conditions check-silent-errors-bool
 check-log-macro-return-type check-no-runtime-abort check-wallet-raw-prepare-log
 check-before-save-hooks check-pthread-create check-model-validation
-check-model-ar-lifecycle check-long-functions check-rpc-registrar
+check-model-ar-lifecycle check-model-sql-literals check-long-functions check-rpc-registrar
 check-lag-slo-observable check-lib-layering check-shape-include-direction
 check-accel-oracle-pinned check-domain-purity check-core-include-boundary check-supervisor-registration
 check-test-registration check-typed-blocker check-blocker-escape-registered
 check-blocker-remedy check-blocker-handoff-declared
 check-supervisor-progress-declared check-framework-shape
 check-framework-filename-suffix check-no-raw-clock-outside-platform
-check-sysinit-ordering check-sandbox-wired check-no-shellouts
+check-sysinit-ordering check-sandbox-wired check-no-shellouts check-no-api-keys
 check-no-writer-below-sealed-frontier check-peer-floor-single-source
 check-proc-self-shim check-no-raw-sqlite-in-controllers check-supervisor-domain
 check-model-column-drift

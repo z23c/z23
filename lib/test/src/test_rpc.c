@@ -13,6 +13,7 @@
 #include "rpc/client.h"
 #include "rpc/httpserver.h"
 #include "rpc/legacy_rpc_client.h"
+#include "services/legacy_balance_observer.h"
 #include "util/ere_match.h"
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -120,8 +121,108 @@ static bool rpc_test_cli_print_case(const char *body, bool want_ok,
     return ok;
 }
 
+static uint32_t balance_observer_seen_timeout;
+static bool balance_observer_call_seen;
+
+static bool balance_observer_fake_call(const char *body_json,
+                                       uint32_t timeout_ms,
+                                       char **out_resp,
+                                       char *err, size_t err_sz)
+{
+    static const char response[] =
+        "HTTP/1.1 200 OK\r\n\r\n"
+        "{\"result\":{\"transparent\":\"0.00999662\","
+        "\"private\":\"0.01970000\",\"total\":\"0.02969662\"},"
+        "\"error\":null,\"id\":\"z23-holdings\"}";
+    balance_observer_call_seen = body_json &&
+        strstr(body_json, "\"method\":\"z_gettotalbalance\"") != NULL;
+    balance_observer_seen_timeout = timeout_ms;
+    *out_resp = strdup(response);
+    if (!*out_resp && err && err_sz)
+        (void)snprintf(err, err_sz, "fixture allocation failed");
+    return *out_resp != NULL;
+}
+
 int test_rpc(void) {
     int failures = 0;
+
+    printf("legacy balance observer exact decimals... ");
+    {
+        static const char raw[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"0.00999662\","
+            "\"private\":\"0.01970000\",\"total\":\"0.02969662\"},"
+            "\"error\":null}";
+        struct legacy_balance_observation observed;
+        struct zcl_result r = legacy_balance_observation_parse(raw, &observed);
+        bool ok = r.ok && observed.complete &&
+            observed.source == LEGACY_BALANCE_SOURCE_ZCLASSICD &&
+            observed.transparent_zat == 999662 &&
+            observed.shielded_zat == 1970000 &&
+            observed.total_zat == 2969662;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("legacy balance observer rejects imprecise or inconsistent data... ");
+    {
+        static const char imprecise[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"0.000000001\","
+            "\"private\":\"0\",\"total\":\"0.000000001\"},"
+            "\"error\":null}";
+        static const char inconsistent[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"1.00000000\","
+            "\"private\":\"2.00000000\",\"total\":\"4.00000000\"},"
+            "\"error\":null}";
+        static const char overflow[] =
+            "HTTP/1.1 200 OK\r\n\r\n"
+            "{\"result\":{\"transparent\":\"92233720369\","
+            "\"private\":\"0\",\"total\":\"92233720369\"},"
+            "\"error\":null}";
+        static const char rpc_error[] =
+            "HTTP/1.1 500 Error\r\n\r\n"
+            "{\"result\":null,\"error\":{\"code\":-1,"
+            "\"message\":\"wallet unavailable\"}}";
+        struct legacy_balance_observation observed;
+        struct zcl_result a = legacy_balance_observation_parse(
+            imprecise, &observed);
+        struct zcl_result b = legacy_balance_observation_parse(
+            inconsistent, &observed);
+        struct zcl_result c = legacy_balance_observation_parse(
+            overflow, &observed);
+        struct zcl_result d = legacy_balance_observation_parse(
+            rpc_error, &observed);
+        struct zcl_result e = legacy_balance_observation_parse(
+            "HTTP/1.1 200 OK\r\n\r\n{", &observed);
+        struct zcl_result f = legacy_balance_observation_parse(NULL,
+                                                               &observed);
+        bool ok = !a.ok && !b.ok && !c.ok && !d.ok && !e.ok && !f.ok &&
+            !observed.complete;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("legacy balance observer enforces 250 ms transport budget... ");
+    {
+        struct legacy_balance_observation observed;
+        balance_observer_call_seen = false;
+        balance_observer_seen_timeout = 0;
+        struct zcl_result r = legacy_balance_observe_with_call(
+            balance_observer_fake_call,
+            LEGACY_BALANCE_OBSERVER_TIMEOUT_MS, &observed);
+        bool ok = r.ok && observed.complete && balance_observer_call_seen &&
+            balance_observer_seen_timeout == 250u &&
+            observed.observed_at_unix > 0;
+        balance_observer_call_seen = false;
+        struct zcl_result refused = legacy_balance_observe_with_call(
+            balance_observer_fake_call, 251u, &observed);
+        ok = ok && !refused.ok && !balance_observer_call_seen;
+        legacy_balance_observer_set_test_call(balance_observer_fake_call);
+        struct zcl_result hooked = legacy_balance_observe(&observed);
+        legacy_balance_observer_set_test_call(NULL);
+        ok = ok && hooked.ok && observed.complete;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
 
     printf("json null/bool/int/str... ");
     {
@@ -544,6 +645,24 @@ int test_rpc(void) {
                                                          errbuf,
                                                          sizeof(errbuf));
         ok = ok && strstr(errbuf, "bad item") != NULL;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("legacy_rpc bounded timeout rejects unsafe budgets... ");
+    {
+        char sentinel = '\0';
+        char *resp = &sentinel;
+        char errbuf[64] = {0};
+        bool ok = !legacy_rpc_call_with_timeout(
+            "127.0.0.1", 1, "u", "p", "{}", 0, &resp,
+            errbuf, sizeof(errbuf));
+        ok = ok && resp == NULL && strcmp(errbuf, "bad args") == 0;
+        resp = &sentinel;
+        errbuf[0] = '\0';
+        ok = ok && !legacy_rpc_call_with_timeout(
+            "127.0.0.1", 1, "u", "p", "{}", 60001, &resp,
+            errbuf, sizeof(errbuf));
+        ok = ok && resp == NULL && strcmp(errbuf, "bad args") == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 

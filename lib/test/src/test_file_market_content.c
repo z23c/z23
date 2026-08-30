@@ -1,6 +1,17 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Owner-private paid-content registration, restart, and tamper tests. */
 
+/* realpath() reaches this TU only through the glibc fortify inline that
+ * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
+ * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
+ * compiles by accident of optimisation and breaks at -O0, under
+ * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
+ * include: after them it does nothing. See lib/util/src/hw_profile.c. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
+#include "platform/directory_compat.h"
 #include "test/test_core.h"
 
 #include "base/hex.h"
@@ -24,6 +35,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32) && !defined(O_CLOEXEC)
+/* mingw's <fcntl.h> ships no O_CLOEXEC and no close-on-exec emulation. This
+ * file exercises fork-free, single-process fixture I/O only; the flag is a
+ * hygiene no-op here regardless of platform, so a zero fallback keeps the
+ * open() calls below syntactically valid on Windows without touching the
+ * value POSIX platforms see. */
+#define O_CLOEXEC 0
+#endif
 
 #define CONTENT_CHECK(label, condition) do {                         \
     printf("file_market content: %s... ", (label));                 \
@@ -157,8 +177,8 @@ int file_market_content_tests(void)
     char dir[256], dbpath[512], filepath[512], symlink_path[512];
     char fifo_path[512], wrong_path[512];
     snprintf(dir, sizeof(dir), "./test-tmp/market_content_%d", (int)getpid());
-    (void)mkdir("./test-tmp", 0700);
-    if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+    (void)platform_directory_create("./test-tmp", 0700);
+    if (platform_directory_create(dir, 0700) != 0 && errno != EEXIST) {
         CONTENT_CHECK("create fixture directory", false);
         return failures;
     }
@@ -327,7 +347,11 @@ int file_market_content_tests(void)
 
     /* An in-place rewrite that restores its old mtime with utimensat(2)
      * must still refuse: ctime cannot be set backwards, so the key misses,
-     * the bytes are re-hashed, and the registration digest disagrees. */
+     * the bytes are re-hashed, and the registration digest disagrees.
+     * st_atim/st_mtim and AT_FDCWD/utimensat(2) are POSIX-only (no Windows
+     * struct stat member or call has this shape), so this sub-test is not
+     * exercised on Windows, only kept syntactically valid there. */
+#if !defined(_WIN32)
     struct stat before_rewrite;
     bool captured = stat(filepath, &before_rewrite) == 0;
     int rewrite_fd = open(filepath, O_WRONLY | O_CLOEXEC);
@@ -345,6 +369,7 @@ int file_market_content_tests(void)
         &ndb, offer.offer_id, 0, &loaded);
     CONTENT_CHECK("mtime-frozen rewrite cannot ride the digest table",
                   clock_frozen && !load_result.ok && loaded.data == NULL);
+#endif /* !defined(_WIN32) */
 
     int mutate_fd = open(filepath, O_WRONLY | O_CLOEXEC);
     uint8_t changed = (uint8_t)(payload[0] ^ 0xffu);
@@ -365,8 +390,8 @@ int file_market_content_tests(void)
         char wdir[256], wdbpath[512];
         snprintf(wdir, sizeof(wdir), "./test-tmp/market_index_window_%d",
                  (int)getpid());
-        (void)mkdir("./test-tmp", 0700);
-        if (mkdir(wdir, 0700) != 0 && errno != EEXIST) {
+        (void)platform_directory_create("./test-tmp", 0700);
+        if (platform_directory_create(wdir, 0700) != 0 && errno != EEXIST) {
             CONTENT_CHECK("create index window fixture directory", false);
             node_db_close(&ndb);
             test_cleanup_tmpdir(dir);

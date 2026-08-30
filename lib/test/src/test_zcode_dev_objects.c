@@ -1,6 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Prove canonical ZCODE task/candidate/policy/review/receipt wires. */
 
+/* realpath() reaches this TU only through the glibc fortify inline that
+ * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
+ * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
+ * compiles by accident of optimisation and breaks at -O0, under
+ * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
+ * include: after them it does nothing. See lib/util/src/hw_profile.c. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 
 #include "test/public_shape_fixture.h"
@@ -15,6 +25,7 @@
 #include "models/build_fabric.h"
 #include "models/database.h"
 #include "models/zcode_lane.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker.h"
@@ -336,8 +347,8 @@ static bool zd_seed_offline_vendor_inputs(const char *workspace)
     int cn = snprintf(cache, sizeof(cache), "%s/.cache", vendor);
     if (vn <= 0 || (size_t)vn >= sizeof(vendor) ||
         cn <= 0 || (size_t)cn >= sizeof(cache) ||
-        (mkdir(vendor, 0700) != 0 && errno != EEXIST) ||
-        (mkdir(cache, 0700) != 0 && errno != EEXIST))
+        (platform_directory_create(vendor, 0700) != 0 && errno != EEXIST) ||
+        (platform_directory_create(cache, 0700) != 0 && errno != EEXIST))
         return false;
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         int n = snprintf(path, sizeof(path), "%s/%s", cache, names[i]);
@@ -1785,7 +1796,7 @@ static int test_zd_work_node(void)
         capability.max_lease_seconds = 120;
         capability.slots = 2;
         capability.queue_headroom = 2;
-        capability.expires_unix = 2000;
+        capability.expires_unix = INT64_MAX;
         ASSERT(vcs_zcode_work_capability_seal(
             &capability, worker_secret, worker_key));
         ASSERT(vcs_zcode_work_node_set_local_signer(
@@ -2056,6 +2067,118 @@ static int test_zd_work_node(void)
     return failures;
 }
 
+static int test_zd_work_node_projection(void)
+{
+    int failures = 0;
+    TEST("zcode_dev: work diagnostics bound fresh verified worker facts") {
+        struct vcs_zcode_work_node *requester = vcs_zcode_work_node_create();
+        struct vcs_zcode_work_node *worker = vcs_zcode_work_node_create();
+        ASSERT(requester && worker);
+        for (uint64_t i = 0; i < 9; i++) {
+            ASSERT(vcs_zcode_work_node_peer_add(requester, 100 + i));
+            ASSERT(vcs_zcode_work_node_peer_add(worker, 200 + i));
+        }
+        uint8_t seed[32], secret[32], key[32];
+        zd_root(seed, 151);
+        ed25519_keypair(key, secret, seed);
+        struct vcs_zcode_work_capability_v1 cap = {0};
+        memcpy(cap.signer_pubkey, key, 32);
+        zd_root(cap.toolchain_capsule_root, 152);
+        cap.work_kinds = (UINT32_C(1) << VCS_ZCODE_WORK_BUILD) |
+                         (UINT32_C(1) << VCS_ZCODE_WORK_TEST);
+        cap.target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3;
+        cap.confinement = VCS_ZCODE_WORK_CONFINEMENT_V1_MASK;
+        cap.max_cpu_seconds = 60;
+        cap.max_memory_bytes = UINT64_C(512) * 1024 * 1024;
+        cap.max_output_bytes = UINT64_C(64) * 1024 * 1024;
+        cap.max_lease_seconds = 120;
+        cap.slots = cap.queue_headroom = 2;
+        cap.expires_unix = INT64_MAX;
+        ASSERT(vcs_zcode_work_capability_seal(&cap, secret, key));
+        ASSERT(vcs_zcode_work_node_set_local_signer(worker, secret, key));
+        ASSERT(vcs_zcode_work_node_set_local_capability(worker, &cap));
+        uint8_t frame[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
+        size_t frame_len = 0;
+        uint64_t peer = 0;
+        for (uint64_t i = 0; i < 9; i++) {
+            ASSERT(vcs_zcode_work_node_next_outbound(
+                worker, 200 + i, &peer, frame, &frame_len));
+            ASSERT_EQ(peer, 200 + i);
+            ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+                requester, 100 + i, frame, frame_len, 1000),
+                VCS_ZCODE_WORK_NODE_OK);
+        }
+
+        uint8_t stale_seed[32], stale_secret[32], stale_key[32];
+        zd_root(stale_seed, 153);
+        ed25519_keypair(stale_key, stale_secret, stale_seed);
+        struct vcs_zcode_work_capability_v1 stale = cap;
+        memcpy(stale.signer_pubkey, stale_key, 32);
+        stale.expires_unix = 2000;
+        ASSERT(vcs_zcode_work_capability_seal(
+            &stale, stale_secret, stale_key));
+        struct vcs_zcode_work_swarm_message message = {
+            .type = VCS_ZCODE_WORK_SWARM_CAPABILITY,
+            .body.capability = stale,
+        };
+        ASSERT(vcs_zcode_work_swarm_serialize(
+            &message, frame, sizeof(frame), &frame_len));
+        ASSERT(vcs_zcode_work_node_peer_add(requester, 999));
+        ASSERT_EQ(vcs_zcode_work_node_handle_frame(
+            requester, 999, frame, frame_len, 1000), VCS_ZCODE_WORK_NODE_OK);
+
+        struct vcs_zcode_work_node *prior = vcs_zcode_work_node_global();
+        vcs_zcode_work_node_set_global(requester);
+        struct json_value dump = {0};
+        ASSERT(vcs_zcode_work_node_dump_state_json(&dump, NULL));
+        ASSERT_EQ(json_get_int(json_get(&dump, "capable_peers")), 9);
+        ASSERT_EQ(json_get_int(json_get(&dump, "total")), 9);
+        ASSERT_EQ(json_get_int(json_get(&dump, "returned")), 8);
+        ASSERT(json_get_bool(json_get(&dump, "truncated")));
+        const struct json_value *workers = json_get(&dump, "workers");
+        ASSERT(workers && workers->type == JSON_ARR);
+        ASSERT_EQ(json_size(workers), 8);
+        const struct json_value *row = json_at(workers, 0);
+        ASSERT(row && row->type == JSON_OBJ);
+        ASSERT_EQ(json_get_int(json_get(row, "peer_id")), 100);
+        char expected[65], toolchain[65];
+        struct sha3_256_ctx hash;
+        static const char domain[] =
+            "zcl.zcode.work.signer.fingerprint.v1";
+        uint8_t digest[32];
+        sha3_256_init(&hash);
+        sha3_256_write(&hash, (const uint8_t *)domain,
+                       sizeof(domain) - 1u);
+        sha3_256_write(&hash, key, 32);
+        sha3_256_finalize(&hash, digest);
+        zcl_hex_encode(digest, 32, expected);
+        zcl_hex_encode(cap.toolchain_capsule_root, 32, toolchain);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "signer_fingerprint_sha3")),
+                      expected);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "toolchain_capsule_root")),
+                      toolchain);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "target")),
+                      "linux-x86_64-v3");
+        ASSERT_EQ(json_get_int(json_get(row, "work_kinds_mask")),
+                  cap.work_kinds);
+        ASSERT_EQ(json_get_int(json_get(row, "confinement_mask")),
+                  cap.confinement);
+        ASSERT_EQ(json_get_int(json_get(row, "max_memory_bytes")),
+                  (int64_t)cap.max_memory_bytes);
+        ASSERT_EQ(json_get_int(json_get(row, "slots")), 2);
+        ASSERT_EQ(json_get_int(json_get(row, "queue_headroom")), 2);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "freshness")), "fresh");
+        ASSERT(json_get(row, "signature") == NULL);
+        ASSERT(json_get(row, "signer_pubkey") == NULL);
+        json_free(&dump);
+        vcs_zcode_work_node_set_global(prior);
+        vcs_zcode_work_node_free(requester);
+        vcs_zcode_work_node_free(worker);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_zd_work_node_three(void)
 {
     int failures = 0;
@@ -2228,7 +2351,7 @@ static int test_zd_improve_command(void)
         test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "improve");
         ASSERT(realpath(dir, workspace) != NULL);
         (void)snprintf(source_dir, sizeof(source_dir), "%s/src", workspace);
-        ASSERT(mkdir(source_dir, 0700) == 0);
+        ASSERT(platform_directory_create(source_dir, 0700) == 0);
         (void)snprintf(source_path, sizeof(source_path), "%s/widget.c",
                        source_dir);
         FILE *source_file = fopen(source_path, "wb");
@@ -2273,7 +2396,7 @@ static int test_zd_improve_command(void)
         char candidate_true[4352], candidate_false[4352];
         (void)snprintf(candidate_source_dir, sizeof(candidate_source_dir),
                        "%s/src", candidate_workspace);
-        ASSERT(mkdir(candidate_source_dir, 0700) == 0);
+        ASSERT(platform_directory_create(candidate_source_dir, 0700) == 0);
         (void)snprintf(candidate_source_path, sizeof(candidate_source_path),
                        "%s/widget.c", candidate_source_dir);
         source_file = fopen(candidate_source_path, "wb");
@@ -3106,13 +3229,13 @@ static int test_zd_improve_command(void)
         zcl_hex_encode(fixture_dependency_root, 32, dependency_hex);
         (void)snprintf(installed_dir, sizeof(installed_dir),
                        "%s/zcode/installed", workspace);
-        ASSERT(mkdir(installed_dir, 0700) == 0 || errno == EEXIST);
+        ASSERT(platform_directory_create(installed_dir, 0700) == 0 || errno == EEXIST);
         (void)snprintf(installed_dir, sizeof(installed_dir),
                        "%s/zcode/installed/%s", workspace, dependency_hex);
-        ASSERT(mkdir(installed_dir, 0700) == 0);
+        ASSERT(platform_directory_create(installed_dir, 0700) == 0);
         (void)snprintf(installed_lib, sizeof(installed_lib), "%s/lib",
                        installed_dir);
-        ASSERT(mkdir(installed_lib, 0700) == 0);
+        ASSERT(platform_directory_create(installed_lib, 0700) == 0);
         (void)snprintf(installed_archive, sizeof(installed_archive),
                        "%s/libdependency.a", installed_lib);
         static const uint8_t dependency_bytes[] = "fixed-dependency-artifact";
@@ -5915,6 +6038,7 @@ int test_zcode_dev_objects(void)
     failures += test_zd_work_node_duplicate_sessions();
     failures += test_zd_work_node_atomic_admission();
     failures += test_zd_work_node();
+    failures += test_zd_work_node_projection();
     failures += test_zd_work_node_three();
     failures += test_zd_improve_command();
     failures += test_zd_task_index();

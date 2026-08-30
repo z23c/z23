@@ -120,6 +120,22 @@ git -C "$ROOT" grep -q '\$(DEV_LIVE_CFLAGS) -fPIC' -- Makefile ||
 git -C "$ROOT" grep -q 'resident action plan contains release-only LTO flags' -- \
     tools/dev/devloop_hotswap_build.c ||
     fail 'resident action-plan LTO refusal is missing'
+git -C "$ROOT" grep -q '^ifeq ($(strip $(MAKECMDGOALS)),)' -- Makefile ||
+    fail 'default build does not have an explicit epoch-profile selection'
+awk '$0 == "ifeq ($(strip $(MAKECMDGOALS)),)" {
+         if (getline > 0 && $0 == "ZCL_EPOCH_PROFILES := node-c23")
+             found = 1
+     }
+     END { exit found ? 0 : 1 }' "$ROOT/Makefile" ||
+    fail 'default z23 build fingerprints profiles it cannot consume'
+git -C "$ROOT" grep -q '^ZCL_NODE_ONLY_BUILD := .*),1)$' -- Makefile ||
+    fail 'default z23 build does not select the node-only dependency scope'
+awk '$0 == "else ifeq ($(strip $(MAKECMDGOALS)),)" {
+         if (getline > 0 && $0 == "ZCL_DEPFILE_PROFILES := node-c23")
+             found = 1
+     }
+     END { exit found ? 0 : 1 }' "$ROOT/Makefile" ||
+    fail 'default z23 build imports unrelated dependency graphs'
 
 # Isolate these diagnostic Makes from the parent jobserver. Invoked under
 # `make pre-push-ci`, an inherited MAKEFLAGS/MAKELEVEL recursive make prints

@@ -301,8 +301,10 @@ endif
 NODE_VENDOR_ARCHIVES = $(notdir $(NODE_SECP_ARCHIVE)) libcrypto.a libssl.a libevent.a \
 	libevent_openssl.a libevent_pthreads.a libsqlite3.a libz.a libtor_stub.a
 # A focused `make z23` (or legacy `make zclassic23`) needs no C++ toolchain.
+# Bare `make` is the same build because `.DEFAULT_GOAL := z23`; keep its
+# dependency and source-identity scope identical to the explicit spelling.
 # Test/dev builds retain LevelDB strictly as a differential oracle.
-ZCL_NODE_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23 zclassic23,$(MAKECMDGOALS))),,1),)
+ZCL_NODE_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23 zclassic23,$(MAKECMDGOALS))),,1),1)
 VENDOR_ARCHIVES = $(NODE_VENDOR_ARCHIVES) \
 	$(if $(ZCL_NODE_ONLY_BUILD),,libleveldb.a)
 VENDOR_LIBS = $(addprefix $(ZCL_VENDOR_LIB)/,$(VENDOR_ARCHIVES))
@@ -393,7 +395,14 @@ ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
 	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
-ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
+# With no explicit goal GNU Make executes `.DEFAULT_GOAL := z23`; selecting
+# every compiler profile here did not make that node build safer.  It only
+# fingerprinted nine toolchain/flag combinations that the default recipe can
+# never consume.  Keep unknown explicit goals conservative, while making the
+# documented first build pay for exactly its node-c23 authority.
+ifeq ($(strip $(MAKECMDGOALS)),)
+ZCL_EPOCH_PROFILES := node-c23
+else ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ZCL_EPOCH_PROFILES :=
@@ -1468,11 +1477,11 @@ $(DEV_TSAN_LEASE): FORCE
 	  "$(DEV_TSAN_EPOCH_COMPILE_FLAGS)" "$(DEV_TSAN_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-# Make normally imports four large immutable depfile graphs even when one
-# profile (or no compiler at all) is requested.  Narrow only an exact,
-# explicitly-known single goal.  Empty/default, mixed, and unknown goals keep
-# the conservative source-wide fallback so a new target cannot accidentally
-# lose header invalidation merely because this table was not updated.
+# Make normally imports large immutable depfile graphs even when one profile
+# is requested. Narrow an exact known goal, including the empty spelling of
+# `.DEFAULT_GOAL := z23`. Mixed and unknown explicit goals keep the
+# conservative source-wide fallback so a new target cannot accidentally lose
+# header invalidation merely because this table was not updated.
 ZCL_DEPFILE_ALL_PROFILES := build-only dev test-fast test-strict coverage fuzz \
 	node-c23
 ZCL_DEPFILE_PROFILES := $(ZCL_DEPFILE_ALL_PROFILES)
@@ -1482,6 +1491,8 @@ ifeq ($(ZCL_HOTSWAP_DEPFILE_LEAN_ONLY),1)
 # tracks its own single-TU depfile. Skip every depfile graph — an unmatched
 # single goal below would otherwise fall through to importing all four.
 ZCL_DEPFILE_PROFILES :=
+else ifeq ($(strip $(MAKECMDGOALS)),)
+ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
@@ -2166,6 +2177,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-wallet-raw-prepare-log check-blob-read-bounds \
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
+        check-model-sql-literals \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
@@ -9640,6 +9652,33 @@ check-byte-order-codec-single:
 	@./tools/lint/check_byte_order_codec_single.sh --selftest
 	@./tools/lint/check_byte_order_codec_single.sh
 
+# Gate — a non-static function is DEFINED once per translation unit. The
+# only way one name has two bodies in a compiling .c file is two disjoint
+# preprocessor arms (platform, feature flag, test-vs-release, ...), and each
+# such pair is a place two bodies can silently drift apart under one name —
+# exactly what happened to three pure ROM wire-parsers duplicated inside
+# lib/net/src/file_service.c's `#if defined(_WIN32)` split (RATCHET at
+# <path>\t<function> granularity; tools/lint/arm_symbol_single_baseline.txt
+# may only shrink).
+check-arm-symbol-single:
+	@echo "══ LINT: one definition per non-static function per TU ══"
+	@./tools/lint/check_arm_symbol_single.sh --selftest
+	@./tools/lint/check_arm_symbol_single.sh
+
+# A .c file may not call a POSIX/GNU function whose declaration reaches it
+# ONLY through a glibc fortify inline — i.e. only when optimisation is on.
+# Found live 2026-08-30: realpath() is declared under __USE_MISC, which
+# -D_POSIX_C_SOURCE=200809L does not set, so 17 TUs compiled purely as a
+# side effect of -O1+ enabling _FORTIFY_SOURCE, and were hard C23 errors at
+# -O0 and on any non-glibc libc. The gate re-MEASURES the masked set against
+# the live toolchain on every run rather than hardcoding a list, because
+# which functions are masked is a property of the compiler and libc, not of
+# this tree. Baseline is empty by design and must stay empty.
+check-fortify-masked-decls:
+	@echo "══ LINT: no declaration that depends on optimisation ══"
+	@./tools/lint/check_fortify_masked_decls.sh --selftest
+	@./tools/lint/check_fortify_masked_decls.sh
+
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"
 	@tools/scripts/check_coins_lookup_nullcheck.sh
@@ -9718,6 +9757,50 @@ $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
 	    -Ilib/platform/include -Ilib/util/include \
 	    -o $@ $(MUTATION_CAMPAIGN_SRCS) -lpthread
+# ── The engine unit dispatcher ──────────────────────────────────────────────
+# `engine_unit` sends ONE scoped unit of work to a model, applies the result in
+# an isolated worktree, and judges it by running the gate. The law it is built
+# on is in lib/engine/include/engine/engine.h: the model proposes, the gate
+# decides. It is the C23 successor to tools/dev/grok-unit.sh.
+#
+# Like $(BIN_DIR)/zclassic23-acme above, this is compiled STRAIGHT FROM SOURCE
+# to an executable with no intermediate object files, and for the same reason:
+# it links tools/acme/tls_client.c, and lib/test/src/test_cold_join_sovereign.c
+# P2 asserts that no Z23 object under build/*obj*/epochs carries an undefined
+# reference to a TLS-client or trust-store entry point. Nothing compiled here
+# can ever appear in a scanned epoch tree, which keeps P2 green honestly rather
+# than by exemption.
+#
+# lib/engine itself carries no transport at all — it is pure logic, is a normal
+# lib module, and is linked into the node like any other. That split is the
+# whole reason this program can exist without weakening the node's claim that
+# it consults no certificate authority.
+ENGINE_UNIT_BIN = $(BIN_DIR)/zclassic23-engine-unit
+ENGINE_UNIT_SRCS = tools/engine_unit.c \
+	tools/acme/tls_client.c \
+	lib/engine/src/engine_registry.c \
+	lib/engine/src/engine_err.c \
+	lib/engine/src/engine_patch.c \
+	lib/engine/src/engine_secret.c \
+	lib/engine/src/engine_verdict.c \
+	lib/engine/src/engine_wire_request.c \
+	lib/engine/src/engine_wire_response.c \
+	lib/json/src/json.c \
+	lib/util/src/spawn.c \
+	lib/base/src/log_level.c \
+	lib/base/src/result.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c
+ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
+	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+.PHONY: engine-unit
+engine-unit: $(ENGINE_UNIT_BIN)
+$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ENGINE_UNIT_INCLUDES) \
+	    -o $@ $(ENGINE_UNIT_SRCS) \
+	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core/ is the physical sealed consensus tree (predicates + static param
@@ -9970,6 +10053,24 @@ check-model-ar-lifecycle:
 	@echo "══ LINT: model ActiveRecord lifecycle saves ══"
 	@./tools/scripts/check_model_ar_lifecycle.sh
 
+# A model file must not carry a hand-written SQL statement: reads and writes
+# build one with app/models/include/models/query_builder.h, whose identifiers
+# come from the closed set in query_schema.def and whose values can only
+# arrive as bound parameters. 70 of 87 model files carried literal SQL when
+# this gate landed, with no injection hole but also no rail — safety resting
+# on 70 files' worth of authors remembering forever. The two defects the
+# first conversion pass surfaced are exactly what hand-written SQL produces:
+# peer.c's strftime('%%s','now') evaluated to the TEXT "%s" (SQLite reads %%
+# as an escaped percent, and nothing printf-formats a model SQL string), so
+# db_peer_mark_tried had been writing two characters into peers.last_try
+# instead of an epoch; and op_return_index.c built its prune DELETE with
+# snprintf. The baseline is shrink-only and a stale row fails, so the count
+# can only go down.
+check-model-sql-literals:
+	@echo "══ LINT: literal SQL in the models layer (shrink-only) ══"
+	@./tools/lint/check_model_sql_literals.sh --selftest
+	@./tools/lint/check_model_sql_literals.sh
+
 # Keep top-level functions in app/controllers + app/services under 500
 # lines. Single state-machines that truly belong as one function can carry
 # a `// long-function-ok:<tag>` override marker explaining WHY.
@@ -10195,6 +10296,15 @@ check-peer-floor-single-source:
 check-no-shellouts:
 	@echo "→ Gate: no_shellouts (os-substrate Rung 0)"
 	@./tools/lint/check_no_shellouts.sh
+
+# No API credential is committed. tools/engine_unit.c dispatches work to a paid
+# API, so this tree now has a reason to hold a key near it; a key in a tracked
+# file is spent the moment it lands. HARD (FAIL), no baseline — a committed
+# credential is not something to ratchet down over time. Proven to actually
+# fail by lib/test/src/test_engine.c, which plants one in a fixture tree.
+check-no-api-keys:
+	@echo "→ Gate: no_api_keys (no committed credential)"
+	@./tools/lint/check_no_api_keys.sh
 
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
 # every saved finding under lib/test/fuzz_seeds/ has a live fuzz binary behind
@@ -10951,6 +11061,45 @@ tools/gen_api_reference: $(API_REFERENCE_TOOL)
 docs-api-reference: $(API_REFERENCE_TOOL)
 	@$(API_REFERENCE_TOOL) docs/API_REFERENCE.md.in docs/API_REFERENCE.md
 
+# docs/CAPABILITY_INVENTORY.jsonl is the complete source-derived public C23
+# capability census.  JSON Lines keeps 1,000+ headers and their full symbol
+# tables grep-friendly without requiring jq or loading one giant document.
+# The checked-in artifact is never edited: regenerate it with this target.
+CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory
+CAPABILITY_INVENTORY_SRCS = tools/gen_capability_inventory.c \
+	lib/codeindex/src/codeindex_inventory.c \
+	lib/codeindex/src/codeindex_inventory_scan.c \
+	lib/codeindex/src/codeindex_inventory_body.c \
+	lib/codeindex/src/codeindex_inventory_evidence.c \
+	lib/codeindex/src/codeindex_scan.c \
+	lib/codeindex/src/codeindex_scan_doc.c \
+	lib/base/src/safe_alloc.c lib/base/src/log_level.c lib/sha3/src/sha3.c
+
+$(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
+	lib/codeindex/include/codeindex/codeindex_inventory.h \
+	lib/codeindex/src/codeindex_inventory_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror \
+	    -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
+	    -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
+	    -Ilib/crypto/include -Ilib/platform/include \
+	    -o $@ $(CAPABILITY_INVENTORY_SRCS)
+
+.PHONY: tools/gen_capability_inventory docs-capability-inventory
+tools/gen_capability_inventory: $(CAPABILITY_INVENTORY_TOOL)
+docs-capability-inventory: $(CAPABILITY_INVENTORY_TOOL)
+	@$(CAPABILITY_INVENTORY_TOOL) docs/CAPABILITY_INVENTORY.jsonl .
+
+check-capability-inventory-generated:
+	@echo "══ LINT: capability inventory is complete source-derived output ══"
+	@./tools/lint/check_capability_inventory_generated.sh --selftest
+	@./tools/lint/check_capability_inventory_generated.sh
+
+check-generated-artifact-contradictions:
+	@echo "══ LINT: generated artifacts cannot contradict each other ══"
+	@./tools/lint/check_generated_artifact_contradictions.sh --selftest
+	@./tools/lint/check_generated_artifact_contradictions.sh
+
 
 # docs/EQUIHASH_PARAMS.md is GENERATED by tools/equihash_params_fact.c, which
 # LINKS the real chainparams and upgrade tables and prints what consensus
@@ -11332,6 +11481,8 @@ LINT_GATES := \
     check-git-hooks-installed \
     check-malloc \
     check-byte-order-codec-single \
+    check-arm-symbol-single \
+    check-fortify-masked-decls \
     check-zcode-package-registry \
     check-zcode-package-standalone \
     check-package-anatomy \
@@ -11369,6 +11520,7 @@ LINT_GATES := \
     check-pthread-create \
     check-model-validation \
     check-model-ar-lifecycle \
+    check-model-sql-literals \
     check-long-functions \
     check-rpc-registrar \
     check-lag-slo-observable \
@@ -11408,6 +11560,7 @@ LINT_GATES := \
     check-sysinit-ordering \
     check-sandbox-wired \
     check-no-shellouts \
+    check-no-api-keys \
     check-no-writer-below-sealed-frontier \
     check-peer-floor-single-source \
     check-proc-self-shim \
@@ -11429,6 +11582,8 @@ LINT_GATES := \
     check-doc-claims \
     check-error-doc-refs \
     check-api-reference-generated \
+    check-capability-inventory-generated \
+    check-generated-artifact-contradictions \
     check-describe-budget \
     check-markdown-links \
     check-doc-inline-paths \
@@ -11502,7 +11657,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
+lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(BIN_DIR)/z23-bootstrap
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif

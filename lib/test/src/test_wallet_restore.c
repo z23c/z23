@@ -30,6 +30,17 @@
  *   - an encrypted backup with no password available
  */
 
+/* realpath() reaches this TU only through the glibc fortify inline that
+ * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
+ * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
+ * compiles by accident of optimisation and breaks at -O0, under
+ * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
+ * include: after them it does nothing. See lib/util/src/hw_profile.c. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
+#include "platform/directory_compat.h"
 #include "test/test_core.h"
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
@@ -45,7 +56,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -62,7 +75,7 @@
 static const char *wr_dir(void)
 {
     static char dir[512];
-    mkdir(WR_DIR_REL, 0755);
+    platform_directory_create(WR_DIR_REL, 0755);
     if (dir[0])
         return dir;
     char cwd[384];
@@ -332,7 +345,7 @@ int test_wallet_restore(void)
     /* wallet_backup_run_once -> wbs_ensure_backup_dir ->
      * platform_private_directory_ensure requires exactly 0700 and refuses a
      * wider directory. mkdir is umask-masked, so restate the mode. */
-    mkdir(backup_dir, 0700);
+    platform_directory_create(backup_dir, 0700);
     chmod(backup_dir, 0700);
 
     /* ---- source wallet with transparent AND shielded rows ---- */
@@ -420,8 +433,13 @@ int test_wallet_restore(void)
         WR_CHECK("refuses a database holding no wallet tables", !r.ok);
         wr_rm(empty);
     }
-    {   /* a datadir another writer is holding */
-        mkdir(target, 0700);
+    {   /* a datadir another writer is holding
+         *
+         * flock(2) and O_CLOEXEC have no Windows equivalent in this shape;
+         * this sub-test is not exercised on Windows, only kept
+         * syntactically valid there. */
+#if !defined(_WIN32)
+        platform_directory_create(target, 0700);
         char pidfile[400];
         snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", target);
         int fd = open(pidfile, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
@@ -443,6 +461,7 @@ int test_wallet_restore(void)
         unlink(pidfile);
         WR_CHECK("datadir_free is ok once the lock is released",
                  wallet_restore_datadir_free(target).ok);
+#endif /* !defined(_WIN32) */
     }
 
     /* ---- (A) dry run: exact counts, nothing written ---- */

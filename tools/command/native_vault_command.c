@@ -38,6 +38,7 @@
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
 #include "services/agent_spend_policy.h"
+#include "services/legacy_balance_observer.h"
 #include "base/log_macros.h"
 
 /* ── THE READ SEAM ─────────────────────────────────────────────────────────
@@ -269,6 +270,44 @@ static void vault_copy_str_as(struct json_value *dst,
     (void)json_push_kv_str(dst, output_key, (v && v[0]) ? v : dflt);
 }
 
+/* A co-located zclassicd is a separate custody authority. Report its exact
+ * live observation beside the canonical vault, never folded into any class
+ * row or total. Unavailable is a named state, not a zero balance. */
+static void vault_push_legacy_wallet(struct zcl_command_reply *reply)
+{
+    struct legacy_balance_observation observed;
+    struct zcl_result result = legacy_balance_observe(&observed);
+    struct json_value legacy;
+
+    json_init(&legacy);
+    json_set_object(&legacy);
+    (void)json_push_kv_str(&legacy, "custody_scope",
+                           "local_zclassicd_wallet");
+    (void)json_push_kv_str(&legacy, "source",
+                           "zclassicd.z_gettotalbalance");
+    (void)json_push_kv_str(&legacy, "aggregation", "excluded");
+    if (result.ok && observed.complete) {
+        (void)json_push_kv_str(&legacy, "status", "current");
+        (void)json_push_kv_bool(&legacy, "complete", true);
+        (void)json_push_kv_int(&legacy, "transparent_zat",
+                               observed.transparent_zat);
+        (void)json_push_kv_int(&legacy, "shielded_zat",
+                               observed.shielded_zat);
+        (void)json_push_kv_int(&legacy, "total_zat", observed.total_zat);
+        (void)json_push_kv_int(&legacy, "observed_at_unix",
+                               observed.observed_at_unix);
+    } else {
+        (void)json_push_kv_str(&legacy, "status", "unavailable");
+        (void)json_push_kv_bool(&legacy, "complete", false);
+        (void)json_push_kv_str(&legacy, "reason",
+                               observed.reason[0]
+                                   ? observed.reason
+                                   : "legacy wallet was not observed");
+    }
+    (void)json_push_kv(&reply->data, "legacy_wallet", &legacy);
+    json_free(&legacy);
+}
+
 /* ── THE READ SEAM (see the header block) ───────────────────────────────────
  * The ONLY place this file reads holdings. Integration with the read model is
  * this function body and nothing else. */
@@ -406,19 +445,24 @@ void zcl_native_handle_vault_list(const struct zcl_command_request *request,
                                c->vault_verb[0] ? c->vault_verb : "none");
         if (row) {
             const struct json_value *complete = json_get(row, "determined");
+            const struct json_value *money = json_get(row, "is_money");
             bool determined = complete && complete->type == JSON_BOOL &&
                               json_get_bool(complete);
+            bool is_money = money && money->type == JSON_BOOL &&
+                            json_get_bool(money);
             (void)json_push_kv_str(&o, "status",
                                    determined ? "ok" : "undetermined");
             vault_copy_str_as(&o, row, "source_primitive", "source",
                               "vault_read_snapshot");
             (void)json_push_kv_bool(&o, "complete",
                                     determined);
-            vault_push_total_as(&o, row, "total_zat");
-            vault_copy_int_as(&o, row, "spendable", "spendable_zat");
-            vault_copy_int_as(&o, row, "pending", "pending_zat");
-            vault_copy_int_as(&o, row, "immature", "immature_zat");
-            vault_copy_int_as(&o, row, "encumbered", "encumbered_zat");
+            if (is_money) {
+                vault_push_total_as(&o, row, "total_zat");
+                vault_copy_int_as(&o, row, "spendable", "spendable_zat");
+                vault_copy_int_as(&o, row, "pending", "pending_zat");
+                vault_copy_int_as(&o, row, "immature", "immature_zat");
+                vault_copy_int_as(&o, row, "encumbered", "encumbered_zat");
+            }
             vault_copy_int(&o, row, "item_count");
             if (!determined) {
                 const char *reason = json_get_str(json_get(row, "reason"));
@@ -464,6 +508,7 @@ void zcl_native_handle_vault_list(const struct zcl_command_request *request,
     (void)json_push_kv(&reply->data, "dropped_sections", &dropped);
     (void)json_push_kv_int(&reply->data, "classes_available", available);
     (void)json_push_kv_int(&reply->data, "classes_unavailable", unavailable);
+    vault_push_legacy_wallet(reply);
     vault_push_provenance(reply, linked ? &snap : NULL, linked, why);
     json_free(&rows);
     json_free(&lines);
@@ -566,6 +611,8 @@ static void vault_render_items(const struct zcl_command_request *request,
                 continue;
             }
             vault_push_line(&scanned, c->name);
+            const char *unit = json_get_str(json_get(row, "unit"));
+            bool is_money = unit && strcmp(unit, "zatoshi") == 0;
             const struct json_value *arr = json_get(row, "items");
             if (!arr || arr->type != JSON_ARR)
                 continue;
@@ -586,7 +633,16 @@ static void vault_render_items(const struct zcl_command_request *request,
                 json_set_object(&o);
                 (void)json_push_kv_str(&o, "class", c->name);
                 vault_copy_str(&o, it, "id", "unknown");
-                vault_copy_int(&o, it, "amount_zat");
+                (void)json_push_kv_str(&o, "unit", unit ? unit : "unknown");
+                if (is_money) {
+                    vault_copy_int(&o, it, "amount_zat");
+                } else if (strcmp(c->name, "tokens") == 0) {
+                    vault_copy_int(&o, it, "units");
+                    vault_copy_int(&o, it, "utxo_count");
+                    vault_copy_str(&o, it, "ticker", "unknown");
+                    vault_copy_str(&o, it, "name", "unknown");
+                    vault_copy_int(&o, it, "decimals");
+                }
                 (void)json_push_kv_bool(&o, "encumbered", is_enc);
                 if (is_enc) {
                     vault_copy_str(&o, it, "encumbered_reason", "unknown");

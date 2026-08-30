@@ -135,6 +135,7 @@ int test_netbase_split_host_port(void);
 int test_nat_route_dump(void);
 int test_peer_strategy_worker(void);
 int test_activerecord(void);
+int test_activerecord_query_builder(void);
 int test_sapling_crypto(void);
 int test_groth16_msm_parity(void);
 int test_groth16_r1cs_oracle(void);
@@ -149,6 +150,7 @@ int test_slp(void);
 int test_models(void);
 int test_core(void);
 int test_json(void);
+int test_engine(void);
 int test_validation(void);
 int test_wallet(void);
 int test_primitives(void);
@@ -707,6 +709,7 @@ int test_zslp_store_port(void);
 int test_atomic_commit_ordering(void);
 int test_shielded_spend_slice(void);
 int test_coldimport_restart_fragility(void);
+int test_territory(void);
 
 /* Spec-based user story tests (one per feature area) */
 int spec_wallet_dashboard(void);

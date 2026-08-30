@@ -6,9 +6,11 @@
 #define ZCL_SERVICES_VAULT_READ_H
 
 #include "base/result.h"
+#include "models/zslp.h"
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct node_db;
@@ -96,6 +98,19 @@ const char *vault_class_name(enum vault_class cls);
 const char *vault_class_unit(enum vault_class cls);
 
 #define VAULT_REASON_MAX 160
+#define VAULT_TOKEN_ITEMS_MAX 64
+
+/* Token balances cannot be added across token IDs. Each item therefore
+ * keeps its own identifier and base-unit balance. */
+struct vault_token_item {
+    uint8_t token_id[32];
+    char ticker[ZSLP_TICKER_MAX + 1];
+    char name[ZSLP_NAME_MAX + 1];
+    int decimals;
+    int64_t units;
+    int64_t utxo_count;
+    bool metadata_available;
+};
 
 /* One asset class's holdings.
  *
@@ -110,7 +125,8 @@ const char *vault_class_unit(enum vault_class cls);
  *
  * For non-fungible classes (names, market offers) the columns count items
  * in `unit` rather than money, and `is_money` is false so a caller never
- * adds names to zatoshi. */
+ * adds names to zatoshi. Token balances are carried only by the per-token
+ * items in vault_snapshot: units from different token IDs are never added. */
 struct vault_row {
     enum vault_class    cls;
     const char         *class_name;
@@ -144,6 +160,9 @@ struct vault_identities {
 struct vault_snapshot {
     struct vault_identities identities;
     struct vault_row        rows[VAULT_CLASS_COUNT];
+    struct vault_token_item token_items[VAULT_TOKEN_ITEMS_MAX];
+    size_t                  token_item_count;
+    bool                    token_items_truncated;
 
     /* Rollup across the money-denominated classes only. This is the number
      * `getbalance` should have been reporting: transparent + shielded +

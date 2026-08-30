@@ -9,8 +9,9 @@ ZCL_COMMAND_BRANCH("code", "", "Hierarchical source-code navigator",
 ZCL_COMMAND_READY_READ(
     "code.guide", "code", "",
     "How to edit and prove a change in this checkout",
-    "The inner coding-agent loop: inspect with code impact/tests, prove with "
-    "t-fast ONLY, lint-fast, and pre-push-ci at push. It reads no checkout "
+    "The inner coding-agent loop: check the generated capability inventory, "
+    "inspect with code impact/tests, then prove with t-fast ONLY, lint-fast, "
+    "bare full lint plus pre-push-ci at push. It reads no checkout "
     "state and never runs a compiler, test, or live-node command.",
     ZCL_COMMAND_LIST_BUDGET,
     "code,guide,develop,proof,lint,t-fast,impact,agent",
@@ -246,6 +247,95 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_NONE,
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_have)
+
+ZCL_COMMAND_READY_READ(
+    "code.territory", "code", "",
+    "One module's generated scorecard: owns, proves, depends, weak",
+    "One module's inventory, generated per call and stored nowhere: the files "
+    "and bytes it owns, its purpose, the registered groups its files ROUTE to, "
+    "and — a different fact, never summed with routing — how many of its "
+    "public functions a registered test entry point actually REACHES through "
+    "the call graph. reached + unreached + unknown always equals "
+    "public_symbols; `unknown` is the walk refusing to answer (a bounded walk, "
+    "or a symbol referenced only at file scope, i.e. an indirect dispatch a "
+    "source call graph cannot follow) and is never folded into either "
+    "neighbour. Also reports include-edge dependencies both ways and the "
+    "weak spots: unreached public functions and files no rule routes anywhere. "
+    "With no argument, lists every territory the tree declares. The "
+    "entry-point closure is memoized against the code index's sealed source "
+    "generation, so the first call after an edit pays for the walk and the "
+    "rest do not. The reply's `cost` block reports what THIS call spent per "
+    "phase; a large territory (lib/net: 209 files, 79 public headers) exceeds "
+    "the latency bucket and says so in the envelope rather than hiding it — "
+    "the two costs are one router call per file and one symbol query per "
+    "public header, both bounded by the file count.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,territory,module,inventory,owns,proves,reached,routed,coverage,weak",
+    "zcl.code_territory_input.v1",
+    "zcl.code_territory.v1", "name", "name",
+    "z23 code territory lib/net",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_territory)
+
+/* `code.general` carries the bare `general` alias, so `z23 general lib/net`
+ * works without a fourth word. It is a code.* child and NOT a new root: the
+ * registry has exactly twelve roots and the root menu has a byte budget, both
+ * asserted by test_command_registry_catalog and test_zcode_node_command. The
+ * bare alias is the same mechanism `explain`, `profile`, `join` and `update`
+ * already use (see zcl_native_command_is_root) — a one-word entry point that
+ * costs the root menu nothing. That matters here: an agent should reach the
+ * inventory it keeps mis-remembering in one word, not four.
+ *
+ * A GENERAL GRANTS NO AUTHORITY. It reports and never decides. "No referee, no
+ * authority — everyone runs a full node" is the project's oldest rule, and
+ * metaverse_grant_check() remains the only answer to what anything may do. The
+ * leaf is AUTH_PUBLIC/SCOPE_LOCAL/TRANSPORT_NATIVE like every other source
+ * read: reading the tree you are checked out on is a developer action, and no
+ * stranger drives it — nothing here reaches the node. */
+ZCL_COMMAND_READY_READ(
+    "code.general", "code", "general",
+    "A territory's dispatch brief, or the roll-up ranked by weakest evidence",
+    "The brief for whoever is about to work in one territory, generated per "
+    "call and stored nowhere: what it OWNS (files, bytes, public functions, "
+    "types, macros), what PROVES it (the groups its files route to, and — a "
+    "different fact, never summed with routing — how many public functions a "
+    "registered test entry point actually reaches), what it TRUSTS (whether a "
+    "result from those groups is reproducible: currently UNKNOWN for every "
+    "group, reported rather than omitted because the determinism ledger has "
+    "not landed and an omitted field reads as 'fine'), where it is WEAK "
+    "(public functions no test reaches, files no rule routes anywhere, and a "
+    "duplicate-code answer reported UNKNOWN because lib/fingerprint has not "
+    "landed), and "
+    "what it REFUSES (the lint gates that bind it, derived from run_lint.sh's "
+    "gate table, each gate script's own text and the baseline ledgers those "
+    "scripts name; a gate that names no territory path lands in an explicit "
+    "scope_unknown bucket and is never guessed either way). With no argument, "
+    "the roll-up: every territory ranked by unproven public surface — where "
+    "the evidence is weakest, not the biggest or the first alphabetically. "
+    "Scoring every territory routes every file in the tree, which costs "
+    "seconds, so the roll-up is memoized against the code index's sealed "
+    "source generation and digest-verified on read; `cost.source` says whether "
+    "this answer was memoized or worked out, and the first call after an edit "
+    "is the one that pays. This leaf reports and never decides: it grants no "
+    "authority, approves nothing, and blocks nothing.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "general,brief,territory,inventory,owns,proves,reached,weak,refuses,"
+    "rollup,dispatch",
+    "zcl.general_input.v1",
+    "zcl.general_brief.v1", "name", "name",
+    "z23 general lib/net",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_general)
 
 /* Provenance sub-branch. Every leaf here answers "what produced this?" about
  * the codebase itself rather than reading it: which tree state produced an
