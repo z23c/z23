@@ -9892,7 +9892,7 @@ mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
 $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Itools -Itools/dev -Ilib/base/include -Ilib/sha3/include \
 	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
 	    -Ilib/platform/include -Ilib/util/include \
@@ -11259,7 +11259,8 @@ $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
 	lib/codeindex/include/codeindex/codeindex_inventory.h \
 	lib/codeindex/src/codeindex_inventory_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror \
+	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -O2 -Wall -Wextra -Werror \
 	    -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
 	    -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
 	    -Ilib/crypto/include -Ilib/platform/include \
