@@ -7,8 +7,8 @@
  * objects: a reader should be able to hold the whole program in mind.
  */
 
-#ifndef ZHELLO_ZHELLO_H
-#define ZHELLO_ZHELLO_H
+#ifndef ZHELLO_H
+#define ZHELLO_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,4 +61,4 @@ uint64_t zhello_canvas_digest(const struct zhello_canvas *canvas);
 }
 #endif
 
-#endif /* ZHELLO_ZHELLO_H */
+#endif /* ZHELLO_H */

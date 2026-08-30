@@ -150,7 +150,7 @@ never varied).
 
 ### Reusable C23 packages — `packages/`
 
-The 76 Commons packages (`zhex`, `zbuf`, `zjson`, …), one directory per
+The Commons packages (`zhex`, `zbuf`, `zjson`, …), one directory per
 component: `zcode-package.json` manifest, `LICENSE`, `README.md`, one
 namespaced public header `include/<pkg>/<pkg>.h`, primary TU `src/<pkg>.c`,
 `tests/`. They are NOT compiled into the node by the Makefile (only the
