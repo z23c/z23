@@ -980,16 +980,17 @@ static int test_ic_dev_proof_contract_is_direct(void)
 {
     int failures = 0;
     TEST("impact composition: dev proof contract stops at its exact owner") {
-        const char *files[] = {
-            "app/controllers/include/controllers/agent_impact_rules.def",
-            "config/commands/dev.def",
-            "lib/test/src/lint_gate_selftests.h",
-            "tools/dev/dev_proof.c",
-            "tools/dev/dev_proof_receipt.h",
-            "tools/dev/devloop.h",
-            "tools/command/native_dev_proof_command.c",
-            "tools/command/native_dev_verify_change_command.c",
+        static const char *const files[] = {
+#define AGENT_DIRECT_DEVELOPMENT_CONTRACT(path_) path_,
+#include "controllers/agent_direct_development_contracts.def"
+#undef AGENT_DIRECT_DEVELOPMENT_CONTRACT
         };
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+            struct agent_impact_acc impact = {0};
+            ASSERT(agent_impact_path_is_direct_development_contract(files[i]));
+            ASSERT(agent_impact_apply_shared_rules(files[i], &impact));
+            ASSERT(impact.groups_len > 0);
+        }
         struct zcl_devloop_plan plan;
         ASSERT(zcl_devloop_plan_files(files,
             sizeof(files) / sizeof(files[0]), &plan));
@@ -1001,8 +1002,9 @@ static int test_ic_dev_proof_contract_is_direct(void)
                ZCL_DEVLOOP_DIM_NOT_APPLICABLE);
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_INCLUDE].status ==
                ZCL_DEVLOOP_DIM_NOT_APPLICABLE);
-        ASSERT(ic_planned(&plan, "dev_platform"));
         ASSERT(zcl_devloop_plan_proof_admissible(&plan, NULL));
+        ASSERT(agent_impact_path_is_direct_development_contract(
+            "tools/command/native_dev_loop_command.h"));
         PASS();
     } _test_next:;
     return failures;

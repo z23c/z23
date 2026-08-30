@@ -3313,7 +3313,7 @@ agent-velocity:
 # Checkout-locked around BOTH prerequisite construction and execution. Locking
 # only this target's final recipe allowed a concurrent public invocation to
 # rewrite build depfiles while codeindex was sealing its physical input graph.
-.PHONY: t-locked t-fast-locked t-fast-exact-locked
+.PHONY: t-locked t-fast-locked t-fast-exact-locked dev-proof-bundle
 t:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
@@ -3346,6 +3346,13 @@ t-fast-exact:
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 	$(ZCL_TEST_STACK_SETUP) && \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
+
+# Build every mutable prerequisite of the native proof runner without running
+# a test. dev_proof.c admits these exact artifacts into its private generation
+# and invokes that admitted runner once; no fallback target may both build and
+# execute a suite.
+dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
+	dev-bin zcl-nodectl zclassic23-acme fbsh
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also

@@ -83,6 +83,18 @@ static void agent_impact_add_group_list(struct agent_impact_acc *acc,
     }
 }
 
+bool agent_impact_path_is_direct_development_contract(const char *path)
+{
+    if (!path)
+        return false;
+#define AGENT_DIRECT_DEVELOPMENT_CONTRACT(path_) \
+    if (strcmp(path, (path_)) == 0) \
+        return true;
+#include "controllers/agent_direct_development_contracts.def"
+#undef AGENT_DIRECT_DEVELOPMENT_CONTRACT
+    return false;
+}
+
 bool agent_impact_apply_shared_rules(const char *path,
                                      struct agent_impact_acc *acc)
 {
