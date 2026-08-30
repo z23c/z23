@@ -982,6 +982,11 @@ static void write_test_timing_json(const struct group_result *results,
     fclose(fp);
     free(order);
 
+#if defined(_WIN32)
+    /* Windows rename() refuses an existing target; the timing artifact is a
+     * best-effort cache, so replacing last run's file is correct. */
+    (void)remove(final_path);
+#endif
     if (rename(tmp_path, final_path) != 0)
         perror("test_parallel: rename timing artifact");
 }

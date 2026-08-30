@@ -12,17 +12,55 @@
 #include "net/ws_events.h"
 #include "event/event.h"
 
+#if !defined(_WIN32)
 #include <poll.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
+#endif
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include "platform/socket_compat.h"
+
+#include <stdint.h>
+
+/* Fixture peer sockets held as int fds; socketpair becomes the verified
+ * loopback-TCP pair, close()/read() SOCKET verbs. Every close()/read() in
+ * this TU targets one of those sockets. */
+static int wse_socketpair(int sv[2])
+{
+    platform_socket_t pair[2];
+    if (!platform_socket_pair(pair))
+        return -1;
+    sv[0] = (int)(intptr_t)pair[0];
+    sv[1] = (int)(intptr_t)pair[1];
+    return 0;
+}
+
+#define socketpair(domain, type, protocol, sv) wse_socketpair(sv)
+#define close(fd) \
+    (platform_socket_close((platform_socket_t)(intptr_t)(fd)) == 0 ? 0 : -1)
+#define read(fd, buf, len) \
+    ((ssize_t)platform_socket_receive((platform_socket_t)(intptr_t)(fd), \
+                                      buf, len))
+#endif
 
 static ssize_t read_timeout(int fd, void *buf, size_t cap, int ms)
 {
+#if defined(_WIN32)
+    platform_socket_pollfd pfd = {
+        .fd = (platform_socket_t)(intptr_t)fd,
+        .events = PLATFORM_SOCKET_POLL_READ,
+    };
+    if (platform_socket_poll(&pfd, 1, ms) <= 0) return 0;
+#else
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
     if (poll(&pfd, 1, ms) <= 0) return 0;
+#endif
     return read(fd, buf, cap);
 }
 

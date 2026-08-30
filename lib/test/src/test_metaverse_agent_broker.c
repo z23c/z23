@@ -58,10 +58,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#endif
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MB_CHECK(name, expr) do { \
@@ -665,6 +667,8 @@ static int mb_audit(void)
 
 /* ── (d) SO_PEERCRED as a predicate ─────────────────────────────────────── */
 
+#if !defined(_WIN32)
+
 static int mb_peercred(void)
 {
     int failures = 0;
@@ -1226,6 +1230,36 @@ static int mb_confinement_assertions(const struct mb_child_run *run,
     return failures;
 }
 
+#else /* _WIN32 */
+
+/* Cases (d)(e) need AF_UNIX + SO_PEERCRED, which do not exist on Windows
+ * (production agent_broker_listen/agent_broker_accept_once refuse there),
+ * and (f)-(i) spawn Landlock-confined children, which the os_sandbox stub
+ * refuses on Windows. The portable codec/grant/audit/custody cases still
+ * run. */
+static int mb_peercred(void)
+{
+    printf("agent_broker: SKIP (Windows): SO_PEERCRED predicate case needs "
+           "AF_UNIX\n");
+    return 0;
+}
+
+static int mb_sender_cred(void)
+{
+    printf("agent_broker: SKIP (Windows): socketpair-credential trap case "
+           "needs AF_UNIX + fork\n");
+    return 0;
+}
+
+static int mb_socket_identity(void)
+{
+    printf("agent_broker: SKIP (Windows): end-to-end peer-identity case "
+           "needs AF_UNIX + SO_PEERCRED\n");
+    return 0;
+}
+
+#endif /* !_WIN32 */
+
 int test_metaverse_agent_broker(void)
 {
     printf("\n=== metaverse confined-agent broker (adversarial) ===\n");
@@ -1245,6 +1279,7 @@ int test_metaverse_agent_broker(void)
     bool seccomp = os_sandbox_seccomp_supported();
     printf("agent_broker: landlock ABI = %d, seccomp = %d\n", abi, (int)seccomp);
 
+#if !defined(_WIN32)
     char self_exe[512] = { 0 };
     bool have_self = os_proc_exe_path(self_exe, sizeof(self_exe));
 
@@ -1281,6 +1316,10 @@ int test_metaverse_agent_broker(void)
                "skipping the confinement assertions; the boundary is not "
                "claimed on such a host\n");
     }
+#else
+    printf("agent_broker: SKIP (Windows): confined-child boundary assertions "
+           "need Landlock + seccomp + fork\n");
+#endif
 
     (void)test_rm_rf_recursive(g_dir);
     printf("=== metaverse confined-agent broker complete: %d failure(s) ===\n",

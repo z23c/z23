@@ -1178,4 +1178,18 @@ int test_event_log(void)
     printf("event_log: SKIP (Windows): fork+SIGKILL event-log kill9-trial lane\n");
     return 0;
 }
+
+int test_event_log_kill9(void)
+{
+    printf("event_log_kill9: SKIP (Windows): fork+SIGKILL event-log "
+           "kill9-trial lane\n");
+    return 0;
+}
+
+int test_event_log_benchmark(void)
+{
+    printf("event_log_benchmark: SKIP (Windows): fork+SIGKILL event-log "
+           "kill9-trial lane\n");
+    return 0;
+}
 #endif

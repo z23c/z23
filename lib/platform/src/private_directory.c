@@ -41,6 +41,11 @@ bool platform_private_directory_ensure(const char *path)
         .nLength = sizeof(attributes),
         .lpSecurityDescriptor = platform_private_acl_descriptor(&acl),
         .bInheritHandle = FALSE};
+    /* Win32 calls below do not set errno; zero it BEFORE the create so a
+     * validation refusal reports EACCES, never a stale CRT errno from an
+     * unrelated earlier call (observed: boot reported EINVAL for what was an
+     * ACL-inheritance refusal on a pre-created datadir). */
+    errno = 0;
     if (ok && !CreateDirectoryW(wide, &attributes)) {
         DWORD error = GetLastError();
         ok = error == ERROR_ALREADY_EXISTS;
@@ -76,6 +81,7 @@ bool platform_private_directory_create(const char *path)
         .nLength = sizeof(attributes),
         .lpSecurityDescriptor = platform_private_acl_descriptor(&acl),
         .bInheritHandle = FALSE};
+    errno = 0;  /* see the errno note in platform_private_directory_ensure */
     if (ok && !CreateDirectoryW(wide, &attributes)) {
         DWORD error = GetLastError();
         errno = error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS
@@ -90,6 +96,7 @@ bool platform_private_directory_create(const char *path)
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     ok = ok && directory != INVALID_HANDLE_VALUE &&
          platform_private_acl_validate_handle(directory, true);
+    if (!ok && errno == 0) errno = EACCES;
     if (!ok && directory != INVALID_HANDLE_VALUE) RemoveDirectoryW(wide);
     if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
     platform_private_acl_destroy(&acl);

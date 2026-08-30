@@ -1190,6 +1190,16 @@ int test_mint_skip_crypto(void)
             return msc_fork_role_dispatch(role);
     }
 #endif
+#if defined(_WIN32)
+    /* progress_store is fail-closed on Windows ("native Windows consensus
+     * store disabled: retained-directory SQLite VFS is not qualified"; that
+     * refusal is the acceptance in
+     * progress_store_windows_refusal_acceptance.c), so neither fold can open
+     * its store and the equivalence claim is unobservable here. */
+    printf("mint_skip_crypto: SKIP (Windows): progress_store refuses on "
+           "Windows by design (see the refusal acceptance)\n");
+    return 0;
+#endif
     printf("\n=== test_mint_skip_crypto: state-only fold == validated fold ===\n");
 
     blocker_module_init();

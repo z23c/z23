@@ -31,8 +31,10 @@
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/uio.h>
 #include <unistd.h>
+#endif
 
 #define BPT_NBLOCKS 12
 

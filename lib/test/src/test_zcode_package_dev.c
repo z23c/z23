@@ -750,8 +750,6 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
         (void)snprintf(root, sizeof(root),
                        "test-tmp/zcode-package-dev-%ld", (long)getpid());
         ASSERT(zpd_fixture(root, false));
-        (void)snprintf(path, sizeof(path), "%s/link", root);
-        ASSERT(symlink("src/x.c", path) == 0);
         struct vcs_package_prepare_options options = {
             .dir = root, .publisher_sequence = 1,
             .reward_address = "", .chain_id = "zclassic-main",
@@ -759,6 +757,17 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
         memcpy(options.publisher_pubkey, pubkey, 33);
         struct vcs_package_prepared prepared;
         char detail[256];
+#if defined(_WIN32)
+        /* CreateSymbolicLinkA fails with ERROR_PRIVILEGE_NOT_HELD without
+         * Developer Mode / SeCreateSymbolicLinkPrivilege, and mkfifo does
+         * not exist: the non-regular-file refusal fixtures cannot be built
+         * here. The portable ERR_META case below still runs. */
+        (void)path;
+        printf("zcode_package_dev: SKIP (Windows): symlink/FIFO file-type "
+               "refusal fixtures (symlink privilege unavailable; no mkfifo)\n");
+#else
+        (void)snprintf(path, sizeof(path), "%s/link", root);
+        ASSERT(symlink("src/x.c", path) == 0);
         (void)snprintf(path, sizeof(path), "%s/.zvcs", root);
         ASSERT(symlink("src", path) == 0);
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
@@ -782,6 +791,7 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
         ASSERT(unlink(path) == 0);
+#endif
         zpd_fixture_cleanup(root);
         ASSERT(zpd_fixture(root, true));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
@@ -986,6 +996,13 @@ static int zpd_test_project_init(void)
         json_free(&input);
         ASSERT(unlink(added) == 0);
 
+#if defined(_WIN32)
+        /* Same constraint as the prepare fail-closed fixtures: no symlink
+         * privilege here, so the "symlink in workspace fails init plan"
+         * probe cannot be built. */
+        printf("zcode_package_dev: SKIP (Windows): init-plan symlink "
+               "refusal fixture (symlink privilege unavailable)\n");
+#else
         char link[320];
         (void)snprintf(link, sizeof(link), "%s/link", root);
         ASSERT(symlink("LICENSE", link) == 0);
@@ -998,6 +1015,7 @@ static int zpd_test_project_init(void)
         ASSERT(access(meta, F_OK) != 0);
         zcl_command_reply_free(&reply);
         json_free(&input);
+#endif
         zpd_fixture_cleanup(root);
         PASS();
     } _test_next:;

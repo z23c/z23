@@ -31,16 +31,52 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#if !defined(_WIN32)
 #include <poll.h>
+#endif
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <io.h>
+#else
 #include <sys/file.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#endif
+#include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+/* flock(2) over LockFileEx on the fd's backing handle: exclusive byte-range
+ * lock at offset 0, blocking unless LOCK_NB, unlocked by LOCK_UN on the same
+ * range. Covers the build-cache lock below; not a general flock. */
+#define LOCK_EX 2
+#define LOCK_NB 4
+#define LOCK_UN 8
+static int hs_flock(int fd, int op)
+{
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        errno = EBADF;
+        return -1;
+    }
+    if (op & LOCK_UN)
+        return UnlockFile(h, 0, 0, 1, 0) ? 0 : -1;
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    DWORD flags = LOCKFILE_EXCLUSIVE_LOCK;
+    if (op & LOCK_NB)
+        flags |= LOCKFILE_FAIL_IMMEDIATELY;
+    return LockFileEx(h, flags, 0, 1, 0, &ov) ? 0 : -1;
+}
+#define flock(fd, op) hs_flock((fd), (op))
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -181,10 +217,46 @@ static bool hs_regular(const char *path, struct stat *out)
 
 static bool hs_stat_equal(const struct stat *a, const struct stat *b)
 {
+#if defined(_WIN32)
+    /* UCRT struct stat has second-resolution st_mtime and no st_mtim. */
+    return a->st_size == b->st_size &&
+           a->st_mtime == b->st_mtime;
+#else
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
            a->st_size == b->st_size &&
            a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
            a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+#endif
+}
+
+static bool hs_mtime_after(const struct stat *a, const struct stat *b)
+{
+#if defined(_WIN32)
+    /* Second-resolution comparison; see hs_stat_equal. */
+    return a->st_mtime > b->st_mtime;
+#else
+    return a->st_mtim.tv_sec > b->st_mtim.tv_sec ||
+           (a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+            a->st_mtim.tv_nsec > b->st_mtim.tv_nsec);
+#endif
+}
+
+static int hs_link(const char *existing, const char *linkpath)
+{
+#if defined(_WIN32)
+    if (CreateHardLinkA(linkpath, existing, NULL))
+        return 0;
+    DWORD err = GetLastError();
+    if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS)
+        errno = EEXIST;
+    else if (err == ERROR_NOT_SAME_DEVICE)
+        errno = EXDEV;
+    else
+        errno = EIO;
+    return -1;
+#else
+    return link(existing, linkpath);
+#endif
 }
 
 static bool hs_plan_line(char *dst, size_t cap, const char *line,
@@ -257,28 +329,16 @@ static bool hs_plan_load_locked(const char *root, bool *cache_hit,
         !hs_regular(services, &services_st) ||
         !hs_regular(shadow_owners, &shadow_owners_st) ||
         !hs_regular(hotfork_capsules, &hotfork_capsules_st) ||
-        make_st.st_mtim.tv_sec > stamp.st_mtim.tv_sec ||
-        (make_st.st_mtim.tv_sec == stamp.st_mtim.tv_sec &&
-         make_st.st_mtim.tv_nsec > stamp.st_mtim.tv_nsec) ||
-        manifest_st.st_mtim.tv_sec > stamp.st_mtim.tv_sec ||
-        (manifest_st.st_mtim.tv_sec == stamp.st_mtim.tv_sec &&
-         manifest_st.st_mtim.tv_nsec > stamp.st_mtim.tv_nsec) ||
-        islands_st.st_mtim.tv_sec > stamp.st_mtim.tv_sec ||
-        (islands_st.st_mtim.tv_sec == stamp.st_mtim.tv_sec &&
-         islands_st.st_mtim.tv_nsec > stamp.st_mtim.tv_nsec) ||
-        services_st.st_mtim.tv_sec > stamp.st_mtim.tv_sec ||
-        (services_st.st_mtim.tv_sec == stamp.st_mtim.tv_sec &&
-         services_st.st_mtim.tv_nsec > stamp.st_mtim.tv_nsec) ||
-        shadow_owners_st.st_mtim.tv_sec > stamp.st_mtim.tv_sec ||
-        (shadow_owners_st.st_mtim.tv_sec == stamp.st_mtim.tv_sec &&
-         shadow_owners_st.st_mtim.tv_nsec > stamp.st_mtim.tv_nsec)) {
+        hs_mtime_after(&make_st, &stamp) ||
+        hs_mtime_after(&manifest_st, &stamp) ||
+        hs_mtime_after(&islands_st, &stamp) ||
+        hs_mtime_after(&services_st, &stamp) ||
+        hs_mtime_after(&shadow_owners_st, &stamp)) {
         hs_why(why, why_len,
                "resident action plan stale; refresh after build-system change");
         return false;
     }
-    if (hotfork_capsules_st.st_mtim.tv_sec > stamp.st_mtim.tv_sec ||
-        (hotfork_capsules_st.st_mtim.tv_sec == stamp.st_mtim.tv_sec &&
-         hotfork_capsules_st.st_mtim.tv_nsec > stamp.st_mtim.tv_nsec)) {
+    if (hs_mtime_after(&hotfork_capsules_st, &stamp)) {
         hs_why(why, why_len,
                "resident action plan stale; refresh after build-system change");
         return false;
@@ -402,7 +462,12 @@ static bool hs_depfile_read(const char *root, const char *path,
             d->dev = st.st_dev;
             d->ino = st.st_ino;
             d->size = st.st_size;
+#if defined(_WIN32)
+            d->mtime.tv_sec = st.st_mtime;
+            d->mtime.tv_nsec = 0;
+#else
             d->mtime = st.st_mtim;
+#endif
             if (!hs_sha256_digest_file(full, d->sha256))
                 return false;
         }
@@ -639,7 +704,11 @@ static bool hs_copy_publish(const char *source, const char *target,
         if (source_fd >= 0) close(source_fd);
         return false;
     }
+#if defined(_WIN32)
+    int temp_fd = mkstemp(temp);
+#else
     int temp_fd = mkostemp(temp, O_CLOEXEC);
+#endif
     if (temp_fd < 0) {
         close(source_fd);
         return false;
@@ -671,7 +740,11 @@ static bool hs_copy_publish(const char *source, const char *target,
     }
     if (close(source_fd) != 0)
         ok = false;
+#if defined(_WIN32)
+    if (ok && (_chmod(temp, _S_IREAD) != 0 || _commit(temp_fd) != 0))
+#else
     if (ok && (fchmod(temp_fd, 0444) != 0 || fsync(temp_fd) != 0))
+#endif
         ok = false;
     if (close(temp_fd) != 0)
         ok = false;
@@ -679,7 +752,7 @@ static bool hs_copy_publish(const char *source, const char *target,
     if (ok && (!hs_sha256_file(temp, actual) ||
                strcmp(actual, expected_sha256) != 0))
         ok = false;
-    if (ok && link(temp, target) != 0) {
+    if (ok && hs_link(temp, target) != 0) {
         if (errno != EEXIST || !hs_regular(target, NULL) ||
             !hs_sha256_file(target, actual) ||
             strcmp(actual, expected_sha256) != 0 ||
@@ -693,7 +766,7 @@ static bool hs_copy_publish(const char *source, const char *target,
 static bool hs_link_or_copy_publish(const char *source, const char *target,
                                     const char expected_sha256[65])
 {
-    if (!hs_force_cache_copy_for_test() && link(source, target) == 0)
+    if (!hs_force_cache_copy_for_test() && hs_link(source, target) == 0)
         return chmod(target, 0444) == 0;
     int link_errno = hs_force_cache_copy_for_test() ? EXDEV : errno;
     if (link_errno == EEXIST) {
@@ -782,11 +855,33 @@ static bool hs_temp(char *out, size_t out_len, const char *root,
                      suffix);
     if (n <= 0 || (size_t)n >= out_len)
         return false;
+#if defined(_WIN32)
+    /* No mkstemps: generate with mkstemp on the stem, then move the
+       created file onto the suffixed name. */
+    size_t suffix_len = strlen(suffix);
+    size_t out_len_used = strlen(out);
+    char stem[PATH_MAX];
+    if (out_len_used < suffix_len || out_len_used - suffix_len >= sizeof(stem))
+        return false;
+    memcpy(stem, out, out_len_used - suffix_len);
+    stem[out_len_used - suffix_len] = '\0';
+    int fd = mkstemp(stem);
+    if (fd < 0)
+        return false;
+    close(fd);
+    if (snprintf(out, out_len, "%s%s", stem, suffix) <= 0 ||
+        rename(stem, out) != 0) {
+        (void)unlink(stem);
+        return false;
+    }
+    return true;
+#else
     int fd = mkstemps(out, (int)strlen(suffix));
     if (fd < 0)
         return false;
     close(fd);
     return true;
+#endif
 }
 
 static bool hs_run_compile(const struct hs_action_plan *plan,
@@ -3565,6 +3660,26 @@ static bool hs_shadow_probe(
                             int64_t *elapsed_us,
                             char *why, size_t why_len)
 {
+#if defined(_WIN32)
+    /* The shadow runner is a disposable fork() that maps an ELF module
+     * through the POSIX loader and polls a pipe for the wire struct; none
+     * of fork/dlopen/pipe-poll exists on this lane. Report unavailable
+     * honestly — never a fake green or red story. */
+    (void)source;
+    (void)build;
+    if (elapsed_us) *elapsed_us = 0;
+    json_init(response); json_set_object(response);
+    (void)json_push_kv_str(response, "schema", "zcl.dev_shadow_story.v2");
+    (void)json_push_kv_str(response, "mode", "HOT_SHADOW_CORE");
+    (void)json_push_kv_str(response, "feedback_class", "HOT_SHADOW_CORE");
+    (void)json_push_kv_str(response, "status", "unavailable");
+    (void)json_push_kv_bool(response, "forked", false);
+    const char *message = "shadow runner unavailable on Windows "
+                          "(fork + ELF module probe)";
+    hs_why(why, why_len, message);
+    (void)json_push_kv_str(response, "error", message);
+    return false;
+#else
     int pipefd[2] = {-1, -1};
     int64_t started = platform_time_monotonic_us();
     const char *artifact = build ? build->artifact_path : NULL;
@@ -3710,6 +3825,7 @@ static bool hs_shadow_probe(
         (void)json_push_kv_str(response, "error", message);
     }
     return ok;
+#endif
 }
 
 struct hs_hotfork_wire {
@@ -3758,6 +3874,7 @@ bool zcl_devloop_hotfork_descriptor_validate(
     return hs_hotfork_descriptor_matches(capsule, def, &receipt);
 }
 
+#if !defined(_WIN32)
 static bool hs_hotfork_child_confine(int report_fd)
 {
     long max_fd = sysconf(_SC_OPEN_MAX);
@@ -3955,6 +4072,30 @@ static bool hs_hotfork_probe(
     }
     return ok;
 }
+#else /* _WIN32 */
+/* The HOT_FORK runner is a fork()ed, seccomp/landlock-confined child that
+ * executes a candidate ELF module and reports over a polled pipe; none of
+ * that machinery exists on this lane. Report unavailable honestly. */
+static bool hs_hotfork_probe(
+    const struct hs_hotfork_def *def,
+    const struct zcl_devloop_hotswap_build_receipt *build,
+    struct json_value *response, int64_t *elapsed_us,
+    char *why, size_t why_len)
+{
+    (void)def;
+    (void)build;
+    if (elapsed_us) *elapsed_us = 0;
+    json_init(response); json_set_object(response);
+    (void)json_push_kv_str(response, "schema", "zcl.dev_hotfork_story.v2");
+    (void)json_push_kv_str(response, "status", "unavailable");
+    (void)json_push_kv_bool(response, "forked", false);
+    const char *message = "HOT_FORK runner unavailable on Windows "
+                          "(fork + seccomp/landlock + ELF module probe)";
+    hs_why(why, why_len, message);
+    (void)json_push_kv_str(response, "error", message);
+    return false;
+}
+#endif
 
 static bool hs_story_receipt_valid(
     const char *source, const struct zcl_devloop_hotswap_build_receipt *build,

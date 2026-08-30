@@ -3825,4 +3825,20 @@ int test_zcode_score_receipt(void)
     printf("zcode_score_receipt: SKIP (Windows): forked score-receipt child lane\n");
     return 0;
 }
+
+#define ZCL_SCORE_RECEIPT_WIN_SKIP(entry) \
+int entry(void) \
+{ \
+    printf(#entry ": SKIP (Windows): forked score-receipt child lane\n"); \
+    return 0; \
+}
+
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_packages)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_rejections)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_creation)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_patronage)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_reproduction)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_shadow)
+
+#undef ZCL_SCORE_RECEIPT_WIN_SKIP
 #endif

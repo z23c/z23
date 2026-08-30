@@ -87,16 +87,20 @@
 #include "util/util.h"
 
 #include <errno.h>
+#if !defined(_WIN32)
 #include <poll.h>
+#endif
 #include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#endif
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1302,6 +1306,7 @@ static int check_receipt_binds_response_to_audit(const char *dir)
 /* The fixture catalog's property ids are SHA3 over a fixed domain tag, so no
  * authoritative model can ever mint one. A production broker that resolves
  * one is answering out of a test double. */
+#if !defined(_WIN32)
 static int check_production_broker_has_no_fixture(void)
 {
     int failures = 0;
@@ -1402,6 +1407,16 @@ static int check_production_broker_has_no_fixture(void)
 
     return failures;
 }
+#else /* _WIN32 */
+/* The shipped broker mode listens on AF_UNIX, which production refuses on
+ * Windows (agent_broker_listen returns -1), so there is no socket to probe. */
+static int check_production_broker_has_no_fixture(void)
+{
+    printf("metaverse_vocabulary: SKIP (Windows): broker-mode probe needs "
+           "fork + AF_UNIX listen\n");
+    return 0;
+}
+#endif /* !_WIN32 */
 
 /* ── the unified-header regression guard ─────────────────────────────────
  *

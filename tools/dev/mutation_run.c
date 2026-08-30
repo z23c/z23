@@ -45,14 +45,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <poll.h>
 #include <signal.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -144,6 +151,137 @@ int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
         *out = NULL;
     if (out_len)
         *out_len = 0;
+#if defined(_WIN32)
+    /* CreateProcess + PeekNamedPipe capture: no fork/execvp on this lane.
+     * lpCurrentDirectory plays the child-side chdir; TerminateProcess is
+     * the SIGKILL analogue; rc stays -2 on timeout, else the exit code. */
+    if (!argv || !argv[0]) {
+        fprintf(stderr, "mutation: empty argv\n");
+        return -1;
+    }
+    char cmd[8192];
+    size_t used = 0;
+    cmd[0] = '\0';
+    for (size_t i = 0; argv[i]; i++) {
+        if (i > 0 && used + 1 < sizeof(cmd))
+            cmd[used++] = ' ';
+        cmd[used] = '\0';
+        const char *a = argv[i];
+        bool quote = strchr(a, ' ') != NULL || strchr(a, '\t') != NULL ||
+                     a[0] == '\0';
+        size_t alen = strlen(a);
+        if (used + alen + 3 >= sizeof(cmd)) {
+            fprintf(stderr, "mutation: command line too long\n");
+            return -1;
+        }
+        if (quote)
+            cmd[used++] = '"';
+        memcpy(cmd + used, a, alen);
+        used += alen;
+        if (quote)
+            cmd[used++] = '"';
+        cmd[used] = '\0';
+    }
+
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        fprintf(stderr, "mutation: CreatePipe failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof(pi));
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, dir,
+                        &si, &pi)) {
+        fprintf(stderr, "mutation: CreateProcess(%s) failed (%lu)\n",
+                argv[0], (unsigned long)GetLastError());
+        CloseHandle(rd);
+        CloseHandle(wr);
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(wr); /* ours must close so the read end sees EOF */
+
+    size_t cap = 65536, len = 0;
+    char *buf = zcl_malloc(cap, "mutation.capture");
+    if (!buf) {
+        CloseHandle(rd);
+        TerminateProcess(pi.hProcess, 137);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        return -1;
+    }
+    long long deadline = mut_now_ms() + (timeout_ms > 0 ? timeout_ms : 600000);
+    bool timed_out = false;
+    for (;;) {
+        long long left = deadline - mut_now_ms();
+        if (left <= 0) {
+            timed_out = true;
+            break;
+        }
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL))
+            break; /* child hung up */
+        if (avail == 0) {
+            if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0)
+                break;
+            Sleep(10);
+            continue;
+        }
+        if (len + 8192 > cap) {
+            size_t ncap = cap * 2;
+            char *nb = zcl_realloc(buf, ncap, "mutation.capture");
+            if (!nb)
+                break;
+            buf = nb;
+            cap = ncap;
+        }
+        DWORD want = (DWORD)(cap - len - 1);
+        if (want > avail)
+            want = avail;
+        DWORD got = 0;
+        if (!ReadFile(rd, buf + len, want, &got, NULL) || got == 0)
+            break;
+        len += (size_t)got;
+    }
+    buf[len] = '\0';
+    CloseHandle(rd);
+
+    int rc;
+    if (timed_out) {
+        TerminateProcess(pi.hProcess, 137);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        rc = -2;
+    } else {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD code = 0;
+        if (!GetExitCodeProcess(pi.hProcess, &code))
+            code = (DWORD)-1;
+        rc = (int)code;
+    }
+    CloseHandle(pi.hProcess);
+    if (out) {
+        *out = buf;
+        if (out_len)
+            *out_len = len;
+    } else {
+        free(buf);
+    }
+    return rc;
+#else
     int fds[2];
     if (pipe(fds) != 0) {
         fprintf(stderr, "mutation: pipe failed: %s\n", strerror(errno));
@@ -245,6 +383,7 @@ int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
         free(buf);
     }
     return rc;
+#endif
 }
 
 /* ── shell word splitting ───────────────────────────────────────────── */

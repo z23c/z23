@@ -48,9 +48,9 @@
  * small *at-style vocabulary used by this module onto them.
  *
  * In the test-fast profile test/windows_compat.h is force-included ahead of
- * this block, so ssize_t/struct stat/S_IS*/the O_* stubs may already exist:
- * guard the type definitions and take the module's own protocol values back
- * with #undef where the compat header parked them at 0. */
+ * this block, so ssize_t, struct stat, the S_IS macros, and the O_* stubs
+ * may already exist: guard the type definitions and take the module's own
+ * protocol values back with #undef where the compat header parked them at 0. */
 #if !defined(_SSIZE_T_DEFINED)
 typedef int64_t ssize_t;
 #endif

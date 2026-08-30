@@ -187,10 +187,21 @@ int file_market_content_tests(void)
     snprintf(symlink_path, sizeof(symlink_path), "%s/content-link", dir);
     snprintf(fifo_path, sizeof(fifo_path), "%s/content-fifo", dir);
     snprintf(wrong_path, sizeof(wrong_path), "%s/wrong.bin", dir);
+#if defined(_WIN32)
+    /* No mkfifo, and symlink creation needs a privilege this host may not
+     * grant (CreateSymbolicLinkA -> ERROR_PRIVILEGE_NOT_HELD), so the
+     * non-regular-file refusal fixtures cannot be built. */
+    bool files_ready = content_write_file(filepath, payload, sizeof(payload)) &&
+        content_write_file(wrong_path, payload, sizeof(payload) - 1);
+    CONTENT_CHECK("regular and mismatch fixtures", files_ready);
+    (void)symlink_path;
+    (void)fifo_path;
+#else
     bool files_ready = content_write_file(filepath, payload, sizeof(payload)) &&
         symlink(filepath, symlink_path) == 0 && mkfifo(fifo_path, 0600) == 0 &&
         content_write_file(wrong_path, payload, sizeof(payload) - 1);
     CONTENT_CHECK("regular, symlink, fifo, and mismatch fixtures", files_ready);
+#endif
 
     int64_t now_unix = (int64_t)platform_time_wall_time_t();
     struct file_offer offer;
@@ -261,12 +272,19 @@ int file_market_content_tests(void)
         memcmp(loaded.sha3, chunk_sha3, 32) == 0);
     free(loaded.data);
 
+#if !defined(_WIN32)
     result = file_market_content_register(
         &ndb, offer.offer_id, symlink_path, now_unix + 1, &registered);
     CONTENT_CHECK("symbolic-link registration fails closed", !result.ok);
     result = file_market_content_register(
         &ndb, offer.offer_id, fifo_path, now_unix + 1, &registered);
     CONTENT_CHECK("nonblocking FIFO registration fails closed", !result.ok);
+#else
+    printf("file_market_content: SKIP (Windows): symbolic-link registration "
+           "fails closed (fixture unbuildable)\n");
+    printf("file_market_content: SKIP (Windows): nonblocking FIFO "
+           "registration fails closed (no mkfifo)\n");
+#endif
     result = file_market_content_register(
         &ndb, offer.offer_id, wrong_path, now_unix + 1, &registered);
     CONTENT_CHECK("signed size mismatch fails before persistence", !result.ok);
