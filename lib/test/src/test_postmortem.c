@@ -2,6 +2,7 @@
 
 #include "test/test_core.h"
 #include "config/boot.h"
+#include "platform/os_sandbox.h"
 #include "sim/postmortem.h"
 
 #include <dirent.h>
@@ -137,7 +138,8 @@ static int test_signal_handler_capsule(void)
 #else
             PM_CHECK("signal capsule records proc status limitation",
                      file_contains(proc_path,
-                                   "/proc/self/status is Linux-only"));
+                                   OS_SANDBOX_PROC_SELF_STATUS_PATH
+                                   " is Linux-only"));
 #endif
             char manifest_path[576];
             snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json",
@@ -224,7 +226,8 @@ static int test_boot_postmortem_install(void)
 #else
             PM_CHECK("boot postmortem proc status limitation recorded",
                      file_contains(proc_path,
-                                   "/proc/self/status is Linux-only"));
+                                   OS_SANDBOX_PROC_SELF_STATUS_PATH
+                                   " is Linux-only"));
 #endif
             char log_path[576];
             snprintf(log_path, sizeof(log_path), "%s/log.txt",
@@ -321,7 +324,8 @@ static int test_boot_postmortem_restart_compresses_prior_sigsegv(void)
 #else
         PM_CHECK("boot restart proc status limitation recorded",
                  file_contains(proc_path,
-                               "/proc/self/status is Linux-only"));
+                               OS_SANDBOX_PROC_SELF_STATUS_PATH
+                               " is Linux-only"));
 #endif
         char log_path[576];
         snprintf(log_path, sizeof(log_path), "%s/log.txt",

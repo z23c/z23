@@ -108,12 +108,12 @@ static void proof_windows_unavailable(struct zcl_dev_proof_status *out)
     }
 }
 
-bool zcl_dev_proof_resolve_pair(const char *repo_root,
-                                const char *requested_local,
-                                const char *requested_base,
-                                char local_commit[65],
-                                char remote_base[65],
-                                char *why, size_t why_len)
+static bool proof_resolve_pair_impl(const char *repo_root,
+                                    const char *requested_local,
+                                    const char *requested_base,
+                                    char local_commit[65],
+                                    char remote_base[65],
+                                    char *why, size_t why_len)
 {
     (void)repo_root;
     (void)requested_local;
@@ -124,10 +124,10 @@ bool zcl_dev_proof_resolve_pair(const char *repo_root,
     return false;
 }
 
-bool zcl_dev_proof_status_read(const char *repo_root,
-                               const char *local_commit,
-                               const char *remote_base,
-                               struct zcl_dev_proof_status *out)
+static bool proof_status_read_impl(const char *repo_root,
+                                   const char *local_commit,
+                                   const char *remote_base,
+                                   struct zcl_dev_proof_status *out)
 {
     (void)repo_root;
     (void)local_commit;
@@ -136,10 +136,10 @@ bool zcl_dev_proof_status_read(const char *repo_root,
     return true;
 }
 
-bool zcl_dev_proof_ensure(const char *repo_root,
-                          const char *local_commit,
-                          const char *remote_base,
-                          struct zcl_dev_proof_status *out)
+static bool proof_ensure_impl(const char *repo_root,
+                              const char *local_commit,
+                              const char *remote_base,
+                              struct zcl_dev_proof_status *out)
 {
     (void)repo_root;
     (void)local_commit;
@@ -148,11 +148,11 @@ bool zcl_dev_proof_ensure(const char *repo_root,
     return false;
 }
 
-bool zcl_dev_proof_wait(const char *repo_root,
-                        const char *local_commit,
-                        const char *remote_base,
-                        int timeout_ms,
-                        struct zcl_dev_proof_status *out)
+static bool proof_wait_impl(const char *repo_root,
+                            const char *local_commit,
+                            const char *remote_base,
+                            int timeout_ms,
+                            struct zcl_dev_proof_status *out)
 {
     (void)repo_root;
     (void)local_commit;
@@ -233,12 +233,12 @@ static bool git_capture(const char *root, const char *const argv[],
     return true;
 }
 
-bool zcl_dev_proof_resolve_pair(const char *repo_root,
-                                const char *requested_local,
-                                const char *requested_base,
-                                char local_commit[65],
-                                char remote_base[65],
-                                char *why, size_t why_len)
+static bool proof_resolve_pair_impl(const char *repo_root,
+                                    const char *requested_local,
+                                    const char *requested_base,
+                                    char local_commit[65],
+                                    char remote_base[65],
+                                    char *why, size_t why_len)
 {
     if (!repo_root || !local_commit || !remote_base) {
         proof_why(why, why_len, "proof_pair_input_invalid");
@@ -354,16 +354,16 @@ static bool proof_lock_stale(const char *path)
     return !proof_running(path, NULL, NULL);
 }
 
-bool zcl_dev_proof_status_read(const char *repo_root,
-                               const char *local_commit,
-                               const char *remote_base,
-                               struct zcl_dev_proof_status *out)
+static bool proof_status_read_impl(const char *repo_root,
+                                   const char *local_commit,
+                                   const char *remote_base,
+                                   struct zcl_dev_proof_status *out)
 {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     char local[65], base[65], why[160] = {0};
-    if (!zcl_dev_proof_resolve_pair(repo_root, local_commit, remote_base,
-                                    local, base, why, sizeof(why))) {
+    if (!proof_resolve_pair_impl(repo_root, local_commit, remote_base,
+                                 local, base, why, sizeof(why))) {
         out->state = ZCL_DEV_PROOF_STATE_INVALID;
         (void)snprintf(out->detail, sizeof(out->detail), "%s", why);
         return false;
@@ -1574,15 +1574,15 @@ static void proof_worker_run(const struct proof_paths *paths,
     _exit(ok ? 0 : 1);
 }
 
-bool zcl_dev_proof_ensure(const char *repo_root,
-                          const char *local_commit,
-                          const char *remote_base,
-                          struct zcl_dev_proof_status *out)
+static bool proof_ensure_impl(const char *repo_root,
+                              const char *local_commit,
+                              const char *remote_base,
+                              struct zcl_dev_proof_status *out)
 {
     char local[65], base[65], why[160] = {0};
-    if (!out || !zcl_dev_proof_resolve_pair(repo_root, local_commit,
-                                             remote_base, local, base,
-                                             why, sizeof(why))) {
+    if (!out || !proof_resolve_pair_impl(repo_root, local_commit,
+                                          remote_base, local, base,
+                                          why, sizeof(why))) {
         if (out) {
             memset(out, 0, sizeof(*out));
             out->state = ZCL_DEV_PROOF_STATE_INVALID;
@@ -1590,7 +1590,7 @@ bool zcl_dev_proof_ensure(const char *repo_root,
         }
         return false;
     }
-    if (!zcl_dev_proof_status_read(repo_root, local, base, out)) return false;
+    if (!proof_status_read_impl(repo_root, local, base, out)) return false;
     if (out->state == ZCL_DEV_PROOF_STATE_PASSED) {
         out->receipt_reused = true;
         return true;
@@ -1609,7 +1609,7 @@ bool zcl_dev_proof_ensure(const char *repo_root,
         fd = open(paths.lock, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         if (fd >= 0) break;
         if (errno != EEXIST) break;
-        if (zcl_dev_proof_status_read(repo_root, local, base, out) &&
+        if (proof_status_read_impl(repo_root, local, base, out) &&
             out->state == ZCL_DEV_PROOF_STATE_RUNNING)
             return true;
         if (!proof_lock_stale(paths.lock)) {
@@ -1656,24 +1656,24 @@ bool zcl_dev_proof_ensure(const char *repo_root,
                        "proof_worker_publication_failed");
         return false;
     }
-    return zcl_dev_proof_status_read(repo_root, local, base, out);
+    return proof_status_read_impl(repo_root, local, base, out);
 }
 
-bool zcl_dev_proof_wait(const char *repo_root,
-                        const char *local_commit,
-                        const char *remote_base,
-                        int timeout_ms,
-                        struct zcl_dev_proof_status *out)
+static bool proof_wait_impl(const char *repo_root,
+                            const char *local_commit,
+                            const char *remote_base,
+                            int timeout_ms,
+                            struct zcl_dev_proof_status *out)
 {
     if (!out || timeout_ms < 1 || timeout_ms > 900000) return false;
     int64_t deadline = platform_time_monotonic_us() + (int64_t)timeout_ms * 1000;
     bool ensured = false;
     for (;;) {
-        if (!zcl_dev_proof_status_read(repo_root, local_commit, remote_base, out))
+        if (!proof_status_read_impl(repo_root, local_commit, remote_base, out))
             return false;
         if (!ensured && out->state == ZCL_DEV_PROOF_STATE_MISSING) {
             ensured = true;
-            if (!zcl_dev_proof_ensure(repo_root, local_commit, remote_base, out))
+            if (!proof_ensure_impl(repo_root, local_commit, remote_base, out))
                 return false;
         }
         if (out->state != ZCL_DEV_PROOF_STATE_RUNNING &&
@@ -1685,3 +1685,40 @@ bool zcl_dev_proof_wait(const char *repo_root,
 }
 
 #endif /* _WIN32 */
+
+bool zcl_dev_proof_resolve_pair(const char *repo_root,
+                                const char *requested_local,
+                                const char *requested_base,
+                                char local_commit[65],
+                                char remote_base[65],
+                                char *why, size_t why_len)
+{
+    return proof_resolve_pair_impl(repo_root, requested_local, requested_base,
+                                   local_commit, remote_base, why, why_len);
+}
+
+bool zcl_dev_proof_status_read(const char *repo_root,
+                               const char *local_commit,
+                               const char *remote_base,
+                               struct zcl_dev_proof_status *out)
+{
+    return proof_status_read_impl(repo_root, local_commit, remote_base, out);
+}
+
+bool zcl_dev_proof_ensure(const char *repo_root,
+                          const char *local_commit,
+                          const char *remote_base,
+                          struct zcl_dev_proof_status *out)
+{
+    return proof_ensure_impl(repo_root, local_commit, remote_base, out);
+}
+
+bool zcl_dev_proof_wait(const char *repo_root,
+                        const char *local_commit,
+                        const char *remote_base,
+                        int timeout_ms,
+                        struct zcl_dev_proof_status *out)
+{
+    return proof_wait_impl(repo_root, local_commit, remote_base, timeout_ms,
+                           out);
+}
