@@ -13,6 +13,10 @@
         <string>-operator-lane=canonical</string>
         <string>-listen</string>
         <string>-txindex</string>
+        <!-- Enable authenticated Noise transport and the ZCODE DHT. Required
+             for private-machine mesh pairing; add only after understanding the
+             operator identity provisioning flow (zcode network delegate). -->
+        <!-- <string>-noisetransport</string> -->
         @EXTRA_FLAGS@
     </array>
 

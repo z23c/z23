@@ -9,7 +9,8 @@
  *      primitive (sysctlbyname("hw.memsize") on Darwin, GlobalMemoryStatusEx
  *      on Windows) where _SC_PHYS_PAGES is absent or is not the documented
  *      total-RAM interface.
- *   3. x86_64 ISA extensions — __builtin_cpu_supports("...").
+ *   3. ISA extensions — x86_64 __builtin_cpu_supports/CPUID, or the arm64
+ *      OS feature report (Darwin sysctl / Linux AT_HWCAP).
  *   4. Datadir storage rotational flag — stat(datadir).st_dev -> major:minor
  *      -> resolve /sys/dev/block/<maj>:<min> -> if it's a partition (has a
  *      "partition" sibling file) walk up to the parent whole-disk dir ->
@@ -47,6 +48,7 @@
 #include "util/cpu_topology.h"
 #include "crypto/blake2b.h"
 #include "crypto/sha256.h"
+#include "crypto/sha3.h"
 #include "json/json.h"
 /* platform/device_compat.h decomposes a dev_t into major:minor for the sysfs
  * walk below. Windows has no such decomposition (and no realpath), so the
@@ -58,6 +60,7 @@
 #include "platform/device_compat.h"
 #endif
 #include "util/log_macros.h"
+#include "util/crc32c.h"
 
 /* Darwin and Windows have no usable sysconf(_SC_PHYS_PAGES); route those two
  * through the shared total-RAM seam instead of restating the incantation. */
@@ -84,6 +87,11 @@
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
+#endif
+#if defined(__aarch64__) && defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
 #endif
 
 #define HW_PROFILE_BLOCK_ROOT_DEFAULT "/sys/dev/block"
@@ -154,6 +162,34 @@ static void probe_isa(struct hw_profile_isa *out)
         out->vaes = ((ecx >> 9) & 1u) != 0;   /* CPUID.7.0:ECX[9] */
         out->sha_ni = ((ebx >> 29) & 1u) != 0; /* CPUID.7.0:EBX[29] */
     }
+#elif defined(__aarch64__) && defined(__APPLE__)
+    struct {
+        const char *name;
+        bool *value;
+    } probes[] = {
+        { "hw.optional.neon", &out->arm_neon },
+        { "hw.optional.arm.FEAT_SHA256", &out->arm_sha256 },
+        { "hw.optional.arm.FEAT_SHA3", &out->arm_sha3 },
+        { "hw.optional.arm.FEAT_CRC32", &out->arm_crc32 },
+        { "hw.optional.arm.FEAT_AES", &out->arm_aes },
+    };
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        int present = 0;
+        size_t size = sizeof(present);
+        if (sysctlbyname(probes[i].name, &present, &size, NULL, 0) == 0 &&
+            size == sizeof(present) && present == 1)
+            *probes[i].value = true;
+    }
+#elif defined(__aarch64__) && defined(__linux__)
+    /* Linux arm64 HWCAP bit assignments are kernel ABI. Spell the small
+     * relevant set locally so a baseline libc without asm/hwcap.h still
+     * builds the same runtime-gated binary. */
+    const unsigned long hwcap = getauxval(AT_HWCAP);
+    out->arm_neon   = (hwcap & (1UL << 1)) != 0;  /* HWCAP_ASIMD */
+    out->arm_aes    = (hwcap & (1UL << 3)) != 0;  /* HWCAP_AES */
+    out->arm_sha256 = (hwcap & (1UL << 6)) != 0;  /* HWCAP_SHA2 */
+    out->arm_crc32  = (hwcap & (1UL << 7)) != 0;  /* HWCAP_CRC32 */
+    out->arm_sha3   = (hwcap & (1UL << 17)) != 0; /* HWCAP_SHA3 */
 #endif
 }
 
@@ -589,6 +625,11 @@ bool hw_profile_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_bool(&isa, "vaes", g_state.isa.vaes);
     json_push_kv_bool(&isa, "gfni", g_state.isa.gfni);
     json_push_kv_bool(&isa, "sha_ni", g_state.isa.sha_ni);
+    json_push_kv_bool(&isa, "arm_neon", g_state.isa.arm_neon);
+    json_push_kv_bool(&isa, "arm_sha256", g_state.isa.arm_sha256);
+    json_push_kv_bool(&isa, "arm_sha3", g_state.isa.arm_sha3);
+    json_push_kv_bool(&isa, "arm_crc32", g_state.isa.arm_crc32);
+    json_push_kv_bool(&isa, "arm_aes", g_state.isa.arm_aes);
     /* The CPUID capability above is NOT the same claim as "the node is using
      * it". These two disagreed silently for the whole life of the -v3 build
      * (SHA-NI was compiled out by `#ifdef __SHA__`), so report the transform
@@ -596,6 +637,8 @@ bool hw_profile_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_str(&isa, "sha256_transform", sha256_implementation());
     json_push_kv_str(&isa, "equihash_blake2b_batch",
                      equihash_blake2b_batch_implementation());
+    json_push_kv_str(&isa, "crc32c_transform", zcl_crc32c_impl_name());
+    json_push_kv_bool(&isa, "keccak_x4_available", keccak_x4_available());
     json_push_kv(out, "isa", &isa);
     json_free(&isa);
 

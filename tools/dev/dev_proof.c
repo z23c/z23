@@ -464,9 +464,24 @@ static bool generation_prepare(const struct proof_paths *paths,
                                const char *local, char generation[PATH_MAX],
                                char *why, size_t why_len)
 {
-    char parent[PATH_MAX];
-    if (snprintf(parent, sizeof(parent), "%s/generations", paths->state) >=
-            (int)sizeof(parent) ||
+    char root_parent[PATH_MAX], parent[PATH_MAX], root_tag[17];
+    uint8_t root_hash[ZCL_DEV_PROOF_ROOT_BYTES];
+    if (snprintf(root_parent, sizeof(root_parent), "%s", paths->root) >=
+        (int)sizeof(root_parent)) {
+        proof_why(why, why_len, "proof_generation_path_invalid");
+        return false;
+    }
+    char *slash = strrchr(root_parent, '/');
+    if (!slash || slash == root_parent) {
+        proof_why(why, why_len, "proof_generation_path_invalid");
+        return false;
+    }
+    *slash = 0;
+    hash_text("zcl.dev_proof_generation_root.v1", paths->root,
+              strlen(paths->root), root_hash);
+    zcl_hex_encode(root_hash, 8, root_tag);
+    if (snprintf(parent, sizeof(parent), "%s/.z23-proof-generations-%s",
+                 root_parent, root_tag) >= (int)sizeof(parent) ||
         snprintf(generation, PATH_MAX, "%s/%s", parent, local) >= PATH_MAX ||
         !platform_private_directory_ensure(parent)) {
         proof_why(why, why_len, "proof_generation_path_invalid");

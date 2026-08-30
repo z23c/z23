@@ -170,8 +170,22 @@ static bool db_mig_family_same(const struct db_mig_family_snapshot *a,
         a->dir_mtime.tv_sec != b->dir_mtime.tv_sec ||
         a->dir_mtime.tv_nsec != b->dir_mtime.tv_nsec ||
         a->dir_ctime.tv_sec != b->dir_ctime.tv_sec ||
-        a->dir_ctime.tv_nsec != b->dir_ctime.tv_nsec)
+        a->dir_ctime.tv_nsec != b->dir_ctime.tv_nsec) {
+        fprintf(stderr,
+                "db_mig family metadata changed count=%zu/%zu "
+                "dir_mtime=%lld.%09ld/%lld.%09ld "
+                "dir_ctime=%lld.%09ld/%lld.%09ld\n",
+                a ? a->count : 0, b ? b->count : 0,
+                a ? (long long)a->dir_mtime.tv_sec : 0,
+                a ? a->dir_mtime.tv_nsec : 0,
+                b ? (long long)b->dir_mtime.tv_sec : 0,
+                b ? b->dir_mtime.tv_nsec : 0,
+                a ? (long long)a->dir_ctime.tv_sec : 0,
+                a ? a->dir_ctime.tv_nsec : 0,
+                b ? (long long)b->dir_ctime.tv_sec : 0,
+                b ? b->dir_ctime.tv_nsec : 0);
         return false;
+    }
     for (size_t i = 0; i < a->count; i++) {
         const struct db_mig_family_file *fa = &a->files[i];
         const struct db_mig_family_file *fb = &b->files[i];
@@ -181,8 +195,11 @@ static bool db_mig_family_same(const struct db_mig_family_snapshot *a,
             fa->mtime.tv_nsec != fb->mtime.tv_nsec ||
             fa->ctime.tv_sec != fb->ctime.tv_sec ||
             fa->ctime.tv_nsec != fb->ctime.tv_nsec ||
-            memcmp(fa->sha3, fb->sha3, sizeof(fa->sha3)) != 0)
+            memcmp(fa->sha3, fb->sha3, sizeof(fa->sha3)) != 0) {
+            fprintf(stderr, "db_mig family file changed: %s/%s\n",
+                    fa->name, fb->name);
             return false;
+        }
     }
     return true;
 }

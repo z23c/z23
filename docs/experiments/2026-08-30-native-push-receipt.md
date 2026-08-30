@@ -36,6 +36,14 @@ Native impact planning for only `docs/CAPABILITY_INVENTORY.jsonl` completed in
 inventory test reported 4,332 milliseconds of runner startup and 34
 milliseconds of test body.
 
+The Equihash prose/freshness lint gate initially took 16.734 seconds warm even
+after its generated tool was current. Its script recursively visited ignored
+build, vendor, and proof-generation trees before filtering their output, and
+started a nested Make invocation on every run. Restricting the scan to Git's
+tracked source set and making the generated fact tool an explicit parent-Make
+prerequisite reduced the same warm gate to 46 milliseconds, with the same
+plant/trip/recover self-test and document comparison.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
@@ -46,13 +54,15 @@ milliseconds of test body.
 - Make startup, repeated generator scanning, and test-runner startup dominate
   the current generated-inventory path. A five-second warm acceptance claim is
   not yet supported by measurement.
+- Exact input enumeration removed 16.688 seconds from the warm Equihash gate;
+  native gate execution remains a separate parity task.
 - A self-sealed aggregate is insufficient by itself. Selected dimensions now
   name fixed-width content-addressed child receipts, and the hook requires each
   child object to exist and match its exact accounting.
 
 ## Next experiment
 
-Give generated-output and lint producers native content-keyed child receipt
-publication, then compare a cold audit with warm direct admission. Separately,
-move compile-epoch session validation, depfile restoration, and hit batching
+Give generated-output and remaining lint producers native content-keyed child
+receipt publication, then compare a cold audit with warm direct admission.
+Move compile-epoch session validation, depfile restoration, and hit batching
 into `zcc` and count process creation before and after.

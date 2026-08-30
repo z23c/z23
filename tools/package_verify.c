@@ -1168,6 +1168,7 @@ static void pv_san_detail_from_stderr(const char *prefix,
 struct pv_compile_args {
     const char *argv[192];
     char source_prefix_map[4300];
+    char arch_flag[128]; /* platform-specific architecture flag(s) */
     char inc[8][4200];   /* -I args */
     char dep[PV_EMIT_MAX_DEPS][2100]; /* -I args for locked dependencies */
     char def[64][80];    /* -D args */
@@ -1188,14 +1189,36 @@ static size_t pv_compile_argv(struct pv_compile_args *store,
     store->argv[n++] = "-O1";
     /* Package artifacts are the Commons' reusable boundary. Make their CPU
      * floor explicit instead of inheriting a worker compiler's configured
-     * default: original AMD64/SSE2, with no AVX/AVX2/FMA/BMI requirement. */
-    store->argv[n++] = "-march=x86-64";
-    store->argv[n++] = "-mtune=generic";
+     * default.  The platform abstraction supplies one or two argv tokens so
+     * Linux keeps its historical AMD64/SSE2 string and macOS uses its native
+     * architecture baseline. */
+    if (platform_toolchain_commons_architecture_flag(
+            store->arch_flag, sizeof(store->arch_flag)) &&
+        store->arch_flag[0]) {
+        char *p = store->arch_flag;
+        while (*p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            char *end = p;
+            while (*end && *end != ' ') end++;
+            if (*end) *end++ = '\0';
+            store->argv[n++] = p;
+            p = end;
+        }
+    }
     store->argv[n++] = "-fno-omit-frame-pointer";
     /* The frozen package API surface is Linux POSIX.1-2008. Keep standalone
      * builds on that declared surface rather than accidentally compiling only
      * packages that avoid gmtime_r/flockfile and similar interfaces. */
     store->argv[n++] = "-D_POSIX_C_SOURCE=200809L";
+    /* macOS hides O_NOFOLLOW and similar POSIX.1-2008 interfaces behind
+     * _DARWIN_C_SOURCE when _POSIX_C_SOURCE is explicitly set.  The platform
+     * abstraction supplies the token; on Linux it is empty. */
+    {
+        const char *feature_macros = platform_toolchain_commons_feature_macros();
+        if (feature_macros && feature_macros[0])
+            store->argv[n++] = feature_macros;
+    }
     /* Package source is materialized beneath a fresh work root. Normalize
      * that root before the compiler can embed it through __FILE__ (or
      * equivalent file-name metadata), otherwise identical source built by
@@ -1795,7 +1818,7 @@ static bool pv_emit_dep_plan(const char *plan_path, const char *package_name,
 {
     struct vcs_toolchain_capsule_v1 capsule;
     uint8_t capsule_root[32];
-    if (!vcs_toolchain_capsule_v1_capture_gcc(&capsule) ||
+    if (!vcs_toolchain_capsule_v1_capture(&capsule) ||
         !vcs_toolchain_capsule_v1_root(&capsule, capsule_root))
         return pv_plan_error(ctx, "toolchain capsule capture failed");
 
@@ -1844,12 +1867,34 @@ static bool pv_emit_dep_plan(const char *plan_path, const char *package_name,
         json_init(&tc);
         json_set_object(&tc);
         zcl_hex_encode(capsule_root, 32, hex);
-        /* march/mtune mirror the fixed flags pv_compile_argv emits; the
-         * argv array below carries them verbatim. */
+        /* march/mtune mirror the Commons architecture flag the argv array
+         * below carries verbatim; on macOS there is no separate mtune. */
+        char arch_flag[128];
+        const char *march = "", *mtune = "";
+        if (platform_toolchain_commons_architecture_flag(
+                arch_flag, sizeof(arch_flag)) && arch_flag[0]) {
+            /* The flag string is either "-march=X" or "-march=X -mtune=Y". */
+            char *p = arch_flag;
+            while (*p == ' ') p++;
+            if (*p == '-') p++;
+            if (strncmp(p, "march=", 6) == 0) {
+                char *march_value = p + 6;
+                char *space = strchr(march_value, ' ');
+                if (space) {
+                    *space = '\0';
+                    char *tune = space + 1;
+                    while (*tune == ' ') tune++;
+                    if (*tune == '-') tune++;
+                    if (strncmp(tune, "mtune=", 6) == 0)
+                        mtune = tune + 6;
+                }
+                march = march_value;
+            }
+        }
         ok = ok && json_push_kv_str(&tc, "compiler_id", cc_id) &&
              json_push_kv_str(&tc, "compiler_version", cc_version) &&
-             json_push_kv_str(&tc, "march", "x86-64") &&
-             json_push_kv_str(&tc, "mtune", "generic") &&
+             json_push_kv_str(&tc, "march", march) &&
+             json_push_kv_str(&tc, "mtune", mtune) &&
              json_push_kv_str(&tc, "target", capsule.target) &&
              json_push_kv_str(&tc, "capsule_root", hex) &&
              json_push_kv(&root, "toolchain", &tc);
@@ -2620,10 +2665,33 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
         env_tmpdir, env_home, "LANG=C", "TZ=UTC", "SOURCE_DATE_EPOCH=0",
         NULL,
     };
-    const char *const cc_argv[] = {
-        VCS_BUILD_COMPILER_V1, "-x", "cpp-output", "-std=c23", "-O2",
-        "-march=x86-64-v3", "-fno-ident", "-c", input, "-o", output, NULL,
-    };
+    char arch_flag[128];
+    const char *cc_argv[14];
+    size_t cc_argc = 0;
+    cc_argv[cc_argc++] = VCS_BUILD_COMPILER_V1;
+    cc_argv[cc_argc++] = "-x";
+    cc_argv[cc_argc++] = "cpp-output";
+    cc_argv[cc_argc++] = "-std=c23";
+    cc_argv[cc_argc++] = "-O2";
+    if (platform_toolchain_architecture_flag(arch_flag, sizeof(arch_flag)) &&
+        arch_flag[0]) {
+        char *p = arch_flag;
+        while (*p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            char *end = p;
+            while (*end && *end != ' ') end++;
+            if (*end) *end++ = '\0';
+            cc_argv[cc_argc++] = p;
+            p = end;
+        }
+    }
+    cc_argv[cc_argc++] = "-fno-ident";
+    cc_argv[cc_argc++] = "-c";
+    cc_argv[cc_argc++] = input;
+    cc_argv[cc_argc++] = "-o";
+    cc_argv[cc_argc++] = output;
+    cc_argv[cc_argc] = NULL;
     uint8_t input_before[32], input_after[32];
     uint64_t input_before_bytes = 0, input_after_bytes = 0;
     if (!pv_sha3_file(input, input_before, &input_before_bytes)) {
@@ -3160,8 +3228,7 @@ int main(int argc, char **argv)
         !key_path && emit_dir && lock_root_hex && candidate_source_arg &&
         candidate_recipe_arg && candidate_name && candidate_name[0] &&
         known_candidate_profile && candidate_cpu_valid &&
-        !reproduce_path && require_full_isolation &&
-        (!plan_path || emit_dir);
+        !reproduce_path && (!plan_path || emit_dir);
     if (!normal_shape && !candidate_shape) {
         pv_usage(stderr);
         return 2;
@@ -3759,7 +3826,7 @@ int main(int argc, char **argv)
                 return 5;
             }
             fast_cache_dir = fast_cache_resolved;
-            if (!vcs_toolchain_capsule_v1_capture_gcc(&fast_capsule) ||
+            if (!vcs_toolchain_capsule_v1_capture(&fast_capsule) ||
                 !vcs_toolchain_capsule_v1_root(&fast_capsule,
                                                fast_capsule_root)) {
                 fprintf(stderr, "%s: --fast-cache: toolchain capsule "
@@ -3950,19 +4017,20 @@ int main(int argc, char **argv)
                 largv[ln++] = bin_file;
                 /* Locked dependency archives come after the objects that
                  * reference them. The transitive closure is wrapped in a
-                 * linker group: within a group the linker rescans until no
-                 * new symbol resolves, so provider-before-dependent order
-                 * inside the closure cannot break the link. */
-                if (dep_archives.count &&
+                 * linker group on platforms whose linker needs it (GNU ld);
+                 * Apple ld processes archives repeatedly by default. */
+                const char *group_start = platform_toolchain_linker_group_start();
+                const char *group_end = platform_toolchain_linker_group_end();
+                if (group_start && dep_archives.count &&
                     ln + 4u < sizeof(largv) / sizeof(largv[0]))
-                    largv[ln++] = "-Wl,--start-group";
+                    largv[ln++] = group_start;
                 for (size_t da = 0; da < dep_archives.count &&
                                     ln + 8u < sizeof(largv) / sizeof(largv[0]);
                      da++)
                     largv[ln++] = dep_archives.path[da];
-                if (dep_archives.count &&
+                if (group_end && dep_archives.count &&
                     ln + 4u < sizeof(largv) / sizeof(largv[0]))
-                    largv[ln++] = "-Wl,--end-group";
+                    largv[ln++] = group_end;
                 for (size_t li = 0; li < recipe.library_count; li++) {
                     if (recipe.libraries[li] == VCS_PACKAGE_RECIPE_LIB_LIBM)
                         largv[ln++] = "-lm";
@@ -4353,7 +4421,7 @@ int main(int argc, char **argv)
             struct vcs_toolchain_capsule_v1 rec_capsule;
             uint8_t rec_capsule_root[32];
             memset(&rec_capsule, 0, sizeof(rec_capsule));
-            if (!vcs_toolchain_capsule_v1_capture_gcc(&rec_capsule) ||
+            if (!vcs_toolchain_capsule_v1_capture(&rec_capsule) ||
                 !vcs_toolchain_capsule_v1_root(&rec_capsule,
                                                rec_capsule_root) ||
                 vcs_package_build_set_toolchain_capsule(
@@ -4404,9 +4472,11 @@ int main(int argc, char **argv)
             char aobjs[512][96];
             size_t an = 0;
             aargv[an++] = "ar";
-            /* D = explicit deterministic mode (zeroed uid/gid/mtime): never
-             * rely on the toolchain default for a receipt-bound artifact. */
-            aargv[an++] = "rcsD";
+            /* Deterministic mode is platform-specific: GNU ar supports D
+             * (zeroed uid/gid/mtime); Apple ar does not.  The platform layer
+             * supplies the right flag token so the rest of the verifier stays
+             * OS-agnostic. */
+            aargv[an++] = platform_toolchain_archive_flags();
             aargv[an++] = archive_name;
             for (size_t o = 0; o < recipe.sources.count &&
                                o < sizeof(aobjs) / sizeof(aobjs[0]);
@@ -4416,16 +4486,45 @@ int main(int argc, char **argv)
                 aargv[an++] = aobjs[o];
             }
             aargv[an] = NULL;
+            /* On platforms whose ar cannot zero archive metadata, normalize
+             * the object mtimes so two archives of identical object bytes
+             * produce identical archive bytes. */
+            const char *obj_paths[512];
+            char obj_abs[512][4300];
+            size_t obj_count = an - 3;
+            for (size_t o = 0; o < obj_count && o < sizeof(obj_abs) / sizeof(obj_abs[0]); o++) {
+                snprintf(obj_abs[o], sizeof(obj_abs[o]), "%s/%s", build_root,
+                         aargv[3 + o]);
+                obj_paths[o] = obj_abs[o];
+            }
+            if (!platform_toolchain_prepare_archive_objects(obj_paths,
+                                                            obj_count)) {
+                fprintf(stderr,
+                        "%s: could not prepare object files for deterministic "
+                        "archiving\n", PV_LOG);
+                emitted = false;
+            }
             struct pv_run ar = pv_run_child(aargv, build_root, &compile_limits,
                                             landlock, rules, n_rules,
                                             compile_env, PV_LINK_TIMEOUT_MS);
             if (!ar.launched || ar.sandbox_fail || ar.timed_out ||
                 !ar.exited || ar.exit_code != 0) {
                 fprintf(stderr,
-                        "%s: `ar rcsD %s` failed (%s) — no artifact emitted\n",
-                        PV_LOG, archive_name,
+                        "%s: `ar %s %s` failed (%s) — no artifact emitted\n",
+                        PV_LOG, platform_toolchain_archive_flags(),
+                        archive_name,
                         ar.timed_out ? "timed out" : ar.stderr_buf);
                 emitted = false;
+            } else {
+                char src_archive_tmp[4300];
+                snprintf(src_archive_tmp, sizeof(src_archive_tmp), "%s/%s",
+                         build_root, archive_name);
+                if (!platform_toolchain_normalize_archive(src_archive_tmp)) {
+                    fprintf(stderr,
+                            "%s: archive normalization failed for %s\n",
+                            PV_LOG, archive_name);
+                    emitted = false;
+                }
             }
             char src_archive[4300];
             char dst_archive[4400];

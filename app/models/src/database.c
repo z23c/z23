@@ -561,6 +561,23 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
     if (path && !platform_path_identity(ndb->path, sizeof(ndb->path), path))
         return false;
     path = ndb->path;
+
+    /* Darwin's mutable pathname lease is a sibling file.  Refuse an
+     * unsupported existing database before acquiring that lease, otherwise
+     * a read-only schema rejection still changes the database family and its
+     * parent directory.  The identical check below remains after lease
+     * acquisition to close the inspect-to-open race. */
+    struct node_db_schema_preflight prelease_preflight =
+        node_db_schema_preflight_existing(path);
+    if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
+        node_db_log_newer_schema_refusal((int)prelease_preflight.version);
+        return false;
+    }
+    if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN) {
+        node_db_log_unknown_schema_refusal(prelease_preflight.detail);
+        return false;
+    }
+
     node_db_state_init(ndb);
     if (!db_lifetime_install())
         return node_db_open_abort(ndb);

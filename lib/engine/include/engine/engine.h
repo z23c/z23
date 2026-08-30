@@ -100,6 +100,51 @@ enum engine_delivery {
     ENGINE_DELIVERS_EDITS         /* the engine edited the worktree itself */
 };
 
+
+/* ── how a CLI vendor is invoked ──────────────────────────────────────────
+ *
+ * Two installed agent CLIs are dispatched to today and they do not agree on
+ * anything: one reads its prompt from a FILE named by a flag, the other takes
+ * the prompt TEXT as an argument. One has a turn cap, the other does not.
+ * Hard-coding one of those shapes in the dispatcher is what kept the second
+ * vendor out of the tree — the machine the owner works on had a working
+ * subscription to it the whole time, and nothing here could reach it.
+ *
+ * So the argv is a row, like the URL is a row. */
+
+/* Where a CLI vendor expects the prompt to be. */
+enum engine_cli_prompt {
+    ENGINE_CLI_PROMPT_FILE = 0,  /* a path in argv; the CLI opens the file */
+    ENGINE_CLI_PROMPT_ARG        /* the prompt text itself fills one slot */
+};
+
+/* An argv slot the caller fills. Anything else in a row is a literal.
+ *
+ *   {prompt}   the prompt file path, or the prompt text — see cli_prompt
+ *   {workdir}  the directory the CLI should work in
+ *   {turns}    the repair-turn cap, decimal
+ *   {model}    the model id
+ *
+ * A placeholder a vendor's CLI has no flag for is simply not in its row.
+ * That is the point: a missing mapping is an ABSENT flag, never a guessed
+ * one. Mapping our turn cap onto a flag that means something else would be
+ * worse than leaving the vendor's own default alone. */
+#define ENGINE_CLI_PROMPT_TOKEN  "{prompt}"
+#define ENGINE_CLI_WORKDIR_TOKEN "{workdir}"
+#define ENGINE_CLI_TURNS_TOKEN   "{turns}"
+#define ENGINE_CLI_MODEL_TOKEN   "{model}"
+
+/* Longest argv this tree will build for a CLI, argv[0] and the NUL included. */
+#define ENGINE_CLI_ARGV_MAX 24u
+
+/* A prompt passed as an ARGUMENT is bounded far below ENGINE_MAX_PROMPT_BYTES.
+ * Linux caps a single argv string at MAX_ARG_STRLEN — 32 pages, 131072 bytes
+ * — and exec fails with E2BIG above it. That failure would arrive as "could
+ * not launch", pointing an operator at the CLI when the answer is the prompt,
+ * so it is refused here with its real reason instead. The margin below the
+ * kernel's number is deliberate: the limit is per-string on Linux and is not
+ * promised by POSIX at all. */
+#define ENGINE_CLI_ARG_PROMPT_MAX (96u * 1024u)
 struct engine_vendor {
     const char      *id;             /* stable selector, e.g. "glm" */
     const char      *display;        /* human name for a transcript line */
@@ -108,9 +153,18 @@ struct engine_vendor {
     const char      *key_env;        /* environment variable holding the key */
     const char      *key_file_rel;   /* $HOME-relative 0600 file, or NULL */
     const char      *program;        /* argv[0] for a CLI dialect, else NULL */
+    /* CLI dialect only. NULL-terminated argument template, argv[0] excluded
+     * because it is always `program`. NULL for a non-CLI vendor. */
+    const char *const *cli_argv;
+    enum engine_cli_prompt cli_prompt;
     enum engine_wire wire;
     enum engine_delivery delivery;
     bool             costs_money;    /* false only for the fixture engine */
+    /* Exactly one row carries this. It is what a caller gets when they name
+     * no engine. A flag rather than an id string elsewhere: a string can name
+     * a row that does not exist, a flag cannot, and a test asserts that
+     * exactly one row sets it. */
+    bool             is_default;
     /* Retry budget. Per vendor, not global: a CLI engine already retries
      * internally, and retrying on top of something that retries multiplies
      * the wall clock invisibly. VibePoint sets 3 for raw APIs and 1 for CLI
@@ -132,5 +186,47 @@ bool engine_is_fixture(const struct engine_vendor *v);
 /* True when this vendor needs a key at all. A CLI engine authenticates
  * through its own installed session and must never be handed one. */
 bool engine_needs_key(const struct engine_vendor *v);
+
+/* The engine a caller gets when they name none.
+ *
+ * It is a CLI row on purpose. A default that needs an API key fails on a
+ * fresh host with a message about credentials, which reads as "this tool is
+ * broken" rather than "you have not chosen an engine"; a subscription CLI
+ * that is already installed just works. Measured on 2026-08-30 this is also
+ * the fastest engine the tree can reach — 7s against 41s for the same
+ * trivial prompt — and a dispatch harness an operator waits on is one they
+ * stop using.
+ *
+ * Defaulting WHICH engine is not defaulting WHETHER to dispatch. Every path
+ * that spends money or writes code still requires its own per-run opt-in. */
+const struct engine_vendor *engine_default(void);
+
+
+/* What a caller supplies for the placeholders. A field a row does not name
+ * may be NULL; a field a row DOES name and the caller left empty is a
+ * refusal, because an argv slot silently filled with nothing is a different
+ * command from the one the row describes. */
+struct engine_cli_inputs {
+    const char *prompt;   /* file path, or the prompt text; see cli_prompt */
+    const char *workdir;
+    const char *turns;    /* already rendered decimal */
+    const char *model;
+};
+
+/* Build the full argv for a CLI vendor into `out`, NULL-terminated.
+ *
+ * Returns the number of entries written EXCLUDING the terminator, or 0 on any
+ * refusal — an unknown placeholder, a placeholder the caller did not supply,
+ * an argument-mode prompt over ENGINE_CLI_ARG_PROMPT_MAX, a row with no
+ * template, or a `cap` too small to hold the result. Every pointer written
+ * borrows from the vendor row or from `in`; nothing is copied and nothing is
+ * allocated, so `out` is only valid while both outlive it.
+ *
+ * This is a pure function on purpose. The exec lives in the dispatch tool,
+ * but WHICH ARGUMENTS a vendor receives is a decision, and a decision that
+ * only exists inside a tool no test links is a decision nothing can check. */
+size_t engine_cli_argv_build(const struct engine_vendor *v,
+                             const struct engine_cli_inputs *in,
+                             const char **out, size_t cap);
 
 #endif /* ZCL_ENGINE_H */

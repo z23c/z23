@@ -38,6 +38,7 @@ cd "$(dirname "$0")/../.." || { echo "FAIL: cannot reach repo root" >&2; exit 2;
 # sample application is package ten and rides the same row shape.
 REGISTRY_DEFS=(config/zcode_package_registry.def config/zcode_c23_commons_app.def)
 PROFILE="config/include/config/c23_commons_build_profile.h"
+TOOLCHAIN_SRC="lib/platform/src/toolchain.c"
 # Default to `cc`, NOT `gcc`. make's own built-in default for CC is `cc`, and
 # make does not export makefile-set variables, so this script receives CC only
 # when the environment already had it — which is to say, usually not. Falling
@@ -51,21 +52,51 @@ CC_BIN="${CC:-cc}"
 # The recipe's own compile contract, read from the header the worker reads, so
 # this gate cannot drift from the profile it claims to mirror. The trailing
 # -c is already part of the macro.
+#
+# The concrete flags are now platform-specific (supplied by lib/platform at
+# runtime), so this script mirrors that choice for the standalone compile gate.
 read_quick_flags() {
-    awk '
-        /#define ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2/ { collecting = 1; next }
-        collecting {
-            line = $0
-            cont = (line ~ /\\$/)
-            gsub(/\\$/, "", line)
-            while (match(line, /"[^"]*"/)) {
-                s = substr(line, RSTART + 1, RLENGTH - 2)
-                printf "%s", s
-                line = substr(line, RSTART + RLENGTH)
-            }
-            if (!cont) { print ""; exit }
-        }
-    ' "$PROFILE"
+    case "$(uname -s)" in
+        Darwin)
+            case "$(uname -m)" in
+                arm64|aarch64)
+                    echo "-std=c23 -O1 -march=armv8-a -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -ffile-prefix-map=SOURCE=. -c"
+                    ;;
+                x86_64|amd64)
+                    echo "-std=c23 -O1 -march=x86-64 -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -ffile-prefix-map=SOURCE=. -c"
+                    ;;
+                *)
+                    echo "FAIL: unsupported Darwin machine $(uname -m)" >&2
+                    exit 2
+                    ;;
+            esac
+            ;;
+        Linux)
+            # The flags are no longer a string literal in the profile header;
+            # that macro now calls into lib/platform at runtime. The Linux
+            # branch of that function preserves the historical V2 string
+            # byte-for-byte on purpose, so read it from there rather than
+            # copying it here — a copy is what lets a gate drift from the
+            # contract it claims to mirror.
+            awk '
+                /platform_toolchain_commons_flags_quick\(void\)/ { infn = 1; next }
+                infn && /#if defined\(__linux__\)/ { collecting = 1; next }
+                collecting && /^#(elif|else|endif)/ { print ""; exit }
+                collecting {
+                    line = $0
+                    while (match(line, /"[^"]*"/)) {
+                        s = substr(line, RSTART + 1, RLENGTH - 2)
+                        printf "%s", s
+                        line = substr(line, RSTART + RLENGTH)
+                    }
+                }
+            ' "$TOOLCHAIN_SRC"
+            ;;
+        *)
+            echo "FAIL: unsupported host $(uname -s) for standalone package gate" >&2
+            exit 2
+            ;;
+    esac
 }
 
 # name<TAB>dir for every package in the registry, so a package added later is

@@ -8,7 +8,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCS_BUILD_TARGET_V1 "linux-x86_64-v3"
+#include "platform/toolchain.h"
+
+#define VCS_BUILD_TARGET_V1 (platform_toolchain_canonical_target_string())
 #define VCS_BUILD_COMPILER_V1 "/usr/bin/cc"
 #define VCS_BUILD_ACTION_KIND_V1 "c23.compile.preprocessed.v1"
 #define VCS_BUILD_ACTION_KIND_PACKAGE_V1 "c23.package.recipe.v1"
@@ -78,12 +80,15 @@ struct vcs_build_action_v1 {
 
 bool vcs_toolchain_capsule_v1_root(
     const struct vcs_toolchain_capsule_v1 *capsule, uint8_t out[32]);
-/* Capture the fixed Linux V1 GCC capsule by content: driver, cc1 backend,
- * GNU as --version identity, startup/sysroot objects, target probe output,
- * and ABI libraries. Assembler identity is the version string, not the
- * assembler file bytes, so two ordinary hosts with the same GNU as version
- * can independently compile. No mtime participates. */
-bool vcs_toolchain_capsule_v1_capture_gcc(
+/* Capture the toolchain capsule by content for the current platform:
+ * driver, compiler backend, assembler --version identity, startup/sysroot
+ * objects, target probe output, and ABI/runtime libraries.  The set of files
+ * is platform-specific (GCC on Linux, Apple Clang on Darwin) and is supplied
+ * by lib/platform; this function consumes it without OS-specific branches.
+ * Assembler identity is the version string, not the assembler file bytes, so
+ * two ordinary hosts with the same assembler version can independently
+ * compile.  No mtime participates. */
+bool vcs_toolchain_capsule_v1_capture(
     struct vcs_toolchain_capsule_v1 *out);
 #ifdef ZCL_TESTING
 void vcs_toolchain_capsule_v1_cache_reset_for_test(void);

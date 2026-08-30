@@ -220,7 +220,8 @@ void zcl_native_handle_metaverse_build_plan(
                    "c23.compile.preprocessed.v1");
     (void)snprintf(action.state, sizeof(action.state), "SNAPSHOTTED");
     (void)snprintf(action.input_root_sha3, sizeof(action.input_root_sha3), "%s", input_root);
-    (void)snprintf(action.target, sizeof(action.target), "linux-x86_64-v3");
+    (void)snprintf(action.target, sizeof(action.target), "%s",
+                   VCS_BUILD_TARGET_V1);
     (void)snprintf(action.flags_sha3, sizeof(action.flags_sha3), "%s",
                    fixed_flags_hex);
     (void)snprintf(action.environment_sha3, sizeof(action.environment_sha3),

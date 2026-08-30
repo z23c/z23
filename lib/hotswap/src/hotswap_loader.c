@@ -21,6 +21,7 @@
 #include "hotswap_loader_internal.h"
 #include "crypto/sha256.h"
 #include "json/json.h"
+#include "platform/dlopen_pin.h"
 #include "platform/time_compat.h"
 #include "util/clientversion.h"
 #include "util/log_macros.h"
@@ -41,10 +42,14 @@ struct hotswap_generation {
     uint32_t gen;
     char so_path[512];
     void *handle;                 /* successful mappings are never closed */
-    /* Keep the descriptor whose /proc/self/fd path was passed to dlopen.
+    /* Keep the descriptor whose pinned path was passed to dlopen.
      * Reusing that numeric fd while an older handle remains mapped makes the
      * dynamic loader return the older cached object for a different artifact. */
     int artifact_fd;
+    /* The actual path passed to dlopen. On Linux this is /proc/self/fd/<fd>;
+     * on macOS it is a unique temp copy of the artifact bytes. Kept for
+     * diagnostics and for cleanup of rejected macOS temp copies. */
+    char mapped_path[512];
     time_t loaded_at;
     size_t replaced_count;
     bool ok;
@@ -220,6 +225,8 @@ static void generation_json(struct json_value *obj,
                                 ? "active" : "retired_mapped")
                          : "rejected");
     json_push_kv_str(obj, "so_path", generation->so_path);
+    if (generation->mapped_path[0])
+        json_push_kv_str(obj, "mapped_path", generation->mapped_path);
     json_push_kv_int(obj, "loaded_at", (int64_t)generation->loaded_at);
     json_push_kv_int(obj, "replaced_count",
                      (int64_t)generation->replaced_count);
@@ -311,7 +318,7 @@ bool hotswap_dump_state_json(struct json_value *out, const char *key)
  * dl* call site can never leave the dev-only region (check-hotswap-dev-only
  * reads that exact toggle; a release build must link zero dl* code). */
 #ifdef ZCL_DEV_BUILD
-#if defined(__linux__) && !defined(_WIN32)
+#if !defined(_WIN32)
 
 #include <dlfcn.h>
 
@@ -463,6 +470,10 @@ static bool generation_reject_locked(struct hotswap_generation *slot,
             dlclose(slot->handle);
             slot->handle = NULL;
         }
+        if (slot->mapped_path[0]) {
+            platform_dlopen_pin_path_cleanup(slot->mapped_path);
+            slot->mapped_path[0] = '\0';
+        }
         if (slot->artifact_fd >= 0) {
             close(slot->artifact_fd);
             slot->artifact_fd = -1;
@@ -541,16 +552,23 @@ static bool load_prepare_locked(const char *so_path, const char *required_probe,
     }
     /* Hash and dlopen the same pinned inode. Opening by the original pathname
      * after hashing creates a replacement race during rapid editor/build
-     * activity; /proc/self/fd keeps identity exact through the loader call. */
-    char pinned_path[64];
-    (void)snprintf(pinned_path, sizeof(pinned_path), "/proc/self/fd/%d",
-                   artifact_fd);
+     * activity; platform_dlopen_pin_path() keeps identity exact through the
+     * loader call. */
+    char pinned_path[512];
+    if (!platform_dlopen_pin_path(artifact_fd, report->artifact_sha256,
+                                  pinned_path, sizeof(pinned_path))) {
+        close(artifact_fd);
+        return generation_reject_locked(
+            NULL, report, "artifact_pin",
+            "could not produce a pinned dlopen path");
+    }
     void *handle = dlopen(pinned_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         const char *dl_error = dlerror();
         char error[256];
         snprintf(error, sizeof(error), "dlopen failed: %s",
                  dl_error ? dl_error : "(unknown)");
+        platform_dlopen_pin_path_cleanup(pinned_path);
         close(artifact_fd);
         return generation_reject_locked(NULL, report, "dlopen", error);
     }
@@ -564,9 +582,11 @@ static bool load_prepare_locked(const char *so_path, const char *required_probe,
         snprintf(error, sizeof(error), "generation registry full (%d)",
                  HOTSWAP_MAX_GENERATIONS);
         dlclose(handle);
+        platform_dlopen_pin_path_cleanup(pinned_path);
         close(artifact_fd);
         return generation_reject_locked(NULL, report, "registry", error);
     }
+    copy_text(slot->mapped_path, sizeof(slot->mapped_path), pinned_path);
     copy_text(slot->artifact_sha256, sizeof(slot->artifact_sha256),
               report->artifact_sha256);
 
@@ -710,7 +730,7 @@ bool hotswap_load_leaves(const char *so_path,
 
 #else
 #define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
-#endif /* Linux */
+#endif /* POSIX */
 #else
 #define ZCL_HOTSWAP_LOADER_UNAVAILABLE 1
 #endif /* ZCL_DEV_BUILD */

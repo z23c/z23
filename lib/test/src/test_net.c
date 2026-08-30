@@ -3,6 +3,7 @@
 #define _DEFAULT_SOURCE
 #include "platform/time_compat.h"
 #include "platform/barrier.h"
+#include "platform/socket_compat.h"
 #include "test/test_core.h"
 #include "core/hash.h"
 #include "core/random.h"
@@ -1805,6 +1806,8 @@ int test_net(void)
             int small = 2048;
             setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
             setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+            ok = platform_socket_set_nonblocking(
+                (platform_socket_t)sv[0], true);
         }
 
         const size_t hard_cap = net_send_peer_bytes_hard_cap();

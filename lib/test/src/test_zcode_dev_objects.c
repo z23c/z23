@@ -3192,6 +3192,19 @@ static int test_zd_improve_command(void)
         struct zcl_result executed_compile = build_fabric_worker_execute(
             &ndb, workspace, workspace, action_id, lease_hex, worker_secret,
             worker_key, &receipt, NULL);
+#ifdef __APPLE__
+        ASSERT(!executed_compile.ok);
+        ASSERT(strstr(executed_compile.message, "landlock-unavailable") !=
+                   NULL);
+        ASSERT(db_build_action_find(&ndb, action_id, &action));
+        ASSERT_STR_EQ(action.state, "LOCAL_FALLBACK");
+        node_db_close(&ndb);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        test_rm_rf(dir);
+        PASS();
+        goto _test_next;
+#endif
         ASSERT_RESULT_OK(executed_compile);
         ASSERT(build_fabric_receipt_admit(
             &ndb, workspace, receipt.receipt_id, now + 1).ok);

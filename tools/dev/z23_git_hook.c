@@ -27,6 +27,17 @@
 #define HOOK_LINE_MAX 1024u
 #define HOOK_OUTPUT_MAX 8192u
 
+static void clear_git_local_environment(void)
+{
+    static const char *const names[] = {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_DIR",
+        "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX",
+        "GIT_QUARANTINE_PATH", "GIT_WORK_TREE",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        (void)unsetenv(names[i]);
+}
+
 static const char *program_basename(const char *path)
 {
     const char *slash = path ? strrchr(path, '/') : NULL;
@@ -88,6 +99,7 @@ static int child_capture(const char *const argv[], char *out, size_t out_size)
             dup2(pipefd[1], STDERR_FILENO) < 0)
             _exit(127);
         if (pipefd[1] > STDERR_FILENO) (void)close(pipefd[1]);
+        clear_git_local_environment();
         execvp(argv[0], (char *const *)argv);
         _exit(127);
     }
@@ -274,6 +286,7 @@ static int notify_proof(void)
         if (devnull > STDERR_FILENO) (void)close(devnull);
     }
     if (chdir(root) != 0) _exit(0);
+    clear_git_local_environment();
     execl(binary, binary, "dev", "proof", "ensure", (char *)NULL);
     _exit(0);
 }

@@ -96,6 +96,14 @@
 #define UNIT_DEFAULT_TURNS    3
 #define UNIT_DEFAULT_TIMEOUT  3600
 #define UNIT_MAX_TIMEOUT      21600
+/* A probe asks for a handful of tokens. If a vendor has not answered in half
+ * a minute the interesting fact is that it did not, not what it eventually
+ * says. */
+#define UNIT_PROBE_TIMEOUT_MS 30000
+/* A CLI starts a runtime, reads a config and opens its own session before it
+ * says anything, so it gets more room than one HTTPS round trip. */
+#define UNIT_PROBE_CLI_TIMEOUT_MS 120000
+#define UNIT_PROBE_LOG_BYTES      (256u * 1024u)
 
 struct unit_opts {
     const char *engine_id;
@@ -121,6 +129,7 @@ struct unit_opts {
     bool   yes_dispatch;
     bool   dry_run;
     bool   list;
+    bool   probe;
 };
 
 static void usage(void)
@@ -128,11 +137,13 @@ static void usage(void)
     printf(
 "engine_unit — dispatch one scoped unit of work to an engine and judge it\n"
 "\n"
-"  engine_unit --engine ID --task FILE (--group NAME | --no-group)\n"
+"  engine_unit [--engine ID] --task FILE (--group NAME | --no-group)\n"
 "              --territory NAME --yes-dispatch [options]\n"
 "  engine_unit --list\n"
+"  engine_unit --probe --yes-dispatch [--engine ID] [--model ID]\n"
 "\n"
-"  --engine ID       which engine (see --list)\n"
+"  --engine ID       which engine (see --list). Defaults to the registry\n"
+"                    default, which the run prints when it is used\n"
 "  --task FILE       the unit of work, in prose: one job, named files, a bar\n"
 "  --group NAME      the test group that must run and pass afterwards\n"
 "  --no-group        for a unit that genuinely cannot have one; the verdict\n"
@@ -155,6 +166,9 @@ static void usage(void)
 "  --key-file PATH   a 0600 key file outside the repo\n"
 "  --fixture-reply F for --engine fixture: a canned response body\n"
 "  --dry-run         print the composed prompt and exit without dispatching\n"
+"  --probe           one minimal real call per HTTPS vendor; prints the\n"
+"                    status, the latency and what came back. Needs\n"
+"                    --yes-dispatch: it is a billed call like any other\n"
 "\n"
 "Exit: 0 the unit landed and its group passed. 1 any other verdict —\n"
 "      including TIMEOUT and including an engine that reported success and\n"
@@ -167,8 +181,9 @@ static void list_engines(void)
     printf("engines:\n");
     for (size_t i = 0; i < engine_count(); i++) {
         const struct engine_vendor *v = engine_at(i);
-        printf("  %-10s %-46s %s\n", v->id, v->display,
-               v->costs_money ? "SPENDS" : "free");
+        printf("  %-10s %-46s %-6s%s\n", v->id, v->display,
+               v->costs_money ? "SPENDS" : "free",
+               v->is_default ? "  (default)" : "");
     }
 }
 
@@ -224,6 +239,7 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         if (strcmp(a, "--yes-dispatch") == 0) { o->yes_dispatch = true; continue; }
         if (strcmp(a, "--dry-run") == 0)      { o->dry_run = true;    continue; }
         if (strcmp(a, "--list") == 0)         { o->list = true;       continue; }
+        if (strcmp(a, "--probe") == 0)        { o->probe = true;      continue; }
         if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage();
             exit(0);
@@ -664,6 +680,188 @@ static bool dispatch_https(const struct engine_vendor *v, const char *body,
     return ok;
 }
 
+
+static int fail_setup(const char *why);
+
+/* ── the probe ────────────────────────────────────────────────────────────
+ *
+ * Every HTTPS vendor in the registry has been UNPROVEN since the day it was
+ * added. The decoder is exercised against fixtures and against real ERROR
+ * bodies, and both funded paths answered 429 on an empty account, so the
+ * question "does this leg work at all" has never had an answer — only an
+ * assumption. Everything built on top of it inherits that assumption.
+ *
+ * This makes one minimal call per vendor and prints what came back. It sends
+ * a two-word prompt and asks for a handful of tokens, so the cost is the
+ * smallest a vendor will bill. It writes nothing, applies nothing, and
+ * touches no worktree: the only thing it produces is a fact.
+ *
+ * It is still a real call that spends real money, so it needs --yes-dispatch
+ * like every other path that does. */
+/* A CLI vendor is probed by running it, because that is what dispatch does.
+ * The prompt is written to a temp file for a file-mode row and passed
+ * directly for an argument-mode one, so the probe exercises the same seam
+ * the real dispatch uses rather than a simplified one. */
+static int probe_cli(const struct engine_vendor *v, const char *model_override)
+{
+    if (!v->program || !v->program[0]) {
+        printf("NO PROGRAM IN ROW\n");
+        return 1;
+    }
+    char prompt_file[512] = {0};
+    const char *ask = "Reply with exactly: ok";
+    if (v->cli_prompt == ENGINE_CLI_PROMPT_FILE) {
+        const char *dir = getenv("TMPDIR");
+        if (!dir || !dir[0]) dir = "/tmp";
+        if ((size_t)snprintf(prompt_file, sizeof(prompt_file),
+                             "%s/z23-probe-%ld.txt", dir, (long)getpid())
+            >= sizeof(prompt_file)) {
+            printf("TEMP PATH TOO LONG\n");
+            return 1;
+        }
+        if (!engine_emit_file(prompt_file, ask, strlen(ask))) {
+            printf("COULD NOT WRITE THE PROBE PROMPT\n");
+            return 1;
+        }
+    }
+    const struct engine_cli_inputs in = {
+        .prompt  = v->cli_prompt == ENGINE_CLI_PROMPT_ARG ? ask : prompt_file,
+        .workdir = ".",
+        .turns   = "1",
+        .model   = model_override ? model_override : v->default_model,
+    };
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {
+        printf("ARGV REFUSED\n");
+        if (prompt_file[0]) (void)remove(prompt_file);
+        return 1;
+    }
+    char *log = zcl_malloc(UNIT_PROBE_LOG_BYTES, "engine_unit_probe_log");
+    if (!log) {
+        printf("NO BUFFER\n");
+        if (prompt_file[0]) (void)remove(prompt_file);
+        return 1;
+    }
+    const int64_t t0 = clock_now_monotonic_ns();
+    const int rc = run(argv, log, UNIT_PROBE_LOG_BYTES, UNIT_PROBE_CLI_TIMEOUT_MS);
+    const int64_t elapsed = (clock_now_monotonic_ns() - t0) / 1000000;
+    if (prompt_file[0]) (void)remove(prompt_file);
+
+    if (rc < 0) {
+        printf("COULD NOT LAUNCH %s in %lldms\n", v->program,
+               (long long)elapsed);
+        free(log);
+        return 1;
+    }
+    /* The last non-empty line, flattened. A CLI prints a transcript; the
+     * probe reports that it answered, not what it said. */
+    char tail[81] = {0};
+    size_t len = strlen(log);
+    while (len > 0 && (log[len - 1] == '\n' || log[len - 1] == '\r'))
+        log[--len] = '\0';
+    const char *last = log;
+    for (size_t i = 0; i < len; i++)
+        if (log[i] == '\n') last = log + i + 1;
+    size_t n = 0;
+    for (const char *p = last; *p && n < sizeof(tail) - 1; p++)
+        tail[n++] = (*p == '\r') ? ' ' : *p;
+    printf("exit %d in %lldms  model=%s  \"%s\"\n", rc, (long long)elapsed,
+           in.model ? in.model : "(vendor default)", tail);
+    free(log);
+    /* An exit code is not evidence a model answered — that is the whole
+     * doctrine of this harness — so a non-zero exit is reported and counted,
+     * while a zero exit is reported and believed only as far as "it ran". */
+    return rc == 0 ? 0 : 1;
+}
+
+static int probe_one(const struct engine_vendor *v, const char *model_override)
+{
+    printf("  %-10s %-44s ", v->id, v->display);
+    fflush(stdout);
+
+    if (v->wire == ENGINE_WIRE_LOCAL_CLI)
+        return probe_cli(v, model_override);
+    if (v->wire != ENGINE_WIRE_OPENAI_CHAT) {
+        printf("SKIPPED (sends nothing)\n");
+        return 0;
+    }
+
+    char where[128] = {0};
+    if (!engine_secret_load(v, NULL, where, sizeof(where))) {
+        printf("NO KEY (set %s, or ~/%s at 0600)\n",
+               v->key_env ? v->key_env : "?",
+               v->key_file_rel ? v->key_file_rel : "?");
+        return 0;   /* A missing key is not a failed probe. It is an absent one. */
+    }
+
+    const char *model = model_override ? model_override : v->default_model;
+    size_t body_len = 0;
+    const struct engine_call call = {
+        .vendor            = v,
+        .model             = model,
+        .system_prompt     = NULL,
+        .user_prompt       = "Reply with the word: ok",
+        .max_output_tokens = 16,
+    };
+    char *body = engine_request_alloc(&call, &body_len);
+    if (!body) {
+        printf("REQUEST BUILD FAILED\n");
+        engine_secret_clear();
+        return 1;
+    }
+
+    const int64_t t0 = clock_now_monotonic_ns();
+    struct dispatch_result dr;
+    memset(&dr, 0, sizeof(dr));
+    bool ok = dispatch_https(v, body, body_len, UNIT_PROBE_TIMEOUT_MS, &dr);
+    const int64_t elapsed = (clock_now_monotonic_ns() - t0) / 1000000;
+    free(body);
+    engine_secret_clear();
+
+    if (ok) {
+        /* The reply text is printed truncated and on one line: a probe reports
+         * that the leg works, not what the model said. */
+        char one_line[81];
+        size_t n = 0;
+        for (const char *p = dr.reply.text; *p && n < sizeof(one_line) - 1; p++)
+            one_line[n++] = (*p == '\n' || *p == '\r') ? ' ' : *p;
+        one_line[n] = '\0';
+        printf("HTTP %d in %lldms  model=%s  \"%s\"\n", dr.http_status,
+               (long long)elapsed,
+               dr.reply.model[0] ? dr.reply.model : model, one_line);
+        engine_reply_free(&dr.reply);
+        return 0;
+    }
+    printf("HTTP %d in %lldms  %s\n", dr.http_status, (long long)elapsed,
+           engine_err_name(dr.err));
+    return 1;
+}
+
+static int probe_all(const struct unit_opts *o)
+{
+    if (!o->yes_dispatch)
+        return fail_setup(
+            "refusing to probe without --yes-dispatch. A probe is a real call "
+            "to a real vendor and it is billed like one");
+
+    printf("engine_unit: probing every vendor with one minimal call\n");
+    int failures = 0;
+    size_t probed = 0;
+    for (size_t i = 0; i < engine_count(); i++) {
+        const struct engine_vendor *v = engine_at(i);
+        if (o->engine_id && strcmp(v->id, o->engine_id) != 0)
+            continue;
+        probed++;
+        failures += probe_one(v, o->model);
+    }
+    if (probed == 0) {
+        return fail_setup("no engine matched --engine; see --list");
+    }
+    printf("engine_unit: %zu probed, %d did not answer\n", probed, failures);
+    /* A probe that could not reach anyone is a failed probe. It is reported
+     * as one rather than as a clean run with sad output. */
+    return failures == 0 ? 0 : 1;
+}
 /* The fixture engine: the same lifecycle with the socket removed. The canned
  * file is read as a RESPONSE BODY and pushed through the identical hardened
  * decoder, so what the fixture proves about the decode path is real. */
@@ -698,21 +896,37 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
  * reported as a timeout. No shell is invoked — zcl_spawn_capture execs argv
  * directly, so the prompt path never passes through metacharacter expansion. */
 static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
+                         const char *prompt_text, const char *model,
                          const char *workdir, int turns, int timeout_ms,
                          struct dispatch_result *dr)
 {
-    if (!prompt_path || !prompt_path[0]) {
+    /* Which of the two the vendor wants is a row, not a branch here. */
+    const char *prompt = (v->cli_prompt == ENGINE_CLI_PROMPT_ARG)
+                             ? prompt_text : prompt_path;
+    if (!prompt || !prompt[0]) {
         dr->err = ENGINE_ERR_REFUSED;
+        if (v->cli_prompt == ENGINE_CLI_PROMPT_ARG)
+            LOG_FAIL("engine_unit",
+                     "%s takes its prompt as an argument and none was composed",
+                     v->id);
         LOG_FAIL("engine_unit",
                  "a CLI engine reads its prompt from a file: pass --state-dir "
                  "so one can be written");
     }
     char turn_cap[32];
     (void)snprintf(turn_cap, sizeof(turn_cap), "%d", turns > 0 ? turns : 1);
-    const char *const argv[] = {
-        v->program, "--prompt-file", prompt_path, "--cwd", workdir,
-        "--max-turns", turn_cap, "--always-approve", NULL
+    const struct engine_cli_inputs in = {
+        .prompt  = prompt,
+        .workdir = workdir,
+        .turns   = turn_cap,
+        .model   = model && model[0] ? model : v->default_model,
     };
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {
+        dr->err = ENGINE_ERR_REFUSED;
+        LOG_FAIL("engine_unit", "could not build an argument vector for %s",
+                 v->id);
+    }
     char *log = zcl_malloc(UNIT_GATE_LOG_BYTES, "engine_unit_cli_log");
     if (!log) {
         dr->err = ENGINE_ERR_REFUSED;
@@ -874,7 +1088,8 @@ static void write_receipt(const struct unit_opts *o,
 static bool dispatch_with_retries(const struct engine_vendor *v,
                                   const struct unit_opts *o,
                                   const char *body, size_t body_len,
-                                  const char *prompt_path, const char *workdir,
+                                  const char *prompt_path, const char *prompt_text,
+                                  const char *workdir,
                                   struct dispatch_result *dr)
 {
     struct engine_breaker breaker = {0};
@@ -893,8 +1108,8 @@ static bool dispatch_with_retries(const struct engine_vendor *v,
             ok = dispatch_https(v, body, body_len, o->timeout_s * 1000, dr);
             break;
         case ENGINE_WIRE_LOCAL_CLI:
-            ok = dispatch_cli(v, prompt_path, workdir, o->turns,
-                              o->timeout_s * 1000, dr);
+            ok = dispatch_cli(v, prompt_path, prompt_text, o->model, workdir,
+                              o->turns, o->timeout_s * 1000, dr);
             break;
         case ENGINE_WIRE_LOCAL_FIXTURE:
             ok = dispatch_fixture(v, o->fixture_reply, dr);
@@ -933,11 +1148,22 @@ int main(int argc, char **argv)
         list_engines();
         return 0;
     }
-    if (!o.engine_id)
-        return fail_setup("need --engine ID (see --list)");
-    const struct engine_vendor *v = engine_by_id(o.engine_id);
+    /* Before --engine is required: a bare --probe covers every vendor, and
+     * naming one narrows it rather than being the way in. */
+    if (o.probe)
+        return probe_all(&o);
+    /* An unnamed engine resolves to the registry default rather than being a
+     * usage error. The choice is still SAID OUT LOUD below: an operator who
+     * did not pick an engine should learn which one they got from the run,
+     * not from reading the table. */
+    const struct engine_vendor *v = o.engine_id ? engine_by_id(o.engine_id)
+                                                : engine_default();
     if (!v)
-        return fail_setup("unknown --engine; see --list");
+        return fail_setup(o.engine_id ? "unknown --engine; see --list"
+                                      : "this build has no default engine");
+    if (!o.engine_id)
+        engine_emit(stdout, "engine_unit: no --engine given, using %s (%s)\n",
+                    v->id, v->display);
     if (!o.task_path)
         return fail_setup("need --task FILE");
     if (!o.group && !o.no_group)
@@ -1089,7 +1315,9 @@ int main(int argc, char **argv)
         && (size_t)snprintf(prompt_path, sizeof(prompt_path), "%s/prompt.txt",
                             o.state_dir) < sizeof(prompt_path))
         (void)engine_emit_file(prompt_path, delivered, delivered_len);
-    free(delivered);
+    /* NOT freed here: a CLI vendor whose row takes the prompt as an ARGUMENT
+     * hands these exact bytes to exec, so they have to outlive the dispatch.
+     * The file above stays the archived record either way. */
 
     /* Only an HTTP dialect has a request document. A CLI engine reads the
      * prompt from the file written above and a fixture reads a canned reply,
@@ -1117,8 +1345,9 @@ int main(int argc, char **argv)
 
     struct dispatch_result dr = {0};
     const bool got = dispatch_with_retries(v, &o, body, body_len, prompt_path,
-                                           workdir, &dr);
+                                           delivered, workdir, &dr);
     free(body);
+    free(delivered);
     engine_secret_clear();
     if (!got)
         return 1;

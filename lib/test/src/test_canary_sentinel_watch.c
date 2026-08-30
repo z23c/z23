@@ -31,6 +31,7 @@
 
 #include "framework/condition.h"
 #include "json/json.h"
+#include "platform/os_proc.h"
 #include "services/canary_sentinel_watch.h"
 #include "conditions/replay_canary_failed.h"
 #include "util/clientversion.h"
@@ -67,27 +68,25 @@ static bool write_file(const char *dir, const char *name, const char *body)
  * ID is the sole cross-build authority; build_commit is display-only. */
 static bool test_running_artifact_sha256(char out[65])
 {
-    int fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    FILE *image = os_proc_open_self_exe();
+    if (!image)
         return false;
     struct sha256_ctx ctx;
     sha256_init(&ctx);
     uint8_t buf[32768];
     bool ok = true;
     for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
+        size_t n = fread(buf, 1, sizeof(buf), image);
         if (n > 0) {
-            sha256_write(&ctx, buf, (size_t)n);
+            sha256_write(&ctx, buf, n);
             continue;
         }
-        if (n == 0)
+        if (feof(image))
             break;
-        if (errno == EINTR)
-            continue;
         ok = false;
         break;
     }
-    if (close(fd) != 0)
+    if (fclose(image) != 0)
         ok = false;
     if (!ok)
         return false;

@@ -1,11 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Bounded header-only repair for snapshot nodes whose local durable stores do
- * not retain an old Equihash solution. A getheaders serve miss arms one global
- * 64-header span. The send loop requests that span from an outbound full peer;
- * msg_headers independently hash-binds and full-PoW verifies every returned
- * candidate before caching it. No block body is requested and no consensus
- * write is delayed. */
+ * not retain an Equihash solution. A getheaders serve miss or the staged
+ * validator's stale-solution condition arms one global 64-header span. The send
+ * loop requests that span from an outbound full peer; msg_headers independently
+ * hash-binds and full-PoW verifies every returned candidate before caching it.
+ * No block body is required by this path and no consensus write is delayed. */
 
 #ifndef ZCL_NET_HEADER_SERVE_REPAIR_H
 #define ZCL_NET_HEADER_SERVE_REPAIR_H

@@ -21,11 +21,11 @@
 config/src/boot.c 4001
 config/src/boot_refold_staged.c 1810
 lib/codeindex/src/codeindex_merkle.c 1776
-lib/hotswap/src/hotswap_activate.c 2325
+lib/hotswap/src/hotswap_activate.c 2314
 lib/kernel/src/command_registry.c 2403
-lib/net/src/connman.c 3432
+lib/net/src/connman.c 3081
 lib/net/src/download.c 1793
-lib/net/src/fast_sync.c 1688
+lib/net/src/fast_sync.c 1684
 lib/net/src/file_service.c 3058
 lib/net/src/msg_headers.c 2370
 lib/net/src/msgprocessor.c 3031
@@ -36,7 +36,7 @@ lib/net/src/peer_lifecycle.c 1634
 lib/platform/src/os_sandbox_linux.c 1526
 lib/vcs/src/package_reward.c 1986
 lib/vcs/src/package_swarm_node.c 2015
-lib/vcs/src/vcs_devloop.c 2390
+lib/vcs/src/vcs_devloop.c 2367
 lib/wallet/src/wallet.c 1560
 lib/wallet/src/wallet_sqlite.c 1603
 src/main_cli_modes.c 4275

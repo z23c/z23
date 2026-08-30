@@ -60,7 +60,7 @@ AGENT_IMPACT_RULE("lib/encoding/src/qr.c|lib/encoding/src/qrcodegen_backend.c|li
 AGENT_IMPACT_RULE("tools/command/native_presentation_publication_status_command.c|config/src/boot_zcode_package_rpc.c|config/src/boot_zcode_package_import.c", "qr zcode_fetch zcode_dht_service command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("lib/util/src/clientversion.c|lib/util/include/util/clientversion.h|lib/test/src/test_clientversion_format.c", "clientversion_format encoding make_lint_gates")
 AGENT_IMPACT_RULE("tools/dev/source-identity.sh|tools/dev/source-identity-selftest.sh|tools/scripts/check_vcs_no_sha1.sh", "clientversion_format consensus_state_producer_receipt vcs_core make_lint_gates")
-AGENT_IMPACT_RULE("lib/util/src/self_backtrace.c|lib/util/include/util/self_backtrace.h|lib/util/src/async_safe_write.c|lib/util/include/util/async_safe_write.h|lib/util/src/signal_handler.c|lib/util/include/util/signal_handler.h|lib/util/src/thread_registry.c|lib/util/include/util/thread_registry.h|lib/test/src/test_self_backtrace.c", "self_backtrace thread_registry command_registry_catalog rpc make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/self_backtrace.c|lib/util/include/util/self_backtrace.h|lib/util/src/async_safe_write.c|lib/util/include/util/async_safe_write.h|lib/util/src/signal_handler.c|lib/util/include/util/signal_handler.h|lib/util/src/thread_registry.c|lib/util/include/util/thread_registry.h|lib/test/src/test_self_backtrace.c|lib/test/src/test_thread_registry.c", "self_backtrace thread_registry command_registry_catalog rpc make_lint_gates")
 AGENT_IMPACT_RULE("lib/util/src/thread_liveness.c|lib/util/include/util/thread_liveness.h|lib/util/src/supervisor.c|lib/util/include/util/supervisor.h|lib/test/src/test_supervisor_production_tree.c|lib/test/src/test_supervisor.c", "supervisor supervisor_domains supervisor_production_tree thread_registry make_lint_gates")
 AGENT_IMPACT_RULE("lib/health/src/heartbeat.c|lib/metrics/src/metrics.c|lib/event/src/event.c|lib/rpc/src/rpc_timeout.c|config/src/db_service.c|tools/lint/check_thread_supervision.sh|tools/lint/thread_supervision_baseline.txt", "supervisor supervisor_production_tree time_authority make_lint_gates")
 /* time-discipline organ: the ONE operational deadline/interval clock +
@@ -180,6 +180,7 @@ AGENT_IMPACT_RULE("lib/sync/src/reducer_stage_profile.c|lib/sync/include/sync/re
  * node_health_service are the two consumers that read memory through
  * this seam. */
 AGENT_IMPACT_RULE("lib/platform/src/os_proc.c|lib/platform/src/os_proc_mem.c|lib/platform/include/platform/os_proc.h|lib/test/src/test_os_proc.c", "os_proc mem_pressure node_health_service make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_canary_sentinel_watch.c", "canary_sentinel_watch os_proc make_lint_gates")
 AGENT_IMPACT_RULE("lib/util/src/mem_pressure.c|lib/util/include/util/mem_pressure.h|lib/test/src/test_mem_pressure.c|config/src/boot_mem_pressure.c|app/conditions/src/memory_pressure_high.c|app/conditions/include/conditions/memory_pressure_high.h|tools/lint/check_proc_self_shim.sh|tools/lint/proc_self_shim_baseline.txt", "mem_pressure sticky_conditions os_proc supervisor condition_engine make_lint_gates")
 /* lib/base is the in-tree dependency sink (log macros, log-level filter,
  * checked allocators, zcl_result). The util/ paths below are one-line
@@ -874,7 +875,11 @@ AGENT_IMPACT_RULE("lib/util/include/util/blocker.h|lib/util/src/blocker.c|lib/te
 /* CPU topology organ (wf/organ-cpu-topology, 2026-07-13): sysfs-derived
  * physical core / L3 cache domain discovery + advisory pin_thread. */
 AGENT_IMPACT_RULE("lib/util/src/cpu_topology.c|lib/util/include/util/cpu_topology.h|lib/test/src/test_cpu_topology.c", "cpu_topology make_lint_gates")
-AGENT_IMPACT_RULE("lib/util/src/hw_profile.c|lib/util/include/util/hw_profile.h|lib/test/src/test_hw_profile.c", "hw_profile cpu_topology make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/hw_profile.c|lib/util/include/util/hw_profile.h|lib/test/src/test_hw_profile.c", "hw_profile hw_bench arm_hw_tiers cpu_topology make_lint_gates")
+/* Hardware benchmark cache identity binds the complete native profile. A
+ * fingerprint change must exercise cache invalidation and pure batch sizing,
+ * not fall through to lint alone. */
+AGENT_IMPACT_RULE("lib/util/src/hw_bench.c|lib/util/include/util/hw_bench.h|lib/test/src/test_hw_bench.c", "hw_bench hw_profile make_lint_gates")
 
 /* os-substrate Rung 0 (lane L2): no-shell process-spawn primitives. */
 AGENT_IMPACT_RULE("lib/util/include/util/spawn.h|lib/util/src/spawn.c|lib/test/src/test_spawn.c", "spawn make_lint_gates")
@@ -2831,6 +2836,12 @@ AGENT_IMPACT_RULE("lib/territory/include/territory/territory.h|lib/territory/src
  * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
  * which is the exact reason this module has no transport in it. */
 AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine cold_join_sovereign make_lint_gates")
+
+/* Tier-1 macOS capability truth and its derived runner. Every declared row
+ * changes which availability/refusal evidence the public aggregate claims,
+ * so a matrix or runner edit must execute the same exact groups as
+ * `make macos-acceptance`; no hand-maintained smaller shadow is accepted. */
+AGENT_IMPACT_RULE("config/platform/macos_capabilities.def|tools/scripts/macos_acceptance.sh", "binary_ab_fallback boot_shutdown_marker_persistence confine dev_activation directory_watcher fast_sync_coins_export net noise_nk_handshake noise_transport_parity noise_xx_handshake os_sandbox rpc sandbox_process_budget service_state service_state_driver tor wallet wallet_backup watcher_record z23_front_door zcode_verify make_lint_gates")
 /* Authored personas. personas.def is prose, so nothing it says can be proven
  * by running code — which is exactly why it needs a gate rather than a test.
  * check_persona_resolves.sh is that gate, and it rides make_lint_gates. The
@@ -2861,6 +2872,23 @@ AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib
  * change to that seam's locking, truncation or fsync behaviour changes what
  * this module's recovery rule actually does. */
 AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")
+/* The build's own numbers, recorded to a hash-chained log. It rides the lint
+ * group because one of the numbers it reports is the Makefile's own gate list,
+ * so a change to how that list is written changes what this module measures. */
+AGENT_IMPACT_RULE("lib/kpi/src/*.c|lib/kpi/include/kpi/*.h|lib/test/src/test_kpi.c", "kpi make_lint_gates")
+/* The claim register. Rides its own group and the chainlog group: every claim
+ * and every trial is a chainlog frame, so a change to that log's recovery or
+ * verification rule changes what "these trials survived a reopen" proves.
+ * It does NOT ride the engine group — it reads enum engine_verdict and calls
+ * engine_verdict_is_pass(), which is a compile-time coupling the build
+ * catches, not a behavioural one this group could observe. */
+AGENT_IMPACT_RULE("lib/science/src/*.c|lib/science/include/science/*.h|lib/test/src/test_science.c", "science chainlog make_lint_gates")
+/* The corpus command surface: the honest distance-to-100M report. It rides
+ * the `science` group because every number it renders comes from
+ * lib/science/science_corpus.c, and the registry groups because it is a
+ * READY_READ code.* leaf — dispatched four times per suite run by the
+ * read-latency contract, so a slow walk here shows up there. */
+AGENT_IMPACT_RULE("tools/command/native_code_corpus_command.c", "science command_registry_catalog command_registry_latency native_api_contract make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
  * because the ratchet it guards is the whole point — the recorded set of
