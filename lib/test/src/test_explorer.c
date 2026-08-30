@@ -1,17 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Explorer controller unit tests — routing, edge cases, factoids. */
 
-/* realpath() reaches this TU only through the glibc fortify inline that
- * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
- * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
- * compiles by accident of optimisation and breaks at -O0, under
- * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
- * include: after them it does nothing. See lib/util/src/hw_profile.c. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
 #include "test/test_core.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/explorer_internal.h"
@@ -31,6 +22,15 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+static int ex_environment_unset(const char *name)
+{
+#if defined(_WIN32)
+    return platform_environment_set(name, "", 1);
+#else
+    return unsetenv(name);
+#endif
+}
 
 /* Build "<cwd>/.zcl_test_explorer_<stem>_<pid>" — an ABSOLUTE fixture
  * datadir. Cases whose subject only reads from the datadir spell it
@@ -725,8 +725,8 @@ int test_explorer(void)
             ok = fputs("body{background:#badbad}.stale-css-marker{}", f) >= 0;
             fclose(f);
         }
-        unsetenv("ZCL_EXPLORER_CSS_FILE");
-        unsetenv("ZCL_EXPLORER_CSS_LIVE");
+        ex_environment_unset("ZCL_EXPLORER_CSS_FILE");
+        ex_environment_unset("ZCL_EXPLORER_CSS_LIVE");
         size_t n = explorer_handle_request("GET", "/explorer/style.css",
                                             NULL, 0, css_resp,
                                             sizeof(css_resp) - 1);

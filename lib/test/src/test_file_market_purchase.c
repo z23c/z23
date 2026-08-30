@@ -1,16 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Durable buyer plan/commit, idempotency, and fail-closed restart tests. */
 
-/* realpath() reaches this TU only through the glibc fortify inline that
- * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
- * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
- * compiles by accident of optimisation and breaks at -O0, under
- * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
- * include: after them it does nothing. See lib/util/src/hw_profile.c. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "test/test_core.h"
 
 #include "chain/chainparams.h"
@@ -24,6 +14,7 @@
 #include "models/vault_intent.h"
 #include "models/wallet_identity.h"
 #include "net/file_market.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "primitives/transaction.h"
 #include "sapling/fr.h"
@@ -482,7 +473,8 @@ int file_market_purchase_tests(void)
 
     char absolute_dir[MARKET_DOWNLOAD_PATH_MAX];
     char destination[MARKET_DOWNLOAD_PATH_MAX];
-    bool destination_ready = realpath(dir, absolute_dir) != NULL;
+    bool destination_ready = platform_directory_canonical_real(
+        dir, absolute_dir, sizeof(absolute_dir));
     snprintf(destination, sizeof(destination), "%s/purchased.bin",
              destination_ready ? absolute_dir : "");
     struct market_purchase_view downloaded;

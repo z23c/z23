@@ -1,16 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: hermetic preparation, capsule, and detached sealing proofs. */
 
-/* realpath() is declared by <stdlib.h> only under
- * __USE_MISC/__USE_XOPEN_EXTENDED, which the build's
- * -D_POSIX_C_SOURCE=200809L does not set. Without this the declaration
- * arrives only via the glibc fortify inline that -D_FORTIFY_SOURCE=2 pulls in
- * at -O1 and above, so the file compiles by accident of optimisation and
- * fails at -O0. Matches lib/util/src/hw_profile.c and 24 other TUs. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "test/test_core.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -41,6 +31,55 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+static bool zpd_symlink_create(const char *target, const char *link,
+                               bool directory)
+{
+#if defined(_WIN32)
+    DWORD flags = (directory ? SYMBOLIC_LINK_FLAG_DIRECTORY : 0) |
+                  SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if (CreateSymbolicLinkA(link, target, flags) != 0)
+        return true;
+    flags &= ~SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    return GetLastError() == ERROR_INVALID_PARAMETER &&
+           CreateSymbolicLinkA(link, target, flags) != 0;
+#else
+    (void)directory;
+    return symlink(target, link) == 0;
+#endif
+}
+
+static bool zpd_symlink_remove(const char *path, bool directory)
+{
+#if defined(_WIN32)
+    return directory ? RemoveDirectoryA(path) != 0 : DeleteFileA(path) != 0;
+#else
+    (void)directory;
+    return unlink(path) == 0;
+#endif
+}
+
+static bool zpd_special_create(const char *path)
+{
+#if defined(_WIN32)
+    return platform_directory_create(path, 0700) == 0;
+#else
+    return mkfifo(path, 0600) == 0;
+#endif
+}
+
+static bool zpd_special_remove(const char *path)
+{
+#if defined(_WIN32)
+    return rmdir(path) == 0;
+#else
+    return unlink(path) == 0;
+#endif
+}
 
 static bool zpd_write(const char *path, const char *text)
 {
@@ -751,7 +790,7 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
                        "test-tmp/zcode-package-dev-%ld", (long)getpid());
         ASSERT(zpd_fixture(root, false));
         (void)snprintf(path, sizeof(path), "%s/link", root);
-        ASSERT(symlink("src/x.c", path) == 0);
+        ASSERT(zpd_symlink_create("src/x.c", path, false));
         struct vcs_package_prepare_options options = {
             .dir = root, .publisher_sequence = 1,
             .reward_address = "", .chain_id = "zclassic-main",
@@ -760,28 +799,28 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
         struct vcs_package_prepared prepared;
         char detail[256];
         (void)snprintf(path, sizeof(path), "%s/.zvcs", root);
-        ASSERT(symlink("src", path) == 0);
+        ASSERT(zpd_symlink_create("src", path, true));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_symlink_remove(path, true));
         (void)snprintf(path, sizeof(path), "%s/build", root);
-        ASSERT(symlink("src", path) == 0);
+        ASSERT(zpd_symlink_create("src", path, true));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_symlink_remove(path, true));
         (void)snprintf(path, sizeof(path), "%s/link", root);
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_symlink_remove(path, false));
         (void)snprintf(path, sizeof(path), "%s/special", root);
-        ASSERT(mkfifo(path, 0600) == 0);
+        ASSERT(zpd_special_create(path));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
                                    sizeof(detail)) ==
                VCS_PACKAGE_PREPARE_ERR_FILE_TYPE);
-        ASSERT(unlink(path) == 0);
+        ASSERT(zpd_special_remove(path));
         zpd_fixture_cleanup(root);
         ASSERT(zpd_fixture(root, true));
         ASSERT(vcs_package_prepare(&options, &prepared, detail,
@@ -988,7 +1027,7 @@ static int zpd_test_project_init(void)
 
         char link[320];
         (void)snprintf(link, sizeof(link), "%s/link", root);
-        ASSERT(symlink("LICENSE", link) == 0);
+        ASSERT(zpd_symlink_create("LICENSE", link, false));
         json_init(&input); json_set_object(&input);
         ASSERT(json_push_kv_str(&input, "workspace", root));
         request.input = &input;
@@ -1095,7 +1134,8 @@ static int zpd_test_work_start_package_bounds(void)
         ASSERT(zpd_write(path, "int x(void) { return 1; }\n"));
         ASSERT(zpd_plant_build_output(root));
         char absolute_root[4400];
-        ASSERT(realpath(root, absolute_root) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, absolute_root, sizeof(absolute_root)));
 
         struct json_value input;
         json_init(&input); json_set_object(&input);
@@ -1158,7 +1198,8 @@ static int zpd_test_work_start(void)
                        "test-tmp/zcode-work-start-%ld", (long)getpid());
         ASSERT(zpd_fixture(root, false));
         char absolute_root[4400];
-        ASSERT(realpath(root, absolute_root) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, absolute_root, sizeof(absolute_root)));
         uint8_t source_before[32], source_after[32];
         ASSERT(vcs_tree_capture_path(root, source_before) == VCS_OK);
 
@@ -1880,7 +1921,9 @@ static int zpd_test_work_start(void)
         (void)snprintf(publication_job_hex, sizeof(publication_job_hex), "%s",
                        publication_job_text);
         char resolved_authority_workspace[4400];
-        ASSERT(realpath(root, resolved_authority_workspace) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, resolved_authority_workspace,
+            sizeof(resolved_authority_workspace)));
         ASSERT(reply.next_count == 1);
         ASSERT(strcmp(reply.next[0].command,
                       "dev.publication.advance") == 0);
@@ -2349,14 +2392,16 @@ static int zpd_test_admitted_single_interpretation(void)
                        "test-tmp/zcode-admitted-%ld", (long)getpid());
         ASSERT(zpd_fixture(root, false));
         char absolute_root[4400];
-        ASSERT(realpath(root, absolute_root) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            root, absolute_root, sizeof(absolute_root)));
         char datadir[256];
         (void)snprintf(datadir, sizeof(datadir),
                        "test-tmp/zcode-admitted-node-%ld", (long)getpid());
         ZCL_IGNORE_RESULT(zcl_tree_remove(datadir), "datadir fixture reset");
         ASSERT(platform_directory_create(datadir, 0700) == 0);
         char absolute_datadir[4400];
-        ASSERT(realpath(datadir, absolute_datadir) != NULL);
+        ASSERT(platform_directory_canonical_real(
+            datadir, absolute_datadir, sizeof(absolute_datadir)));
 
         struct json_value input;
         json_init(&input); json_set_object(&input);
@@ -2579,7 +2624,7 @@ static int zpd_test_work_toolchain(void)
         char dir[256], abs[4096];
         test_make_tmpdir(dir, sizeof(dir), "zcode_package_dev",
                          "toolchain-join-dd");
-        ASSERT(realpath(dir, abs) != NULL);
+        ASSERT(platform_directory_canonical_real(dir, abs, sizeof(abs)));
         zcl_native_bridge_bind_rpc(abs, 0);
         struct zcl_command_request request = { .input = NULL };
         struct zcl_command_reply reply;
