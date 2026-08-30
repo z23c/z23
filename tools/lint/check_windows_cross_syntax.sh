@@ -58,6 +58,7 @@ BASELINE="tools/lint/windows_cross_syntax_baseline.txt"
 SRC_FLOOR=150
 INC_FLOOR=50
 SCAN_ROOTS=(lib app config core domain ports)
+TEST_COMPAT_HEADER="test/windows_compat.h"
 
 echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
 
@@ -170,6 +171,25 @@ fi
 # not a Windows syntax bug.
 COMPILE_FLAGS=(-std=c2x -fsyntax-only -DZCL_TESTING
                "${API_FLOOR_DEFINES[@]}" "${PLATFORM_DEFINES[@]}")
+
+# The native Windows test profile force-includes one test-only compatibility
+# header. Grade lib/test translation units under that same contract; applying
+# it to production sources would hide a real platform-seam defect. Keep the
+# header spelling tied to the Makefile assignment instead of inventing a
+# second compatibility layer here.
+test_compat_assignment="$(awk '/^ZCL_TEST_WINDOWS_COMPAT_FLAGS[ \t]*=/ {print; exit}' Makefile)"
+case "$test_compat_assignment" in
+    *'-include test/windows_compat.h'*) ;;
+    *)
+        echo "  $GATE: FAIL — could not bind the Windows test compatibility" >&2
+        echo "      include to ZCL_TEST_WINDOWS_COMPAT_FLAGS in Makefile." >&2
+        exit 1
+        ;;
+esac
+[ -f "lib/test/include/$TEST_COMPAT_HEADER" ] || {
+    echo "  $GATE: FAIL — missing lib/test/include/$TEST_COMPAT_HEADER." >&2
+    exit 1
+}
 
 # ── Include search path ───────────────────────────────────────────────────
 # Proven recipe: every source-tree directory named include, excluding build,
@@ -315,6 +335,9 @@ if [ ${#flags[@]} -gt 0 ]; then
         unset "flags[$last]"
     fi
 fi
+case "$src" in
+    lib/test/*) flags+=( -include "$ZCL_GATE_TEST_COMPAT_HEADER" ) ;;
+esac
 if "$ZCL_GATE_CC" "${flags[@]}" "$src" >"$log" 2>&1; then
     echo 0 > "$rcf"
 else
@@ -328,6 +351,7 @@ chmod +x "$WORK/compile_one.sh"
 # xargs into a hollow pass over the remaining files.
 tr '\n' '\0' < "$SRC_LIST" |
     env ZCL_GATE_FLAGS="$WORK/flags.nul" ZCL_GATE_CC="$CC_BIN" ZCL_GATE_OUT="$OUT_DIR" \
+        ZCL_GATE_TEST_COMPAT_HEADER="$TEST_COMPAT_HEADER" \
         xargs -0 -r -P "$JOBS" -n 1 "$WORK/compile_one.sh" || true
 
 LOG_COUNT="$(find "$OUT_DIR" -name '*.log' -type f | grep -c . || true)"

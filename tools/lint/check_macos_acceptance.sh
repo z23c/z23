@@ -71,9 +71,9 @@ GATE="check-macos-acceptance"
 ACCEPT="tools/scripts/macos_acceptance.sh"
 MATRIX="config/platform/macos_capabilities.def"
 CATALOG="tools/dev/test_group_catalog.def"
-# The floor is only an anti-hollow guard: a matrix that derives almost no
-# evidence groups must never read as clean.
-GROUP_FLOOR=10
+# The union is a closed acceptance contract: 29 capability-evidence groups
+# plus eight required platform-baseline groups.  A floor would miss deletions.
+EXPECTED_GROUPS=37
 
 check_root() {
     local out rc groups group_n
@@ -107,11 +107,15 @@ check_root() {
         return 1
     fi
 
-    # ── Leg 1b: the derived evidence set must not be empty. ────────────────
+    # ── Leg 1b: the derived evidence union is exact, not merely nonempty. ──
     groups="$("$ACCEPT" --groups 2>/dev/null)"
     group_n="$(printf '%s' "$groups" | tr ',' '\n' | grep -c . || true)"
-    gate_require_scanned "${group_n:-0}" "$GROUP_FLOOR" "$GATE" \
-        "the capability matrix derived almost no evidence groups — a hollow matrix must not read as clean"
+    if [ "${group_n:-0}" -ne "$EXPECTED_GROUPS" ]; then
+        echo "  $GATE: FAIL — expected $EXPECTED_GROUPS exact macOS groups; derived ${group_n:-0}." >&2
+        echo "  The capability evidence and required platform baseline form a" >&2
+        echo "  closed union; deletion must not degrade into a smaller pass." >&2
+        return 1
+    fi
 
     # ── Leg 1c: the Make target must still reach the script. ───────────────
     # The whole reason this gate exists is that the script had exactly one
@@ -238,8 +242,30 @@ run_selftest() {
     expect_reject "F: a missing capability matrix fails closed" \
                   "missing capability matrix" "$FIXTURE_ROOT/not_here.def" || rc=1
 
+    # G. Removing one of the eight required baseline groups must fail even
+    #    though every remaining group is registered and the capability rows
+    #    are otherwise untouched.
+    sed '/^ZCL_MACOS_REQUIRED_TEST(test_crypto)$/d' \
+        "$MATRIX" > "$FIXTURE_ROOT/required_deleted.def"
+    expect_reject "G: deletion from the required baseline is caught" \
+                  "required test set drift" "$FIXTURE_ROOT/required_deleted.def" || rc=1
+
+    # H. The required set is subject to the same registration authority as
+    #    capability evidence.
+    sed 's/^ZCL_MACOS_REQUIRED_TEST(test_crypto)$/ZCL_MACOS_REQUIRED_TEST(test_macos_group_that_does_not_exist)/' \
+        "$MATRIX" > "$FIXTURE_ROOT/required_unknown.def"
+    expect_reject "H: an unknown required group is caught" \
+                  "unregistered group" "$FIXTURE_ROOT/required_unknown.def" || rc=1
+
+    # I. Count equality is insufficient: replacing a required group with a
+    #    different, registered group must still violate the exact set.
+    sed 's/^ZCL_MACOS_REQUIRED_TEST(test_crypto)$/ZCL_MACOS_REQUIRED_TEST(test_json)/' \
+        "$MATRIX" > "$FIXTURE_ROOT/required_exact_set.def"
+    expect_reject "I: a same-size registered mutation violates the exact set" \
+                  "required test set drift" "$FIXTURE_ROOT/required_exact_set.def" || rc=1
+
     if [ "$rc" -eq 0 ]; then
-        echo "══ selftest: PASS (8/8) ══"
+        echo "══ selftest: PASS (11/11) ══"
     else
         echo "══ selftest: FAIL ══"
     fi

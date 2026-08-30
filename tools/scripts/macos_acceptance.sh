@@ -25,6 +25,15 @@ matrix_rows() {
     ' "$MATRIX"
 }
 
+required_groups() {
+    awk '
+        /^ZCL_MACOS_REQUIRED_TEST\([A-Za-z_0-9]+\)[[:space:]]*$/ {
+            row=$0; sub(/^[^(]*\(/, "", row); sub(/\).*/, "", row)
+            print row
+        }
+    ' "$MATRIX"
+}
+
 registered_groups() {
     awk '
         /^[[:space:]]*ZCL_TEST_GROUP\([A-Za-z_0-9]+\)[[:space:]]*$/ {
@@ -42,7 +51,8 @@ validate() {
     [ -f "$MATRIX" ] || die "missing capability matrix: $MATRIX"
     [ -f "$REGISTRY" ] || die "missing registered-test catalog: $REGISTRY"
 
-    local rows expected actual registered id state reason groups group
+    local rows expected actual registered required required_actual
+    local id state reason groups group required_count union_count
     rows="$(matrix_rows)"
     [ -n "$rows" ] || die "capability matrix yielded no rows"
     expected='arm_acceleration hot_activation kqueue launchd node noise package_execution release_packaging resident_confinement scheduler_qos snapshot_export tor wallet'
@@ -50,6 +60,20 @@ validate() {
     [ "$actual" = "$expected" ] || die "capability set drift: expected '$expected'; observed '$actual'"
     registered="$(registered_groups)"
     [ -n "$registered" ] || die "registered-test catalog yielded no groups"
+
+    required="$(required_groups)"
+    [ -n "$required" ] || die "required test set yielded no groups"
+    required_count="$(printf '%s\n' "$required" | awk 'NF {n++} END {print n+0}')"
+    [ "$required_count" = 8 ] ||
+        die "required test set drift: expected 8 rows; observed $required_count"
+    while IFS= read -r group; do
+        grep -Fqx "$group" <<< "$registered" ||
+            die "required test set names unregistered group '$group'"
+    done <<< "$required"
+    expected='test_binary_staleness test_cold_join_sovereign test_crypto test_dev_platform test_os_proc test_rng test_self_backtrace test_sqlite'
+    required_actual="$(printf '%s\n' "$required" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+    [ "$required_actual" = "$expected" ] ||
+        die "required test set drift: expected '$expected'; observed '$required_actual'"
 
     while IFS=',' read -r id state reason groups; do
         id="${id//[[:space:]]/}"
@@ -69,16 +93,23 @@ validate() {
         # name exactly one group (tor, release_packaging, snapshot_export).
         done < <(printf '%s\n' "$groups" | tr ',' '\n')
     done <<< "$rows"
+
+    union_count="$(exact_groups | tr ',' '\n' | awk 'NF {n++} END {print n+0}')"
+    [ "$union_count" = 37 ] ||
+        die "exact evidence union drift: expected 37 groups; observed $union_count"
 }
 
 exact_groups() {
-    matrix_rows | cut -d',' -f4- | tr ',' '\n' | sed 's/[[:space:]]//g' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
+    {
+        matrix_rows | cut -d',' -f4- | tr ',' '\n'
+        required_groups
+    } | sed 's/[[:space:]]//g' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
 }
 
 case "${1:---check}" in
     --check)
         validate
-        printf 'macos-acceptance: capability matrix PASS\n'
+        printf 'macos-acceptance: capability matrix + required baseline PASS (37 exact groups)\n'
         ;;
     --groups)
         validate
