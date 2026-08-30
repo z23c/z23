@@ -269,6 +269,24 @@ static void raw_first_line(const struct scan_ctx *c, size_t a, size_t b,
     buf[n] = '\0';
 }
 
+static bool macro_invocation_segment(const char *clean, size_t start,
+                                     size_t end)
+{
+    start = first_tok(clean, start, end);
+    if (start == end || !is_ident_start((unsigned char)clean[start]))
+        return false;
+    bool has_upper = false;
+    size_t p = start;
+    while (p < end && is_ident_char((unsigned char)clean[p])) {
+        unsigned char ch = (unsigned char)clean[p];
+        if (isupper(ch)) has_upper = true;
+        else if (islower(ch)) return false;
+        p++;
+    }
+    while (p < end && isspace((unsigned char)clean[p])) p++;
+    return has_upper && p < end && clean[p] == '(';
+}
+
 /* ── symbol emission ────────────────────────────────────────────────── */
 
 static void emit_sym(struct scan_ctx *c, const char *name, char kind,
@@ -675,6 +693,21 @@ void ci_scan_text(const char *src, size_t len, const char *relpath,
                     cond[cn] = '\0';
                     if (sp < CI_GUARD_STACK_MAX)
                         snprintf(stack[sp++], 128, "%s", cond);
+                } else if (strcmp(dir, "elif") == 0) {
+                    while (d < b && (clean[d] == ' ' || clean[d] == '\t')) d++;
+                    char cond[120]; size_t cn = 0;
+                    while (d < b && clean[d] != '\n' && cn + 1 < sizeof(cond))
+                        cond[cn++] = clean[d++];
+                    while (cn > 0 && isspace((unsigned char)cond[cn - 1])) cn--;
+                    cond[cn] = '\0';
+                    if (sp > 0)
+                        snprintf(stack[sp - 1], 128, "elif:%s", cond);
+                } else if (strcmp(dir, "else") == 0) {
+                    if (sp > 0) {
+                        char prior[128];
+                        snprintf(prior, sizeof(prior), "%s", stack[sp - 1]);
+                        snprintf(stack[sp - 1], 128, "else:%.122s", prior);
+                    }
                 } else if (strcmp(dir, "endif") == 0) {
                     if (sp > 0) sp--;
                 }
@@ -736,7 +769,13 @@ void ci_scan_text(const char *src, size_t len, const char *relpath,
         size_t line = 0;
         for (size_t i = 0; i < len; i++) {
             char ch = clean[i];
-            if (ch == '\n') { line++; continue; }
+            if (ch == '\n') {
+                if (brace == 0 && paren == 0 &&
+                    macro_invocation_segment(clean, seg_start, i))
+                    seg_start = i + 1;
+                line++;
+                continue;
+            }
             if ((size_t)line < nl && c.pp_line[line]) continue;
             if (ch == '(') { paren++; continue; }
             if (ch == ')') { if (paren > 0) paren--; continue; }

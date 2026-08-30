@@ -119,6 +119,7 @@ gate_command() {
         check-outparam-init-before-return) echo 'bash tools/lint/check_outparam_init_before_return.sh --selftest && bash tools/lint/check_outparam_init_before_return.sh' ;;
         check-byte-order-codec-single)     echo './tools/lint/check_byte_order_codec_single.sh --selftest && ./tools/lint/check_byte_order_codec_single.sh' ;;
         check-arm-symbol-single)           echo './tools/lint/check_arm_symbol_single.sh --selftest && ./tools/lint/check_arm_symbol_single.sh' ;;
+        check-fortify-masked-decls)        echo './tools/lint/check_fortify_masked_decls.sh --selftest && ./tools/lint/check_fortify_masked_decls.sh' ;;
         check-model-sql-literals)          echo './tools/lint/check_model_sql_literals.sh --selftest && ./tools/lint/check_model_sql_literals.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-zcode-package-standalone)    echo './tools/lint/check_zcode_package_standalone.sh' ;;
@@ -162,7 +163,7 @@ gate_command() {
         check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh' ;;
         check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh' ;;
         check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
-        check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest' ;;
+        check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
         check-published-platforms)         echo './tools/lint/check_published_platforms.sh --selftest && ./tools/lint/check_published_platforms.sh' ;;
         check-identity-parser-single)      echo './tools/lint/check_identity_parser_single.sh --selftest && ./tools/lint/check_identity_parser_single.sh' ;;
         check-source-identity-authority)   echo './tools/lint/check_source_identity_authority.sh --selftest && ./tools/lint/check_source_identity_authority.sh' ;;
@@ -176,6 +177,7 @@ gate_command() {
         check-sysinit-ordering)            echo './tools/lint/check_sysinit_ordering.sh' ;;
         check-sandbox-wired)               echo './tools/lint/check_sandbox_wired.sh' ;;
         check-no-shellouts)                echo './tools/lint/check_no_shellouts.sh' ;;
+        check-no-api-keys)                 echo './tools/lint/check_no_api_keys.sh' ;;
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
         check-app-bundle-reproducible)     echo './tools/lint/check_app_bundle_reproducible.sh --selftest && ./tools/lint/check_app_bundle_reproducible.sh' ;;
         check-live-datadir-isolation)      echo './tools/lint/check_live_datadir_isolation.sh --selftest && ./tools/lint/check_live_datadir_isolation.sh' ;;
@@ -207,6 +209,7 @@ gate_command() {
         check-error-doc-refs)              echo './tools/lint/check_error_doc_refs.sh' ;;
         check-api-reference-generated)     echo './tools/lint/check_api_reference_generated.sh' ;;
         check-capability-inventory-generated) echo './tools/lint/check_capability_inventory_generated.sh --selftest && ./tools/lint/check_capability_inventory_generated.sh' ;;
+        check-generated-artifact-contradictions) echo './tools/lint/check_generated_artifact_contradictions.sh --selftest && ./tools/lint/check_generated_artifact_contradictions.sh' ;;
         check-describe-budget)             echo './tools/lint/check_describe_budget.sh --selftest && ./tools/lint/check_describe_budget.sh' ;;
         check-markdown-links)              echo './tools/lint/check_markdown_links.sh .' ;;
         check-doc-inline-paths)            echo './tools/lint/check_doc_inline_paths.sh' ;;

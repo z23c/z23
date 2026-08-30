@@ -331,6 +331,24 @@ static bool inv_function_name(const char *clean, size_t start, size_t end,
     return true;
 }
 
+static bool inv_macro_invocation_segment(const char *clean, size_t start,
+                                         size_t end)
+{
+    while (start < end && isspace((unsigned char)clean[start])) start++;
+    if (start == end || !inv_ident_start((unsigned char)clean[start]))
+        return false;
+    bool has_upper = false;
+    size_t p = start;
+    while (p < end && inv_ident_char((unsigned char)clean[p])) {
+        unsigned char c = (unsigned char)clean[p];
+        if (isupper(c)) has_upper = true;
+        else if (islower(c)) return false;
+        p++;
+    }
+    while (p < end && isspace((unsigned char)clean[p])) p++;
+    return has_upper && p < end && clean[p] == '(';
+}
+
 static bool inv_body_push(struct inv_scan *s, int file_index, const char *src,
                           const char *clean, const char *name,
                           size_t open, size_t close)
@@ -350,6 +368,19 @@ static bool inv_body_push(struct inv_scan *s, int file_index, const char *src,
     body->file_index = file_index;
     body->line = inv_line_of(src, open);
     body->end_line = inv_line_of(src, close);
+    int best_line = 0;
+    for (int i = 0; i < s->occurrence_count; i++) {
+        const struct inv_symbol_occurrence *occ = &s->occurrences[i];
+        if (occ->file_index != file_index ||
+            strcmp(occ->symbol.name, name) != 0 ||
+            strcmp(occ->symbol.def_path, body->path) != 0 ||
+            occ->symbol.def_line <= 0 || occ->symbol.def_line > body->line ||
+            occ->symbol.def_line < best_line)
+            continue;
+        best_line = occ->symbol.def_line;
+        inv_cpy(body->preprocessor_guard,
+                sizeof(body->preprocessor_guard), occ->symbol.guard);
+    }
     inv_body_fingerprints(src, clean, open + 1, close, body);
     return true;
 }
@@ -382,6 +413,11 @@ static void inv_scan_bodies(struct inv_scan *s, int file_index,
     char active[128] = "";
     for (size_t i = 0; i < len; i++) {
         char c = clean[i];
+        if (c == '\n' && brace == 0 && paren == 0 &&
+            inv_macro_invocation_segment(clean, segment, i)) {
+            segment = i + 1;
+            continue;
+        }
         if (brace == 0) {
             if (c == '(') { paren++; continue; }
             if (c == ')') { if (paren > 0) paren--; continue; }

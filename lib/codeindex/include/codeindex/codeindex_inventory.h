@@ -41,6 +41,8 @@ struct ci_inventory_symbol {
     int test_use_files;
     enum ci_inventory_test_evidence test_evidence;
     char registered_test_group[128];
+    bool multi_arm_definition;
+    int definition_arm_count;
     bool constant_return_body;
     char constant_return_value[16];
 };
@@ -85,6 +87,23 @@ struct ci_inventory_invariant {
     int test_use_files;
     enum ci_inventory_test_evidence test_evidence;
     char registered_test_group[128];
+    bool multi_arm_definition;
+    char definition_scope[40];
+    char preprocessor_guard[128];
+    char constant_return_evidence[40];
+    bool constant_return_body;
+    char constant_return_value[16];
+    char verdict[16];
+    char proof_needed[192];
+};
+
+struct ci_inventory_definition_arm {
+    char header[256];
+    char symbol[128];
+    char definition_path[256];
+    int definition_line;
+    char preprocessor_guard[128];
+    char constant_return_evidence[40];
     bool constant_return_body;
     char constant_return_value[16];
     char verdict[16];
@@ -115,6 +134,7 @@ struct ci_inventory_report {
     int ambiguous_test_call_edges;
     int unresolved_symbol_definitions;
     int scanner_partial_symbols;
+    int arm_baseline_symbols;
 
     struct ci_inventory_capability *capabilities;
     int capability_count;
@@ -124,6 +144,9 @@ struct ci_inventory_report {
     int duplicate_count;
     struct ci_inventory_invariant *invariants;
     int invariant_count;
+    struct ci_inventory_definition_arm *definition_arms;
+    int definition_arm_count;
+    int multi_arm_symbol_count;
     struct ci_inventory_test_root_gap *test_root_gaps;
     int test_root_gap_count;
 };

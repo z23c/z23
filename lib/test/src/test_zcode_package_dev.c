@@ -20,6 +20,7 @@
 #include "json/json.h"
 #include "models/build_fabric.h"
 #include "models/database.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
 #include "services/zcode_lane_service.h"
@@ -111,7 +112,7 @@ static bool zpd_plant_build_output(const char *root)
 {
     char path[320];
     (void)snprintf(path, sizeof(path), "%s/build", root);
-    if (mkdir(path, 0700) != 0) return false;
+    if (platform_directory_create(path, 0700) != 0) return false;
     (void)snprintf(path, sizeof(path), "%s/build/obj.o", root);
     return zpd_write(path, "not source\n");
 }
@@ -211,11 +212,11 @@ static bool zpd_fixture(const char *root, bool unknown_key)
 {
     char path[512];
     zpd_fixture_cleanup(root);
-    if (mkdir(root, 0700) != 0) return false;
+    if (platform_directory_create(root, 0700) != 0) return false;
     static const char *const dirs[] = { "src", "include", "tests" };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
-        if (mkdir(path, 0700) != 0) return false;
+        if (platform_directory_create(path, 0700) != 0) return false;
     }
     (void)snprintf(path, sizeof(path), "%s/LICENSE", root);
     if (!zpd_write(path, "MIT\n")) return false;
@@ -235,12 +236,12 @@ static bool zpd_benchmark_project(const char *root, const char *name,
                                   int value)
 {
     ZCL_IGNORE_RESULT(zcl_tree_remove(root), "benchmark fixture reset");
-    if (mkdir(root, 0700) != 0) return false;
+    if (platform_directory_create(root, 0700) != 0) return false;
     char path[512], text[512];
     static const char *const dirs[] = {"src", "include", "tests"};
     for (size_t i = 0; i < 3; i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
-        if (mkdir(path, 0700) != 0) return false;
+        if (platform_directory_create(path, 0700) != 0) return false;
     }
     (void)snprintf(path, sizeof(path), "%s/LICENSE", root);
     if (!zpd_write(path, "MIT\n")) return false;
@@ -609,11 +610,11 @@ static int zpd_test_control_stores(const uint8_t pubkey[33])
         ASSERT(vcs_package_prepare(&options, &before, detail,
                                    sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
         (void)snprintf(path, sizeof(path), "%s/.zvcs", root);
-        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(platform_directory_create(path, 0700) == 0);
         (void)snprintf(path, sizeof(path), "%s/.zvcs/control", root);
         ASSERT(zpd_write(path, "local vcs state\n"));
         (void)snprintf(path, sizeof(path), "%s/.codeindex", root);
-        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(platform_directory_create(path, 0700) == 0);
         (void)snprintf(path, sizeof(path), "%s/.codeindex/control", root);
         ASSERT(zpd_write(path, "derived index state\n"));
         ASSERT(zpd_plant_build_output(root));
@@ -1086,10 +1087,10 @@ static int zpd_test_work_start_package_bounds(void)
         (void)snprintf(root, sizeof(root),
                        "test-tmp/zcode-work-init-%ld", (long)getpid());
         zpd_fixture_cleanup(root);
-        ASSERT(mkdir(root, 0700) == 0);
+        ASSERT(platform_directory_create(root, 0700) == 0);
         char path[320];
         (void)snprintf(path, sizeof(path), "%s/src", root);
-        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(platform_directory_create(path, 0700) == 0);
         (void)snprintf(path, sizeof(path), "%s/src/x.c", root);
         ASSERT(zpd_write(path, "int x(void) { return 1; }\n"));
         ASSERT(zpd_plant_build_output(root));
@@ -2353,7 +2354,7 @@ static int zpd_test_admitted_single_interpretation(void)
         (void)snprintf(datadir, sizeof(datadir),
                        "test-tmp/zcode-admitted-node-%ld", (long)getpid());
         ZCL_IGNORE_RESULT(zcl_tree_remove(datadir), "datadir fixture reset");
-        ASSERT(mkdir(datadir, 0700) == 0);
+        ASSERT(platform_directory_create(datadir, 0700) == 0);
         char absolute_datadir[4400];
         ASSERT(realpath(datadir, absolute_datadir) != NULL);
 

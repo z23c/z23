@@ -677,7 +677,7 @@ REMOTE_COMMAND_CLASS("ops.telemetry.zcode.summary", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.zcode.swarm", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.zcode.installs", REMOTE_CLASS_NEVER, "")
 
-/* CODE — 16 never_remote leaves.
+/* CODE — 18 never_remote leaves.
  *
  * The whole `code` branch is a source-content read surface: it returns file
  * bytes, symbol bodies, room and capsule excerpts, and provenance facts from
@@ -705,6 +705,8 @@ REMOTE_COMMAND_CLASS("code.refs", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.impact", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.find", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.have", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.territory", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.general", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.merkle", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.facts", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.emitter", REMOTE_CLASS_NEVER, "")
