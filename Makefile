@@ -7338,7 +7338,9 @@ mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
 # Binary-path argument: ZCL_BIN=/path/to/zclassic23 make
 # mvp-coldstart-to-tip-stopwatch points the stopwatch at any built binary
 # (e.g. an orchestrator's freshly-integrated candidate) without editing this
-# file or the script. ZCL_PEER=HOST:PORT names the serving peer, and it is
+# file or the script. ZCL_PEER=HOST:PORT names one serving peer; a comma list
+# names several and becomes one -connect per endpoint. Repeated --peer flags
+# are equivalent when invoking the harness directly. The peer set is
 # REQUIRED: there is deliberately no default. It used to default to
 # 127.0.0.1:8033 — the canonical node's own P2P port — so a bare
 # `make mvp-coldstart-to-tip-stopwatch` on an operator host quietly synced a
@@ -7467,7 +7469,7 @@ mvp-coldstart-to-tip-triple: zclassic23
 # (SEAM), 4 (STALLED-NAMED), 5 (FRONTIER-BUSY-TIMEOUT) and 6
 # (READBACK-FAILED) are honest verdicts and propagate as a failing recipe —
 # a remote peer that refuses the handshake is NOT laundered into a SKIP, it
-# is labelled peer_precheck=accept_close in the artifact and the run reports
+# is labelled in peer_prechecks[] as accept_close and the run reports
 # what the node actually earned.
 .PHONY: mvp-coldstart-to-tip-remote
 mvp-coldstart-to-tip-remote: zclassic23
