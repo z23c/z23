@@ -24,6 +24,33 @@
 
 #include <string.h>
 
+/* ── CLI argument templates ───────────────────────────────────────────────
+ * argv[0] is the vendor's `program` and is not repeated here. See
+ * engine/engine.h for the placeholder vocabulary. */
+
+/* Reads its prompt from a file and has a turn cap of its own. */
+static const char *const k_grok_cli_argv[] = {
+    "--prompt-file", ENGINE_CLI_PROMPT_TOKEN,
+    "--cwd",         ENGINE_CLI_WORKDIR_TOKEN,
+    "--max-turns",   ENGINE_CLI_TURNS_TOKEN,
+    "--always-approve",
+    NULL
+};
+
+/* Takes the prompt TEXT as an argument in headless mode, and names its
+ * working directory rather than its cwd. It has no flag meaning what our
+ * --turns means: --max-tool-rounds bounds TOOL CALLS, not repair attempts,
+ * and mapping a repair budget of 3 onto it would cap real work at three tool
+ * calls. So no {turns} slot — the CLI keeps its own default, which is the
+ * honest answer to "we have nothing to say about this". */
+static const char *const k_glm_cli_argv[] = {
+    "--no-color",
+    "--directory", ENGINE_CLI_WORKDIR_TOKEN,
+    "--model",     ENGINE_CLI_MODEL_TOKEN,
+    "--prompt",    ENGINE_CLI_PROMPT_TOKEN,
+    NULL
+};
+
 static const struct engine_vendor k_engine_vendors[] = {
     {
         .id            = "grok",
@@ -91,6 +118,36 @@ static const struct engine_vendor k_engine_vendors[] = {
         .key_env       = NULL,
         .key_file_rel  = NULL,
         .program       = "grok",
+        .cli_argv      = k_grok_cli_argv,
+        .cli_prompt    = ENGINE_CLI_PROMPT_FILE,
+        .wire          = ENGINE_WIRE_LOCAL_CLI,
+        .delivery      = ENGINE_DELIVERS_EDITS,
+        .costs_money   = true,
+        .max_retries   = 1,
+    },
+    {
+        /* The Z.ai agent CLI, subscription-authenticated. Added 2026-08-30
+         * after a probe found the truth about this machine: every HTTPS row
+         * in this table answers 429 for want of credit, while `zai` and
+         * `grok` both answer in under a second on a subscription. The table
+         * held one CLI row and no way to express a second one, so the only
+         * two engines that actually work here were one hard-coded argv apart
+         * from being unreachable.
+         *
+         * glm-5.3-flash rather than the HTTPS row's model: it is the fast
+         * model the subscription covers, and a dispatch harness that makes an
+         * operator wait on a frontier model for a two-line answer is one they
+         * stop using. */
+        .id            = "glm-cli",
+        .display       = "Z.ai GLM (installed agent CLI, subscription auth)",
+        .url           = NULL,
+        .default_model = "glm-5.3-flash",
+        .key_env       = NULL,
+        .key_file_rel  = NULL,
+        .program       = "zai",
+        .is_default    = true,
+        .cli_argv      = k_glm_cli_argv,
+        .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
         .costs_money   = true,
@@ -151,4 +208,15 @@ bool engine_is_fixture(const struct engine_vendor *v)
 bool engine_needs_key(const struct engine_vendor *v)
 {
     return v != NULL && v->wire == ENGINE_WIRE_OPENAI_CHAT;
+}
+
+const struct engine_vendor *engine_default(void)
+{
+    for (size_t i = 0; i < k_engine_count; i++)
+        if (k_engine_vendors[i].is_default)
+            return &k_engine_vendors[i];
+    /* Unreachable while the table is well-formed, and test_engine asserts it
+     * is. Returning NULL rather than picking row 0 keeps a malformed table
+     * from silently electing whoever happens to be first. */
+    return NULL;
 }

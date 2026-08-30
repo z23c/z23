@@ -119,3 +119,9 @@ deploy/devfleet/*.sync
 deploy/devfleet/*.status
 deploy/devfleet/*.identity
 deploy/devfleet/*.jsonl
+
+# Installed agent CLIs write their own per-directory state into the checkout
+# when they are dispatched to. `zai` drops .zai/settings.json on first run.
+# It is the CLI's state, not this project's, and a committed copy would pin
+# every operator to whatever model the last dispatch happened to use.
+.zai/
