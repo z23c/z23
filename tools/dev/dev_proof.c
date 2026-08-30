@@ -1104,7 +1104,7 @@ static bool test_helpers_prepare(
 {
     char verifier_source[PATH_MAX], verifier_target[PATH_MAX];
     char node_source[PATH_MAX], node_target[PATH_MAX];
-    char nodectl_target[PATH_MAX], acme_target[PATH_MAX];
+    char nodectl_target[PATH_MAX], acme_target[PATH_MAX], fbsh_target[PATH_MAX];
     uint8_t depfile_root[32];
     int verifier_len = snprintf(
         verifier_source, sizeof(verifier_source),
@@ -1115,11 +1115,14 @@ static bool test_helpers_prepare(
                                "%s/build/bin/zcl-nodectl", generation);
     int acme_len = snprintf(acme_target, sizeof(acme_target),
                             "%s/build/bin/zclassic23-acme", generation);
+    int fbsh_len = snprintf(fbsh_target, sizeof(fbsh_target),
+                            "%s/build/bin/fbsh", generation);
     if (verifier_len <= 0 ||
         (size_t)verifier_len >= sizeof(verifier_source) ||
         node_len <= 0 || (size_t)node_len >= sizeof(node_source) ||
         nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
         acme_len <= 0 || (size_t)acme_len >= sizeof(acme_target) ||
+        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target) ||
         !admitted_executable_materialize(
             paths, generation, runner_source, "build/bin/test_parallel_fast",
             expected_source, runner_target) ||
@@ -1137,14 +1140,14 @@ static bool test_helpers_prepare(
     }
     const char *prerequisite_argv[] = {
         "make", "--no-print-directory", "zcl-nodectl", "zclassic23-acme",
-        NULL};
+        "fbsh", NULL};
     if (run_logged(generation, paths->helper_log, prerequisite_argv,
                    120000) != 0) {
         proof_why(why, why_len, "proof_test_helper_build_failed");
         return false;
     }
     uint8_t runner_root[32], verifier_root[32], node_root[32], nodectl_root[32];
-    uint8_t acme_root[32];
+    uint8_t acme_root[32], fbsh_root[32];
     if (!hash_file("zcl.dev_proof_test_runner.v1", runner_target,
                    runner_root) ||
         !hash_file("zcl.dev_proof_package_verifier.v1", verifier_target,
@@ -1152,7 +1155,8 @@ static bool test_helpers_prepare(
         !hash_file("zcl.dev_proof_test_node.v1", node_target, node_root) ||
         !hash_file("zcl.dev_proof_nodectl.v1", nodectl_target,
                    nodectl_root) ||
-        !hash_file("zcl.dev_proof_acme_worker.v1", acme_target, acme_root)) {
+        !hash_file("zcl.dev_proof_acme_worker.v1", acme_target, acme_root) ||
+        !hash_file("zcl.dev_proof_fbsh.v1", fbsh_target, fbsh_root)) {
         proof_why(why, why_len, "proof_test_helper_hash_failed");
         return false;
     }
@@ -1163,6 +1167,7 @@ static bool test_helpers_prepare(
     sha3_256_write(&helpers, node_root, sizeof(node_root));
     sha3_256_write(&helpers, nodectl_root, sizeof(nodectl_root));
     sha3_256_write(&helpers, acme_root, sizeof(acme_root));
+    sha3_256_write(&helpers, fbsh_root, sizeof(fbsh_root));
     sha3_256_write(&helpers, depfile_root, sizeof(depfile_root));
     sha3_256_finalize(&helpers, helper_root);
     return true;

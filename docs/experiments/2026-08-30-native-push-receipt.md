@@ -122,7 +122,9 @@ The first depfile-aware proof planned 131 cacheable groups, reused one prior
 PASS, ran 160 groups, and stored 129 new PASS receipts in 429.1 seconds. Its
 only failed group refused because the isolated generation did not contain the
 required `zclassic23-acme` executable. The broker now builds and hashes that
-test prerequisite alongside `zcl-nodectl`; absence remains a hard failure.
+test prerequisite alongside `zcl-nodectl`. The merged mesh-terminal acceptance
+also requires the confined `fbsh` runtime, which is built and hashed in the
+same isolated helper set; absence remains a hard failure.
 
 ## Knowledge gained
 
