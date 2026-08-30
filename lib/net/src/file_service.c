@@ -23,6 +23,54 @@
 #include "crypto/sha3.h"
 #include "json/json.h"
 
+#include <string.h>
+
+/* ── Pure ROM wire-parsers — deliberately OUTSIDE the platform split ────
+ * fs_parse_rom_request / fs_parse_rom_manifest_request /
+ * fs_parse_rom_list_request do no I/O and touch no platform API. Until this
+ * fix, each had a second body inside the `#if defined(_WIN32)` arm below,
+ * and the two bodies had DRIFTED: Windows required an exact payload length
+ * and refused a NULL output; POSIX accepted any payload at least the
+ * minimum length (silently ignoring trailing bytes) and treated the
+ * root/idx out-params as optional, returning true having written nothing.
+ * A Windows node and a Linux node could therefore disagree about whether
+ * identical wire bytes form a valid request. Hoisting these here, defined
+ * exactly once, makes that drift impossible by construction. Semantics
+ * kept: the STRICTER of both axes — exact length (the header's documented
+ * FS_ROM*_SIZE contract) and non-NULL outputs required. */
+bool fs_parse_rom_request(const uint8_t *payload, uint32_t plen,
+                          uint8_t root_out[32], uint32_t *idx_out)
+{
+    if (!payload || !root_out || !idx_out || plen != FS_ROM_REQUEST_SIZE)
+        return false;
+    if (memcmp(payload, "ROM", 3) != 0)
+        return false;
+    memcpy(root_out, payload + 3, 32);
+    *idx_out = (uint32_t)payload[35] |
+               ((uint32_t)payload[36] << 8) |
+               ((uint32_t)payload[37] << 16) |
+               ((uint32_t)payload[38] << 24);
+    return true;
+}
+
+bool fs_parse_rom_manifest_request(const uint8_t *payload, uint32_t plen,
+                                   uint8_t root_out[32])
+{
+    if (!payload || !root_out || plen != FS_ROM_MANIFEST_REQUEST_SIZE)
+        return false;
+    if (memcmp(payload, "RMF", 3) != 0)
+        return false;
+    memcpy(root_out, payload + 3, 32);
+    return true;
+}
+
+bool fs_parse_rom_list_request(const uint8_t *payload, uint32_t plen)
+{
+    if (!payload || plen != FS_ROM_LIST_REQUEST_SIZE)
+        return false;
+    return memcmp(payload, "RLS", 3) == 0;
+}
+
 #if defined(_WIN32)
 
 #include <errno.h>
@@ -105,6 +153,13 @@ bool fs_conn_budget_ok(uint64_t bytes, int64_t start, int64_t now)
     return now >= start && bytes <= FS_CONN_MAX_BYTES &&
            now - start <= FS_CONN_MAX_SECONDS * INT64_C(1000);
 }
+/* NOT hoisted alongside the three fs_parse_rom_* parsers above: unlike
+ * those, the Windows and POSIX bodies of fs_parse_serve_request implement
+ * genuinely different logic (this stub never learned the POW-gated-prefix
+ * detection the POSIX body has), not just a length/NULL-output divergence
+ * on an otherwise-identical parser. Collapsing it into one definition is a
+ * real behavior change to the PoW admission path, out of this fix's scope.
+ * Tracked, not silently accepted, in tools/lint/arm_symbol_single_baseline.txt. */
 bool fs_parse_serve_request(const uint8_t *p, uint32_t n, bool *all,
                             bool *range, const uint8_t **puzzle,
                             uint16_t *start, uint16_t *end)
@@ -134,26 +189,6 @@ bool fs_parse_serve_request(const uint8_t *p, uint32_t n, bool *all,
     }
     return false;
 }
-bool fs_parse_rom_request(const uint8_t *p, uint32_t n, uint8_t root[32],
-                          uint32_t *idx)
-{
-    if (!p || n != FS_ROM_REQUEST_SIZE || memcmp(p, "ROM", 3) != 0 ||
-        !root || !idx) return false;
-    memcpy(root, p + 3, 32);
-    *idx = (uint32_t)p[35] | (uint32_t)p[36] << 8 |
-           (uint32_t)p[37] << 16 | (uint32_t)p[38] << 24;
-    return true;
-}
-bool fs_parse_rom_manifest_request(const uint8_t *p, uint32_t n,
-                                   uint8_t root[32])
-{
-    if (!p || !root || n != FS_ROM_MANIFEST_REQUEST_SIZE ||
-        memcmp(p, "RMF", 3) != 0) return false;
-    memcpy(root, p + 3, 32);
-    return true;
-}
-bool fs_parse_rom_list_request(const uint8_t *p, uint32_t n)
-{ return p && n == FS_ROM_LIST_REQUEST_SIZE && memcmp(p, "RLS", 3) == 0; }
 enum fs_admit_result fs_admit_serve_pow(const uint8_t *p,
     const uint8_t token[32], uint8_t seed[32], int *bits, int64_t *server_time)
 {
@@ -974,48 +1009,6 @@ bool fs_parse_serve_request(const uint8_t *payload, uint32_t plen,
         return true;
     }
     return false;
-}
-
-bool fs_parse_rom_request(const uint8_t *payload, uint32_t plen,
-                          uint8_t root_out[32], uint32_t *idx_out)
-{
-    if (!payload || plen < FS_ROM_REQUEST_SIZE)
-        return false;
-    if (memcmp(payload, "ROM", 3) != 0)
-        return false;
-    if (root_out)
-        memcpy(root_out, payload + 3, 32);
-    if (idx_out)
-        *idx_out = (uint32_t)payload[35] |
-                   ((uint32_t)payload[36] << 8) |
-                   ((uint32_t)payload[37] << 16) |
-                   ((uint32_t)payload[38] << 24);
-    return true;
-}
-
-/* WF2 artifact-protocol: parse the per-chunk manifest request. Sibling of
- * fs_parse_rom_request — pure/testable, wired into the serve dispatch by
- * lane 2A. body = ["RMF"(3)][chunk_root(32)]. */
-bool fs_parse_rom_manifest_request(const uint8_t *payload, uint32_t plen,
-                                   uint8_t root_out[32])
-{
-    if (!payload || plen < FS_ROM_MANIFEST_REQUEST_SIZE)
-        return false;
-    if (memcmp(payload, "RMF", 3) != 0)
-        return false;
-    if (root_out)
-        memcpy(root_out, payload + 3, 32);
-    return true;
-}
-
-/* ROM directory-listing request (RLS) — pure/testable sibling of
- * fs_parse_rom_request. body = ["RLS"(3)], no root: the directory is a
- * whole-node catalog, not per-artifact. */
-bool fs_parse_rom_list_request(const uint8_t *payload, uint32_t plen)
-{
-    if (!payload || plen < FS_ROM_LIST_REQUEST_SIZE)
-        return false;
-    return memcmp(payload, "RLS", 3) == 0;
 }
 
 enum fs_admit_result fs_admit_serve_pow(const uint8_t *puzzle,
