@@ -69,6 +69,13 @@ LIB_MODULE("codec")
 LIB_MODULE("primitives")
 LIB_MODULE("support")
 LIB_MODULE("json")
+/* The engine-dispatch harness's pure half: the vendor registry, the request
+ * document, the hardened response decoder, the file envelope, the key holder,
+ * and the verdict. Depends only on base and json — it deliberately carries no
+ * transport, so that nothing here can put a TLS-client or trust-store symbol
+ * into a Z23 object file (test_cold_join_sovereign.c P2). The socket lives in
+ * tools/engine_unit.c, which is compiled straight to an executable. */
+LIB_MODULE("engine")
 /* Standalone Commons demo core depends on base, codec, and json. */
 LIB_MODULE("commons_demo")
 LIB_MODULE("encoding")

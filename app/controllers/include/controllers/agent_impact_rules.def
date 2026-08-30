@@ -2702,3 +2702,12 @@ AGENT_IMPACT_RULE("lib/test/src/test_zendp.c", "zendp zendp_records make_lint_ga
  * publishes is read by the onion_directory refresh round, so that group
  * rides along. */
 AGENT_IMPACT_RULE("lib/net/src/peer_strategy.c|lib/net/include/net/peer_strategy.h|lib/net/src/peer_strategy_worker.c|lib/net/include/net/peer_strategy_worker.h|lib/net/src/nat.c|lib/net/include/net/nat.h|lib/test/src/test_peer_strategy_worker.c|lib/test/src/test_nat_route_dump.c", "peer_strategy_worker nat_route_dump net onion_directory make_lint_gates")
+
+/* The engine-dispatch harness. lib/engine is the pure half (registry, request
+ * document, hardened response decoder, file envelope, key holder, verdict);
+ * tools/engine_unit.c is the program that carries the transport and is already
+ * covered by the broad tools rule above. The key gate rides along because its
+ * self-test lives inside the engine group, and cold_join_sovereign rides along
+ * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
+ * which is the exact reason this module has no transport in it. */
+AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine cold_join_sovereign make_lint_gates")

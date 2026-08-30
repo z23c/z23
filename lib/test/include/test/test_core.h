@@ -149,6 +149,7 @@ int test_slp(void);
 int test_models(void);
 int test_core(void);
 int test_json(void);
+int test_engine(void);
 int test_validation(void);
 int test_wallet(void);
 int test_primitives(void);

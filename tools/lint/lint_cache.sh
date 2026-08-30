@@ -101,7 +101,7 @@ check-test-registration check-typed-blocker check-blocker-escape-registered
 check-blocker-remedy check-blocker-handoff-declared
 check-supervisor-progress-declared check-framework-shape
 check-framework-filename-suffix check-no-raw-clock-outside-platform
-check-sysinit-ordering check-sandbox-wired check-no-shellouts
+check-sysinit-ordering check-sandbox-wired check-no-shellouts check-no-api-keys
 check-no-writer-below-sealed-frontier check-peer-floor-single-source
 check-proc-self-shim check-no-raw-sqlite-in-controllers check-supervisor-domain
 check-thread-supervision check-file-purpose check-group-purpose
