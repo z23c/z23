@@ -531,6 +531,87 @@ static bool dependency_materialize(const char *source, const char *target)
     return closedir(dir) == 0 && ok;
 }
 
+static bool dependency_copy_fresh(const char *source, const char *target)
+{
+    int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (input < 0) return false;
+    struct stat st;
+    char temporary[PATH_MAX];
+    int temporary_len = snprintf(temporary, sizeof(temporary),
+                                 "%s.tmp.XXXXXX", target);
+    bool ok = fstat(input, &st) == 0 && S_ISREG(st.st_mode) &&
+        temporary_len > 0 && temporary_len < (int)sizeof(temporary);
+    int output = ok ? mkstemp(temporary) : -1;
+    if (output < 0) ok = false;
+    unsigned char buffer[65536];
+    while (ok) {
+        ssize_t got = read(input, buffer, sizeof(buffer));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) ok = false;
+        if (got <= 0) break;
+        ok = write_all(output, buffer, (size_t)got);
+    }
+    if (close(input) != 0) ok = false;
+    if (output >= 0) {
+        if (fchmod(output, 0600) != 0) ok = false;
+        if (close(output) != 0) ok = false;
+    }
+    if (ok && rename(temporary, target) != 0) ok = false;
+    if (!ok && output >= 0) (void)unlink(temporary);
+    return ok;
+}
+
+static bool depfile_tree_copy(const char *source, const char *target,
+                              size_t source_root_len,
+                              struct sha3_256_ctx *root, size_t *count)
+{
+    if (!dependency_parent_ensure(target)) return false;
+    struct stat target_st;
+    if (lstat(target, &target_st) != 0) {
+        if (errno != ENOENT || mkdir(target, 0700) != 0) return false;
+    } else if (!S_ISDIR(target_st.st_mode) || S_ISLNK(target_st.st_mode)) {
+        return false;
+    }
+    DIR *dir = opendir(source);
+    if (!dir) return false;
+    bool ok = true;
+    for (struct dirent *entry = readdir(dir); ok && entry;
+         entry = readdir(dir)) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        char child_source[PATH_MAX], child_target[PATH_MAX];
+        if (snprintf(child_source, sizeof(child_source), "%s/%s", source,
+                     entry->d_name) >= (int)sizeof(child_source) ||
+            snprintf(child_target, sizeof(child_target), "%s/%s", target,
+                     entry->d_name) >= (int)sizeof(child_target)) {
+            ok = false;
+            break;
+        }
+        struct stat st;
+        if (lstat(child_source, &st) != 0) ok = false;
+        else if (S_ISDIR(st.st_mode))
+            ok = depfile_tree_copy(child_source, child_target, source_root_len,
+                                   root, count);
+        else if (S_ISREG(st.st_mode) &&
+                 strlen(entry->d_name) > 2 &&
+                 strcmp(entry->d_name + strlen(entry->d_name) - 2, ".d") == 0) {
+            uint8_t digest[32];
+            ok = dependency_copy_fresh(child_source, child_target) &&
+                hash_file("zcl.dev_proof_depfile.v1", child_source, digest);
+            if (ok) {
+                const char *relative = child_source + source_root_len;
+                if (*relative == '/') relative++;
+                sha3_256_write(root, (const uint8_t *)relative,
+                               strlen(relative) + 1);
+                sha3_256_write(root, digest, sizeof(digest));
+                (*count)++;
+            }
+        }
+    }
+    return closedir(dir) == 0 && ok;
+}
+
 static bool generation_gitlink_prepare(const struct proof_paths *paths,
                                        const char *generation,
                                        char *why, size_t why_len)
@@ -915,8 +996,8 @@ static bool admitted_executable_materialize(
         dependency_materialize(source, target);
 }
 
-static bool test_binary_path(const struct proof_paths *paths,
-                             char out[PATH_MAX])
+static bool test_object_dir_relative(const struct proof_paths *paths,
+                                     char object_dir[PATH_MAX])
 {
     char plan[PATH_MAX];
     if (snprintf(plan, sizeof(plan), "%s/build/dev-loop/restart.env",
@@ -924,23 +1005,60 @@ static bool test_binary_path(const struct proof_paths *paths,
         return false;
     FILE *file = fopen(plan, "r");
     if (!file) return false;
-    char line[PATH_MAX], object_dir[PATH_MAX] = {0};
+    char line[PATH_MAX];
+    object_dir[0] = 0;
     while (fgets(line, sizeof(line), file)) {
         static const char prefix[] = "TEST_OBJ_DIR=";
         if (strncmp(line, prefix, sizeof(prefix) - 1) != 0) continue;
         size_t len = strcspn(line + sizeof(prefix) - 1, "\r\n");
-        if (len == 0 || len >= sizeof(object_dir)) break;
+        if (len == 0 || len >= PATH_MAX) break;
         memcpy(object_dir, line + sizeof(prefix) - 1, len);
         object_dir[len] = 0;
         break;
     }
     bool read_ok = !ferror(file) && fclose(file) == 0;
+    static const char prefix[] = "build/test-obj/epochs/";
+    return read_ok && strncmp(object_dir, prefix, sizeof(prefix) - 1) == 0 &&
+        object_dir[sizeof(prefix) - 1] != 0 && !strstr(object_dir, "..") &&
+        !strchr(object_dir, '\\');
+}
+
+static bool test_binary_path(const struct proof_paths *paths,
+                             char out[PATH_MAX])
+{
+    char object_dir[PATH_MAX];
+    if (!test_object_dir_relative(paths, object_dir)) return false;
     const char *epoch = strrchr(object_dir, '/');
-    if (!read_ok || !epoch || !epoch[1] || strchr(epoch + 1, '/')) return false;
+    if (!epoch || !epoch[1] || strchr(epoch + 1, '/')) return false;
     int n = snprintf(out, PATH_MAX,
                      "%s/build/bin/test-fast/epochs/%s/test_parallel_fast",
                      paths->root, epoch + 1);
     return n > 0 && n < PATH_MAX && access(out, X_OK) == 0;
+}
+
+static bool test_depfiles_prepare(const struct proof_paths *paths,
+                                  const char *generation,
+                                  uint8_t depfile_root[32])
+{
+    char relative[PATH_MAX], source[PATH_MAX], target[PATH_MAX];
+    if (!test_object_dir_relative(paths, relative) ||
+        snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
+            (int)sizeof(source) ||
+        snprintf(target, sizeof(target), "%s/%s", generation, relative) >=
+            (int)sizeof(target))
+        return false;
+    struct sha3_256_ctx root;
+    hash_begin(&root, "zcl.dev_proof_depfiles.v1");
+    size_t count = 0;
+    if (!depfile_tree_copy(source, target, strlen(source), &root, &count) ||
+        count == 0)
+        return false;
+    uint8_t count_le[8];
+    for (size_t i = 0; i < sizeof(count_le); i++)
+        count_le[i] = (uint8_t)(((uint64_t)count) >> (i * 8));
+    sha3_256_write(&root, count_le, sizeof(count_le));
+    sha3_256_finalize(&root, depfile_root);
+    return true;
 }
 
 static bool test_helpers_prepare(
@@ -952,6 +1070,7 @@ static bool test_helpers_prepare(
     char verifier_source[PATH_MAX], verifier_target[PATH_MAX];
     char node_source[PATH_MAX], node_target[PATH_MAX];
     char nodectl_target[PATH_MAX];
+    uint8_t depfile_root[32];
     int verifier_len = snprintf(
         verifier_source, sizeof(verifier_source),
         "%s/build/bin/zclassic23-package-verify-dev", paths->root);
@@ -973,7 +1092,8 @@ static bool test_helpers_prepare(
         !admitted_executable_materialize(
             paths, generation, node_source, "build/bin/zclassic23",
             expected_source,
-            node_target)) {
+            node_target) ||
+        !test_depfiles_prepare(paths, generation, depfile_root)) {
         proof_why(why, why_len, "proof_test_helper_admission_failed");
         return false;
     }
@@ -1000,6 +1120,7 @@ static bool test_helpers_prepare(
     sha3_256_write(&helpers, verifier_root, sizeof(verifier_root));
     sha3_256_write(&helpers, node_root, sizeof(node_root));
     sha3_256_write(&helpers, nodectl_root, sizeof(nodectl_root));
+    sha3_256_write(&helpers, depfile_root, sizeof(depfile_root));
     sha3_256_finalize(&helpers, helper_root);
     return true;
 }

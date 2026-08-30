@@ -109,6 +109,14 @@ artifact. The generation also materializes every linked Tor archive included
 by source identity. A stale helper now refuses admission without launching a
 compiler.
 
+Compile reuse initially left the isolated generation with no depfiles, so the
+test cache correctly refused all 131 closure-based groups even though their
+PASS objects were available. The broker now copies only the exact active test
+epoch's depfiles into the generation with fresh private inodes, binds their
+paths and content hashes into the test-helper receipt, and leaves object files
+behind. Source and include-graph reads therefore stay generation-local while
+the immutable PASS objects remain shared.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
@@ -135,6 +143,8 @@ compiler.
   lifecycle.
 - Exact helper byte identity is reusable across worktrees; ABA mutation tokens
   are worktree-local and must not trigger one full inventory scan per helper.
+- Compile reuse and test reuse are coupled: a reused binary still needs its
+  exact depfile graph, but it does not need copied object files.
 
 ## Next experiment
 
