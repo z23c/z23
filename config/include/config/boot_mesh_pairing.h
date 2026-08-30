@@ -8,8 +8,10 @@
  * time — and commit additionally requires the peer's Noise fingerprint
  * compared out of band (read from `ops mesh pair plan` here and `ops mesh
  * identity` on the other machine). The granted capability is status-read
- * only. Inspection and revocation live in the mesh pairing controller
- * (`ops mesh pair list` / `ops mesh pair revoke`).
+ * plus, only when the operator passes "terminal":true at commit time,
+ * confined terminal-exec. Pairing rows are insert-only: a grant cannot be
+ * widened after commit. Inspection and revocation live in the mesh pairing
+ * controller (`ops mesh pair list` / `ops mesh pair revoke`).
  * There is no two-sided wire ceremony yet: each host pairs the other
  * independently, and no dial is ever performed — a peer with no live
  * session is PEER_NOT_CONNECTED.
@@ -42,7 +44,7 @@ struct boot_mesh_pairing_plan {
     uint64_t delegation_expiry; /* zid doc expiry, unix seconds */
     uint64_t delegation_sequence;
     uint32_t delegation_beacon_height;
-    uint64_t capability_mask; /* always MESH_PAIRING_CAP_STATUS_READ */
+    uint64_t capability_mask; /* status-read, plus terminal-exec iff requested */
     int64_t now;
     int64_t default_expires_at; /* now + BOOT_MESH_PAIRING_DEFAULT_DAYS */
     char pairing_id[MESH_PAIRING_ID_HEX + 1]; /* id commit would derive */
@@ -115,11 +117,15 @@ enum boot_mesh_pairing_plan_result boot_mesh_pairing_plan(
     const char *selector, struct boot_mesh_pairing_plan *out);
 
 /* expected_fingerprint is the MANDATORY out-of-band compared value. days of
- * zero with days_given=false selects the default. On MESH_PAIR_COMMIT_OK the
- * durable record (new or identical-existing) is in out. */
+ * zero with days_given=false selects the default. grant_terminal opts the
+ * record into MESH_PAIRING_CAP_TERMINAL_EXEC alongside the always-present
+ * status-read; the mask is fixed at commit and never widened afterwards.
+ * On MESH_PAIR_COMMIT_OK the durable record (new or identical-existing) is
+ * in out. */
 enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
     const char *selector, const uint8_t expected_fingerprint[32],
-    int64_t days, bool days_given, struct db_mesh_pairing *out,
+    int64_t days, bool days_given, bool grant_terminal,
+    struct db_mesh_pairing *out,
     enum mesh_pairing_reason *service_reason_out);
 
 #endif /* ZCL_CONFIG_BOOT_MESH_PAIRING_H */

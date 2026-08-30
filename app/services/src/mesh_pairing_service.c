@@ -47,14 +47,20 @@ const char *mesh_pairing_reason_token(enum mesh_pairing_reason reason)
 }
 
 static enum mesh_pairing_reason mesh_pairing_delegation_check(
-    struct node_db *ndb,
+    struct node_db *ndb, const uint8_t network_genesis[32],
     const struct vcs_zcode_dht_delegation *delegation, int64_t now)
 {
-    if (!ndb || !ndb->open || !delegation || now <= 0)
+    if (!ndb || !ndb->open || !delegation || !network_genesis || now <= 0)
         return MESH_PAIRING_BAD_ARGUMENT;
-    struct db_block genesis;
-    if (!db_block_find_by_height(ndb, 0, &genesis) ||
-        memcmp(genesis.hash, delegation->network_genesis, 32) != 0)
+    /* The genesis binding is the caller-resolved local consensus constant,
+     * never a node.db row: a locally-mining node never persists a genesis
+     * row (ConnectBlock special-cases the genesis hash), so a row read here
+     * refused every pairing on exactly the nodes that mint delegations. The
+     * beacon row below still proves the db itself rides the delegation's
+     * chain. */
+    static const uint8_t zero[32] = {0};
+    if (memcmp(network_genesis, zero, 32) == 0 ||
+        memcmp(network_genesis, delegation->network_genesis, 32) != 0)
         return MESH_PAIRING_NETWORK_MISMATCH;
     struct zid_identity identity;
     if (!db_zid_identity_find(ndb, delegation->doc.master_pubkey, &identity) ||
@@ -75,7 +81,7 @@ static enum mesh_pairing_reason mesh_pairing_delegation_check(
         return MESH_PAIRING_BEACON_PROVISIONAL;
     enum vcs_zcode_dht_delegation_error result =
         vcs_zcode_dht_delegation_verify(
-            delegation, genesis.hash, delegation->noise_static_pubkey,
+            delegation, network_genesis, delegation->noise_static_pubkey,
             delegation->beacon_height, beacon.hash, (uint64_t)now);
     return result == VCS_ZCODE_DHT_DELEGATION_OK
         ? MESH_PAIRING_OK : MESH_PAIRING_DELEGATION_INVALID;
@@ -98,14 +104,14 @@ static bool mesh_pairing_same(const struct db_mesh_pairing *left,
 }
 
 enum mesh_pairing_reason mesh_pairing_service_accept(
-    struct node_db *ndb,
+    struct node_db *ndb, const uint8_t network_genesis[32],
     const struct vcs_zcode_dht_delegation *delegation,
     const uint8_t expected_noise_fingerprint[32],
     const uint8_t authenticated_session_noise_static[32],
     bool session_authenticated, uint64_t capability_mask, int64_t now,
     int64_t expires_at, struct db_mesh_pairing *out)
 {
-    if (!ndb || !ndb->open || !delegation ||
+    if (!ndb || !ndb->open || !delegation || !network_genesis ||
         !expected_noise_fingerprint || !authenticated_session_noise_static ||
         now <= 0 || !out)
         return MESH_PAIRING_BAD_ARGUMENT;
@@ -113,7 +119,12 @@ enum mesh_pairing_reason mesh_pairing_service_accept(
         memcmp(authenticated_session_noise_static,
                delegation->noise_static_pubkey, 32) != 0)
         return MESH_PAIRING_SESSION_MISMATCH;
-    if (capability_mask != MESH_PAIRING_CAP_STATUS_READ)
+    /* Status-read is the always-granted base capability; terminal-exec may
+     * ride alongside it (the operator opted in at commit time), never alone
+     * and never with a bit outside the known set. */
+    if (capability_mask != MESH_PAIRING_CAP_STATUS_READ &&
+        capability_mask !=
+            (MESH_PAIRING_CAP_STATUS_READ | MESH_PAIRING_CAP_TERMINAL_EXEC))
         return MESH_PAIRING_CAPABILITY_UNAVAILABLE;
     if (expires_at <= now ||
         expires_at - now > MESH_PAIRING_MAX_LIFETIME_SECONDS)
@@ -124,7 +135,7 @@ enum mesh_pairing_reason mesh_pairing_service_accept(
         memcmp(actual_fingerprint, expected_noise_fingerprint, 32) != 0)
         return MESH_PAIRING_FINGERPRINT_MISMATCH;
     enum mesh_pairing_reason verified =
-        mesh_pairing_delegation_check(ndb, delegation, now);
+        mesh_pairing_delegation_check(ndb, network_genesis, delegation, now);
     if (verified != MESH_PAIRING_OK)
         return verified;
 
@@ -352,13 +363,14 @@ enum mesh_pairing_reason mesh_pairing_service_revoke_commit(
 }
 
 static enum mesh_pairing_reason mesh_pairing_authorize(
-    struct node_db *ndb, const char *pairing_id,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], uint64_t required_capability,
     int64_t now)
 {
-    if (!ndb || !ndb->open || !pairing_id || !live_delegation ||
-        !session_noise_static || now <= 0)
+    if (!ndb || !ndb->open || !network_genesis || !pairing_id ||
+        !live_delegation || !session_noise_static || now <= 0)
         return MESH_PAIRING_BAD_ARGUMENT;
     struct db_mesh_pairing before;
     if (!db_mesh_pairing_find(ndb, pairing_id, &before))
@@ -381,7 +393,8 @@ static enum mesh_pairing_reason mesh_pairing_authorize(
         return MESH_PAIRING_SESSION_MISMATCH;
     uint64_t zid_generation = zid_identity_status_generation();
     enum mesh_pairing_reason verified =
-        mesh_pairing_delegation_check(ndb, live_delegation, now);
+        mesh_pairing_delegation_check(ndb, network_genesis, live_delegation,
+                                      now);
     if (verified != MESH_PAIRING_OK)
         return verified;
     struct db_mesh_pairing after;
@@ -396,20 +409,34 @@ static enum mesh_pairing_reason mesh_pairing_authorize(
 }
 
 enum mesh_pairing_reason mesh_pairing_service_authorize_status(
-    struct node_db *ndb, const char *pairing_id,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], int64_t now)
 {
     return mesh_pairing_authorize(
-        ndb, pairing_id, live_delegation, session_noise_static,
-        MESH_PAIRING_CAP_STATUS_READ, now);
+        ndb, network_genesis, pairing_id, live_delegation,
+        session_noise_static, MESH_PAIRING_CAP_STATUS_READ, now);
+}
+
+enum mesh_pairing_reason mesh_pairing_service_authorize_terminal(
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const char *pairing_id,
+    const struct vcs_zcode_dht_delegation *live_delegation,
+    const uint8_t session_noise_static[32], int64_t now)
+{
+    return mesh_pairing_authorize(
+        ndb, network_genesis, pairing_id, live_delegation,
+        session_noise_static, MESH_PAIRING_CAP_TERMINAL_EXEC, now);
 }
 
 enum mesh_pairing_reason mesh_pairing_service_authorize_delegation(
-    struct node_db *ndb, const char *pairing_id,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], int64_t now)
 {
     return mesh_pairing_authorize(
-        ndb, pairing_id, live_delegation, session_noise_static, 0, now);
+        ndb, network_genesis, pairing_id, live_delegation,
+        session_noise_static, 0, now);
 }
