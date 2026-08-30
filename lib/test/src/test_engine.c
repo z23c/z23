@@ -774,6 +774,47 @@ static int case_err(void)
              engine_err_backoff_ms(0) < engine_err_backoff_ms(2)
              && engine_err_backoff_ms(99) <= 60000);
 
+    /* MEASURED 2026-08-30. Two unrelated vendors answered 429 — a retryable
+     * status — for an empty account, a condition no amount of waiting fixes.
+     * A status-only classifier retries a billing failure on every dispatch
+     * forever. These are the two bodies they actually sent. */
+    {
+        static const char zai[] =
+            "1113: Insufficient balance or no resource package. Please recharge.";
+        static const char oai[] =
+            "credit_balance_exhausted: You have no credits remaining. Add "
+            "credits to continue using the API at https://platform.openai.com/";
+        EN_CHECK("Z.ai's 429 for an empty account becomes non-retryable",
+                 !engine_err_should_retry(
+                     engine_err_refine(ENGINE_ERR_RATE_LIMIT, zai)));
+        EN_CHECK("OpenAI's 429 for an empty account becomes non-retryable",
+                 !engine_err_should_retry(
+                     engine_err_refine(ENGINE_ERR_RATE_LIMIT, oai)));
+        EN_CHECK("a genuine rate limit is still retried",
+                 engine_err_should_retry(engine_err_refine(
+                     ENGINE_ERR_RATE_LIMIT,
+                     "Too many requests, please slow down")));
+        /* The refinement only ever makes a failure MORE terminal. A vendor
+         * must not be able to talk its way back into being retried, and must
+         * never be able to talk its way into a success. */
+        EN_CHECK("refinement never makes a terminal class retryable",
+                 engine_err_refine(ENGINE_ERR_AUTH, "please retry later")
+                     == ENGINE_ERR_AUTH
+                 && engine_err_refine(ENGINE_ERR_BAD_REQUEST, "transient")
+                     == ENGINE_ERR_BAD_REQUEST);
+        EN_CHECK("refinement never turns a failure into a success",
+                 engine_err_refine(ENGINE_ERR_SERVER, "everything is fine")
+                     != ENGINE_OK);
+        EN_CHECK("no body leaves the class alone",
+                 engine_err_refine(ENGINE_ERR_OVERLOADED, NULL)
+                     == ENGINE_ERR_OVERLOADED
+                 && engine_err_refine(ENGINE_ERR_OVERLOADED, "")
+                     == ENGINE_ERR_OVERLOADED);
+        EN_CHECK("the match is case-insensitive across vendors",
+                 !engine_err_should_retry(engine_err_refine(
+                     ENGINE_ERR_RATE_LIMIT, "INSUFFICIENT BALANCE")));
+    }
+
     /* The breaker: retries alone turn one outage into a bill. */
     {
         struct engine_breaker b = {0};
