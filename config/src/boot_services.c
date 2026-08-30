@@ -346,10 +346,19 @@ static bool boot_register_runtime_services(struct boot_svc_ctx *svc)
         if (!zcl_service_kernel_register(&svc->runtime_kernel, &specs[i]))
             return false;
     }
-    return boot_utxo_parity_register(svc) && boot_soak_attestation_register(svc) &&
-           boot_canary_watch_register(svc) && boot_mem_pressure_register(svc) &&
-           boot_utxo_mirror_sync_register(svc) && boot_supervisor_backstop_register(svc) &&
-           boot_segment_sealer_register(svc); /* parity/soak/canary/mem/mirror/backstop/seal */
+    if (!boot_utxo_parity_register(svc) ||
+        !boot_soak_attestation_register(svc) ||
+        !boot_canary_watch_register(svc) ||
+        !boot_mem_pressure_register(svc) ||
+        !boot_utxo_mirror_sync_register(svc) ||
+        !boot_supervisor_backstop_register(svc) ||
+        !boot_segment_sealer_register(svc))
+        return false;
+
+    /* Register the node.db-writing payment worker last so reverse-order
+     * runtime shutdown signals and joins it before any other runtime stop.
+     * The entire runtime kernel drains before DB/WAL/state release. */
+    return boot_register_store_payment_runtime(svc);
 }
 
 bool boot_running(const struct boot_svc_ctx *svc)
