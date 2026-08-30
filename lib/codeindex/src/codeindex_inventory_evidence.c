@@ -335,11 +335,11 @@ static bool inv_ev_root_gap_push(struct ci_inventory_report *report,
                                  const char *reason, const char *proof)
 {
     int n = report->test_root_gap_count;
-    void *p = zcl_realloc(report->test_root_gaps,
-        (size_t)(n + 1) * sizeof(*report->test_root_gaps),
-        "ci_inventory_test_root_gaps");
-    if (!p) return false;
-    report->test_root_gaps = p;
+    if (!inv_report_array_grow((void **)&report->test_root_gaps,
+                               &report->test_root_gap_cap, n,
+                               sizeof(*report->test_root_gaps),
+                               "ci_inventory_test_root_gaps"))
+        return false;
     struct ci_inventory_test_root_gap *gap = &report->test_root_gaps[n];
     memset(gap, 0, sizeof(*gap));
     inv_cpy(gap->group, sizeof(gap->group), group->name);
