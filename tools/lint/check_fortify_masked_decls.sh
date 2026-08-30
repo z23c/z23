@@ -43,6 +43,10 @@
 # declaration. If this gate fails, add the guard -- do not add a row.
 set -u
 
+# Every path below (the stripper, git ls-files) is repo-relative, matching
+# the other gates in this directory.
+cd "$(dirname "$0")/../.." || exit 2
+
 FAIL=0
 SELFTEST=0
 [ "${1:-}" = "--selftest" ] && SELFTEST=1
@@ -112,39 +116,19 @@ if [ -z "$MASKED" ]; then
 fi
 
 # --- comment/string stripper ------------------------------------------------
-cat > "$WORK/strip.awk" <<'AWKEOF'
-BEGIN { inblk = 0 }
-{
-    line = $0; out = ""; i = 1; n = length(line)
-    while (i <= n) {
-        c = substr(line, i, 1); d = substr(line, i, 2)
-        if (inblk) {
-            if (d == "*/") { inblk = 0; i += 2 } else { i++ }
-            continue
-        }
-        if (d == "/*") { inblk = 1; i += 2; continue }
-        if (d == "//") { break }
-        if (c == "\"" || c == "'") {
-            q = c; i++
-            while (i <= n) {
-                e = substr(line, i, 1)
-                if (e == "\\") { i += 2; continue }
-                if (e == q) { i++; break }
-                i++
-            }
-            out = out " "
-            continue
-        }
-        out = out c; i++
-    }
-    print out
+# Shared with check_model_sql_literals.sh — one implementation, two callers.
+# strings=1 because a masked function NAMED inside a literal is not a call.
+STRIPPER="tools/lint/strip_c_comments.awk"
+[ -f "$STRIPPER" ] || {
+    echo "check-fortify-masked-decls: FATAL — $STRIPPER is missing;" >&2
+    echo "  refusing to scan without it." >&2
+    exit 2
 }
-AWKEOF
 
 # --- scan -------------------------------------------------------------------
 scan_file() {
     f="$1"
-    awk -f "$WORK/strip.awk" "$f" > "$WORK/stripped.c" || { echo "  $f: comment stripper failed — refusing to report this file clean"; return 1; }
+    awk -f "$STRIPPER" -v strings=1 "$f" > "$WORK/stripped.c" || { echo "  $f: comment stripper failed — refusing to report this file clean"; return 1; }
     hits=""
     for fn in $MASKED; do
         if grep -qE "(^|[^A-Za-z0-9_])$fn[[:space:]]*\(" "$WORK/stripped.c"; then

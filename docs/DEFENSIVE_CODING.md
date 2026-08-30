@@ -384,6 +384,17 @@ assert green).
   `tools/lint/check_model_sql_literals.sh`, with a mandatory `--selftest`
   that plants each statement shape, a stale row, and a converted-file
   regression and requires a rejection on every one.
+  **Comments are stripped before matching** (`tools/lint/strip_c_comments.awk`,
+  shared with `check-fortify-masked-decls`), so a header that *documents* a
+  statement is not read as carrying one — `model_fields.h` was reported for
+  explaining the column macros with an example `"SELECT " BLOG_POST_COLUMNS
+  " FROM blog_posts …"` line while containing no SQL at all, and a gate that
+  treats documentation as evidence makes deleting the explanation the
+  cheapest fix. String literals are kept verbatim, since a literal is exactly
+  what this gate is looking for, but they are still tracked so a `/*` inside
+  one cannot open a comment and hide real SQL after it. Stripping shrank the
+  baseline from 67 rows to 62: five of them were headers whose only SQL was
+  in prose.
 
 - **Gate #12: `check-long-functions`** — flags any top-level function whose
   body spans >500 lines. Two tiers (a split Gate E1 no longer uses — E1 is

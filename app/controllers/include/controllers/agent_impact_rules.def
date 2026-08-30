@@ -2792,3 +2792,9 @@ AGENT_IMPACT_RULE("app/models/include/models/query_schema.def|app/models/include
  * the toolchain changes and not only when this tree does; that is why it
  * rides make_lint_gates rather than any subject group. */
 AGENT_IMPACT_RULE("tools/lint/check_fortify_masked_decls.sh", "make_lint_gates")
+
+/* One comment/string stripper, shared by check_fortify_masked_decls and
+ * check_model_sql_literals. Both are text scanners whose verdict changes
+ * if it changes, so it rides the model group the SQL gate reports through
+ * as well as the lint-gate group. */
+AGENT_IMPACT_RULE("tools/lint/strip_c_comments.awk|tools/lint/check_model_sql_literals.sh|tools/lint/model_sql_literal_baseline.txt", "activerecord_query_builder models make_lint_gates")
