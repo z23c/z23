@@ -8,6 +8,7 @@
 #include <string.h>
 #else
 #include "devloop.h"
+#include "dev_proof.h"
 
 #include "base/serialize_le.h"
 #include "codeindex/codeindex.h"
@@ -227,6 +228,12 @@ struct watch_pending_event {
     char body[ZCL_DEVLOOP_CYCLE_JSON_MAX];
 };
 
+enum watch_proof_worker_kind {
+    WATCH_PROOF_WORKER_NONE = 0,
+    WATCH_PROOF_WORKER_EDIT,
+    WATCH_PROOF_WORKER_COMMIT,
+};
+
 struct watch_context {
     int fd;
     char root[PATH_MAX];
@@ -255,6 +262,7 @@ struct watch_context {
     bool prepared_epoch_ready;
     bool prepared_full_rescan;
     pid_t proof_worker_pid;
+    enum watch_proof_worker_kind proof_worker_kind;
     char proof_pending[ZCL_DEVLOOP_RESTART_SOURCE_MAX]
                       [ZCL_DEVLOOP_PATH_MAX];
     size_t proof_pending_count;
@@ -345,8 +353,10 @@ static void watch_proof_reap(struct watch_context *ctx)
         return;
     int status = 0;
     pid_t got = waitpid(ctx->proof_worker_pid, &status, WNOHANG);
-    if (got == ctx->proof_worker_pid || (got < 0 && errno == ECHILD))
+    if (got == ctx->proof_worker_pid || (got < 0 && errno == ECHILD)) {
         ctx->proof_worker_pid = 0;
+        ctx->proof_worker_kind = WATCH_PROOF_WORKER_NONE;
+    }
 }
 
 static void watch_proof_cancel(struct watch_context *ctx)
@@ -355,7 +365,8 @@ static void watch_proof_cancel(struct watch_context *ctx)
         return;
     ctx->proof_pending_count = 0;
     watch_proof_reap(ctx);
-    if (ctx->proof_worker_pid <= 1)
+    if (ctx->proof_worker_pid <= 1 ||
+        ctx->proof_worker_kind == WATCH_PROOF_WORKER_COMMIT)
         return;
 
     /* Cancellation is a priority boundary, not a best-effort notification.
@@ -363,6 +374,15 @@ static void watch_proof_cancel(struct watch_context *ctx)
      * through devloop_process. Do not wait here: this function also runs on
      * the first byte of a newer edit, whose reflex must start immediately. */
     (void)kill(ctx->proof_worker_pid, SIGTERM);
+}
+
+static void watch_proof_stop(struct watch_context *ctx)
+{
+    if (!ctx) return;
+    ctx->proof_pending_count = 0;
+    watch_proof_reap(ctx);
+    if (ctx->proof_worker_pid > 1)
+        (void)kill(ctx->proof_worker_pid, SIGTERM);
 }
 
 static void watch_proof_join(struct watch_context *ctx)
@@ -375,8 +395,10 @@ static void watch_proof_join(struct watch_context *ctx)
     do {
         got = waitpid(worker, &status, 0);
     } while (got < 0 && errno == EINTR);
-    if (got == worker || (got < 0 && errno == ECHILD))
+    if (got == worker || (got < 0 && errno == ECHILD)) {
         ctx->proof_worker_pid = 0;
+        ctx->proof_worker_kind = WATCH_PROOF_WORKER_NONE;
+    }
 }
 
 static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
@@ -405,7 +427,37 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
         _exit(rc == 0 ? 0 : 1);
     }
     ctx->proof_worker_pid = child;
+    ctx->proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
     ctx->proof_pending_count = 0;
+    return true;
+}
+
+static bool watch_commit_proof_start(struct watch_context *ctx,
+                                     int watcher_lock_fd)
+{
+    if (!ctx) return false;
+    watch_proof_reap(ctx);
+    if (ctx->proof_worker_pid > 1 || ctx->proof_pending_count > 0 ||
+        !zcl_dev_proof_queue_has_pending(ctx->root))
+        return true;
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) {
+        close(ctx->fd);
+        close(watcher_lock_fd);
+        zcl_devloop_process_cancel_clear();
+        zcl_devloop_process_cancel_poll_clear();
+        signal(SIGINT, proof_worker_signal);
+        signal(SIGTERM, proof_worker_signal);
+        char why[256] = {0};
+        int rc = zcl_dev_proof_queue_run_next(ctx->root, why, sizeof(why));
+        if (rc < 0)
+            fprintf(stderr, "[devloop] commit proof queue failed: %s\n",
+                    why[0] ? why : "unknown");
+        _exit(rc < 0 ? 1 : 0);
+    }
+    ctx->proof_worker_pid = child;
+    ctx->proof_worker_kind = WATCH_PROOF_WORKER_COMMIT;
     return true;
 }
 
@@ -1225,7 +1277,7 @@ static int open_singleton_lock(const char *repo_root,
         return -1;
     }
     if (ftruncate(fd, 0) == 0)
-        dprintf(fd, "%ld %s starting\n", (long)getpid(),
+        dprintf(fd, "%ld %s starting proofq1\n", (long)getpid(),
                 zcl_devloop_publish_mode_name(publish_mode));
     return fd;
 }
@@ -1235,7 +1287,7 @@ static bool mark_singleton_ready(
 {
     if (fd < 0 || ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0)
         return false;
-    return dprintf(fd, "%ld %s ready\n", (long)getpid(),
+    return dprintf(fd, "%ld %s ready proofq1\n", (long)getpid(),
                    zcl_devloop_publish_mode_name(publish_mode)) > 0;
 }
 
@@ -1331,6 +1383,10 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
     while (!g_watch_stop && !(stop && stop(stop_opaque))) {
         if (!watch_proof_start(&ctx, lock_fd)) {
             fprintf(stderr, "[devloop] complete proof worker start failed\n");
+            break;
+        }
+        if (!watch_commit_proof_start(&ctx, lock_fd)) {
+            fprintf(stderr, "[devloop] commit proof worker start failed\n");
             break;
         }
         if (ctx.changed_count == 0 && !ctx.prepared_epoch_ready) {
@@ -1529,7 +1585,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         }
     }
 
-    watch_proof_cancel(&ctx);
+    watch_proof_stop(&ctx);
     zcl_devloop_process_cancel_poll_clear();
     printf("{\"schema\":\"zcl.dev_watch_heartbeat.v1\","
            "\"status\":\"stopped\",\"pid\":%ld}\n", (long)getpid());

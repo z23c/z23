@@ -143,7 +143,20 @@ static void proof_ensure(
     struct zcl_command_reply watcher;
     zcl_command_reply_init(&watcher, "zcl.dev_loop_status.v1");
     zcl_native_handle_dev_loop_start_async(request, &watcher);
+    const struct json_value *created = json_get(&watcher.data, "created");
+    bool queue_ready = watcher.exit_code == ZCL_COMMAND_EXIT_OK &&
+        ((created && created->type == JSON_BOOL && json_get_bool(created)) ||
+         zcl_native_dev_loop_proof_queue_ready(proof_source_root(request)));
     zcl_command_reply_free(&watcher);
+    if (!queue_ready) {
+        proof_emit_status(reply, &status, false);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "PROOF_QUEUE_OWNER_STALE", "schedule", true, false,
+            "the resident watcher does not advertise the proof queue contract",
+            "restart the development watcher with the current z23-dev binary");
+        return;
+    }
     if (!zcl_dev_proof_ensure(
             proof_source_root(request),
             proof_optional_text(request->input, "local_commit"),
