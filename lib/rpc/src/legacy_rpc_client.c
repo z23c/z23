@@ -21,6 +21,7 @@
 #include <string.h>
 
 #define LRC_TIMEOUT_SECS    5
+#define LRC_TIMEOUT_MAX_MS  60000u
 /* 8 MB hard cap. A full getblock verbose=0 response is the serialized
  * block as hex (≤2 MB consensus block → ≤4 MB hex) plus the JSON-RPC
  * envelope; 8 MB leaves comfortable headroom for the largest block.
@@ -105,6 +106,15 @@ bool legacy_rpc_authenticated_call(const char *body_json,
                                    char **out_resp,
                                    char *err, size_t err_sz)
 {
+    return legacy_rpc_authenticated_call_with_timeout(
+        body_json, LRC_TIMEOUT_SECS * 1000u, out_resp, err, err_sz);
+}
+
+bool legacy_rpc_authenticated_call_with_timeout(const char *body_json,
+                                                uint32_t timeout_ms,
+                                                char **out_resp,
+                                                char *err, size_t err_sz)
+{
     char user[128] = {0};
     char pass[256] = {0};
     int port = ZCLASSICD_RPC_DEFAULT_PORT;
@@ -121,8 +131,9 @@ bool legacy_rpc_authenticated_call(const char *body_json,
         return false;
     }
 
-    return legacy_rpc_call("127.0.0.1", port, user, pass, body_json,
-                           out_resp, err, err_sz);
+    return legacy_rpc_call_with_timeout("127.0.0.1", port, user, pass,
+                                        body_json, timeout_ms, out_resp,
+                                        err, err_sz);
 }
 
 bool legacy_rpc_call(const char *host, int port,
@@ -131,8 +142,21 @@ bool legacy_rpc_call(const char *host, int port,
                      char **out_resp,
                      char *err, size_t err_sz)
 {
+    return legacy_rpc_call_with_timeout(host, port, user, pass, body_json,
+                                        LRC_TIMEOUT_SECS * 1000u, out_resp,
+                                        err, err_sz);
+}
+
+bool legacy_rpc_call_with_timeout(const char *host, int port,
+                                  const char *user, const char *pass,
+                                  const char *body_json,
+                                  uint32_t timeout_ms,
+                                  char **out_resp,
+                                  char *err, size_t err_sz)
+{
     if (out_resp) *out_resp = NULL;
-    if (!host || port < 1 || port > UINT16_MAX || !body_json || !out_resp) {
+    if (!host || port < 1 || port > UINT16_MAX || !body_json || !out_resp ||
+        timeout_ms == 0 || timeout_ms > LRC_TIMEOUT_MAX_MS) {
         if (err && err_sz) snprintf(err, err_sz, "bad args");
         return false;
     }
@@ -146,8 +170,8 @@ bool legacy_rpc_call(const char *host, int port,
                                               detail, sizeof(detail)));
         return false;
     }
-    (void)platform_socket_set_receive_timeout(sock, LRC_TIMEOUT_SECS * 1000);
-    (void)platform_socket_set_send_timeout(sock, LRC_TIMEOUT_SECS * 1000);
+    (void)platform_socket_set_receive_timeout(sock, timeout_ms);
+    (void)platform_socket_set_send_timeout(sock, timeout_ms);
 
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET;

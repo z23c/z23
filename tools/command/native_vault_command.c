@@ -406,19 +406,24 @@ void zcl_native_handle_vault_list(const struct zcl_command_request *request,
                                c->vault_verb[0] ? c->vault_verb : "none");
         if (row) {
             const struct json_value *complete = json_get(row, "determined");
+            const struct json_value *money = json_get(row, "is_money");
             bool determined = complete && complete->type == JSON_BOOL &&
                               json_get_bool(complete);
+            bool is_money = money && money->type == JSON_BOOL &&
+                            json_get_bool(money);
             (void)json_push_kv_str(&o, "status",
                                    determined ? "ok" : "undetermined");
             vault_copy_str_as(&o, row, "source_primitive", "source",
                               "vault_read_snapshot");
             (void)json_push_kv_bool(&o, "complete",
                                     determined);
-            vault_push_total_as(&o, row, "total_zat");
-            vault_copy_int_as(&o, row, "spendable", "spendable_zat");
-            vault_copy_int_as(&o, row, "pending", "pending_zat");
-            vault_copy_int_as(&o, row, "immature", "immature_zat");
-            vault_copy_int_as(&o, row, "encumbered", "encumbered_zat");
+            if (is_money) {
+                vault_push_total_as(&o, row, "total_zat");
+                vault_copy_int_as(&o, row, "spendable", "spendable_zat");
+                vault_copy_int_as(&o, row, "pending", "pending_zat");
+                vault_copy_int_as(&o, row, "immature", "immature_zat");
+                vault_copy_int_as(&o, row, "encumbered", "encumbered_zat");
+            }
             vault_copy_int(&o, row, "item_count");
             if (!determined) {
                 const char *reason = json_get_str(json_get(row, "reason"));
@@ -566,6 +571,8 @@ static void vault_render_items(const struct zcl_command_request *request,
                 continue;
             }
             vault_push_line(&scanned, c->name);
+            const char *unit = json_get_str(json_get(row, "unit"));
+            bool is_money = unit && strcmp(unit, "zatoshi") == 0;
             const struct json_value *arr = json_get(row, "items");
             if (!arr || arr->type != JSON_ARR)
                 continue;
@@ -586,7 +593,16 @@ static void vault_render_items(const struct zcl_command_request *request,
                 json_set_object(&o);
                 (void)json_push_kv_str(&o, "class", c->name);
                 vault_copy_str(&o, it, "id", "unknown");
-                vault_copy_int(&o, it, "amount_zat");
+                (void)json_push_kv_str(&o, "unit", unit ? unit : "unknown");
+                if (is_money) {
+                    vault_copy_int(&o, it, "amount_zat");
+                } else if (strcmp(c->name, "tokens") == 0) {
+                    vault_copy_int(&o, it, "units");
+                    vault_copy_int(&o, it, "utxo_count");
+                    vault_copy_str(&o, it, "ticker", "unknown");
+                    vault_copy_str(&o, it, "name", "unknown");
+                    vault_copy_int(&o, it, "decimals");
+                }
                 (void)json_push_kv_bool(&o, "encumbered", is_enc);
                 if (is_enc) {
                     vault_copy_str(&o, it, "encumbered_reason", "unknown");
