@@ -641,6 +641,7 @@ struct fp_index *fp_index_build(const char *root, const char *const *files,
     if (ix == NULL)
         return NULL;
     snprintf(ix->root, sizeof ix->root, "%s", root);
+    ix->allow_source_route = true;
     ix->files = (struct fp_file *)zcl_calloc(n_files ? n_files : 1u,
                                              sizeof *ix->files, "fp.files");
     ix->nbuckets = 1u << 17;
@@ -666,6 +667,44 @@ struct fp_index *fp_index_build(const char *root, const char *const *files,
             return NULL;
         }
     }
+    /* Mark the units that own a main(). A probe translation unit that
+     * included one would define main() twice — once from the tree, once from
+     * the generated driver — and the whole link would fail rather than one
+     * candidate. Refusing them at scan time keeps that a NAMED exclusion. */
+    for (i = 0; i < ix->nsyms; i++) {
+        const struct fp_sym *s = &ix->syms[i];
+        if (s->kind == (unsigned char)FP_SYM_FUNC &&
+            strcmp(s->name, "main") == 0 && s->file >= 0 &&
+            (size_t)s->file < ix->nfiles)
+            ix->files[s->file].defines_main = true;
+    }
+    /* Mark the units that export a symbol some other unit also exports. See
+     * fp_file.dup_export: these are the `#if`-guarded platform twins, and
+     * including two of them into two probe TUs is a link failure, not a
+     * probe failure. Quadratic only in the hash chain, which is short. */
+    for (i = 0; i < ix->nsyms; i++) {
+        const struct fp_sym *s = &ix->syms[i];
+        uint64_t h;
+        int j;
+        if (s->kind != (unsigned char)FP_SYM_FUNC || s->is_static)
+            continue;
+        if (ix->files[s->file].is_header || ix->files[s->file].dup_export)
+            continue;
+        h = fp_hash_str(s->name);
+        for (j = ix->bucket[h % ix->nbuckets]; j >= 0; j = ix->syms[j].next) {
+            const struct fp_sym *o = &ix->syms[j];
+            if (o == s || o->kind != (unsigned char)FP_SYM_FUNC ||
+                o->is_static || o->file == s->file)
+                continue;
+            if (ix->files[o->file].is_header)
+                continue;
+            if (strcmp(o->name, s->name) != 0)
+                continue;
+            ix->files[s->file].dup_export = true;
+            ix->files[o->file].dup_export = true;
+            break;
+        }
+    }
     return ix;
 }
 
@@ -685,6 +724,11 @@ void fp_index_free(struct fp_index *ix)
 size_t fp_index_function_count(const struct fp_index *ix)
 {
     return ix->nfuncs;
+}
+
+void fp_index_allow_source_route(struct fp_index *ix, bool on)
+{
+    ix->allow_source_route = on;
 }
 
 const char *fp_verdict_text(enum fp_verdict v)

@@ -6,7 +6,9 @@
 
 #include "engine/engine_err.h"
 
+#include <ctype.h>
 #include <stddef.h>
+#include <string.h>
 
 const char *engine_err_name(enum engine_err e)
 {
@@ -59,6 +61,54 @@ bool engine_err_should_retry(enum engine_err e)
         return false;
     }
     return false;
+}
+
+/* Case-insensitive substring search. Vendors do not agree on capitalization
+ * and this must not depend on which one is being talked to. */
+static bool contains_ci(const char *hay, const char *needle)
+{
+    const size_t nl = strlen(needle);
+    if (nl == 0)
+        return false;
+    for (const char *p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < nl && p[i]
+               && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == nl)
+            return true;
+    }
+    return false;
+}
+
+enum engine_err engine_err_refine(enum engine_err e, const char *text)
+{
+    if (!text || !text[0])
+        return e;
+    /* Only ever makes a failure MORE terminal. A vendor cannot talk its way
+     * out of a class this harness already decided not to retry, and it
+     * certainly cannot talk its way into a success. */
+    if (!engine_err_should_retry(e))
+        return e;
+
+    /* The phrases two unrelated vendors actually used for the same condition.
+     * Matching on words rather than on a vendor-specific error code keeps this
+     * from becoming a table of one company's constants. */
+    static const char *const k_out_of_money[] = {
+        "insufficient balance",
+        "no credits remaining",
+        "credit_balance_exhausted",
+        "exceeded your current quota",
+        "billing",
+        "recharge",
+        "payment required",
+    };
+    for (size_t i = 0; i < sizeof(k_out_of_money) / sizeof(k_out_of_money[0]);
+         i++) {
+        if (contains_ci(text, k_out_of_money[i]))
+            return ENGINE_ERR_BAD_REQUEST;
+    }
+    return e;
 }
 
 int engine_err_backoff_ms(int attempt)

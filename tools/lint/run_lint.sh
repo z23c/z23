@@ -121,6 +121,7 @@ gate_command() {
         check-arm-symbol-single)           echo './tools/lint/check_arm_symbol_single.sh --selftest && ./tools/lint/check_arm_symbol_single.sh' ;;
         check-fortify-masked-decls)        echo './tools/lint/check_fortify_masked_decls.sh --selftest && ./tools/lint/check_fortify_masked_decls.sh' ;;
         check-model-sql-literals)          echo './tools/lint/check_model_sql_literals.sh --selftest && ./tools/lint/check_model_sql_literals.sh' ;;
+        check-persona-resolves)            echo './tools/lint/check_persona_resolves.sh --selftest && ./tools/lint/check_persona_resolves.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-zcode-package-standalone)    echo './tools/lint/check_zcode_package_standalone.sh' ;;
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;

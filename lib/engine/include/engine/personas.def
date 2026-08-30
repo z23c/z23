@@ -1,0 +1,93 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * personas — the ONE place a territory's authored STANCE is written down,
+ * and the only thing about a territory that is written down at all.
+ *
+ * ── why this file is allowed to exist ────────────────────────────────────
+ * lib/territory refuses persona text on purpose, and it is right to:
+ * "There is no persona file, no owners table, no per-territory prose. A
+ * territory's personality is its invariants and refusals — derived, never
+ * written down." Everything a brief reports — what a territory owns, which
+ * groups its files route to, how many of its public functions a test
+ * actually reaches, which gates bind it — is regenerated from the code index
+ * on every call, because a written copy of a measurable fact is a copy that
+ * goes stale while still reading as true.
+ *
+ * This file writes down the one thing that is NOT measurable: a refusal.
+ * "These two dead ends must never be reported as one" is a judgement someone
+ * made after an operator was sent to repair a fault that did not exist. No
+ * call graph derives it. It is not in the index because it is not a fact
+ * about the code; it is a fact about what the code must never become.
+ *
+ * ── what a row may and may not carry ─────────────────────────────────────
+ * TERRITORY  a territory the tree really declares. Not a topic, not a team.
+ * STANCE     one refusal, in plain words, that a reader could act on. Not a
+ *            summary of the module, not its purpose, not advice.
+ * EVIDENCE   a tracked file where the reasoning already lives. A stance
+ *            whose evidence has been deleted is a stance nobody is holding
+ *            to any more, and check-persona-resolves fails until the row
+ *            goes with it.
+ *
+ * A row carries NO list of gates. The gates that bind a territory are
+ * derived and reported live by `z23 code general <territory>`; writing them
+ * here would create the second copy this file exists to avoid.
+ *
+ * A PERSONA GRANTS NO AUTHORITY. It is read into a prompt and nowhere else.
+ * Nothing branches on it, metaverse_grant_check() never sees it, and no
+ * verdict, gate or receipt is affected by whether one exists. If a caller
+ * appears that decides something because of a stance, that is a referee, and
+ * a referee is the thing this project refuses.
+ *
+ * Consumers: tools/engine_unit.c (pastes the stance into a dispatched unit's
+ * prompt, beside the generated brief) and tools/lint/check_persona_resolves.sh.
+ */
+
+/* clang-format off */
+
+PERSONA("lib/net",
+    "Never merge two different dead ends into one 'not found'. Nobody has "
+    "attested this root yet and pointers exist but no authenticated provider "
+    "served the bytes are different facts with different repairs, and "
+    "collapsing them sends an operator to fix reachability that was never "
+    "broken. The same rule holds anywhere in this module that reports why "
+    "something did not arrive: reachability and speed are different "
+    "properties, and an honest node on a slow disk is reachable.",
+    "docs/P2P_SOURCE_HOSTING.md")
+
+PERSONA("lib/validation",
+    "The block-connection ordering layer is sealed, and an ordering bug here "
+    "forks the node exactly as hard as a bug in a consensus predicate. "
+    "connect_block.c and chainstate.c may not be edited without the unseal "
+    "ritual. Refuse any change that reaches them by a route that skips it.",
+    "core/UNSEAL.md")
+
+PERSONA("app/models",
+    "Build the statement; do not write it. A hand-written SQL literal in a "
+    "model becomes a row in a shrink-only baseline, and a row is not a fix — "
+    "the baseline's own header says so. Add the table and columns to "
+    "query_schema.def and use qb_select/qb_insert/qb_update/qb_delete.",
+    "app/models/include/models/query_builder.h")
+
+PERSONA("lib/test",
+    "A test file that exists proves nothing. A group must be registered and "
+    "must actually run: groups_ran of zero is a FAILURE no matter what the "
+    "exit code says, and a fully cached run is not evidence about the change "
+    "that provoked it. Never weaken an assertion to obtain a green result.",
+    "lib/test/src/test_parallel.c")
+
+PERSONA("lib/base",
+    "LOG_FAIL, LOG_ERR and LOG_NULL RETURN. They are not print statements. "
+    "Calling one and discarding its value silently changes control flow at "
+    "the site that looked like it was only logging, and the wrong one for "
+    "the function's return type is a type error the compiler will not catch "
+    "for you.",
+    "lib/base/include/base/log_macros.h")
+
+PERSONA("lib/crypto",
+    "An acceleration tier is a measurement, never a claim. A tier named for "
+    "an instruction set that has not beaten the portable C on the machine in "
+    "front of you is slower than the code it replaced, and that has already "
+    "happened here. Pin the oracle, measure, and let the number decide.",
+    "tools/lint/check_accel_oracle_pinned.sh")
+
+/* clang-format on */

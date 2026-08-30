@@ -2178,6 +2178,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
+        check-persona-resolves \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
@@ -6216,7 +6217,15 @@ $(FPSCAN_BIN): $(FP_SRCS) \
 fingerprint-scan: $(FPSCAN_BIN) build-only
 	@mkdir -p $(FP_WORK)
 	@rm -f $(FP_TREE_ARCHIVE)
-	@find $(OBJ_DIR) -name '*.o' -print0 | xargs -0 ar rcs $(FP_TREE_ARCHIVE)
+# `P` (full path member names) is load-bearing, not tidiness. An archive
+# member is named by its BASENAME by default, and this tree has 18 basenames
+# that occur in more than one module (block.o, protocol.o, zanc.o, …), so
+# plain `ar rcs` silently REPLACED one object with another: 2010 objects in,
+# 2002 members out. Every symbol in a lost object then came back undefined,
+# got "stubbed" as a zeroed data byte array, and the LTO link died comparing
+# that array against the real function's header declaration — the whole scan
+# exited 2 having measured nothing.
+	@find $(OBJ_DIR) -name '*.o' -print0 | xargs -0 ar rcsP $(FP_TREE_ARCHIVE)
 	@git ls-files '*.c' '*.h' | grep -v '^vendor/' > $(FP_WORK)/sources.txt
 	$(FPSCAN_BIN) --root=. --work=$(FP_WORK) --cc='$(CC)' \
 	    --files-from=$(FP_WORK)/sources.txt \
@@ -10063,6 +10072,19 @@ check-model-sql-literals:
 	@./tools/lint/check_model_sql_literals.sh --selftest
 	@./tools/lint/check_model_sql_literals.sh
 
+# lib/engine/include/engine/personas.def writes down the one thing about a
+# territory that cannot be derived: an authored refusal. Everything else a
+# brief reports is regenerated from the code index on every call, precisely
+# so it cannot go stale while still reading as true. Writing a stance buys
+# that staleness problem back, and this gate is the price: every row's
+# territory must still hold tracked C, and the file it cites as evidence must
+# still be tracked. There is no baseline — a row that stopped being true is
+# not a debt, it is a false statement.
+check-persona-resolves:
+	@echo "══ LINT: every authored persona still resolves ══"
+	@./tools/lint/check_persona_resolves.sh --selftest
+	@./tools/lint/check_persona_resolves.sh
+
 # Keep top-level functions in app/controllers + app/services under 500
 # lines. Single state-machines that truly belong as one function can carry
 # a `// long-function-ok:<tag>` override marker explaining WHY.
@@ -11513,6 +11535,7 @@ LINT_GATES := \
     check-model-validation \
     check-model-ar-lifecycle \
     check-model-sql-literals \
+    check-persona-resolves \
     check-long-functions \
     check-rpc-registrar \
     check-lag-slo-observable \
