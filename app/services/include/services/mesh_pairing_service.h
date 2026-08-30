@@ -72,7 +72,8 @@ const char *mesh_pairing_reason_token(enum mesh_pairing_reason reason);
 /* Accept one peer only after its public Noise fingerprint was compared out of
  * band. The signed delegation is rechecked against this node's connected
  * genesis, active ZID projection, finality-delayed beacon, and current time.
- * The first product capability is deliberately status-read only. */
+ * The capability set is status-read by default, with confined terminal-exec
+ * as the only opt-in addition at accept time. */
 enum mesh_pairing_reason mesh_pairing_service_accept(
     struct node_db *ndb,
     const struct vcs_zcode_dht_delegation *delegation,
@@ -106,6 +107,16 @@ enum mesh_pairing_reason mesh_pairing_service_revoke_commit(
  * chain state plus the exact established Noise peer. The delegation is live
  * session evidence, never a substitute for the local pairing record. */
 enum mesh_pairing_reason mesh_pairing_service_authorize_status(
+    struct node_db *ndb, const char *pairing_id,
+    const struct vcs_zcode_dht_delegation *live_delegation,
+    const uint8_t session_noise_static[32], int64_t now);
+
+/* Authorize the confined terminal operation against current local revocation
+ * and chain state plus the exact established Noise peer. Requires the pairing
+ * to carry MESH_PAIRING_CAP_TERMINAL_EXEC, granted only at commit time. The
+ * delegation is live session evidence, never a substitute for the local
+ * pairing record. */
+enum mesh_pairing_reason mesh_pairing_service_authorize_terminal(
     struct node_db *ndb, const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], int64_t now);

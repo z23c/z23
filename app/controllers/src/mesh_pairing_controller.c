@@ -77,7 +77,10 @@ static void mesh_pairing_push_public(
                            view->peer_noise_fingerprint);
     (void)json_push_kv_int(&item, "capability_mask",
                            (int64_t)view->capability_mask);
-    (void)json_push_kv_str(&item, "capability", "status_read");
+    (void)json_push_kv_str(&item, "capability",
+        (view->capability_mask & MESH_PAIRING_CAP_TERMINAL_EXEC)
+            ? "status_read+terminal_exec"
+            : "status_read");
     (void)json_push_kv_int(&item, "delegation_sequence",
                            (int64_t)view->delegation_sequence);
     (void)json_push_kv_int(&item, "paired_at", view->paired_at);

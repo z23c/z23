@@ -6,6 +6,7 @@
 #include "config/boot_zcode_dht.h"
 #include "config/boot_internal.h"
 #include "config/boot_mesh_status.h"
+#include "config/boot_mesh_terminal.h"
 #include "config/runtime.h"
 #include "config/boot_zcode_work_authority.h"
 #include "config/boot_zcode_async_proof.h"
@@ -549,6 +550,11 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
     if (boot_mesh_status_frame(mp, node, payload, payload_len,
                                (struct boot_svc_ctx *)ctx))
         return true;
+    /* Confined mesh terminal: same reasoning — its OPENs are answered on
+     * the pairing authority alone, never gated on swarm hosting. */
+    if (boot_mesh_terminal_frame(mp, node, payload, payload_len,
+                                 (struct boot_svc_ctx *)ctx))
+        return true;
     boot_zcode_swarm_lock();
     struct vcs_swarm_engine *engine =
         boot_zcode_swarm_ensure((struct boot_svc_ctx *)ctx);
@@ -833,6 +839,7 @@ void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
                                   boot_zcode_swarm_tick, svc);
     s_svc = svc;
     boot_mesh_status_wire(svc);
+    boot_mesh_terminal_wire(svc);
     liveness_contract_init(&s_timer_contract, "net.zcode_swarm");
     s_timer_contract.on_tick = boot_zcode_swarm_timer_tick;
     supervisor_domains_init();
@@ -860,6 +867,7 @@ void boot_zcode_swarm_shutdown(void)
     }
     boot_zcode_dht_shutdown();
     boot_mesh_status_shutdown();
+    boot_mesh_terminal_shutdown();
     boot_zcode_swarm_lock();
     s_svc = NULL;
     vcs_swarm_engine_set_global(NULL);
