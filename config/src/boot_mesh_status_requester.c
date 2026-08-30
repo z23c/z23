@@ -52,109 +52,12 @@ const char *boot_mesh_status_begin_result_string(
     return "bad_argument";
 }
 
-/* Snapshot connected peers under cs_nodes, then return the first whose
- * established Noise session names the paired Noise static. Caller releases the
- * returned reference. Never dials. */
-static struct p2p_node *mesh_find_session_peer(
-    struct net_manager *nm, const uint8_t peer_noise[32],
-    struct noise_transport_snapshot *session_out)
-{
-    struct p2p_node *candidates[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
-    size_t count = 0;
-    zcl_mutex_lock(&nm->cs_nodes);
-    for (size_t i = 0;
-         i < nm->num_nodes && count < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++) {
-        struct p2p_node *node = nm->nodes[i];
-        if (!boot_zcode_dht_peer_ready(node))
-            continue;
-        candidates[count++] = node;
-        p2p_node_add_ref(node);
-    }
-    zcl_mutex_unlock(&nm->cs_nodes);
-    struct p2p_node *found = NULL;
-    for (size_t i = 0; i < count; i++) {
-        struct noise_transport_snapshot snapshot;
-        memset(&snapshot, 0, sizeof(snapshot));
-        if (!found && candidates[i]->transport &&
-            noise_transport_snapshot(candidates[i]->transport, &snapshot) &&
-            snapshot.established &&
-            memcmp(snapshot.remote_static, peer_noise, 32) == 0) {
-            found = candidates[i];
-            *session_out = snapshot;
-        } else {
-            p2p_node_release(candidates[i]);
-        }
-    }
-    return found;
-}
-
-struct mesh_requester_delegation_collect {
-    struct vcs_zcode_dht_delegation *held;
-    size_t held_max;
-    struct vcs_zcode_dht_delegation best;
-    uint8_t genesis[32];
-    uint8_t master[32];
-    uint8_t noise_static[32];
-    bool found;
-    bool ambiguous;
-};
-
-/* Runs under the DHT service lock: memory copies only. The greatest sequence
- * for the exact paired identity wins; two different online keys at that same
- * sequence are ambiguous and fail closed. */
-static void mesh_collect_responder_delegation(
-    struct vcs_zcode_dht_service *service, void *opaque)
-{
-    struct mesh_requester_delegation_collect *collect = opaque;
-    if (!service || !collect || !collect->held)
-        return;
-    size_t count = vcs_zcode_dht_service_delegations(
-        service, collect->held, collect->held_max);
-    for (size_t i = 0; i < count; i++) {
-        struct vcs_zcode_dht_delegation *candidate = &collect->held[i];
-        if (memcmp(candidate->network_genesis, collect->genesis, 32) != 0 ||
-            memcmp(candidate->doc.master_pubkey, collect->master, 32) != 0 ||
-            memcmp(candidate->noise_static_pubkey,
-                   collect->noise_static, 32) != 0)
-            continue;
-        if (!collect->found ||
-            candidate->doc.seq > collect->best.doc.seq) {
-            collect->best = *candidate;
-            collect->found = true;
-            collect->ambiguous = false;
-        } else if (candidate->doc.seq == collect->best.doc.seq &&
-                   memcmp(candidate->online_pubkey,
-                          collect->best.online_pubkey, 32) != 0) {
-            collect->ambiguous = true;
-        }
-    }
-}
-
-static bool mesh_responder_delegation(
-    const struct db_mesh_pairing *row,
-    struct vcs_zcode_dht_delegation *out)
-{
-    struct mesh_requester_delegation_collect collect;
-    memset(&collect, 0, sizeof(collect));
-    collect.held = zcl_malloc(
-        VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS * sizeof(*collect.held),
-        "mesh_status.requester_delegations");
-    if (!collect.held) {
-        LOG_ERROR("net.mesh_status", "requester delegation alloc failed");
-        return false;
-    }
-    collect.held_max = VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS;
-    memcpy(collect.genesis, row->network_genesis, 32);
-    memcpy(collect.master, row->peer_master_pubkey, 32);
-    memcpy(collect.noise_static, row->peer_noise_pubkey, 32);
-    bool available = boot_zcode_dht_service_apply(
-        mesh_collect_responder_delegation, &collect);
-    bool found = available && collect.found && !collect.ambiguous;
-    if (found)
-        *out = collect.best;
-    free(collect.held);
-    return found;
-}
+/* Session-peer lookup lives in boot_mesh_status.c as
+ * boot_mesh_find_session_peer (internal header): the terminal lane's pump
+ * needs the identical lookup, so it is shared rather than copied. The peer's
+ * held-delegation lookup is shared the same way, as boot_mesh_peer_delegation
+ * — an open and a status request must pre-flight the identical authority the
+ * responder re-verifies. */
 
 enum boot_mesh_status_begin_result boot_mesh_status_begin(
     const char *pairing_id_hex, uint8_t request_id_out[32])
@@ -207,13 +110,13 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
 
     struct noise_transport_snapshot session;
     memset(&session, 0, sizeof(session));
-    struct p2p_node *peer = mesh_find_session_peer(
+    struct p2p_node *peer = boot_mesh_find_session_peer(
         mp->net_mgr, row.peer_noise_pubkey, &session);
     if (!peer)
         return MESH_STATUS_BEGIN_PEER_NOT_CONNECTED;
 
     struct vcs_zcode_dht_delegation responder_delegation;
-    if (!mesh_responder_delegation(&row, &responder_delegation) ||
+    if (!boot_mesh_peer_delegation(&row, &responder_delegation) ||
         mesh_pairing_service_authorize_status(
             ndb, pairing_id_hex, &responder_delegation,
             session.remote_static, now) != MESH_PAIRING_OK) {

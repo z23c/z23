@@ -135,6 +135,8 @@ ZCL_TEST_GROUP(mesh_pairing)
 ZCL_TEST_GROUP(mesh_capability_grant)
 ZCL_TEST_GROUP(mesh_pairing_controller)
 ZCL_TEST_GROUP(mesh_status_proto)
+/* mesh terminal open/receipt/data/resize/close wire codec and receipt proof */
+ZCL_TEST_GROUP(mesh_terminal_proto)
 ZCL_TEST_GROUP(mesh_private_object_proto)
 ZCL_TEST_GROUP(mesh_private_object_crypto)
 ZCL_TEST_GROUP(mesh_private_object_root)
@@ -522,6 +524,14 @@ ZCL_TEST_GROUP(os_proc)
 ZCL_TEST_GROUP(os_sandbox)
 ZCL_TEST_GROUP(sandbox_process_budget)
 ZCL_TEST_GROUP(os_sandbox_hotswap_interaction)
+/* terminal worker cage: attacks against os_sandbox_terminal_worker_profile */
+ZCL_TEST_GROUP(terminal_worker_sandbox)
+/* live confined terminal worker: PTY pump, budgets, named endings */
+ZCL_TEST_GROUP(mesh_terminal_worker)
+/* mesh terminal wire: ZMTERM responder decision, receipts, session table */
+ZCL_TEST_GROUP(boot_mesh_terminal)
+/* mesh terminal requester: receipt binding, DATA sequence/FIFO, watchdogs */
+ZCL_TEST_GROUP(mesh_terminal_client)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)
@@ -1022,6 +1032,10 @@ ZCL_TEST_GROUP(replay_receipt_root)
  * of the watcher family sits behind #if defined(_WIN32). */
 ZCL_TEST_GROUP(directory_watcher)
 ZCL_TEST_GROUP(watcher_record)
+/* vendored FreeBSD /bin/sh smoke acceptance: execs build/bin/fbsh (a
+ * standalone `make fbsh` artifact, deliberately not a prerequisite of
+ * the test binaries) and skips when it is absent. */
+ZCL_TEST_GROUP(freebsd_sh)
 ZCL_SPEC_GROUP(wallet_dashboard)
 ZCL_SPEC_GROUP(wallet_send)
 ZCL_SPEC_GROUP(wallet_receive)

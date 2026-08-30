@@ -436,6 +436,12 @@ void zcl_native_handle_ops_mesh_pair_commit(
     json_push_kv_str(&commit_input, "fingerprint", fingerprint);
     if (days_given)
         json_push_kv_int(&commit_input, "days", days);
+    /* "terminal":true is forwarded verbatim so the RPC layer owns the type
+     * check (a non-boolean there is INVALID_TERMINAL, nothing written). */
+    const struct json_value *terminal =
+        input ? json_get(input, "terminal") : NULL;
+    if (terminal && terminal->type == JSON_BOOL && json_get_bool(terminal))
+        json_push_kv_bool(&commit_input, "terminal", true);
     mesh_pair_bridge(request, &commit_input, "mesh_pairing_commit", true,
                      reply);
     json_free(&commit_input);

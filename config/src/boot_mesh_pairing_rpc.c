@@ -44,6 +44,22 @@ static bool input_days(const struct json_value *in, int64_t *days_out,
     return false; /* a days value that is not an integer is a bad argument */
 }
 
+/* "terminal":true opts the commit into the confined terminal-exec grant.
+ * Absent or false keeps the status-read-only default; any other type is a
+ * bad argument, never silently ignored. */
+static bool input_terminal(const struct json_value *in, bool *terminal_out)
+{
+    *terminal_out = false;
+    const struct json_value *value = in ? json_get(in, "terminal") : NULL;
+    if (!value)
+        return true;
+    if (value->type == JSON_BOOL) {
+        *terminal_out = json_get_bool(value);
+        return true;
+    }
+    return false;
+}
+
 static void rpc_error(struct json_value *result, const char *code,
                       const char *message)
 {
@@ -66,7 +82,10 @@ static void pairing_view_json(struct json_value *value,
     json_push_kv_str(value, "peer_noise_fingerprint",
                      view->peer_noise_fingerprint);
     json_push_kv_int(value, "capability_mask", (int64_t)view->capability_mask);
-    json_push_kv_str(value, "capability", "status_read");
+    json_push_kv_str(value, "capability",
+                     (view->capability_mask & MESH_PAIRING_CAP_TERMINAL_EXEC)
+                         ? "status_read+terminal_exec"
+                         : "status_read");
     json_push_kv_int(value, "delegation_sequence",
                      (int64_t)view->delegation_sequence);
     json_push_kv_int(value, "paired_at", view->paired_at);
@@ -194,9 +213,12 @@ static bool rpc_mesh_pairing_commit(const struct json_value *params, bool help,
     if (help) {
         json_set_str(result,
                      "mesh_pairing_commit {\"peer\":\"<selector>\","
-                     "\"fingerprint\":\"<64 lowercase hex>\",\"days\":7} — "
+                     "\"fingerprint\":\"<64 lowercase hex>\",\"days\":7,"
+                     "\"terminal\":true} — "
                      "fingerprint is the mandatory out-of-band compared "
-                     "value; days defaults to 7 (max 30)");
+                     "value; days defaults to 7 (max 30); terminal opts the "
+                     "record into the confined terminal-exec grant "
+                     "(default status-read only, never widened after commit)");
         return true;
     }
     const struct json_value *in = rpc_input(params);
@@ -226,10 +248,17 @@ static bool rpc_mesh_pairing_commit(const struct json_value *params, bool help,
                   "days must be in [1, 30]; nothing was written");
         return true;
     }
+    bool terminal = false;
+    if (!input_terminal(in, &terminal)) {
+        rpc_error(result, "INVALID_TERMINAL",
+                  "terminal must be a boolean; nothing was written");
+        return true;
+    }
     struct db_mesh_pairing row;
     enum mesh_pairing_reason service_reason = MESH_PAIRING_OK;
     enum boot_mesh_pairing_commit_result committed = boot_mesh_pairing_commit(
-        selector, fingerprint, days, days_given, &row, &service_reason);
+        selector, fingerprint, days, days_given, terminal, &row,
+        &service_reason);
     if (committed != MESH_PAIR_COMMIT_OK) {
         if (committed == MESH_PAIR_COMMIT_SERVICE_REFUSED) {
             rpc_error(result, boot_mesh_pairing_reason_code(service_reason),

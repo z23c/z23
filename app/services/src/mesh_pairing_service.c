@@ -113,7 +113,12 @@ enum mesh_pairing_reason mesh_pairing_service_accept(
         memcmp(authenticated_session_noise_static,
                delegation->noise_static_pubkey, 32) != 0)
         return MESH_PAIRING_SESSION_MISMATCH;
-    if (capability_mask != MESH_PAIRING_CAP_STATUS_READ)
+    /* Status-read is the always-granted base capability; terminal-exec may
+     * ride alongside it (the operator opted in at commit time), never alone
+     * and never with a bit outside the known set. */
+    if (capability_mask != MESH_PAIRING_CAP_STATUS_READ &&
+        capability_mask !=
+            (MESH_PAIRING_CAP_STATUS_READ | MESH_PAIRING_CAP_TERMINAL_EXEC))
         return MESH_PAIRING_CAPABILITY_UNAVAILABLE;
     if (expires_at <= now ||
         expires_at - now > MESH_PAIRING_MAX_LIFETIME_SECONDS)
@@ -403,6 +408,16 @@ enum mesh_pairing_reason mesh_pairing_service_authorize_status(
     return mesh_pairing_authorize(
         ndb, pairing_id, live_delegation, session_noise_static,
         MESH_PAIRING_CAP_STATUS_READ, now);
+}
+
+enum mesh_pairing_reason mesh_pairing_service_authorize_terminal(
+    struct node_db *ndb, const char *pairing_id,
+    const struct vcs_zcode_dht_delegation *live_delegation,
+    const uint8_t session_noise_static[32], int64_t now)
+{
+    return mesh_pairing_authorize(
+        ndb, pairing_id, live_delegation, session_noise_static,
+        MESH_PAIRING_CAP_TERMINAL_EXEC, now);
 }
 
 enum mesh_pairing_reason mesh_pairing_service_authorize_delegation(
