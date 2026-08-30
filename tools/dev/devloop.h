@@ -15,10 +15,11 @@ extern "C" {
 #define ZCL_DEVLOOP_PATH_MAX 1024
 #define ZCL_DEVLOOP_OUTPUT_MAX 65536
 #define ZCL_DEVLOOP_RESTART_SOURCE_MAX 32
-/* Proof-group storage covers the measured 64-group path floor plus distinct
- * semantic/include additions. Each dimension still refuses at its explicit
- * bound; the rendered command document has an independent byte ceiling. */
-#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 256
+/* A graph plan can legitimately reach hundreds of registered proof owners
+ * through a central header. Retain a measured 512-group envelope while the
+ * 64-group direct path accumulator remains separate; overflow still refuses.
+ * The rendered command document has an independent byte ceiling. */
+#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 512
 #define ZCL_DEVLOOP_GROUP_MAX 64
 /* Union across every dimension: the path floor plus the closure additions,
  * so a full path set and a full closure set both fit without either evicting
