@@ -35,6 +35,8 @@ enum zcl_native_body_status {
     ZCL_NATIVE_BODY_UNAVAILABLE = 2,
     /* Allocation or serialization failed. */
     ZCL_NATIVE_BODY_INTERNAL = 3,
+    /* An upstream success body violated its declared protocol shape. */
+    ZCL_NATIVE_BODY_PROTOCOL = 4,
 };
 
 struct zcl_native_body_err {

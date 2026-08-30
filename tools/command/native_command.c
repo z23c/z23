@@ -145,6 +145,7 @@ static const struct {
     { "ops.logs", zcl_native_node_log_body },
     { "ops.timeline", zcl_native_timeline_body },
     { "ops.metrics", zcl_native_metrics_body },
+    { "ops.health", zcl_native_ops_health_body },
     { "ops.postmortem.list", zcl_native_postmortem_list_body },
     { "ops.debug.dash.kpi", zcl_native_kpi_body },
     { "ops.debug.dash.snapshot", zcl_native_operator_snapshot_body },
@@ -238,9 +239,6 @@ static const struct bridge_rpc_binding g_bridge_rpc_direct[] = {
     { "core.mining.benchmark", "benchmark", JSON_OBJ,
       {{"primary_benchmark_source", JSON_STR},
        {"primary_benchmarks", JSON_ARR}}, BRIDGE_RPC_ARRAY_NONE },
-    { "ops.health", "healthcheck", JSON_OBJ,
-      {{"status", JSON_STR}, {"healthy", JSON_BOOL}, {"serving", JSON_BOOL}},
-      BRIDGE_RPC_ARRAY_NONE },
     { "ops.lanes", "agentlanes", JSON_OBJ,
       {{"status", JSON_STR}, {"lanes", JSON_ARR}}, BRIDGE_RPC_ARRAY_NONE },
     { "ops.recovery.status", "refold", JSON_OBJ,
@@ -895,6 +893,8 @@ void zcl_native_bridge_run(const struct zcl_command_request *request,
                 failure_exit = ZCL_COMMAND_EXIT_INVALID;
             } else if (body_err.status == ZCL_NATIVE_BODY_INTERNAL) {
                 failure_exit = ZCL_COMMAND_EXIT_INTERNAL;
+            } else if (body_err.status == ZCL_NATIVE_BODY_PROTOCOL) {
+                failure_exit = ZCL_COMMAND_EXIT_FAILED;
             }
         } else {
             (void)snprintf(msgbuf, sizeof(msgbuf), "RPC %s returned null",
