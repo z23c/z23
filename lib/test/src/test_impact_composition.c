@@ -196,9 +196,8 @@ static int test_ic_truncated_closure_preserves_groups(void)
     return failures;
 }
 
-/* The second discard site: the plan's own group array filling up. Enough
- * distinct impacted files to exceed ZCL_DEVLOOP_MAX_PLAN_GROUPS; the old code
- * reset closure_groups_len to 0 on the way out of the loop. */
+/* A representative high-fanout graph plan must retain substantially more
+ * groups than the direct path floor without becoming incomplete. */
 static const char *const ic_many_group_files[] = {
     "lib/test/src/test_simnet_wire_ibd.c",
     "lib/test/src/test_importblockindex_roundtrip.c",
@@ -291,10 +290,10 @@ static const char *const ic_many_group_files[] = {
     "lib/test/src/test_mutation_harness.c",
 };
 
-static int test_ic_group_cap_preserves_groups(void)
+static int test_ic_large_plan_preserves_groups(void)
 {
     int failures = 0;
-    TEST("impact composition: a FULL plan group set keeps its groups too") {
+    TEST("impact composition: a large graph plan keeps complete groups") {
         system("rm -rf " IC_FIX_GROUP);
         ASSERT(ic_write_call_pair(IC_FIX_GROUP));
         ASSERT(ic_write_depfiles(IC_FIX_GROUP));
@@ -315,11 +314,9 @@ static int test_ic_group_cap_preserves_groups(void)
         ASSERT(zcl_devloop_plan_files(files, 1, &plan));
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_GROUP, files, 1, &plan));
 
-        /* The array really filled. */
-        ASSERT(plan.closure_groups_len == ZCL_DEVLOOP_MAX_PLAN_GROUPS);
+        ASSERT(plan.closure_groups_len > ZCL_AGENT_IMPACT_MAX_GROUPS);
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
-               ZCL_DEVLOOP_DIM_INCOMPLETE);
-        /* Kept, not discarded. */
+               ZCL_DEVLOOP_DIM_COMPLETE);
         ASSERT(ic_planned(&plan, "download"));
 
         /* Regression: the exact execution list is droppable presentation,
@@ -1020,7 +1017,7 @@ int test_impact_composition(void)
 {
     int failures = 0;
     failures += test_ic_truncated_closure_preserves_groups();
-    failures += test_ic_group_cap_preserves_groups();
+    failures += test_ic_large_plan_preserves_groups();
     failures += test_ic_command_latency_scope_is_precise();
     failures += test_ic_registry_def_has_dependents();
     failures += test_ic_macro_only_header_has_dependents();

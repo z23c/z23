@@ -18,7 +18,7 @@ extern "C" {
 /* Proof-group storage covers the measured 64-group path floor plus distinct
  * semantic/include additions. Each dimension still refuses at its explicit
  * bound; the rendered command document has an independent byte ceiling. */
-#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 96
+#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 256
 #define ZCL_DEVLOOP_GROUP_MAX 64
 /* Union across every dimension: the path floor plus the closure additions,
  * so a full path set and a full closure set both fit without either evicting
