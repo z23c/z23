@@ -132,7 +132,11 @@ MOCKCURL
 
     cat >"$ROOT/unamebin/uname" <<'MOCKUNAME'
 #!/usr/bin/env bash
-case "${1:-}" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac
+case "${1:-}" in
+    -s) echo "${Z23_FD_TEST_UNAME_S:-Linux}" ;;
+    -m) echo "${Z23_FD_TEST_UNAME_M:-x86_64}" ;;
+    *) echo "${Z23_FD_TEST_UNAME_S:-Linux}" ;;
+esac
 MOCKUNAME
     chmod 755 "$ROOT/unamebin/uname"
 
@@ -151,7 +155,8 @@ run_shim() {
     rm -f "$ARGV"
     : >"$CURL"
     RC=0
-    env -i PATH="$path_prefix$ROOT/minbin" HOME="$ROOT" TMPDIR="$ROOT" \
+    env -i PATH="$path_prefix$ROOT/unamebin:$ROOT/minbin" \
+        HOME="$ROOT" TMPDIR="$ROOT" \
         Z23_FD_TEST_HTTP="$ROOT/http" \
         Z23_FD_TEST_ARGV_LOG="$ARGV" \
         Z23_FD_TEST_CURL_LOG="$CURL" \
@@ -163,7 +168,11 @@ run_shim() {
 # The sentinel is the whole reason this scaffold is safe to serve today: no
 # bootstrap is published, so the shim must refuse before it touches a network.
 case_shim_sentinel() {
-    run_shim shim-sentinel ""
+    # Exercise the one currently published platform even when this self-test
+    # runs natively on an unpublished Mac. Platform refusal is a separate
+    # case below; it must not hide the all-zero sentinel branch here.
+    run_shim shim-sentinel "$ROOT/unamebin:" \
+        Z23_FD_TEST_UNAME_S=Linux Z23_FD_TEST_UNAME_M=x86_64
     [ "$RC" -eq 1 ] || die "the all-zero bootstrap digest must refuse (rc=$RC)"
     grep -q 'no Z23 bootstrap is pinned into this script yet' "$ERR" \
         || die "the sentinel refusal must say nothing is pinned"
@@ -175,6 +184,7 @@ case_shim_sentinel() {
 
 case_shim_platform() {
     run_shim shim-platform "$ROOT/unamebin:" \
+        Z23_FD_TEST_UNAME_S=Darwin Z23_FD_TEST_UNAME_M=arm64 \
         Z23_INSTALL_TEST_BOOT_SHA256="$BOOT_SHA"
     [ "$RC" -eq 1 ] || die "an unpublished platform must refuse (rc=$RC)"
     grep -q 'no Z23 bootstrap is published for darwin-aarch64' "$ERR" \
@@ -218,18 +228,23 @@ case_shim_digest() {
 case_cut_shim_installs() {
     local cut="$ROOT/cut" cutbin="$ROOT/cutbin" saved="$FRONT_DOOR" truebin=""
     mkdir -p "$cutbin"
-    # A real ELF, because the cutter reads the object format to decide what it
-    # is packaging and refuses anything it cannot classify — a shell script
-    # would be rejected for its format and this case would stop grading what
-    # it says it grades. true(1) also ignores argv and exits 0, which is all
-    # the handoff needs here; argv forwarding is proved by case_shim_digest
-    # above. `command -v true` is the SHELL BUILTIN and is not a path, so the
-    # real file is looked for by name.
+    # A real ELF, because the only currently published front-door bootstrap is
+    # linux-x86_64 and the cutter correctly refuses to relabel a native Mach-O
+    # as ELF. true(1) also ignores argv and exits 0, which is all the handoff
+    # needs here; argv forwarding is proved by case_shim_digest above.
+    # `command -v true` is the SHELL BUILTIN and is not a path, so the real
+    # file is looked for by name.
     local candidate
     for candidate in /usr/bin/true /bin/true; do
         [ -x "$candidate" ] && { truebin="$candidate"; break; }
     done
     [ -n "$truebin" ] || die "no true(1) binary to stand in for a bootstrap"
+    case "$(file -b "$truebin" 2>/dev/null)" in
+        *ELF*) ;;
+        *)
+            say "UNOBSERVED Linux front-door cut: host true(1) is not ELF"
+            return 0 ;;
+    esac
     cp -f -- "$truebin" "$cutbin/z23-bootstrap"
     chmod 755 "$cutbin/z23-bootstrap"
     bash "$REPO_ROOT/packaging/release/build_release.sh" --front-door \
@@ -276,6 +291,8 @@ run_boot() {
         Z23_INSTALL_TEST_ORIGIN="file://$ROOT/http/front" \
         Z23_INSTALL_TEST_PIN_REPO_URL="file://$ROOT/http/repo/RELEASE_PIN" \
         Z23_INSTALL_TEST_RESOLV_CONF="$ROOT/resolv/empty.conf" \
+        Z23_INSTALL_TEST_UNAME_S=Linux \
+        Z23_INSTALL_TEST_UNAME_M=x86_64 \
         "$@" \
         "$BOOTSTRAP" >"$OUT" 2>"$ERR" || RC=$?
 }

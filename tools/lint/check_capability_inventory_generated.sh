@@ -33,7 +33,8 @@ if [ ! -f "$DOC" ]; then
 fi
 
 CC_BIN="${CC:-cc}"
-if ! "$CC_BIN" -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra \
+if ! "$CC_BIN" -std=c23 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
+        -O2 -Wall -Wextra \
         -Werror -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
         -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
         -Ilib/crypto/include -Ilib/platform/include \
