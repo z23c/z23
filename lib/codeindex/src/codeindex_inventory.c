@@ -107,6 +107,19 @@ static int inv_invariant_value_cmp(const void *a, const void *b)
            (x->definition_line < y->definition_line);
 }
 
+static int inv_definition_arm_value_cmp(const void *a, const void *b)
+{
+    const struct ci_inventory_definition_arm *x = a, *y = b;
+    int c = strcmp(x->header, y->header);
+    if (c) return c;
+    c = strcmp(x->symbol, y->symbol);
+    if (c) return c;
+    c = strcmp(x->definition_path, y->definition_path);
+    if (c) return c;
+    return (x->definition_line > y->definition_line) -
+           (x->definition_line < y->definition_line);
+}
+
 static bool inv_header_guard_symbol(const struct ci_symbol *s)
 {
     return s && s->kind == 'M' && s->guard[0] &&
@@ -194,6 +207,29 @@ static const struct inv_body *inv_body_for(
         }
     }
     return fallback;
+}
+
+static bool inv_occurrence_is_baselined_arm(
+    const struct inv_scan *scan, const struct inv_symbol_occurrence *occ)
+{
+    if (!occ->symbol.def_path[0]) return false;
+    for (int i = 0; i < scan->arm_symbol_count; i++)
+        if (strcmp(scan->arm_symbols[i].path, occ->symbol.def_path) == 0 &&
+            strcmp(scan->arm_symbols[i].name, occ->symbol.name) == 0)
+            return true;
+    return false;
+}
+
+static int inv_multi_arm_definition_count(const struct inv_scan *scan,
+                                          const char *name, char kind)
+{
+    int count = 0;
+    for (int i = 0; i < scan->occurrence_count; i++)
+        if (scan->occurrences[i].symbol.kind == kind &&
+            strcmp(scan->occurrences[i].symbol.name, name) == 0 &&
+            inv_occurrence_is_baselined_arm(scan, &scan->occurrences[i]))
+            count++;
+    return count;
 }
 
 static void inv_include_token(const char *path, char out[256])
@@ -285,9 +321,20 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
                 ? occ->symbol.decl_line : occ->symbol.def_line;
             inv_cpy(dst->signature, sizeof(dst->signature), occ->symbol.signature);
             inv_cpy(dst->contract, sizeof(dst->contract), occ->symbol.doc);
-            const struct ci_symbol *def = inv_definition_for(
-                defs, def_count, &occ->symbol);
-            if (def) {
+            dst->definition_arm_count =
+                (dst->kind == 'T' || dst->kind == 't')
+                    ? inv_multi_arm_definition_count(scan, dst->name,
+                                                     dst->kind)
+                    : 0;
+            dst->multi_arm_definition = dst->definition_arm_count > 0;
+            const struct ci_symbol *def = dst->multi_arm_definition ? NULL :
+                inv_definition_for(defs, def_count, &occ->symbol);
+            if (dst->multi_arm_definition) {
+                inv_cpy(dst->definition_evidence,
+                        sizeof(dst->definition_evidence),
+                        "multiple_preprocessor_arms_UNPROVEN");
+                report->multi_arm_symbol_count++;
+            } else if (def) {
                 inv_cpy(dst->definition_path, sizeof(dst->definition_path),
                         def->def_path);
                 dst->definition_line = def->def_line;
@@ -300,8 +347,9 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
                         sizeof(dst->definition_evidence),
                         "unresolved_UNPROVEN");
             }
-            const struct inv_body *body = inv_body_for(
-                bodies, scan->body_count, dst->name, dst->definition_path);
+            const struct inv_body *body = dst->multi_arm_definition ? NULL :
+                inv_body_for(bodies, scan->body_count, dst->name,
+                             dst->definition_path);
             if (body) {
                 dst->constant_return_body = body->constant_return;
                 inv_cpy(dst->constant_return_value,
@@ -315,7 +363,7 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
                             "unique_function_body");
                 }
             }
-            if (!dst->definition_path[0])
+            if (!dst->definition_path[0] && !dst->multi_arm_definition)
                 report->unresolved_symbol_definitions++;
             if (dst->kind == 'T' || dst->kind == 't') cap->function_count++;
             else if (dst->kind == 'S' || dst->kind == 'Y' || dst->kind == 'E')
@@ -493,6 +541,21 @@ static bool inv_invariant_push(struct ci_inventory_report *report,
         inv_cpy(gap->registered_test_group,
                 sizeof(gap->registered_test_group),
                 symbol->registered_test_group);
+    gap->multi_arm_definition = symbol->multi_arm_definition;
+    inv_cpy(gap->definition_scope, sizeof(gap->definition_scope),
+            symbol->multi_arm_definition
+                ? (variant ? "preprocessor_arm_UNPROVEN"
+                           : "multi_arm_aggregate_UNPROVEN")
+                : "single_definition");
+    if (variant)
+        inv_cpy(gap->preprocessor_guard,
+                sizeof(gap->preprocessor_guard),
+                variant->preprocessor_guard);
+    inv_cpy(gap->constant_return_evidence,
+            sizeof(gap->constant_return_evidence),
+            variant ? "parsed_definition_body" :
+            (symbol->multi_arm_definition
+                ? "aggregate_withheld_UNPROVEN" : "parsed_definition_body"));
     gap->constant_return_body = variant ? true : symbol->constant_return_body;
     inv_cpy(gap->constant_return_value, sizeof(gap->constant_return_value),
             variant ? variant->constant_value : symbol->constant_return_value);
@@ -500,7 +563,9 @@ static bool inv_invariant_push(struct ci_inventory_report *report,
     inv_cpy(gap->proof_needed, sizeof(gap->proof_needed),
             gap->constant_return_body
                 ? (variant
-                    ? "preprocess and run a registered positive/negative test reaching this exact definition variant and proving its constant result is intentional"
+                    ? (symbol->multi_arm_definition
+                        ? "preprocess each named arm and run outcome-distinguishing registered tests; this constant belongs only to this arm, never the aggregate symbol"
+                        : "preprocess and run a registered positive/negative test reaching this exact definition variant and proving its constant result is intentional")
                     : "registered positive/negative test proving the constant result is intentional for every documented input class")
                 : "registered test reaching this symbol and asserting the header claim with outcome-distinguishing cases");
     report->invariant_count++;
@@ -548,6 +613,104 @@ static bool inv_derive_invariants(const struct inv_scan *scan,
     return true;
 }
 
+static bool inv_definition_arm_push(
+    struct ci_inventory_report *report,
+    const struct ci_inventory_capability *cap,
+    const struct ci_inventory_symbol *symbol,
+    const struct inv_symbol_occurrence *occ,
+    const struct inv_body *body)
+{
+    int n = report->definition_arm_count;
+    void *p = zcl_realloc(report->definition_arms,
+                          (size_t)(n + 1) * sizeof(*report->definition_arms),
+                          "ci_inventory_definition_arms");
+    if (!p) return false;
+    report->definition_arms = p;
+    struct ci_inventory_definition_arm *arm = &report->definition_arms[n];
+    memset(arm, 0, sizeof(*arm));
+    inv_cpy(arm->header, sizeof(arm->header), cap->header);
+    inv_cpy(arm->symbol, sizeof(arm->symbol), symbol->name);
+    inv_cpy(arm->definition_path, sizeof(arm->definition_path),
+            occ->symbol.def_path);
+    arm->definition_line = occ->symbol.def_line;
+    inv_cpy(arm->preprocessor_guard, sizeof(arm->preprocessor_guard),
+            occ->symbol.guard);
+    inv_cpy(arm->constant_return_evidence,
+            sizeof(arm->constant_return_evidence),
+            body ? "parsed_definition_body" : "body_binding_UNPROVEN");
+    arm->constant_return_body = body && body->constant_return;
+    if (body)
+        inv_cpy(arm->constant_return_value,
+                sizeof(arm->constant_return_value), body->constant_value);
+    inv_cpy(arm->verdict, sizeof(arm->verdict), "UNPROVEN");
+    inv_cpy(arm->proof_needed, sizeof(arm->proof_needed),
+            body && occ->symbol.guard[0]
+                ? "preprocess the translation unit for this guard and run registered outcome-distinguishing tests against the emitted arm"
+                : "recover the missing preprocessor-arm binding, preprocess the selected profile, and run registered outcome-distinguishing tests");
+    report->definition_arm_count++;
+    return true;
+}
+
+static const struct inv_body *inv_body_for_occurrence(
+    const struct inv_scan *scan, const struct inv_symbol_occurrence *occ)
+{
+    int next_definition = 0;
+    for (int i = 0; i < scan->occurrence_count; i++) {
+        const struct inv_symbol_occurrence *other = &scan->occurrences[i];
+        if (other == occ || strcmp(other->symbol.name, occ->symbol.name) != 0 ||
+            strcmp(other->symbol.def_path, occ->symbol.def_path) != 0 ||
+            other->symbol.def_line <= occ->symbol.def_line)
+            continue;
+        if (!next_definition || other->symbol.def_line < next_definition)
+            next_definition = other->symbol.def_line;
+    }
+    const struct inv_body *best = NULL;
+    for (int i = 0; i < scan->body_count; i++) {
+        const struct inv_body *body = &scan->bodies[i];
+        if (strcmp(body->name, occ->symbol.name) != 0 ||
+            strcmp(body->path, occ->symbol.def_path) != 0 ||
+            body->line < occ->symbol.def_line ||
+            (next_definition && body->line >= next_definition))
+            continue;
+        if (!best || body->line < best->line) best = body;
+    }
+    return best;
+}
+
+static bool inv_derive_definition_arms(const struct inv_scan *scan,
+                                       struct ci_inventory_report *report)
+{
+    for (int c = 0; c < report->capability_count; c++) {
+        const struct ci_inventory_capability *cap = &report->capabilities[c];
+        for (int i = cap->symbol_offset;
+             i < cap->symbol_offset + cap->symbol_count; i++) {
+            const struct ci_inventory_symbol *symbol = &report->symbols[i];
+            if (!symbol->multi_arm_definition) continue;
+            int found = 0;
+            for (int oi = 0; oi < scan->occurrence_count; oi++) {
+                const struct inv_symbol_occurrence *occ =
+                    &scan->occurrences[oi];
+                if (occ->symbol.kind != symbol->kind ||
+                    strcmp(occ->symbol.name, symbol->name) != 0 ||
+                    !inv_occurrence_is_baselined_arm(scan, occ))
+                    continue;
+                const struct inv_body *body =
+                    inv_body_for_occurrence(scan, occ);
+                if (!inv_definition_arm_push(report, cap, symbol, occ, body))
+                    return false;
+                found++;
+            }
+            if (found != symbol->definition_arm_count)
+                LOG_FAIL("codeindex.inventory",
+                         "multi-arm count changed during derivation: %s",
+                         symbol->name);
+        }
+    }
+    qsort(report->definition_arms, (size_t)report->definition_arm_count,
+          sizeof(*report->definition_arms), inv_definition_arm_value_cmp);
+    return true;
+}
+
 struct ci_inventory_report *codeindex_inventory_analyze(const char *root)
 {
     if (!root || !root[0]) LOG_NULL("codeindex.inventory", "empty source root");
@@ -561,6 +724,7 @@ struct ci_inventory_report *codeindex_inventory_analyze(const char *root)
         !inv_count_uses(&scan, report, cap_for_symbol) ||
         !inv_registered_reachability(&scan, report) ||
         !inv_derive_duplicates(&scan, report) ||
+        !inv_derive_definition_arms(&scan, report) ||
         !inv_derive_invariants(&scan, report)) {
         free(cap_for_symbol);
         inv_scan_release(&scan);
@@ -569,6 +733,7 @@ struct ci_inventory_report *codeindex_inventory_analyze(const char *root)
     }
     report->files_scanned = scan.file_count;
     report->registered_test_groups = scan.group_count;
+    report->arm_baseline_symbols = scan.arm_symbol_count;
     report->scanner_partial_symbols = scan.scanner_partial_symbols;
     for (int i = 0; i < scan.file_count; i++) {
         if (scan.files[i].is_test) report->test_files++;
@@ -586,6 +751,7 @@ void codeindex_inventory_free(struct ci_inventory_report *report)
     free(report->symbols);
     free(report->duplicates);
     free(report->invariants);
+    free(report->definition_arms);
     free(report->test_root_gaps);
     free(report);
 }

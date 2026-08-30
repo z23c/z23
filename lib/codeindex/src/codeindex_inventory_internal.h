@@ -59,6 +59,12 @@ struct inv_body {
     uint8_t shape_sha3[32];
     bool constant_return;
     char constant_value[16];
+    char preprocessor_guard[128];
+};
+
+struct inv_arm_symbol {
+    char path[256];
+    char name[128];
 };
 
 struct inv_registered_group {
@@ -89,6 +95,9 @@ struct inv_scan {
     struct inv_registered_group *groups;
     int group_count;
     int group_cap;
+    struct inv_arm_symbol *arm_symbols;
+    int arm_symbol_count;
+    int arm_symbol_cap;
     int scanner_partial_symbols;
     bool failed;
 };
@@ -102,6 +111,7 @@ bool inv_read_stable(const struct inv_scan *scan, int file_index,
 void inv_scan_includes_and_bodies(struct inv_scan *scan, int file_index,
                                   const char *src, size_t len);
 bool inv_read_registered_groups(struct inv_scan *scan);
+bool inv_read_arm_symbol_baseline(struct inv_scan *scan);
 
 bool inv_count_uses(struct inv_scan *scan,
                     struct ci_inventory_report *report,

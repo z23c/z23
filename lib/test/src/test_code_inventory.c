@@ -40,7 +40,8 @@ static bool ci_fixture(void)
                CI_FIX "/lib/test/src "
                CI_FIX "/packages/zmini/include/zmini "
                CI_FIX "/packages/zmini/src "
-               CI_FIX "/tools/dev") != 0) return false;
+               CI_FIX "/tools/dev "
+               CI_FIX "/tools/lint") != 0) return false;
     return ci_write(CI_FIX "/lib/demo/include/demo/demo.h",
         "/* purpose: Validate demo values for the fixture. */\n"
         "#ifndef DEMO_H\n#define DEMO_H\n#include <stdbool.h>\n"
@@ -106,7 +107,14 @@ static bool ci_fixture(void)
         ci_write(CI_FIX "/tools/dev/test_group_catalog.def",
         "/* Include with ZCL_TEST_GROUP(name) and ZCL_SPEC_GROUP(name). */\n"
         "ZCL_TEST_GROUP(code_inventory_fixture)\n"
-        "ZCL_TEST_GROUP(generated_fixture)\n");
+        "ZCL_TEST_GROUP(generated_fixture)\n") &&
+        ci_write(CI_FIX "/tools/lint/arm_symbol_single_baseline.txt",
+        "# z23-generated-artifact: zcl.generated_artifact.v1\n"
+        "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
+        "# asserts: multi_arm_definition(path,symbol)\n"
+        "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh\n"
+        "lib/demo/src/demo.c\tdemo_platform\n");
 }
 
 static const struct ci_inventory_capability *ci_cap(
@@ -168,6 +176,8 @@ int test_code_inventory(void)
         first, demo, "local_pick");
     const struct ci_inventory_symbol *other_local = ci_symbol(
         first, other, "local_pick");
+    const struct ci_inventory_symbol *platform = ci_symbol(
+        first, demo, "demo_platform");
     CI_ASSERT(validate != NULL);
     CI_ASSERT(validate && validate->test_evidence ==
               CI_INVENTORY_TEST_REGISTERED_REACHABLE);
@@ -179,6 +189,11 @@ int test_code_inventory(void)
                 stub->definition_path, stub->definition_line);
     CI_ASSERT(stub && stub->constant_return_body);
     CI_ASSERT(stub && strcmp(stub->constant_return_value, "true") == 0);
+    CI_ASSERT(platform && platform->multi_arm_definition);
+    CI_ASSERT(platform && platform->definition_arm_count == 2);
+    CI_ASSERT(platform && !platform->constant_return_body);
+    CI_ASSERT(platform && strcmp(platform->definition_evidence,
+              "multiple_preprocessor_arms_UNPROVEN") == 0);
     CI_ASSERT(demo_local != NULL);
     CI_ASSERT(other_local != NULL);
     CI_ASSERT(demo_local && strcmp(demo_local->definition_path,
@@ -196,6 +211,7 @@ int test_code_inventory(void)
     CI_ASSERT(first->unresolved_include_sites == 2);
 
     bool exact = false, shape = false, stub_gap = false, platform_gap = false;
+    bool platform_constant_arm = false, platform_real_arm = false;
     for (int i = 0; i < first->duplicate_count; i++) {
         const struct ci_inventory_duplicate *d = &first->duplicates[i];
         if (d->kind == CI_INVENTORY_DUPLICATE_EXACT_BODY &&
@@ -219,12 +235,30 @@ int test_code_inventory(void)
         else if (strcmp(first->invariants[i].symbol, "demo_platform") == 0 &&
                  first->invariants[i].constant_return_body &&
                  strcmp(first->invariants[i].constant_return_value,
-                        "true") == 0)
+                        "true") == 0 &&
+                 first->invariants[i].multi_arm_definition &&
+                 strcmp(first->invariants[i].definition_scope,
+                        "preprocessor_arm_UNPROVEN") == 0)
             platform_gap = true;
+    for (int i = 0; i < first->definition_arm_count; i++) {
+        const struct ci_inventory_definition_arm *arm =
+            &first->definition_arms[i];
+        if (strcmp(arm->symbol, "demo_platform") != 0) continue;
+        if (arm->constant_return_body &&
+            strcmp(arm->constant_return_value, "true") == 0 &&
+            strcmp(arm->preprocessor_guard, "defined(_WIN32)") == 0)
+            platform_constant_arm = true;
+        if (!arm->constant_return_body &&
+            strcmp(arm->preprocessor_guard,
+                   "else:defined(_WIN32)") == 0)
+            platform_real_arm = true;
+    }
     CI_ASSERT(exact);
     CI_ASSERT(shape);
     CI_ASSERT(stub_gap);
     CI_ASSERT(platform_gap);
+    CI_ASSERT(platform_constant_arm);
+    CI_ASSERT(platform_real_arm);
 
     struct ci_inventory_report *same = codeindex_inventory_analyze(CI_FIX);
     CI_ASSERT(same != NULL);

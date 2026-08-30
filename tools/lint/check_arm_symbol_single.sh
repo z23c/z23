@@ -378,6 +378,17 @@ mapfile -t FOUND < <(
 )
 
 declare -A BASELINED=()
+for claim in \
+    '# z23-generated-artifact: zcl.generated_artifact.v1' \
+    '# artifact-id: zcl.arm_symbol_single_baseline.v1' \
+    '# asserts: multi_arm_definition(path,symbol)' \
+    '# generated-by: tools/lint/check_arm_symbol_single.sh' \
+    '# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh'; do
+    if [ ! -f "$BASELINE" ] || ! grep -Fqx "$claim" "$BASELINE"; then
+        echo "[$GATE] UNPROVEN — generated artifact absent or lacks: $claim" >&2
+        exit 2
+    fi
+done
 gate_load_list_file "$BASELINE" BASELINED baseline_count
 
 declare -A HIT=()
@@ -397,6 +408,11 @@ done
 
 if [ "$MODE" = "UPDATE" ]; then
     {
+        echo "# z23-generated-artifact: zcl.generated_artifact.v1"
+        echo "# artifact-id: zcl.arm_symbol_single_baseline.v1"
+        echo "# asserts: multi_arm_definition(path,symbol)"
+        echo "# generated-by: tools/lint/check_arm_symbol_single.sh"
+        echo "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh"
         echo "# $GATE baseline — <path>\\t<function> pairs where a non-static"
         echo "# function is DEFINED more than once in one translation unit"
         echo "# (necessarily in disjoint preprocessor arms — see the header"
@@ -413,7 +429,6 @@ if [ "$MODE" = "UPDATE" ]; then
         echo "# real per-arm implementation is intentional and has no"
         echo "# external caller relying on a single symbol. Adding a row is"
         echo "# not a fix."
-        echo "# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/$GATE.sh"
         printf '%s\n' "${FOUND[@]}" | sort
     } > "$BASELINE"
     echo "[$GATE] baseline UPDATED: $BASELINE"
