@@ -5171,6 +5171,15 @@ $(ZCL_RPC_BIN): FORCE tools/zcl-rpc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -o $@ $(filter-out FORCE,$^)
 
+# Portable syscall-level replacement for the util-linux setsid(1) command,
+# which macOS does not ship.  Isolated acceptance harnesses use it so cleanup
+# can signal the spawned node's whole process group on every POSIX host.
+.PHONY: process-group-exec
+process-group-exec: $(BIN_DIR)/process-group-exec
+$(BIN_DIR)/process-group-exec: tools/process_group_exec.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -o $@ $<
+
 # zcl-portfwd: tiny self-contained userspace TCP forwarder that maps public
 # 443/80 -> the node's unprivileged high ports (8443/8080). It is the ONE file
 # that gets cap_net_bind_service (via tools/scripts/zcl-portfwd-setup.sh), so
@@ -6397,7 +6406,7 @@ test-reindex-killmid: zclassic23 zcl-rpc
 .PHONY: test-two-node-peer-tip
 # Runs under bash for `set -o pipefail` parity with the other spawn
 # harnesses; the script itself sets -euo pipefail.
-test-two-node-peer-tip: zclassic23 zcl-rpc
+test-two-node-peer-tip: zclassic23 zcl-rpc process-group-exec
 	@bash tools/scripts/two_node_peer_tip.sh
 
 # ZCODE science-slice v1 acceptance proof: two disjoint isolated regtest

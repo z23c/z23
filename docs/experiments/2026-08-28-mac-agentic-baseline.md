@@ -70,7 +70,7 @@ height 0 has none.
 |---|---|---|
 | Dev watcher | Native kqueue backend landed in `lib/platform/src/directory_watcher.c`; `tools/dev/devloop_watch.c` still hard-codes inotify | Move `devloop_watch.c` onto the platform directory watcher so the dev loop gets sub-50 ms detection on macOS |
 | Resident hot swap | Mach-O probe/validation landed, but `zcl_hotswap_hotfork_visit_so()` still fails closed on Darwin because descriptor-bound A/B execution is unavailable | Implement immutable executable-image staging with ad-hoc signed bundle loading, or keep activation "Unavailable" |
-| `make test-two-node-peer-tip` | Ported preflight from `ss(8)` to `lsof`/`netstat`; needs a clean run to claim PASS | Run `make test-two-node-peer-tip` on macOS and record result |
+| `make test-two-node-peer-tip` | PASS on arm64 macOS after replacing the absent util-linux `setsid(1)` command with the in-tree C23 `process-group-exec` launcher | Keep the gate green as the sync path evolves |
 | Embedded Tor | PASS on arm64 macOS; `vendor/tor/libtor.a` builds from vendored deps | Update capability docs and remove from open-gap list |
 
 ## Mesh identity detail
@@ -195,6 +195,9 @@ Remaining before macOS agentic parity is complete:
 
 1. Move `tools/dev/devloop_watch.c` off raw inotify and onto the platform
    `directory_watcher_*` abstraction.
-2. Run `make test-two-node-peer-tip` end-to-end on macOS.
-3. Decide whether to land immutable Mach-O executable-image staging for dev
+2. Decide whether to land immutable Mach-O executable-image staging for dev
    hot-swap activation, or keep the capability table honest about "Unavailable".
+
+The previously open `make test-two-node-peer-tip` item now passes end-to-end
+on macOS: B reached A at height 10, survived a kill-9/restart cycle on the
+same datadir, and re-reached peer tip 15.
