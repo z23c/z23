@@ -30,6 +30,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#if defined(_WIN32)
+#include <utime.h>
+#endif
 #include <unistd.h>
 
 /* Scratch datadir. Lives INSIDE the suite's one scratch root (./test-tmp) so
@@ -60,8 +63,14 @@ static bool sr_exists(const char *path)
 static void sr_age_file(const char *path, int seconds_old)
 {
     time_t old = platform_time_wall_time_t() - seconds_old;
+#if defined(_WIN32)
+    /* No utimes(2) in the UCRT; _utime sets both times from one value. */
+    struct _utimbuf tb = { old, old };
+    (void)_utime(path, &tb);
+#else
     struct timeval tv[2] = { { .tv_sec = old }, { .tv_sec = old } };
     (void)utimes(path, tv);
+#endif
 }
 
 int test_storage_reclaim(void)

@@ -6,6 +6,7 @@
 #include "base/bytes.h"
 #include "models/model_fields.h"
 #include "models/def/market_download_fields.def"
+#include "platform/path_compat.h"
 
 #include "net/file_market.h"
 #include "util/log_macros.h"
@@ -70,11 +71,13 @@ bool db_market_download_validate(const struct market_download_record *record,
                      "offer_id", "can't be all zero");
     validates_custom(errors, zcl_bytes_any_set(record->root_hash, 32),
                      "root_hash", "can't be all zero");
-    validates_custom(errors, record->private_destination[0] == '/' &&
+    validates_custom(errors, platform_path_is_absolute(
+        record->private_destination) &&
         strnlen(record->private_destination, MARKET_DOWNLOAD_PATH_MAX) <
             MARKET_DOWNLOAD_PATH_MAX,
         "private_destination", "must be a bounded absolute path");
-    validates_custom(errors, record->private_staging[0] == '/' &&
+    validates_custom(errors, platform_path_is_absolute(
+        record->private_staging) &&
         strnlen(record->private_staging, MARKET_DOWNLOAD_PATH_MAX) <
             MARKET_DOWNLOAD_PATH_MAX,
         "private_staging", "must be a bounded absolute path");

@@ -484,6 +484,14 @@ static bool piv_seed_sapling_frontier(sqlite3 *db, int32_t height,
 
 static int case_post_install_invalidation(void)
 {
+#if defined(_WIN32)
+    /* The post-install derived-state engine
+     * (config/src/consensus_state_install_runtime.c) is a fail-closed
+     * refusal on Windows, and its ZCL_TESTING hooks do not exist there. */
+    printf("install_verb_warm: SKIP (Windows): post-install derived-state "
+           "invalidation (install runtime refuses on Windows)\n");
+    return 0;
+#else
     int failures = 0;
     const int32_t bundle_h = A; /* 3056758 */
 
@@ -581,6 +589,7 @@ static int case_post_install_invalidation(void)
     reducer_frontier_provable_tip_reset();
     test_rm_rf_recursive(dir);
     return failures;
+#endif
 }
 
 int test_install_verb_warm(void)

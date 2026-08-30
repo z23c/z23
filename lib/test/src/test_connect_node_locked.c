@@ -23,9 +23,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "platform/socket_compat.h"
 
 /* Manually splice a pre-built node into nm->nodes[] the way nm_add_node does
  * internally (nm_add_node is declared only in net_internal.h).
@@ -131,21 +129,23 @@ int test_connect_node_locked(void)
          * Two refs at publish time are exactly what pins the node across the
          * window between connect_node returning and the dialer's first deref —
          * the UAF the fix closes. */
-        int lsock = socket(AF_INET, SOCK_STREAM, 0);
-        ASSERT(lsock >= 0);
-        int reuse = 1;
-        setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        platform_socket_t lsock = platform_socket_open(AF_INET, SOCK_STREAM,
+                                                       0, true, false);
+        ASSERT(lsock != PLATFORM_SOCKET_INVALID);
+        (void)platform_socket_set_reuse_address(lsock, true);
 
         struct sockaddr_in sa;
         memset(&sa, 0, sizeof(sa));
         sa.sin_family = AF_INET;
         sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         sa.sin_port = 0; /* ephemeral — kernel picks a free port */
-        ASSERT(bind(lsock, (struct sockaddr *)&sa, sizeof(sa)) == 0);
-        ASSERT(listen(lsock, 4) == 0);
+        ASSERT(platform_socket_bind(lsock, (struct sockaddr *)&sa,
+                                    sizeof(sa)) == 0);
+        ASSERT(platform_socket_listen(lsock, 4) == 0);
 
-        socklen_t salen = sizeof(sa);
-        ASSERT(getsockname(lsock, (struct sockaddr *)&sa, &salen) == 0);
+        size_t salen = sizeof(sa);
+        ASSERT(platform_socket_local_address(lsock, (struct sockaddr *)&sa,
+                                             &salen) == 0);
         uint16_t listen_port = ntohs(sa.sin_port);
 
         struct net_manager nm3;
@@ -192,7 +192,7 @@ int test_connect_node_locked(void)
         ASSERT(nm3.num_nodes == nodes_before);
 
         net_manager_free(&nm3);
-        close(lsock);
+        platform_socket_close(lsock);
     }
     TEST_END
 

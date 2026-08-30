@@ -24,9 +24,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -73,7 +75,11 @@ static int test_wallet_rebuild_probe(void)
  *
  * An abstract-namespace socket (leading NUL) is used deliberately: it
  * needs no filesystem path, so this fixture can never write into a
- * datadir and needs no unlink on any exit path. */
+ * datadir and needs no unlink on any exit path. Windows has no abstract
+ * AF_UNIX namespace (and no sd_notify listener to speak to), so the
+ * fixture and the cases that drive it are POSIX-only; the Windows arm of
+ * the group prints a loud SKIP instead. */
+#if !defined(_WIN32)
 static int bp_bind_abstract_socket(char *name_out, size_t name_cap)
 {
     static unsigned counter;
@@ -133,6 +139,7 @@ static bool bp_saw_extend(int fd)
     }
     return seen;
 }
+#endif /* !_WIN32 */
 
 /* Injectable evidence source: the mechanism under test is "the sweeper
  * asks a probe whether anything changed", and a fake makes the moved /
@@ -192,6 +199,28 @@ static bool bp_burn_block_io(size_t bytes)
 
 int test_boot_phase(void)
 {
+#if defined(_WIN32)
+    /* Re-exec'd child lanes for the illegal-transition abort cases
+     * (Windows has no fork()): perform the illegal advance and let
+     * abort() end the process. UCRT abort() exits with code 3, which the
+     * parent asserts as the signal-death analogue of WTERMSIG==SIGABRT. */
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        zcl_win_suppress_abort_dialog();
+        if (strcmp(fork_role, "bp_backward") == 0) {
+            boot_stage_reset_for_testing();            /* -> INIT */
+            boot_stage_advance_to(BOOT_STAGE_DB_OPEN); /* legal forward jump */
+            boot_stage_advance_to(BOOT_STAGE_INIT);    /* illegal: backward */
+            return 99; /* reached only if the abort() did NOT fire */
+        }
+        if (strcmp(fork_role, "bp_range") == 0) {
+            boot_stage_reset_for_testing();            /* -> INIT */
+            boot_stage_advance_to(BOOT_STAGE__MAX);    /* illegal: >= MAX */
+            return 99; /* reached only if the abort() did NOT fire */
+        }
+        return 97;
+    }
+#endif
     printf("\n=== boot_phase tests ===\n");
     int failures = 0;
 
@@ -363,6 +392,13 @@ int test_boot_phase(void)
     fflush(stdout);
     fflush(stderr);
     {
+#if defined(_WIN32)
+        void *hp = test_spawn_self_with_role("test_boot_phase", "bp_backward",
+                                             "test-tmp/bp_backward_child.log");
+        int wcode = hp ? test_self_child_wait(hp) : -1;
+        BP_CHECK("backward move (DB_OPEN -> INIT) aborts via SIGABRT",
+                 wcode == 3);
+#else
         pid_t pid = fork();
         if (pid == 0) {
             int dn = open("/dev/null", O_WRONLY);
@@ -381,12 +417,20 @@ int test_boot_phase(void)
                      got == pid && WIFSIGNALED(status) &&
                      WTERMSIG(status) == SIGABRT);
         }
+#endif
     }
 
     /* (b) OUT-OF-RANGE target: BOOT_STAGE__MAX must abort. */
     fflush(stdout);
     fflush(stderr);
     {
+#if defined(_WIN32)
+        void *hp = test_spawn_self_with_role("test_boot_phase", "bp_range",
+                                             "test-tmp/bp_range_child.log");
+        int wcode = hp ? test_self_child_wait(hp) : -1;
+        BP_CHECK("out-of-range target (__MAX) aborts via SIGABRT",
+                 wcode == 3);
+#else
         pid_t pid = fork();
         if (pid == 0) {
             int dn = open("/dev/null", O_WRONLY);
@@ -404,6 +448,7 @@ int test_boot_phase(void)
                      got == pid && WIFSIGNALED(status) &&
                      WTERMSIG(status) == SIGABRT);
         }
+#endif
     }
 
     /* ── boot step reporter: slow, stuck, and failed are three states ──
@@ -582,6 +627,7 @@ int test_boot_phase(void)
     {
         boot_stage_reset_for_testing();
 
+#if !defined(_WIN32)
         char sock_name[64];
         int  fd = bp_bind_abstract_socket(sock_name, sizeof(sock_name));
         BP_CHECK("evidence: notify socket bound", fd >= 0);
@@ -657,6 +703,11 @@ int test_boot_phase(void)
             unsetenv("NOTIFY_SOCKET");
             sd_notify_reset_for_testing();
         }
+#else
+        printf("boot_phase: SKIP (Windows): sd_notify EXTEND_TIMEOUT_USEC "
+               "evidence probe — no abstract AF_UNIX namespace and no "
+               "systemd notify socket on this lane\n");
+#endif
 
         /* The stock probe must be real, non-blocking, and must observe
          * this process's own block I/O. fsync forces the writes out to

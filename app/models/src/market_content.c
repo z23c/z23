@@ -7,6 +7,7 @@
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "net/file_market.h"
+#include "platform/path_compat.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
@@ -29,7 +30,7 @@ bool db_market_content_validate(const struct market_content_record *record,
                      "offer_id", "can't be all zero");
     validates_custom(errors, zcl_bytes_any_set(record->root_hash, 32),
                      "root_hash", "can't be all zero");
-    validates_custom(errors, record->private_path[0] == '/' &&
+    validates_custom(errors, platform_path_is_absolute(record->private_path) &&
         strnlen(record->private_path, MARKET_CONTENT_PATH_MAX) <
             MARKET_CONTENT_PATH_MAX,
         "private_path", "must be a bounded absolute canonical path");
@@ -125,7 +126,7 @@ bool db_market_content_find_chunk(
         AR_READ_STR(s, 5, out->private_path, sizeof(out->private_path));
         AR_READ_BLOB(s, 6, out->chunk_sha3, 32);
         out->chunk_index = chunk_index;
-        if (out->private_path[0] != '/') {
+        if (!platform_path_is_absolute(out->private_path)) {
             AR_FINALIZE(s);
             return false;
         });

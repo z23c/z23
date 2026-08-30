@@ -91,6 +91,29 @@ static int db_mig_family_file_cmp(const void *a, const void *b)
     return strcmp(fa->name, fb->name);
 }
 
+/* UCRT struct stat carries second-resolution st_mtime/st_ctime and no
+ * st_mtim/st_ctim; the comparison below only needs change detection, and a
+ * same-second rewrite keeping the same hash is not a mutation this test is
+ * trying to catch. */
+static struct timespec db_mig_stat_mtime(const struct stat *st)
+{
+#if defined(_WIN32)
+    struct timespec ts = { (time_t)st->st_mtime, 0 };
+    return ts;
+#else
+    return st->st_mtim;
+#endif
+}
+static struct timespec db_mig_stat_ctime(const struct stat *st)
+{
+#if defined(_WIN32)
+    struct timespec ts = { (time_t)st->st_ctime, 0 };
+    return ts;
+#else
+    return st->st_ctim;
+#endif
+}
+
 /* Snapshot every directory entry in the SQLite database family, not merely
  * node.db.  A refusal that creates/deletes/changes WAL, SHM, rollback-journal
  * or master-journal state has mutated the database even when node.db itself
@@ -118,8 +141,8 @@ static bool db_mig_snapshot_family(const char *dbpath,
     struct stat dst;
     if (stat(dir, &dst) != 0)
         return false;
-    out->dir_mtime = dst.st_mtim;
-    out->dir_ctime = dst.st_ctim;
+    out->dir_mtime = db_mig_stat_mtime(&dst);
+    out->dir_ctime = db_mig_stat_ctime(&dst);
 
     DIR *d = opendir(dir);
     if (!d)
@@ -151,8 +174,8 @@ static bool db_mig_snapshot_family(const char *dbpath,
             break;
         }
         f->mode = st.st_mode;
-        f->mtime = st.st_mtim;
-        f->ctime = st.st_ctim;
+        f->mtime = db_mig_stat_mtime(&st);
+        f->ctime = db_mig_stat_ctime(&st);
         out->count++;
     }
     closedir(d);

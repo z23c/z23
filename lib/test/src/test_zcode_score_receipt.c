@@ -38,7 +38,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 struct score_work_fixture {
@@ -65,6 +67,8 @@ static const struct score_package_fixture score_packages[] = {
 #include "../../../config/zcode_package_registry.def"
 };
 #undef ZCODE_PACKAGE
+
+#if !defined(_WIN32)
 
 static void score_fill(uint8_t out[32], uint8_t value)
 {
@@ -3813,3 +3817,28 @@ int test_zcode_score_receipt_shadow(void)
 {
     return test_shadow_protocol_contract();
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked score-receipt child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_zcode_score_receipt(void)
+{
+    printf("zcode_score_receipt: SKIP (Windows): forked score-receipt child lane\n");
+    return 0;
+}
+
+#define ZCL_SCORE_RECEIPT_WIN_SKIP(entry) \
+int entry(void) \
+{ \
+    printf(#entry ": SKIP (Windows): forked score-receipt child lane\n"); \
+    return 0; \
+}
+
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_packages)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_rejections)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_creation)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_patronage)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_reproduction)
+ZCL_SCORE_RECEIPT_WIN_SKIP(test_zcode_score_receipt_shadow)
+
+#undef ZCL_SCORE_RECEIPT_WIN_SKIP
+#endif

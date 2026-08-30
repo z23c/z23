@@ -55,7 +55,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #define WPL_CHECK(name, expr) do {                                     \
@@ -149,6 +151,13 @@ static int t_terminal_probe_tells_the_truth(const char *dir)
 
     /* A pty is. Opened and probed only — nothing is ever written to it, so
      * there is no way for this to block on a full pty buffer. */
+#if defined(_WIN32)
+    /* No posix_openpt/grantpt/ptsname on Windows, and no capturable
+     * terminal fixture exists here (ConPTY presents pipes to the child, so
+     * CRT isatty stays false) — the "yes" half cannot run on this lane. */
+    printf("wallet_phrase_never_logged: a terminal on stdout IS reported "
+           "as a terminal... SKIP (Windows): no posix_openpt pty lane\n");
+#else
     int master = posix_openpt(O_RDWR | O_NOCTTY);
     bool pty_says_yes = false;
     bool pty_ready = false;
@@ -174,6 +183,7 @@ static int t_terminal_probe_tells_the_truth(const char *dir)
     WPL_CHECK("a pty was available to probe against", pty_ready);
     WPL_CHECK("a terminal on stdout IS reported as a terminal",
               pty_says_yes);
+#endif
     return failures;
 }
 
@@ -438,6 +448,19 @@ static int t_refusal_is_scoped_to_a_spendable_wallet(void)
  * fork so the parent can never see EIO before the child has anything to say. */
 static int t_a_real_terminal_gets_the_words_and_the_warning(void)
 {
+#if defined(_WIN32)
+    /* Windows lane: this case is built on posix_openpt/grantpt/ptsname plus
+     * fork(), none of which exist on Windows, and no Windows fixture can put
+     * a captureable terminal behind isatty() (ConPTY presents pipes to the
+     * child, so CRT isatty stays false; a real CREATE_NEW_CONSOLE window is
+     * a terminal but cannot be drained by the parent). The NEGATIVE half of
+     * this contract — nothing leaks to a redirected stdout — is fully tested
+     * by the other cases in this group, which do run here. */
+    printf("wallet_phrase_never_logged: a real terminal DOES get the "
+           "twelve words... SKIP (Windows): no posix_openpt/fork pty lane; "
+           "the leak-negative cases above cover the custody invariant\n");
+    return 0;
+#else
     int failures = 0;
     char seen[32768];
     seen[0] = '\0';
@@ -497,6 +520,7 @@ static int t_a_real_terminal_gets_the_words_and_the_warning(void)
               ran && strstr(seen, "not work in Electrum") != NULL &&
               strstr(seen, "wallet software") != NULL);
     return failures;
+#endif
 }
 
 /* A declared throwaway lane, headless, end to end: a wallet IS created, and

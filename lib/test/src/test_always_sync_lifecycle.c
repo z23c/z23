@@ -53,6 +53,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 
 /* Test-only seam (defined in reducer_frontier.c under ZCL_TESTING; the same
  * forward declaration test_stall_totality_matrix.c uses): pin the compiled
@@ -695,3 +696,11 @@ int test_always_sync_lifecycle(void)
         printf("always_sync_lifecycle: failures=%d\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Fatal-signal crash-guard lane built on sigaction/sigsetjmp/siglongjmp, which have no Windows delivery mechanism. Skipped loudly rather than faked. */
+int test_always_sync_lifecycle(void)
+{
+    printf("always_sync_lifecycle: SKIP (Windows): fatal-signal crash-guard lane built on sigaction/sigsetjmp/siglongjmp, which have no windows delivery mechanism.\n");
+    return 0;
+}
+#endif

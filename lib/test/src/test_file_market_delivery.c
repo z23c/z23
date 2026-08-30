@@ -18,13 +18,116 @@
 
 #include <errno.h>
 #include <pthread.h>
+#if !defined(_WIN32)
 #include <netinet/in.h>
+#endif
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/socket.h>
+#endif
 #include <sys/time.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include "platform/socket_compat.h"
+
+#include <stdint.h>
+
+typedef int socklen_t;
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 1
+#endif
+
+/* The fixtures hold peer sockets as int fds and use POSIX verbs on them.
+ * These shims keep every call site stable: SOCKET handles round-trip
+ * through int via intptr_t and the verbs map onto the platform socket
+ * layer (socketpair becomes the verified loopback-TCP pair). Every close()
+ * in this file targets one of those sockets. */
+static int fmd_socketpair(int sv[2])
+{
+    platform_socket_t pair[2];
+    if (!platform_socket_pair(pair))
+        return -1;
+    sv[0] = (int)(intptr_t)pair[0];
+    sv[1] = (int)(intptr_t)pair[1];
+    return 0;
+}
+
+static int fmd_socket(int domain, int type, int protocol)
+{
+    platform_socket_t s = platform_socket_open(domain, type, protocol,
+                                               true, false);
+    return s == PLATFORM_SOCKET_INVALID ? -1 : (int)(intptr_t)s;
+}
+
+static ssize_t fmd_recv(int fd, void *buf, size_t len, int flags)
+{
+    platform_socket_t sock = (platform_socket_t)(intptr_t)fd;
+    if (flags == MSG_DONTWAIT)
+        return platform_socket_receive_nonblocking(sock, buf, len);
+    return platform_socket_receive(sock, buf, len);
+}
+
+static ssize_t fmd_send(int fd, const void *buf, size_t len, int flags)
+{
+    platform_socket_t sock = (platform_socket_t)(intptr_t)fd;
+    if (flags == MSG_DONTWAIT)
+        return platform_socket_send_nonblocking(sock, buf, len);
+    return platform_socket_send(sock, buf, len); /* MSG_NOSIGNAL: no-op */
+}
+
+static int fmd_setsockopt(int fd, int level, int opt, const void *val,
+                          socklen_t len)
+{
+    platform_socket_t sock = (platform_socket_t)(intptr_t)fd;
+    if (level == SOL_SOCKET &&
+        (opt == SO_RCVTIMEO || opt == SO_SNDTIMEO)) {
+        const struct timeval *tv = val;
+        int ms = (int)(tv->tv_sec * 1000 + tv->tv_usec / 1000);
+        (void)len;
+        return opt == SO_RCVTIMEO
+            ? platform_socket_set_receive_timeout(sock, ms)
+            : platform_socket_set_send_timeout(sock, ms);
+    }
+    return setsockopt(sock, level, opt, val, (int)len);
+}
+
+static int fmd_accept(int fd)
+{
+    platform_socket_t s = platform_socket_accept(
+        (platform_socket_t)(intptr_t)fd, NULL, NULL);
+    return s == PLATFORM_SOCKET_INVALID ? -1 : (int)(intptr_t)s;
+}
+
+static int fmd_getsockname(int fd, struct sockaddr *addr, socklen_t *len)
+{
+    size_t out = (size_t)*len;
+    int rc = platform_socket_local_address((platform_socket_t)(intptr_t)fd,
+                                           addr, &out);
+    *len = (socklen_t)out;
+    return rc;
+}
+
+#define socketpair(domain, type, protocol, sv) fmd_socketpair(sv)
+#define socket(domain, type, protocol) fmd_socket(domain, type, protocol)
+#define recv(fd, buf, len, flags) fmd_recv(fd, buf, len, flags)
+#define send(fd, buf, len, flags) fmd_send(fd, buf, len, flags)
+#define close(fd) (platform_socket_close((platform_socket_t)(intptr_t)(fd)))
+#define setsockopt(fd, level, opt, val, len) \
+    fmd_setsockopt(fd, level, opt, val, len)
+#define accept(fd, addr, len) fmd_accept(fd)
+#define bind(fd, addr, len) \
+    platform_socket_bind((platform_socket_t)(intptr_t)(fd), addr, len)
+#define listen(fd, backlog) \
+    platform_socket_listen((platform_socket_t)(intptr_t)(fd), backlog)
+#define getsockname(fd, addr, len) fmd_getsockname(fd, addr, len)
+#endif
 
 #define DELIVERY_CHECK(label, condition) do {                        \
     printf("file_market delivery: %s... ", (label));                \

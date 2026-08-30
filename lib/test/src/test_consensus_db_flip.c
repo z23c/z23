@@ -30,8 +30,11 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define CKF(name, expr) do {                                               \
     if (expr) { printf("  consensus_db_flip: %s... OK\n", (name)); }        \
@@ -514,3 +517,12 @@ int test_consensus_db_flip(void)
     printf("consensus_db_flip: %d failures\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork crash-window flip-proof lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_consensus_db_flip(void)
+{
+    printf("consensus_db_flip: SKIP (Windows): fork crash-window flip-proof lane\n");
+    return 0;
+}
+#endif

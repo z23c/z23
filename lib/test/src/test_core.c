@@ -9,7 +9,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 /* Forward-declared here rather than in core/random.h: the scope
@@ -19,6 +21,22 @@ extern void zcl_random_test_force_fail(bool on);
 
 int test_core(void)
 {
+#if defined(_WIN32)
+    /* Re-exec'd child lane for the RNG-failure abort case (Windows has no
+     * fork()): trip the forced-failure path and let abort() end the
+     * process. UCRT abort() exits with code 3, which the parent asserts. */
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0]) {
+        if (strcmp(fork_role, "rng_abort") == 0) {
+            zcl_win_suppress_abort_dialog();
+            zcl_random_test_force_fail(true);
+            uint8_t b[32] = {0};
+            GetRandBytes(b, sizeof(b));
+            return 17; /* unreachable unless the silent zero-fill regresses */
+        }
+        return 97;
+    }
+#endif
     int failures = 0;
 
     printf("uint256 set/get hex roundtrip... ");
@@ -172,6 +190,23 @@ int test_core(void)
      * SIGABRT. */
     printf("GetRandBytes aborts on RNG failure (no silent zero-fill)... ");
     {
+#if defined(_WIN32)
+        /* Re-exec child runs the rng_abort role above; UCRT abort() exits
+         * with code 3 — the signal-death analogue of WTERMSIG==SIGABRT. */
+        void *hp = test_spawn_self_with_role("test_core", "rng_abort",
+                                             "test-tmp/rng_abort_child.log");
+        int wcode = hp ? test_self_child_wait(hp) : -1;
+        if (wcode == 3) {
+            printf("OK\n");
+        } else if (wcode == 17) {
+            printf("FAIL (child returned normally with %d — "
+                   "silent zero-fill regression)\n", wcode);
+            failures++;
+        } else {
+            printf("FAIL (unexpected child exit %d)\n", wcode);
+            failures++;
+        }
+#else
         pid_t pid = fork();
         if (pid < 0) { printf("FAIL (fork: %s)\n", strerror(errno)); failures++; }
         else if (pid == 0) {
@@ -211,6 +246,7 @@ int test_core(void)
                 failures++;
             }
         }
+#endif
     }
 
     /* And recovery: clearing the flag returns GetRandBytes to normal

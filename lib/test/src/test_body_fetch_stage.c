@@ -43,9 +43,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define BF_CHECK(name, expr) do { \
     printf("body_fetch: %s... ", (name)); \
@@ -902,3 +905,12 @@ int test_body_fetch_stage(void)
     printf("body_fetch_stage: %d failures\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork+SIGKILL body-fetch crash-window lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_body_fetch_stage(void)
+{
+    printf("body_fetch_stage: SKIP (Windows): fork+SIGKILL body-fetch crash-window lane\n");
+    return 0;
+}
+#endif

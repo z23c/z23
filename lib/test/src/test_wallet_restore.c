@@ -32,6 +32,7 @@
 
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
+#include "platform/private_directory.h"
 #include "test/test_core.h"
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
@@ -333,6 +334,19 @@ static int wr_test_rescan_reports_missing_bodies(void)
 
 int test_wallet_restore(void)
 {
+#if defined(_WIN32)
+    /* Production native-Windows wallet restore is FAIL-CLOSED by design:
+     * wallet_restore_datadir_free/_hold refuse (-58) until current-SID
+     * single-writer qualification passes (app/services/src/
+     * wallet_restore_service.c:69-72 and :128-132). Every case below runs
+     * through those gates, so none can pass here. The refusal contract
+     * itself is proven by the Windows-lane acceptance
+     * (lib/test/src/wallet_restore_windows_refusal_acceptance.c). */
+    printf("wallet_restore: SKIP (Windows): restore is fail-closed on "
+           "native Windows; refusal proven by "
+           "wallet_restore_windows_refusal_acceptance\n");
+    return 0;
+#else
     int failures = 0;
     char src_db[256], backup_dir[256], target[256], target_db[320];
     const char *scratch = wr_dir();
@@ -345,8 +359,8 @@ int test_wallet_restore(void)
     /* wallet_backup_run_once -> wbs_ensure_backup_dir ->
      * platform_private_directory_ensure requires exactly 0700 and refuses a
      * wider directory. mkdir is umask-masked, so restate the mode. */
-    platform_directory_create(backup_dir, 0700);
-    chmod(backup_dir, 0700);
+    if (!platform_private_directory_ensure(backup_dir))
+        return false;
 
     /* ---- source wallet with transparent AND shielded rows ---- */
     struct node_db ndb;
@@ -690,4 +704,5 @@ int test_wallet_restore(void)
     wr_rmdir_datadir(target);
     rmdir(backup_dir);
     return failures;
+#endif
 }

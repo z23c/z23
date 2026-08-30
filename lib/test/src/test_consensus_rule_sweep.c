@@ -34,8 +34,11 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define CRS_CHECK(name, expr) do {                  \
     printf("  consensus_rule_sweep: %s... ", (name)); \
@@ -632,3 +635,12 @@ int test_consensus_rule_sweep(void)
     printf("consensus_rule_sweep: %d failure(s)\n", failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork/exec rule-sweep child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_consensus_rule_sweep(void)
+{
+    printf("consensus_rule_sweep: SKIP (Windows): fork/exec rule-sweep child lane\n");
+    return 0;
+}
+#endif

@@ -47,10 +47,8 @@
 #include "json/json.h"
 
 #include <errno.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -109,29 +107,32 @@ static struct rpc_table g_tbl;
 
 /* Hold one kernel-assigned loopback port open so the production frontend
  * hook must propagate rpc_http_start()'s bind failure. */
-static int rsr_hold_loopback_port(uint16_t *port_out)
+static platform_socket_t rsr_hold_loopback_port(uint16_t *port_out)
 {
     if (!port_out)
-        return -1;
-    int fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
-    if (fd < 0)
-        return -1;
+        return PLATFORM_SOCKET_INVALID;
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
+        return PLATFORM_SOCKET_INVALID;
     const struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
         .sin_port = 0,
     };
-    if (bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-        listen(fd, 1) != 0) {
-        close(fd);
-        return -1;
+    if (platform_socket_bind(fd, (const struct sockaddr *)&addr,
+                             sizeof(addr)) != 0 ||
+        platform_socket_listen(fd, 1) != 0) {
+        platform_socket_close(fd);
+        return PLATFORM_SOCKET_INVALID;
     }
     struct sockaddr_in bound = {0};
-    socklen_t bound_len = sizeof(bound);
-    if (getsockname(fd, (struct sockaddr *)&bound, &bound_len) != 0 ||
+    size_t bound_len = sizeof(bound);
+    if (platform_socket_local_address(fd, (struct sockaddr *)&bound,
+                                      &bound_len) != 0 ||
         bound_len != sizeof(bound)) {
-        close(fd);
-        return -1;
+        platform_socket_close(fd);
+        return PLATFORM_SOCKET_INVALID;
     }
     *port_out = ntohs(bound.sin_port);
     return fd;
@@ -168,8 +169,8 @@ int test_rpc_service_restart(void)
     }
 
     uint16_t held_port = 0;
-    int held_fd = rsr_hold_loopback_port(&held_port);
-    if (held_fd < 0) {
+    platform_socket_t held_fd = rsr_hold_loopback_port(&held_port);
+    if (held_fd == PLATFORM_SOCKET_INVALID) {
         printf("rpc_service_restart: FAIL (hold loopback port)\n");
         test_rm_rf(datadir);
         return 1;
@@ -190,7 +191,7 @@ int test_rpc_service_restart(void)
     struct zcl_service_spec spec = boot_frontend_rpc_http_spec(&g_svc);
     if (!zcl_service_kernel_register(&kernel, &spec)) {
         printf("rpc_service_restart: FAIL (service registration)\n");
-        close(held_fd);
+        platform_socket_close(held_fd);
         unsetenv("ZCL_RPC_COOKIE_ROTATE_SEC");
         test_rm_rf(datadir);
         return 1;
@@ -234,7 +235,7 @@ int test_rpc_service_restart(void)
     }
     if (occupied_started)
         zcl_service_kernel_stop_all(&kernel);
-    close(held_fd);
+    platform_socket_close(held_fd);
 
     printf("rpc_service_restart: a fresh process starts in warmup... ");
     if (rpc_is_in_warmup(NULL, 0) &&

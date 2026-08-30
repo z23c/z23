@@ -23,6 +23,8 @@
 
 #include "util/file_tree_ops.h"
 
+#if !defined(_WIN32)
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -489,3 +491,17 @@ int test_file_tree_ops(void)
 
     return failures;
 }
+
+#else /* _WIN32 */
+
+/* Production file_tree_ops refuses every recursive mutation on Windows
+ * (lib/util/src/file_tree_ops.c: "disabled pending handle-bound no-reparse
+ * qualification"), so no case here can run. */
+int test_file_tree_ops(void)
+{
+    printf("test_file_tree_ops: SKIP (Windows): file_tree_ops recursive "
+           "mutation is disabled on Windows by production refusal\n");
+    return 0;
+}
+
+#endif /* !_WIN32 */
