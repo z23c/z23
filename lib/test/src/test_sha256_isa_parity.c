@@ -4,8 +4,8 @@
  * ACCEL-ORACLE: lib/crypto/src/sha256.c
  *
  * Differential parity oracle for the two SHA-256 compression transforms in
- * lib/crypto/src/sha256.c: the portable C reference and the Intel SHA-NI
- * hardware transform.
+ * lib/crypto/src/sha256.c: the portable C reference and the native hardware
+ * transform (Intel SHA-NI or ARMv8 FEAT_SHA256).
  *
  * SHA-256 is consensus crypto here — block hashes, merkle roots, txids and
  * signature hashes all bottom out in it. A single differing verdict forks the
@@ -13,8 +13,9 @@
  * proven byte-identical to the frozen portable reference. This group is that
  * proof, in the same shape as test_sha3_256_x4.c:
  *
- *   1. Reachability. On a CPU whose CPUID advertises SHA-NI, the node MUST
- *      actually run SHA-NI. This is the regression guard for the defect this
+ *   1. Reachability. On a CPU whose OS/CPUID feature authority advertises a
+ *      SHA-256 tier, the node MUST actually run it. This is the regression
+ *      guard for the defect this
  *      test was written for: sha256.c used to wrap the hardware transform and
  *      its dispatch in `#ifdef __SHA__`, and the shipped -march=x86-64-v3 does
  *      not define __SHA__, so the accelerated path was compiled out of every
@@ -34,8 +35,9 @@
  *   8. The boot self-test path (sha256_selftest) is still reachable and green.
  *   9. Honest benchmark, reported and never gated.
  *
- * On a host without SHA-NI every parity leg degrades to portable-vs-portable
- * (still exercises padding/chunking geometry); that is reported, not failed.
+ * On a host without a SHA hardware tier every parity leg degrades to
+ * portable-vs-portable (still exercises padding/chunking geometry); that is
+ * reported, not self-skipped.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -48,6 +50,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(__aarch64__) && defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#endif
 
 /* Deterministic xorshift64* — no libc rand, reproducible across runs. */
 static uint64_t rng_state = 0x9e3779b97f4a7c15ULL;
@@ -88,49 +96,68 @@ static void sha256_oneshot(const uint8_t *in, size_t len, uint8_t out[32])
     sha256_finalize(&c, out);
 }
 
-/* Does the HOST advertise SHA-NI? Deliberately probed independently of
- * sha256.c so leg 1 cannot be satisfied by the code under test agreeing with
- * itself. */
-static bool host_advertises_sha_ni(void)
+/* Does the HOST advertise its native SHA-256 tier? Deliberately probed
+ * independently of sha256.c so leg 1 cannot be satisfied by the code under
+ * test agreeing with itself. */
+static bool host_advertises_sha_hardware(void)
 {
 #if defined(__x86_64__) || defined(__i386__)
     __builtin_cpu_init();
     return __builtin_cpu_supports("sha") != 0;
+#elif defined(__aarch64__) && defined(__APPLE__)
+    int present = 0;
+    size_t size = sizeof(present);
+    return sysctlbyname("hw.optional.arm.FEAT_SHA256", &present, &size,
+                        NULL, 0) == 0 &&
+           size == sizeof(present) && present == 1;
+#elif defined(__aarch64__) && defined(__linux__)
+    return (getauxval(AT_HWCAP) & (1UL << 6)) != 0; /* HWCAP_SHA2 */
 #else
     return false;
 #endif
 }
 
+static const char *hardware_tier_name(void)
+{
+#if defined(__aarch64__)
+    return "ARMv8 SHA";
+#else
+    return "SHA-NI";
+#endif
+}
+
 int test_sha256_isa_parity(void)
 {
-    printf("\n=== sha256_isa_parity (portable vs SHA-NI differential oracle) ===\n");
+    printf("\n=== sha256_isa_parity (portable vs native-hardware differential oracle) ===\n");
     int failures = 0;
 
-    const bool hw = host_advertises_sha_ni();
+    const bool hw = host_advertises_sha_hardware();
     const int  got_shani = sha256_select_impl(SHA256_IMPL_SHANI);
     const bool have_shani = (got_shani == SHA256_IMPL_SHANI);
 
-    printf("sha256_isa_parity: CPUID advertises SHA-NI... %s\n", hw ? "YES" : "no");
+    printf("sha256_isa_parity: host advertises %-10s... %s\n",
+           hardware_tier_name(), hw ? "YES" : "no");
     printf("sha256_isa_parity: node selects................ %s\n",
            sha256_implementation());
 
     /* ── 1. Reachability — the regression guard ──────────────────────── */
     printf("sha256_isa_parity: hardware path reachable when CPU has it... ");
     if (!hw) {
-        printf("SKIP (host has no SHA-NI)\n");
-    } else if (have_shani && sha256_shani_available()) {
+        printf("not applicable (host advertises no SHA hardware)\n");
+    } else if (have_shani && strstr(sha256_implementation(), "hardware")) {
         printf("OK\n");
     } else {
         printf("FAIL\n");
-        printf("  CPUID reports SHA-NI but sha256.c refuses to install it.\n"
-               "  This is the -march=x86-64-v3 / `#ifdef __SHA__` defect: the\n"
+        printf("  The host reports %s but sha256.c refuses to install it.\n"
+               "  This is the compile-time feature-guard defect: the\n"
                "  hardware transform has been compiled out of the shipped\n"
                "  binary again. The guard must be a RUNTIME check, never a\n"
-               "  preprocessor one — see lib/crypto/src/sha256.c.\n");
+               "  preprocessor one — see lib/crypto/src/sha256.c.\n",
+               hardware_tier_name());
         failures++;
     }
 
-    /* Every parity leg below compares the two transforms. Without SHA-NI both
+    /* Every parity leg below compares the two transforms. Without hardware both
      * sides resolve to portable — still worth running for the geometry. */
     if (hw && !have_shani)
         printf("sha256_isa_parity: NOTE parity legs degrade to portable-vs-portable\n");
@@ -272,7 +299,7 @@ int test_sha256_isa_parity(void)
             0x5d,0xae,0x22,0x23,0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,
             0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad };
         for (int pass = 0; pass < 2; ++pass) {
-            const char *nm = pass == 0 ? "portable" : "sha-ni  ";
+            const char *nm = pass == 0 ? "portable" : "hardware";
             sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE : SHA256_IMPL_SHANI);
             uint8_t good[32], bad[32];
             uint8_t msg[3] = { 'a', 'b', 'c' };
@@ -298,8 +325,8 @@ int test_sha256_isa_parity(void)
     printf("sha256_isa_parity: implementation string agrees with probe... ");
     {
         const char *impl = sha256_implementation();
-        bool says_hw = (strstr(impl, "SHA-NI") != NULL);
-        if (says_hw == sha256_shani_available()) printf("OK (%s)\n", impl);
+        bool says_hw = strstr(impl, "hardware") != NULL;
+        if (says_hw == have_shani) printf("OK (%s)\n", impl);
         else { printf("FAIL (%s)\n", impl); failures++; }
     }
 
@@ -328,9 +355,9 @@ int test_sha256_isa_parity(void)
                         sha256_oneshot(b, sizes[s], out);
                     ns[pass] = (now_s() - t0) * 1e9 / (double)iters[s];
                 }
-                printf("sha256_isa_parity:   %-13s portable %9.1f ns   sha-ni %9.1f ns   %.2fx%s\n",
+                printf("sha256_isa_parity:   %-13s portable %9.1f ns   hardware %9.1f ns   %.2fx%s\n",
                        names[s], ns[0], ns[1], ns[0] / ns[1],
-                       have_shani ? "" : " (no sha-ni: portable-vs-portable)");
+                       have_shani ? "" : " (no hardware: portable-vs-portable)");
             }
             free(b);
         }

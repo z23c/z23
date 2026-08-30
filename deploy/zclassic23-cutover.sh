@@ -322,9 +322,14 @@ unit_start "$CANONICAL_UNIT" || rollback "canonical unit failed to start on the 
 # chance to fire; otherwise a short --timeout could exit while silence was
 # still unproven, and neither answer would have been earned.
 _report_window="$READY_TIMEOUT"
-if [ "$_report_window" -lt "$READY_STALL_TIMEOUT" ]; then
-    _report_window="$READY_STALL_TIMEOUT"
-    log "note: reporting window widened to ${_report_window}s so the ${READY_STALL_TIMEOUT}s stall detector can reach a verdict"
+_minimum_report_window=$(( READY_STALL_TIMEOUT + POLL_INTERVAL ))
+if [ "$_report_window" -lt "$_minimum_report_window" ]; then
+    _report_window="$_minimum_report_window"
+    # The first observation establishes the baseline; it does not prove
+    # elapsed silence. Reserve one complete poll beyond the stall threshold
+    # so second-granularity wall-clock rounding cannot let the reporting
+    # verdict race ahead of the rollback verdict.
+    log "note: reporting window widened to ${_report_window}s so the ${READY_STALL_TIMEOUT}s stall detector gets a baseline plus one full poll"
 fi
 log "verifying promoted canonical reaches H* >= $BAR"
 log "  rollback fires ONLY on ${READY_STALL_TIMEOUT}s of observed silence, never on elapsed time"
