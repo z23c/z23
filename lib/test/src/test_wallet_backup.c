@@ -415,10 +415,12 @@ static int t_status_snapshot(void)
     cfg.backup_dir = f.backup_dir;
     cfg.interval_seconds = 3600;
 
+    struct wallet_backup_status before;
+    wallet_backup_status_snapshot(&before);
     bool started = wallet_backup_start(&cfg, &f.ndb).ok;
     /* Wait for the thread's start-of-day backup. */
     struct wallet_backup_status status;
-    wb_wait_runs_past(0, &status);
+    wb_wait_runs_past(before.total_runs, &status);
     struct supervisor_snapshot snaps[SUPERVISOR_CAP];
     int n = supervisor_snapshot_all(snaps, SUPERVISOR_CAP);
     const struct supervisor_snapshot *backup = NULL;

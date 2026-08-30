@@ -635,7 +635,12 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
         snprintf(src_dir, sizeof(src_dir), "%s", src_path);
         char *slash = strrchr(src_dir, '/');
         if (slash) *slash = '\0';
-        if (strcmp(src_dir, cfg->backup_dir) == 0) {
+        char src_real[1024], backup_real[1024];
+        const char *src_compare = realpath(src_dir, src_real)
+            ? src_real : src_dir;
+        const char *backup_compare = realpath(cfg->backup_dir, backup_real)
+            ? backup_real : cfg->backup_dir;
+        if (strcmp(src_compare, backup_compare) == 0) {
             struct zcl_result r = ZCL_ERR(-21,
                 "start: refusing to back up into source dir %s", src_dir);
             pthread_mutex_unlock(&g_wbs.lock);

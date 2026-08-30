@@ -121,8 +121,13 @@ int test_cpu_topology(void)
 
     /* pin_thread: valid domain succeeds (advisory — always attempted on
      * the calling thread itself, which is always affinity-settable). */
+#ifdef __APPLE__
+    CPT_CHECK("pin_thread refuses where Darwin exposes no affinity API",
+              !cpu_topology_pin_thread(pthread_self(), 0));
+#else
     CPT_CHECK("pin_thread succeeds for domain 0",
               cpu_topology_pin_thread(pthread_self(), 0));
+#endif
     CPT_CHECK("pin_thread fails for an invalid (negative) domain",
               !cpu_topology_pin_thread(pthread_self(), -1));
     CPT_CHECK("pin_thread fails for an out-of-range domain",
@@ -191,8 +196,13 @@ int test_cpu_topology(void)
         }
     }
 
+#ifdef __APPLE__
+    CPT_CHECK("fallback pin still refuses without a Darwin affinity API",
+              !cpu_topology_pin_thread(pthread_self(), 0));
+#else
     CPT_CHECK("pin_thread still works on the fallback single domain",
               cpu_topology_pin_thread(pthread_self(), 0));
+#endif
 
     /* ── restore default root + re-scan the real box for any test that
      * runs after this one in the same process. ── */
