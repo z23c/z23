@@ -1088,8 +1088,7 @@ static bool test_depfiles_prepare(const struct proof_paths *paths,
         !test_epoch_pointer_prepare(paths, generation, relative, pointer_root))
         return false;
     uint8_t count_le[8];
-    for (size_t i = 0; i < sizeof(count_le); i++)
-        count_le[i] = (uint8_t)(((uint64_t)count) >> (i * 8));
+    zcl_write_u64_le(count_le, (uint64_t)count);
     sha3_256_write(&root, count_le, sizeof(count_le));
     sha3_256_write(&root, pointer_root, sizeof(pointer_root));
     sha3_256_finalize(&root, depfile_root);

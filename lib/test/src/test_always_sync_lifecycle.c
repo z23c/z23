@@ -357,8 +357,8 @@ static enum sticky_rung lc_drive_to_deepest(int64_t t0, int64_t *last_now,
     return r;
 }
 
-int test_always_sync_lifecycle(void);
-int test_always_sync_lifecycle(void)
+static int test_always_sync_lifecycle_platform_arm(void);
+static int test_always_sync_lifecycle_platform_arm(void)
 {
     printf("\n=== always_sync_lifecycle (full-lifecycle sync proof harness) ===\n");
     int failures = 0;
@@ -698,9 +698,14 @@ int test_always_sync_lifecycle(void)
 }
 #else  /* _WIN32 */
 /* Fatal-signal crash-guard lane built on sigaction/sigsetjmp/siglongjmp, which have no Windows delivery mechanism. Skipped loudly rather than faked. */
-int test_always_sync_lifecycle(void)
+static int test_always_sync_lifecycle_platform_arm(void)
 {
     printf("always_sync_lifecycle: SKIP (Windows): fatal-signal crash-guard lane built on sigaction/sigsetjmp/siglongjmp, which have no windows delivery mechanism.\n");
     return 0;
 }
 #endif
+
+int test_always_sync_lifecycle(void)
+{
+    return test_always_sync_lifecycle_platform_arm();
+}

@@ -174,7 +174,7 @@ static bool pcas_no_temp_names(int dir_fd, const char *name)
     return ok;
 }
 
-int test_consensus_state_publication_cas(void)
+static int test_consensus_state_publication_cas_platform_arm(void)
 {
     int failures = 0;
 
@@ -543,9 +543,14 @@ int test_consensus_state_publication_cas(void)
 }
 #else  /* _WIN32 */
 /* CAS fixture is written on the POSIX fdopendir/unlinkat directory-fd surface; the Windows production arm (consensus_state_publication_cas_windows.c) exists but this fixture cannot drive it. Skipped loudly rather than faked. */
-int test_consensus_state_publication_cas(void)
+static int test_consensus_state_publication_cas_platform_arm(void)
 {
     printf("consensus_state_publication_cas: SKIP (Windows): cas fixture is written on the posix fdopendir/unlinkat directory-fd surface; the windows production arm (consensus_state_publication_cas_windows.c) exists but this fixture cannot drive it.\n");
     return 0;
 }
 #endif
+
+int test_consensus_state_publication_cas(void)
+{
+    return test_consensus_state_publication_cas_platform_arm();
+}

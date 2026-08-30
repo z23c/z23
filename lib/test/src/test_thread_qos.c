@@ -235,9 +235,9 @@ static int t_thread_qos_idempotent(void)
     return failures;
 }
 
-int test_thread_qos(void);
+static int test_thread_qos_platform_arm(void);
 
-int test_thread_qos(void)
+static int test_thread_qos_platform_arm(void)
 {
     printf("\n=== thread_qos tests ===\n");
     int failures = 0;
@@ -248,9 +248,14 @@ int test_thread_qos(void)
 }
 #else  /* _WIN32 */
 /* Thread-QoS proof reads ioprio_get(2)/sched_getscheduler via raw Linux syscalls (sys/syscall.h); no Windows analogue. Skipped loudly rather than faked. */
-int test_thread_qos(void)
+static int test_thread_qos_platform_arm(void)
 {
     printf("thread_qos: SKIP (Windows): thread-qos proof reads ioprio_get(2)/sched_getscheduler via raw linux syscalls (sys/syscall.h); no windows analogue.\n");
     return 0;
 }
 #endif
+
+int test_thread_qos(void)
+{
+    return test_thread_qos_platform_arm();
+}

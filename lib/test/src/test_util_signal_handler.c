@@ -282,7 +282,7 @@ static int test_termination_handler_reclaim(void)
     return failures;
 }
 
-int test_util_signal_handler(void)
+static int test_util_signal_handler_platform_arm(void)
 {
     printf("\n=== util/signal_handler tests ===\n");
 
@@ -308,10 +308,15 @@ int test_util_signal_handler(void)
 /* Every case in this group installs or exercises a POSIX fatal-signal
  * disposition (sigaction, signal alt stacks, SIGCHLD/SA_NOCLDWAIT semantics)
  * in a forked child — none of which has a Windows analogue. */
-int test_util_signal_handler(void)
+static int test_util_signal_handler_platform_arm(void)
 {
     printf("util_signal_handler: SKIP (Windows): POSIX signal-disposition "
            "+ fork lane (sigaction/altstack/SIGCHLD) does not exist here\n");
     return 0;
 }
 #endif
+
+int test_util_signal_handler(void)
+{
+    return test_util_signal_handler_platform_arm();
+}

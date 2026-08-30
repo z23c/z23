@@ -43,19 +43,13 @@ platform_alternative_groups=(
     "lib/platform/src/os_sandbox_linux.c lib/platform/src/os_sandbox_stub.c"
     "lib/vcs/src/vcs_devloop.c lib/vcs/src/vcs_devloop_windows.c"
 )
-# Empty on purpose, and kept rather than deleted.
-#
-# The devloop pair used to live here, because the Windows implementation was
-# compiled on EVERY host: only the POSIX one was host-optional, so "expected 1
-# on Linux, 0 on MSYS" described the build exactly. That was the defect, not
-# the description — a Windows devloop has no business being compiled into a
-# Linux binary, and once the Makefile stopped doing it the pair became a
-# straightforward platform alternative like the sandbox pair above.
-#
-# The mechanism stays because "this source is genuinely optional on this host"
-# is a different claim from "exactly one of these alternatives is chosen", and
-# the day something is the former, describing it as the latter would hide it.
-host_optional_sources=()
+# The terminal-worker cage is a Linux-only companion to the Linux sandbox,
+# not an alternative implementation: Linux compiles it once, while Darwin and
+# Windows compile neither it nor a pretend substitute. Keep that honest host
+# boundary separate from the exactly-one implementation groups above.
+host_optional_sources=(
+    "lib/platform/src/os_sandbox_terminal_worker.c"
+)
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
     echo "check-zcode-package-registry: FAIL — empty package or monolith source projection" >&2
@@ -88,8 +82,10 @@ for optional in "${host_optional_sources[@]}"; do
         [[ "$compiled" == "$optional" ]] && ((count += 1))
     done
     expected=1
-    case "$host_name" in
-        MINGW*|MSYS*) expected=0 ;;
+    case "$optional:$host_name" in
+        lib/platform/src/os_sandbox_terminal_worker.c:Linux) expected=1 ;;
+        lib/platform/src/os_sandbox_terminal_worker.c:*) expected=0 ;;
+        *:MINGW*|*:MSYS*) expected=0 ;;
     esac
     if (( count != expected )); then
         echo "check-zcode-package-registry: FAIL — host-optional $optional appears $count times in LIB_SRCS (expected $expected on $host_name)" >&2

@@ -705,7 +705,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev proof ensure` | compat 🔧 → `z23-dev dev proof status` | mutate / dev-mutation / **owner** · fast/low | `root`, `local_commit`, `remote_base`, `mode` | `zcl.dev_proof_status.v1` | `z23-dev dev proof ensure` | Ensure background proof for one exact commit and remote base — *background proof scheduling requires the dev binary* |
-| `dev proof status` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `root`, `local_commit`, `remote_base` | `zcl.dev_proof_status.v1` | `z23-dev dev proof status` | Read exact commit/base proof status — *proof receipt status requires the dev binary* |
+| `dev proof status` | compat 🔧 → `z23-dev dev proof status` | read / read / operator · instant/tiny | `root`, `local_commit`, `remote_base`, `mode` | `zcl.dev_proof_status.v1` | `z23-dev dev proof status` | Read exact commit/base proof status — *proof receipt status requires the dev binary* |
 | `dev proof wait` | compat 🔧 → `z23-dev dev proof status` | mutate / dev-mutation / **owner** · persistent/low | `root`, `local_commit`, `remote_base`, `timeout_ms` | `zcl.dev_proof_status.v1` | `z23-dev dev proof wait` | Wait for one exact commit/base receipt — *proof receipt waiting requires the dev binary* |
 
 #### `dev.test` — Focused proof selection
@@ -844,7 +844,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `ops mesh pair plan` | ready | read / read / operator · fast/low | **`peer`** | `zcl.mesh.pairing.plan.v1` | `z23 ops mesh pair plan --peer=<addr-or-fingerprint-prefix>` | Preview pairing one connected machine |
-| `ops mesh pair commit` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`peer`**, `fingerprint`, `days` | `zcl.mesh.pairing.commit.v1` | `z23 ops mesh pair commit --peer=<selector> --fingerprint=<64hex> [--days=7]` | Pair one connected machine with status-read authority |
+| `ops mesh pair commit` | ready | mutate / app-write / **owner**, plan-commit · foreground/low | **`peer`**, `fingerprint`, `days`, `terminal` | `zcl.mesh.pairing.commit.v1` | `z23 ops mesh pair commit --peer=<selector> --fingerprint=<64hex> [--days=7]` | Pair one connected machine with status-read authority |
 | `ops mesh pair list` | ready | read / read / operator · fast/low | none | `zcl.mesh.pairing.list.v1` | `z23 ops mesh pair list` | List this machine's owner-approved pairings |
 | `ops mesh pair revoke` | ready | mutate / app-write / **owner**, plan-commit · fast/low | **`pairing_id`**, `confirm` | `zcl.mesh.pairing.revoke.v1` | `z23 ops mesh pair revoke --pairing-id=<64hex>` | Revoke one local machine pairing |
 

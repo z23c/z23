@@ -858,9 +858,9 @@ static int test_concurrent_swap_hammer(void)
     return failures;
 }
 
-int test_hotswap_module(void);
+static int test_hotswap_module_platform_arm(void);
 
-int test_hotswap_module(void)
+static int test_hotswap_module_platform_arm(void)
 {
     int failures = 0;
     failures += test_module_admit();
@@ -878,9 +878,14 @@ int test_hotswap_module(void)
 }
 #else  /* _WIN32 */
 /* mmap/mprotect/munmap module-image fixture; Windows has no mmap(2). Skipped loudly rather than faked. */
-int test_hotswap_module(void)
+static int test_hotswap_module_platform_arm(void)
 {
     printf("hotswap_module: SKIP (Windows): mmap/mprotect/munmap module-image fixture; windows has no mmap(2).\n");
     return 0;
 }
 #endif
+
+int test_hotswap_module(void)
+{
+    return test_hotswap_module_platform_arm();
+}

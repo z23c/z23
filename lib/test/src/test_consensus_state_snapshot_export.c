@@ -10,6 +10,7 @@
 #include "config/consensus_state_snapshot_install.h"
 #include "config/consensus_state_bundle_validate.h"
 #include "config/consensus_state_producer_receipt.h"
+#include "../../../config/src/consensus_state_snapshot_export_internal.h"
 #include "../../../config/src/consensus_state_proof_prefix.h"
 #include "jobs/tip_finalize_stage.h"
 #include "chain/checkpoints.h"
@@ -40,6 +41,7 @@ void reducer_frontier_test_set_compiled_anchor(int32_t height);
     else { printf("FAIL\n"); failures++; }                            \
 } while (0)
 
+#if !defined(__APPLE__)
 struct cse_parent_swap_fixture {
     char original[512];
     char moved[512];
@@ -839,10 +841,29 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
 
     *failures_ptr = failures;
 }
+#endif
 
-int test_consensus_state_snapshot_export(void)
+static int test_consensus_state_snapshot_export_platform_arm(void)
 {
     int failures = 0;
+#if defined(__APPLE__)
+    struct consensus_export_output_binding output;
+    struct consensus_state_export_result result;
+    sqlite3 *destination = (sqlite3 *)(uintptr_t)1;
+    memset(&result, 0, sizeof(result));
+    consensus_export_output_init(&output);
+    CSE_CHECK("Darwin anonymous staging refuses before SQLite execution",
+              !consensus_export_open_temp(&output, &destination, &result));
+    CSE_CHECK("Darwin refusal leaves no destination handle",
+              destination == NULL);
+    CSE_CHECK("Darwin refusal is typed as an output capability boundary",
+              result.status == CONSENSUS_EXPORT_OUTPUT_ERROR &&
+              strstr(result.reason,
+                     "anonymous no-replace output staging is unavailable") !=
+                  NULL);
+    consensus_export_output_close(&output);
+    return failures;
+#else
     char dir_template[] = "/tmp/zcl-cse-XXXXXX";
     char *dir = mkdtemp(dir_template);
     CSE_CHECK("fixture directory", dir != NULL);
@@ -1871,12 +1892,18 @@ int test_consensus_state_snapshot_export(void)
     (void)rmdir(export_dir);
     (void)rmdir(dir);
     return failures;
+#endif
 }
 #else  /* _WIN32 */
 /* Export-proof fixture is written on the POSIX at()/fcntl(F_DUPFD_CLOEXEC)/futimens surface; no Windows analogue for the fixture. Skipped loudly rather than faked. */
-int test_consensus_state_snapshot_export(void)
+static int test_consensus_state_snapshot_export_platform_arm(void)
 {
     printf("consensus_state_snapshot_export: SKIP (Windows): export-proof fixture is written on the posix at()/fcntl(f_dupfd_cloexec)/futimens surface; no windows analogue for the fixture.\n");
     return 0;
 }
 #endif
+
+int test_consensus_state_snapshot_export(void)
+{
+    return test_consensus_state_snapshot_export_platform_arm();
+}

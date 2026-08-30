@@ -1,6 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Fail-fast Git admission for exact local development receipts. */
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "dev_proof_receipt.h"

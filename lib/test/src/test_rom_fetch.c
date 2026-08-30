@@ -1861,7 +1861,7 @@ static int test_directory_discovery(void)
     return failures;
 }
 
-int test_rom_fetch(void)
+static int test_rom_fetch_platform_arm(void)
 {
     int failures = 0;
     failures += test_manifest_sane();
@@ -1888,10 +1888,15 @@ int test_rom_fetch(void)
  * (lib/net/src/rom_fetch.c:504 and :739): every case below drives a real
  * fs/TCP fetch that cannot succeed on this lane, so the group reports one
  * loud skip rather than a field of transport refusals. */
-int test_rom_fetch(void)
+static int test_rom_fetch_platform_arm(void)
 {
     printf("rom_fetch: SKIP (Windows): ROM fetch transport is fail-closed "
            "ENOTSUP on native Windows (rom_fetch.c:504,739)\n");
     return 0;
 }
 #endif
+
+int test_rom_fetch(void)
+{
+    return test_rom_fetch_platform_arm();
+}

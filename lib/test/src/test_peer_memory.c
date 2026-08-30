@@ -250,9 +250,9 @@ static bool pm_forge_store(struct byte_stream *s, const struct pm_forged *f)
     return ok;
 }
 
-int test_peer_memory(void);
+static int test_peer_memory_platform_arm(void);
 
-int test_peer_memory(void)
+static int test_peer_memory_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== peer memory tests ===\n");
@@ -878,9 +878,14 @@ int test_peer_memory(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked memory-bound child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_peer_memory(void)
+static int test_peer_memory_platform_arm(void)
 {
     printf("peer_memory: SKIP (Windows): forked memory-bound child lane\n");
     return 0;
 }
 #endif
+
+int test_peer_memory(void)
+{
+    return test_peer_memory_platform_arm();
+}

@@ -52,6 +52,7 @@
 #include "platform/time_compat.h"
 #include "storage/block_index_db.h"
 #include "storage/dbwrapper.h"
+#include "test/importblockindex_fixture.h"
 #include "util/blocker.h"
 
 #include <errno.h>
@@ -252,6 +253,12 @@ static bool ibr_build_fixture(const char *src_dir,
 
     db_wrapper_close(&dbw);
     return ok;
+}
+
+bool test_importblockindex_fixture_build_minimal(const char *src_dir)
+{
+    struct ibr_block_fixture fx;
+    return src_dir && ibr_build_fixture(src_dir, &fx, 1);
 }
 
 /* Assert every fixture row (hash/prev_hash/merkle_root/time/bits) landed in

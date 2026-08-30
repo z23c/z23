@@ -602,7 +602,7 @@ static bool set_contains(char set[64][64], int n, const char *s)
     return false;
 }
 
-int test_codeindex(void)
+static int test_codeindex_platform_arm(void)
 {
     int failures = 0;
 
@@ -1407,9 +1407,14 @@ int test_codeindex(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked crash-rebuild and multi-child concurrency lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_codeindex(void)
+static int test_codeindex_platform_arm(void)
 {
     printf("codeindex: SKIP (Windows): forked crash-rebuild and multi-child concurrency lane\n");
     return 0;
 }
 #endif
+
+int test_codeindex(void)
+{
+    return test_codeindex_platform_arm();
+}

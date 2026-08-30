@@ -862,6 +862,7 @@ AGENT_IMPACT_RULE("app/controllers/src/snapshot_controller_import.c|app/services
 /* --importblockindex round-trip: both call shapes of
  * snapshot_import_block_index (CLI header-only + bundle-loader full-position). */
 AGENT_IMPACT_RULE("lib/test/src/test_importblockindex_roundtrip.c", "importblockindex_roundtrip block_index_integrity make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/include/test/importblockindex_fixture.h", "importblockindex_cli_dispatch importblockindex_roundtrip block_index_integrity make_lint_gates")
 AGENT_IMPACT_RULE("src/main_cli_modes.c|config/include/config/cli_lane_defaults.h|lib/test/src/test_importblockindex_cli_dispatch.c", "importblockindex_cli_dispatch importblockindex_roundtrip cli_auth_robust cli_argv_strict make_lint_gates")
 /* D4 (wf/cli-harness-honesty): -rpcport= datadir auto-discovery match-by-port
  * + refuse-on-ambiguous/no-match — the CLI-mode taxonomy proof lives in
@@ -2972,3 +2973,16 @@ AGENT_IMPACT_RULE("lib/storage/src/topology_store.c|lib/storage/include/storage/
  * Editing any vendored source, the compat shim, or the smoke test itself
  * selects the freebsd_sh group. */
 AGENT_IMPACT_RULE("vendor/freebsd-sh/*|vendor/freebsd-sh/bin/*|vendor/freebsd-sh/bin/sh/*|vendor/freebsd-sh/bin/sh/bltin/*|vendor/freebsd-sh/bin/kill/*|vendor/freebsd-sh/bin/test/*|vendor/freebsd-sh/usr.bin/*|vendor/freebsd-sh/usr.bin/printf/*|vendor/freebsd-sh/compat/*|vendor/freebsd-sh/compat/bin/*|vendor/patches/freebsd-sh-dirent-d-namlen.patch|lib/test/src/test_freebsd_sh.c", "freebsd_sh make_lint_gates")
+
+/* Platform-arm wrappers still belong to their exact registered invariants.
+ * These files predated the impact table rows; naming each independently keeps
+ * a future edit from hiding behind a broad test-directory wildcard. */
+AGENT_IMPACT_RULE("lib/test/src/test_block_status_event_restart_proof.c", "block_status_event_restart_proof make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_body_fetch_stage.c", "body_fetch_stage make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_chain_advance_atomicity.c", "chain_advance_atomicity make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_ckpt_recheck.c", "ckpt_recheck make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_consensus_db_flip.c", "consensus_db_flip make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_postmortem.c", "postmortem make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_refold_auto_arm.c", "refold_auto_arm make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_refold_from_anchor_fatal.c", "refold_from_anchor_fatal make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_util_signal_handler.c", "util_signal_handler make_lint_gates")
