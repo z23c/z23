@@ -8,6 +8,7 @@
 #include "crypto/sha256.h"
 #include "crypto/sha3.h"
 #include "vcs/build_action.h"
+#include "vcs/signed_evidence.h"
 #include "vcs/zcode_science.h"
 
 #include <stdio.h>
@@ -957,6 +958,316 @@ static int test_zs_result_v2(void)
     return failures;
 }
 
+static void zs_relations(struct vcs_zcode_science_relation_set_v1 *relations)
+{
+    memset(relations, 0, sizeof(*relations));
+    relations->schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION;
+    relations->row_count = 4;
+    relations->rows[0].type = VCS_ZCODE_SCIENCE_RELATION_SUPPORT;
+    relations->rows[1].type = VCS_ZCODE_SCIENCE_RELATION_CONFLICT;
+    relations->rows[2].type = VCS_ZCODE_SCIENCE_RELATION_SUPERSESSION;
+    relations->rows[3].type = VCS_ZCODE_SCIENCE_RELATION_RETRACTION;
+    for (size_t i = 0; i < relations->row_count; i++)
+        zs_root(relations->rows[i].statement_root, (uint8_t)(0xa1u + i));
+}
+
+static void zs_statement(struct vcs_zcode_science_statement_v1 *statement,
+                         const uint8_t predicate_body_root[32])
+{
+    struct vcs_zcode_science_relation_set_v1 relations;
+    memset(statement, 0, sizeof(*statement));
+    statement->schema_version = VCS_ZCODE_SCIENCE_STATEMENT_VERSION;
+    statement->profile = VCS_ZCODE_SCIENCE_PROFILE_PREREGISTRATION;
+    statement->access = VCS_ZCODE_SCIENCE_ACCESS_PUBLIC;
+    statement->privacy = VCS_ZCODE_SCIENCE_PRIVACY_PUBLIC;
+    statement->redistribution = VCS_ZCODE_SCIENCE_REDISTRIBUTION_PERMITTED;
+    statement->authorship = VCS_ZCODE_SCIENCE_AUTHORSHIP_ASSERTED;
+    statement->relation_types = VCS_ZCODE_SCIENCE_RELATION_KNOWN_MASK;
+    statement->relation_count = 4;
+    zs_root(statement->subject_root, 0x81);
+    memcpy(statement->predicate_body_root, predicate_body_root, 32);
+    zs_root(statement->profile_schema_root, 0x83);
+    zs_root(statement->provenance_root, 0x84);
+    zs_root(statement->activity_root, 0x85);
+    zs_root(statement->input_root, 0x86);
+    zs_root(statement->authorship_assertion_root, 0x87);
+    zs_root(statement->license_root, 0x88);
+    zs_root(statement->access_policy_root, 0x89);
+    zs_root(statement->privacy_policy_root, 0x8a);
+    zs_root(statement->external_identifiers_root, 0x8b);
+    zs_root(statement->citations_root, 0x8c);
+    zs_relations(&relations);
+    (void)vcs_zcode_science_relation_set_root(
+        &relations, statement->relations_root);
+    statement->observed_unix = 1500;
+}
+
+static int test_zs_wire_enum_values(void)
+{
+    int failures = 0;
+    TEST("zcode_science: immutable statement enums keep explicit wire values") {
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_IDEA, 1);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_QUESTION, 2);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_HYPOTHESIS, 3);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_PREREGISTRATION, 4);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_PROTOCOL, 5);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_DATASET, 6);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_OBSERVATION, 7);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_COMPUTATIONAL_RUN, 8);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_RESULT, 9);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_CLAIM, 10);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_REVIEW, 11);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_REPLICATION, 12);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_COUNTEREVIDENCE, 13);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_SUPERSESSION, 14);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_RETRACTION, 15);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PROFILE_COUNT, 16);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_ACCESS_PUBLIC, 1);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_ACCESS_CONTROLLED, 2);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_ACCESS_METADATA_ONLY, 3);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_ACCESS_COUNT, 4);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PRIVACY_PUBLIC, 1);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PRIVACY_DEIDENTIFIED, 2);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PRIVACY_SENSITIVE, 3);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_PRIVACY_COUNT, 4);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_REDISTRIBUTION_PERMITTED, 1);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_REDISTRIBUTION_METADATA_ONLY, 2);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_REDISTRIBUTION_PROHIBITED, 3);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_REDISTRIBUTION_COUNT, 4);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_AUTHORSHIP_ASSERTED, 1);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_AUTHORSHIP_SIGNED, 2);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_AUTHORSHIP_COUNT, 3);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_RELATION_SUPPORT, 1);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_RELATION_CONFLICT, 2);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_RELATION_SUPERSESSION, 3);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_RELATION_RETRACTION, 4);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_RELATION_COUNT, 5);
+        ASSERT_EQ(VCS_ZCODE_SCIENCE_RELATION_KNOWN_MASK, 0x0f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zs_relation_set_codec(void)
+{
+    int failures = 0;
+    TEST("zcode_science: statement relations are canonical bounded typed rows") {
+        struct vcs_zcode_science_relation_set_v1 relations, parsed, changed;
+        struct vcs_zcode_science_relation_set_v1 zero = {0};
+        uint8_t wire[VCS_ZCODE_SCIENCE_RELATION_SET_MAX_WIRE_BYTES];
+        uint8_t root[32], again[32];
+        char root_hex[65];
+        size_t wire_len = 0;
+        zs_relations(&relations);
+        ASSERT_EQ(vcs_zcode_science_relation_set_validate(&relations),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_relation_set_serialize(
+                      &relations, wire, &wire_len), VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(wire_len,
+                  VCS_ZCODE_SCIENCE_RELATION_SET_HEADER_BYTES +
+                      4u * VCS_ZCODE_SCIENCE_RELATION_ROW_BYTES);
+        ASSERT(memcmp(wire, "ZCSREL\r\n", 8) == 0);
+        ASSERT_EQ(vcs_zcode_science_relation_set_parse(
+                      wire, wire_len, &parsed), VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(&relations, &parsed, sizeof(relations)) == 0);
+        ASSERT_EQ(vcs_zcode_science_relation_set_root(&relations, root),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_relation_set_root(&parsed, again),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(root, again, sizeof(root)) == 0);
+        zcl_hex_encode(root, sizeof(root), root_hex);
+        ASSERT_STR_EQ(root_hex,
+            "d19ffc862ca29987a01bae3ea37bf263e070f2ce508416707fb556c37b19d092");
+
+        changed = relations;
+        changed.rows[0].type = VCS_ZCODE_SCIENCE_RELATION_COUNT;
+        ASSERT_EQ(vcs_zcode_science_relation_set_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE);
+        changed = relations;
+        changed.rows[1] = changed.rows[0];
+        ASSERT_EQ(vcs_zcode_science_relation_set_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_RELATION_ORDER);
+        ASSERT_EQ(vcs_zcode_science_relation_set_parse(
+                      wire, wire_len - 1, &parsed),
+                  VCS_ZCODE_SCIENCE_ERR_WIRE_SIZE);
+        ASSERT(memcmp(&parsed, &zero, sizeof(parsed)) == 0);
+        wire[VCS_ZCODE_SCIENCE_RELATION_SET_HEADER_BYTES] = 0xff;
+        ASSERT_EQ(vcs_zcode_science_relation_set_parse(
+                      wire, wire_len, &parsed),
+                  VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE);
+        ASSERT(memcmp(&parsed, &zero, sizeof(parsed)) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zs_statement_codec(void)
+{
+    int failures = 0;
+    TEST("zcode_science: universal statement is an exact inert envelope") {
+        struct vcs_zcode_study_spec_v1 study;
+        struct vcs_zcode_science_relation_set_v1 relations;
+        struct vcs_zcode_science_relation_set_v1 empty_relations = {
+            .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
+        };
+        struct vcs_zcode_science_statement_v1 statement, original, parsed, zero;
+        uint8_t study_root[32], root[32], changed_root[32], alternate[32];
+        uint8_t wire[VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES + 1];
+        uint8_t seed[32], secret[32], pubkey[32], wrong[32];
+        uint8_t other_seed[32], other_secret[32], other_pubkey[32];
+        char root_hex[65];
+        zs_study(&study);
+        zs_relations(&relations);
+        ASSERT_EQ(vcs_zcode_study_spec_root(&study, study_root),
+                  VCS_ZCODE_SCIENCE_OK);
+        zs_statement(&statement, study_root);
+        original = statement;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&statement),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_validate_relations(
+                      &statement, &relations), VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_serialize(&statement, wire),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_parse(
+                      wire, VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES, &parsed),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(parsed.predicate_body_root, study_root, 32) == 0);
+        ASSERT(memcmp(parsed.subject_root, statement.subject_root, 32) == 0);
+        ASSERT(memcmp(&parsed, &statement, sizeof(statement)) == 0);
+
+        memset(&zero, 0, sizeof(zero));
+        memset(&parsed, 0xa5, sizeof(parsed));
+        ASSERT_EQ(vcs_zcode_science_statement_parse(
+                      wire, VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES + 1,
+                      &parsed), VCS_ZCODE_SCIENCE_ERR_WIRE_SIZE);
+        ASSERT(memcmp(&parsed, &zero, sizeof(parsed)) == 0);
+        wire[0] ^= 1;
+        memset(&parsed, 0xa5, sizeof(parsed));
+        ASSERT_EQ(vcs_zcode_science_statement_parse(
+                      wire, VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES, &parsed),
+                  VCS_ZCODE_SCIENCE_ERR_WIRE_MAGIC);
+        ASSERT(memcmp(&parsed, &zero, sizeof(parsed)) == 0);
+        wire[0] ^= 1;
+
+        ASSERT_EQ(vcs_zcode_science_statement_root(&statement, root),
+                  VCS_ZCODE_SCIENCE_OK);
+        zcl_hex_encode(root, 32, root_hex);
+        ASSERT_STR_EQ(root_hex,
+            "395e3b477dd1429b5d4a8c7d926886a2ae5994b5c531bcbff29125f5f6e2a1ac");
+        struct vcs_zcode_science_statement_v1 changed = statement;
+        changed.predicate_body_root[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_science_statement_root(&changed, changed_root),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(root, changed_root, 32) != 0);
+        ASSERT(vcs_signed_evidence_root(
+            "zcl.science_statement.alternate.v1",
+            sizeof("zcl.science_statement.alternate.v1"), wire,
+            VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES, alternate));
+        ASSERT(memcmp(root, alternate, 32) != 0);
+
+        changed = statement;
+        memset(changed.subject_root, 0, 32);
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO);
+        changed = statement;
+        changed.profile = VCS_ZCODE_SCIENCE_PROFILE_COUNT;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_PROFILE);
+        changed = statement;
+        changed.access = 0;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_RIGHTS);
+        changed = statement;
+        changed.privacy = VCS_ZCODE_SCIENCE_PRIVACY_COUNT;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_RIGHTS);
+        changed = statement;
+        changed.redistribution = 0;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_RIGHTS);
+        changed = statement;
+        changed.relation_types |= 0x80u;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE);
+        changed = statement;
+        changed.relation_count++;
+        ASSERT_EQ(vcs_zcode_science_statement_validate_relations(
+                      &changed, &relations),
+                  VCS_ZCODE_SCIENCE_ERR_RELATION_MISMATCH);
+        changed = statement;
+        changed.relations_root[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_science_statement_validate_relations(
+                      &changed, &relations),
+                  VCS_ZCODE_SCIENCE_ERR_RELATION_MISMATCH);
+        changed = statement;
+        changed.relation_types = 0;
+        changed.relation_count = 0;
+        ASSERT_EQ(vcs_zcode_science_relation_set_root(
+                      &empty_relations, changed.relations_root),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_validate_relations(
+                      &changed, &empty_relations), VCS_ZCODE_SCIENCE_OK);
+        changed.relations_root[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_RELATION_MISMATCH);
+        changed = statement;
+        changed.observed_unix = 0;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_TIME_ORDER);
+        changed = statement;
+        changed.embargo_until_unix = changed.observed_unix - 1;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_EMBARGO);
+        changed = statement;
+        changed.signer_pubkey[0] = 1;
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_AUTHORSHIP);
+
+        zs_root(seed, 0x91);
+        ed25519_keypair(pubkey, secret, seed);
+        zs_root(other_seed, 0x93);
+        ed25519_keypair(other_pubkey, other_secret, other_seed);
+        changed = original;
+        ASSERT_EQ(vcs_zcode_science_statement_seal(
+                      &changed, secret, other_pubkey),
+                  VCS_ZCODE_SCIENCE_ERR_SIGNATURE);
+        ASSERT(memcmp(&changed, &original, sizeof(changed)) == 0);
+        ASSERT_EQ(vcs_zcode_science_statement_seal(
+                      &statement, secret, pubkey), VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(statement.authorship, VCS_ZCODE_SCIENCE_AUTHORSHIP_SIGNED);
+        ASSERT_EQ(vcs_zcode_science_statement_verify(&statement, pubkey),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_serialize(&statement, wire),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_parse(
+                      wire, VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES, &parsed),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_verify(&parsed, pubkey),
+                  VCS_ZCODE_SCIENCE_OK);
+        wire[18] ^= 1u;
+        ASSERT_EQ(vcs_zcode_science_statement_parse(
+                      wire, VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES, &parsed),
+                  VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_science_statement_verify(&parsed, pubkey),
+                  VCS_ZCODE_SCIENCE_ERR_SIGNATURE);
+        wire[18] ^= 1u;
+        zs_root(wrong, 0x92);
+        ASSERT_EQ(vcs_zcode_science_statement_verify(&statement, wrong),
+                  VCS_ZCODE_SCIENCE_ERR_SIGNATURE);
+        changed = statement;
+        changed.signature[0] ^= 1;
+        ASSERT_EQ(vcs_zcode_science_statement_verify(&changed, pubkey),
+                  VCS_ZCODE_SCIENCE_ERR_SIGNATURE);
+        memset(changed.signature, 0, sizeof(changed.signature));
+        ASSERT_EQ(vcs_zcode_science_statement_validate(&changed),
+                  VCS_ZCODE_SCIENCE_ERR_AUTHORSHIP);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_science(void)
 {
     int failures = 0;
@@ -970,6 +1281,9 @@ int test_zcode_science(void)
     failures += test_zs_hardware_profile();
     failures += test_zs_benchmark_method();
     failures += test_zs_result_v2();
+    failures += test_zs_wire_enum_values();
+    failures += test_zs_relation_set_codec();
+    failures += test_zs_statement_codec();
     printf("=== zcode_science: %d failures ===\n", failures);
     return failures;
 }
