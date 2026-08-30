@@ -11,6 +11,7 @@
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "models/peer.h"
+#include "models/query_builder.h"
 #include "event/event.h"
 #include "net/port_policy.h"
 #include "storage/peers_projection.h"
@@ -18,6 +19,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+/* The projection every read in this file uses, in row_to_peer() order. */
+static const enum qb_column k_peer_cols[] = {
+    QB_C_peers_id,        QB_C_peers_ip,              QB_C_peers_port,
+    QB_C_peers_services,  QB_C_peers_last_seen,       QB_C_peers_last_try,
+    QB_C_peers_attempts,  QB_C_peers_source,          QB_C_peers_bandwidth_score,
+    QB_C_peers_is_zcl23,
+};
+#define K_PEER_NCOLS (sizeof(k_peer_cols) / sizeof(k_peer_cols[0]))
 
 #define DB_PEER_SAVE_MAX_ATTEMPTS 1200
 #define DB_PEER_SAVE_RETRY_MS 25
@@ -247,32 +257,34 @@ int db_peer_count(struct node_db *ndb)
 int db_peer_recent(struct node_db *ndb, struct db_peer *out, size_t max)
 {
     if (!ndb->open) return 0;
-    sqlite3_stmt *s = NULL;
-    int count = 0;
-
-    AR_PREPARE_RET(ndb, s,
-        "SELECT id,ip,port,services,last_seen,last_try,attempts,"
-        "source,bandwidth_score,is_zcl23"
-        " FROM peers ORDER BY last_seen DESC LIMIT ?",
-        0);
-    AR_BIND_INT(s, 1, (int)max);
-    AR_LIST_ROWS(s, out, max, row_to_peer(s, &out[count], 0));
-    AR_FINALIZE(s);
-    return count;
+    struct qb q;
+    qb_select(&q, QB_T_peers);
+    qb_select_columns(&q, k_peer_cols, K_PEER_NCOLS);
+    qb_order_by(&q, QB_C_peers_last_seen, QB_DESC);
+    qb_limit(&q, (int64_t)max);
+    QB_QUERY_LIST(ndb, &q, s, out, max, row_to_peer(s, &out[count], 0));
 }
 
 /* ── Mark Tried ───────────────────────────────────────────────── */
 
+/* NOTE (found by the query-builder conversion): the literal this replaced
+ * read `strftime('%%s','now')`. Nothing printf-formats a model SQL string —
+ * it goes straight to sqlite3_prepare_v2 — and in SQLite `%%` is an escaped
+ * percent, so that expression evaluated to the TEXT "%s" and every
+ * mark_tried since had been storing the two characters `%s` in last_try
+ * instead of the epoch. Every other strftime site in app/models uses a
+ * single `%s`. qb_set_unix_now() emits the correct form. */
 bool db_peer_mark_tried(struct node_db *ndb,
                         const uint8_t ip[16], uint16_t port)
 {
     if (!ndb->open) return false;
-    sqlite3_stmt *s = NULL;
-    AR_EXEC_BOOL(ndb, s,
-        "UPDATE peers SET last_try=strftime('%%s','now'),"
-        " attempts=attempts+1 WHERE ip=? AND port=?",
-        AR_BIND_BLOB(s, 1, ip, 16);
-        AR_BIND_INT(s, 2, port));
+    struct qb q;
+    qb_update(&q, QB_T_peers);
+    qb_set_unix_now(&q, QB_C_peers_last_try);
+    qb_set_increment(&q, QB_C_peers_attempts, 1);
+    qb_where_blob(&q, QB_C_peers_ip, QB_EQ, ip, 16);
+    qb_where_int(&q, QB_C_peers_port, QB_EQ, port);
+    QB_EXEC_BOOL(ndb, &q, s);
 }
 
 /* ── Mark Seen ────────────────────────────────────────────────── */
@@ -282,12 +294,13 @@ bool db_peer_mark_seen(struct node_db *ndb,
                        int64_t now)
 {
     if (!ndb->open) return false;
-    sqlite3_stmt *s = NULL;
-    AR_EXEC_BOOL(ndb, s,
-        "UPDATE peers SET last_seen=?,attempts=0 WHERE ip=? AND port=?",
-        AR_BIND_INT(s, 1, now);
-        AR_BIND_BLOB(s, 2, ip, 16);
-        AR_BIND_INT(s, 3, port));
+    struct qb q;
+    qb_update(&q, QB_T_peers);
+    qb_set_int(&q, QB_C_peers_last_seen, now);
+    qb_set_int(&q, QB_C_peers_attempts, 0);
+    qb_where_blob(&q, QB_C_peers_ip, QB_EQ, ip, 16);
+    qb_where_int(&q, QB_C_peers_port, QB_EQ, port);
+    QB_EXEC_BOOL(ndb, &q, s);
 }
 
 /* ── Update Score ─────────────────────────────────────────────── */
@@ -297,37 +310,54 @@ bool db_peer_update_score(struct node_db *ndb,
                           uint32_t bandwidth_score, bool is_zcl23)
 {
     if (!ndb->open) return false;
-    sqlite3_stmt *s = NULL;
-    AR_EXEC_BOOL(ndb, s,
-        "UPDATE peers SET bandwidth_score=?,is_zcl23=?"
-        " WHERE ip=? AND port=?",
-        AR_BIND_INT(s, 1, (int)bandwidth_score);
-        AR_BIND_INT(s, 2, is_zcl23 ? 1 : 0);
-        AR_BIND_BLOB(s, 3, ip, 16);
-        AR_BIND_INT(s, 4, port));
+    struct qb q;
+    qb_update(&q, QB_T_peers);
+    qb_set_int(&q, QB_C_peers_bandwidth_score, (int64_t)bandwidth_score);
+    qb_set_int(&q, QB_C_peers_is_zcl23, is_zcl23 ? 1 : 0);
+    qb_where_blob(&q, QB_C_peers_ip, QB_EQ, ip, 16);
+    qb_where_int(&q, QB_C_peers_port, QB_EQ, port);
+    QB_EXEC_BOOL(ndb, &q, s);
 }
 
 /* ── Fast ZCL23 Peers ─────────────────────────────────────────── */
 
+/* The reachable-port set used to exist twice: as the C switch in
+ * lib/net/include/net/port_policy.h and, for this one query, as a second
+ * hand-maintained comma list in ZCL_NET_REACHABLE_PORTS_SQL. Two copies of
+ * a policy that must agree is one copy too many, so this derives the list
+ * from the switch — the authority every dialer already consults — and binds
+ * each port as a parameter. */
+#define PEER_REACHABLE_PORTS_MAX 256
+
+static size_t peer_reachable_ports(int64_t *out, size_t max)
+{
+    size_t n = 0;
+    for (uint32_t p = 1; p <= UINT16_MAX; p++) {
+        if (!zcl_net_port_is_reachable_candidate((uint16_t)p))
+            continue;
+        if (n >= max)
+            return 0;   /* policy outgrew the buffer: refuse, never truncate */
+        out[n++] = (int64_t)p;
+    }
+    return n;
+}
+
 int db_peer_fast_zcl23(struct node_db *ndb, struct db_peer *out, size_t max)
 {
     if (!ndb->open) return 0;
-    sqlite3_stmt *s = NULL;
-    sqlite3_prepare_v2(ndb->db,
-        "SELECT id,ip,port,services,last_seen,last_try,attempts,"
-        "source,bandwidth_score,is_zcl23"
-        " FROM peers WHERE is_zcl23=1"
-        " AND port IN (" ZCL_NET_REACHABLE_PORTS_SQL ")"
-        " ORDER BY bandwidth_score DESC, last_seen DESC LIMIT ?",
-        -1, &s, NULL);
-    if (!s) LOG_RETURN(0, "peer", "prepare failed: %s", sqlite3_errmsg(ndb->db));
-    AR_BIND_INT(s, 1, (int)max);
-    int count = 0;
-    while (AR_STEP_ROW(s) && (size_t)count < max) {
-        memset(&out[count], 0, sizeof(out[count]));
-        row_to_peer(s, &out[count], 0);
-        count++;
-    }
-    AR_FINALIZE(s);
-    return count;
+
+    int64_t ports[PEER_REACHABLE_PORTS_MAX];
+    size_t nports = peer_reachable_ports(ports, PEER_REACHABLE_PORTS_MAX);
+    if (nports == 0)
+        LOG_RETURN(0, "peer", "no reachable candidate ports in port policy");
+
+    struct qb q;
+    qb_select(&q, QB_T_peers);
+    qb_select_columns(&q, k_peer_cols, K_PEER_NCOLS);
+    qb_where_int(&q, QB_C_peers_is_zcl23, QB_EQ, 1);
+    qb_where_in_int(&q, QB_C_peers_port, ports, nports);
+    qb_order_by(&q, QB_C_peers_bandwidth_score, QB_DESC);
+    qb_order_by(&q, QB_C_peers_last_seen, QB_DESC);
+    qb_limit(&q, (int64_t)max);
+    QB_QUERY_LIST(ndb, &q, s, out, max, row_to_peer(s, &out[count], 0));
 }
