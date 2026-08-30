@@ -28,8 +28,8 @@
  * GENERATED AS A SNAPSHOT, 2026-08-30, from the current object tree:
  *   E=build/dev-obj/epochs/0f649ffbe4d8a65f5f3b01639d87f37666aa4437fa7fdbc1d7908c4710bc7f93
  *   find $E -name '*.o' -print0 | xargs -0 nm -u --print-file-name
- * cross-referenced against the real config/capability_symbols.def (544
- * rows). The extraction treats BOTH `U` (strong) and `w` (weak) type letters
+ * cross-referenced against the real config/capability_symbols.def. The
+ * extraction treats BOTH `U` (strong) and `w` (weak) type letters
  * as undefined — a `U`-only strip silently drops every weak-undefined
  * reference (measured: 18 occurrences across this tree, including
  * ed25519_secret_key_from_seed and five other dynhost_*/tor_*/hs_* entry
@@ -37,8 +37,10 @@
  * sail past this table unseen. tools/lint/check_capability_closure.sh makes
  * the same U+w extraction and carries a selftest that regresses on it.
  *
- * This records what the object tree shows TODAY. It is a starting position,
- * not an approval.
+ * This records the portable/Linux object shape. Exact Windows replacements
+ * live in config/module_capabilities_windows.def; package claims take the
+ * union across both tables. Each records what its object tree shows TODAY.
+ * Neither is an approval.
  *
  * Ordering is alphabetical by path and carries no meaning. */
 

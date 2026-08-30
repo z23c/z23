@@ -100,7 +100,7 @@ source "$SCRIPT_DIR/zcode_pkg_sources.sh"
 # check_zcode_package_standalone.sh reads.
 REGISTRY_DEF_NAMES=(config/zcode_package_registry.def config/zcode_c23_commons_app.def)
 CLASSES_DEF_NAME=config/capability_classes.def
-MODULES_DEF_NAME=config/module_capabilities.def
+MODULES_DEF_NAMES=(config/module_capabilities.def config/module_capabilities_windows.def)
 
 # ── config/capability_classes.def ───────────────────────────────────────────
 # ZCL_CAPABILITY_CLASS(NETWORK, ...) -> CAP_NETWORK, one per line.
@@ -134,7 +134,7 @@ pkgcap_module_tsv() {
                 if (path != "" && cls != "") print path "\t" cls
             }
         }
-    ' "$1"
+    ' "$@"
 }
 
 # ── config/*.def registry rows ──────────────────────────────────────────────
@@ -161,7 +161,11 @@ check_root() {
     local violations=0
 
     local classes_file="$root/$CLASSES_DEF_NAME"
-    local modules_file="$root/$MODULES_DEF_NAME"
+    local -a modules_files=()
+    local module_name
+    for module_name in "${MODULES_DEF_NAMES[@]}"; do
+        [ -f "$root/$module_name" ] && modules_files+=("$root/$module_name")
+    done
 
     # ── vocabulary ──────────────────────────────────────────────────────────
     if [ ! -f "$classes_file" ]; then
@@ -186,22 +190,31 @@ check_root() {
     fi
 
     # ── per-file declarations ───────────────────────────────────────────────
-    if [ ! -f "$modules_file" ]; then
-        echo "check_package_capabilities: UNPROVEN — cannot read $modules_file"
+    if [ "${#modules_files[@]}" -eq 0 ]; then
+        echo "check_package_capabilities: UNPROVEN — cannot read ${MODULES_DEF_NAMES[0]}"
         echo "  That file is what every package capability set is DERIVED from."
         echo "  Its absence is a broken precondition, not zero violations."
         return 2
     fi
     local -A MOD_RAW=()
-    local path raw n_mod=0
+    local path raw old tok n_mod=0
     while IFS=$'\t' read -r path raw; do
         [ -n "$path" ] || continue
-        MOD_RAW["$path"]="$raw"
+        old="${MOD_RAW[$path]:-}"
+        IFS='|' read -ra toks <<< "$raw"
+        for tok in "${toks[@]}"; do
+            [ -n "$tok" ] && [ "$tok" != "CAP_NONE" ] || continue
+            case "|$old|" in
+                *"|$tok|"*) ;;
+                *) [ -n "$old" ] && old="$old|$tok" || old="$tok" ;;
+            esac
+        done
+        MOD_RAW["$path"]="$old"
         n_mod=$((n_mod + 1))
-    done < <(pkgcap_module_tsv "$modules_file")
+    done < <(pkgcap_module_tsv "${modules_files[@]}")
     if [ "$n_mod" -lt 1 ]; then
         echo "check_package_capabilities: UNPROVEN — parsed 0 rows from"
-        echo "  $modules_file. Every package would derive the empty set and"
+        echo "  ${modules_files[*]}. Every package would derive the empty set and"
         echo "  every genuinely inert package would 'pass' off a scan that saw"
         echo "  nothing. That is not a proof of inertness."
         return 2
@@ -514,6 +527,21 @@ run_selftest() {
     fixture_rows "$d" "lib/busy/src/a.c CAP_FS_READ|CAP_NETWORK" \
                       "lib/busy/src/b.c CAP_FS_WRITE"
     expect_rc "C2: a correct three-class declaration passes (positive control)" 0 "OK — every manifest" "$d" || rc=1
+    n=$((n + 1))
+
+    # C3. Platform-exact rows replace portable rows for object symmetry, but
+    # a package crosses platforms and must declare their UNION. Pin the
+    # duplicate-path merge so an associative-array overwrite cannot silently
+    # discard either target's reach.
+    d="$FIXTURE_ROOT/c3"; fixture_base "$d"
+    fixture_pkg "$d" "fx/cross-target" "lib/cross-target" \
+        '"CAP_FS_READ", "CAP_NETWORK"' src/portable.c
+    fixture_rows "$d" "lib/cross-target/src/portable.c CAP_FS_READ"
+    cat > "$d/config/module_capabilities_windows.def" <<'EOF'
+ZCL_MODULE_CAPABILITY("lib/cross-target/src/portable.c", CAP_NETWORK, "Windows exact arm")
+EOF
+    expect_rc "C3: package claims union portable and Windows exact reach" \
+        0 "OK — every manifest" "$d" || rc=1
     n=$((n + 1))
 
     # D. ABSENT IS NOT EMPTY. No "capabilities" key at all must FAIL, and must

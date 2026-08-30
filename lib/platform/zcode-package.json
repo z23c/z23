@@ -9,6 +9,7 @@
   "dependencies": [],
   "capabilities": [
     "CAP_CLOCK",
+    "CAP_DYNLOAD",
     "CAP_FS_READ",
     "CAP_FS_WRITE",
     "CAP_PRIVILEGE",
