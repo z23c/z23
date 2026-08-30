@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 
 #include "vcs/vcs_devloop.h"
+#include "base/bytes.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_commit.h"
 #include "vcs/vcs_index.h"
@@ -55,14 +56,6 @@ static const uint8_t publication_receipt_magic[8] =
 static const uint8_t publication_ack_set_magic[8] =
     {'Z','P','A','K','1',0,0,0};
 
-static bool publication_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
-
 static void publication_fixed(char *out, size_t cap, const char *value)
 {
     memset(out, 0, cap);
@@ -76,11 +69,11 @@ static bool publication_job_serialize(
 {
     if (!job || !wire ||
         job->version != VCS_DEVLOOP_PUBLICATION_JOB_VERSION ||
-        !publication_root_nonzero(job->vcs_commit_root) ||
-        !publication_root_nonzero(job->source_tree_root) ||
-        !publication_root_nonzero(job->proof_receipt_root) ||
-        !publication_root_nonzero(job->source_identity_sha256) ||
-        !publication_root_nonzero(job->source_cas_sha3)) {
+        !zcl_bytes_any_set(job->vcs_commit_root, 32) ||
+        !zcl_bytes_any_set(job->source_tree_root, 32) ||
+        !zcl_bytes_any_set(job->proof_receipt_root, 32) ||
+        !zcl_bytes_any_set(job->source_identity_sha256, 32) ||
+        !zcl_bytes_any_set(job->source_cas_sha3, 32)) {
         LOG_WARN("vcs.devloop", "publication job serialize: invalid roots");
         return false;
     }
@@ -280,10 +273,10 @@ static bool publication_receipt_serialize(
              VCS_DEVLOOP_PUBLICATION_PHASE_STORAGE_ACKNOWLEDGED &&
          receipt->phase !=
              VCS_DEVLOOP_PUBLICATION_PHASE_SOURCE_REPRODUCED) ||
-        !publication_root_nonzero(receipt->job_root) ||
+        !zcl_bytes_any_set(receipt->job_root, 32) ||
         (receipt->phase !=
              VCS_DEVLOOP_PUBLICATION_PHASE_WAITING_ACCEPTANCE &&
-         !publication_root_nonzero(receipt->artifact_root))) {
+         !zcl_bytes_any_set(receipt->artifact_root, 32))) {
         LOG_WARN("vcs.devloop", "publication receipt serialize: invalid");
         return false;
     }
@@ -730,7 +723,7 @@ static bool publication_mapping_valid(
     struct vcs_package_mapping_set set;
     if (!vcs_package_mapping_set_load(repo_root, mapping_set_root, &set) ||
         memcmp(set.source_tree_root, job->source_tree_root, 32) != 0 ||
-        !publication_root_nonzero(set.lane_receipt_root)) {
+        !zcl_bytes_any_set(set.lane_receipt_root, 32)) {
         vcs_package_mapping_set_free(&set);
         return false;
     }
@@ -865,7 +858,7 @@ bool vcs_devloop_publication_advance_release(
     struct vcs_package_mapping_set set;
     if (!repo_root || !repo_root[0] || !job_root || !mapping_set_root ||
         !release_root || !receipt_root_out ||
-        !publication_root_nonzero(release_root) ||
+        !zcl_bytes_any_set(release_root, 32) ||
         !vcs_devloop_publication_job_load(repo_root, job_root, &job) ||
         !vcs_devloop_publication_job_is_queued(repo_root, job_root) ||
         !publication_mapping_valid(repo_root, &job, mapping_set_root, &set))
@@ -953,8 +946,8 @@ bool vcs_devloop_publication_advance_passport(
     struct vcs_package_mapping_set set;
     if (!repo_root || !repo_root[0] || !job_root || !mapping_set_root ||
         !release_root || !passport_root || !receipt_root_out ||
-        !publication_root_nonzero(release_root) ||
-        !publication_root_nonzero(passport_root) ||
+        !zcl_bytes_any_set(release_root, 32) ||
+        !zcl_bytes_any_set(passport_root, 32) ||
         !vcs_devloop_publication_job_load(repo_root, job_root, &job) ||
         !vcs_devloop_publication_job_is_queued(repo_root, job_root) ||
         !publication_mapping_valid(repo_root, &job, mapping_set_root, &set))
@@ -1050,9 +1043,9 @@ bool vcs_devloop_publication_advance_workspace(
     struct vcs_package_mapping_set set;
     if (!repo_root || !repo_root[0] || !job_root || !mapping_set_root ||
         !release_root || !passport_root || !workspace_root ||
-        !receipt_root_out || !publication_root_nonzero(release_root) ||
-        !publication_root_nonzero(passport_root) ||
-        !publication_root_nonzero(workspace_root) ||
+        !receipt_root_out || !zcl_bytes_any_set(release_root, 32) ||
+        !zcl_bytes_any_set(passport_root, 32) ||
+        !zcl_bytes_any_set(workspace_root, 32) ||
         !vcs_devloop_publication_job_load(repo_root, job_root, &job) ||
         !vcs_devloop_publication_job_is_queued(repo_root, job_root) ||
         !publication_mapping_valid(repo_root, &job, mapping_set_root, &set))

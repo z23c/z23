@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_family_admission.h"
 
+#include "base/bytes.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -16,14 +17,6 @@ struct vcs_zcode_family_admission_projection {
     size_t count;
     uint8_t root[32];
 };
-
-static bool projection_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static bool projection_pass_state(uint16_t state)
 {
@@ -187,9 +180,9 @@ static enum vcs_zcode_family_admission_error projection_config_validate(
     const struct vcs_zcode_family_projection_config_v1 *config)
 {
     if (!config) return VCS_ZCODE_FAMILY_ADMISSION_NULL;
-    if (!projection_nonzero(config->family_policy_root) ||
-        !projection_nonzero(config->moderation_set_root) ||
-        !projection_nonzero(config->chain_tip_root))
+    if (!zcl_bytes_any_set(config->family_policy_root, 32) ||
+        !zcl_bytes_any_set(config->moderation_set_root, 32) ||
+        !zcl_bytes_any_set(config->chain_tip_root, 32))
         return VCS_ZCODE_FAMILY_ADMISSION_ROOT;
     if (!config->cutoff_height || config->cutoff_mtp <= 0)
         return VCS_ZCODE_FAMILY_ADMISSION_TIME;

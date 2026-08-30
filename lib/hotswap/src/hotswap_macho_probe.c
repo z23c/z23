@@ -9,6 +9,13 @@
 
 #include "hotswap/hotswap_macho_probe.h"
 
+/* The mach-o headers below exist only on Darwin, and hotswap_activate.c —
+ * the sole consumer — already selects this probe under the same guard,
+ * falling back to the ELF probe elsewhere. Without this the file breaks the
+ * Linux build outright. Mirrors the guard in hotswap_elf_probe_windows.c;
+ * every C file under lib/hotswap/src is compiled on every platform. */
+#if defined(__APPLE__)
+
 #include "util/safe_alloc.h"
 
 #include <mach-o/fat.h>
@@ -660,3 +667,5 @@ void hotswap_macho_pinned_path(int fd, char buf[64])
 {
     (void)snprintf(buf, 64, "/dev/fd/%d", fd);
 }
+
+#endif /* __APPLE__ */

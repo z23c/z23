@@ -3,6 +3,7 @@
 
 #include "session/mesh_capability_proto.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -63,20 +64,10 @@ const char *mesh_capability_proto_error_string(
     return "unknown";
 }
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < count; i++)
-        any |= bytes[i];
-    return any != 0;
-}
-
 static bool fields_nonzero(const uint8_t *const *fields, size_t count)
 {
     for (size_t i = 0; i < count; i++)
-        if (!bytes_nonzero(fields[i], 32))
+        if (!zcl_bytes_any_set(fields[i], 32))
             return false;
     return true;
 }
@@ -96,8 +87,8 @@ static bool signed_fields_valid(const uint8_t public_key[32],
                                 const uint8_t signature[64],
                                 bool require_signature)
 {
-    return bytes_nonzero(public_key, 32) &&
-           (!require_signature || bytes_nonzero(signature, 64));
+    return zcl_bytes_any_set(public_key, 32) &&
+           (!require_signature || zcl_bytes_any_set(signature, 64));
 }
 
 static enum mesh_capability_proto_error proposal_shape(

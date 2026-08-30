@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_agent_context.h"
 
+#include "base/bytes.h"
 #include "vcs_priv.h"
 
 #include "crypto/sha3.h"
@@ -15,13 +16,6 @@
 static const uint8_t agent_context_magic[8] = {
     'Z', 'C', 'A', 'C', 'T', 'X', '\r', '\n'
 };
-
-static bool nonzero_root(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_agent_context_result_string(
     enum vcs_zcode_agent_context_result result)
@@ -58,10 +52,10 @@ static enum vcs_zcode_agent_context_result context_measure(
     if (!context || !total_out || !content_out)
         return VCS_ZCODE_AGENT_CONTEXT_NULL;
     size_t query_len = strnlen(context->query, sizeof(context->query));
-    if (!nonzero_root(context->task_root) ||
-        !nonzero_root(context->source_root) ||
-        !nonzero_root(context->goal_root) ||
-        !nonzero_root(context->source_tree_root) || query_len == 0 ||
+    if (!zcl_bytes_any_set(context->task_root, 32) ||
+        !zcl_bytes_any_set(context->source_root, 32) ||
+        !zcl_bytes_any_set(context->goal_root, 32) ||
+        !zcl_bytes_any_set(context->source_tree_root, 32) || query_len == 0 ||
         query_len > VCS_ZCODE_AGENT_CONTEXT_QUERY_MAX ||
         context->file_count == 0 ||
         context->file_count > VCS_ZCODE_AGENT_CONTEXT_MAX_FILES ||

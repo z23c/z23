@@ -3,6 +3,7 @@
 
 #include "vcs/space.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "support/cleanse.h"
@@ -18,19 +19,9 @@ static const uint8_t manifest_magic[8] =
 static const char manifest_signature_domain[] =
     "zcl.space_manifest.signature.v1";
 
-static bool nonzero(const uint8_t *value, size_t length)
-{
-  uint8_t any = 0;
-  if (!value)
-    return false;
-  for (size_t i = 0; i < length; i++)
-    any |= value[i];
-  return any != 0;
-}
-
 static bool zero(const uint8_t *value, size_t length)
 {
-  return !nonzero(value, length);
+  return !zcl_bytes_any_set(value, length);
 }
 
 static bool root_set_valid(const uint8_t roots[][32], size_t count,
@@ -39,7 +30,7 @@ static bool root_set_valid(const uint8_t roots[][32], size_t count,
   if (!roots || count > capacity)
     return false;
   for (size_t i = 0; i < count; i++) {
-    if (!nonzero(roots[i], 32) ||
+    if (!zcl_bytes_any_set(roots[i], 32) ||
         (i > 0 && memcmp(roots[i - 1], roots[i], 32) >= 0))
       return false;
   }
@@ -98,7 +89,7 @@ enum vcs_space_result vcs_service_descriptor_validate(
     return VCS_SPACE_ERR_NULL;
   if (descriptor->schema_version != VCS_SERVICE_DESCRIPTOR_VERSION)
     return VCS_SPACE_ERR_VERSION;
-  if (!nonzero(descriptor->protocol_root, 32))
+  if (!zcl_bytes_any_set(descriptor->protocol_root, 32))
     return VCS_SPACE_ERR_ROOT;
   if (!descriptor->read_verbs ||
       (descriptor->read_verbs & ~VCS_SERVICE_VERB_READ_MASK))
@@ -249,7 +240,7 @@ static enum vcs_space_result manifest_shape(
       !root_set_valid(manifest->portal_roots, manifest->portal_count,
                       VCS_SPACE_PORTAL_MAX))
     return VCS_SPACE_ERR_ORDER;
-  if (manifest->has_admission != nonzero(manifest->admission_root, 32))
+  if (manifest->has_admission != zcl_bytes_any_set(manifest->admission_root, 32))
     return VCS_SPACE_ERR_ROOT;
   if (manifest->not_before < manifest->delegation.not_before ||
       manifest->expiry > manifest->delegation.doc.expiry)
@@ -258,7 +249,7 @@ static enum vcs_space_result manifest_shape(
           &manifest->delegation, NULL, NULL, 0, NULL,
           manifest->not_before) != VCS_ZCODE_DHT_DELEGATION_OK)
     return VCS_SPACE_ERR_DELEGATION;
-  if (require_signature && !nonzero(manifest->signature, 64))
+  if (require_signature && !zcl_bytes_any_set(manifest->signature, 64))
     return VCS_SPACE_ERR_SIGNATURE;
   return VCS_SPACE_OK;
 }

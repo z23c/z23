@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_lane.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "vcs/signed_evidence.h"
 
@@ -11,13 +12,6 @@
 static const uint8_t lane_magic[8] = {
     'Z', 'C', 'L', 'A', 'N', 'E', '\r', '\n'
 };
-
-static bool lane_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_lane_name(uint8_t lane)
 {
@@ -36,25 +30,22 @@ static enum vcs_zcode_dev_error lane_fields(
     if (receipt->lane < VCS_ZCODE_LANE_FRONTIER ||
         receipt->lane > VCS_ZCODE_LANE_PROVEN)
         return VCS_ZCODE_DEV_ERR_VERDICT;
-    if (!lane_nonzero(receipt->source_root) ||
-        !lane_nonzero(receipt->task_root) ||
-        !lane_nonzero(receipt->candidate_root) ||
-        !lane_nonzero(receipt->proof_policy_root) ||
-        !lane_nonzero(receipt->signer_pubkey))
+    if (!zcl_bytes_any_set(receipt->source_root, 32) ||
+        !zcl_bytes_any_set(receipt->task_root, 32) ||
+        !zcl_bytes_any_set(receipt->candidate_root, 32) ||
+        !zcl_bytes_any_set(receipt->proof_policy_root, 32) ||
+        !zcl_bytes_any_set(receipt->signer_pubkey, 32))
         return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
-    bool proof = lane_nonzero(receipt->proof_set_root);
-    bool prior = lane_nonzero(receipt->prior_receipt_root);
+    bool proof = zcl_bytes_any_set(receipt->proof_set_root, 32);
+    bool prior = zcl_bytes_any_set(receipt->prior_receipt_root, 32);
     if ((receipt->lane == VCS_ZCODE_LANE_FRONTIER && (proof || prior)) ||
         (receipt->lane != VCS_ZCODE_LANE_FRONTIER && (!proof || !prior)))
         return VCS_ZCODE_DEV_ERR_POLICY;
     if (receipt->created_unix <= 0)
         return VCS_ZCODE_DEV_ERR_TIME_ORDER;
-    if (signature) {
-        uint8_t any = 0;
-        for (size_t i = 0; i < sizeof(receipt->signature); i++)
-            any |= receipt->signature[i];
-        if (!any) return VCS_ZCODE_DEV_ERR_SIGNATURE;
-    }
+    if (signature && !zcl_bytes_any_set(receipt->signature,
+                                        sizeof(receipt->signature)))
+        return VCS_ZCODE_DEV_ERR_SIGNATURE;
     return VCS_ZCODE_DEV_OK;
 }
 

@@ -2,6 +2,7 @@
  * Purpose: exact, encrypted, idempotent file-market purchase intents. */
 
 #include "services/file_market_purchase_service.h"
+#include "base/bytes.h"
 #include "services/file_market_purchase_internal.h"
 
 #include "base/serialize_le.h"
@@ -24,14 +25,6 @@
 #include <string.h>
 
 #define MP_TTL_SECS 600LL
-
-static bool mp_nonzero(const uint8_t *p, size_t n)
-{
-    uint8_t any = 0;
-    if (!p) return false;
-    for (size_t i = 0; i < n; i++) any |= p[i];
-    return any != 0;
-}
 
 static void mp_request_digest(const struct market_purchase_request *r,
                               uint8_t out[32])
@@ -128,8 +121,8 @@ static bool mp_payload_decode(const uint8_t *raw, size_t len,
         !mp_take(raw, len, &off, p->memo, FILE_MARKET_PAYMENT_MEMO_BYTES))
         return false; // raw-return-ok:pure bounded payload decoder
     return off == len && p->chunks_paid > 0 && p->amount_zat > 0 &&
-           p->maximum_fee_zat >= 0 && mp_nonzero(p->buyer_seed, 32) &&
-           mp_nonzero(p->buyer_pubkey, 32);
+           p->maximum_fee_zat >= 0 && zcl_bytes_any_set(p->buyer_seed, 32) &&
+           zcl_bytes_any_set(p->buyer_pubkey, 32);
 }
 
 static void mp_intent_digest(const uint8_t *plain, size_t plain_len,
@@ -161,7 +154,7 @@ struct zcl_result market_purchase_runtime_validate(
     if (!rt || !rt->node_db || !rt->node_db->open || rt->now_unix <= 0)
         return ZCL_ERR(-1, "open purchase database and observation time are required");
     if (needs_money && (!rt->read_money || rt->tip_height < 0 ||
-        !mp_nonzero(rt->tip_hash, 32) || rt->maximum_fee_zat < 0))
+        !zcl_bytes_any_set(rt->tip_hash, 32) || rt->maximum_fee_zat < 0))
         return ZCL_ERR(-1, "complete purchase money runtime is required");
     if (committing && (!rt->send || !rt->check_source))
         return ZCL_ERR(-2, "purchase commit requires source and send ports");
@@ -264,7 +257,7 @@ struct zcl_result market_purchase_plan(
     if (!req || !out ||
         (strcmp(req->wallet_scope, "dev") != 0 &&
          strcmp(req->wallet_scope, "prod") != 0) ||
-        !mp_nonzero(req->offer_id, 32) || req->source_address[0] == '\0' ||
+        !zcl_bytes_any_set(req->offer_id, 32) || req->source_address[0] == '\0' ||
         strlen(req->source_address) > MARKET_PURCHASE_SOURCE_MAX ||
         req->chunks_paid == 0 || req->chunk_start > UINT32_MAX - req->chunks_paid ||
         req->idempotency_key[0] == '\0' ||
@@ -590,7 +583,7 @@ struct zcl_result market_purchase_commit(
         memory_cleanse(&payload, sizeof(payload));
         return sent;
     }
-    if (!mp_nonzero(txid, 32) || !vault_intent_set_state(
+    if (!zcl_bytes_any_set(txid, 32) || !vault_intent_set_state(
             rt->node_db, row.plan_id, VAULT_INTENT_MEMPOOL_ACCEPTED,
             txid, "", rt->now_unix) ||
         !vault_intent_find(rt->node_db, row.plan_id, &row)) {

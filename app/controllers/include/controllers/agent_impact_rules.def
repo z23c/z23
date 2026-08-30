@@ -46,6 +46,13 @@ AGENT_IMPACT_RULE("lib/base/include/base/hex.h|lib/test/src/test_hex_codec.c|too
 /* The one byte-order codec. crypto/common.h forwards to it, so its own
  * seven callers ride the same group; the behaviour is all in the header. */
 AGENT_IMPACT_RULE("lib/base/include/base/serialize_le.h|lib/crypto/include/crypto/common.h|lib/test/src/test_byte_order_codec.c|tools/lint/check_byte_order_codec_single.sh|tools/lint/byte_order_codec_baseline.txt", "byte_order_codec make_lint_gates")
+/* The one branchless all-zero/any-set byte test, which replaced 119 private
+ * copies. Header-only like hex.h and serialize_le.h, so every caller
+ * re-compiles, but the behaviour under test lives entirely in the header and
+ * is proven by the polarity checks in the base_foundation group. Its callers
+ * are spread across most of the tree; they are covered by their own rules,
+ * and a change HERE is a change to the predicate itself. */
+AGENT_IMPACT_RULE("lib/base/include/base/bytes.h", "base_foundation make_lint_gates")
 /* Self-hosted foundation packages.  Scalar SHA3 is consensus-facing even
  * though its source authority now sits below lib/crypto. */
 AGENT_IMPACT_RULE("lib/base/include/base/checked.h|lib/base/include/base/cleanse.h|lib/base/src/cleanse.c|lib/support/include/support/cleanse.h|lib/base/tests/*|lib/base/examples/*|lib/base/zcode-package.json|lib/base/LICENSE|lib/base/NOTICE", "base_foundation key_scrub byte_order_codec hex_codec make_lint_gates")

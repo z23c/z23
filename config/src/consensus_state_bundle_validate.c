@@ -2,6 +2,7 @@
  * Strict validation for external zcl.consensus_state_bundle.v1 files. */
 
 #include "config/consensus_state_bundle_validate.h"
+#include "base/bytes.h"
 #include "consensus_state_bundle_validate_schema.h"
 #include "consensus_state_sqlite_text.h"
 
@@ -51,14 +52,6 @@ static bool validation_fail(struct consensus_state_install_result *result,
     }
     LOG_WARN(VALIDATE_SUBSYS, "%s", reason);
     return false;
-}
-
-static bool digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= digest[i];
-    return any != 0;
 }
 
 static bool integrity_check(sqlite3 *db)
@@ -178,8 +171,8 @@ static bool read_manifest(sqlite3 *db,
              sprout_frontier_height <= height &&
              sapling_frontier_height >= 0 &&
              sapling_frontier_height <= height &&
-             digest_nonzero(m->sprout_frontier_root) &&
-             digest_nonzero(m->sapling_frontier_root);
+             zcl_bytes_any_set(m->sprout_frontier_root, 32) &&
+             zcl_bytes_any_set(m->sapling_frontier_root, 32);
         if (ok) {
             m->height = (int32_t)height;
             m->history_complete = history == 1;
@@ -199,7 +192,7 @@ static bool read_manifest(sqlite3 *db,
         }
     }
     sqlite3_finalize(st);
-    if (!ok || !digest_nonzero(m->block_hash))
+    if (!ok || !zcl_bytes_any_set(m->block_hash, 32))
         return validation_fail(r, CONSENSUS_INSTALL_REFUSED,
                                "bundle_meta has invalid schema/types/bounds");
     if (m->history_complete) {
@@ -207,9 +200,9 @@ static bool read_manifest(sqlite3 *db,
             m->sapling_source_cursor != 0 ||
             m->nullifier_source_cursor != 0 ||
             m->source_fold_cursor != (int64_t)m->height + 1 ||
-            !digest_nonzero(m->proof_manifest_digest) ||
-            !digest_nonzero(m->source_digest) ||
-            !digest_nonzero(m->artifact_digest))
+            !zcl_bytes_any_set(m->proof_manifest_digest, 32) ||
+            !zcl_bytes_any_set(m->source_digest, 32) ||
+            !zcl_bytes_any_set(m->artifact_digest, 32))
             return validation_fail(r, CONSENSUS_INSTALL_REFUSED,
                                    "complete history lacks genesis cursors/provenance");
     } else if (m->activation_boundary <= 0 ||
@@ -303,12 +296,12 @@ static bool validate_source_receipt(
     if (ok) {
         consensus_state_source_epoch_digest(&receipt, source_epoch);
         consensus_state_source_receipt_digest(&receipt, recomputed);
-        ok = digest_nonzero(receipt.source_epoch_digest) &&
-             digest_nonzero(receipt.source_tree_root) &&
-             digest_nonzero(receipt.running_binary_digest) &&
-             digest_nonzero(receipt.toolchain_digest) &&
-             digest_nonzero(receipt.build_inputs_digest) &&
-             digest_nonzero(receipt.chain_corpus_digest) &&
+        ok = zcl_bytes_any_set(receipt.source_epoch_digest, 32) &&
+             zcl_bytes_any_set(receipt.source_tree_root, 32) &&
+             zcl_bytes_any_set(receipt.running_binary_digest, 32) &&
+             zcl_bytes_any_set(receipt.toolchain_digest, 32) &&
+             zcl_bytes_any_set(receipt.build_inputs_digest, 32) &&
+             zcl_bytes_any_set(receipt.chain_corpus_digest, 32) &&
              consensus_state_source_receipt_commit_valid(
                  receipt.schema_version, receipt.producer_commit,
                  strnlen(receipt.producer_commit,
@@ -359,10 +352,10 @@ static bool validate_bundle_proof(
             copy_blob32(parent_st, 3, parent.proof_manifest_digest) &&
             copy_blob32(parent_st, 4, parent.source_digest) &&
             copy_blob32(parent_st, 5, parent.artifact_digest) &&
-            digest_nonzero(parent.base_block_hash) &&
-            digest_nonzero(parent.proof_manifest_digest) &&
-            digest_nonzero(parent.source_digest) &&
-            digest_nonzero(parent.artifact_digest);
+            zcl_bytes_any_set(parent.base_block_hash, 32) &&
+            zcl_bytes_any_set(parent.proof_manifest_digest, 32) &&
+            zcl_bytes_any_set(parent.source_digest, 32) &&
+            zcl_bytes_any_set(parent.artifact_digest, 32);
         if (parent_ok)
             parent_ok = sqlite3_step(parent_st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
         sqlite3_finalize(parent_st);
@@ -405,8 +398,8 @@ static bool validate_bundle_proof(
                 copy_blob32(parent_st, 7,
                             parent.components[i].component_digest) &&
                 copy_blob32(parent_st, 8, parent.suffix_digest[i]) &&
-                digest_nonzero(parent.components[i].component_digest) &&
-                digest_nonzero(parent.suffix_digest[i]);
+                zcl_bytes_any_set(parent.components[i].component_digest, 32) &&
+                zcl_bytes_any_set(parent.suffix_digest[i], 32);
             uint64_t minimum =
                 i == CONSENSUS_STATE_BUNDLE_PROOF_COUNT - 1u
                     ? (uint64_t)parent.base_height : parent_rows;
@@ -489,7 +482,7 @@ static bool validate_bundle_proof(
         if (proofs[i].cursor < minimum ||
             (i == 6 && proofs[i].cursor != expected_rows) ||
             (i == 7 && proofs[i].cursor > minimum + 1) ||
-            !digest_nonzero(proofs[i].component_digest)) {
+            !zcl_bytes_any_set(proofs[i].component_digest, 32)) {
             ok = false;
             break;
         }
@@ -790,12 +783,12 @@ static bool validate_nullifiers(
  * shielded fold must REFUSE at the checkpoint height, never admit unbound state. */
 static bool rom_keystone_is_placeholder(const struct rom_state_checkpoint *rom)
 {
-    return !digest_nonzero(rom->anchor_digest) ||
-           !digest_nonzero(rom->nullifier_digest) ||
-           !digest_nonzero(rom->sprout_frontier_root) ||
-           !digest_nonzero(rom->sapling_frontier_root) ||
-           !digest_nonzero(rom->utxo_root) ||
-           !digest_nonzero(rom->rom_state_root);
+    return !zcl_bytes_any_set(rom->anchor_digest, 32) ||
+           !zcl_bytes_any_set(rom->nullifier_digest, 32) ||
+           !zcl_bytes_any_set(rom->sprout_frontier_root, 32) ||
+           !zcl_bytes_any_set(rom->sapling_frontier_root, 32) ||
+           !zcl_bytes_any_set(rom->utxo_root, 32) ||
+           !zcl_bytes_any_set(rom->rom_state_root, 32);
 }
 
 /* Shielded-ROM keystone binding — the complete-state extension of the

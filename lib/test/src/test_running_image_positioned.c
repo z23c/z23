@@ -9,6 +9,7 @@
  * larger image to read; the probe body is the original verbatim. */
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "platform/os_proc.h"
 #include "platform/positioned_file.h"
 
@@ -27,7 +28,7 @@ static int running_image_positioned_probe(void)
         return 1;
     uint8_t bytes[32768];
     uint64_t offset = 0;
-    uint8_t any = 0;
+    bool any = false;
     while (offset < before.size) {
         size_t want = before.size - offset < sizeof(bytes)
                           ? (size_t)(before.size - offset)
@@ -37,8 +38,7 @@ static int running_image_positioned_probe(void)
             platform_positioned_file_close(&file);
             return 2;
         }
-        for (size_t i = 0; i < want; i++)
-            any |= bytes[i];
+        any |= zcl_bytes_any_set(bytes, want);
         offset += want;
     }
     bool stable = any && platform_positioned_file_snapshot(&file, &after) &&

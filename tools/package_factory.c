@@ -47,6 +47,7 @@
 #define _GNU_SOURCE
 
 #include "base/checked.h"
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
@@ -161,16 +162,9 @@ static uint64_t now_ms(void)
     return (uint64_t)(clock_now_monotonic_ns() / 1000000);
 }
 
-static bool root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
-
 static bool root_zero(const uint8_t root[32])
 {
-    return !root_nonzero(root);
+    return !zcl_bytes_any_set(root, 32);
 }
 
 static void pf_root_hex(const uint8_t root[32], char out[65])
@@ -2690,7 +2684,7 @@ admission_done:
         json_init(&adm);
         json_set_object(&adm);
         (void)json_push_kv_str(&adm, "admission_root",
-                               root_nonzero(admission_root) ? ahex : "");
+                               zcl_bytes_any_set(admission_root, 32) ? ahex : "");
         if (admission_wire) {
             size_t hex_len = admission_wire_len * 2u;
             char *hex = zcl_malloc(hex_len + 1u, "factory.adm.hex");

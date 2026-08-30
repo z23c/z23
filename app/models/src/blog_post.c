@@ -5,6 +5,7 @@
 
 #include "models/blog_post.h"
 
+#include "base/bytes.h"
 #include "models/model_fields.h"
 #include "models/def/blog_post_fields.def"
 
@@ -53,14 +54,6 @@ ZCL_MODEL_READ_ROW_FN(blog_receipt_read_row,
                       BLOG_PUBLICATION_RECEIPT_FIELDS)
 ZCL_MODEL_BIND_FN(blog_receipt_bind, struct db_blog_publication_receipt,
                   BLOG_PUBLICATION_RECEIPT_FIELDS)
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static bool bounded_utf8_text(const char *text, size_t max_len,
                               bool allow_multiline)
@@ -150,7 +143,7 @@ bool db_blog_sequence_shape_valid(uint64_t sequence,
 {
     if (!previous_event_id || sequence == 0 || sequence > INT64_MAX)
         return false;
-    bool has_previous = bytes_nonzero(previous_event_id, 32);
+    bool has_previous = zcl_bytes_any_set(previous_event_id, 32);
     return (sequence == 1 && !has_previous) ||
            (sequence > 1 && has_previous);
 }
@@ -189,7 +182,7 @@ bool db_blog_post_validate(const struct db_blog_post *post,
         validates_custom(errors, false, "post", "is null");
         return false;
     }
-    validates_custom(errors, bytes_nonzero(post->event_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(post->event_id, 32),
                      "event_id", "is empty");
     validates_custom(errors, znam_validate_name(post->blog_name),
                      "blog_name", "is not a valid ZNAM name");
@@ -199,7 +192,7 @@ bool db_blog_post_validate(const struct db_blog_post *post,
                      "title", "is empty or contains control bytes");
     validates_custom(errors, db_blog_body_valid(post->body),
                      "body", "is empty or contains control bytes");
-    validates_custom(errors, bytes_nonzero(post->author_key_id, 20),
+    validates_custom(errors, zcl_bytes_any_set(post->author_key_id, 20),
                      "author_key_id", "is empty");
     validates_custom(errors,
                      post->author_pubkey[0] == 0x02 ||
@@ -212,7 +205,7 @@ bool db_blog_post_validate(const struct db_blog_post *post,
     validates_custom(errors, blog_author_identity_valid(post),
                      "author_identity",
                      "public key, key ID, and address do not match");
-    validates_custom(errors, bytes_nonzero(post->chain_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(post->chain_id, 32),
                      "chain_id", "is empty");
     validates_custom(errors,
                      db_blog_sequence_shape_valid(
@@ -238,15 +231,15 @@ bool db_blog_publication_receipt_validate(
         validates_custom(errors, false, "receipt", "is null");
         return false;
     }
-    validates_custom(errors, bytes_nonzero(receipt->txid, 32),
+    validates_custom(errors, zcl_bytes_any_set(receipt->txid, 32),
                      "txid", "is empty");
-    validates_custom(errors, bytes_nonzero(receipt->event_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(receipt->event_id, 32),
                      "event_id", "is empty");
     validates_custom(errors, znam_validate_name(receipt->blog_name),
                      "blog_name", "is not a valid ZNAM name");
-    validates_custom(errors, bytes_nonzero(receipt->author_key_id, 20),
+    validates_custom(errors, zcl_bytes_any_set(receipt->author_key_id, 20),
                      "author_key_id", "is empty");
-    validates_custom(errors, bytes_nonzero(receipt->znam_reg_txid, 32),
+    validates_custom(errors, zcl_bytes_any_set(receipt->znam_reg_txid, 32),
                      "znam_reg_txid", "is empty");
     validates_custom(errors,
                      receipt->block_height >= -1 &&
@@ -257,7 +250,7 @@ bool db_blog_publication_receipt_validate(
                      receipt->status <= BLOG_PUBLICATION_ORPHANED,
                      "status", "is unknown");
     if (receipt->status != BLOG_PUBLICATION_UNRESOLVED) {
-        validates_custom(errors, bytes_nonzero(receipt->block_hash, 32),
+        validates_custom(errors, zcl_bytes_any_set(receipt->block_hash, 32),
                          "block_hash", "is required for final status");
         validates_custom(errors, receipt->block_height >= 0,
                          "block_height", "is required for final status");

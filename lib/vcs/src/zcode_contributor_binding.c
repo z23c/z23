@@ -5,6 +5,7 @@
 
 #include "vcs/zcode_contributor_binding.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "core/hash.h"
 #include "crypto/ed25519.h"
@@ -44,17 +45,9 @@ static const uint8_t binding_half_order[32] = {
     0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
 };
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool root_nonzero(const uint8_t root[32])
 {
-    return bytes_nonzero(root, 32);
+    return zcl_bytes_any_set(root, 32);
 }
 
 static void put_bytes(uint8_t *wire, size_t *off, const void *src, size_t len)
@@ -185,10 +178,10 @@ static enum vcs_zcode_binding_error binding_fields(
         binding->expires_unix <= binding->issued_unix)
         return VCS_ZCODE_BINDING_ERR_TIME_ORDER;
     if (require_signatures) {
-        if (!bytes_nonzero(binding->zid_signature,
+        if (!zcl_bytes_any_set(binding->zid_signature,
                            sizeof(binding->zid_signature)))
             return VCS_ZCODE_BINDING_ERR_SIGNATURE;
-        if (!bytes_nonzero(binding->zcl_signature,
+        if (!zcl_bytes_any_set(binding->zcl_signature,
                            sizeof(binding->zcl_signature)))
             return VCS_ZCODE_BINDING_ERR_SIGNATURE;
     }
@@ -568,14 +561,14 @@ static enum vcs_zcode_binding_error binding_fields_v2(
         return VCS_ZCODE_BINDING_ERR_OPERATION;
     }
     if (require_signatures) {
-        if (!bytes_nonzero(binding->zid_signature,
+        if (!zcl_bytes_any_set(binding->zid_signature,
                            sizeof(binding->zid_signature)))
             return VCS_ZCODE_BINDING_ERR_SIGNATURE;
         bool current_signed =
-            bytes_nonzero(binding->zcl_current_signature,
+            zcl_bytes_any_set(binding->zcl_current_signature,
                           sizeof(binding->zcl_current_signature));
         bool new_signed =
-            bytes_nonzero(binding->zcl_new_signature,
+            zcl_bytes_any_set(binding->zcl_new_signature,
                           sizeof(binding->zcl_new_signature));
         /* Slot shape per operation: ACTIVE/ROTATE sign both, REVOKE signs
          * only current, RECOVER signs only new. */

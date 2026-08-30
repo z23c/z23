@@ -2,6 +2,7 @@
  * Purpose: independently re-derive every creation-attribution authority. */
 #include "vcs/zcode_creation_attribution.h"
 
+#include "base/bytes.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_release.h"
 #include "vcs/vcs_object.h"
@@ -37,14 +38,6 @@ static enum vcs_zcode_creation_error creation_verify_cas_depth(
 static bool creation_equal(const uint8_t a[32], const uint8_t b[32])
 {
     return memcmp(a, b, 32) == 0;
-}
-
-static bool creation_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= root[i];
-    return any != 0;
 }
 
 static bool creation_load(const char *workspace, const uint8_t root[32],
@@ -555,8 +548,8 @@ static enum vcs_zcode_creation_error creation_verify_cas_depth(
         !context->expected_zc23_policy_root ||
         !context->anchor_is_active ||
         !context->contribution_is_duplicate || context->now_unix <= 0 ||
-        !creation_nonzero(context->expected_network_genesis_root) ||
-        !creation_nonzero(context->expected_zc23_policy_root))
+        !zcl_bytes_any_set(context->expected_network_genesis_root, 32) ||
+        !zcl_bytes_any_set(context->expected_zc23_policy_root, 32))
         return VCS_ZCODE_CREATION_CONTEXT;
     if (!creation_equal(a->network_genesis_root,
                         context->expected_network_genesis_root))

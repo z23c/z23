@@ -11,6 +11,7 @@
 
 #include "vcs/moderation_attestation.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -78,14 +79,6 @@ const char *zcl_moderation_reason_string(enum zcl_moderation_reason_v1 reason)
     return "unknown-moderation-reason";
 }
 
-static bool attest_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static enum zcl_moderation_error attest_literal_root(
     const char *domain, size_t domain_len, const char *literal,
     size_t literal_len, uint8_t out[32])
@@ -151,19 +144,19 @@ static enum zcl_moderation_error attest_shape(
     if (attestation->expires_mtp - attestation->reviewed_mtp >
         ZCL_MODERATION_MAX_LIFETIME_SECS)
         return ZCL_MODERATION_TIME;
-    if (!attest_nonzero(attestation->content_root, 32) ||
-        !attest_nonzero(attestation->profile_root, 32) ||
-        !attest_nonzero(attestation->policy_root, 32) ||
-        !attest_nonzero(attestation->signer_pubkey, 32))
+    if (!zcl_bytes_any_set(attestation->content_root, 32) ||
+        !zcl_bytes_any_set(attestation->profile_root, 32) ||
+        !zcl_bytes_any_set(attestation->policy_root, 32) ||
+        !zcl_bytes_any_set(attestation->signer_pubkey, 32))
         return ZCL_MODERATION_ROOT;
     /* sequence 1 is a first statement and has no predecessor; anything above
      * it must name what it supersedes, so the order is tamper-evident. */
     if ((attestation->sequence == 1u &&
-         attest_nonzero(attestation->predecessor_root, 32)) ||
+         zcl_bytes_any_set(attestation->predecessor_root, 32)) ||
         (attestation->sequence > 1u &&
-         !attest_nonzero(attestation->predecessor_root, 32)))
+         !zcl_bytes_any_set(attestation->predecessor_root, 32)))
         return ZCL_MODERATION_CHAIN;
-    if (require_signature && !attest_nonzero(attestation->signature, 64))
+    if (require_signature && !zcl_bytes_any_set(attestation->signature, 64))
         return ZCL_MODERATION_SIGNATURE;
     return ZCL_MODERATION_OK;
 }
