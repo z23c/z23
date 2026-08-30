@@ -50,6 +50,9 @@ OWNER_PID="${17}"
 VERIFY_TOOL="${18:-tools/dev/source-identity.sh}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
+HOST_SYSTEM="$(uname -s 2>/dev/null || printf 'unknown')"
+HOST_IS_MSYS=0
+case "$HOST_SYSTEM" in MINGW*|MSYS*) HOST_IS_MSYS=1 ;; esac
 
 case "$MODE" in acquire|check|verify) ;; *) fail "unknown mode: $MODE" ;; esac
 
@@ -77,10 +80,14 @@ find_make_owner()
 
 process_parent()
 {
-    local pid="$1"
-    case "$(uname -s 2>/dev/null)" in
+    local pid="$1" ppid=""
+    case "$HOST_SYSTEM" in
         MINGW*|MSYS*)
-            sed -n '1p' "/proc/$pid/ppid" 2>/dev/null || true
+            ppid=$(sed -n '1p' "/proc/$pid/ppid" 2>/dev/null)
+            # MSYS/Cygwin /proc is sparse for orphan or init-parented
+            # processes; fall back to the native ps listing.
+            [ -n "$ppid" ] || ppid=$(ps -p "$pid" -f 2>/dev/null | awk 'NR==2 {print $3}')
+            printf '%s\n' "$ppid"
             ;;
         *) ps -p "$pid" -o ppid= 2>/dev/null || true ;;
     esac
@@ -88,11 +95,13 @@ process_parent()
 
 process_comm()
 {
-    local pid="$1"
-    case "$(uname -s 2>/dev/null)" in
+    local pid="$1" comm=""
+    case "$HOST_SYSTEM" in
         MINGW*|MSYS*)
-            sed -n 's/^Name:[[:space:]]*//p' "/proc/$pid/status" \
-                2>/dev/null || true
+            comm=$(sed -n 's/^Name:[[:space:]]*//p' "/proc/$pid/status" \
+                2>/dev/null)
+            [ -n "$comm" ] || comm=$(ps -p "$pid" -f 2>/dev/null | awk 'NR==2 {sub(/^[^ ]+[ ]+[0-9]+[ ]+[0-9]+[ ]+[^ ]+[ ]+[^ ]+[ ]+/, ""); print}')
+            printf '%s\n' "$comm"
             ;;
         *) ps -p "$pid" -o comm= 2>/dev/null || true ;;
     esac
@@ -126,6 +135,14 @@ if [ -n "$resolved_owner" ]; then
     OWNER_PID="$resolved_owner"
 elif "$SELF_DIR/process-start-token.sh" "$OWNER_PID" >/dev/null 2>&1; then
     :
+# Headless MSYS2 service wrappers can hide the Make ancestor from /proc and
+# native ps.  Accept the live recipe process only on that host and only when
+# Make exported a positive nesting level.  Other hosts retain the strict
+# ancestor-or-explicit-owner requirement.
+elif [ "$HOST_IS_MSYS" = 1 ] &&
+     [[ "${MAKELEVEL:-}" =~ ^[1-9][0-9]*$ ]] &&
+     "$SELF_DIR/process-start-token.sh" "$$" >/dev/null 2>&1; then
+    OWNER_PID="$$"
 elif [ "$MODE" != acquire ]; then
     OWNER_PID="$$"
 else
@@ -204,11 +221,72 @@ export ZCL_SOURCE_IDENTITY_SESSION="$OWNER_PID:$OWNER_START"
 verify_authority
 [ "$MODE" = verify ] && { check_stamp; exit 0; }
 
-command -v flock >/dev/null 2>&1 || fail 'flock is required for epoch leases'
-
 mkdir -p "$OBJECT_ROOT/epochs/$EPOCH/.leases"
-exec 9> "$OBJECT_ROOT/.epoch-gc.lock"
-flock -x 9
+
+# MSYS2/Git Bash cannot reliably share inherited descriptors with the MSYS2
+# util-linux flock binary. Keep the crash-safe descriptor lock on POSIX and
+# use an identity-bearing atomic directory only on MSYS hosts.
+EPOCH_GC_LOCK_FILE="$OBJECT_ROOT/.epoch-gc.lock"
+EPOCH_GC_LOCK_DIR="$OBJECT_ROOT/.epoch-gc.lock.d"
+EPOCH_GC_LOCK_OWNER="$EPOCH_GC_LOCK_DIR/owner"
+EPOCH_GC_LOCK_HELD=0
+epoch_gc_owner_live()
+{
+    local pid start actual
+    pid="$(sed -n 's/^pid=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    start="$(sed -n 's/^start=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9a-f]+$ ]] ||
+        return 1
+    actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null)" ||
+        return 1
+    [ "$actual" = "$start" ]
+}
+acquire_epoch_gc_lock()
+{
+    local deadline
+    if [ "$HOST_IS_MSYS" = 0 ]; then
+        command -v flock >/dev/null 2>&1 ||
+            fail 'flock is required for epoch leases'
+        exec 9> "$EPOCH_GC_LOCK_FILE"
+        flock -x 9
+        return 0
+    fi
+    deadline=$(($(date +%s) + 30))
+    while :; do
+        if mkdir "$EPOCH_GC_LOCK_DIR" 2>/dev/null; then
+            if (set -o noclobber
+                printf 'pid=%s\nstart=%s\n' "$OWNER_PID" "$OWNER_START" \
+                    > "$EPOCH_GC_LOCK_OWNER") 2>/dev/null; then
+                EPOCH_GC_LOCK_HELD=1
+                return 0
+            fi
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            if epoch_gc_owner_live; then
+                fail "could not acquire epoch GC lock $EPOCH_GC_LOCK_DIR (another build is live)"
+            fi
+            rm -f -- "$EPOCH_GC_LOCK_OWNER"
+            rmdir "$EPOCH_GC_LOCK_DIR" 2>/dev/null ||
+                fail "could not recover stale epoch GC lock $EPOCH_GC_LOCK_DIR"
+        fi
+        sleep 0.2
+    done
+}
+release_epoch_gc_lock()
+{
+    local pid start
+    [ "$EPOCH_GC_LOCK_HELD" = 1 ] || return 0
+    pid="$(sed -n 's/^pid=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    start="$(sed -n 's/^start=//p' "$EPOCH_GC_LOCK_OWNER" 2>/dev/null)"
+    if [ "$pid" = "$OWNER_PID" ] && [ "$start" = "$OWNER_START" ]; then
+        rm -f -- "$EPOCH_GC_LOCK_OWNER"
+        rmdir "$EPOCH_GC_LOCK_DIR" 2>/dev/null || true
+    fi
+    EPOCH_GC_LOCK_HELD=0
+}
+trap 'release_epoch_gc_lock; cleanup' EXIT
+trap 'exit 2' HUP INT TERM
+acquire_epoch_gc_lock
 
 tmp_session="$(mktemp "$(dirname "$SESSION")/.build-session.XXXXXX")"
 cp -- "$EXPECTED" "$tmp_session"

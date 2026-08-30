@@ -234,6 +234,10 @@ struct zcl_result mesh_private_object_receiver_admit(
     if (opened != MESH_PRIVATE_OBJECT_STAGE_OK)
         return ZCL_ERR(-2, "private-object stage open failed: %s",
                        mesh_private_object_stage_error_string(opened));
+    if (mesh_private_object_stage_cancelled_v1(stage, NULL)) {
+        mesh_private_object_stage_close(stage);
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+    }
     memset(slot, 0, sizeof(*slot));
     slot->used = true;
     slot->peer_token = peer_token;
@@ -366,6 +370,18 @@ struct zcl_result mesh_private_object_receiver_cancel(
     if (slot->peer_token != peer_token ||
         memcmp(slot->offer.request_id, cancel->offer_request_id, 32) != 0)
         return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BINDING);
+    enum mesh_private_object_stage_error stored =
+        mesh_private_object_stage_cancel_v1(slot->stage, cancel);
+    if (stored == MESH_PRIVATE_OBJECT_STAGE_IDENTITY ||
+        stored == MESH_PRIVATE_OBJECT_STAGE_OFFER)
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BINDING);
+    if (stored == MESH_PRIVATE_OBJECT_STAGE_CANCELLED)
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+    if (stored != MESH_PRIVATE_OBJECT_STAGE_OK) {
+        receiver_slot_clear(slot);
+        return ZCL_ERR(-2, "private-object cancel persistence failed: %s",
+                       mesh_private_object_stage_error_string(stored));
+    }
     mesh_private_object_schedule_v1_cancel(&slot->schedule);
     receiver_slot_clear(slot);
     return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);

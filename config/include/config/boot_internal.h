@@ -5,6 +5,7 @@
 #ifndef ZCL_BOOT_INTERNAL_H
 #define ZCL_BOOT_INTERNAL_H
 
+#include "net/netbase.h"
 #include "config/boot.h"
 #include "config/boot_flyclient.h"
 #include "config/db_service.h"

@@ -9,6 +9,7 @@
 // wire. Failure logging happens here at the request edge.
 
 #include "config/boot_mesh_status.h"
+#include "config/boot_mesh_route.h"
 #include "boot_mesh_status_internal.h"
 
 #include "config/boot_internal.h"
@@ -43,6 +44,10 @@ const char *boot_mesh_status_begin_result_string(
     case MESH_STATUS_BEGIN_REVOKED: return "revoked";
     case MESH_STATUS_BEGIN_EXPIRED: return "expired";
     case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED: return "peer_not_connected";
+    case MESH_STATUS_BEGIN_ROUTE_PENDING: return "route_pending";
+    case MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH:
+        return "route_identity_mismatch";
+    case MESH_STATUS_BEGIN_ROUTE_DOWNGRADE: return "route_plaintext_downgrade";
     case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE: return "identity_unavailable";
     case MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE:
         return "peer_identity_unavailable";
@@ -54,7 +59,7 @@ const char *boot_mesh_status_begin_result_string(
 
 /* Snapshot connected peers under cs_nodes, then return the first whose
  * established Noise session names the paired Noise static. Caller releases the
- * returned reference. Never dials. */
+ * returned reference. */
 static struct p2p_node *mesh_find_session_peer(
     struct net_manager *nm, const uint8_t peer_noise[32],
     struct noise_transport_snapshot *session_out)
@@ -209,8 +214,32 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
     memset(&session, 0, sizeof(session));
     struct p2p_node *peer = mesh_find_session_peer(
         mp->net_mgr, row.peer_noise_pubkey, &session);
-    if (!peer)
-        return MESH_STATUS_BEGIN_PEER_NOT_CONNECTED;
+    if (!peer) {
+        int64_t now_mono = platform_time_monotonic_ms();
+        if (now_mono <= 0)
+            return MESH_STATUS_BEGIN_UNAVAILABLE;
+        enum boot_mesh_route_result route = boot_mesh_route_acquire(
+            svc, &row, (uint64_t)now, (uint64_t)now_mono, &peer, &session);
+        switch (route) {
+        case BOOT_MESH_ROUTE_ACQUIRED: break;
+        case BOOT_MESH_ROUTE_PENDING:
+        case BOOT_MESH_ROUTE_RESOURCE_DEFERRED:
+            return MESH_STATUS_BEGIN_ROUTE_PENDING;
+        case BOOT_MESH_ROUTE_IDENTITY_MISMATCH:
+            return MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH;
+        case BOOT_MESH_ROUTE_DOWNGRADE:
+            return MESH_STATUS_BEGIN_ROUTE_DOWNGRADE;
+        case BOOT_MESH_ROUTE_AMBIGUOUS_ENDPOINT:
+            return MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE;
+        case BOOT_MESH_ROUTE_BUSY:
+            return MESH_STATUS_BEGIN_BUSY;
+        case BOOT_MESH_ROUTE_NO_ENDPOINT:
+        case BOOT_MESH_ROUTE_EXHAUSTED:
+            return MESH_STATUS_BEGIN_PEER_NOT_CONNECTED;
+        default:
+            return MESH_STATUS_BEGIN_UNAVAILABLE;
+        }
+    }
 
     struct vcs_zcode_dht_delegation responder_delegation;
     if (!mesh_responder_delegation(&row, &responder_delegation) ||

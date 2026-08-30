@@ -109,9 +109,11 @@ A route failure may try another candidate, but an identity mismatch,
 delegation failure, plaintext downgrade, revocation, or capability refusal is
 terminal for that request. Relays and rendezvous peers forward opaque records
 only. They do not receive target credentials, plaintext, or machine authority.
-The currently implemented status requester is narrower: it uses an already
-connected authenticated peer and never dials. Automatic route selection,
-onion failover, and relay transport remain acceptance work.
+The status requester now accepts one active, signed direct ZENDP endpoint as an
+untrusted hint and submits at most three bounded dial requests. It sends no
+status frame until the resulting Noise static and unique active delegation
+match the local pairing. Multiple direct candidates, onion failover, relay
+transport, and independent-host route receipts remain acceptance work.
 
 ## Current truthful state
 
@@ -119,15 +121,15 @@ onion failover, and relay transport remain acceptance work.
 | --- | --- | --- |
 | Local machine identity | Implemented: `ops mesh identity` reports redacted source, binary, platform, Noise, DHT, confinement, and hot-swap readiness | Restart-stable receipts from independent hosts and remote authenticated retrieval |
 | Pairing authority | Implemented: durable schema-v76 records, status-read-only capability, expiry, session binding, and sticky revocation. Owner-facing `ops mesh pair plan|commit` create pairings only through `mesh_pairing_service_accept` with a mandatory out-of-band fingerprint; redacted `ops mesh pair list` and a 60-second generation-bound plan/commit `ops mesh pair revoke` cover inspection and revocation | Two-sided wire ceremony; each host still pairs the other independently |
-| Fleet view | Implemented: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget); rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, fixed replay/cadence bounds protect both ends, and a supervised, sync-subordinate scheduler refreshes paired-machine status automatically (bounded in-flight, cooldown/backoff, admitted only at chain tip with clear disk, memory, and DB); every verified receipt persists through the one serialized db_service writer; never dials, offline machines stay listed | Independent-host receipts |
+| Fleet view | Implemented locally: `ops mesh machines` pairs durable verified receipt evidence (schema-v77 store, fresh/stale/never-seen, older/equivocal receipts refused) with a bounded live probe (8 actives, 12 s collective budget); rows merge the live verdict (online with responder identity fingerprint / refused:<status> / unreachable / timeout / unknown / expired / revoked) with persisted evidence; requester acceptance pins the responder's unique active delegated online signing key, fixed replay/cadence bounds protect both ends, and a supervised, sync-subordinate scheduler refreshes paired-machine status automatically (bounded in-flight, cooldown/backoff, admitted only at chain tip with clear disk, memory, and DB). A current signed direct endpoint can trigger a bounded Noise-only dial, but grants no authority and carries no private frame before identity proof. Every verified receipt persists through the one serialized db_service writer; offline machines stay listed | Independent-host direct-route receipts; multiple direct candidates and onion failover |
 | Public immutable transfer | Implemented by the package CAS and swarm | Compose it into the owner journey without granting private or execution authority |
-| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, and verifies the complete ciphertext root. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, and restart resume | Private dispatcher and queue, atomic no-clobber plaintext publication, cancellation wiring, signed receipts, and independent-host acceptance |
+| Private file transfer | Foundation only: a signed offer is bound to the live Noise session, active delegated source, target-local pairing, exact one-use grant, nonce, roots, limits, and canonical 64 KiB independently authenticated chunks. Schema-v79 preserves an exact transfer claim for restart-safe resume; a bounded portable codec defines OFFER, REQUEST, CHUNK, and CANCEL frames. A current-user-only staging store durably journals authenticated ciphertext chunks, re-authenticates every recorded chunk on reopen, verifies the complete ciphertext root, and persists one terminal canonical cancellation that survives reconnect without mutating grant authority. A serialized receiver composes that store with an eight-chunk request window, exact response correlation, unsent-request rollback, fresh admission binding, bounded active transfers, restart resume, and durable cancellation | Private dispatcher and queue, atomic no-clobber plaintext publication, signed completion/cancellation receipts, and independent-host acceptance |
 | Remote build/test | Immutable task, bounded worker, CAS, and receipt primitives exist | Pairing-bound request transport, cancellation, platform confinement policy, remote result retrieval |
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
 | Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
 | macOS | Native arm64 node build and isolated startup are measured; a launchd service template exists | Native service lifecycle, independent node/session receipts, embedded-Tor build and runtime proof, and truthful confinement/tunnel probes |
-| Windows | Native UCRT64 `z23.exe` builds and a Task Scheduler installer exists; WSL2 runs the Linux node | Native full-node and service acceptance, embedded Tor, and Windows confinement/tunnel probes |
+| Windows | Native UCRT64 `z23.exe` builds, retained-handle source-package traversal is cross-linked and rejects a real reparse point under Wine, and a Task Scheduler installer exists; WSL2 runs the Linux node. The native consensus store refuses before mutation because the default SQLite VFS is not directory-capability-bound | Retained-directory SQLite VFS and migration, native full-node and service acceptance, embedded Tor, and Windows confinement/tunnel probes |
 
 ### Platform service and activation truth
 
@@ -464,15 +466,23 @@ The phases below are delivered in this dependency order:
 5. completed: project responses into `ops mesh machines` with honest fresh,
    stale, and unknown state, then refresh connected active pairings without
    competing with chain synchronization;
-6. extract the mesh resource gate into shared subordinate-work admission, use
-   it before build-fabric lease claims, apply platform background QoS, and prove
-   deferral never consumes an attempt or competes with chain synchronization;
-7. record independent-host native service and signed status receipts, then add
-   identity-pinned direct and, where available, onion route selection without
+6. completed: extract the mesh resource gate into shared subordinate-work
+   admission, use it before build-fabric lease claims, apply platform background
+   QoS, and prove deferral never consumes an attempt or competes with chain
+   synchronization;
+7. in progress: identity-pinned single-direct-route acquisition is locally
+   implemented; record independent-host native service and signed status
+   receipts, then add bounded multiple-direct and onion route selection without
    changing authority when the path changes;
-8. complete the two-sided capability plan/commit, renewal, cancellation, and
-   sticky-revocation lifecycle for the next typed operation;
-9. add the encrypted private-object envelope and resumable transfer before any
+8. in progress: the signed bounded capability lifecycle codec and sticky local
+   grant revocation exist; the private-object encryption context no longer
+   depends on the later ciphertext-bound grant identifier. Add a canonical
+   private-object template rooted by the proposal, then target-side
+   plan/commit, renewal, remote cancellation/revocation acknowledgement, and
+   two-host agreement for the next typed operation;
+9. in progress: the encrypted private-object envelope, resumable ciphertext
+   receiver, and durable terminal cancellation exist; add the dispatcher,
+   atomic no-clobber plaintext publication, and signed receipts before any
    remote execution surface;
 10. bind existing immutable build/test actions to paired capabilities;
 11. add local-service tunnels and the separately granted terminal worker; and
@@ -942,6 +952,54 @@ peers, never production wallet state.
   path took upstream's db_service persist call. Gates: `make z23` passed;
   t-fast ONLY=mesh passed with zero skips; `make lint-fast` passed. What
   remains before the product claim: independent-host receipts.
+- 2026-08-29T17:18:49-04:00 / 2026-08-29T21:18:49Z: paired status acquisition
+  gained one bounded direct route from the exact master identity's active,
+  chain-bound ZENDP record. The endpoint remains an untrusted address: the
+  requester sends no `ZMSTAT` frame until an established Noise static and
+  unique current ZID delegation match the local pairing. Eight fixed slots,
+  three submissions, exponential backoff, a 15-second deadline, subordinate
+  work admission, abandoned-slot reclamation, and exact-endpoint downgrade
+  disconnection bound the lane. Wrong Noise identity and plaintext completion
+  are terminal for the current acquisition and recover only after a fixed
+  retention interval. The cold `mesh_route` group passed seven adversarial
+  cases and `mesh_status_wire` passed twelve cases, each with zero failures and
+  zero skips, using GCC 16.1.1 on an AMD Ryzen 7 PRO 8840U. This is local direct
+  route evidence only; onion selection and independent-host receipts remain
+  open.
+- 2026-08-29T18:11:22-04:00 / 2026-08-29T22:11:22Z: Windows package
+  preparation replaced pathname traversal with one retained-root,
+  handle-relative NT walk and refused a real reparse point under Wine. Review
+  of the separately merged native consensus-store path found that migration
+  could mutate before directory validation and that the default SQLite VFS
+  reopened main/WAL/SHM paths outside the retained capability. Windows now
+  refuses that store before any mutation, with a strict cross-linked fixture
+  proving a sentinel `progress.kv` and absent database families remain inert.
+  Unicode state-root overrides and pre-existing ACL repair are also
+  cross-linked. Six affected native groups passed with zero failures and zero
+  skips. Native Windows node operation remains unclaimed until a
+  retained-directory SQLite VFS and native-host acceptance exist.
+- 2026-08-29T19:17:40-04:00 / 2026-08-29T23:17:40Z: a signed,
+  allocation-free capability lifecycle codec added canonical PROPOSAL, COMMIT,
+  GRANT, REFUSAL, RENEW, CANCEL, and ACK frames with exact lengths, closed
+  operation/result vocabularies, bounded resource fields, mandatory ambient
+  authority denials, per-kind SHA3 domains, and Ed25519 evidence. Private
+  object cancellation now appends and flushes the existing canonical CANCEL
+  frame to the confined stage journal before terminal success. Reopen accepts
+  only active or exactly-cancelled lengths; malformed, torn, oversized,
+  wrong-kind, zero-id, and wrong-transfer tails refuse. A fresh re-signed offer
+  on a different Noise transcript cannot resurrect the stable cancelled
+  transfer. The three focused groups ran cold with zero failures and skips;
+  native GCC and MinGW strict syntax checks passed. Target-side capability
+  plan/commit and network dispatch remain open.
+- 2026-08-29T19:39:55-04:00 / 2026-08-29T23:39:55Z: a real two-chunk
+  private-object pipeline removed a protocol construction cycle. The sender
+  now derives the stable encryption context before either `grant_id` or
+  `ciphertext_root` exists, encrypts and roots the ciphertext, then derives the
+  target's ciphertext-bound durable grant and signs the complete offer. The
+  final request and offer signature still bind the grant and root; changing
+  either is refused. The new registered group and the protocol and chunk
+  crypto groups passed cold with zero failures and skips. A root-bound
+  private-object capability template and target-side plan/commit remain open.
 
 ## Completion rule
 

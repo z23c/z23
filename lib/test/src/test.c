@@ -1239,8 +1239,12 @@ int main(int argc, char **argv)
       failures += test_zses(); }
     { extern int test_mesh_pairing(void);
       failures += test_mesh_pairing(); }
+    { extern int test_mesh_route(void);
+      failures += test_mesh_route(); }
     { extern int test_mesh_capability_grant(void);
       failures += test_mesh_capability_grant(); }
+    { extern int test_mesh_capability_proto(void);
+      failures += test_mesh_capability_proto(); }
     { extern int test_mesh_pairing_controller(void);
       failures += test_mesh_pairing_controller(); }
     { extern int test_mesh_status_proto(void);
@@ -1249,6 +1253,8 @@ int main(int argc, char **argv)
       failures += test_mesh_private_object_proto(); }
     { extern int test_mesh_private_object_crypto(void);
       failures += test_mesh_private_object_crypto(); }
+    { extern int test_mesh_private_object_grant_pipeline(void);
+      failures += test_mesh_private_object_grant_pipeline(); }
     { extern int test_mesh_private_object_root(void);
       failures += test_mesh_private_object_root(); }
     { extern int test_mesh_private_object_frame(void);

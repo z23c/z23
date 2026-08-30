@@ -21,9 +21,10 @@
  *     also use, so every writer funnels into the same store handoff; there
  *     is no parallel verdict-only truth.
  *
- * No dial is ever attempted; a peer without a live established Noise session is
- * UNREACHABLE, not reconnected. Offline machines stay listed. Public keys
- * never leave the surface — fingerprints only. The pure mapping from
+ * A current signed endpoint may trigger a bounded direct dial. Endpoint bytes
+ * remain untrusted: no request is sent until the live Noise static and current
+ * delegation uniquely match the pairing. Offline machines stay listed. Public
+ * keys never leave the surface — fingerprints only. The pure mapping from
  * (record state, begin verdict, poll outcome, receipt status) to a verdict
  * is mesh_machine_derive_state, so the wire group test drives the exact
  * production mapping without sockets.

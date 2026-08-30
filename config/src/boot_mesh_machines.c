@@ -6,8 +6,9 @@
  * The pure half (derive/plan/tally/fill) is exported from the header so the
  * wire group test drives the exact production mapping without sockets; the
  * live half (boot_mesh_machines_refresh) is the only function that touches
- * the pairing store or the status lane, and it never dials. Receipt
- * persistence goes through boot_mesh_status_receipt_persist — the
+ * the pairing store or the status lane. It may request a bounded direct route
+ * from a current signed endpoint, but the route grants no status authority.
+ * Receipt persistence goes through boot_mesh_status_receipt_persist — the
  * serialized db_service writer the single-machine poll and the background
  * refresh scheduler share — so the fleet refresh is a writer of the one
  * observation store, not a parallel truth. */
@@ -60,6 +61,18 @@ enum mesh_machine_state mesh_machine_derive_state(
         case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED:
             state = MESH_MACHINE_UNREACHABLE;
             detail = "no_live_noise_session";
+            break;
+        case MESH_STATUS_BEGIN_ROUTE_PENDING:
+            state = MESH_MACHINE_TIMEOUT;
+            detail = "route_acquisition_pending";
+            break;
+        case MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH:
+            state = MESH_MACHINE_REFUSED;
+            detail = "route-identity-mismatch";
+            break;
+        case MESH_STATUS_BEGIN_ROUTE_DOWNGRADE:
+            state = MESH_MACHINE_REFUSED;
+            detail = "route-plaintext-downgrade";
             break;
         case MESH_STATUS_BEGIN_NOISE_DISABLED:
             state = MESH_MACHINE_UNREACHABLE;
@@ -184,11 +197,13 @@ bool mesh_machines_fill_live_identity(
 
 /* Per-probe bookkeeping for the collective wait. Only probed rows get one. */
 struct mesh_machine_probe {
+    char pairing_id[MESH_PAIRING_ID_HEX + 1];
     uint8_t request_id[32];
     enum boot_mesh_status_begin_result begin;
     enum boot_mesh_status_poll_state poll;
     enum mesh_status_receipt_status receipt_status;
     bool outstanding;
+    bool route_pending;
 };
 
 /* A fleet burst must fit the status lane's pending table on an empty table:
@@ -273,7 +288,12 @@ bool boot_mesh_machines_refresh(struct node_db *ndb, struct db_service *dbsvc,
         probe->receipt_status = MESH_STATUS_RECEIPT_INTERNAL;
         probe->begin = boot_mesh_status_begin(views[i].pairing_id,
                                               probe->request_id);
-        probe->outstanding = (probe->begin == MESH_STATUS_BEGIN_OK);
+        memcpy(probe->pairing_id, views[i].pairing_id,
+               MESH_PAIRING_ID_HEX + 1u);
+        probe->route_pending =
+            probe->begin == MESH_STATUS_BEGIN_ROUTE_PENDING;
+        probe->outstanding = probe->begin == MESH_STATUS_BEGIN_OK ||
+                             probe->route_pending;
         probe_of_row[i] = (int)probe_count;
         out->rows[i].probed = true;
         probe_count++;
@@ -292,6 +312,20 @@ bool boot_mesh_machines_refresh(struct node_db *ndb, struct db_service *dbsvc,
             struct mesh_machine_probe *probe = &probes[p];
             if (!probe->outstanding)
                 continue;
+            if (probe->route_pending) {
+                probe->begin = boot_mesh_status_begin(probe->pairing_id,
+                                                      probe->request_id);
+                probe->route_pending =
+                    probe->begin == MESH_STATUS_BEGIN_ROUTE_PENDING;
+                if (probe->route_pending) {
+                    outstanding++;
+                    continue;
+                }
+                if (probe->begin != MESH_STATUS_BEGIN_OK) {
+                    probe->outstanding = false;
+                    continue;
+                }
+            }
             struct mesh_status_receipt_v1 receipt;
             enum boot_mesh_status_poll_state polled =
                 boot_mesh_status_poll(probe->request_id, &receipt);

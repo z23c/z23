@@ -41,8 +41,8 @@ mapfile -t monolith_sources < <(
 )
 platform_alternative_groups=(
     "lib/platform/src/os_sandbox_linux.c lib/platform/src/os_sandbox_stub.c"
-    "lib/vcs/src/vcs_devloop.c lib/vcs/src/vcs_devloop_windows.c"
 )
+host_optional_sources=(lib/vcs/src/vcs_devloop.c)
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
     echo "check-zcode-package-registry: FAIL — empty package or monolith source projection" >&2
@@ -55,6 +55,9 @@ for source in "${package_sources[@]}"; do
             [[ "$source" == "$alternative" ]] && continue 3
         done
     done
+    for optional in "${host_optional_sources[@]}"; do
+        [[ "$source" == "$optional" ]] && continue 2
+    done
     count=0
     for compiled in "${monolith_sources[@]}"; do
         [[ "$compiled" == "$source" ]] && ((count += 1))
@@ -63,6 +66,23 @@ for source in "${package_sources[@]}"; do
         echo "check-zcode-package-registry: FAIL — $source appears $count times in LIB_SRCS" >&2
         exit 1
     fi
+done
+
+host_name="$(uname -s 2>/dev/null || true)"
+for optional in "${host_optional_sources[@]}"; do
+    count=0
+    for compiled in "${monolith_sources[@]}"; do
+        [[ "$compiled" == "$optional" ]] && ((count += 1))
+    done
+    expected=1
+    case "$host_name" in
+        MINGW*|MSYS*) expected=0 ;;
+    esac
+    if (( count != expected )); then
+        echo "check-zcode-package-registry: FAIL — host-optional $optional appears $count times in LIB_SRCS (expected $expected on $host_name)" >&2
+        exit 1
+    fi
+    echo "zcode package registry: host-optional source count is exact: $optional=$count"
 done
 
 for group in "${platform_alternative_groups[@]}"; do

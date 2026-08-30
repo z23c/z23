@@ -416,8 +416,6 @@ static enum vcs_package_prepare_error prepare_finish(
 
 #ifdef _WIN32
 
-#include "platform/directory_compat.h"
-
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
@@ -425,6 +423,27 @@ static enum vcs_package_prepare_error prepare_finish(
 #include <unistd.h>
 #include <wchar.h>
 #include <windows.h>
+#include <winternl.h>
+
+typedef NTSTATUS (NTAPI *prepare_nt_create_file_fn)(
+    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
+    PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+typedef NTSTATUS (NTAPI *prepare_nt_query_directory_file_fn)(
+    HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, PVOID, ULONG,
+    FILE_INFORMATION_CLASS, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+
+struct prepare_windows_entry {
+    char *name;
+    uint64_t file_id;
+};
+
+struct prepare_windows_snapshot {
+    uint64_t size;
+    uint64_t volume;
+    uint64_t file_id;
+    int64_t modified;
+    int64_t changed;
+};
 
 static wchar_t *prepare_utf8_to_wide(const char *path)
 {
@@ -442,60 +461,148 @@ static wchar_t *prepare_utf8_to_wide(const char *path)
     return wide;
 }
 
-static bool prepare_stat_same(const struct stat *a, const struct stat *b)
+static bool prepare_nt_functions(
+    prepare_nt_create_file_fn *create_file,
+    prepare_nt_query_directory_file_fn *query_directory)
 {
-    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-           a->st_size == b->st_size && a->st_mtime == b->st_mtime;
+    HMODULE module = GetModuleHandleW(L"ntdll.dll");
+    FARPROC create_symbol = module ? GetProcAddress(module, "NtCreateFile") : NULL;
+    FARPROC query_symbol = module
+        ? GetProcAddress(module, "NtQueryDirectoryFile") : NULL;
+    if (!create_symbol || !query_symbol)
+        return false;
+    static_assert(sizeof(*create_file) == sizeof(create_symbol));
+    static_assert(sizeof(*query_directory) == sizeof(query_symbol));
+    memcpy(create_file, &create_symbol, sizeof(*create_file));
+    memcpy(query_directory, &query_symbol, sizeof(*query_directory));
+    return true;
 }
 
-static bool prepare_regular(struct prepare_walk *walk, const char *fs_path,
-                            const char *pkg_path,
-                            const struct stat *listed)
+static bool prepare_windows_snapshot(HANDLE handle,
+                                     struct prepare_windows_snapshot *out)
 {
-    wchar_t *wide = prepare_utf8_to_wide(fs_path);
-    if (!wide) {
-        walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
-        prepare_detail(walk, "%s: utf8 conversion", pkg_path);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    FILE_BASIC_INFO basic = {0};
+    if (!out || !GetFileInformationByHandle(handle, &info) ||
+        !GetFileInformationByHandleEx(handle, FileBasicInfo, &basic,
+                                      sizeof(basic)))
+        return false;
+    out->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    out->volume = info.dwVolumeSerialNumber;
+    out->file_id = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    out->modified = basic.LastWriteTime.QuadPart;
+    out->changed = basic.ChangeTime.QuadPart;
+    return true;
+}
+
+static bool prepare_windows_snapshot_same(
+    const struct prepare_windows_snapshot *a,
+    const struct prepare_windows_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_id == b->file_id && a->modified == b->modified &&
+           a->changed == b->changed;
+}
+
+static HANDLE prepare_open_child(HANDLE parent, const char *name,
+                                 prepare_nt_create_file_fn create_file)
+{
+    wchar_t wide[260];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1,
+                                    wide, 260);
+    if (count <= 1 || strchr(name, '/') || strchr(name, '\\') ||
+        strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return INVALID_HANDLE_VALUE;
+    UNICODE_STRING leaf = {
+        .Length = (USHORT)((count - 1) * (int)sizeof(*wide)),
+        .MaximumLength = (USHORT)((count - 1) * (int)sizeof(*wide)),
+        .Buffer = wide,
+    };
+    OBJECT_ATTRIBUTES attributes;
+    InitializeObjectAttributes(&attributes, &leaf, 0, parent, NULL);
+    IO_STATUS_BLOCK io_status = {0};
+    HANDLE child = INVALID_HANDLE_VALUE;
+    NTSTATUS status = create_file(
+        &child, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        &attributes, &io_status, NULL, FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+        FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    return status >= 0 ? child : INVALID_HANDLE_VALUE;
+}
+
+static bool prepare_append_entry(struct prepare_windows_entry **entries,
+                                 size_t *count, const wchar_t *wide,
+                                 int wide_count, uint64_t file_id)
+{
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide,
+                                    wide_count, NULL, 0, NULL, NULL);
+    if (bytes <= 0 || *count >= SIZE_MAX / sizeof(**entries))
+        return false;
+    char *name = zcl_malloc((size_t)bytes + 1u,
+                            "vcs.package.prepare.win.name");
+    struct prepare_windows_entry *grown = name ? zcl_realloc(
+        *entries, (*count + 1u) * sizeof(**entries),
+        "vcs.package.prepare.win.entries") : NULL;
+    if (!grown) {
+        free(name);
         return false;
     }
-    HANDLE h = CreateFileW(
-        wide, GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    free(wide);
-    if (h == INVALID_HANDLE_VALUE) {
-        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-        prepare_detail(walk, "%s: open: %s", pkg_path, strerror(errno));
+    *entries = grown;
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, wide_count,
+                            name, bytes, NULL, NULL) != bytes) {
+        free(name);
         return false;
     }
-    FILE_ATTRIBUTE_TAG_INFO info;
-    if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &info,
-                                      sizeof(info)) ||
-        (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-        (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        CloseHandle(h);
-        walk->error = VCS_PACKAGE_PREPARE_ERR_FILE_TYPE;
-        prepare_detail(walk, "%s: not a regular file", pkg_path);
-        return false;
-    }
-    int fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
-    if (fd < 0) {
-        CloseHandle(h);
-        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-        prepare_detail(walk, "%s: _open_osfhandle", pkg_path);
-        return false;
-    }
-    struct stat before;
-    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_size != listed->st_size ||
-        before.st_mtime != listed->st_mtime || before.st_size < 0 ||
-        (uint64_t)before.st_size > VCS_PACKAGE_MAX_FILE_BYTES) {
-        close(fd);
+    name[bytes] = '\0';
+    grown[*count] = (struct prepare_windows_entry){name, file_id};
+    (*count)++;
+    return true;
+}
+
+static int prepare_entry_compare(const void *left, const void *right)
+{
+    const struct prepare_windows_entry *a = left;
+    const struct prepare_windows_entry *b = right;
+    return strcmp(a->name, b->name);
+}
+
+static void prepare_entries_free(struct prepare_windows_entry *entries,
+                                 size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        free(entries[i].name);
+    free(entries);
+}
+
+static bool prepare_regular(struct prepare_walk *walk, HANDLE handle,
+                            const char *pkg_path,
+                            uint64_t listed_file_id)
+{
+    struct prepare_windows_snapshot before;
+    if (!prepare_windows_snapshot(handle, &before) ||
+        (listed_file_id != 0 && before.file_id != 0 &&
+         before.file_id != listed_file_id) ||
+        before.size > VCS_PACKAGE_MAX_FILE_BYTES) {
+        CloseHandle(handle);
         walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
         prepare_detail(walk, "%s: changed before read", pkg_path);
         return false;
     }
-    uint64_t size = (uint64_t)before.st_size;
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: _open_osfhandle", pkg_path);
+        return false;
+    }
+    struct stat mode_info;
+    if (fstat(fd, &mode_info) != 0 || !S_ISREG(mode_info.st_mode)) {
+        close(fd);
+        walk->error = VCS_PACKAGE_PREPARE_ERR_FILE_TYPE;
+        prepare_detail(walk, "%s: not a regular file", pkg_path);
+        return false;
+    }
+    uint64_t size = before.size;
     uint32_t chunks = size == 0 ? 0u :
         (uint32_t)(1u + (size - 1u) / VCS_PACKAGE_CHUNK_BYTES);
     uint8_t *hashes = NULL;
@@ -525,8 +632,9 @@ static bool prepare_regular(struct prepare_walk *walk, const char *fs_path,
         }
         left -= want;
     }
-    struct stat after;
-    if (fstat(fd, &after) != 0 || !prepare_stat_same(&before, &after)) {
+    struct prepare_windows_snapshot after;
+    if (!prepare_windows_snapshot(handle, &after) ||
+        !prepare_windows_snapshot_same(&before, &after)) {
         free(hashes); free(buf); close(fd);
         walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
         prepare_detail(walk, "%s: changed while read", pkg_path);
@@ -548,9 +656,9 @@ static bool prepare_regular(struct prepare_walk *walk, const char *fs_path,
             prepare_detail(walk, "%s: metadata read", pkg_path);
             return false;
         }
-        struct stat metadata_after;
-        if (fstat(fd, &metadata_after) != 0 ||
-            !prepare_stat_same(&before, &metadata_after)) {
+        struct prepare_windows_snapshot metadata_after;
+        if (!prepare_windows_snapshot(handle, &metadata_after) ||
+            !prepare_windows_snapshot_same(&before, &metadata_after)) {
             free(walk->meta); walk->meta = NULL;
             free(hashes); free(buf); close(fd);
             walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
@@ -561,7 +669,7 @@ static bool prepare_regular(struct prepare_walk *walk, const char *fs_path,
         walk->meta_len = (size_t)size;
     }
     close(fd);
-    uint32_t mode = (before.st_mode & 0111u)
+    uint32_t mode = (mode_info.st_mode & 0111u)
         ? VCS_PACKAGE_MODE_EXECUTABLE : VCS_PACKAGE_MODE_FILE;
     bool ok = vcs_package_manifest_add(&walk->out->manifest, pkg_path, mode,
                                        size, hashes, chunks) &&
@@ -574,44 +682,59 @@ static bool prepare_regular(struct prepare_walk *walk, const char *fs_path,
     return ok;
 }
 
-static bool prepare_walk_dir(struct prepare_walk *walk, const char *dir_path,
-                             const char *prefix)
+static bool prepare_walk_dir(
+    struct prepare_walk *walk, HANDLE directory, const char *prefix,
+    prepare_nt_create_file_fn create_file,
+    prepare_nt_query_directory_file_fn query_directory)
 {
-    struct platform_directory_list files = {0};
-    struct platform_directory_list dirs = {0};
-    bool listed_ok = true;
-    if (!platform_directory_list_regular_sorted(dir_path, &files)) {
-        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-        prepare_detail(walk, "%s: list files: %s", prefix, strerror(errno));
-        listed_ok = false;
-    }
-    if (listed_ok && !platform_directory_list_real_sorted(dir_path, &dirs)) {
-        platform_directory_list_free(&files);
-        walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-        prepare_detail(walk, "%s: list directories: %s", prefix,
-                       strerror(errno));
-        listed_ok = false;
-    }
-    if (!listed_ok) {
-        platform_directory_list_free(&files);
-        platform_directory_list_free(&dirs);
-        return false;
-    }
-
+    struct prepare_windows_entry *entries = NULL;
+    size_t count = 0;
+    bool restart = true;
     bool ok = true;
-    for (size_t i = 0; i < files.count && ok; i++) {
-        const char *name = files.entries[i].name;
-        char child_path[32768];
-        char path[VCS_PACKAGE_PATH_MAX + 1u];
-        int n = snprintf(child_path, sizeof(child_path), "%s/%s", dir_path,
-                         name);
-        if (n <= 0 || (size_t)n >= sizeof(child_path)) {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
-            prepare_detail(walk, "%s/%s: path too long", dir_path, name);
+    unsigned char buffer[16384];
+    for (;;) {
+        IO_STATUS_BLOCK io_status = {0};
+        NTSTATUS status = query_directory(
+            directory, NULL, NULL, NULL, &io_status, buffer, sizeof(buffer),
+            FileIdBothDirectoryInformation, FALSE, NULL, restart ? TRUE : FALSE);
+        restart = false;
+        if ((ULONG)status == 0x80000006u)
+            break;
+        if (status < 0 || io_status.Information == 0) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+            prepare_detail(walk, "%s: directory query failed (0x%08lx)",
+                           prefix, (unsigned long)(ULONG)status);
             ok = false;
             break;
         }
-        n = prefix[0]
+        FILE_ID_BOTH_DIR_INFO *entry = (FILE_ID_BOTH_DIR_INFO *)buffer;
+        for (;;) {
+            int chars = (int)(entry->FileNameLength / sizeof(wchar_t));
+            bool dot = (chars == 1 && entry->FileName[0] == L'.') ||
+                (chars == 2 && entry->FileName[0] == L'.' &&
+                 entry->FileName[1] == L'.');
+            if (!dot && !prepare_append_entry(
+                    &entries, &count, entry->FileName, chars,
+                    (uint64_t)entry->FileId.QuadPart)) {
+                walk->error = VCS_PACKAGE_PREPARE_ERR_ALLOC;
+                prepare_detail(walk, "%s: directory entry allocation", prefix);
+                ok = false;
+                break;
+            }
+            if (!entry->NextEntryOffset)
+                break;
+            entry = (FILE_ID_BOTH_DIR_INFO *)
+                ((unsigned char *)entry + entry->NextEntryOffset);
+        }
+        if (!ok)
+            break;
+    }
+    if (count > 1)
+        qsort(entries, count, sizeof(*entries), prepare_entry_compare);
+    for (size_t i = 0; i < count && ok; i++) {
+        const char *name = entries[i].name;
+        char path[VCS_PACKAGE_PATH_MAX + 1u];
+        int n = prefix[0]
             ? snprintf(path, sizeof(path), "%s/%s", prefix, name)
             : snprintf(path, sizeof(path), "%s", name);
         if (n <= 0 || (size_t)n >= sizeof(path) ||
@@ -621,70 +744,82 @@ static bool prepare_walk_dir(struct prepare_walk *walk, const char *dir_path,
             ok = false;
             break;
         }
-        struct stat listed;
-        if (stat(child_path, &listed) != 0 || !S_ISREG(listed.st_mode)) {
+        HANDLE child = prepare_open_child(directory, name, create_file);
+        if (child == INVALID_HANDLE_VALUE) {
+            walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+            prepare_detail(walk, "%s: changed before open", path);
+            ok = false;
+            break;
+        }
+        BY_HANDLE_FILE_INFORMATION info = {0};
+        uint64_t file_id;
+        if (!GetFileInformationByHandle(child, &info)) {
+            CloseHandle(child);
             walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-            prepare_detail(walk, "%s: stat: %s", path, strerror(errno));
+            prepare_detail(walk, "%s: handle information", path);
             ok = false;
             break;
         }
-        ok = prepare_regular(walk, child_path, path, &listed);
+        file_id = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+        if (file_id != 0 && entries[i].file_id != 0 &&
+            file_id != entries[i].file_id) {
+            CloseHandle(child);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_CHANGED;
+            prepare_detail(walk, "%s: changed after listing", path);
+            ok = false;
+        } else if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            CloseHandle(child);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_FILE_TYPE;
+            prepare_detail(walk, "%s: reparse point refused", path);
+            ok = false;
+        } else if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (prepare_local_control_dir(prefix, name)) {
+                CloseHandle(child);
+                continue;
+            }
+            ok = prepare_walk_dir(walk, child, path, create_file,
+                                  query_directory);
+            CloseHandle(child);
+        } else if (GetFileType(child) == FILE_TYPE_DISK) {
+            ok = prepare_regular(walk, child, path, entries[i].file_id);
+        } else {
+            CloseHandle(child);
+            walk->error = VCS_PACKAGE_PREPARE_ERR_FILE_TYPE;
+            prepare_detail(walk, "%s: special file refused", path);
+            ok = false;
+        }
     }
-
-    for (size_t i = 0; i < dirs.count && ok; i++) {
-        const char *name = dirs.entries[i].name;
-        if (prepare_local_control_dir(prefix, name))
-            continue;
-        char child_path[32768];
-        char path[VCS_PACKAGE_PATH_MAX + 1u];
-        int n = snprintf(child_path, sizeof(child_path), "%s/%s", dir_path,
-                         name);
-        if (n <= 0 || (size_t)n >= sizeof(child_path)) {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
-            prepare_detail(walk, "%s/%s: path too long", dir_path, name);
-            ok = false;
-            break;
-        }
-        n = prefix[0]
-            ? snprintf(path, sizeof(path), "%s/%s", prefix, name)
-            : snprintf(path, sizeof(path), "%s", name);
-        if (n <= 0 || (size_t)n >= sizeof(path) ||
-            !vcs_package_path_valid(path)) {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_PATH;
-            prepare_detail(walk, "%s: non-canonical package path", path);
-            ok = false;
-            break;
-        }
-        struct stat listed;
-        if (stat(child_path, &listed) != 0 || !S_ISDIR(listed.st_mode)) {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-            prepare_detail(walk, "%s: stat: %s", path, strerror(errno));
-            ok = false;
-            break;
-        }
-        if (!prepare_walk_dir(walk, child_path, path))
-            ok = false;
-    }
-
-    platform_directory_list_free(&files);
-    platform_directory_list_free(&dirs);
+    prepare_entries_free(entries, count);
     return ok;
 }
 
-static enum vcs_package_prepare_error prepare_open_root(
-    const char *dir, char *detail, size_t detail_cap)
+static HANDLE prepare_open_root(const char *dir, char *detail,
+                                size_t detail_cap)
 {
-    enum platform_directory_probe_result probe =
-        platform_directory_probe_real(dir);
-    if (probe == PLATFORM_DIRECTORY_PROBE_OK)
-        return VCS_PACKAGE_PREPARE_OK;
-    if (detail && detail_cap) {
-        if (probe == PLATFORM_DIRECTORY_PROBE_MISSING)
-            (void)snprintf(detail, detail_cap, "%s: %s", dir, strerror(errno));
-        else
-            (void)snprintf(detail, detail_cap, "%s: not a real directory", dir);
+    wchar_t *wide = prepare_utf8_to_wide(dir);
+    if (!wide) {
+        if (detail && detail_cap)
+            (void)snprintf(detail, detail_cap, "%s: utf8 conversion", dir);
+        return INVALID_HANDLE_VALUE;
     }
-    return VCS_PACKAGE_PREPARE_ERR_PATH;
+    HANDLE root = CreateFileW(
+        wide, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    if (root == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(root, &info) ||
+        !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        if (root != INVALID_HANDLE_VALUE)
+            CloseHandle(root);
+        if (detail && detail_cap)
+            (void)snprintf(detail, detail_cap, "%s: not a real directory", dir);
+        return INVALID_HANDLE_VALUE;
+    }
+    return root;
 }
 
 enum vcs_package_prepare_error vcs_package_prepare(
@@ -696,17 +831,27 @@ enum vcs_package_prepare_error vcs_package_prepare(
     vcs_package_prepared_init(out);
     if (detail && detail_cap)
         detail[0] = '\0';
-    enum vcs_package_prepare_error open_err =
-        prepare_open_root(options->dir, detail, detail_cap);
-    if (open_err != VCS_PACKAGE_PREPARE_OK)
-        return open_err;
+    prepare_nt_create_file_fn create_file = NULL;
+    prepare_nt_query_directory_file_fn query_directory = NULL;
+    HANDLE root = prepare_open_root(options->dir, detail, detail_cap);
+    if (root == INVALID_HANDLE_VALUE)
+        return VCS_PACKAGE_PREPARE_ERR_PATH;
+    if (!prepare_nt_functions(&create_file, &query_directory)) {
+        CloseHandle(root);
+        if (detail && detail_cap)
+            (void)snprintf(detail, detail_cap,
+                           "Windows native directory APIs unavailable");
+        return VCS_PACKAGE_PREPARE_ERR_IO;
+    }
     struct prepare_walk walk = {
         .out = out,
         .error = VCS_PACKAGE_PREPARE_OK,
         .detail = detail,
         .detail_cap = detail_cap,
     };
-    bool walked = prepare_walk_dir(&walk, options->dir, "");
+    bool walked = prepare_walk_dir(&walk, root, "", create_file,
+                                   query_directory);
+    CloseHandle(root);
     enum vcs_package_prepare_error err = walked
         ? prepare_finish(options, &walk) : walk.error;
     free(walk.meta);
@@ -727,17 +872,27 @@ enum vcs_package_prepare_error vcs_package_scan_layout(
     *has_package_config = false;
     if (detail && detail_cap)
         detail[0] = '\0';
-    enum vcs_package_prepare_error open_err =
-        prepare_open_root(dir, detail, detail_cap);
-    if (open_err != VCS_PACKAGE_PREPARE_OK)
-        return open_err;
+    prepare_nt_create_file_fn create_file = NULL;
+    prepare_nt_query_directory_file_fn query_directory = NULL;
+    HANDLE root = prepare_open_root(dir, detail, detail_cap);
+    if (root == INVALID_HANDLE_VALUE)
+        return VCS_PACKAGE_PREPARE_ERR_PATH;
+    if (!prepare_nt_functions(&create_file, &query_directory)) {
+        CloseHandle(root);
+        if (detail && detail_cap)
+            (void)snprintf(detail, detail_cap,
+                           "Windows native directory APIs unavailable");
+        return VCS_PACKAGE_PREPARE_ERR_IO;
+    }
     struct prepare_walk walk = {
         .out = out,
         .error = VCS_PACKAGE_PREPARE_OK,
         .detail = detail,
         .detail_cap = detail_cap,
     };
-    bool walked = prepare_walk_dir(&walk, dir, "");
+    bool walked = prepare_walk_dir(&walk, root, "", create_file,
+                                   query_directory);
+    CloseHandle(root);
     enum vcs_package_prepare_error err = walked
         ? VCS_PACKAGE_PREPARE_OK : walk.error;
     *has_package_config = walk.meta != NULL;

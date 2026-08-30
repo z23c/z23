@@ -110,11 +110,32 @@ static bool stage_fixture_make(struct stage_fixture *f)
             MESH_PRIVATE_OBJECT_PROTO_OK;
 }
 
-static void stage_data_leaf(char out[80], const uint8_t id[32])
+static void stage_leaf(char out[80], const uint8_t id[32], const char *suffix)
 {
     memcpy(out, "mpos-", 5);
     zcl_hex_encode(id, 32, out + 5);
-    memcpy(out + 69, ".data", 6);
+    snprintf(out + 69, 11, ".%s", suffix);
+}
+
+static bool stage_append_journal(const char *dir, const uint8_t transfer_id[32],
+                                 const uint8_t *bytes, size_t count)
+{
+    char leaf[80];
+    stage_leaf(leaf, transfer_id, "journal");
+    struct platform_directory_transaction directory;
+    struct platform_directory_child journal;
+    struct platform_directory_child_info info;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&journal);
+    bool ok = platform_directory_transaction_open(&directory, dir) &&
+        platform_directory_child_open(&directory, leaf, &journal) &&
+        platform_directory_child_info(&journal, &info) &&
+        platform_directory_child_write_exact(
+            &journal, bytes, count, info.size) &&
+        platform_directory_child_flush(&journal);
+    platform_directory_child_close(&journal);
+    platform_directory_transaction_close(&directory);
+    return ok;
 }
 
 static int stage_resume_roundtrip(void)
@@ -180,7 +201,7 @@ static int stage_corruption_refusal(void)
         ASSERT_EQ(mesh_private_object_offer_transfer_id_v1(
                       &f.offer, transfer_id), MESH_PRIVATE_OBJECT_PROTO_OK);
         char leaf[80];
-        stage_data_leaf(leaf, transfer_id);
+        stage_leaf(leaf, transfer_id, "data");
         struct platform_directory_transaction directory;
         struct platform_directory_child data;
         platform_directory_transaction_init(&directory);
@@ -202,7 +223,125 @@ static int stage_corruption_refusal(void)
     return failures;
 }
 
+static int stage_cancellation(void)
+{
+    int failures = 0;
+    TEST_CASE("private staging persists one terminal canonical cancellation") {
+        char dir[512];
+        test_make_tmpdir(dir, sizeof(dir), "mesh_private_stage", "cancel");
+        struct stage_fixture f;
+        ASSERT(stage_fixture_make(&f));
+        uint8_t transfer_id[32];
+        ASSERT_EQ(mesh_private_object_offer_transfer_id_v1(
+                      &f.offer, transfer_id), MESH_PRIVATE_OBJECT_PROTO_OK);
+        struct mesh_private_object_cancel_v1 cancel = {.cancel_id = 17};
+        memcpy(cancel.transfer_id, transfer_id, 32);
+        memcpy(cancel.offer_request_id, f.offer.request_id, 32);
+        struct mesh_private_object_stage *stage = NULL;
+        ASSERT_EQ(mesh_private_object_stage_open_v1(
+                      &stage, dir, &f.offer, f.target_secret),
+                  MESH_PRIVATE_OBJECT_STAGE_OK);
+        ASSERT_EQ(mesh_private_object_stage_put_v1(
+                      stage, 0, f.sealed[0], f.sealed_len[0]),
+                  MESH_PRIVATE_OBJECT_STAGE_OK);
+        ASSERT_EQ(mesh_private_object_stage_cancel_v1(stage, &cancel),
+                  MESH_PRIVATE_OBJECT_STAGE_OK);
+        ASSERT_EQ(mesh_private_object_stage_cancel_v1(stage, &cancel),
+                  MESH_PRIVATE_OBJECT_STAGE_OK);
+        struct mesh_private_object_cancel_v1 recorded = {0};
+        ASSERT(mesh_private_object_stage_cancelled_v1(stage, &recorded));
+        ASSERT_EQ(recorded.cancel_id, cancel.cancel_id);
+        ASSERT(memcmp(&recorded, &cancel, sizeof(cancel)) == 0);
+        ASSERT_EQ(mesh_private_object_stage_put_v1(
+                      stage, 1, f.sealed[1], f.sealed_len[1]),
+                  MESH_PRIVATE_OBJECT_STAGE_CANCELLED);
+        ASSERT_EQ(mesh_private_object_stage_verify_v1(stage),
+                  MESH_PRIVATE_OBJECT_STAGE_CANCELLED);
+        mesh_private_object_stage_close(stage);
+        stage = NULL;
+        ASSERT_EQ(mesh_private_object_stage_open_v1(
+                      &stage, dir, &f.offer, f.target_secret),
+                  MESH_PRIVATE_OBJECT_STAGE_OK);
+        memset(&recorded, 0, sizeof(recorded));
+        ASSERT(mesh_private_object_stage_cancelled_v1(stage, &recorded));
+        ASSERT(memcmp(&recorded, &cancel, sizeof(cancel)) == 0);
+        mesh_private_object_stage_close(stage);
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
+static bool stage_cancel_tail_refused(
+    const struct stage_fixture *f, const uint8_t transfer_id[32],
+    const char *tag, const uint8_t *tail, size_t tail_len)
+{
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "mesh_private_stage", tag);
+    struct mesh_private_object_stage *stage = NULL;
+    bool created = mesh_private_object_stage_open_v1(
+                       &stage, dir, &f->offer, f->target_secret) ==
+                   MESH_PRIVATE_OBJECT_STAGE_OK;
+    mesh_private_object_stage_close(stage);
+    stage = NULL;
+    bool appended = created &&
+        stage_append_journal(dir, transfer_id, tail, tail_len);
+    bool refused = appended && mesh_private_object_stage_open_v1(
+        &stage, dir, &f->offer, f->target_secret) ==
+        MESH_PRIVATE_OBJECT_STAGE_CORRUPT && stage == NULL;
+    mesh_private_object_stage_close(stage);
+    test_rm_rf_recursive(dir);
+    return refused;
+}
+
+static int stage_cancel_corruption(void)
+{
+    int failures = 0;
+    TEST_CASE("private staging fails closed on torn or forged cancellation") {
+        struct stage_fixture f;
+        ASSERT(stage_fixture_make(&f));
+        uint8_t transfer_id[32];
+        ASSERT_EQ(mesh_private_object_offer_transfer_id_v1(
+                      &f.offer, transfer_id), MESH_PRIVATE_OBJECT_PROTO_OK);
+        struct mesh_private_object_cancel_v1 cancel = {.cancel_id = 29};
+        memcpy(cancel.transfer_id, transfer_id, 32);
+        memcpy(cancel.offer_request_id, f.offer.request_id, 32);
+        uint8_t wire[MESH_PRIVATE_OBJECT_FRAME_CANCEL_BYTES];
+        size_t wire_len = 0;
+        ASSERT_EQ(mesh_private_object_frame_cancel_v1_encode(
+                      &cancel, wire, sizeof(wire), &wire_len),
+                  MESH_PRIVATE_OBJECT_FRAME_OK);
+
+        ASSERT(stage_cancel_tail_refused(
+            &f, transfer_id, "cancel-torn", wire, wire_len - 1u));
+        uint8_t oversized[MESH_PRIVATE_OBJECT_FRAME_CANCEL_BYTES + 1u];
+        memcpy(oversized, wire, wire_len);
+        oversized[wire_len] = 0;
+        ASSERT(stage_cancel_tail_refused(
+            &f, transfer_id, "cancel-oversized",
+            oversized, sizeof(oversized)));
+        wire[0] ^= 1u;
+        ASSERT(stage_cancel_tail_refused(
+            &f, transfer_id, "cancel-malformed", wire, wire_len));
+        wire[0] ^= 1u;
+        wire[6] = MESH_PRIVATE_OBJECT_FRAME_REQUEST;
+        ASSERT(stage_cancel_tail_refused(
+            &f, transfer_id, "cancel-wrong-kind", wire, wire_len));
+        wire[6] = MESH_PRIVATE_OBJECT_FRAME_CANCEL;
+        memset(wire + 72, 0, 8);
+        ASSERT(stage_cancel_tail_refused(
+            &f, transfer_id, "cancel-zero-id", wire, wire_len));
+        cancel.transfer_id[0] ^= 1u;
+        ASSERT_EQ(mesh_private_object_frame_cancel_v1_encode(
+                      &cancel, wire, sizeof(wire), &wire_len),
+                  MESH_PRIVATE_OBJECT_FRAME_OK);
+        ASSERT(stage_cancel_tail_refused(
+            &f, transfer_id, "cancel-wrong-transfer", wire, wire_len));
+    } TEST_END
+    return failures;
+}
+
 int test_mesh_private_object_stage(void)
 {
-    return stage_resume_roundtrip() + stage_corruption_refusal();
+    return stage_resume_roundtrip() + stage_corruption_refusal() +
+           stage_cancellation() + stage_cancel_corruption();
 }

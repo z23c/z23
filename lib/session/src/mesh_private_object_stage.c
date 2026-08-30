@@ -34,6 +34,8 @@ struct mesh_private_object_stage {
     uint8_t bitmap[STAGE_BITMAP_MAX_BYTES];
     uint32_t bitmap_bytes;
     uint32_t done;
+    bool cancelled;
+    struct mesh_private_object_cancel_v1 cancel;
 };
 
 _Static_assert(
@@ -60,6 +62,7 @@ const char *mesh_private_object_stage_error_string(
     case MESH_PRIVATE_OBJECT_STAGE_AUTH: return "auth";
     case MESH_PRIVATE_OBJECT_STAGE_INCOMPLETE: return "incomplete";
     case MESH_PRIVATE_OBJECT_STAGE_ROOT: return "root";
+    case MESH_PRIVATE_OBJECT_STAGE_CANCELLED: return "cancelled";
     }
     return "unknown";
 }
@@ -124,6 +127,40 @@ static bool stage_stray_bits(const struct mesh_private_object_stage *stage)
 static uint64_t stage_chunk_offset(uint32_t index)
 {
     return (uint64_t)index * MESH_PRIVATE_OBJECT_CHUNK_BYTES;
+}
+
+static uint64_t stage_journal_base_size(
+    const struct mesh_private_object_stage *stage)
+{
+    return STAGE_HEADER_BYTES + (uint64_t)stage->bitmap_bytes;
+}
+
+static enum mesh_private_object_stage_error stage_read_cancel(
+    struct mesh_private_object_stage *stage, uint64_t journal_size)
+{
+    uint64_t base = stage_journal_base_size(stage);
+    if (journal_size == base)
+        return MESH_PRIVATE_OBJECT_STAGE_OK;
+    if (journal_size != base + MESH_PRIVATE_OBJECT_FRAME_CANCEL_BYTES) {
+        LOG_ERROR(STAGE_SUBSYS, "resume journal has a torn cancel record");
+        return MESH_PRIVATE_OBJECT_STAGE_CORRUPT;
+    }
+    uint8_t wire[MESH_PRIVATE_OBJECT_FRAME_CANCEL_BYTES];
+    struct mesh_private_object_frame_view_v1 view;
+    if (!platform_directory_child_read_exact(
+            &stage->journal, wire, sizeof(wire), base) ||
+        mesh_private_object_frame_v1_decode(&view, wire, sizeof(wire)) !=
+            MESH_PRIVATE_OBJECT_FRAME_OK ||
+        view.kind != MESH_PRIVATE_OBJECT_FRAME_CANCEL ||
+        memcmp(view.body.cancel.transfer_id, stage->transfer_id, 32) != 0) {
+        memory_cleanse(wire, sizeof(wire));
+        LOG_ERROR(STAGE_SUBSYS, "resume journal cancel record is invalid");
+        return MESH_PRIVATE_OBJECT_STAGE_CORRUPT;
+    }
+    stage->cancel = view.body.cancel;
+    stage->cancelled = true;
+    memory_cleanse(wire, sizeof(wire));
+    return MESH_PRIVATE_OBJECT_STAGE_OK;
 }
 
 static enum mesh_private_object_stage_error stage_authenticate(
@@ -233,7 +270,9 @@ static enum mesh_private_object_stage_error stage_open_files(
     uint8_t header[STAGE_HEADER_BYTES];
     bool readable = platform_directory_child_info(&stage->journal, &ji) &&
         platform_directory_child_info(&stage->data, &di) &&
-        ji.size == STAGE_HEADER_BYTES + stage->bitmap_bytes &&
+        (ji.size == stage_journal_base_size(stage) ||
+         ji.size == stage_journal_base_size(stage) +
+                        MESH_PRIVATE_OBJECT_FRAME_CANCEL_BYTES) &&
         di.size == stage->offer.ciphertext_size_bytes &&
         platform_directory_child_read_exact(
             &stage->journal, header, sizeof(header), 0);
@@ -254,7 +293,10 @@ static enum mesh_private_object_stage_error stage_open_files(
         return MESH_PRIVATE_OBJECT_STAGE_CORRUPT;
     }
     stage->done = stage_count_bits(stage->bitmap, stage->bitmap_bytes);
-    return stage_verify_recorded(stage);
+    enum mesh_private_object_stage_error cancel_error =
+        stage_read_cancel(stage, ji.size);
+    return cancel_error == MESH_PRIVATE_OBJECT_STAGE_OK
+        ? stage_verify_recorded(stage) : cancel_error;
 }
 
 enum mesh_private_object_stage_error mesh_private_object_stage_open_v1(
@@ -350,6 +392,7 @@ enum mesh_private_object_stage_error mesh_private_object_stage_put_v1(
     const uint8_t *sealed, size_t sealed_len)
 {
     if (!stage || !sealed) return MESH_PRIVATE_OBJECT_STAGE_NULL;
+    if (stage->cancelled) return MESH_PRIVATE_OBJECT_STAGE_CANCELLED;
     if (chunk_index >= stage->offer.chunk_count)
         return MESH_PRIVATE_OBJECT_STAGE_INDEX;
     uint32_t plain_expected = 0, sealed_expected = 0;
@@ -394,10 +437,56 @@ enum mesh_private_object_stage_error mesh_private_object_stage_put_v1(
     return MESH_PRIVATE_OBJECT_STAGE_OK;
 }
 
+bool mesh_private_object_stage_cancelled_v1(
+    const struct mesh_private_object_stage *stage,
+    struct mesh_private_object_cancel_v1 *cancel_out)
+{
+    if (!stage || !stage->cancelled) return false;
+    if (cancel_out) *cancel_out = stage->cancel;
+    return true;
+}
+
+enum mesh_private_object_stage_error mesh_private_object_stage_cancel_v1(
+    struct mesh_private_object_stage *stage,
+    const struct mesh_private_object_cancel_v1 *cancel)
+{
+    if (!stage || !cancel) return MESH_PRIVATE_OBJECT_STAGE_NULL;
+    if (stage->cancelled) {
+        return memcmp(stage->cancel.transfer_id, cancel->transfer_id, 32) == 0 &&
+                       memcmp(stage->cancel.offer_request_id,
+                              cancel->offer_request_id, 32) == 0 &&
+                       stage->cancel.cancel_id == cancel->cancel_id
+                   ? MESH_PRIVATE_OBJECT_STAGE_OK
+                   : MESH_PRIVATE_OBJECT_STAGE_CANCELLED;
+    }
+    if (memcmp(cancel->transfer_id, stage->transfer_id, 32) != 0)
+        return MESH_PRIVATE_OBJECT_STAGE_IDENTITY;
+    uint8_t wire[MESH_PRIVATE_OBJECT_FRAME_CANCEL_BYTES];
+    size_t wire_len = 0;
+    if (mesh_private_object_frame_cancel_v1_encode(
+            cancel, wire, sizeof(wire), &wire_len) !=
+            MESH_PRIVATE_OBJECT_FRAME_OK || wire_len != sizeof(wire)) {
+        memory_cleanse(wire, sizeof(wire));
+        return MESH_PRIVATE_OBJECT_STAGE_OFFER;
+    }
+    stage->cancelled = true;
+    stage->cancel = *cancel;
+    uint64_t base = stage_journal_base_size(stage);
+    bool stored = platform_directory_child_write_exact(
+                      &stage->journal, wire, sizeof(wire), base) &&
+                  platform_directory_child_truncate(
+                      &stage->journal, base + sizeof(wire)) &&
+                  platform_directory_child_flush(&stage->journal);
+    memory_cleanse(wire, sizeof(wire));
+    return stored ? MESH_PRIVATE_OBJECT_STAGE_OK
+                  : MESH_PRIVATE_OBJECT_STAGE_IO;
+}
+
 enum mesh_private_object_stage_error mesh_private_object_stage_verify_v1(
     struct mesh_private_object_stage *stage)
 {
     if (!stage) return MESH_PRIVATE_OBJECT_STAGE_NULL;
+    if (stage->cancelled) return MESH_PRIVATE_OBJECT_STAGE_CANCELLED;
     if (stage->done != stage->offer.chunk_count)
         return MESH_PRIVATE_OBJECT_STAGE_INCOMPLETE;
     struct mesh_private_object_root_v1 root;
