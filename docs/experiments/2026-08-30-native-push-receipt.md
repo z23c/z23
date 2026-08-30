@@ -118,6 +118,12 @@ receipt, and leaves object files behind. Source and include-graph reads
 therefore stay generation-local while the immutable PASS objects remain
 shared.
 
+The first depfile-aware proof planned 131 cacheable groups, reused one prior
+PASS, ran 160 groups, and stored 129 new PASS receipts in 429.1 seconds. Its
+only failed group refused because the isolated generation did not contain the
+required `zclassic23-acme` executable. The broker now builds and hashes that
+test prerequisite alongside `zcl-nodectl`; absence remains a hard failure.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
