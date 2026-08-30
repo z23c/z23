@@ -239,35 +239,6 @@ static bool path_is_opaque_class(const char *path)
     return false;
 }
 
-/* These development-policy components have explicit behavioral owners in
- * agent_impact_rules.def. Their direct compile/lint/test set is the boundary;
- * walking through generic registries and test harnesses selects unrelated
- * product families without observing additional behavior. */
-static bool path_is_direct_development_contract(const char *path)
-{
-    static const char *const paths[] = {
-        "app/controllers/include/controllers/agent_impact_rules.def",
-        "config/commands/dev.def",
-        "lib/test/src/lint_gate_hygiene_selftests.c",
-        "lib/test/src/lint_gate_selftests.h",
-        "tools/command/native_dev_proof_command.c",
-        "tools/command/native_dev_proof_command.h",
-        "tools/command/native_dev_verify_change_command.c",
-        "tools/dev/dev_proof.c",
-        "tools/dev/dev_proof.h",
-        "tools/dev/dev_proof_receipt.c",
-        "tools/dev/dev_proof_receipt.h",
-        "tools/dev/devloop.h",
-        "tools/dev/devloop_cycle.c",
-        "tools/dev/devloop_plan.c",
-        "tools/dev/z23_git_hook.c",
-    };
-    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++)
-        if (path && strcmp(path, paths[i]) == 0)
-            return true;
-    return false;
-}
-
 /* Graph dimensions are properties of a source shape, not mandatory rituals.
  * A .c file cannot be reverse-included; a .def registry has no callable
  * symbols; opaque assets enter neither compiler graph. Dedicated registered
@@ -279,7 +250,7 @@ static bool path_is_direct_development_contract(const char *path)
  * historic test_parallel fanout false alarm without hiding helper impacts. */
 static bool path_semantic_applies(const char *path)
 {
-    if (!path || path_is_direct_development_contract(path) ||
+    if (!path || agent_impact_path_is_direct_development_contract(path) ||
         path_is_opaque_class(path) || has_suffix(path, ".def"))
         return false;
     if (has_suffix(path, ".h"))
@@ -291,7 +262,8 @@ static bool path_semantic_applies(const char *path)
 
 static bool path_include_applies(const char *path)
 {
-    return path && !path_is_direct_development_contract(path) &&
+    return path &&
+           !agent_impact_path_is_direct_development_contract(path) &&
            !path_is_opaque_class(path) &&
            (has_suffix(path, ".h") || has_suffix(path, ".def"));
 }
