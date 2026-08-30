@@ -3204,6 +3204,10 @@ check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
 .PHONY: check-zcode-package-standalone
 check-zcode-package-standalone:
 	@tools/lint/check_zcode_package_standalone.sh
+.PHONY: check-package-capabilities
+check-package-capabilities:
+	@./tools/lint/check_package_capabilities.sh --selftest
+	@./tools/lint/check_package_capabilities.sh
 .PHONY: check-package-anatomy
 check-package-anatomy:
 	@./tools/lint/check_package_anatomy.sh --selftest
@@ -11662,6 +11666,7 @@ LINT_GATES := \
     check-fortify-masked-decls \
     check-zcode-package-registry \
     check-zcode-package-standalone \
+    check-package-capabilities \
     check-package-anatomy \
     check-capability-closure \
     check-hotswap-dev-only \

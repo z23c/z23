@@ -1,8 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Private declaration shared between package_prepare.c and
- * package_prepare_schema.c. NOT a public header: only these two
- * translation units include it. */
+ * Private declaration shared between package_prepare.c,
+ * package_prepare_schema.c and package_verify_capabilities.c. NOT a public
+ * header: only these three translation units include it. The third is the
+ * receiver-side capability check, which grades a stranger's manifest and so
+ * must apply the SAME closed-shape rule the publisher side applies — a
+ * second copy of that rule would be a second answer to what a valid manifest
+ * is, and the two would drift. */
 #ifndef ZCL_VCS_PACKAGE_PREPARE_INTERNAL_H
 #define ZCL_VCS_PACKAGE_PREPARE_INTERNAL_H
 

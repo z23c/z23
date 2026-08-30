@@ -6,5 +6,9 @@
   "license": "Apache-2.0",
   "include_dir": "include",
   "source_dir": "src",
-  "dependencies": []
+  "dependencies": [],
+  "capabilities": [
+    "CAP_CLOCK",
+    "CAP_FS_WRITE"
+  ]
 }
