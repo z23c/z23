@@ -893,14 +893,18 @@ static bool test_helpers_prepare(
     char *why, size_t why_len)
 {
     char verifier_source[PATH_MAX], verifier_target[PATH_MAX];
+    char node_source[PATH_MAX], node_target[PATH_MAX];
     char nodectl_target[PATH_MAX];
     int verifier_len = snprintf(
         verifier_source, sizeof(verifier_source),
         "%s/build/bin/zclassic23-package-verify-dev", paths->root);
+    int node_len = snprintf(node_source, sizeof(node_source),
+                            "%s/build/bin/z23-dev", paths->root);
     int nodectl_len = snprintf(nodectl_target, sizeof(nodectl_target),
                                "%s/build/bin/zcl-nodectl", generation);
     if (verifier_len <= 0 ||
         (size_t)verifier_len >= sizeof(verifier_source) ||
+        node_len <= 0 || (size_t)node_len >= sizeof(node_source) ||
         nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
         !admitted_executable_materialize(
             paths, generation, runner_source, "build/bin/test_parallel_fast",
@@ -908,7 +912,11 @@ static bool test_helpers_prepare(
         !admitted_executable_materialize(
             paths, generation, verifier_source,
             "build/bin/zclassic23-package-verify-dev", expected_source_cas,
-            verifier_target)) {
+            verifier_target) ||
+        !admitted_executable_materialize(
+            paths, generation, node_source, "build/bin/zclassic23",
+            expected_source_cas,
+            node_target)) {
         proof_why(why, why_len, "proof_test_helper_admission_failed");
         return false;
     }
@@ -918,11 +926,12 @@ static bool test_helpers_prepare(
         proof_why(why, why_len, "proof_test_helper_build_failed");
         return false;
     }
-    uint8_t runner_root[32], verifier_root[32], nodectl_root[32];
+    uint8_t runner_root[32], verifier_root[32], node_root[32], nodectl_root[32];
     if (!hash_file("zcl.dev_proof_test_runner.v1", runner_target,
                    runner_root) ||
         !hash_file("zcl.dev_proof_package_verifier.v1", verifier_target,
                    verifier_root) ||
+        !hash_file("zcl.dev_proof_test_node.v1", node_target, node_root) ||
         !hash_file("zcl.dev_proof_nodectl.v1", nodectl_target,
                    nodectl_root)) {
         proof_why(why, why_len, "proof_test_helper_hash_failed");
@@ -932,6 +941,7 @@ static bool test_helpers_prepare(
     hash_begin(&helpers, "zcl.dev_proof_test_helpers.v1");
     sha3_256_write(&helpers, runner_root, sizeof(runner_root));
     sha3_256_write(&helpers, verifier_root, sizeof(verifier_root));
+    sha3_256_write(&helpers, node_root, sizeof(node_root));
     sha3_256_write(&helpers, nodectl_root, sizeof(nodectl_root));
     sha3_256_finalize(&helpers, helper_root);
     return true;
