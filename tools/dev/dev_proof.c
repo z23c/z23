@@ -23,11 +23,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -68,6 +70,80 @@ const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
     }
     return "invalid";
 }
+
+#if defined(_WIN32)
+
+/* The proof worker currently depends on fork/setsid, descriptor inheritance,
+ * POSIX hard-link/symlink inspection, and process-group termination.  Native
+ * Windows must not approximate those authority boundaries with CRT path
+ * calls or a detached shell.  Keep the typed command available, but refuse
+ * before creating proof state until it is ported onto retained directories
+ * and platform_process Job Objects. */
+static void proof_windows_unavailable(struct zcl_dev_proof_status *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->state = ZCL_DEV_PROOF_STATE_INVALID;
+        (void)snprintf(out->detail, sizeof(out->detail), "%s",
+                       "windows_native_proof_worker_unavailable");
+    }
+}
+
+bool zcl_dev_proof_resolve_pair(const char *repo_root,
+                                const char *requested_local,
+                                const char *requested_base,
+                                char local_commit[65],
+                                char remote_base[65],
+                                char *why, size_t why_len)
+{
+    (void)repo_root;
+    (void)requested_local;
+    (void)requested_base;
+    if (local_commit) local_commit[0] = 0;
+    if (remote_base) remote_base[0] = 0;
+    proof_why(why, why_len, "windows_native_proof_worker_unavailable");
+    return false;
+}
+
+bool zcl_dev_proof_status_read(const char *repo_root,
+                               const char *local_commit,
+                               const char *remote_base,
+                               struct zcl_dev_proof_status *out)
+{
+    (void)repo_root;
+    (void)local_commit;
+    (void)remote_base;
+    proof_windows_unavailable(out);
+    return true;
+}
+
+bool zcl_dev_proof_ensure(const char *repo_root,
+                          const char *local_commit,
+                          const char *remote_base,
+                          struct zcl_dev_proof_status *out)
+{
+    (void)repo_root;
+    (void)local_commit;
+    (void)remote_base;
+    proof_windows_unavailable(out);
+    return false;
+}
+
+bool zcl_dev_proof_wait(const char *repo_root,
+                        const char *local_commit,
+                        const char *remote_base,
+                        int timeout_ms,
+                        struct zcl_dev_proof_status *out)
+{
+    (void)repo_root;
+    (void)local_commit;
+    (void)remote_base;
+    (void)timeout_ms;
+    proof_windows_unavailable(out);
+    return false;
+}
+
+#else
 
 static bool proof_oid_text(const char *value)
 {
@@ -1561,3 +1637,5 @@ bool zcl_dev_proof_wait(const char *repo_root,
         platform_sleep_ms(20);
     }
 }
+
+#endif /* _WIN32 */
