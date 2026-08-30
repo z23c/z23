@@ -9885,7 +9885,6 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	lib/sha3/src/sha3.c \
 	lib/util/src/spawn.c \
 	lib/base/src/log_level.c \
-	lib/base/src/safe_alloc.c \
 	lib/base/src/result.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
