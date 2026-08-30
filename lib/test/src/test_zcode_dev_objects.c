@@ -25,6 +25,7 @@
 #include "models/build_fabric.h"
 #include "models/database.h"
 #include "models/zcode_lane.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
 #include "services/build_fabric_worker.h"
@@ -346,8 +347,8 @@ static bool zd_seed_offline_vendor_inputs(const char *workspace)
     int cn = snprintf(cache, sizeof(cache), "%s/.cache", vendor);
     if (vn <= 0 || (size_t)vn >= sizeof(vendor) ||
         cn <= 0 || (size_t)cn >= sizeof(cache) ||
-        (mkdir(vendor, 0700) != 0 && errno != EEXIST) ||
-        (mkdir(cache, 0700) != 0 && errno != EEXIST))
+        (platform_directory_create(vendor, 0700) != 0 && errno != EEXIST) ||
+        (platform_directory_create(cache, 0700) != 0 && errno != EEXIST))
         return false;
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         int n = snprintf(path, sizeof(path), "%s/%s", cache, names[i]);
@@ -2238,7 +2239,7 @@ static int test_zd_improve_command(void)
         test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "improve");
         ASSERT(realpath(dir, workspace) != NULL);
         (void)snprintf(source_dir, sizeof(source_dir), "%s/src", workspace);
-        ASSERT(mkdir(source_dir, 0700) == 0);
+        ASSERT(platform_directory_create(source_dir, 0700) == 0);
         (void)snprintf(source_path, sizeof(source_path), "%s/widget.c",
                        source_dir);
         FILE *source_file = fopen(source_path, "wb");
@@ -2283,7 +2284,7 @@ static int test_zd_improve_command(void)
         char candidate_true[4352], candidate_false[4352];
         (void)snprintf(candidate_source_dir, sizeof(candidate_source_dir),
                        "%s/src", candidate_workspace);
-        ASSERT(mkdir(candidate_source_dir, 0700) == 0);
+        ASSERT(platform_directory_create(candidate_source_dir, 0700) == 0);
         (void)snprintf(candidate_source_path, sizeof(candidate_source_path),
                        "%s/widget.c", candidate_source_dir);
         source_file = fopen(candidate_source_path, "wb");
@@ -3116,13 +3117,13 @@ static int test_zd_improve_command(void)
         zcl_hex_encode(fixture_dependency_root, 32, dependency_hex);
         (void)snprintf(installed_dir, sizeof(installed_dir),
                        "%s/zcode/installed", workspace);
-        ASSERT(mkdir(installed_dir, 0700) == 0 || errno == EEXIST);
+        ASSERT(platform_directory_create(installed_dir, 0700) == 0 || errno == EEXIST);
         (void)snprintf(installed_dir, sizeof(installed_dir),
                        "%s/zcode/installed/%s", workspace, dependency_hex);
-        ASSERT(mkdir(installed_dir, 0700) == 0);
+        ASSERT(platform_directory_create(installed_dir, 0700) == 0);
         (void)snprintf(installed_lib, sizeof(installed_lib), "%s/lib",
                        installed_dir);
-        ASSERT(mkdir(installed_lib, 0700) == 0);
+        ASSERT(platform_directory_create(installed_lib, 0700) == 0);
         (void)snprintf(installed_archive, sizeof(installed_archive),
                        "%s/libdependency.a", installed_lib);
         static const uint8_t dependency_bytes[] = "fixed-dependency-artifact";

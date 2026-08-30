@@ -11,6 +11,7 @@
 #define _DEFAULT_SOURCE
 #endif
 
+#include "platform/directory_compat.h"
 #include "test/test_core.h"
 
 #include "base/hex.h"
@@ -167,8 +168,8 @@ int file_market_content_tests(void)
     char dir[256], dbpath[512], filepath[512], symlink_path[512];
     char fifo_path[512], wrong_path[512];
     snprintf(dir, sizeof(dir), "./test-tmp/market_content_%d", (int)getpid());
-    (void)mkdir("./test-tmp", 0700);
-    if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+    (void)platform_directory_create("./test-tmp", 0700);
+    if (platform_directory_create(dir, 0700) != 0 && errno != EEXIST) {
         CONTENT_CHECK("create fixture directory", false);
         return failures;
     }
@@ -375,8 +376,8 @@ int file_market_content_tests(void)
         char wdir[256], wdbpath[512];
         snprintf(wdir, sizeof(wdir), "./test-tmp/market_index_window_%d",
                  (int)getpid());
-        (void)mkdir("./test-tmp", 0700);
-        if (mkdir(wdir, 0700) != 0 && errno != EEXIST) {
+        (void)platform_directory_create("./test-tmp", 0700);
+        if (platform_directory_create(wdir, 0700) != 0 && errno != EEXIST) {
             CONTENT_CHECK("create index window fixture directory", false);
             node_db_close(&ndb);
             test_cleanup_tmpdir(dir);

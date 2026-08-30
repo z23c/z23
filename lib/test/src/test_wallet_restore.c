@@ -40,6 +40,7 @@
 #define _DEFAULT_SOURCE
 #endif
 
+#include "platform/directory_compat.h"
 #include "test/test_core.h"
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
@@ -72,7 +73,7 @@
 static const char *wr_dir(void)
 {
     static char dir[512];
-    mkdir(WR_DIR_REL, 0755);
+    platform_directory_create(WR_DIR_REL, 0755);
     if (dir[0])
         return dir;
     char cwd[384];
@@ -342,7 +343,7 @@ int test_wallet_restore(void)
     /* wallet_backup_run_once -> wbs_ensure_backup_dir ->
      * platform_private_directory_ensure requires exactly 0700 and refuses a
      * wider directory. mkdir is umask-masked, so restate the mode. */
-    mkdir(backup_dir, 0700);
+    platform_directory_create(backup_dir, 0700);
     chmod(backup_dir, 0700);
 
     /* ---- source wallet with transparent AND shielded rows ---- */
@@ -431,7 +432,7 @@ int test_wallet_restore(void)
         wr_rm(empty);
     }
     {   /* a datadir another writer is holding */
-        mkdir(target, 0700);
+        platform_directory_create(target, 0700);
         char pidfile[400];
         snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", target);
         int fd = open(pidfile, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
