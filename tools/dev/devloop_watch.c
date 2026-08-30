@@ -10,6 +10,7 @@
 #include "devloop.h"
 #include "dev_proof.h"
 
+#include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_merkle.h"
@@ -176,7 +177,7 @@ int zcl_devloop_watch(const char *repo_root)
 
 #else
 
-#define DEVLOOP_MAX_WATCHES 512
+#define DEVLOOP_INITIAL_WATCHES 512
 #define DEVLOOP_EDIT_EPOCH_MAX_FILES 16
 #define DEVLOOP_EDIT_QUIET_US 1000
 #define DEVLOOP_MUTATION_MASK                                                \
@@ -237,8 +238,9 @@ enum watch_proof_worker_kind {
 struct watch_context {
     int fd;
     char root[PATH_MAX];
-    struct watched_dir dirs[DEVLOOP_MAX_WATCHES];
+    struct watched_dir *dirs;
     size_t dir_count;
+    size_t dir_capacity;
     char changed[ZCL_DEVLOOP_MAX_FILES][ZCL_DEVLOOP_PATH_MAX];
     size_t changed_count;
     struct zcl_devloop_restart_source_set restart_sources;
@@ -969,9 +971,29 @@ static struct watched_dir *find_watch(struct watch_context *ctx, int wd)
     return NULL;
 }
 
+static bool reserve_watch(struct watch_context *ctx)
+{
+    if (!ctx)
+        return false;
+    if (ctx->dir_count < ctx->dir_capacity)
+        return true;
+    size_t capacity = ctx->dir_capacity
+        ? ctx->dir_capacity * 2u : DEVLOOP_INITIAL_WATCHES;
+    if (capacity < ctx->dir_capacity ||
+        capacity > SIZE_MAX / sizeof(*ctx->dirs))
+        return false;
+    struct watched_dir *dirs = zcl_realloc(
+        ctx->dirs, capacity * sizeof(*ctx->dirs), "devloop watcher table");
+    if (!dirs)
+        return false;
+    ctx->dirs = dirs;
+    ctx->dir_capacity = capacity;
+    return true;
+}
+
 static bool add_watch_recursive(struct watch_context *ctx, const char *rel)
 {
-    if (!ctx || ctx->dir_count >= DEVLOOP_MAX_WATCHES)
+    if (!reserve_watch(ctx))
         return false;
     char full[PATH_MAX];
     int n = rel && rel[0]
@@ -1340,6 +1362,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 strerror(errno));
         if (ctx.fd >= 0)
             close(ctx.fd);
+        free(ctx.dirs);
         close(lock_fd);
         return 1;
     }
@@ -1347,6 +1370,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         fprintf(stderr,
                 "[devloop] watch: source snapshot reconciliation failed\n");
         close(ctx.fd);
+        free(ctx.dirs);
         close(lock_fd);
         return 1;
     }
@@ -1355,6 +1379,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 "[devloop] watch: bounded local event stream unavailable\n");
         ci_merkle_free(ctx.verified_tree);
         close(ctx.fd);
+        free(ctx.dirs);
         close(lock_fd);
         return 1;
     }
@@ -1362,6 +1387,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         fprintf(stderr,
                 "[devloop] watch: could not publish ready ownership\n");
         close(ctx.fd);
+        free(ctx.dirs);
         close(lock_fd);
         return 1;
     }
@@ -1596,6 +1622,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
     close(lock_fd);
     watch_proof_join(&ctx);
     ci_merkle_free(ctx.verified_tree);
+    free(ctx.dirs);
     return 0;
 }
 

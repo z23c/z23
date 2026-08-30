@@ -168,6 +168,25 @@ no lease. Native stop verified and stopped the exact watcher ID in 20
 milliseconds. No compiler, lint, test, Make, Bash, or PowerShell process is
 reachable from notification enqueue or push admission.
 
+The first clean-checkout launch exposed a separate scale refusal before any
+proof work began: the Linux watcher stored at most 512 directory descriptors,
+while the tracked tree contained 935 distinct directory paths. The watcher
+now grows its checked descriptor table geometrically instead of placing a
+fixed table on the stack. At `2026-08-30T19:31:42-04:00`
+(`2026-08-30T23:31:42+00:00`), a disposable checkout fixture containing 600
+child directories plus its root reached `watcher_ready=true` in 21
+milliseconds, advertised `proof_queue_version=1`, and stopped its exact owner
+in 20 milliseconds. The host had 16 logical CPUs, an AMD Ryzen 7 PRO 8840U,
+and GCC 16.1.1 20260430. The exact clean pair then enqueued in one millisecond;
+the earlier fixed-capacity binary had left the same pair queued without a
+resident owner.
+
+Build cost remains the measured dominant problem. A warm `make dev-bin` before
+the directory fix took 35.319 seconds of wall time, 27.520 seconds of user CPU,
+and 8.866 seconds of system CPU. Rebuilding the changed watcher and its test
+artifact took 98.134 seconds wall, 74.433 seconds user, and 24.818 seconds
+system. These are build measurements, not proof or push latency claims.
+
 The registered `test_impact_composition` queue fixture enqueued two pairs,
 selected the newer request, preserved the older request because its ancestry
 was unavailable, then claimed both private attempts in order. Each attempt
