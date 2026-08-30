@@ -36,6 +36,9 @@
 #include "ports/wallet_backup_store_port.h"
 #include "services/wallet_backup_service.h"
 #include "models/database.h"
+#if defined(_WIN32)
+#include "platform/private_directory.h"
+#endif
 
 #include <sqlite3.h>
 #include <stdint.h>
@@ -241,8 +244,16 @@ int test_wallet_backup_port(void)
         /* wallet_backup_run_once hands this to wbs_ensure_backup_dir ->
          * platform_private_directory_ensure, which requires exactly 0700 and
          * refuses a wider directory. mkdir is umask-masked, so restate it. */
+#if defined(_WIN32)
+        /* No mode bits on Windows: private means a current-SID-only
+         * protected DACL, which only the private-directory creation path
+         * installs. A plain mkdir leaves inherited ACLs the ensure step
+         * rightly refuses. */
+        platform_private_directory_create(svc_dir);
+#else
         mkdir(svc_dir, 0700);
         chmod(svc_dir, 0700);
+#endif
 
         char out_path[512] = {0};
         int64_t out_keys = -1;

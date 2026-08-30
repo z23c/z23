@@ -25,6 +25,7 @@
 #endif
 
 #include "platform/directory_compat.h"
+#include "platform/private_directory.h"
 #include "test/test_core.h"
 #include "json/json.h"
 
@@ -110,8 +111,15 @@ static bool wb_fixture_init(struct wb_fixture *f, const char *tag)
      * which requires the directory to be exactly 0700 and refuses rather than
      * narrowing a wider one. mkdir's mode argument is masked by the process
      * umask, so state the mode a second time instead of hoping for it. */
+#if defined(_WIN32)
+    /* No mode bits on Windows: private means a current-SID-only protected
+     * DACL, which only the private-directory creation path installs. A plain
+     * create leaves inherited ACLs that the ensure step rightly refuses. */
+    if (!platform_private_directory_create(f->backup_dir)) return false;
+#else
     platform_directory_create(f->backup_dir, 0700);
     chmod(f->backup_dir, 0700);
+#endif
     snprintf(f->dbpath, sizeof(f->dbpath), "%s/node.db", f->datadir);
     return node_db_open(&f->ndb, f->dbpath);
 }

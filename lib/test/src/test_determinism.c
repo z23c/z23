@@ -71,7 +71,19 @@ static bool one_group_sink(void *ctx, const struct zcl_det_group_digest *g)
 
 static bool digest_of(const struct fixture *f, struct zcl_det_group_digest *out)
 {
+#if defined(_WIN32)
+    /* No fmemopen on Windows: stage the transcript through a real temp file
+     * (the scanner only needs a readable FILE*). */
+    FILE *in = tmpfile();
+    if (!in) return false;
+    if (f->len && fwrite(f->text, 1, f->len, in) != f->len) {
+        fclose(in);
+        return false;
+    }
+    rewind(in);
+#else
     FILE *in = fmemopen((void *)f->text, f->len, "r");
+#endif
     if (!in) return false;
     struct one_group o;
     memset(&o, 0, sizeof(o));
