@@ -457,6 +457,23 @@ make service-install                      # loads ~/Library/LaunchAgents/org.z23
 launchctl list | grep org.z23.zclassic    # confirm it is loaded
 ```
 
+Those Make targets are the checkout/development path. A verified
+`darwin-arm64` release directory instead goes through the transactional native
+installer:
+
+```bash
+tools/scripts/install_z23.sh --source=build/release/z23-darwin-arm64
+```
+
+That path verifies the closed manifest, installs immutable generations under
+`~/.local/lib/z23/generations`, switches `current` atomically, validates its
+plist with `plutil`, uses `launchctl bootstrap`/`bootout`/`kickstart`, waits for
+typed node readiness, qualifies the running image, and automatically restores
+`last-good` if the candidate fails. It operates on `~/.zclassic-c23`; use only
+with an operator-approved release and datadir. The public download front door
+remains disabled until the signed platform index and fresh-host acceptance in
+[`docs/work/BOOTSTRAP_PLAN.md`](work/BOOTSTRAP_PLAN.md) are complete.
+
 `make service-install` fails closed if `$(PREFIX)/bin/z23` is missing, so
 run `make install` first or use `make dev-service-install` to run the node
 straight from `build/bin/z23`. The LaunchAgent starts at login, restarts on
