@@ -2815,3 +2815,9 @@ AGENT_IMPACT_RULE("lib/territory/include/territory/territory.h|lib/territory/src
  * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
  * which is the exact reason this module has no transport in it. */
 AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine cold_join_sovereign make_lint_gates")
+
+/* Tier-1 macOS capability truth and its derived runner. Every declared row
+ * changes which availability/refusal evidence the public aggregate claims,
+ * so a matrix or runner edit must execute the same exact groups as
+ * `make macos-acceptance`; no hand-maintained smaller shadow is accepted. */
+AGENT_IMPACT_RULE("config/platform/macos_capabilities.def|tools/scripts/macos_acceptance.sh", "binary_ab_fallback boot_shutdown_marker_persistence confine dev_activation directory_watcher fast_sync_coins_export net noise_nk_handshake noise_transport_parity noise_xx_handshake os_sandbox rpc sandbox_process_budget service_state service_state_driver tor wallet wallet_backup watcher_record z23_front_door zcode_verify make_lint_gates")
