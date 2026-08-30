@@ -23,6 +23,7 @@
  * flood from spending wallet fees for free), mirroring store_controller_pow.c.
  */
 
+#include "base/hex.h"
 #include "controllers/name_site_controller.h"
 #include "controllers/web_form.h"
 #include "controllers/name_controller.h"
@@ -262,12 +263,7 @@ static void name_csrf_token(const char *context, char out[33])
     hmac_sha256_init(&ctx, s_csrf_key, sizeof(s_csrf_key));
     hmac_sha256_write(&ctx, (const unsigned char *)context, strlen(context));
     hmac_sha256_finalize(&ctx, mac);
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < 16; i++) {
-        out[i * 2]     = hex[(mac[i] >> 4) & 0x0f];
-        out[i * 2 + 1] = hex[mac[i] & 0x0f];
-    }
-    out[32] = '\0';
+    zcl_hex_encode(mac, 16, out);
 }
 
 /* Live register-action CSRF token (public — form issuance + tests). */

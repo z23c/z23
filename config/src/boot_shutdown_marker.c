@@ -2,6 +2,7 @@
 
 #include "config/boot_shutdown_marker.h"
 
+#include "base/hex.h"
 #include "event/event.h"
 #include "platform/file_metadata.h"
 #include "platform/positioned_file.h"
@@ -35,32 +36,6 @@ static _Atomic uint64_t              g_marker_nonce;
 static struct shutdown_clean_binding g_cached_fr;        /* fr_valid=false start */
 /* Facts to bake into the NEXT clean-shutdown marker (set at shutdown). */
 static struct fast_restart_shutdown_facts g_fr_facts;    /* valid=false at start */
-
-static void marker_hex32(char *out /* >=65 */, const uint8_t *b)
-{
-    static const char h[] = "0123456789abcdef";
-    for (int i = 0; i < 32; i++) {
-        out[i * 2]     = h[(b[i] >> 4) & 0xF];
-        out[i * 2 + 1] = h[b[i] & 0xF];
-    }
-    out[64] = '\0';
-}
-
-/* Parse exactly 64 lowercase/uppercase hex chars into out[32]. */
-static bool marker_unhex32(const char *s, uint8_t *out)
-{
-    for (int i = 0; i < 64; i++) {
-        char c = s[i];
-        int v;
-        if (c >= '0' && c <= '9') v = c - '0';
-        else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
-        else return false;
-        if (i & 1) out[i / 2] |= (uint8_t)v;
-        else       out[i / 2]  = (uint8_t)(v << 4);
-    }
-    return true;
-}
 
 static bool boot_shutdown_marker_path(char *out, size_t out_n,
                                       const char *datadir,
@@ -119,8 +94,8 @@ int boot_shutdown_marker_format(char *buf, size_t n, int64_t unix_seconds,
      * unknown keys). */
     if (b->fr_valid) {
         char tip_hex[65], coins_hex[65];
-        marker_hex32(tip_hex, b->fr_tip_hash);
-        marker_hex32(coins_hex, b->fr_coins_best_hash);
+        zcl_hex_encode(b->fr_tip_hash, 32, tip_hex);
+        zcl_hex_encode(b->fr_coins_best_hash, 32, coins_hex);
         int off2 = snprintf(buf + off, n - (size_t)off,
                     "fast_restart=1\n"
                     "fr_tip_height=%lld\n"
@@ -242,7 +217,7 @@ bool boot_shutdown_marker_parse(const char *text, size_t len,
         } else fr_ok = false;
 
         if (fr_ok && marker_find_kv(text, len, "fr_tip_hash", hx, sizeof(hx)) &&
-            strlen(hx) == 64 && marker_unhex32(hx, out->fr_tip_hash)) {
+            strlen(hx) == 64 && zcl_hex_decode(hx, out->fr_tip_hash, 32)) {
             /* ok */
         } else fr_ok = false;
 
@@ -255,7 +230,7 @@ bool boot_shutdown_marker_parse(const char *text, size_t len,
 
         if (fr_ok &&
             marker_find_kv(text, len, "fr_coins_best_hash", hx, sizeof(hx)) &&
-            strlen(hx) == 64 && marker_unhex32(hx, out->fr_coins_best_hash)) {
+            strlen(hx) == 64 && zcl_hex_decode(hx, out->fr_coins_best_hash, 32)) {
             /* ok */
         } else fr_ok = false;
 

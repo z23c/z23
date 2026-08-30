@@ -15,6 +15,7 @@
 
 #include "services/canary_sentinel_watch.h"
 
+#include "base/hex.h"
 #include "crypto/sha256.h"
 #include "framework/condition.h"
 #include "json/json.h"
@@ -110,13 +111,8 @@ static void capture_running_artifact_sha256(void)
     if (!ok)
         return;
     uint8_t digest[32];
-    static const char hex[] = "0123456789abcdef";
     sha256_finalize(&ctx, digest);
-    for (size_t i = 0; i < sizeof(digest); i++) {
-        g_running_artifact_sha256[i * 2] = hex[digest[i] >> 4];
-        g_running_artifact_sha256[i * 2 + 1] = hex[digest[i] & 0x0f];
-    }
-    g_running_artifact_sha256[64] = '\0';
+    zcl_hex_encode(digest, sizeof(digest), g_running_artifact_sha256);
 }
 
 static const char *running_artifact_sha256(void)

@@ -121,9 +121,6 @@ void dev_activation_ensure_rollback(struct dev_activation_txn *txn);
  * Returns false on overflow / empty input. */
 bool dev_activation_canon(const char *in, char *out, size_t out_sz);
 
-/* Hex-encode 32 bytes into out[65] (lowercase, NUL-terminated). */
-void dev_activation_hex32(const uint8_t in[32], char out[65]);
-
 /* SHA-256 of the file at `path`, lowercase hex into out[65]. */
 bool dev_activation_sha256_file(const char *path, char out[65]);
 

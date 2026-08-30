@@ -12,6 +12,7 @@
 
 #include "consensus_state_publication_cas_internal.h"
 
+#include "base/hex.h"
 #include "config/consensus_state_snapshot_install.h"
 #include "crypto/sha3.h"
 #include "framework/condition.h"
@@ -530,13 +531,8 @@ struct zcl_result consensus_state_publication_cas_run(
 static void push_hex32(struct json_value *out, const char *key,
                        const uint8_t d[32])
 {
-    static const char hexd[] = "0123456789abcdef";
     char hex[65];
-    for (size_t i = 0; i < 32; i++) {
-        hex[i * 2] = hexd[(d[i] >> 4) & 0xF];
-        hex[i * 2 + 1] = hexd[d[i] & 0xF];
-    }
-    hex[64] = '\0';
+    zcl_hex_encode(d, 32, hex);
     json_push_kv_str(out, key, hex);
 }
 

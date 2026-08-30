@@ -3,6 +3,7 @@
 
 #include "views/blog_post_view.h"
 
+#include "base/hex.h"
 #include "views/format_helpers.h"
 #include "views/site_css.h"
 #include "views/site_layout.h"
@@ -64,16 +65,6 @@ static void sink_html(struct blog_view_sink *sink, const char *text)
         default: sink_bytes(sink, (const char *)p, 1); break;
         }
     }
-}
-
-static void hex32(const uint8_t bytes[32], char out[65])
-{
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; i++) {
-        out[i * 2] = hex[bytes[i] >> 4];
-        out[i * 2 + 1] = hex[bytes[i] & 15];
-    }
-    out[64] = 0;
 }
 
 static const char *view_status_name(enum blog_publication_status status)
@@ -223,7 +214,7 @@ size_t blog_post_view_render(const struct blog_post_page *page,
     };
     sink.out[0] = 0;
     char event_hex[65], when[40];
-    hex32(page->post.event_id, event_hex);
+    zcl_hex_encode(page->post.event_id, 32, event_hex);
     zcl_format_time(when, sizeof(when), page->post.event_created_at);
     blog_document_open(&sink, page->post.title);
     blog_nav(&sink, page->post.blog_name);
@@ -254,8 +245,8 @@ size_t blog_post_view_render(const struct blog_post_page *page,
             "Chain anchor unresolved</div><p>No fresh exact-script projection match is currently available.</p></div>");
     } else {
         char txid_hex[65], znam_txid_hex[65], observed_when[40];
-        hex32(page->receipt.txid, txid_hex);
-        hex32(page->receipt.znam_reg_txid, znam_txid_hex);
+        zcl_hex_encode(page->receipt.txid, 32, txid_hex);
+        zcl_hex_encode(page->receipt.znam_reg_txid, 32, znam_txid_hex);
         zcl_format_time(observed_when, sizeof(observed_when),
                         page->receipt.observed_at);
         sink_format(&sink, "<div class='proof-item'><div class='proof-label %s'>"
