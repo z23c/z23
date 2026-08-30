@@ -985,8 +985,3 @@ bool hotswap_elf_probe_and_admit_fd(int fd,
     return hotswap_elf_pre_map_admit(&facts, expected_core_seal_root,
                                      expected_abi, err, err_cap);
 }
-
-void hotswap_elf_pinned_path(int fd, char buf[64])
-{
-    (void)snprintf(buf, 64, "/proc/self/fd/%d", fd);
-}

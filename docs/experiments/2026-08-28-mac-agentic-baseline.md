@@ -25,7 +25,7 @@ on the current tree rather than trusted.
 | SHA-256 ARMv8 hardware tier | `build/bin/simd_bench` | 4.58x faster than generic; detected `sha256=ARMv8 SHA (hardware)` |
 | Quality-job guard/retention selftest | `bash tools/scripts/test_quality_job_guard.sh` | PASS after bash 3.2 / BSD tool fixes |
 | Regtest node boots and shuts down cleanly | Isolated `/tmp/zcl-mesh-id` node | PASS; RPC ready in ~2 s, graceful shutdown in ~5 s |
-| `ops mesh identity` capsule on macOS | `z23 ops mesh identity` against running regtest node | PASS; reports `platform.os=macos`, `architecture=aarch64`, live observation fields populated |
+| `ops mesh identity` capsule on macOS | `z23 ops mesh identity --datadir=/tmp/<fixture>` against running regtest node | PASS; reports `platform.os=macos`, `architecture=aarch64`, live observation fields populated |
 | Native kqueue directory watcher | `make -j t-fast ONLY=directory_watcher` | PASS; `lib/platform/src/directory_watcher.c` uses kqueue and recursively watches real subdirectories |
 | Embedded full Tor | `make tor-full` | PASS; builds `vendor/tor/libtor.a` from vendored OpenSSL/libevent/zlib, ~110 s, no source changes |
 
@@ -60,7 +60,8 @@ Against an isolated regtest node started with `-v2transport`:
 
 The remaining blocker is expected on a fresh regtest node: the authenticated DHT
 requires an on-chain-active operator identity provisioned through
-`z23 zcode network delegate --input='{"seed_file":"/path/master.hex"}'`.
+`z23 zcode network delegate --datadir=/tmp/<fixture>
+--input='{"seed_file":"/path/master.hex"}'`.
 That provisioning needs a ZID identity that is ACTIVE on-chain; a regtest node at
 height 0 has none.
 
@@ -164,9 +165,9 @@ Verification plan:
 2. `make lint-fast` and focused boot-legacy tests must pass.
 3. Restart the durable LaunchAgent; boot log should report linked block files
    from `$HOME/Library/Application Support/Zclassic/blocks`.
-4. `z23 dumpstate body_coverage` should show the held ranges expanding past
-   the old 14k frontier, and `reducer_drive` should advance faster than the
-   P2P-only ~5 bps.
+4. `z23 dumpstate body_coverage --datadir=/tmp/<fixture>` should show the held
+   ranges expanding past the old 14k frontier, and `reducer_drive` should
+   advance faster than the P2P-only ~5 bps.
 
 Port conflict note: ZclWallet already binds mainnet P2P port 8033 on this
 host, so z23's `-listen` bind fails. For now outbound P2P works and the

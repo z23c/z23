@@ -329,10 +329,6 @@ bool hotswap_elf_probe_and_admit_fd(int fd,
                                     uint32_t expected_abi,
                                     char *err, size_t err_cap);
 
-/* The pinned path this platform uses to dlopen a descriptor we already hold.
- * Linux uses /proc/self/fd; macOS uses /dev/fd. */
-void hotswap_elf_pinned_path(int fd, char buf[64]);
-
 #ifdef __cplusplus
 }
 #endif
