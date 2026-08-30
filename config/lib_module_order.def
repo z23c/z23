@@ -190,3 +190,10 @@ LIB_MODULE("fingerprint")
  * above lib/codeindex. It references nothing else that is not already below
  * codeindex (base, sha3), so last is also its lowest legal rank. */
 LIB_MODULE("territory")
+/* Reads the artifacts this build already writes (the generated capability
+ * inventory, the registered test catalog, the Makefile lint-gate list, the
+ * determinism ratchet baseline) plus lib/territory's index-derived counts, and
+ * appends one canonical frame per run to a lib/chainlog log. It therefore
+ * ranks above codeindex, territory and chainlog, which is last — and last is
+ * also its lowest legal rank. */
+LIB_MODULE("kpi")

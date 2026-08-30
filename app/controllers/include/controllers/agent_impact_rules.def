@@ -2860,6 +2860,10 @@ AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib
  * change to that seam's locking, truncation or fsync behaviour changes what
  * this module's recovery rule actually does. */
 AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")
+/* The build's own numbers, recorded to a hash-chained log. It rides the lint
+ * group because one of the numbers it reports is the Makefile's own gate list,
+ * so a change to how that list is written changes what this module measures. */
+AGENT_IMPACT_RULE("lib/kpi/src/*.c|lib/kpi/include/kpi/*.h|lib/test/src/test_kpi.c", "kpi make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
  * because the ratchet it guards is the whole point — the recorded set of

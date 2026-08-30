@@ -22,6 +22,8 @@
 #include "codeindex/codeindex_merkle.h"
 #include "config/command_handler_index.h"
 #include "controllers/agent_impact_rules.h"
+#include "base/hex.h"
+#include "kpi/kpi.h"
 #include "territory/territory.h"
 #include "test_group_catalog.h"
 
@@ -1858,6 +1860,138 @@ void zcl_native_handle_code_territory(const struct zcl_command_request *request,
     territory_report_free(r);
     territory_reach_free(rs);
     codeindex_close(ci);
+}
+
+/* ── code.kpi ────────────────────────────────────────────────────────────
+ *
+ * The build's own numbers, recorded rather than remembered. Every metric here
+ * already existed somewhere in the checkout; what did not exist was a record
+ * of what it was LAST time, so "did that get better?" was answered from memory
+ * or not at all.
+ *
+ * THE ONLY code.* LEAF THAT WRITES. It appends one canonical frame per run to
+ * <root>/.codeindex/kpi.chainlog — the same directory the code index already
+ * uses for local derived state, and one git does not track. That write is the
+ * point of the command, so the registry row classes it MUTATE rather than
+ * dressing a writer as a read.
+ *
+ * 0 AND "I COULD NOT LOOK" ARE DIFFERENT FACTS. A metric whose artifact is
+ * missing or unparsable renders state "unavailable", value null and verdict
+ * "unavailable" — never 0. The run still writes its frame, because the
+ * unavailability is itself what is being recorded, and the summary names how
+ * many were unavailable so a short answer is never read as a clean one.
+ *
+ * `previous` is the most recent PRIOR frame, read before the append. With no
+ * prior frame the verdict is no_baseline, never unchanged: "equal to nothing"
+ * is not a measurement.
+ *
+ * IT GRANTS NOTHING. A frame is a measurement, never an approval, never a
+ * gate, never permission to land anything.
+ */
+
+
+void zcl_native_handle_code_kpi(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply)
+{
+    const char *root = code_source_root(request);
+    struct codeindex *ci = code_open(request, reply);
+    if (!ci) return;
+
+    struct kpi_frame frame;
+    kpi_collect(root, ci, &frame);
+    codeindex_close(ci);
+
+    char ledger[1024];
+    int wrote_path = snprintf(ledger, sizeof ledger, "%s/.codeindex/kpi.chainlog",
+                              root);
+    if (wrote_path < 0 || (size_t)wrote_path >= sizeof ledger) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "KPI_LEDGER_PATH",
+                               "dispatch", true, false,
+                               "the source root is too long to hold a ledger "
+                               "path", root);
+        return;
+    }
+
+    struct kpi_ledger_result led;
+    bool appended = kpi_ledger_record(ledger, &frame, &led);
+    /* A ledger that refuses is reported as a refusal, by the chainlog's own
+     * status name. Rendering the metrics anyway while quietly dropping the
+     * frame would leave a reader believing a history exists that does not. */
+    if (!appended) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "KPI_LEDGER_APPEND",
+                               "dispatch", true, false,
+                               zcl_chainlog_status_label(led.status), ledger);
+        return;
+    }
+
+    size_t ndefs = 0;
+    const struct kpi_metric_def *defs = kpi_metric_defs(&ndefs);
+
+    struct json_value arr;
+    json_init(&arr); json_set_array(&arr);
+    int improved = 0, regressed = 0, unavailable = 0;
+
+    for (size_t i = 0; i < ndefs; i++) {
+        const struct kpi_entry *cur = kpi_frame_find(&frame, defs[i].id);
+        if (!cur) continue;
+        const struct kpi_entry *prev =
+            led.have_previous ? kpi_frame_find(&led.previous, defs[i].id)
+                              : NULL;
+        enum kpi_verdict v = kpi_verdict_of(defs[i].direction, prev, cur);
+        if (v == KPI_VERDICT_IMPROVED) improved++;
+        else if (v == KPI_VERDICT_REGRESSED) regressed++;
+        if (cur->state != KPI_STATE_PRESENT) unavailable++;
+
+        struct json_value o;
+        json_init(&o); json_set_object(&o);
+        (void)json_push_kv_str(&o, "id", defs[i].id);
+        (void)json_push_kv_str(&o, "state", kpi_state_label(cur->state));
+        if (cur->state == KPI_STATE_PRESENT)
+            (void)json_push_kv_int(&o, "value", (int64_t)cur->value);
+        if (prev && prev->state == KPI_STATE_PRESENT) {
+            (void)json_push_kv_int(&o, "previous", (int64_t)prev->value);
+            if (cur->state == KPI_STATE_PRESENT)
+                (void)json_push_kv_int(&o, "delta",
+                                       (int64_t)cur->value -
+                                           (int64_t)prev->value);
+        }
+        (void)json_push_kv_str(&o, "direction",
+                               kpi_direction_label(defs[i].direction));
+        (void)json_push_kv_str(&o, "verdict", kpi_verdict_label(v));
+        (void)json_push_kv_str(&o, "drill", defs[i].drill);
+        code_push_obj(&arr, &o);
+    }
+
+    char root_hex[65];
+    zcl_hex_encode(frame.source_root_sha3, 32, root_hex);
+
+    (void)json_push_kv_str(&reply->data, "scope", "kpi");
+    (void)json_push_kv(&reply->data, "metrics", &arr);
+    (void)json_push_kv_int(&reply->data, "count", (int64_t)ndefs);
+    (void)json_push_kv_int(&reply->data, "seq", (int64_t)led.seq);
+    (void)json_push_kv_int(&reply->data, "prior_frames",
+                           (int64_t)led.prior_records);
+    (void)json_push_kv_str(&reply->data, "source_root_sha3", root_hex);
+    (void)json_push_kv_str(&reply->data, "ledger", ".codeindex/kpi.chainlog");
+    json_free(&arr);
+
+    char summary[320];
+    if (!led.have_previous)
+        (void)snprintf(summary, sizeof summary,
+                       "frame %llu is the first: %d improved, %d regressed, "
+                       "%d unavailable, %d with no baseline yet",
+                       (unsigned long long)led.seq, improved, regressed,
+                       unavailable, (int)ndefs - unavailable);
+    else
+        (void)snprintf(summary, sizeof summary,
+                       "frame %llu vs %llu: %d improved, %d regressed, "
+                       "%d unavailable",
+                       (unsigned long long)led.seq,
+                       (unsigned long long)led.prior_records, improved,
+                       regressed, unavailable);
+    (void)json_push_kv_str(&reply->data, "summary", summary);
 }
 
 /* ── `general` — the dispatch brief, and the roll-up ─────────────────────
