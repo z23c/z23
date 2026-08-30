@@ -98,6 +98,7 @@
 #include "vcs/package_release.h"
 
 #include "base/hex.h"
+#include "util/clientversion.h"
 #include "config/c23_commons_build_profile.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -3078,6 +3079,11 @@ static int pv_zbuild_fuzz_mode(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--source-record") == 0) {
+        printf("%s 1 %s\n", zcl_build_source_id_sha256(),
+               zcl_build_source_mutation_sha256());
+        return 0;
+    }
     for (int i = 1; i < argc; i++)
         if (strncmp(argv[i], "--zbuild-fuzz-input=", 20) == 0)
             return pv_zbuild_fuzz_mode(argc, argv);

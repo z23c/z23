@@ -993,6 +993,28 @@ static int test_ic_dev_proof_contract_is_direct(void)
     return failures;
 }
 
+static int test_ic_lint_helpers_exclude_onion_stress(void)
+{
+    int failures = 0;
+    TEST("impact composition: hermetic lint helpers exclude onion stress") {
+        struct agent_impact_acc lint = {0};
+        (void)agent_impact_apply_shared_rules(
+            "lib/test/src/lint_gate_hygiene_selftests.c", &lint);
+        ASSERT(ic_acc_has_group(&lint, "make_lint_gates"));
+        ASSERT(ic_acc_has_group(&lint, "binary_ab_fallback"));
+        ASSERT(ic_acc_has_group(&lint, "self_backtrace"));
+        ASSERT(!ic_acc_has_group(&lint, "onion_bootstrap"));
+
+        struct agent_impact_acc onion = {0};
+        (void)agent_impact_apply_shared_rules(
+            "lib/test/src/test_onion_bootstrap.c", &onion);
+        ASSERT(ic_acc_has_group(&onion, "make_lint_gates"));
+        ASSERT(ic_acc_has_group(&onion, "onion_bootstrap"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static struct zcl_dev_acceptance_receipt_v1 ic_valid_dev_proof_receipt(void)
 {
     static const char local[] =
@@ -1154,6 +1176,7 @@ int test_impact_composition(void)
     failures += test_ic_snapshot_overlays_current_symbols();
     failures += test_ic_code_capsule_stays_with_code_owner();
     failures += test_ic_dev_proof_contract_is_direct();
+    failures += test_ic_lint_helpers_exclude_onion_stress();
     failures += test_ic_dev_proof_receipt_admission();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();

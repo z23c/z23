@@ -1487,7 +1487,8 @@ AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|l
  *     allowlist.
  * Mapped so an edit to any of them re-runs the groups that would notice a
  * regression, instead of reaching the push gate having run nothing. */
-AGENT_IMPACT_RULE("tools/lint/check_no_wallclock_assertion.sh|tools/lint/wallclock_assertion_allowlist.txt|tools/scripts/fresh-boot-weld-prove.sh|tools/scripts/fresh-boot-weld-prove-selftest.sh|lib/test/src/lint_gate_helpers.c|lib/test/src/lint_gate_selftests.h|lib/test/src/lint_gate_hygiene_selftests.c|lib/test/src/test_parallel.c|lib/test/src/test_binary_ab_fallback.c|lib/test/src/test_self_backtrace.c|lib/test/src/test_onion_bootstrap.c|tools/dev/build-epoch-selftest.sh|tools/dev/checkout-lock-selftest.sh", "make_lint_gates binary_ab_fallback self_backtrace onion_bootstrap")
+AGENT_IMPACT_RULE("tools/lint/check_no_wallclock_assertion.sh|tools/lint/wallclock_assertion_allowlist.txt|tools/scripts/fresh-boot-weld-prove.sh|tools/scripts/fresh-boot-weld-prove-selftest.sh|lib/test/src/lint_gate_helpers.c|lib/test/src/lint_gate_selftests.h|lib/test/src/lint_gate_hygiene_selftests.c|lib/test/src/test_parallel.c|lib/test/src/test_binary_ab_fallback.c|lib/test/src/test_self_backtrace.c|tools/dev/build-epoch-selftest.sh|tools/dev/checkout-lock-selftest.sh", "make_lint_gates binary_ab_fallback self_backtrace")
+AGENT_IMPACT_RULE("lib/test/src/test_onion_bootstrap.c", "make_lint_gates onion_bootstrap")
 /* LANE reproducible-build: the flag that makes a compile repeat, the gate that
  * keeps it wired, and the end-to-end proof that a second builder gets the same
  * bytes. They move together because each one is half of the same claim: a node

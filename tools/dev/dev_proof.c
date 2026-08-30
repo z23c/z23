@@ -48,6 +48,7 @@ struct proof_paths {
     char lock[PATH_MAX];
     char failure[PATH_MAX];
     char changed[PATH_MAX];
+    char helper_log[PATH_MAX];
 };
 
 static void proof_why(char *why, size_t why_len, const char *message)
@@ -99,7 +100,9 @@ static bool proof_paths_fill(const char *repo_root, const char *local,
         snprintf(out->failure, sizeof(out->failure), "%s/%s.failed",
                  out->state, out->key) >= (int)sizeof(out->failure) ||
         snprintf(out->changed, sizeof(out->changed), "%s/%s.files",
-                 out->state, out->key) >= (int)sizeof(out->changed))
+                 out->state, out->key) >= (int)sizeof(out->changed) ||
+        snprintf(out->helper_log, sizeof(out->helper_log), "%s/%s.helper.log",
+                 out->logs, out->key) >= (int)sizeof(out->helper_log))
         return false;
     return true;
 }
@@ -510,8 +513,8 @@ static bool generation_prepare(const struct proof_paths *paths,
                                const char *local, char generation[PATH_MAX],
                                char *why, size_t why_len)
 {
-    char root_parent[PATH_MAX], parent[PATH_MAX], root_tag[17];
-    uint8_t root_hash[ZCL_DEV_PROOF_ROOT_BYTES];
+    char root_parent[PATH_MAX], parent[PATH_MAX], generation_tag[33];
+    uint8_t generation_hash[ZCL_DEV_PROOF_ROOT_BYTES];
     if (snprintf(root_parent, sizeof(root_parent), "%s", paths->root) >=
         (int)sizeof(root_parent)) {
         proof_why(why, why_len, "proof_generation_path_invalid");
@@ -523,12 +526,18 @@ static bool generation_prepare(const struct proof_paths *paths,
         return false;
     }
     *slash = 0;
-    hash_text("zcl.dev_proof_generation_root.v1", paths->root,
-              strlen(paths->root), root_hash);
-    zcl_hex_encode(root_hash, 8, root_tag);
-    if (snprintf(parent, sizeof(parent), "%s/.z23-proof-generations-%s",
-                 root_parent, root_tag) >= (int)sizeof(parent) ||
-        snprintf(generation, PATH_MAX, "%s/%s", parent, local) >= PATH_MAX ||
+    struct sha3_256_ctx generation_identity;
+    hash_begin(&generation_identity, "zcl.dev_proof_generation_root.v2");
+    sha3_256_write(&generation_identity, (const uint8_t *)paths->root,
+                   strlen(paths->root) + 1);
+    sha3_256_write(&generation_identity, (const uint8_t *)local,
+                   strlen(local) + 1);
+    sha3_256_finalize(&generation_identity, generation_hash);
+    zcl_hex_encode(generation_hash, 16, generation_tag);
+    if (snprintf(parent, sizeof(parent), "%s/.z23p", root_parent) >=
+            (int)sizeof(parent) ||
+        snprintf(generation, PATH_MAX, "%s/%s", parent, generation_tag) >=
+            PATH_MAX ||
         !platform_private_directory_ensure(parent)) {
         proof_why(why, why_len, "proof_generation_path_invalid");
         return false;
@@ -834,6 +843,21 @@ static bool executable_reuse(const struct proof_paths *paths,
     return true;
 }
 
+static bool admitted_executable_materialize(
+    const struct proof_paths *paths, const char *generation,
+    const char *source, const char *relative_target,
+    const char *expected_source_cas, char target[PATH_MAX])
+{
+    struct zcl_dev_proof_dimension artifact = {.selected = 1};
+    int target_len = generation && relative_target && target
+        ? snprintf(target, PATH_MAX, "%s/%s", generation, relative_target)
+        : -1;
+    return paths && source && expected_source_cas && target &&
+        target_len > 0 && target_len < PATH_MAX &&
+        executable_reuse(paths, source, expected_source_cas, &artifact) &&
+        dependency_materialize(source, target);
+}
+
 static bool test_binary_path(const struct proof_paths *paths,
                              char out[PATH_MAX])
 {
@@ -860,6 +884,69 @@ static bool test_binary_path(const struct proof_paths *paths,
                      "%s/build/bin/test-fast/epochs/%s/test_parallel_fast",
                      paths->root, epoch + 1);
     return n > 0 && n < PATH_MAX && access(out, X_OK) == 0;
+}
+
+static bool test_helpers_prepare(
+    const struct proof_paths *paths, const char *generation,
+    const char *runner_source, const char *expected_source_cas,
+    char runner_target[PATH_MAX], uint8_t helper_root[32],
+    char *why, size_t why_len)
+{
+    char verifier_source[PATH_MAX], verifier_target[PATH_MAX];
+    char nodectl_target[PATH_MAX];
+    int verifier_len = snprintf(
+        verifier_source, sizeof(verifier_source),
+        "%s/build/bin/zclassic23-package-verify-dev", paths->root);
+    int nodectl_len = snprintf(nodectl_target, sizeof(nodectl_target),
+                               "%s/build/bin/zcl-nodectl", generation);
+    if (verifier_len <= 0 ||
+        (size_t)verifier_len >= sizeof(verifier_source) ||
+        nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
+        !admitted_executable_materialize(
+            paths, generation, runner_source, "build/bin/test_parallel_fast",
+            expected_source_cas, runner_target) ||
+        !admitted_executable_materialize(
+            paths, generation, verifier_source,
+            "build/bin/zclassic23-package-verify-dev", expected_source_cas,
+            verifier_target)) {
+        proof_why(why, why_len, "proof_test_helper_admission_failed");
+        return false;
+    }
+    const char *nodectl_argv[] = {
+        "make", "--no-print-directory", "zcl-nodectl", NULL};
+    if (run_logged(generation, paths->helper_log, nodectl_argv, 60000) != 0) {
+        proof_why(why, why_len, "proof_test_helper_build_failed");
+        return false;
+    }
+    uint8_t runner_root[32], verifier_root[32], nodectl_root[32];
+    if (!hash_file("zcl.dev_proof_test_runner.v1", runner_target,
+                   runner_root) ||
+        !hash_file("zcl.dev_proof_package_verifier.v1", verifier_target,
+                   verifier_root) ||
+        !hash_file("zcl.dev_proof_nodectl.v1", nodectl_target,
+                   nodectl_root)) {
+        proof_why(why, why_len, "proof_test_helper_hash_failed");
+        return false;
+    }
+    struct sha3_256_ctx helpers;
+    hash_begin(&helpers, "zcl.dev_proof_test_helpers.v1");
+    sha3_256_write(&helpers, runner_root, sizeof(runner_root));
+    sha3_256_write(&helpers, verifier_root, sizeof(verifier_root));
+    sha3_256_write(&helpers, nodectl_root, sizeof(nodectl_root));
+    sha3_256_finalize(&helpers, helper_root);
+    return true;
+}
+
+static void test_receipt_bind_helpers(
+    struct zcl_dev_proof_dimension *test, const uint8_t helper_root[32])
+{
+    uint8_t test_root[32];
+    memcpy(test_root, test->receipt_root, sizeof(test_root));
+    struct sha3_256_ctx receipt;
+    hash_begin(&receipt, "zcl.dev_proof_test_child_with_helpers.v1");
+    sha3_256_write(&receipt, test_root, sizeof(test_root));
+    sha3_256_write(&receipt, helper_root, 32);
+    sha3_256_finalize(&receipt, test->receipt_root);
 }
 
 static bool receipt_store(const struct proof_paths *paths,
@@ -1047,17 +1134,21 @@ static bool proof_worker(const struct proof_paths *paths,
                 proof_why(why, why_len, "test_selection_invalid_or_truncated");
                 return false;
             }
-            char binary[PATH_MAX];
-            struct zcl_dev_proof_dimension artifact = {.selected = 1};
-            if (test_binary_path(paths, binary) &&
-                executable_reuse(paths, binary, source_before.cas_root_sha3,
-                                 &artifact)) {
-                const char *argv[] = {binary, only, "--cache",
+            char binary[PATH_MAX], generation_binary[PATH_MAX];
+            uint8_t helper_root[32];
+            bool runner_reused = test_binary_path(paths, binary) &&
+                test_helpers_prepare(
+                    paths, generation, binary, source_before.cas_root_sha3,
+                    generation_binary, helper_root, why, why_len);
+            if (runner_reused) {
+                const char *argv[] = {generation_binary, only, "--cache",
                                       "--activate-proof-contracts", NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv,
                                    test, true, why, why_len))
                     return false;
+                test_receipt_bind_helpers(test, helper_root);
             } else {
+                if (why && why_len > 0) why[0] = 0;
                 char make_only[sizeof(groups) + 8];
                 if (snprintf(make_only, sizeof(make_only), "ONLY=%s", groups) >=
                     (int)sizeof(make_only)) {
