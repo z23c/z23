@@ -139,9 +139,7 @@ static bool inv_prune_dir(const char *name)
            strcmp(name, "fixtures") == 0 ||
            strncmp(name, "test-tmp", 8) == 0;
 }
-#endif
 
-#if !defined(_WIN32)
 static bool inv_path_push(struct inv_scan *s, const char *path,
                           const struct stat *st)
 {
@@ -167,6 +165,7 @@ static bool inv_path_push(struct inv_scan *s, const char *path,
 }
 #endif
 
+#if !defined(_WIN32)
 static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 {
     char full[INV_PATH_MAX];
