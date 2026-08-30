@@ -738,7 +738,19 @@ static int lifetime_explicit_fs(const char *event, const char *from,
     unsigned refs = 0;
     bool unauthorized = lifetime_delete_unauthorized(
         from, &current_generation, &refs);
-    int rc = rename_op ? rename(from, to) : unlink(from);
+    int rc;
+    if (unauthorized) {
+        /* The canonical backing owner is still live. Refuse on EVERY
+         * platform, not only Linux where the syscall interposition below
+         * also guards raw SQLite callers: elsewhere unlink()/rename() of an
+         * open file can succeed outright, letting a helper close retire the
+         * owner's live WAL/SHM pathname. */
+        atomic_fetch_add(&g_unauthorized, 1);
+        errno = EPERM;
+        rc = -1;
+    } else {
+        rc = rename_op ? rename(from, to) : unlink(from);
+    }
     lifetime_log(event, from, 0,
                  current_generation ? current_generation : generation,
                  0, refs, unauthorized, rc == 0 ? SQLITE_OK : SQLITE_ERROR);

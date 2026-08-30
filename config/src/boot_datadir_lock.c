@@ -73,13 +73,14 @@ bool boot_datadir_lock_acquire(const char *datadir)
     g_pidfile_initialized = true;
     if (n <= 0 || (size_t)n >= sizeof(pidpath) ||
         !platform_private_file_open_locked_create(pidpath, &g_pidfile)) {
+        DWORD lock_err = GetLastError();
         platform_private_file_close(&g_pidfile);
         g_pidfile_initialized = false;
         platform_private_directory_close(directory_native);
         boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_LOCKED", BDL_PHASE,
                           "another process holds the datadir or its private lock file is invalid",
-                          NULL, 0, "datadir=%s lockfile=%s", datadir,
-                          BDL_PIDFILE);
+                          NULL, 0, "datadir=%s lockfile=%s windows_error=%lu",
+                          datadir, BDL_PIDFILE, (unsigned long)lock_err);
         return false;
     }
 

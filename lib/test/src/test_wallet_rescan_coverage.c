@@ -31,6 +31,7 @@
  */
 
 #include "test/test_core.h"
+#include "platform/directory_compat.h"
 
 #include "controllers/wallet_controller.h"
 
@@ -113,6 +114,18 @@ int test_wallet_rescan_coverage(void)
     char datadir[256];
     snprintf(datadir, sizeof(datadir),
              "test-tmp/wallet_rescan_coverage_%d", (int)getpid());
+#if defined(_WIN32)
+    /* No POSIX shell on Windows: create the two directories directly. The
+     * pid suffix makes the path unique, so the rm -rf pre-clean is a no-op
+     * there anyway. */
+    char blocksdir[320];
+    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", datadir);
+    if (platform_directory_create(datadir, 0700) != 0 ||
+        platform_directory_create(blocksdir, 0700) != 0) {
+        printf("wallet_rescan_coverage: could not create %s\n", datadir);
+        return 1;
+    }
+#else
     {
         char cmd[512];
         snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s/blocks",
@@ -122,6 +135,7 @@ int test_wallet_rescan_coverage(void)
             return 1;
         }
     }
+#endif
 
     char dbpath[320];
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", datadir);
@@ -368,11 +382,17 @@ int test_wallet_rescan_coverage(void)
     free(chain);
     free(idx);
     node_db_close(&ndb);
+#if defined(_WIN32)
+    /* No rm -rf: the fixture is exactly two levels deep. */
+    test_cleanup_tmpdir(blocksdir);
+    test_cleanup_tmpdir(datadir);
+#else
     {
         char cmd[512];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", datadir);
         (void)system(cmd);
     }
+#endif
 
     if (failures == 0)
         printf("wallet_rescan_coverage: OK (a rescan can no longer "
