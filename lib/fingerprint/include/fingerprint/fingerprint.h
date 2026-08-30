@@ -23,9 +23,11 @@
  * ── The pipeline ────────────────────────────────────────────────────────
  *   1. SCAN     every tracked .c/.h: definitions, bodies, prototypes,
  *               macros, file-scope objects, enum constants.
- *   2. SELECT   a candidate must be (a) externally linkable, (b) provably
- *               pure by a fail-closed transitive analysis of its own body
- *               and its whole callee closure, and (c) callable from a
+ *   2. SELECT   a candidate must be (a) provably pure by a fail-closed
+ *               transitive analysis of its own body and its whole callee
+ *               closure, (b) REACHABLE — either externally linkable through
+ *               a header prototype, or file-local in a unit whose whole
+ *               source the probe can include — and (c) callable from a
  *               generated harness given only its signature.
  *   3. EMIT     one generated C probe per candidate, grouped into per-module
  *               translation units, plus a driver.
@@ -56,9 +58,17 @@
  *    the clock, the allocator, a lock, a socket, a database, a global, or a
  *    function static is excluded by construction. In a systems codebase that
  *    is most of the tree. The coverage number is small and is meant to be.
- *  - STATIC FUNCTIONS ARE INVISIBLE. A candidate must be externally
- *    linkable to be callable from a generated harness, so every `static`
- *    function in the tree is excluded regardless of how pure it is.
+ *  - A FILE-LOCAL FUNCTION IS REACHED BY INCLUDING ITS DEFINING UNIT, NOT
+ *    ITS HEADER. A `static` function has no external linkage, so a probe
+ *    that included only a header could never call it. Its probe translation
+ *    unit therefore `#include`s the whole defining `.c`, which makes the
+ *    static callable and simultaneously drags in that unit's file-scope
+ *    state, its other statics and its own include set. Two consequences are
+ *    load-bearing and neither is papered over: a defining unit that will not
+ *    compile that way, or whose symbols collide at link, costs every
+ *    candidate in it, and that is COUNTED and named rather than dropped; and
+ *    the purity analysis is NOT relaxed to pay for the reach — a static that
+ *    touches file-scope state is refused exactly as an extern one is.
  *  - INDIRECT CALLS ARE A BLIND SPOT, AND THAT IS WHY THEY ARE REFUSED.
  *    A call through a function pointer cannot be resolved from source, so
  *    the purity analysis refuses the function rather than assuming. It
@@ -127,8 +137,8 @@
 #define FP_VERDICT_TABLE(X)                                                  \
     X(CANDIDATE,             "candidate")                                    \
     X(SELF_EXCLUDED,         "belongs to the fingerprint tool itself")       \
-    X(STATIC_LINKAGE,        "static (not externally linkable)")             \
-    X(NO_PROTOTYPE,          "no header prototype to include")               \
+    X(STATIC_LINKAGE,        "file-local in an unincludable unit")           \
+    X(NO_PROTOTYPE,          "no header prototype, unit not includable")     \
     X(VARIADIC,              "variadic parameter list")                      \
     X(FUNCTION_POINTER,      "takes, returns or calls a function pointer")   \
     X(UNSUPPORTED_PARAM,     "parameter shape not synthesisable")            \
@@ -181,6 +191,14 @@ struct fp_candidate {
     char def_path[FP_MAX_PATH];
     int  def_line;
     char include[FP_MAX_PATH];    /* what the harness must #include */
+    /* True when `include` names the DEFINING TRANSLATION UNIT rather than a
+     * header — the only way to call a file-local function. It changes the
+     * emitted TU (the unit is included first, ahead of everything the probe
+     * scaffolding needs, so its own feature macros still take effect) and it
+     * changes how a link failure is attributed: a `static` can never be an
+     * undefined reference, so a source-included candidate is only ever
+     * blamed through the object file it landed in. */
+    bool via_source;
     char group[64];               /* lib/<mod>, app/<shape>, core, … */
     char shape_text[FP_MAX_SHAPE];/* canonical, name-blind shape string */
     uint64_t shape;               /* hash of shape_text; seeds the corpus */
@@ -201,6 +219,12 @@ void fp_index_free(struct fp_index *ix);
 /* How many function DEFINITIONS the scan found. This is the denominator of
  * the coverage number. */
 size_t fp_index_function_count(const struct fp_index *ix);
+
+/* Turn the source-inclusion route off, so only functions reachable through a
+ * header are selected. It exists to MEASURE: run the same tree twice and the
+ * difference is exactly what including defining units bought and cost, on one
+ * machine, in one build, with nothing else changed. Default is on. */
+void fp_index_allow_source_route(struct fp_index *ix, bool on);
 
 /* Judge every scanned definition. Fills `out` with the candidates (up to
  * `cap`) and `tally` with the per-verdict counts (FP_V_COUNT entries).

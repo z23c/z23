@@ -10,13 +10,24 @@
  * Two decisions in here are what keep the generated code sound rather than
  * merely compiling:
  *
- *  - ONE TRANSLATION UNIT PER DECLARING HEADER. A single generated file
+ *  - ONE TRANSLATION UNIT PER INCLUDED FILE. A single generated file
  *    including two hundred of this tree's headers would hit macro and type
  *    collisions that have nothing to do with any candidate, and one such
- *    collision would take every probe down with it. Grouping by header keeps
- *    each TU's include set at exactly one project header, so a TU that fails
- *    to compile costs only the functions declared in that header — and that
- *    failure is recorded as an exclusion rather than papered over.
+ *    collision would take every probe down with it. Grouping by the included
+ *    file keeps each TU's project include set at exactly one file, so a TU
+ *    that fails to compile costs only the functions that file declares — and
+ *    that failure is recorded as an exclusion rather than papered over.
+ *
+ *    That included file is a HEADER for an externally linkable function and
+ *    the DEFINING .c ITSELF for a file-local one, which is the only way a
+ *    `static` can be called at all. A source-included TU is the riskier of
+ *    the two by construction — it inherits the unit's file-scope objects,
+ *    its other statics and its whole include set — and two things keep it
+ *    honest. The unit is included FIRST, so its own feature macros still
+ *    take effect. And every generated identifier is spelled `fp__…`: a probe
+ *    body that used `iter` or `h` would be silently rewritten by any tree
+ *    unit that happens to `#define` those, and the probe would still
+ *    compile.
  *
  *  - EVERY PARAMETER SLOT HAS ITS OWN GENERATOR, seeded from the shape and
  *    the slot index. If one generator produced all of a call's inputs, a
@@ -80,11 +91,12 @@ static void fp_emit_twin(FILE *out, const struct fp_candidate *c, int i,
     const char *amp = addr_of ? "&" : "";
     if (j < 0)
         return;
-    fprintf(out, "    if ((iter & 3u) == 1u) memcpy(%sa%d, %sa%d, sizeof a%d);\n",
-            amp, i, amp, j, i);
-    fprintf(out, "    else if ((iter & 3u) == 2u) { memcpy(%sa%d, %sa%d, "
-                 "sizeof a%d); ((unsigned char *)%sa%d)[iter %% sizeof a%d] "
-                 "^= 1u; }\n", amp, i, amp, j, i, amp, i, i);
+    fprintf(out, "    if ((fp__iter & 3u) == 1u) memcpy(%sfp__a%d, %sfp__a%d,"
+                 " sizeof fp__a%d);\n", amp, i, amp, j, i);
+    fprintf(out, "    else if ((fp__iter & 3u) == 2u) { memcpy(%sfp__a%d,"
+                 " %sfp__a%d, sizeof fp__a%d); ((unsigned char *)%sfp__a%d)"
+                 "[fp__iter %% sizeof fp__a%d] ^= 1u; }\n",
+            amp, i, amp, j, i, amp, i, i);
 }
 
 static void fp_emit_local(FILE *out, const struct fp_candidate *c, int i,
@@ -93,60 +105,70 @@ static void fp_emit_local(FILE *out, const struct fp_candidate *c, int i,
     const struct fp_param *p = &c->param[i];
     switch (p->kind) {
     case FP_K_SCALAR:
-        fprintf(out, "    %s a%d;\n", p->type_text, i);
-        fprintf(out, "    { struct fp_rng r; fp_rng_seed(&r, %lluull, iter, salt);"
-                     " a%d = (%s)fp_rng_scalar(&r, (unsigned)sizeof a%d, iter, %du); }\n",
+        fprintf(out, "    %s fp__a%d;\n", p->type_text, i);
+        fprintf(out, "    { struct fp_rng fp__r; fp_rng_seed(&fp__r, %lluull,"
+                     " fp__iter, fp__salt); fp__a%d = (%s)fp_rng_scalar(&fp__r,"
+                     " (unsigned)sizeof fp__a%d, fp__iter, %du); }\n",
                 (unsigned long long)seed, i, p->type_text, i, (unsigned)i);
         {
             int j = fp_twin_slot(c, i);
             if (j >= 0) {
-                fprintf(out, "    if ((iter & 3u) == 1u) a%d = a%d;\n", i, j);
-                fprintf(out, "    else if ((iter & 3u) == 2u) a%d = (%s)(a%d "
-                             "^ 1);\n", i, p->type_text, j);
+                fprintf(out, "    if ((fp__iter & 3u) == 1u) fp__a%d = fp__a%d;\n",
+                        i, j);
+                fprintf(out, "    else if ((fp__iter & 3u) == 2u) fp__a%d ="
+                             " (%s)(fp__a%d ^ 1);\n", i, p->type_text, j);
             }
         }
         break;
     case FP_K_CSTR_IN:
-        fprintf(out, "    char a%d[FP_STR_BYTES];\n", i);
-        fprintf(out, "    { struct fp_rng r; fp_rng_seed(&r, %lluull, iter, salt);"
-                     " fp_rng_cstr(&r, a%d, sizeof a%d, iter); }\n",
+        fprintf(out, "    char fp__a%d[FP_STR_BYTES];\n", i);
+        fprintf(out, "    { struct fp_rng fp__r; fp_rng_seed(&fp__r, %lluull,"
+                     " fp__iter, fp__salt); fp_rng_cstr(&fp__r, fp__a%d,"
+                     " sizeof fp__a%d, fp__iter); }\n",
                 (unsigned long long)seed, i, i);
         if (fp_twin_slot(c, i) >= 0)
-            fprintf(out, "    if ((iter & 3u) == 1u) memcpy(a%d, a%d, "
-                         "sizeof a%d);\n", i, fp_twin_slot(c, i), i);
+            fprintf(out, "    if ((fp__iter & 3u) == 1u) memcpy(fp__a%d,"
+                         " fp__a%d, sizeof fp__a%d);\n",
+                    i, fp_twin_slot(c, i), i);
         break;
     case FP_K_BUF_IN:
-        fprintf(out, "    %s a%d[FP_BUF_BYTES];\n", p->type_text, i);
-        fprintf(out, "    { struct fp_rng r; fp_rng_seed(&r, %lluull, iter, salt);"
-                     " fp_rng_textbytes(&r, a%d, sizeof a%d, iter); }\n",
+        fprintf(out, "    %s fp__a%d[FP_BUF_BYTES];\n", p->type_text, i);
+        fprintf(out, "    { struct fp_rng fp__r; fp_rng_seed(&fp__r, %lluull,"
+                     " fp__iter, fp__salt); fp_rng_textbytes(&fp__r, fp__a%d,"
+                     " sizeof fp__a%d, fp__iter); }\n",
                 (unsigned long long)seed, i, i);
         fp_emit_twin(out, c, i, false);
         break;
     case FP_K_ARR_IN:
-        fprintf(out, "    %s a%d[%s];\n", p->type_text, i, p->elem_text);
-        fprintf(out, "    { struct fp_rng r; fp_rng_seed(&r, %lluull, iter, salt);"
-                     " fp_rng_bytes(&r, a%d, sizeof a%d); }\n",
+        fprintf(out, "    %s fp__a%d[%s];\n", p->type_text, i, p->elem_text);
+        fprintf(out, "    { struct fp_rng fp__r; fp_rng_seed(&fp__r, %lluull,"
+                     " fp__iter, fp__salt); fp_rng_bytes(&fp__r, fp__a%d,"
+                     " sizeof fp__a%d); }\n",
                 (unsigned long long)seed, i, i);
         fp_emit_twin(out, c, i, false);
         break;
     case FP_K_OBJ_IN:
-        fprintf(out, "    %s a%d;\n", p->type_text, i);
-        fprintf(out, "    { struct fp_rng r; fp_rng_seed(&r, %lluull, iter, salt);"
-                     " fp_rng_objbytes(&r, &a%d, sizeof a%d, iter); }\n",
+        fprintf(out, "    %s fp__a%d;\n", p->type_text, i);
+        fprintf(out, "    { struct fp_rng fp__r; fp_rng_seed(&fp__r, %lluull,"
+                     " fp__iter, fp__salt); fp_rng_objbytes(&fp__r, &fp__a%d,"
+                     " sizeof fp__a%d, fp__iter); }\n",
                 (unsigned long long)seed, i, i);
         fp_emit_twin(out, c, i, true);
         break;
     case FP_K_OUT_SCALAR:
     case FP_K_OUT_OBJ:
-        fprintf(out, "    %s a%d;\n", p->type_text, i);
-        fprintf(out, "    memset(&a%d, (int)fill, sizeof a%d);\n", i, i);
+        fprintf(out, "    %s fp__a%d;\n", p->type_text, i);
+        fprintf(out, "    memset(&fp__a%d, (int)fp__fill, sizeof fp__a%d);\n",
+                i, i);
         break;
     case FP_K_OUT_ARR:
         if (p->elem_text[0] == '\0')
-            fprintf(out, "    %s a%d[FP_BUF_BYTES];\n", p->type_text, i);
+            fprintf(out, "    %s fp__a%d[FP_BUF_BYTES];\n", p->type_text, i);
         else
-            fprintf(out, "    %s a%d[%s];\n", p->type_text, i, p->elem_text);
-        fprintf(out, "    memset(a%d, (int)fill, sizeof a%d);\n", i, i);
+            fprintf(out, "    %s fp__a%d[%s];\n", p->type_text, i,
+                    p->elem_text);
+        fprintf(out, "    memset(fp__a%d, (int)fp__fill, sizeof fp__a%d);\n",
+                i, i);
         break;
     case FP_K_LEN:
     case FP_K_VOID:
@@ -162,14 +184,14 @@ static void fp_emit_arg(FILE *out, const struct fp_candidate *c, int i)
     if (i > 0)
         fprintf(out, ", ");
     switch (p->kind) {
-    case FP_K_SCALAR:      fprintf(out, "a%d", i); break;
-    case FP_K_CSTR_IN:     fprintf(out, "a%d", i); break;
-    case FP_K_BUF_IN:      fprintf(out, "a%d", i); break;
-    case FP_K_ARR_IN:      fprintf(out, "a%d", i); break;
-    case FP_K_OBJ_IN:      fprintf(out, "&a%d", i); break;
-    case FP_K_OUT_SCALAR:  fprintf(out, "&a%d", i); break;
-    case FP_K_OUT_OBJ:     fprintf(out, "&a%d", i); break;
-    case FP_K_OUT_ARR:     fprintf(out, "a%d", i); break;
+    case FP_K_SCALAR:      fprintf(out, "fp__a%d", i); break;
+    case FP_K_CSTR_IN:     fprintf(out, "fp__a%d", i); break;
+    case FP_K_BUF_IN:      fprintf(out, "fp__a%d", i); break;
+    case FP_K_ARR_IN:      fprintf(out, "fp__a%d", i); break;
+    case FP_K_OBJ_IN:      fprintf(out, "&fp__a%d", i); break;
+    case FP_K_OUT_SCALAR:  fprintf(out, "&fp__a%d", i); break;
+    case FP_K_OUT_OBJ:     fprintf(out, "&fp__a%d", i); break;
+    case FP_K_OUT_ARR:     fprintf(out, "fp__a%d", i); break;
     case FP_K_LEN:         fprintf(out, "FP_BUF_BYTES"); break;
     default:               fprintf(out, "0"); break;
     }
@@ -185,9 +207,10 @@ static void fp_emit_probe(FILE *out, const struct fp_candidate *c, size_t idx)
      * need — and the map has to be exact, because it is what decides which
      * probe a compiler error belongs to. */
     fprintf(out, "/*FPPROBE %zu*/\n", idx);
-    fprintf(out, "static void fp_p_%zu(struct fp_acc *h, uint32_t iter,"
-                 " unsigned fill, uint64_t salt)\n{\n", idx);
-    fprintf(out, "    (void)h; (void)iter; (void)fill; (void)salt;\n");
+    fprintf(out, "static void fp_p_%zu(struct fp_acc *fp__h, uint32_t fp__iter,"
+                 " unsigned fp__fill, uint64_t fp__salt)\n{\n", idx);
+    fprintf(out, "    (void)fp__h; (void)fp__iter; (void)fp__fill;"
+                 " (void)fp__salt;\n");
     for (i = 0; i < c->n_params; i++)
         fp_emit_local(out, c, i, c->shape ^ ((uint64_t)i * FP_SEED_STRIDE));
 
@@ -201,33 +224,33 @@ static void fp_emit_probe(FILE *out, const struct fp_candidate *c, size_t idx)
         const struct fp_param *p = &c->param[i];
         if (p->kind == FP_K_OBJ_IN || p->kind == FP_K_OUT_OBJ ||
             p->kind == FP_K_OUT_ARR || p->kind == FP_K_ARR_IN)
-            fprintf(out, "    fp_acc_u64(h, %uu, (uint64_t)sizeof a%d);\n",
-                    (unsigned)(128 + i), i);
+            fprintf(out, "    fp_acc_u64(fp__h, %uu, (uint64_t)sizeof"
+                         " fp__a%d);\n", (unsigned)(128 + i), i);
     }
 
     fprintf(out, "    ");
     if (c->ret.kind == FP_K_SCALAR)
-        fprintf(out, "%s rv = ", c->ret.type_text);
+        fprintf(out, "%s fp__rv = ", c->ret.type_text);
     else if (c->ret.kind == FP_K_CSTR_OUT)
-        fprintf(out, "const char *rv = ");
+        fprintf(out, "const char *fp__rv = ");
     fprintf(out, "%s(", c->name);
     for (i = 0; i < c->n_params; i++)
         fp_emit_arg(out, c, i);
     fprintf(out, ");\n");
 
     if (c->ret.kind == FP_K_SCALAR)
-        fprintf(out, "    fp_acc_u64(h, 0u, (uint64_t)rv);\n");
+        fprintf(out, "    fp_acc_u64(fp__h, 0u, (uint64_t)fp__rv);\n");
     else if (c->ret.kind == FP_K_CSTR_OUT)
-        fprintf(out, "    fp_acc_cstr(h, 0u, rv);\n");
+        fprintf(out, "    fp_acc_cstr(fp__h, 0u, fp__rv);\n");
 
     for (i = 0; i < c->n_params; i++) {
         const struct fp_param *p = &c->param[i];
         if (p->kind == FP_K_OUT_SCALAR || p->kind == FP_K_OUT_OBJ)
-            fprintf(out, "    fp_acc_mem(h, %uu, &a%d, sizeof a%d);\n",
-                    (unsigned)(i + 1), i, i);
+            fprintf(out, "    fp_acc_mem(fp__h, %uu, &fp__a%d,"
+                         " sizeof fp__a%d);\n", (unsigned)(i + 1), i, i);
         else if (p->kind == FP_K_OUT_ARR)
-            fprintf(out, "    fp_acc_mem(h, %uu, a%d, sizeof a%d);\n",
-                    (unsigned)(i + 1), i, i);
+            fprintf(out, "    fp_acc_mem(fp__h, %uu, fp__a%d,"
+                         " sizeof fp__a%d);\n", (unsigned)(i + 1), i, i);
     }
     fprintf(out, "}\n\n");
 }
@@ -306,9 +329,19 @@ static bool fp_write_main(const char *work_dir, size_t n_cands, size_t ngroups)
 "#include \"fp_reg.h\"\n"
 "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
 "#include <unistd.h>\n#include <signal.h>\n#include <sys/wait.h>\n\n"
-"#define FP_MAX_PROBES %zuu\n\n"
+"#define FP_MAX_PROBES %zuu\n"
+"#define FP_MAX_JOBS 256u\n\n"
 "struct fp_slot { const char *id; uint64_t shape; fp_probe_fn fn; };\n"
-"static struct fp_slot g_slot[FP_MAX_PROBES];\n\n"
+"struct fp_kid { pid_t pid; int fd; unsigned idx; };\n"
+"static struct fp_slot g_slot[FP_MAX_PROBES];\n"
+"/* Empty means \"every probe\". --only=<file> narrows the run to the listed\n"
+" * probe indices, which is what makes the confirmation corpus affordable:\n"
+" * it is 32x the size of the first one, and it is only ever CONSULTED for\n"
+" * candidates that landed in a match group. Running it over everything else\n"
+" * computes hashes nothing reads. */\n"
+"static unsigned char g_only[FP_MAX_PROBES];\n"
+"static int g_only_set;\n\n", n_cands ? n_cands : 1u);
+    fprintf(out,
 "void fp_register(unsigned idx, const char *id, uint64_t shape, fp_probe_fn fn)\n"
 "{\n"
 "    if (idx >= FP_MAX_PROBES) return;\n"
@@ -337,13 +370,22 @@ static bool fp_write_main(const char *work_dir, size_t n_cands, size_t ngroups)
 "    }\n"
 "    r->h1 = acc.h1; r->h2 = acc.h2; r->distinct = nseen;\n"
 "}\n\n"
+"/* Results go to --out=<file>, NEVER to stdout. A probe TU is compiled\n"
+" * against a whole tree unit, so anything that unit's file-scope\n"
+" * initialisers or a wrongly-accepted callee prints lands on this process's\n"
+" * stdout and stderr. Sharing a stream with the result rows would let one\n"
+" * such line be parsed as a result and silently overwrite an unrelated\n"
+" * probe's verdict: a log line beginning with a year parses as one. The\n"
+" * streams are separated so that noise stays legible AS noise. */\n"
 "int main(int argc, char **argv)\n"
 "{\n"
 "    unsigned fill = 0u;\n"
 "    uint64_t salt = 0ull;\n"
 "    uint32_t iters = FP_ITERATIONS;\n"
 "    unsigned timeout = 5u;\n"
+"    unsigned jobs = 1u;\n"
 "    unsigned i;\n"
+"    FILE *res_out = stdout;\n"
 "    for (i = 1; i < (unsigned)argc; i++) {\n"
 "        if (strncmp(argv[i], \"--fill=\", 7) == 0)\n"
 "            fill = (unsigned)strtoul(argv[i] + 7, NULL, 0);\n"
@@ -353,49 +395,98 @@ static bool fp_write_main(const char *work_dir, size_t n_cands, size_t ngroups)
 "            iters = (uint32_t)strtoul(argv[i] + 8, NULL, 0);\n"
 "        else if (strncmp(argv[i], \"--timeout=\", 10) == 0)\n"
 "            timeout = (unsigned)strtoul(argv[i] + 10, NULL, 0);\n"
-"    }\n", n_cands ? n_cands : 1u);
+"        else if (strncmp(argv[i], \"--jobs=\", 7) == 0)\n"
+"            jobs = (unsigned)strtoul(argv[i] + 7, NULL, 0);\n"
+"        else if (strncmp(argv[i], \"--only=\", 7) == 0) {\n"
+"            FILE *sel = fopen(argv[i] + 7, \"r\");\n"
+"            unsigned long w;\n"
+"            if (sel == NULL) return 2;\n"
+"            g_only_set = 1;\n"
+"            while (fscanf(sel, \"%%lu\", &w) == 1)\n"
+"                if (w < FP_MAX_PROBES) g_only[w] = 1u;\n"
+"            fclose(sel);\n"
+"        }\n"
+"        else if (strncmp(argv[i], \"--out=\", 6) == 0) {\n"
+"            res_out = fopen(argv[i] + 6, \"w\");\n"
+"            if (res_out == NULL) return 2;\n"
+"        }\n"
+"    }\n"
+"    if (jobs < 1u) jobs = 1u;\n"
+"    if (jobs > FP_MAX_JOBS) jobs = FP_MAX_JOBS;\n");
     {
         size_t g;
         for (g = 0; g < ngroups; g++)
             fprintf(out, "    fp_group_%zu_register();\n", g);
     }
     fprintf(out,
-"    for (i = 0; i < FP_MAX_PROBES; i++) {\n"
-"        int fds[2];\n"
-"        pid_t pid;\n"
-"        struct fp_result res;\n"
-"        int status = 0;\n"
-"        ssize_t got;\n"
-"        if (g_slot[i].fn == NULL) { printf(\"%%u SKIP\\n\", i); continue; }\n"
-"        if (pipe(fds) != 0) { printf(\"%%u ERR\\n\", i); continue; }\n"
-"        pid = fork();\n"
-"        if (pid < 0) { close(fds[0]); close(fds[1]);"
-" printf(\"%%u ERR\\n\", i); continue; }\n"
-"        if (pid == 0) {\n"
-"            close(fds[0]);\n"
-"            alarm(timeout);\n"
+"    /* Probes run JOBS at a time. One at a time is not a safety property —\n"
+"     * the isolation comes from each probe having its own process, not from\n"
+"     * there being one of them — and it costs an hour per configuration on\n"
+"     * a tree this size, times five configurations plus the confirmation\n"
+"     * corpus. A batch is forked, then reaped in order. Nothing is shared\n"
+"     * between children, each result is 24 bytes and so is written to its\n"
+"     * own pipe in one unblockable go, and a child that crashes or is\n"
+"     * alarmed out is still exactly one lost result. */\n"
+"    for (i = 0; i < FP_MAX_PROBES; ) {\n"
+"        struct fp_kid kid[FP_MAX_JOBS];\n"
+"        unsigned n = 0;\n"
+"        unsigned k;\n"
+"        while (i < FP_MAX_PROBES && n < jobs) {\n"
+"            int fds[2];\n"
+"            pid_t pid;\n"
+"            if (g_slot[i].fn == NULL || (g_only_set && !g_only[i])) {\n"
+"                fprintf(res_out, \"%%u SKIP\\n\", i); i++; continue;\n"
+"            }\n"
+"            if (pipe(fds) != 0) {\n"
+"                fprintf(res_out, \"%%u ERR\\n\", i); i++; continue;\n"
+"            }\n"
+"            /* Empty the result buffer BEFORE forking. A child inherits the\n"
+"             * buffer's contents, and any path that flushed it there would\n"
+"             * duplicate every row written so far. */\n"
+"            fflush(res_out);\n"
+"            pid = fork();\n"
+"            if (pid < 0) {\n"
+"                close(fds[0]); close(fds[1]);\n"
+"                fprintf(res_out, \"%%u ERR\\n\", i); i++; continue;\n"
+"            }\n"
+"            if (pid == 0) {\n"
+"                struct fp_result res;\n"
+"                close(fds[0]);\n"
+"                alarm(timeout);\n"
+"                memset(&res, 0, sizeof res);\n"
+"                fp_run_one(&g_slot[i], fill, salt, iters, &res);\n"
+"                if (write(fds[1], &res, sizeof res) != (ssize_t)sizeof res)\n"
+"                    _exit(3);\n"
+"                _exit(0);\n"
+"            }\n"
+"            close(fds[1]);\n"
+"            kid[n].pid = pid; kid[n].fd = fds[0]; kid[n].idx = i;\n"
+"            n++; i++;\n"
+"        }\n");
+    fprintf(out,
+"        for (k = 0; k < n; k++) {\n"
+"            struct fp_result res;\n"
+"            int status = 0;\n"
+"            ssize_t got;\n"
 "            memset(&res, 0, sizeof res);\n"
-"            fp_run_one(&g_slot[i], fill, salt, iters, &res);\n"
-"            if (write(fds[1], &res, sizeof res) != (ssize_t)sizeof res)\n"
-"                _exit(3);\n"
-"            _exit(0);\n"
+"            got = read(kid[k].fd, &res, sizeof res);\n"
+"            close(kid[k].fd);\n"
+"            while (waitpid(kid[k].pid, &status, 0) < 0) { }\n"
+"            if (got != (ssize_t)sizeof res || !WIFEXITED(status) ||\n"
+"                WEXITSTATUS(status) != 0) {\n"
+"                fprintf(res_out, \"%%u %%s %%s\\n\", kid[k].idx,\n"
+"                       (WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM)\n"
+"                           ? \"TIMEOUT\" : \"CRASH\", g_slot[kid[k].idx].id);\n"
+"                continue;\n"
+"            }\n"
+"            fprintf(res_out, \"%%u OK %%016llx%%016llx %%u %%s\\n\","
+" kid[k].idx,\n"
+"                   (unsigned long long)res.h1, (unsigned long long)res.h2,\n"
+"                   res.distinct, g_slot[kid[k].idx].id);\n"
 "        }\n"
-"        close(fds[1]);\n"
-"        memset(&res, 0, sizeof res);\n"
-"        got = read(fds[0], &res, sizeof res);\n"
-"        close(fds[0]);\n"
-"        while (waitpid(pid, &status, 0) < 0) { }\n"
-"        if (got != (ssize_t)sizeof res || !WIFEXITED(status) ||\n"
-"            WEXITSTATUS(status) != 0) {\n"
-"            printf(\"%%u %%s %%s\\n\", i,\n"
-"                   (WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM)\n"
-"                       ? \"TIMEOUT\" : \"CRASH\", g_slot[i].id);\n"
-"            continue;\n"
-"        }\n"
-"        printf(\"%%u OK %%016llx%%016llx %%u %%s\\n\", i,\n"
-"               (unsigned long long)res.h1, (unsigned long long)res.h2,\n"
-"               res.distinct, g_slot[i].id);\n"
 "    }\n"
+"    if (res_out != stdout && fclose(res_out) != 0)\n"
+"        return 2;\n"
 "    return 0;\n"
 "}\n");
     return fclose(out) == 0;
@@ -429,15 +520,25 @@ bool fp_emit_harness(const struct fp_candidate *cands, size_t n_cands,
              * that could not be compiled (a package outside this build's
              * include path), so keeping it would fail forever. */
             bool alive = false;
+            bool via_source = cands[start].via_source;
             for (k = start; k < i; k++)
                 if (disabled == NULL || !disabled[k]) { alive = true; break; }
             fprintf(out, "/* GENERATED by lib/fingerprint. Do not edit. */\n");
+            /* A source-included unit goes FIRST, ahead of even <stdint.h>.
+             * A translation unit is allowed to define its own feature macros
+             * (_GNU_SOURCE, _POSIX_C_SOURCE) before its first include, and
+             * putting anything in front of it would silently compile it
+             * against a different libc surface than the tree builds it with.
+             * The probe scaffolding is happy to come second; the unit is
+             * not. */
+            if (alive && via_source)
+                fprintf(out, "#include \"%s\"\n", cands[start].include);
             fprintf(out, "#include <stdint.h>\n#include <stddef.h>\n"
                          "#include <stdbool.h>\n#include <string.h>\n"
                          "#include <limits.h>\n");
-            if (alive)
+            if (alive && !via_source)
                 fprintf(out, "#include \"%s\"\n", cands[start].include);
-            else
+            else if (!alive)
                 fprintf(out, "/* group empty: %s */\n", cands[start].include);
             fprintf(out, "#include \"fp_reg.h\"\n\n");
         }
