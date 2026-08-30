@@ -41,8 +41,21 @@ mapfile -t monolith_sources < <(
 )
 platform_alternative_groups=(
     "lib/platform/src/os_sandbox_linux.c lib/platform/src/os_sandbox_stub.c"
+    "lib/vcs/src/vcs_devloop.c lib/vcs/src/vcs_devloop_windows.c"
 )
-host_optional_sources=(lib/vcs/src/vcs_devloop.c)
+# Empty on purpose, and kept rather than deleted.
+#
+# The devloop pair used to live here, because the Windows implementation was
+# compiled on EVERY host: only the POSIX one was host-optional, so "expected 1
+# on Linux, 0 on MSYS" described the build exactly. That was the defect, not
+# the description — a Windows devloop has no business being compiled into a
+# Linux binary, and once the Makefile stopped doing it the pair became a
+# straightforward platform alternative like the sandbox pair above.
+#
+# The mechanism stays because "this source is genuinely optional on this host"
+# is a different claim from "exactly one of these alternatives is chosen", and
+# the day something is the former, describing it as the latter would hide it.
+host_optional_sources=()
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
     echo "check-zcode-package-registry: FAIL — empty package or monolith source projection" >&2
