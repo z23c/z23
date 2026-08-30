@@ -1082,6 +1082,19 @@ static bool admitted_executable_materialize(
         dependency_materialize(source, target);
 }
 
+static bool admitted_executable_mark_fresh(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    const struct timespec times[2] = {
+        {.tv_nsec = UTIME_OMIT},
+        {.tv_nsec = UTIME_NOW},
+    };
+    bool ok = futimens(fd, times) == 0;
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
 static bool test_object_dir_relative(const struct proof_paths *paths,
                                      char object_dir[PATH_MAX])
 {
@@ -1219,7 +1232,7 @@ static bool test_helpers_prepare(
         !admitted_executable_materialize(
             paths, generation, node_source, "build/bin/zclassic23",
             expected_source,
-            node_target) ||
+            node_target) || !admitted_executable_mark_fresh(node_target) ||
         !test_depfiles_prepare(paths, generation, depfile_root)) {
         proof_why(why, why_len, "proof_test_helper_admission_failed");
         return false;
