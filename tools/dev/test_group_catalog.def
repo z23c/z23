@@ -679,6 +679,15 @@ ZCL_TEST_GROUP(retrieval)
  * exactly where it is. Confusing the two would either lose history or
  * destroy the evidence that history was changed. */
 ZCL_TEST_GROUP(chainlog)
+/* The batching landing queue. The group exists for one distinction and one
+ * guarantee. The distinction: "the gate did not run" and "the gate passed"
+ * are different facts, so four cases try to fabricate a landing through the
+ * four ways that could collapse — no gate run, a run that did not contain
+ * this submission, a red run, and a run that skipped its groups — and each
+ * must refuse by name. The guarantee: a red batch refuses ONLY the culprit,
+ * because a batch that rejected an agent's work over a stranger's bug would
+ * be worse than not batching at all. */
+ZCL_TEST_GROUP(land_queue)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)

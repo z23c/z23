@@ -2248,11 +2248,16 @@ TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c
 	$(MUTATION_LIB_SRCS)
 SPEC_SRCS = $(wildcard lib/test/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
+# The landing queue's two library translation units. land_main.c owns a
+# main() and is deliberately NOT here — the queue logic is what the test
+# group proves, and linking the CLI's entry point would collide with the
+# harness's own.
+TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
 # helpers as sequential test_zcl.
-TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
@@ -4851,6 +4856,35 @@ ACME_WORKER_LDFLAGS = $(if $(ZCL_CROSS_TRIPLE),-static $(ZCL_WINDOWS_CLANG_LINKE
 ACME_WORKER_LIBS = $(ZCL_VENDOR_LIB)/libssl.a $(ZCL_VENDOR_LIB)/libcrypto.a \
 	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
+
+# ── The landing queue ─────────────────────────────────────────────────────
+# `z23-land` is the command surface of tools/dev/land.sh and the batching
+# lander. Built STRAIGHT FROM SOURCE like the ACME worker rather than linked
+# against the node: it drives git and `make`, touches no consensus state, and
+# keeping it off the node's object graph is what stops a landing queue from
+# ever becoming reachable from a peer. Its whole dependency set is the
+# chainlog it writes receipts into, the hash that chains them, and the
+# platform file seam underneath both.
+LAND_SRCS = \
+	tools/land/land_main.c \
+	tools/land/land_queue.c \
+	tools/land/land_record.c \
+	lib/chainlog/src/chainlog.c \
+	lib/sha3/src/sha3.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
+	lib/platform/src/private_file.c \
+	lib/platform/src/private_acl_internal.c
+LAND_INCLUDES = -Ilib/base/include -Ilib/chainlog/include -Ilib/sha3/include \
+	-Ilib/platform/include -Itools/land
+LAND_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(LAND_INCLUDES)
+
+.PHONY: z23-land
+z23-land: $(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT)
+$(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT): $(LAND_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LAND_CFLAGS) -o $@ $(LAND_SRCS)
 
 .PHONY: zclassic23-acme
 zclassic23-acme: $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT)
@@ -9360,7 +9394,7 @@ $(COV_LEASE): FORCE
 	  "$(COV_EPOCH_COMPILE_FLAGS)" "$(COV_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS)
+COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))
 COV_LINK_RSP = $(COV_BUILD_DIR)/link-inputs.rsp
 
@@ -9851,6 +9885,7 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	lib/sha3/src/sha3.c \
 	lib/util/src/spawn.c \
 	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c \
 	lib/base/src/result.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
