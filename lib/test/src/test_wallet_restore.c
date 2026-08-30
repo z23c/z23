@@ -45,7 +45,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -320,6 +322,19 @@ static int wr_test_rescan_reports_missing_bodies(void)
 
 int test_wallet_restore(void)
 {
+#if defined(_WIN32)
+    /* Production native-Windows wallet restore is FAIL-CLOSED by design:
+     * wallet_restore_datadir_free/_hold refuse (-58) until current-SID
+     * single-writer qualification passes (app/services/src/
+     * wallet_restore_service.c:69-72 and :128-132). Every case below runs
+     * through those gates, so none can pass here. The refusal contract
+     * itself is proven by the Windows-lane acceptance
+     * (lib/test/src/wallet_restore_windows_refusal_acceptance.c). */
+    printf("wallet_restore: SKIP (Windows): restore is fail-closed on "
+           "native Windows; refusal proven by "
+           "wallet_restore_windows_refusal_acceptance\n");
+    return 0;
+#else
     int failures = 0;
     char src_db[256], backup_dir[256], target[256], target_db[320];
     const char *scratch = wr_dir();
@@ -671,4 +686,5 @@ int test_wallet_restore(void)
     wr_rmdir_datadir(target);
     rmdir(backup_dir);
     return failures;
+#endif
 }

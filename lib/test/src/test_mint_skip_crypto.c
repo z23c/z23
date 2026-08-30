@@ -60,8 +60,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include "platform/time_compat.h"
+#endif
 
 /* Source-private reducer-log helpers under direct authority-type test. */
 bool script_validate_log_ensure_schema(sqlite3 *db);
@@ -269,11 +275,92 @@ static bool msc_identity_same(const struct stat *a, const struct stat *b)
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
         a->st_nlink == b->st_nlink && a->st_size == b->st_size &&
         a->st_mode == b->st_mode &&
+#if defined(_WIN32)
+        /* UCRT struct stat carries second-resolution timestamps only; the
+         * identity assertion (same unmodified file) is unaffected. */
+        a->st_mtime == b->st_mtime &&
+        a->st_ctime == b->st_ctime;
+#else
         a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
         a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
         a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
         a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
 }
+
+#if defined(_WIN32)
+
+/* Child body for the Windows arm of msc_make_killed_wal: re-executed suite
+ * process, dispatched via ZCL_TEST_FORK_ROLE (see test_core.h). Reads the
+ * target dir and lane from env, commits the row, drops a ready-token FILE
+ * (Windows has no pipe(2) across re-exec), then sleeps forever until the
+ * parent TerminateProcess()es it — the kill -9 analogue. */
+static int msc_wal_writer_child(void)
+{
+    const char *dir = getenv("ZCL_MSC_WAL_DIR");
+    const char *prod = getenv("ZCL_MSC_PRODUCER");
+    if (!dir || !dir[0] || !prod) return 2;
+    bool producer = strcmp(prod, "1") == 0;
+
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/consensus.db", dir);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return 2;
+
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK &&
+        sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) ==
+            SQLITE_OK &&
+        sqlite3_exec(db, "PRAGMA synchronous=FULL", NULL, NULL, NULL) ==
+            SQLITE_OK &&
+        sqlite3_exec(db, "PRAGMA wal_autocheckpoint=0", NULL, NULL, NULL) ==
+            SQLITE_OK &&
+        sqlite3_exec(db,
+            "CREATE TABLE IF NOT EXISTS progress_meta("
+            "key TEXT PRIMARY KEY,value BLOB NOT NULL)",
+            NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)",
+                     NULL, NULL, NULL) == SQLITE_OK;
+    const char *insert = producer
+        ? "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
+          MINT_ANCHOR_PRODUCER_LANE_KEY "',X'02')"
+        : "INSERT OR REPLACE INTO progress_meta(key,value) "
+          "VALUES('ordinary_serving_marker',X'01')";
+    if (ok)
+        ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) ==
+                SQLITE_OK &&
+             sqlite3_exec(db, insert, NULL, NULL, NULL) == SQLITE_OK &&
+             sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+
+    char ready_path[560];
+    if (snprintf(ready_path, sizeof(ready_path), "%s/wal_ready.token", dir) <= 0)
+        ok = false;
+    if (ok) {
+        FILE *fp = fopen(ready_path, "wb");
+        if (fp) {
+            fputc('R', fp);
+            fclose(fp);
+        } else {
+            ok = false;
+        }
+    }
+    if (!ok) return 2;
+    for (;;)
+        platform_sleep_ms(1000);
+    return 0; /* unreachable */
+}
+
+/* Returns 0 when the role was handled (group entry short-circuits), -1 when
+ * the role names nothing here (harness error surfaces as a failure). */
+int msc_fork_role_dispatch(const char *role)
+{
+    if (strcmp(role, "wal_writer") == 0)
+        return msc_wal_writer_child() == 0 ? 0 : 1;
+    fprintf(stderr, "mint_skip_crypto: unknown ZCL_TEST_FORK_ROLE '%s'\n",
+            role);
+    return 1;
+}
+
+#endif /* _WIN32 */
 
 /* Leave a committed row only in a kill-9-surviving WAL.  The child keeps the
  * SQLite connection open until the parent kills it, so no graceful close can
@@ -286,6 +373,34 @@ static bool msc_make_killed_wal(const char *dir, bool producer)
     if (n <= 0 || (size_t)n >= sizeof(path))
         return false;
 
+#if defined(_WIN32)
+    (void)path; /* the child recomputes it from ZCL_MSC_WAL_DIR */
+    char ready_path[560];
+    char log_path[576];
+    if (snprintf(ready_path, sizeof(ready_path), "%s/wal_ready.token", dir)
+                <= 0 ||
+        snprintf(log_path, sizeof(log_path), "%s/wal_child.log", dir) <= 0)
+        return false;
+    (void)unlink(ready_path);
+    if (_putenv_s("ZCL_MSC_WAL_DIR", dir) != 0 ||
+        _putenv_s("ZCL_MSC_PRODUCER", producer ? "1" : "0") != 0)
+        return false;
+    void *child = test_spawn_self_with_role("test_mint_skip_crypto",
+                                            "wal_writer", log_path);
+    if (!child)
+        return false;
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; i++) {
+        struct stat st;
+        ready = stat(ready_path, &st) == 0;
+        if (!ready) platform_sleep_ms(50);
+    }
+    if (ready)
+        test_self_child_kill(child);
+    int code = test_self_child_wait(child);
+    (void)unlink(ready_path);
+    return ready && code == 137;
+#else
     int ready[2];
     if (pipe(ready) != 0)
         return false;
@@ -345,6 +460,7 @@ static bool msc_make_killed_wal(const char *dir, bool producer)
     } while (waited < 0 && errno == EINTR);
     return got == 1 && token == 'R' && waited == child &&
         WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+#endif
 }
 
 /* Seed body_persist_log + its cursor so script_validate sees an ok=1 upstream
@@ -808,10 +924,16 @@ static int test_mint_anchor_lane_containment(void)
               lstat(progress_path,&after)==0&&
               before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&
               before.st_size==after.st_size&&before.st_mode==after.st_mode&&
+#if defined(_WIN32)
+              /* UCRT struct stat carries second-resolution times only. */
+              before.st_mtime==after.st_mtime&&
+              before.st_ctime==after.st_ctime&&
+#else
               before.st_mtim.tv_sec==after.st_mtim.tv_sec&&
               before.st_mtim.tv_nsec==after.st_mtim.tv_nsec&&
               before.st_ctim.tv_sec==after.st_ctim.tv_sec&&
               before.st_ctim.tv_nsec==after.st_ctim.tv_nsec&&
+#endif
               access(node_path,F_OK)!=0&&access(wallet_path,F_OK)!=0);
     test_cleanup_tmpdir(dir);
     return failures;
@@ -1059,6 +1181,15 @@ int test_mint_skip_crypto(void);
 int test_mint_skip_crypto(void)
 {
     int failures = 0;
+#if defined(_WIN32)
+    /* Re-executed child-process arm (test_spawn_self_with_role): run only
+     * the fork-role body, never the full group. */
+    {
+        const char *role = getenv("ZCL_TEST_FORK_ROLE");
+        if (role && role[0])
+            return msc_fork_role_dispatch(role);
+    }
+#endif
     printf("\n=== test_mint_skip_crypto: state-only fold == validated fold ===\n");
 
     blocker_module_init();

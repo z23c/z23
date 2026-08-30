@@ -105,6 +105,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -724,3 +725,15 @@ int test_fold_inram_crash_proof(void)
            failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Both proof items drive crash injection through fork()+SIGKILL children;
+ * the Windows TerminateProcess analogue of the fold-recovery invariant is
+ * carried by test_kill9_recovery.c's mint-fold phase. */
+int test_fold_inram_crash_proof(void)
+{
+    printf("fold_inram_crash_proof: SKIP (Windows): fork+SIGKILL "
+           "crash-injection lane; kill9_recovery mint-fold covers the "
+           "TerminateProcess analogue\n");
+    return 0;
+}
+#endif

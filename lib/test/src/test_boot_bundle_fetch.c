@@ -38,6 +38,7 @@
 #include "net/file_service.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
+#include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
 
@@ -48,9 +49,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 
 /* SQLite-magic-prefixed deterministic content the serve path accepts + the
@@ -1299,19 +1297,23 @@ static int case_peer_seed_stall_is_bounded(void)
          * the expensive shape a bounded wait exists for. Never accept(): the
          * kernel backlog completes the connect, so the client gets a live
          * socket and no reply. */
-        int stall_fd = socket(AF_INET, SOCK_STREAM, 0);
-        ASSERT(stall_fd >= 0);
-        int one = 1;
-        (void)setsockopt(stall_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        platform_socket_t stall_fd = platform_socket_open(AF_INET,
+                                                          SOCK_STREAM, 0,
+                                                          true, false);
+        ASSERT(stall_fd != PLATFORM_SOCKET_INVALID);
+        ASSERT(platform_socket_set_reuse_address(stall_fd, true) == 0);
         struct sockaddr_in sa;
         memset(&sa, 0, sizeof(sa));
         sa.sin_family = AF_INET;
         sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         sa.sin_port = 0; /* OS-assigned */
-        ASSERT(bind(stall_fd, (struct sockaddr *)&sa, sizeof(sa)) == 0);
-        ASSERT(listen(stall_fd, 8) == 0);
-        socklen_t slen = sizeof(sa);
-        ASSERT(getsockname(stall_fd, (struct sockaddr *)&sa, &slen) == 0);
+        ASSERT(platform_socket_bind(stall_fd, (struct sockaddr *)&sa,
+                                    sizeof(sa)) == 0);
+        ASSERT(platform_socket_listen(stall_fd, 8) == 0);
+        size_t slen = sizeof(sa);
+        ASSERT(platform_socket_local_address(stall_fd,
+                                             (struct sockaddr *)&sa,
+                                             &slen) == 0);
         uint16_t stall_port = ntohs(sa.sin_port);
         ASSERT(stall_port != 0);
 
@@ -1344,7 +1346,7 @@ static int case_peer_seed_stall_is_bounded(void)
         ASSERT(rom_fetch_directory_io_timeout_ms_for_test() ==
                rom_fetch_directory_io_timeout_default_ms_for_test());
 
-        close(stall_fd);
+        platform_socket_close(stall_fd);
         test_rm_rf_recursive(cdir);
         bbf_seeder_stop(&srv);
     } _test_next:;

@@ -42,12 +42,10 @@
 #include "platform/socket_compat.h"
 
 #include <errno.h>
-#include <netinet/in.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 /* ── Loopback stand-in for the embedded Tor fork ─────────────────────────
@@ -203,14 +201,11 @@ static bool make_onion_host(char host[ONION_V3_ADDRESS_LEN + 1])
  * the right shape here -- it cannot hang unbounded. */
 static bool read_exact_blocking(platform_socket_t fd, uint8_t *out, size_t want)
 {
+    /* platform_socket_receive already retries on EINTR/WSAEINTR. */
     size_t got = 0;
     while (got < want) {
-        ssize_t n = recv(fd, out + got, want - got, 0);
+        int n = platform_socket_receive(fd, out + got, want - got);
         if (n > 0) { got += (size_t)n; continue; }
-        if (n == 0)
-            return false;
-        if (errno == EINTR)
-            continue;
         return false;
     }
     return true;
@@ -219,15 +214,7 @@ static bool read_exact_blocking(platform_socket_t fd, uint8_t *out, size_t want)
 static bool write_all_blocking(platform_socket_t fd, const uint8_t *buf,
                                size_t len)
 {
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t n = send(fd, buf + sent, len - sent, 0);
-        if (n > 0) { sent += (size_t)n; continue; }
-        if (n < 0 && errno == EINTR)
-            continue;
-        return false;
-    }
-    return true;
+    return platform_socket_send_all(fd, buf, len);
 }
 
 /* A real clearnet listener on an ephemeral loopback port -- no hardcoded
@@ -237,25 +224,25 @@ static bool loopback_listen(platform_socket_t *fd_out, uint16_t *port_out)
     *fd_out = PLATFORM_SOCKET_INVALID;
     *port_out = 0;
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
         return false;
-    int one = 1;
-    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    (void)platform_socket_set_reuse_address(fd, true);
 
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 ||
-        listen(fd, 4) != 0) {
-        close(fd);
+    if (platform_socket_bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 ||
+        platform_socket_listen(fd, 4) != 0) {
+        platform_socket_close(fd);
         return false;
     }
-    socklen_t sl = sizeof(sa);
-    if (getsockname(fd, (struct sockaddr *)&sa, &sl) != 0) {
-        close(fd);
+    size_t sl = sizeof(sa);
+    if (platform_socket_local_address(fd, (struct sockaddr *)&sa, &sl) != 0) {
+        platform_socket_close(fd);
         return false;
     }
     *fd_out = fd;
@@ -342,16 +329,19 @@ int test_rom_fetch_onion(void)
 
         /* It really is connected to the listener. */
         if (ok) {
-            int afd = accept(lfd, NULL, NULL);
-            ok = afd >= 0;
-            if (afd >= 0)
-                close(afd);
+            struct sockaddr_storage peer_addr;
+            size_t peer_len = sizeof(peer_addr);
+            platform_socket_t afd = platform_socket_accept(
+                lfd, (struct sockaddr *)&peer_addr, &peer_len);
+            ok = afd != PLATFORM_SOCKET_INVALID;
+            if (afd != PLATFORM_SOCKET_INVALID)
+                platform_socket_close(afd);
         }
 
         if (fd != PLATFORM_SOCKET_INVALID)
             platform_socket_close(fd);
         if (lfd != PLATFORM_SOCKET_INVALID)
-            close(lfd);
+            platform_socket_close(lfd);
         rom_fetch_set_onion_backend_for_test(NULL);
         stub_reset();
 

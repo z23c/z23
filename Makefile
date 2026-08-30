@@ -2102,8 +2102,16 @@ TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
+# On Windows hosts, force-include the test-only POSIX compat shims (two-arg
+# mkdir, setenv/unsetenv, pread/pwrite, realpath, O_CLOEXEC-family flags) into
+# every test-fast TU. Test-only: the production sources in this profile
+# already route through lib/platform compat modules, and the header is a
+# no-op off _WIN32.
+ZCL_TEST_WINDOWS_COMPAT_FLAGS = \
+	$(if $(ZCL_HOST_WINDOWS),-include test/windows_compat.h,)
 TEST_FAST_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
-	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
+	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) \
+	$(ZCL_TEST_WINDOWS_COMPAT_FLAGS)
 TEST_FAST_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
 TEST_FAST_EPOCH_COMPILE_FLAGS := $(strip $(TEST_FAST_CFLAGS) deps=-MD,-MP)
 TEST_FAST_EPOCH_LINK_FLAGS := $(strip $(TEST_FAST_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
@@ -4651,13 +4659,21 @@ ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
 	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
 ACME_WORKER_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ACME_WORKER_INCLUDES)
+# The vendored libcrypto's socket BIOs (bss_conn.c) and its Windows entropy
+# path import Winsock and BCrypt symbols on a native Windows link.
+ifneq ($(ZCL_HOST_WINDOWS),)
+ACME_WORKER_PLATFORM_LIBS = -lws2_32 -lbcrypt -lcrypt32
+else
+ACME_WORKER_PLATFORM_LIBS =
+endif
 
 .PHONY: zclassic23-acme
 zclassic23-acme: $(BIN_DIR)/zclassic23-acme
 $(BIN_DIR)/zclassic23-acme: $(ACME_WORKER_SRCS) $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) $(ACME_WORKER_CFLAGS) -o $@ $(ACME_WORKER_SRCS) \
-		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+		vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm \
+		$(ACME_WORKER_PLATFORM_LIBS)
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))

@@ -57,9 +57,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__linux__)
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #if !defined(__linux__)

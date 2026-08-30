@@ -50,7 +50,7 @@ static void it_reset_observer(void)
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
-static bool near(double a, double b) { return fabs(a - b) < 1e-6; }
+static bool near_d(double a, double b) { return fabs(a - b) < 1e-6; }
 
 struct it_worker_arg {
     _Atomic bool *done;
@@ -119,20 +119,20 @@ int test_ibd_throttle(void)
     /* ── 4. Pure refill — elapsed 0 keeps tokens ───────────── */
     {
         double t = ibd_throttle_refill(10.0, 500.0, 50.0, 0);
-        IT_CHECK("it: refill elapsed=0 keeps tokens", near(t, 10.0));
+        IT_CHECK("it: refill elapsed=0 keeps tokens", near_d(t, 10.0));
     }
 
     /* ── 5. Pure refill — 1 second at rate 500 caps at burst — */
     {
         double t = ibd_throttle_refill(0.0, 500.0, 50.0, 1000000);
-        IT_CHECK("it: refill caps at burst", near(t, 50.0));
+        IT_CHECK("it: refill caps at burst", near_d(t, 50.0));
     }
 
     /* ── 6. Pure refill — sub-second partial refill ────────── */
     {
         /* Rate 1000/s, elapsed 2ms → +2 tokens. */
         double t = ibd_throttle_refill(0.0, 1000.0, 100.0, 2000);
-        IT_CHECK("it: refill sub-second arithmetic", near(t, 2.0));
+        IT_CHECK("it: refill sub-second arithmetic", near_d(t, 2.0));
     }
 
     /* ── 7. Pure refill — negative tokens clamped to 0 first — */
@@ -140,14 +140,14 @@ int test_ibd_throttle(void)
         double t = ibd_throttle_refill(-5.0, 1000.0, 10.0, 1000);
         /* 0 + (1000 * 0.001) = 1.0 */
         IT_CHECK("it: refill clamps negative input to 0",
-                 near(t, 1.0));
+                 near_d(t, 1.0));
     }
 
     /* ── 8. Pure refill — zero rate is a no-op ─────────────── */
     {
         double t = ibd_throttle_refill(3.0, 0.0, 10.0, 1000000);
         IT_CHECK("it: refill with rate=0 is a no-op",
-                 near(t, 3.0));
+                 near_d(t, 3.0));
     }
 
     /* ── 9. Not-running: acquire is a pass-through ─────────── */

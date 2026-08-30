@@ -42,11 +42,15 @@
 #include "vcs/vcs.h"
 
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
+#endif
 #include <pthread.h>
 #include <stdatomic.h>
-#include <sys/socket.h>
+
+#if !defined(_WIN32)
 
 /* ── Fixtures ───────────────────────────────────────────────────────── */
 
@@ -1087,3 +1091,16 @@ int test_source_bundle_fetch(void)
     failures += test_leaf_end_to_end();
     return failures;
 }
+#else /* _WIN32 */
+
+/* Source-bundle fetch runs over the file-service transport, which is a
+ * fail-closed refusal stub on native Windows (lib/net/src/file_service.c:26,
+ * lib/net/src/rom_fetch.c:504): no case below can complete a real fetch on
+ * this lane. */
+int test_source_bundle_fetch(void)
+{
+    printf("source_bundle_fetch: SKIP (Windows): file-service transport is "
+           "a refusal stub on native Windows (file_service.c:26)\n");
+    return 0;
+}
+#endif

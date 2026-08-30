@@ -35,9 +35,12 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 /* Sleep for `us` microseconds. nanosleep is POSIX.1-2001 and works
  * under -D_POSIX_C_SOURCE=200809L; usleep is BSD-flavoured and would
@@ -1167,3 +1170,12 @@ int test_event_log_benchmark(void)
     run_benchmark(&failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork+SIGKILL event-log kill9-trial lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_event_log(void)
+{
+    printf("event_log: SKIP (Windows): fork+SIGKILL event-log kill9-trial lane\n");
+    return 0;
+}
+#endif

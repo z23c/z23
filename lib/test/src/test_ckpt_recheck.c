@@ -26,8 +26,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
+#if !defined(_WIN32)
 
 #define CKR_CHECK(name, expr) do {                                          \
     if (expr) { printf("  ckpt_recheck: %s... OK\n", (name)); }             \
@@ -222,3 +225,12 @@ int test_ckpt_recheck(void)
 
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's forked verify-rom child dispatch lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_ckpt_recheck(void)
+{
+    printf("ckpt_recheck: SKIP (Windows): forked verify-rom child dispatch lane\n");
+    return 0;
+}
+#endif

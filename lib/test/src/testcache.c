@@ -139,8 +139,13 @@ static bool trc_memo_grow(struct trc_memo *m)
 
 static int64_t trc_stat_mtime_ns(const struct stat *st)
 {
+#if defined(_WIN32)
+    /* UCRT struct stat has second resolution only. */
+    return (int64_t)st->st_mtime * INT64_C(1000000000);
+#else
     return (int64_t)st->st_mtim.tv_sec * INT64_C(1000000000) +
            (int64_t)st->st_mtim.tv_nsec;
+#endif
 }
 
 /* SHA3-256 the bytes of <root>/<relpath> via a streaming read (no whole-file

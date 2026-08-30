@@ -33,16 +33,20 @@
 #include "platform/time_compat.h"
 
 #include <fcntl.h>
+#if !defined(_WIN32)
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
+#endif
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if !defined(_WIN32)
 
 static void gen_content(uint8_t *buf, size_t size)
 {
@@ -1371,3 +1375,16 @@ int test_rom_fetch(void)
     failures += test_bundle_handler_corrupted_refused();
     return failures;
 }
+#else /* _WIN32 */
+
+/* The ROM fetch transport is fail-closed ENOTSUP on native Windows
+ * (lib/net/src/rom_fetch.c:504 and :739): every case below drives a real
+ * fs/TCP fetch that cannot succeed on this lane, so the group reports one
+ * loud skip rather than a field of transport refusals. */
+int test_rom_fetch(void)
+{
+    printf("rom_fetch: SKIP (Windows): ROM fetch transport is fail-closed "
+           "ENOTSUP on native Windows (rom_fetch.c:504,739)\n");
+    return 0;
+}
+#endif

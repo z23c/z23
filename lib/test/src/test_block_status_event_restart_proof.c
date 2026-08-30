@@ -111,9 +111,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+#if !defined(_WIN32)
 
 int test_block_status_event_restart_proof(void);
 
@@ -599,3 +602,12 @@ int test_block_status_event_restart_proof(void)
     test_rm_rf_recursive(dir);
     return failures;
 }
+#else  /* _WIN32 */
+/* Windows has no fork()/waitpid process model; this group's fork+SIGKILL restart-proof child lane
+ * cannot run here. Skipped loudly rather than faked. */
+int test_block_status_event_restart_proof(void)
+{
+    printf("block_status_event_restart_proof: SKIP (Windows): fork+SIGKILL restart-proof child lane\n");
+    return 0;
+}
+#endif

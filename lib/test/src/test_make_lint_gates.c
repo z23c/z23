@@ -102,7 +102,7 @@ bool lint_gates_group_requires_quiet_pool(const char *group_name)
     return false;
 }
 
-#ifdef ZCL_TESTING
+#if defined(ZCL_TESTING) && !defined(_WIN32)
 
 #include "lint_gate_selftests.h"
 #include "platform/os_proc.h"
@@ -912,6 +912,58 @@ int test_make_lint_gates_partition(void)
     return failures;
 }
 
+#else  /* !ZCL_TESTING, or _WIN32 */
+
+#if defined(_WIN32)
+
+#include <stdio.h>
+
+/* The make_lint_gates family proves the bash lint-gate scripts by
+ * fork+exec'ing them against planted fixtures in a reflink-cloned worktree
+ * (lint_gate_helpers.c run_gate_script*, lint_sandbox_build). Native Windows
+ * has no fork/exec/waitpid and the gate scripts are POSIX shell, so the whole
+ * family is compiled out on _WIN32. Every registered entry point below still
+ * exists (the catalog in tools/dev/test_group_catalog.def expands to direct
+ * symbol references) and reports the skip LOUDLY — a silent PASS here would
+ * claim lint-gate coverage the run never executed. The Windows-side lint
+ * contract is carried by `make lint` itself under MSYS2 and by the
+ * windows_acceptance lane, not by re-execing bash gates from a native
+ * binary. */
+static int lint_gate_skip_windows(const char *group)
+{
+    printf("[lint-gate] SKIP (Windows): %s — the lint-gate self-test family "
+           "fork+execs POSIX bash gate scripts and cannot run in the native "
+           "Windows lane; no lint-gate coverage was executed\n", group);
+    return 0;
+}
+
+int test_make_lint_gates(void) { return lint_gate_skip_windows("make_lint_gates"); }
+int test_make_lint_gates_realroot(void)
+{
+    return lint_gate_skip_windows("make_lint_gates_realroot");
+}
+int test_make_lint_gates_heavy_01(void)
+{
+    return lint_gate_skip_windows("make_lint_gates_heavy_01");
+}
+int test_make_lint_gates_heavy_02(void)
+{
+    return lint_gate_skip_windows("make_lint_gates_heavy_02");
+}
+int test_make_lint_gates_partition(void)
+{
+    return lint_gate_skip_windows("make_lint_gates_partition");
+}
+
+#define LINT_SHARD_SKIP(tag, idx) \
+    int test_make_lint_gates_shard_##tag(void) \
+    { \
+        (void)idx; \
+        return lint_gate_skip_windows("make_lint_gates_shard_" #tag); \
+    }
+LINT_SHARD_LIST(LINT_SHARD_SKIP)
+#undef LINT_SHARD_SKIP
+
 #else  /* !ZCL_TESTING */
 
 /* No-ops when the lint-gate integration test is disabled. */
@@ -926,5 +978,7 @@ int test_make_lint_gates_partition(void) { return 0; }
 LINT_SHARD_STUB(01) LINT_SHARD_STUB(02) LINT_SHARD_STUB(03) LINT_SHARD_STUB(04)
 LINT_SHARD_STUB(05) LINT_SHARD_STUB(06) LINT_SHARD_STUB(07) LINT_SHARD_STUB(08)
 #undef LINT_SHARD_STUB
+
+#endif /* _WIN32 */
 
 #endif /* ZCL_TESTING */

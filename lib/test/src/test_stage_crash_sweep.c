@@ -181,6 +181,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -789,3 +790,15 @@ int test_stage_crash_sweep(void)
            failures);
     return failures;
 }
+#else  /* _WIN32 */
+/* A kill -9 sweep across reducer stage-batch commit boundaries, driven by
+ * fork()+SIGKILL+waitpid children. The Windows kill9 analogue lives in
+ * test_kill9_recovery.c (TerminateProcess re-exec lanes); this sweep's
+ * per-stage fork machinery is POSIX-only. */
+int test_stage_crash_sweep(void)
+{
+    printf("stage_crash_sweep: SKIP (Windows): fork+SIGKILL stage sweep "
+           "lane; kill9_recovery covers the TerminateProcess analogue\n");
+    return 0;
+}
+#endif

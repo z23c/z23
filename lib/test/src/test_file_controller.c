@@ -10,9 +10,11 @@
 #include "../../net/src/file_service_worker_internal.h"
 #include "services/consensus_snapshot_export_service.h"
 #include <sqlite3.h>
+#if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sys/socket.h>
+#endif
 #include <stdlib.h>
 #include <utime.h>
 #include <unistd.h>
@@ -434,6 +436,15 @@ static int test_file_service_start_stop_and_lifetime(void)
     int failures = 0;
 
     printf("file_controller: file service start/stop and connection lifetime... ");
+#if defined(_WIN32)
+    /* The file-service transport is a fail-closed refusal stub on native
+     * Windows (lib/net/src/file_service.c:26): fs_server_start/fs_handshake
+     * never succeed, so there is no live connection whose lifetime could be
+     * observed. */
+    printf("SKIP (Windows): file-service transport is a refusal stub on "
+           "this lane\n");
+    return failures;
+#else
     {
         char dir[256];
         int fd = -1;
@@ -505,6 +516,7 @@ static int test_file_service_start_stop_and_lifetime(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+#endif
 
     return failures;
 }
@@ -514,6 +526,11 @@ static int test_file_service_range_worker_socket_lifecycle(void)
     int failures = 0;
 
     printf("file_controller: range worker cancellation owns its socket... ");
+#if defined(_WIN32)
+    printf("SKIP (Windows): file-service transport is a refusal stub on "
+           "this lane\n");
+    return failures;
+#else
     if (fs_test_range_worker_socket_lifecycle())
         printf("OK\n");
     else {
@@ -521,6 +538,7 @@ static int test_file_service_range_worker_socket_lifecycle(void)
         failures++;
     }
     return failures;
+#endif
 }
 
 static int test_file_service_resolved_connect_lifecycle(void)
@@ -528,6 +546,11 @@ static int test_file_service_resolved_connect_lifecycle(void)
     int failures = 0;
 
     printf("file_controller: resolved connects are bounded and blocking on return... ");
+#if defined(_WIN32)
+    printf("SKIP (Windows): file-service transport is a refusal stub on "
+           "this lane\n");
+    return failures;
+#else
     if (fs_test_resolved_connect_lifecycle())
         printf("OK\n");
     else {
@@ -535,6 +558,7 @@ static int test_file_service_resolved_connect_lifecycle(void)
         failures++;
     }
     return failures;
+#endif
 }
 
 static int test_file_export_snapshot_success(void)
