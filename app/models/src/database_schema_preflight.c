@@ -26,6 +26,7 @@
 
 #if defined(_WIN32)
 #include <io.h>
+#include <windows.h>
 #endif
 
 #define NODE_DB_PREFLIGHT_URI_MAX 128
@@ -105,12 +106,46 @@ static bool probe_sidecars(const char *path, struct preflight_sidecars *out)
  * magic fd-reopen path instead; this cannot follow a later path replacement
  * and deliberately ignores sidecars. The caller only selects it when no
  * non-empty WAL and no SHM exists. */
+#if defined(_WIN32)
+/* Windows has no /proc/self/fd. GetFinalPathNameByHandleW names the file the
+ * descriptor itself has open (handle-bound, never a caller-supplied string),
+ * so the result cannot be a different pre-existing file; a rename between
+ * this call and SQLite's re-open remains possible — the same residual class
+ * the Darwin F_GETPATH mismatch guard documents in platform/fd_path.h.
+ * Same idiom as directory_compat.c's canonicalization arm. */
+static bool preflight_fd_real_path(char *out, size_t out_size, int fd)
+{
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+    wchar_t wbuf[32768];
+    DWORD count = GetFinalPathNameByHandleW(
+        h, wbuf, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (!count || count >= 32768)
+        return false;
+    const wchar_t *plain = wcsncmp(wbuf, L"\\\\?\\", 4) == 0
+                               ? wbuf + 4 : wbuf;
+    int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                     plain, -1, NULL, 0, NULL, NULL);
+    return needed > 0 && (size_t)needed <= out_size &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, plain,
+                               -1, out, (int)out_size, NULL, NULL) > 0;
+}
+#endif
+
 static int open_quiet_wal_immutable(int fd, sqlite3 **db_out)
 {
+#if defined(_WIN32)
+    char fd_path[4096];
+    char uri[4096 + 32];
+    if (!preflight_fd_real_path(fd_path, sizeof(fd_path), fd))
+        return SQLITE_CANTOPEN;
+#else
     char fd_path[64];
     char uri[NODE_DB_PREFLIGHT_URI_MAX];
     if (!platform_fd_path(fd_path, sizeof(fd_path), fd, NULL))
         return SQLITE_CANTOPEN;
+#endif
     int n = snprintf(uri, sizeof(uri), "file:%s?mode=ro&immutable=1",
                      fd_path);
     if (n <= 0 || (size_t)n >= sizeof(uri))

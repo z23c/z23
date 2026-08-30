@@ -41,8 +41,8 @@
  * opens no descriptor, names no path, moves no byte off the box, reads no
  * clock and changes no authority. memcpy earns it. close earns it, because
  * the acquisition it undoes is what carried the class. open does not earn it
- * and never will. Three hundred of the rows below are CAP_HARMLESS, which is
- * the number that makes the other two hundred and forty-four worth reading.
+ * and never will. Most rows are CAP_HARMLESS; that reviewed majority is what
+ * makes the smaller set of capability-bearing boundary calls worth reading.
  *
  * WHERE ONE SYMBOL SPANS TWO CLASSES, THE RESTRICTIVE ONE WINS. A wrong row
  * in the strict direction costs one declaration; a wrong row in the loose
@@ -75,9 +75,10 @@
 
 /* ZCL_CAPABILITY_SYMBOL(symbol, class, note)
  *
- *   symbol  the exact undefined-symbol string nm reports, including any
- *           fortify or ABI decoration, because that string is what the gate
- *           matches
+ *   symbol  the reviewed external entry-point name. Fortify aliases remain
+ *           exact rows where their semantics differ; on MinGW, mechanical
+ *           __imp_ / __mingw_ COFF decoration inherits this base judgement
+ *           in check-capability-closure rather than duplicating every row
  *   class   one of the CAP_ ids in config/capability_classes.def, or
  *           CAP_HARMLESS
  *   note    one line saying why this class and not the neighbouring one.
@@ -1049,19 +1050,14 @@ ZCL_CAPABILITY_SYMBOL("__vsnprintf_chk", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("arc4random_buf", CAP_RANDOM, "Darwin kernel-backed random bytes.")
 ZCL_CAPABILITY_SYMBOL("CFBundleCopyResourcesDirectoryURL", CAP_FS_READ, "Resolves the running bundle resource directory.")
 ZCL_CAPABILITY_SYMBOL("_NSGetExecutablePath", CAP_FS_READ, "Returns the running Mach-O filesystem path.")
-ZCL_CAPABILITY_SYMBOL("fscanf", CAP_FS_READ, "Consumes bytes from an already-open file stream.")
 ZCL_CAPABILITY_SYMBOL("proc_pidinfo", CAP_FS_READ, "Reads Darwin process metadata.")
 ZCL_CAPABILITY_SYMBOL("proc_pidpath", CAP_FS_READ, "Reads a Darwin process executable path.")
 ZCL_CAPABILITY_SYMBOL("task_threads", CAP_FS_READ, "Enumerates threads belonging to a Mach task.")
 ZCL_CAPABILITY_SYMBOL("dprintf", CAP_FS_WRITE, "Writes to an arbitrary descriptor.")
-ZCL_CAPABILITY_SYMBOL("fprintf", CAP_FS_WRITE, "Writes to an arbitrary file stream.")
-ZCL_CAPABILITY_SYMBOL("rename", CAP_FS_WRITE, "")
 ZCL_CAPABILITY_SYMBOL("renameat", CAP_FS_WRITE, "")
 ZCL_CAPABILITY_SYMBOL("renameatx_np", CAP_FS_WRITE, "Darwin atomic rename with flags.")
-ZCL_CAPABILITY_SYMBOL("unlink", CAP_FS_WRITE, "")
 ZCL_CAPABILITY_SYMBOL("unlinkat", CAP_FS_WRITE, "")
 ZCL_CAPABILITY_SYMBOL("utimensat", CAP_FS_WRITE, "Changes filesystem timestamps.")
-ZCL_CAPABILITY_SYMBOL("vfprintf", CAP_FS_WRITE, "Writes to an arbitrary file stream.")
 ZCL_CAPABILITY_SYMBOL("getpeereid", CAP_NETWORK, "Reads credentials from a connected local socket peer.")
 ZCL_CAPABILITY_SYMBOL("proc_pid_rusage", CAP_CLOCK, "Reads process resource-time accounting.")
 ZCL_CAPABILITY_SYMBOL("_NSGetEnviron", CAP_PROCESS, "Exposes the process environment vector used by spawn paths.")
@@ -1103,15 +1099,11 @@ ZCL_CAPABILITY_SYMBOL("__dso_handle", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__error", CAP_HARMLESS, "Darwin errno storage accessor.")
 ZCL_CAPABILITY_SYMBOL("__exp10", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__maskrune", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("__stack_chk_guard", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__stderrp", CAP_HARMLESS, "Darwin standard error stream pointer.")
 ZCL_CAPABILITY_SYMBOL("__stdoutp", CAP_HARMLESS, "Darwin standard output stream pointer.")
 ZCL_CAPABILITY_SYMBOL("__tolower", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__toupper", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("_tlv_bootstrap", CAP_HARMLESS, "Darwin thread-local runtime support.")
-ZCL_CAPABILITY_SYMBOL("atoi", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("atoll", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("bsearch", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("bzero", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("class_addIvar", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("class_addMethod", CAP_HARMLESS, "")
@@ -1133,25 +1125,463 @@ ZCL_CAPABILITY_SYMBOL("objc_registerClassPair", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("object_getClass", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("object_getInstanceVariable", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("object_setInstanceVariable", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("printf", CAP_HARMLESS, "Writes only to standard output.")
 ZCL_CAPABILITY_SYMBOL("pthread_attr_set_qos_class_np", CAP_HARMLESS, "Selects Darwin scheduling QoS.")
 ZCL_CAPABILITY_SYMBOL("pthread_cancel", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("pthread_equal", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("pthread_from_mach_thread_np", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("pthread_getname_np", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("pthread_set_qos_class_self_np", CAP_HARMLESS, "Changes only current-thread scheduling QoS.")
 ZCL_CAPABILITY_SYMBOL("pthread_threadid_np", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("putchar", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("puts", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sel_getUid", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sel_registerName", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("sprintf", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("sscanf", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("strtol", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("strtoll", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("strtoul", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("strtoull", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("task_info", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("thread_info", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("vm_deallocate", CAP_HARMLESS, "")
-ZCL_CAPABILITY_SYMBOL("vsnprintf", CAP_HARMLESS, "")
+
+/* ---- WINDOWS COFF CAP_NETWORK ----
+ * These are the WinSock and IP Helper spellings of the already-classified
+ * POSIX socket boundary. MinGW's __imp_ pointer decoration is normalized by
+ * check_capability_closure; this table records the API once. */
+ZCL_CAPABILITY_SYMBOL("closesocket", CAP_NETWORK, "WinSock close family.")
+ZCL_CAPABILITY_SYMBOL("FreeAddrInfoW", CAP_NETWORK, "WinSock resolver family.")
+ZCL_CAPABILITY_SYMBOL("GetAddrInfoW", CAP_NETWORK, "WinSock resolver family.")
+ZCL_CAPABILITY_SYMBOL("GetBestRoute2", CAP_NETWORK,
+    "Reads the system route selected for an off-box destination.")
+ZCL_CAPABILITY_SYMBOL("htonl", CAP_NETWORK, "Socket byte-order family.")
+ZCL_CAPABILITY_SYMBOL("htons", CAP_NETWORK, "Socket byte-order family.")
+ZCL_CAPABILITY_SYMBOL("ioctlsocket", CAP_NETWORK,
+    "The request code is not visible in the object symbol.")
+ZCL_CAPABILITY_SYMBOL("ntohl", CAP_NETWORK, "Socket byte-order family.")
+ZCL_CAPABILITY_SYMBOL("ntohs", CAP_NETWORK, "Socket byte-order family.")
+ZCL_CAPABILITY_SYMBOL("select", CAP_NETWORK,
+    "WinSock readiness API; kept with the socket boundary on Windows.")
+ZCL_CAPABILITY_SYMBOL("WSAGetLastError", CAP_NETWORK, "WinSock error family.")
+ZCL_CAPABILITY_SYMBOL("WSAPoll", CAP_NETWORK, "WinSock readiness family.")
+ZCL_CAPABILITY_SYMBOL("WSASetLastError", CAP_NETWORK, "WinSock error family.")
+ZCL_CAPABILITY_SYMBOL("WSASocketW", CAP_NETWORK, "Creates a WinSock socket.")
+ZCL_CAPABILITY_SYMBOL("WSAStartup", CAP_NETWORK, "Initialises WinSock.")
+
+/* ---- WINDOWS COFF CAP_PROCESS ---- */
+ZCL_CAPABILITY_SYMBOL("AssignProcessToJobObject", CAP_PROCESS,
+    "Attaches a process to a Windows supervision boundary.")
+ZCL_CAPABILITY_SYMBOL("CreateProcessA", CAP_PROCESS, "Spawns a process.")
+ZCL_CAPABILITY_SYMBOL("CreateProcessW", CAP_PROCESS, "Spawns a process.")
+ZCL_CAPABILITY_SYMBOL("CreateToolhelp32Snapshot", CAP_PROCESS,
+    "Enumerates processes or threads selected by runtime flags.")
+ZCL_CAPABILITY_SYMBOL("DeleteProcThreadAttributeList", CAP_PROCESS,
+    "Kept with the child-process attribute family.")
+ZCL_CAPABILITY_SYMBOL("GetExitCodeProcess", CAP_PROCESS,
+    "Observes a process handle already acquired.")
+ZCL_CAPABILITY_SYMBOL("GetNamedPipeClientProcessId", CAP_PROCESS,
+    "Identifies the process at the other end of local IPC.")
+ZCL_CAPABILITY_SYMBOL("GetProcessHandleCount", CAP_PROCESS,
+    "Inspects a process handle.")
+ZCL_CAPABILITY_SYMBOL("GetProcessIoCounters", CAP_PROCESS,
+    "Inspects a process handle.")
+ZCL_CAPABILITY_SYMBOL("InitializeProcThreadAttributeList", CAP_PROCESS,
+    "Builds attributes consumed only by CreateProcess.")
+ZCL_CAPABILITY_SYMBOL("K32GetProcessMemoryInfo", CAP_PROCESS,
+    "Inspects a process handle.")
+ZCL_CAPABILITY_SYMBOL("OpenProcess", CAP_PROCESS,
+    "The access mask is invisible to nm and can reach another process.")
+ZCL_CAPABILITY_SYMBOL("OpenThread", CAP_PROCESS,
+    "The access mask is invisible to nm and can reach another process.")
+ZCL_CAPABILITY_SYMBOL("Process32FirstW", CAP_PROCESS, "Process enumeration family.")
+ZCL_CAPABILITY_SYMBOL("Process32NextW", CAP_PROCESS, "Process enumeration family.")
+ZCL_CAPABILITY_SYMBOL("QueryFullProcessImageNameA", CAP_PROCESS,
+    "Inspects the executable identity behind a process handle.")
+ZCL_CAPABILITY_SYMBOL("QueryFullProcessImageNameW", CAP_PROCESS,
+    "Inspects the executable identity behind a process handle.")
+ZCL_CAPABILITY_SYMBOL("ResumeThread", CAP_PROCESS,
+    "Changes execution of a thread handle.")
+ZCL_CAPABILITY_SYMBOL("SetHandleInformation", CAP_PROCESS,
+    "Controls whether a handle crosses a later CreateProcess boundary.")
+ZCL_CAPABILITY_SYMBOL("TerminateProcess", CAP_PROCESS,
+    "Reaches a process just as kill does on POSIX.")
+ZCL_CAPABILITY_SYMBOL("Thread32First", CAP_PROCESS, "Thread enumeration family.")
+ZCL_CAPABILITY_SYMBOL("Thread32Next", CAP_PROCESS, "Thread enumeration family.")
+ZCL_CAPABILITY_SYMBOL("UpdateProcThreadAttribute", CAP_PROCESS,
+    "Sets attributes consumed by CreateProcess.")
+ZCL_CAPABILITY_SYMBOL("_putenv_s", CAP_PROCESS,
+    "Mutates the environment inherited by a later child.")
+
+/* ---- WINDOWS COFF CAP_DYNLOAD ---- */
+ZCL_CAPABILITY_SYMBOL("FreeLibrary", CAP_DYNLOAD, "Windows dynamic-loader family.")
+ZCL_CAPABILITY_SYMBOL("GetProcAddress", CAP_DYNLOAD,
+    "Selects executable code by a runtime string.")
+ZCL_CAPABILITY_SYMBOL("LoadLibraryA", CAP_DYNLOAD, "Loads a DLL at runtime.")
+
+/* ---- WINDOWS COFF CAP_FS_WRITE ---- */
+ZCL_CAPABILITY_SYMBOL("CreateDirectoryW", CAP_FS_WRITE, "Creates a directory.")
+ZCL_CAPABILITY_SYMBOL("CreateHardLinkA", CAP_FS_WRITE, "Creates a filesystem link.")
+ZCL_CAPABILITY_SYMBOL("CreateHardLinkW", CAP_FS_WRITE, "Creates a filesystem link.")
+ZCL_CAPABILITY_SYMBOL("DeleteFileW", CAP_FS_WRITE, "Deletes a file.")
+ZCL_CAPABILITY_SYMBOL("FlushFileBuffers", CAP_FS_WRITE,
+    "Forces pending writes through a file handle.")
+ZCL_CAPABILITY_SYMBOL("LockFileEx", CAP_FS_WRITE,
+    "Can exclude another writer from an operator file.")
+ZCL_CAPABILITY_SYMBOL("MoveFileExW", CAP_FS_WRITE,
+    "Renames, replaces, or deletes according to runtime flags.")
+ZCL_CAPABILITY_SYMBOL("RemoveDirectoryW", CAP_FS_WRITE, "Deletes a directory.")
+ZCL_CAPABILITY_SYMBOL("SetEndOfFile", CAP_FS_WRITE, "Truncates or extends a file.")
+ZCL_CAPABILITY_SYMBOL("SetFileAttributesW", CAP_FS_WRITE, "Writes file metadata.")
+ZCL_CAPABILITY_SYMBOL("SetFileInformationByHandle", CAP_FS_WRITE,
+    "The information class can rename, delete, or resize a file.")
+ZCL_CAPABILITY_SYMBOL("UnlockFile", CAP_FS_WRITE, "File-locking family.")
+ZCL_CAPABILITY_SYMBOL("UnlockFileEx", CAP_FS_WRITE, "File-locking family.")
+ZCL_CAPABILITY_SYMBOL("WriteFile", CAP_FS_WRITE, "Writes an arbitrary handle.")
+ZCL_CAPABILITY_SYMBOL("_chsize_s", CAP_FS_WRITE, "Resizes a file descriptor.")
+ZCL_CAPABILITY_SYMBOL("_commit", CAP_FS_WRITE, "Flushes a file descriptor.")
+ZCL_CAPABILITY_SYMBOL("rename", CAP_FS_WRITE, "Renames a filesystem object.")
+ZCL_CAPABILITY_SYMBOL("unlink", CAP_FS_WRITE, "Deletes a filesystem object.")
+
+/* ---- WINDOWS COFF CAP_FS_READ ---- */
+ZCL_CAPABILITY_SYMBOL("CreateFileMappingW", CAP_FS_READ,
+    "Windows mapping twin of mmap; the backing-handle mode is not visible.")
+ZCL_CAPABILITY_SYMBOL("CreateFileW", CAP_FS_READ,
+    "The desired-access and create-disposition arguments are invisible to nm.")
+ZCL_CAPABILITY_SYMBOL("FindFirstFileW", CAP_FS_READ, "Enumerates a directory.")
+ZCL_CAPABILITY_SYMBOL("FindNextFileW", CAP_FS_READ, "Enumerates a directory.")
+ZCL_CAPABILITY_SYMBOL("GetDiskFreeSpaceExW", CAP_FS_READ,
+    "Queries the volume containing a supplied path.")
+ZCL_CAPABILITY_SYMBOL("GetFileAttributesA", CAP_FS_READ, "Reads path metadata.")
+ZCL_CAPABILITY_SYMBOL("GetFileAttributesW", CAP_FS_READ, "Reads path metadata.")
+ZCL_CAPABILITY_SYMBOL("GetFileInformationByHandle", CAP_FS_READ,
+    "Windows fstat family.")
+ZCL_CAPABILITY_SYMBOL("GetFileInformationByHandleEx", CAP_FS_READ,
+    "Windows fstat family.")
+ZCL_CAPABILITY_SYMBOL("GetFileSizeEx", CAP_FS_READ, "Reads file metadata.")
+ZCL_CAPABILITY_SYMBOL("GetFileType", CAP_FS_READ, "Reads handle metadata.")
+ZCL_CAPABILITY_SYMBOL("GetFinalPathNameByHandleW", CAP_FS_READ,
+    "Discloses the operator path behind a handle.")
+ZCL_CAPABILITY_SYMBOL("GetFullPathNameW", CAP_FS_READ,
+    "Resolves a path against process filesystem state.")
+ZCL_CAPABILITY_SYMBOL("GetModuleFileNameW", CAP_FS_READ,
+    "Discloses the path of an executable image.")
+ZCL_CAPABILITY_SYMBOL("GetTempPathW", CAP_FS_READ,
+    "Reads the operator-selected temporary directory path.")
+ZCL_CAPABILITY_SYMBOL("MapViewOfFile", CAP_FS_READ, "Windows mmap family.")
+ZCL_CAPABILITY_SYMBOL("ReadDirectoryChangesW", CAP_FS_READ,
+    "Observes changes below a directory handle.")
+ZCL_CAPABILITY_SYMBOL("ReadFile", CAP_FS_READ, "Reads an arbitrary handle.")
+ZCL_CAPABILITY_SYMBOL("ReOpenFile", CAP_FS_READ,
+    "The desired-access flags are invisible to nm.")
+ZCL_CAPABILITY_SYMBOL("SetFilePointerEx", CAP_FS_READ,
+    "Windows lseek family; writing remains carried by WriteFile.")
+ZCL_CAPABILITY_SYMBOL("SHGetFolderPathA", CAP_FS_READ,
+    "Returns an operator-specific filesystem location.")
+ZCL_CAPABILITY_SYMBOL("SHGetKnownFolderPath", CAP_FS_READ,
+    "Returns an operator-specific filesystem location.")
+ZCL_CAPABILITY_SYMBOL("_fstat64", CAP_FS_READ, "Windows fstat ABI.")
+ZCL_CAPABILITY_SYMBOL("_fullpath", CAP_FS_READ, "Resolves a filesystem path.")
+ZCL_CAPABILITY_SYMBOL("_lseeki64", CAP_FS_READ, "Windows lseek ABI.")
+ZCL_CAPABILITY_SYMBOL("_open_osfhandle", CAP_FS_READ,
+    "Wraps a handle whose access mode is not visible to nm.")
+ZCL_CAPABILITY_SYMBOL("_wopen", CAP_FS_READ,
+    "The open flags are invisible to nm.")
+ZCL_CAPABILITY_SYMBOL("fstat64i32", CAP_FS_READ, "MinGW fstat ABI.")
+ZCL_CAPABILITY_SYMBOL("fscanf", CAP_FS_READ, "Reads from an arbitrary stream.")
+ZCL_CAPABILITY_SYMBOL("stat64i32", CAP_FS_READ, "MinGW stat ABI.")
+
+/* ---- WINDOWS COFF CAP_RANDOM ---- */
+ZCL_CAPABILITY_SYMBOL("BCryptGenRandom", CAP_RANDOM,
+    "Windows system cryptographic random generator.")
+
+/* ---- WINDOWS COFF CAP_CLOCK ---- */
+ZCL_CAPABILITY_SYMBOL("CreateTimerQueueTimer", CAP_CLOCK,
+    "Schedules a callback against an elapsed interval.")
+ZCL_CAPABILITY_SYMBOL("CreateWaitableTimerW", CAP_CLOCK, "Creates a kernel timer.")
+ZCL_CAPABILITY_SYMBOL("GetProcessTimes", CAP_CLOCK, "Reports process CPU time.")
+ZCL_CAPABILITY_SYMBOL("GetSystemTimeAsFileTime", CAP_CLOCK, "Reads wall time.")
+ZCL_CAPABILITY_SYMBOL("GetThreadTimes", CAP_CLOCK, "Reports thread CPU time.")
+ZCL_CAPABILITY_SYMBOL("MsgWaitForMultipleObjects", CAP_CLOCK,
+    "Its timeout makes the result depend on elapsed time.")
+ZCL_CAPABILITY_SYMBOL("QueryPerformanceFrequency", CAP_CLOCK,
+    "Defines the scale used for monotonic time measurements.")
+ZCL_CAPABILITY_SYMBOL("SetWaitableTimer", CAP_CLOCK, "Arms a kernel timer.")
+ZCL_CAPABILITY_SYMBOL("Sleep", CAP_CLOCK, "Blocks for an elapsed interval.")
+ZCL_CAPABILITY_SYMBOL("SleepConditionVariableCS", CAP_CLOCK,
+    "The timeout makes the result depend on elapsed time.")
+ZCL_CAPABILITY_SYMBOL("WaitForSingleObject", CAP_CLOCK,
+    "The timeout makes the result depend on elapsed time.")
+ZCL_CAPABILITY_SYMBOL("_time64", CAP_CLOCK, "Reads wall time.")
+ZCL_CAPABILITY_SYMBOL("clock_gettime64", CAP_CLOCK, "MinGW clock ABI.")
+ZCL_CAPABILITY_SYMBOL("nanosleep64", CAP_CLOCK, "MinGW sleep ABI.")
+ZCL_CAPABILITY_SYMBOL("pthread_cond_timedwait64", CAP_CLOCK,
+    "MinGW timed-wait ABI.")
+
+/* ---- WINDOWS COFF CAP_PRIVILEGE ---- */
+ZCL_CAPABILITY_SYMBOL("OpenProcessToken", CAP_PRIVILEGE,
+    "Opens the authority token attached to a process.")
+ZCL_CAPABILITY_SYMBOL("SetInformationJobObject", CAP_PRIVILEGE,
+    "Changes the authority and resource limits of attached processes.")
+ZCL_CAPABILITY_SYMBOL("SetSecurityInfo", CAP_PRIVILEGE,
+    "Changes ownership or access control on a kernel object.")
+ZCL_CAPABILITY_SYMBOL("SetThreadPriority", CAP_PRIVILEGE,
+    "Can request scheduler authority beyond the default class.")
+
+/* ---- WINDOWS COFF CAP_HARMLESS ----
+ * These APIs operate on this image, caller-owned memory, UI state, local
+ * synchronization, or handles already acquired. Acquisition or byte-moving
+ * twins above carry the applicable capability. */
+ZCL_CAPABILITY_SYMBOL("AcquireSRWLockExclusive", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("AcquireSRWLockShared", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("AddVectoredExceptionHandler", CAP_HARMLESS,
+    "Installs a handler whose code is already in this image.")
+ZCL_CAPABILITY_SYMBOL("AllocateAndInitializeSid", CAP_HARMLESS,
+    "Builds an identity value in caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("BeginPaint", CAP_HARMLESS, "Local window presentation.")
+ZCL_CAPABILITY_SYMBOL("BitBlt", CAP_HARMLESS, "Local window presentation.")
+ZCL_CAPABILITY_SYMBOL("BringWindowToTop", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("CancelIoEx", CAP_HARMLESS,
+    "Cancels work on a handle already acquired.")
+ZCL_CAPABILITY_SYMBOL("ChangeDisplaySettingsExA", CAP_HARMLESS, "Local display state.")
+ZCL_CAPABILITY_SYMBOL("ClientToScreen", CAP_HARMLESS, "Coordinate conversion.")
+ZCL_CAPABILITY_SYMBOL("ClipCursor", CAP_HARMLESS, "Local input state.")
+ZCL_CAPABILITY_SYMBOL("CloseClipboard", CAP_HARMLESS, "Releases local UI state.")
+ZCL_CAPABILITY_SYMBOL("CloseHandle", CAP_HARMLESS,
+    "Releases a handle; acquisition carries the capability.")
+ZCL_CAPABILITY_SYMBOL("CoTaskMemFree", CAP_HARMLESS, "Releases caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("CommandLineToArgvW", CAP_HARMLESS, "Parses caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("ConnectNamedPipe", CAP_HARMLESS,
+    "Local IPC twin of pipe; it cannot move data off-box.")
+ZCL_CAPABILITY_SYMBOL("ConvertSidToStringSidW", CAP_HARMLESS, "Identity formatting.")
+ZCL_CAPABILITY_SYMBOL("ConvertStringSecurityDescriptorToSecurityDescriptorW", CAP_HARMLESS,
+    "Parses a descriptor into caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("CreateBitmap", CAP_HARMLESS, "Local presentation object.")
+ZCL_CAPABILITY_SYMBOL("CreateCompatibleDC", CAP_HARMLESS, "Local presentation object.")
+ZCL_CAPABILITY_SYMBOL("CreateDCW", CAP_HARMLESS, "Local presentation object.")
+ZCL_CAPABILITY_SYMBOL("CreateDIBSection", CAP_HARMLESS, "Local presentation memory.")
+ZCL_CAPABILITY_SYMBOL("CreateEventA", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("CreateEventW", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("CreateIconIndirect", CAP_HARMLESS, "Local presentation object.")
+ZCL_CAPABILITY_SYMBOL("CreateJobObjectW", CAP_HARMLESS,
+    "Creates an empty supervision object; attaching a process is classified.")
+ZCL_CAPABILITY_SYMBOL("CreateNamedPipeW", CAP_HARMLESS,
+    "Local IPC twin of pipe; it cannot move data off-box.")
+ZCL_CAPABILITY_SYMBOL("CreatePipe", CAP_HARMLESS, "Windows twin of pipe.")
+ZCL_CAPABILITY_SYMBOL("CreateThread", CAP_HARMLESS,
+    "Runs code already present in this image.")
+ZCL_CAPABILITY_SYMBOL("CreateWellKnownSid", CAP_HARMLESS,
+    "Builds an identity value in caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("CreateWindowExW", CAP_HARMLESS, "Local window creation.")
+ZCL_CAPABILITY_SYMBOL("DefWindowProcW", CAP_HARMLESS, "Local window dispatch.")
+ZCL_CAPABILITY_SYMBOL("DeleteCriticalSection", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("DeleteDC", CAP_HARMLESS, "Releases a presentation object.")
+ZCL_CAPABILITY_SYMBOL("DeleteObject", CAP_HARMLESS, "Releases a presentation object.")
+ZCL_CAPABILITY_SYMBOL("DestroyCursor", CAP_HARMLESS, "Releases a presentation object.")
+ZCL_CAPABILITY_SYMBOL("DestroyIcon", CAP_HARMLESS, "Releases a presentation object.")
+ZCL_CAPABILITY_SYMBOL("DestroyWindow", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("DispatchMessageA", CAP_HARMLESS, "Local window dispatch.")
+ZCL_CAPABILITY_SYMBOL("DragAcceptFiles", CAP_HARMLESS, "Local window input state.")
+ZCL_CAPABILITY_SYMBOL("DragFinish", CAP_HARMLESS, "Releases local UI state.")
+ZCL_CAPABILITY_SYMBOL("DragQueryFileW", CAP_HARMLESS,
+    "Reads a path already delivered in a window message; it opens nothing.")
+ZCL_CAPABILITY_SYMBOL("DragQueryPoint", CAP_HARMLESS, "Reads local UI state.")
+ZCL_CAPABILITY_SYMBOL("EmptyClipboard", CAP_HARMLESS, "Local UI state, not a file.")
+ZCL_CAPABILITY_SYMBOL("EndPaint", CAP_HARMLESS, "Local window presentation.")
+ZCL_CAPABILITY_SYMBOL("EnterCriticalSection", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("EnumDisplayDevicesA", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("EnumDisplayDevicesW", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("EnumDisplayMonitors", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("EnumDisplaySettingsA", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("EnumDisplaySettingsW", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("EqualSid", CAP_HARMLESS, "Compares identity values.")
+ZCL_CAPABILITY_SYMBOL("FindClose", CAP_HARMLESS,
+    "Releases a search handle; FindFirst carries filesystem reach.")
+ZCL_CAPABILITY_SYMBOL("FOLDERID_LocalAppData", CAP_HARMLESS,
+    "A GUID constant; SHGetKnownFolderPath carries filesystem reach.")
+ZCL_CAPABILITY_SYMBOL("FreeSid", CAP_HARMLESS, "Releases caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("GetAce", CAP_HARMLESS, "Inspects a supplied ACL.")
+ZCL_CAPABILITY_SYMBOL("GetAclInformation", CAP_HARMLESS, "Inspects a supplied ACL.")
+ZCL_CAPABILITY_SYMBOL("GetActiveProcessorCount", CAP_HARMLESS, "Static host inventory.")
+ZCL_CAPABILITY_SYMBOL("GetClientRect", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GetClipboardData", CAP_HARMLESS, "Local UI state, not a file.")
+ZCL_CAPABILITY_SYMBOL("GetCommandLineW", CAP_HARMLESS, "Reads this process memory.")
+ZCL_CAPABILITY_SYMBOL("GetConsoleMode", CAP_HARMLESS, "Inspects an acquired handle.")
+ZCL_CAPABILITY_SYMBOL("GetConsoleScreenBufferInfo", CAP_HARMLESS,
+    "Inspects an acquired console handle.")
+ZCL_CAPABILITY_SYMBOL("GetCurrentProcess", CAP_HARMLESS, "Pseudo-handle for this process.")
+ZCL_CAPABILITY_SYMBOL("GetCurrentProcessId", CAP_HARMLESS, "Reports this process identity.")
+ZCL_CAPABILITY_SYMBOL("GetCurrentThread", CAP_HARMLESS, "Pseudo-handle for this thread.")
+ZCL_CAPABILITY_SYMBOL("GetCurrentThreadId", CAP_HARMLESS, "Reports this thread identity.")
+ZCL_CAPABILITY_SYMBOL("GetCursorPos", CAP_HARMLESS, "Local input state.")
+ZCL_CAPABILITY_SYMBOL("GetDC", CAP_HARMLESS, "Local presentation handle.")
+ZCL_CAPABILITY_SYMBOL("GetDeviceCaps", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("GetEnvironmentVariableW", CAP_HARMLESS,
+    "Reads this process environment memory.")
+ZCL_CAPABILITY_SYMBOL("GetErrorMode", CAP_HARMLESS, "Reads this process state.")
+ZCL_CAPABILITY_SYMBOL("GetHandleInformation", CAP_HARMLESS, "Inspects an acquired handle.")
+ZCL_CAPABILITY_SYMBOL("GetKeyboardLayout", CAP_HARMLESS, "Local input state.")
+ZCL_CAPABILITY_SYMBOL("GetKeyboardState", CAP_HARMLESS, "Local input state.")
+ZCL_CAPABILITY_SYMBOL("GetKeyState", CAP_HARMLESS, "Local input state.")
+ZCL_CAPABILITY_SYMBOL("GetLastError", CAP_HARMLESS, "Per-thread error slot.")
+ZCL_CAPABILITY_SYMBOL("GetLayeredWindowAttributes", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GetLogicalProcessorInformationEx", CAP_HARMLESS,
+    "Static host inventory.")
+ZCL_CAPABILITY_SYMBOL("GetModuleHandleA", CAP_HARMLESS,
+    "Finds an image already loaded; it loads no new code.")
+ZCL_CAPABILITY_SYMBOL("GetModuleHandleW", CAP_HARMLESS,
+    "Finds an image already loaded; it loads no new code.")
+ZCL_CAPABILITY_SYMBOL("GetMonitorInfoA", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("GetMonitorInfoW", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("GetOverlappedResult", CAP_HARMLESS,
+    "Observes I/O on a handle already acquired.")
+ZCL_CAPABILITY_SYMBOL("GetProcessWindowStation", CAP_HARMLESS,
+    "Returns this process window station.")
+ZCL_CAPABILITY_SYMBOL("GetPropW", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GetRawInputData", CAP_HARMLESS, "Reads local input state.")
+ZCL_CAPABILITY_SYMBOL("GetSecurityDescriptorControl", CAP_HARMLESS,
+    "Inspects a supplied security descriptor.")
+ZCL_CAPABILITY_SYMBOL("GetSecurityDescriptorDacl", CAP_HARMLESS,
+    "Inspects a supplied security descriptor.")
+ZCL_CAPABILITY_SYMBOL("GetSecurityInfo", CAP_HARMLESS,
+    "Reads security metadata from a handle already acquired.")
+ZCL_CAPABILITY_SYMBOL("GetSidIdentifierAuthority", CAP_HARMLESS, "Inspects a SID.")
+ZCL_CAPABILITY_SYMBOL("GetSidSubAuthority", CAP_HARMLESS, "Inspects a SID.")
+ZCL_CAPABILITY_SYMBOL("GetSidSubAuthorityCount", CAP_HARMLESS, "Inspects a SID.")
+ZCL_CAPABILITY_SYMBOL("GetStdHandle", CAP_HARMLESS, "Returns a process-owned handle.")
+ZCL_CAPABILITY_SYMBOL("GetSystemInfo", CAP_HARMLESS, "Static host inventory.")
+ZCL_CAPABILITY_SYMBOL("GetSystemMetrics", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("GetTokenInformation", CAP_HARMLESS,
+    "Reports authority from a token already acquired.")
+ZCL_CAPABILITY_SYMBOL("GetVersionExW", CAP_HARMLESS, "Static host inventory.")
+ZCL_CAPABILITY_SYMBOL("GetWindowLongA", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GetWindowLongPtrA", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GetWindowLongW", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GetWindowPlacement", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GetWindowRect", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("GlobalAlloc", CAP_HARMLESS, "Allocates process memory.")
+ZCL_CAPABILITY_SYMBOL("GlobalFree", CAP_HARMLESS, "Releases process memory.")
+ZCL_CAPABILITY_SYMBOL("GlobalLock", CAP_HARMLESS, "Maps process memory.")
+ZCL_CAPABILITY_SYMBOL("GlobalMemoryStatusEx", CAP_HARMLESS, "Static host inventory.")
+ZCL_CAPABILITY_SYMBOL("GlobalUnlock", CAP_HARMLESS, "Unmaps process memory.")
+ZCL_CAPABILITY_SYMBOL("InitializeConditionVariable", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("InitializeCriticalSection", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("InitOnceExecuteOnce", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("IsValidSid", CAP_HARMLESS, "Validates a SID in memory.")
+ZCL_CAPABILITY_SYMBOL("IsWindowVisible", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("IsZoomed", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("LeaveCriticalSection", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("LoadCursorA", CAP_HARMLESS, "Loads a system UI resource.")
+ZCL_CAPABILITY_SYMBOL("LoadIconA", CAP_HARMLESS, "Loads a system UI resource.")
+ZCL_CAPABILITY_SYMBOL("LoadImageA", CAP_HARMLESS, "Loads a system UI resource.")
+ZCL_CAPABILITY_SYMBOL("LocalAlloc", CAP_HARMLESS, "Allocates process memory.")
+ZCL_CAPABILITY_SYMBOL("LocalFree", CAP_HARMLESS, "Releases process memory.")
+ZCL_CAPABILITY_SYMBOL("MapVirtualKeyW", CAP_HARMLESS, "Local input conversion.")
+ZCL_CAPABILITY_SYMBOL("MonitorFromPoint", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("MonitorFromWindow", CAP_HARMLESS, "Local display inventory.")
+ZCL_CAPABILITY_SYMBOL("MultiByteToWideChar", CAP_HARMLESS, "Text conversion.")
+ZCL_CAPABILITY_SYMBOL("OpenClipboard", CAP_HARMLESS, "Acquires local UI state.")
+ZCL_CAPABILITY_SYMBOL("OpenEventA", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("PeekMessageA", CAP_HARMLESS, "Local window dispatch.")
+ZCL_CAPABILITY_SYMBOL("PeekNamedPipe", CAP_HARMLESS,
+    "Observes local IPC on a handle already acquired.")
+ZCL_CAPABILITY_SYMBOL("PostMessageA", CAP_HARMLESS, "Local window dispatch.")
+ZCL_CAPABILITY_SYMBOL("PostMessageW", CAP_HARMLESS, "Local window dispatch.")
+ZCL_CAPABILITY_SYMBOL("RegisterClassW", CAP_HARMLESS, "Local window registration.")
+ZCL_CAPABILITY_SYMBOL("RegisterRawInputDevices", CAP_HARMLESS, "Local input registration.")
+ZCL_CAPABILITY_SYMBOL("ReleaseDC", CAP_HARMLESS, "Releases a presentation handle.")
+ZCL_CAPABILITY_SYMBOL("ReleaseSRWLockExclusive", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("ReleaseSRWLockShared", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("RemovePropW", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("ResetEvent", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("RtlCaptureStackBackTrace", CAP_HARMLESS,
+    "Reads this process own stack.")
+ZCL_CAPABILITY_SYMBOL("ScreenToClient", CAP_HARMLESS, "Coordinate conversion.")
+ZCL_CAPABILITY_SYMBOL("SelectObject", CAP_HARMLESS, "Local presentation state.")
+ZCL_CAPABILITY_SYMBOL("SendMessageA", CAP_HARMLESS, "Local window dispatch.")
+ZCL_CAPABILITY_SYMBOL("SetClassLongPtrA", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetClipboardData", CAP_HARMLESS, "Local UI state, not a file.")
+ZCL_CAPABILITY_SYMBOL("SetConsoleCtrlHandler", CAP_HARMLESS,
+    "Installs a handler whose code is already in this image.")
+ZCL_CAPABILITY_SYMBOL("SetCursor", CAP_HARMLESS, "Local input state.")
+ZCL_CAPABILITY_SYMBOL("SetCursorPos", CAP_HARMLESS, "Local input state.")
+ZCL_CAPABILITY_SYMBOL("SetErrorMode", CAP_HARMLESS, "Changes this process error policy.")
+ZCL_CAPABILITY_SYMBOL("SetEvent", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("SetFocus", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetForegroundWindow", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetLastError", CAP_HARMLESS, "Per-thread error slot.")
+ZCL_CAPABILITY_SYMBOL("SetLayeredWindowAttributes", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetProcessDPIAware", CAP_HARMLESS, "Local presentation policy.")
+ZCL_CAPABILITY_SYMBOL("SetPropW", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetThreadErrorMode", CAP_HARMLESS, "Changes this thread error policy.")
+ZCL_CAPABILITY_SYMBOL("SetWindowLongA", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetWindowLongW", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetWindowPos", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("SetWindowTextW", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("ShowWindow", CAP_HARMLESS, "Local window state.")
+ZCL_CAPABILITY_SYMBOL("ToUnicodeEx", CAP_HARMLESS, "Local input conversion.")
+ZCL_CAPABILITY_SYMBOL("TranslateMessage", CAP_HARMLESS, "Local window dispatch.")
+ZCL_CAPABILITY_SYMBOL("TryEnterCriticalSection", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("UnmapViewOfFile", CAP_HARMLESS,
+    "Releases a mapping; acquisition carries filesystem reach.")
+ZCL_CAPABILITY_SYMBOL("VirtualLock", CAP_HARMLESS,
+    "Pins this process pages, like mlock.")
+ZCL_CAPABILITY_SYMBOL("VirtualUnlock", CAP_HARMLESS,
+    "Releases a pin this process took.")
+ZCL_CAPABILITY_SYMBOL("WakeAllConditionVariable", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("WakeConditionVariable", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("WideCharToMultiByte", CAP_HARMLESS, "Text conversion.")
+ZCL_CAPABILITY_SYMBOL("___chkstk_ms", CAP_HARMLESS, "Compiler stack-probe helper.")
+ZCL_CAPABILITY_SYMBOL("__acrt_iob_func", CAP_HARMLESS,
+    "Returns a standard stream object; emitting calls carry the class.")
+ZCL_CAPABILITY_SYMBOL("__chk_fail", CAP_HARMLESS, "Compiler bounds-check helper.")
+ZCL_CAPABILITY_SYMBOL("__main", CAP_HARMLESS, "MinGW runtime initialisation helper.")
+ZCL_CAPABILITY_SYMBOL("__stack_chk_guard", CAP_HARMLESS,
+    "Compiler stack-canary data, not an entry point.")
+ZCL_CAPABILITY_SYMBOL("_assert", CAP_HARMLESS, "Runtime assertion helper.")
+ZCL_CAPABILITY_SYMBOL("_errno", CAP_HARMLESS, "Per-thread errno slot.")
+ZCL_CAPABILITY_SYMBOL("_get_osfhandle", CAP_HARMLESS,
+    "Inspects a descriptor already held, like fileno.")
+ZCL_CAPABILITY_SYMBOL("_gmtime64_s", CAP_HARMLESS,
+    "Formats a supplied time value; it does not read the clock.")
+ZCL_CAPABILITY_SYMBOL("_localtime64", CAP_HARMLESS,
+    "Formats a supplied time value; it does not read the clock.")
+ZCL_CAPABILITY_SYMBOL("_lock_file", CAP_HARMLESS, "Locks a supplied stdio object.")
+ZCL_CAPABILITY_SYMBOL("_pthread_tryjoin", CAP_HARMLESS, "Joins an in-process thread.")
+ZCL_CAPABILITY_SYMBOL("_stricmp", CAP_HARMLESS, "String comparison.")
+ZCL_CAPABILITY_SYMBOL("_strnicmp", CAP_HARMLESS, "String comparison.")
+ZCL_CAPABILITY_SYMBOL("_tls_index", CAP_HARMLESS, "MinGW TLS runtime data.")
+ZCL_CAPABILITY_SYMBOL("_unlock_file", CAP_HARMLESS, "Unlocks a supplied stdio object.")
+ZCL_CAPABILITY_SYMBOL("_wcsicmp", CAP_HARMLESS, "String comparison.")
+ZCL_CAPABILITY_SYMBOL("atoi", CAP_HARMLESS, "Parses caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("atoll", CAP_HARMLESS, "Parses caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("bsearch", CAP_HARMLESS, "Searches caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("fprintf", CAP_FS_WRITE, "Writes to an arbitrary stream.")
+ZCL_CAPABILITY_SYMBOL("isalpha", CAP_HARMLESS, "Character classification.")
+ZCL_CAPABILITY_SYMBOL("isalnum", CAP_HARMLESS, "Character classification.")
+ZCL_CAPABILITY_SYMBOL("islower", CAP_HARMLESS, "Character classification.")
+ZCL_CAPABILITY_SYMBOL("isprint", CAP_HARMLESS, "Character classification.")
+ZCL_CAPABILITY_SYMBOL("isspace", CAP_HARMLESS, "Character classification.")
+ZCL_CAPABILITY_SYMBOL("isupper", CAP_HARMLESS, "Character classification.")
+ZCL_CAPABILITY_SYMBOL("isxdigit", CAP_HARMLESS, "Character classification.")
+ZCL_CAPABILITY_SYMBOL("printf", CAP_HARMLESS, "Writes only to stdout.")
+ZCL_CAPABILITY_SYMBOL("pthread_equal", CAP_HARMLESS, "Compares in-process thread ids.")
+ZCL_CAPABILITY_SYMBOL("pthread_gethandle", CAP_HARMLESS,
+    "Returns the native handle for an in-process thread.")
+ZCL_CAPABILITY_SYMBOL("putchar", CAP_HARMLESS, "Writes only to stdout.")
+ZCL_CAPABILITY_SYMBOL("puts", CAP_HARMLESS, "Writes only to stdout.")
+ZCL_CAPABILITY_SYMBOL("setlocale", CAP_HARMLESS, "Changes process text formatting state.")
+ZCL_CAPABILITY_SYMBOL("sprintf", CAP_HARMLESS, "Formats into caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_deserialize", CAP_HARMLESS,
+    "Installs caller-owned bytes as an in-memory database image.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_malloc64", CAP_HARMLESS, "Allocates process memory.")
+ZCL_CAPABILITY_SYMBOL("sscanf", CAP_HARMLESS, "Parses caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("strtol", CAP_HARMLESS, "Parses caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("strtoll", CAP_HARMLESS, "Parses caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("strtoul", CAP_HARMLESS, "Parses caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("strtoull", CAP_HARMLESS, "Parses caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("swprintf", CAP_HARMLESS, "Formats into caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("tolower", CAP_HARMLESS, "Character conversion.")
+ZCL_CAPABILITY_SYMBOL("toupper", CAP_HARMLESS, "Character conversion.")
+ZCL_CAPABILITY_SYMBOL("towupper", CAP_HARMLESS, "Character conversion.")
+ZCL_CAPABILITY_SYMBOL("vfprintf", CAP_FS_WRITE, "Writes to an arbitrary stream.")
+ZCL_CAPABILITY_SYMBOL("vsnprintf", CAP_HARMLESS, "Formats into caller-owned memory.")
+ZCL_CAPABILITY_SYMBOL("wcschr", CAP_HARMLESS, "Searches caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("wcscmp", CAP_HARMLESS, "Compares caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("wcscspn", CAP_HARMLESS, "Searches caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("wcslen", CAP_HARMLESS, "Measures caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("wcsncmp", CAP_HARMLESS, "Compares caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("wcspbrk", CAP_HARMLESS, "Searches caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("wcsrchr", CAP_HARMLESS, "Searches caller-owned text.")
+ZCL_CAPABILITY_SYMBOL("wcstombs", CAP_HARMLESS, "Text conversion.")

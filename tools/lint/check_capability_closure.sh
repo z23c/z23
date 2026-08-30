@@ -12,9 +12,9 @@
 #   config/capability_symbols.def   — every external symbol this tree calls,
 #                                      and which class it belongs to (or
 #                                      CAP_HARMLESS, meaning none).
-#   config/module_capabilities.def  — every source file that reaches a
-#                                      non-harmless symbol, and which classes
-#                                      it has declared for itself.
+#   config/module_capabilities.def  — portable/Linux source declarations.
+#   config/module_capabilities_windows.def — exact overrides for paths whose
+#                                      selected Windows arm differs.
 #
 # Neither file enforces anything by existing. This script is the enforcement:
 # it reads what the compiler already proved (every undefined symbol in every
@@ -131,43 +131,72 @@ CAP_CLOSURE_MIN_OBJECTS_SCANNED=500
 # Overridable (ZCL_CAP_CLOSURE_COVERAGE_BASELINE) so --selftest can aim it at
 # synthetic fixtures far too small to ever carry the production count.
 #
-# Baseline measured 2026-08-30 against a freshly built COMPLETE epoch:
+# Baseline measured 2026-08-30 against a freshly built COMPLETE Linux epoch:
 #   tools/dev/checkout-lock.sh foreground build/.checkout.lock -- \
 #     make -j16 build/bin/z23-dev build/bin/zclassic23-package-verify-dev
 # (2060 objects, epoch 2617150eb95064fbce18c5cd445173e9dc2e80d3787aa96ad604d8c14f9b26f7).
-# Of the 1054 module_capabilities.def rows, exactly 2 have no compiled object
+# Of the complete portable module declaration set, exactly 2 have no compiled object
 # anywhere in that epoch, both genuine standalone binaries neither target
 # links:
 #   lib/test/src/test_thread_qos.c   — built only by the test harness
 #   tools/rebuild_recent.c           — its own BUILD_NODE_TOOL binary
 # Neither belongs in z23-dev or the package verifier; this is the honest
-# Linux floor for THIS pair of targets, not padding. Darwin has two additional
-# honest platform alternatives: os_sandbox_linux.c and self_backtrace.c are
-# replaced by their fail-closed stub implementations, so its measured floor
-# is 4. Keep the ratchet host-specific rather than forcing a Mac build to
-# pretend it compiled Linux authority. If the target pair's dependency shape
-# changes, each host baseline may only move DOWN without review.
+# floor for THIS pair of targets, not padding. A complete Windows epoch has
+# the same two unobserved rows after excluding exactly three targets which
+# cannot belong to that host graph: os_sandbox_linux.c and vcs_devloop.c have
+# selected Windows replacement arms, and package_verify.c is the explicitly
+# refused Linux-confinement helper. These are exact source identities below,
+# not extra baseline headroom. If a dependency shape changes, the baseline
+# may only move DOWN without review — a rise means either a legitimate new
+# standalone exemption (document it above) or the partial-scan regression
+# this floor exists to catch. Darwin has two additional honest platform
+# alternatives: os_sandbox_linux.c and self_backtrace.c are replaced by their
+# fail-closed stubs, so its measured floor is 4.
 CAP_CLOSURE_HOST_BASELINE=2
 [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] &&
     CAP_CLOSURE_HOST_BASELINE=4
 CAP_CLOSURE_COVERAGE_BASELINE="${ZCL_CAP_CLOSURE_COVERAGE_BASELINE:-$CAP_CLOSURE_HOST_BASELINE}"
 
-# module_capabilities.def is the portable union of target-specific object
-# reach. Linux produced the original snapshot and remains the shrink-only
-# symmetry authority. Darwin still enforces closure and every undeclared
-# reach, but cannot call a Linux-only declaration stale merely because Apple
-# libc/compiler lowering does not emit glibc's fortified symbol on this host.
+# Linux produced the portable declaration snapshot and remains the
+# shrink-only symmetry authority. Darwin still enforces closure and every
+# undeclared reach, but cannot call Linux-only compiler lowering stale.
 CAP_CLOSURE_HOST_SYMMETRY=1
 [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] &&
     CAP_CLOSURE_HOST_SYMMETRY=0
 CAP_CLOSURE_ENFORCE_SYMMETRY="${ZCL_CAP_CLOSURE_ENFORCE_SYMMETRY:-$CAP_CLOSURE_HOST_SYMMETRY}"
 
+CAP_CLOSURE_HOST_WINDOWS=false
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) CAP_CLOSURE_HOST_WINDOWS=true ;;
+esac
+
+# Return success when a declared source belongs to the complete epoch shape
+# for this host. The Windows exclusions mirror Makefile's selected platform
+# arms plus its named package-verifier refusal; do not turn this into a broad
+# directory or pattern exemption.
+cap_closure_coverage_applicable() {
+    local path="$1"
+    if [ "$CAP_CLOSURE_HOST_WINDOWS" = true ]; then
+        case "$path" in
+            lib/platform/src/os_sandbox_linux.c|\
+            lib/vcs/src/vcs_devloop.c|\
+            tools/package_verify.c)
+                return 1
+                ;;
+        esac
+    fi
+    return 0
+}
+
 # ── nm output parsing ───────────────────────────────────────────────────────
 # One line of `nm --print-file-name` looks like:
 #   <path>:<16-hex-or-blank> <TYPE> <name>          (defined: has an address)
 #   <path>:                  <type> <name>          (undefined: no address)
-# Split on the FIRST colon for the path, then take the last two whitespace
-# tokens as (type, name) regardless of whether the address field is present.
+# Split on the first colon AFTER an optional Windows drive prefix, then take
+# the last two whitespace tokens as (type, name) regardless of whether the
+# address field is present.  Native MinGW nm rewrites an MSYS /c/... input to
+# C:/... in its output; treating the drive colon as the record delimiter maps
+# every such object to the fake source name "C" and hollows the scan.
 # Prints "<path>\t<type>\t<name>" per input line; unparsable lines are
 # dropped silently (nm's own banner/error lines, if any leak through).
 cap_closure_parse_nm() {
@@ -178,6 +207,12 @@ cap_closure_parse_nm() {
         {
             line = $0
             colon = index(line, ":")
+            if (colon == 2 && substr(line, 1, 1) ~ /[A-Za-z]/ &&
+                (substr(line, 3, 1) == "/" || substr(line, 3, 1) == "\\")) {
+                tail_colon = index(substr(line, 3), ":")
+                if (tail_colon == 0) next
+                colon = tail_colon + 2
+            }
             if (colon == 0) next
             path = substr(line, 1, colon - 1)
             rest = substr(line, colon + 1)
@@ -270,6 +305,18 @@ cap_closure_load_symbols() {
         CAP_SYM["$sym"]="$cls"
         n=$((n + 1))
     done <<< "$out"
+    if [ "$CAP_CLOSURE_HOST_WINDOWS" = true ]; then
+        # MinGW COFF names an imported function pointer __imp_<symbol> while
+        # ELF/Mach-O report the callable symbol itself. This is ABI decoration,
+        # not a second capability judgement: give every reviewed table row its
+        # exact import-pointer alias without inflating the configured-row count.
+        while IFS=$'\t' read -r sym cls; do
+            [ -n "$sym" ] || continue
+            CAP_SYM["__imp_$sym"]="$cls"
+            CAP_SYM["__imp__$sym"]="$cls"
+            CAP_SYM["__mingw_$sym"]="$cls"
+        done <<< "$out"
+    fi
     CAP_SYM_COUNT=$n
     return 0
 }
@@ -301,18 +348,49 @@ cap_closure_module_tsv() {
     ' "$1"
 }
 declare -A CAP_MOD_RAW=()
+declare -A CAP_MOD_UNION_RAW=()
 CAP_MOD_COUNT=0
+CAP_MOD_PLATFORM_COUNT=0
+
+# Add the tokens in $2 to the set encoded by $1. CAP_NONE is the explicit
+# empty-set spelling used only by a platform override that must replace a
+# non-empty portable row.
+cap_closure_union_caps() {
+    local out="$1" add="$2" tok
+    IFS='|' read -ra toks <<< "$add"
+    for tok in "${toks[@]}"; do
+        [ -n "$tok" ] && [ "$tok" != "CAP_NONE" ] || continue
+        if ! cap_closure_grants "$out" "$tok"; then
+            [ -n "$out" ] && out="$out|$tok" || out="$tok"
+        fi
+    done
+    printf '%s' "$out"
+}
+
 cap_closure_load_module_rows() {
-    local file="$1" out path cls n=0
+    local file="$1" platform_file="${2:-}" out path cls pn=0
     CAP_MOD_RAW=()
+    CAP_MOD_UNION_RAW=()
     [ -f "$file" ] || return 1
     out="$(cap_closure_module_tsv "$file")" || return 1
     while IFS=$'\t' read -r path cls; do
         [ -n "$path" ] || continue
         CAP_MOD_RAW["$path"]="$cls"
-        n=$((n + 1))
+        CAP_MOD_UNION_RAW["$path"]="$(cap_closure_union_caps "${CAP_MOD_UNION_RAW[$path]:-}" "$cls")"
     done <<< "$out"
-    CAP_MOD_COUNT=$n
+    if [ "$CAP_CLOSURE_HOST_WINDOWS" = true ] && [ -n "$platform_file" ] && [ -f "$platform_file" ]; then
+        out="$(cap_closure_module_tsv "$platform_file")" || return 1
+        while IFS=$'\t' read -r path cls; do
+            [ -n "$path" ] || continue
+            # Exact active-target replacement for object-level symmetry.
+            # The source/package union is retained separately below.
+            CAP_MOD_RAW["$path"]="$cls"
+            CAP_MOD_UNION_RAW["$path"]="$(cap_closure_union_caps "${CAP_MOD_UNION_RAW[$path]:-}" "$cls")"
+            pn=$((pn + 1))
+        done <<< "$out"
+    fi
+    CAP_MOD_COUNT="${#CAP_MOD_RAW[@]}"
+    CAP_MOD_PLATFORM_COUNT=$pn
     return 0
 }
 
@@ -335,6 +413,7 @@ check_root() {
     local root="$1"
     local symbols_file="$root/config/capability_symbols.def"
     local module_file="$root/config/module_capabilities.def"
+    local platform_module_file="$root/config/module_capabilities_windows.def"
     local violations=0
 
     if ! cap_closure_load_symbols "$symbols_file"; then
@@ -353,20 +432,24 @@ check_root() {
         return 2
     fi
 
-    if ! cap_closure_load_module_rows "$module_file"; then
+    if ! cap_closure_load_module_rows "$module_file" "$platform_module_file"; then
         echo "check_capability_closure: FATAL — cannot read $module_file"
         return 2
     fi
     local n_mod="$CAP_MOD_COUNT"
 
     # ── item 4: hollowness, checked before anything is reported clean ──────
-    local epoch
+    local epoch epoch_nm
     epoch="$(cap_closure_find_epoch "$root")"
     if [ -z "$epoch" ]; then
         echo "check_capability_closure: UNPROVEN — no build/dev-obj/epochs/* found."
         echo "  Populate it with the normal dev build (e.g. 'make z23-dev') and"
         echo "  re-run. Never treat an absent object tree as zero violations."
         return 2
+    fi
+    epoch_nm="$epoch"
+    if command -v cygpath >/dev/null 2>&1; then
+        epoch_nm="$(cygpath -m "$epoch")" || return 2
     fi
     # ── gather nm data over the whole epoch, once ───────────────────────────
     local work
@@ -380,7 +463,10 @@ check_root() {
     # build actively adding/removing objects underneath this scan (this repo
     # normally runs several agent lanes against one checkout) cannot hand the
     # undefined-symbol pass and the defined-symbol pass two different sets.
-    find "$epoch" -name '*.o' -print0 > "$work/objs.z"
+    # restart-base.o is a generated relocatable aggregate of the exact object
+    # list already scanned below. Treating it as an ordinary TU both doubles
+    # every undefined edge and invents a nonexistent restart-base.c owner.
+    find "$epoch" -name '*.o' ! -name 'restart-base.o' -print0 > "$work/objs.z"
     local n_obj
     n_obj="$(tr -cd '\0' < "$work/objs.z" | wc -c | tr -d ' ')"
     if [ -z "$n_obj" ] || [ "$n_obj" -lt "$CAP_CLOSURE_MIN_OBJECTS_SCANNED" ]; then
@@ -426,7 +512,7 @@ check_root() {
     # A source with no object here is either a standalone tool/test binary
     # this epoch legitimately never links, or a file a PARTIAL rebuild
     # silently dropped — the coverage floor below is what tells those apart.
-    awk -F'\t' -v epoch="$epoch/" '
+    awk -F'\t' -v epoch="$epoch_nm/" '
         { obj = $1; src = obj; sub("^" epoch, "", src); sub(/\.o$/, ".c", src); print src }
     ' "$work/undef.tsv" "$work/defined.tsv" | LC_ALL=C sort -u > "$work/compiled_sources.txt"
 
@@ -435,10 +521,14 @@ check_root() {
     # CAP_CLOSURE_COVERAGE_BASELINE above for the reasoning and the measured
     # baseline. A row whose source file no longer exists at all is item 3b's
     # concern, not this one, and is excluded here.
-    local unobserved=0 cov_path
+    local unobserved=0 platform_excluded=0 cov_path
     : > "$work/declared_unobserved.txt"
     for cov_path in "${!CAP_MOD_RAW[@]}"; do
         [ -f "$root/$cov_path" ] || continue
+        if ! cap_closure_coverage_applicable "$cov_path"; then
+            platform_excluded=$((platform_excluded + 1))
+            continue
+        fi
         grep -qxF "$cov_path" "$work/compiled_sources.txt" && continue
         printf '%s\n' "$cov_path" >> "$work/declared_unobserved.txt"
         unobserved=$((unobserved + 1))
@@ -459,7 +549,11 @@ check_root() {
         fi
         echo "  Build a COMPLETE epoch and re-run:"
         echo "    tools/dev/checkout-lock.sh foreground build/.checkout.lock -- \\"
-        echo "      make -j16 build/bin/z23-dev build/bin/zclassic23-package-verify-dev"
+        if [ "$CAP_CLOSURE_HOST_WINDOWS" = true ]; then
+            echo "      make -j16 z23-dev"
+        else
+            echo "      make -j16 build/bin/z23-dev build/bin/zclassic23-package-verify-dev"
+        fi
         return 2
     fi
 
@@ -507,7 +601,7 @@ check_root() {
     # obj path relative to the epoch root, .o -> .c, matching the convention
     # this whole design uses.
     : > "$work/file_uses.tsv"
-    awk -F'\t' -v epoch="$epoch/" '
+    awk -F'\t' -v epoch="$epoch_nm/" '
         NR == FNR { cls[$1] = $2; next }
         {
             obj = $1; name = $3
@@ -568,7 +662,7 @@ check_root() {
         fi
         IFS='|' read -ra toks <<< "$raw"
         for tok in "${toks[@]}"; do
-            [ -n "$tok" ] || continue
+            [ -n "$tok" ] && [ "$tok" != "CAP_NONE" ] || continue
             if ! grep -qF "$(printf '%s\t%s' "$path" "$tok")" "$work/file_uses.tsv"; then
                 if [ "$CAP_CLOSURE_ENFORCE_SYMMETRY" != "1" ]; then
                     platform_unobserved=$((platform_unobserved + 1))
@@ -618,7 +712,7 @@ check_root() {
     local f granted5 hit
     while IFS= read -r f; do
         [ -n "$f" ] || continue
-        granted5="${CAP_MOD_RAW[$f]:-}"
+        granted5="${CAP_MOD_UNION_RAW[$f]:-}"
         [ -n "$granted5" ] && cap_closure_grants "$granted5" "CAP_PRIVILEGE" && continue
         hit="$(grep -nE "$pat" "$root/$f" 2>/dev/null || true)"
         if [ -n "$hit" ]; then
@@ -636,6 +730,8 @@ check_root() {
     echo "  platform-unobserved=$platform_unobserved symmetry-enforced=$CAP_CLOSURE_ENFORCE_SYMMETRY"
     echo "  missing-source-rows=$missing_src raw-syscall=$syscall_violations"
     echo "  declared-but-unobserved=$unobserved (coverage baseline=$CAP_CLOSURE_COVERAGE_BASELINE)"
+    echo "  platform-target-excluded=$platform_excluded"
+    echo "  platform-exact-overrides=$CAP_MOD_PLATFORM_COUNT"
 
     if [ "$violations" -gt 0 ]; then
         echo "check_capability_closure: FAIL — $violations violation(s)"
@@ -665,6 +761,11 @@ check_root() {
 #      the ratchet must not be allowed to rust shut at a stale number.
 # And a positive control:
 #   D. a correctly declared, fully-used fixture passes.
+# Windows/COFF regressions are pinned separately:
+#   H. a native drive-letter nm record keeps the whole object path;
+#   I. MinGW import-pointer decorations inherit the reviewed base symbol;
+#   J. a Windows exact override replaces (rather than unions with) the
+#      portable row, including CAP_NONE and exact platform coverage skips.
 FIXTURE_ROOT=""
 selftest_cleanup() { [ -n "$FIXTURE_ROOT" ] && rm -rf "$FIXTURE_ROOT"; }
 
@@ -746,10 +847,11 @@ run_selftest() {
     FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cap-closure-selftest.XXXXXX")"
     trap selftest_cleanup EXIT
     local rc=0 d
+    local host_windows_saved="$CAP_CLOSURE_HOST_WINDOWS"
 
     # Cases A-E below declare either zero rows or one row that IS compiled,
     # so their true "declared but unobserved" count is always 0 — nothing
-    # about the production coverage baseline (calibrated against 1054 real
+    # about the production coverage baseline (calibrated against the real
     # rows) is meaningful for a 0-or-1-row fixture. Pin it to 0 so those
     # cases exercise exactly what they intend to and nothing else; cases F
     # and G below set it explicitly for what they are testing.
@@ -829,6 +931,17 @@ EOF
         -o "$d/build/dev-obj/epochs/fx0/fixture_src/declared_user.o"
     fixture_module_rows "$d" \
         'ZCL_MODULE_CAPABILITY("fixture_src/declared_user.c", CAP_NETWORK, "test: correctly declared")'
+    # A generated relocatable aggregate repeats the same TU edges and maps to
+    # no real source owner. Give it an unclassified edge: the positive control
+    # stays green only while restart-base.o is excluded from every nm pass.
+    cat > "$d/.restart-base.c" <<'EOF'
+extern int aggregate_only_unknown(void);
+int aggregate_edge(void) { return aggregate_only_unknown(); }
+EOF
+    cc -std=c23 -c "$d/.restart-base.c" \
+        -o "$d/build/dev-obj/epochs/fx0/restart-base.o" 2>/dev/null \
+      || cc -c "$d/.restart-base.c" \
+        -o "$d/build/dev-obj/epochs/fx0/restart-base.o"
     expect_accept "D: a correctly declared, fully-used fixture passes (positive control)" "$d" || rc=1
 
     # E. hollowness — an epoch below the floor must UNPROVEN (exit 2), never
@@ -914,8 +1027,61 @@ EOF
     fi
     CAP_CLOSURE_COVERAGE_BASELINE=0
 
+    # H. MinGW nm rewrites /c/... to C:/... and therefore emits two colons.
+    # The drive colon is not the record delimiter.
+    local parsed expected
+    parsed="$(printf '%s\n' 'C:/work/epoch/lib/net/dialer.o:         U connect' | cap_closure_parse_nm)"
+    expected="$(printf 'C:/work/epoch/lib/net/dialer.o\tU\tconnect')"
+    if [ "$parsed" != "$expected" ]; then
+        echo "SELFTEST FAIL: H: Windows drive-letter nm path was parsed as '$parsed'"
+        rc=1
+    else
+        echo "  selftest ok: H: Windows drive-letter nm records preserve the full object path"
+    fi
+
+    # I. COFF import pointers and MinGW stdio wrappers are ABI spellings of a
+    # reviewed base entry, not new unclassified capabilities.
+    d="$FIXTURE_ROOT/i"; fixture_symbols "$d"
+    CAP_CLOSURE_HOST_WINDOWS=true
+    if ! cap_closure_load_symbols "$d/config/capability_symbols.def" ||
+       [ "${CAP_SYM[__imp_connect]:-}" != "CAP_NETWORK" ] ||
+       [ "${CAP_SYM[__imp__connect]:-}" != "CAP_NETWORK" ] ||
+       [ "${CAP_SYM[__mingw_connect]:-}" != "CAP_NETWORK" ]; then
+        echo "SELFTEST FAIL: I: MinGW ABI aliases did not inherit CAP_NETWORK"
+        rc=1
+    else
+        echo "  selftest ok: I: MinGW import and wrapper decorations inherit the base symbol class"
+    fi
+
+    # J. The portable row is a cross-target/package claim; Windows symmetry
+    # must grade the exact replacement. CAP_NONE is deliberately explicit so
+    # a harmless refusal/native arm can replace a non-empty portable row.
+    d="$FIXTURE_ROOT/j"; mkdir -p "$d/fixture_src" "$d/lib/platform/src"
+    make_epoch "$d"
+    fixture_symbols "$d"
+    cat > "$d/fixture_src/platform_user.c" <<'EOF'
+static int local_only(int x) { return x + 1; }
+int platform_export(int x) { return local_only(x); }
+EOF
+    cat > "$d/lib/platform/src/os_sandbox_linux.c" <<'EOF'
+int linux_only_fixture(void) { return 1; }
+EOF
+    mkdir -p "$d/build/dev-obj/epochs/fx0/fixture_src"
+    cc -std=c23 -c "$d/fixture_src/platform_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/platform_user.o" 2>/dev/null \
+      || cc -c "$d/fixture_src/platform_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/platform_user.o"
+    fixture_module_rows "$d" \
+        'ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NETWORK, "portable arm")' \
+        'ZCL_MODULE_CAPABILITY("lib/platform/src/os_sandbox_linux.c", CAP_NETWORK, "Linux-only arm")'
+    cat > "$d/config/module_capabilities_windows.def" <<'EOF'
+ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NONE, "Windows exact empty arm")
+EOF
+    expect_accept "J: Windows exact CAP_NONE override replaces portable reach and skips only the named Linux arm" "$d" || rc=1
+    CAP_CLOSURE_HOST_WINDOWS="$host_windows_saved"
+
     if [ "$rc" -eq 0 ]; then
-        echo "== selftest: PASS (7/7) =="
+        echo "== selftest: PASS (10/10) =="
     else
         echo "== selftest: FAIL =="
     fi

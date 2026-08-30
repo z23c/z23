@@ -38,9 +38,10 @@
  * survives growth: at a billion lines nobody will notice the day a module
  * starts calling a libc entry point that did not exist when the gate was
  * written, so the gate has to notice instead. It costs one row per new libc
- * call across the entire project, because this table is sized by the C library
- * and not by the codebase. There are 545 external symbols under the whole tree
- * today; there would be about as many under a tree a thousand times larger.
+ * call across the entire project, because this table is sized by the platform
+ * libraries and not by the codebase. The live count is derived by
+ * check-capability-closure; a tree a thousand times larger would have a
+ * comparable boundary vocabulary.
  *
  * WHAT THIS DOES NOT CATCH, stated here so nobody has to discover it later:
  *

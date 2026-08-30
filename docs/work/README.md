@@ -39,6 +39,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | File | Authority | Purpose |
 |---|---|---|
 | [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) | PLAN | THE ordered execution plan (autonomous / owner-gated / operational) |
+| [`TRI_PLATFORM_PLAN.md`](./TRI_PLATFORM_PLAN.md) | PLAN | what a person on Linux, macOS or Windows can actually build, sync and install today, and the ordered work that closes each gap |
 | [`self-verified-tip-plan.md`](./self-verified-tip-plan.md) | PLAN | the `G-SOV` sovereignty-gate design + open hardening items; `G-SOV` is the active gate in `sovereignty_controller.c` |
 | [`SOVEREIGN-NETWORK-ROADMAP.md`](./SOVEREIGN-NETWORK-ROADMAP.md) | PLAN | durable Phase 0–6 hierarchy and promotion gates; ordering authority when other plans differ |
 | [`SOVEREIGN_MACHINE_MESH_PLAN.md`](./SOVEREIGN_MACHINE_MESH_PLAN.md) | DESIGN | owner-paired Linux/macOS/Windows machine discovery, private transfer, typed control, secure remote-service tunnels, and hot-swap acceptance |

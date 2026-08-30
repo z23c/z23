@@ -731,7 +731,7 @@ cmd_selftest() {
     ) || st_fail "case=all-down collect must exit 0"
     f="$ST_TMP/c/uptime-ledger.jsonl"
     [ "$(wc -l < "$f")" -eq 2 ] || st_fail "case=all-down expected 2 lines"
-    grep -c '"reachable":false' "$f" | grep -q '^2$' \
+    [ "$(grep -c '"reachable":false' "$f")" -eq 2 ] \
         || { cat "$f" >&2; st_fail "case=all-down expected all lines reachable:false"; }
     echo "selftest: ok case=all-down"
 

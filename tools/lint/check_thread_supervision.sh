@@ -192,7 +192,7 @@ records=$(
             else
                 prev=$((n - 1))
                 if [ "$prev" -gt 0 ] && \
-                   sed -n "${prev}p" "$f" | grep -qE "$MARKER_RE"; then
+                   grep -qE "$MARKER_RE" <<<"$(sed -n "${prev}p" "$f")"; then
                     marked=1
                 fi
             fi

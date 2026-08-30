@@ -6,6 +6,7 @@
 
 #include "session/mesh_terminal_worker.h"
 
+#if defined(__linux__)
 #include "platform/os_sandbox.h"
 
 #include <errno.h>
@@ -20,6 +21,7 @@
 #include <sys/wait.h>
 #include <termios.h> /* struct winsize */
 #include <unistd.h>
+#endif
 
 /* The default subtree process budget, enforced by the parent's
  * process-group census (RLIMIT_NPROC cannot do this job — it counts the

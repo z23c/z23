@@ -116,7 +116,7 @@ iso_assert_not_live_port() {
 # Abort if a chosen port is already LISTENING (the authoritative guard).
 iso_assert_port_free() {
     local p="$1"
-    if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
+    if [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]; then
         iso_die "port $p is already LISTENING — refusing (operator port math is wrong)"
     fi
     return 0

@@ -67,7 +67,9 @@ static void proof_emit_status(struct zcl_command_reply *reply,
                      "{\"local_commit\":\"%s\",\"remote_base\":\"%s\"}",
                      status->local_commit, status->remote_base);
     if (add_wait_next && n > 0 && (size_t)n < sizeof(input) &&
-        status->state != ZCL_DEV_PROOF_STATE_PASSED)
+        status->state != ZCL_DEV_PROOF_STATE_PASSED &&
+        status->state != ZCL_DEV_PROOF_STATE_INVALID &&
+        status->local_commit[0] && status->remote_base[0])
         (void)zcl_command_reply_add_next(
             reply, "dev.proof.wait", input,
             "wait for the exact commit/base receipt without running push-time work");
@@ -96,7 +98,7 @@ static void proof_status(
         "DEV_BUILD_REQUIRED", "dispatch", false, false,
         "proof receipt status requires the dev binary", "make dev-bin");
 #else
-    struct zcl_dev_proof_status status;
+    struct zcl_dev_proof_status status = {0};
     if (!zcl_dev_proof_status_read(
             proof_source_root(request),
             proof_optional_text(request->input, "local_commit"),
@@ -123,11 +125,24 @@ static void proof_ensure(
         "DEV_BUILD_REQUIRED", "dispatch", false, false,
         "background proof scheduling requires the dev binary", "make dev-bin");
 #else
+    struct zcl_dev_proof_status status = {0};
+    if (!zcl_dev_proof_status_read(
+            proof_source_root(request),
+            proof_optional_text(request->input, "local_commit"),
+            proof_optional_text(request->input, "remote_base"), &status) ||
+        status.state == ZCL_DEV_PROOF_STATE_INVALID) {
+        proof_emit_status(reply, &status, false);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "PROOF_WORKER_UNAVAILABLE", "preflight", false, false,
+            "exact background verification is unavailable on this platform",
+            status.detail[0] ? status.detail : "proof_worker_unavailable");
+        return;
+    }
     struct zcl_command_reply watcher;
     zcl_command_reply_init(&watcher, "zcl.dev_loop_status.v1");
     zcl_native_handle_dev_loop_ensure(request, &watcher);
     zcl_command_reply_free(&watcher);
-    struct zcl_dev_proof_status status;
     if (!zcl_dev_proof_ensure(
             proof_source_root(request),
             proof_optional_text(request->input, "local_commit"),

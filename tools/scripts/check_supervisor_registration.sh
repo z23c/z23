@@ -132,17 +132,19 @@ file_is_long_running() {
         return 0
     fi
     # Any unmarked pthread_create line ⇒ long-running.
-    grep -nE 'pthread_create\s*\(' "$f" | while IFS=: read -r n _; do
-        if sed -n "${n}p" "$f" | grep -q 'raw-pthread-ok'; then
+    local unmarked
+    unmarked="$(grep -nE 'pthread_create\s*\(' "$f" | while IFS=: read -r n _; do
+        if grep -q 'raw-pthread-ok' <<<"$(sed -n "${n}p" "$f")"; then
             continue
         fi
         prev=$((n - 1))
         if [ "$prev" -gt 0 ] && \
-           sed -n "${prev}p" "$f" | grep -q 'raw-pthread-ok'; then
+           grep -q 'raw-pthread-ok' <<<"$(sed -n "${prev}p" "$f")"; then
             continue
         fi
         echo "unmarked"
-    done | grep -q unmarked
+    done)"
+    [ -n "$unmarked" ]
 }
 
 # Fail-loud preflight: the service file set MUST be non-empty. A bare

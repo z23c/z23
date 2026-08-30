@@ -37,6 +37,9 @@
 #include "ports/wallet_backup_store_port.h"
 #include "services/wallet_backup_service.h"
 #include "models/database.h"
+#if defined(_WIN32)
+#include "platform/private_directory.h"
+#endif
 
 #include <sqlite3.h>
 #include <stdint.h>

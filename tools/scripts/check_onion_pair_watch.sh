@@ -33,7 +33,7 @@ die() {
 
 # Structural: this shipped probe is bash. The repository-wide no-runtime gate
 # owns interpreter-path enforcement; duplicating its regex here self-matches.
-head -n 1 "$WATCH" | grep -q '^#!/usr/bin/env bash$' \
+[ "$(head -n 1 "$WATCH")" = '#!/usr/bin/env bash' ] \
     || die "onion_pair_watch.sh must start with #!/usr/bin/env bash"
 
 # Structural: sources isolated_node_env.sh; does not execute it.

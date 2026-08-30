@@ -330,7 +330,7 @@ iso_append_published_mesh_ports
 
 probe_port_is_listening() {
     local p=$1
-    ss -tlnH "sport = :$p" 2>/dev/null | grep -q .
+    [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]
 }
 
 probe_port_is_reserved() {

@@ -11,6 +11,7 @@
 #include "base/serialize_le.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
@@ -20,20 +21,24 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
 #define PROOF_MAX_FILES ZCL_DEVLOOP_MAX_FILES
+#define PROOF_MAX_JOBS 16u
 #define PROOF_TIMEOUT_MS 900000
 #define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v1"
 
@@ -57,6 +62,22 @@ static void proof_why(char *why, size_t why_len, const char *message)
         (void)snprintf(why, why_len, "%s", message ? message : "unknown");
 }
 
+/* Same contract as proof_why, for a refusal that can name the exact thing it
+ * refused over. A bare code makes the reader open this file and hand-check a
+ * twenty-entry list; the missing path plus the command that produces it is the
+ * whole diagnosis. */
+static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
+{
+    if (!why || !why_len)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(why, why_len, fmt, ap);
+    va_end(ap);
+}
+
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
 {
     switch (state) {
@@ -68,6 +89,80 @@ const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
     }
     return "invalid";
 }
+
+#if defined(_WIN32)
+
+/* The proof worker currently depends on fork/setsid, descriptor inheritance,
+ * POSIX hard-link/symlink inspection, and process-group termination.  Native
+ * Windows must not approximate those authority boundaries with CRT path
+ * calls or a detached shell.  Keep the typed command available, but refuse
+ * before creating proof state until it is ported onto retained directories
+ * and platform_process Job Objects. */
+static void proof_windows_unavailable(struct zcl_dev_proof_status *out)
+{
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->state = ZCL_DEV_PROOF_STATE_INVALID;
+        (void)snprintf(out->detail, sizeof(out->detail), "%s",
+                       "windows_native_proof_worker_unavailable");
+    }
+}
+
+bool zcl_dev_proof_resolve_pair(const char *repo_root,
+                                const char *requested_local,
+                                const char *requested_base,
+                                char local_commit[65],
+                                char remote_base[65],
+                                char *why, size_t why_len)
+{
+    (void)repo_root;
+    (void)requested_local;
+    (void)requested_base;
+    if (local_commit) local_commit[0] = 0;
+    if (remote_base) remote_base[0] = 0;
+    proof_why(why, why_len, "windows_native_proof_worker_unavailable");
+    return false;
+}
+
+bool zcl_dev_proof_status_read(const char *repo_root,
+                               const char *local_commit,
+                               const char *remote_base,
+                               struct zcl_dev_proof_status *out)
+{
+    (void)repo_root;
+    (void)local_commit;
+    (void)remote_base;
+    proof_windows_unavailable(out);
+    return true;
+}
+
+bool zcl_dev_proof_ensure(const char *repo_root,
+                          const char *local_commit,
+                          const char *remote_base,
+                          struct zcl_dev_proof_status *out)
+{
+    (void)repo_root;
+    (void)local_commit;
+    (void)remote_base;
+    proof_windows_unavailable(out);
+    return false;
+}
+
+bool zcl_dev_proof_wait(const char *repo_root,
+                        const char *local_commit,
+                        const char *remote_base,
+                        int timeout_ms,
+                        struct zcl_dev_proof_status *out)
+{
+    (void)repo_root;
+    (void)local_commit;
+    (void)remote_base;
+    (void)timeout_ms;
+    proof_windows_unavailable(out);
+    return false;
+}
+
+#else
 
 static bool proof_oid_text(const char *value)
 {
@@ -711,7 +806,12 @@ static bool generation_prepare(const struct proof_paths *paths,
             (int)sizeof(bin_dir) ||
         !platform_private_directory_ensure(build_dir) ||
         !platform_private_directory_ensure(bin_dir)) {
-        proof_why(why, why_len, "proof_generation_dependency_unavailable");
+        /* Distinct from the dependency loop below: nothing is missing from
+         * the checkout here, the generation's own build tree could not be
+         * created. Conflating the two sent a reader hunting a vendored
+         * archive that was present all along. */
+        proof_whyf(why, why_len, "proof_generation_build_dir_unwritable:%s",
+                   build_dir);
         return false;
     }
     for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++) {
@@ -722,7 +822,15 @@ static bool generation_prepare(const struct proof_paths *paths,
                      dependencies[i]) >= (int)sizeof(target) ||
             !dependency_parent_ensure(target) ||
             !dependency_materialize(source, target)) {
-            proof_why(why, why_len, "proof_generation_dependency_unavailable");
+            /* vendor/ entries come from the vendored-archive build; the
+             * git-hook pair comes from arming the clone. Naming the target
+             * turns a class into one command the reader can run. */
+            const char *fix = strncmp(dependencies[i], "vendor/", 7) == 0
+                                  ? "make vendor"
+                                  : "make install-hooks";
+            proof_whyf(why, why_len,
+                       "proof_generation_dependency_unavailable:%s (%s)",
+                       dependencies[i], fix);
             return false;
         }
     }
@@ -958,6 +1066,14 @@ static bool environment_root(uint8_t out[32])
     return true;
 }
 
+static bool proof_make_jobs_arg(char out[16])
+{
+    uint32_t jobs = platform_logical_cpu_count();
+    if (jobs > PROOF_MAX_JOBS) jobs = PROOF_MAX_JOBS;
+    int written = snprintf(out, 16, "-j%u", jobs);
+    return written > 0 && written < 16;
+}
+
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
                              const struct dev_source_record *expected_source,
@@ -1098,7 +1214,7 @@ static bool test_depfiles_prepare(const struct proof_paths *paths,
 static bool test_helpers_prepare(
     const struct proof_paths *paths, const char *generation,
     const char *runner_source, const struct dev_source_record *expected_source,
-    char runner_target[PATH_MAX], uint8_t helper_root[32],
+    const char *make_jobs, char runner_target[PATH_MAX], uint8_t helper_root[32],
     char *why, size_t why_len)
 {
     char verifier_source[PATH_MAX], verifier_target[PATH_MAX];
@@ -1138,8 +1254,8 @@ static bool test_helpers_prepare(
         return false;
     }
     const char *prerequisite_argv[] = {
-        "make", "--no-print-directory", "zcl-nodectl", "zclassic23-acme",
-        "fbsh", NULL};
+        "make", "--no-print-directory", make_jobs, "zcl-nodectl",
+        "zclassic23-acme", "fbsh", NULL};
     if (run_logged(generation, paths->helper_log, prerequisite_argv,
                    120000) != 0) {
         proof_why(why, why_len, "proof_test_helper_build_failed");
@@ -1324,6 +1440,12 @@ static bool proof_worker(const struct proof_paths *paths,
     struct zcl_dev_proof_dimension *test =
         &receipt.dimensions[ZCL_DEV_PROOF_TEST];
 
+    char make_jobs[16];
+    if (!proof_make_jobs_arg(make_jobs)) {
+        proof_why(why, why_len, "proof_job_count_unavailable");
+        return false;
+    }
+
     generated->selected = inventory_only ? 1 : 0;
     bool compile_selected = !inventory_only && !plan.docs_only;
     compile->selected = compile_selected ? 1 : 0;
@@ -1342,7 +1464,7 @@ static bool proof_worker(const struct proof_paths *paths,
         paths, source_before.cas_root_sha3, receipt.dimensions);
     if (!cycle_reused) {
         if (generated->selected) {
-            const char *argv[] = {"make", "--no-print-directory",
+            const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                   "check-capability-inventory-generated", NULL};
             if (!run_dimension(&execution, ZCL_DEV_PROOF_GENERATED, argv,
                                generated, false, why, why_len))
@@ -1355,7 +1477,7 @@ static bool proof_worker(const struct proof_paths *paths,
             if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
                 !executable_reuse(paths, artifact,
                                   &source_before, compile)) {
-                const char *argv[] = {"make", "--no-print-directory",
+                const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                       "build-only", NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_COMPILE, argv,
                                    compile, false, why, why_len))
@@ -1363,7 +1485,7 @@ static bool proof_worker(const struct proof_paths *paths,
             }
         } else unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
         if (lint->selected) {
-            const char *argv[] = {"make", "--no-print-directory",
+            const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                   "lint-fast", NULL};
             if (!run_dimension(&execution, ZCL_DEV_PROOF_LINT, argv, lint,
                                false, why, why_len))
@@ -1384,7 +1506,7 @@ static bool proof_worker(const struct proof_paths *paths,
             bool runner_reused = test_binary_path(paths, binary) &&
                 test_helpers_prepare(
                     paths, generation, binary, &source_before,
-                    generation_binary, helper_root, why, why_len);
+                    make_jobs, generation_binary, helper_root, why, why_len);
             if (runner_reused) {
                 const char *argv[] = {generation_binary, only, "--cache",
                                       "--activate-proof-contracts", NULL};
@@ -1402,7 +1524,8 @@ static bool proof_worker(const struct proof_paths *paths,
                     return false;
                 }
                 const char *argv[] = {
-                    "make", "--no-print-directory", "t-fast-exact", make_only,
+                    "make", "--no-print-directory", make_jobs,
+                    "t-fast-exact", make_only,
                     "T_FAST_EXACT_ARGS=--cache --activate-proof-contracts",
                     NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv, test,
@@ -1560,3 +1683,5 @@ bool zcl_dev_proof_wait(const char *repo_root,
         platform_sleep_ms(20);
     }
 }
+
+#endif /* _WIN32 */
