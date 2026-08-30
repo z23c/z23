@@ -257,7 +257,7 @@ struct download_manager {
      * so a legitimately-requested block body that arrives late (the
      * original peer was just slow, or we were under backpressure) is
      * indistinguishable from a truly unsolicited push by inspecting the
-     * hash alone — dl_mark_received() returns 0 for both. See
+     * hash alone — dl_mark_received() returns UINT32_MAX for both. See
      * dl_last_forced_settle_time() / the PEER_OFFENCE_UNREQUESTED
      * call-site in msg_blocks.c, which withholds scoring for
      * DL_STALL_TIMEOUT_SECS after either event rather than risk
@@ -281,7 +281,8 @@ bool dl_mark_requested(struct download_manager *dm,
                        uint32_t peer_id);
 
 /* Mark a block as received (remove from in-flight).
- * Returns the peer_id that requested it, or 0 if not found. */
+ * Returns the peer_id that requested it, or UINT32_MAX if not found. Peer id
+ * zero is valid and must never be collapsed into the not-found result. */
 uint32_t dl_mark_received(struct download_manager *dm,
                           const struct uint256 *hash);
 
@@ -452,7 +453,7 @@ struct download_manager *msg_get_download_mgr(void);
 /* drain the queue + in-flight tracking under tip-stall
  * backpressure. Returns the number of (queued + in-flight) entries
  * dropped. Block bodies that arrive after the drain are no longer
- * tracked — dl_mark_received returns 0 — and are freed by the
+ * tracked — dl_mark_received returns UINT32_MAX — and are freed by the
  * normal net_message_free / block_already_seen paths. The header
  * chain in main_state is untouched. Safe to call from any thread. */
 size_t dl_drain_for_backpressure(struct download_manager *dm);

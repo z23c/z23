@@ -612,7 +612,9 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
                  pdb, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
                  receipt.source_epoch_digest, 32) &&
              (prior == FINAL_RECEIPT_IDENTICAL ||
-              write_final_receipt(pdb, &receipt));
+              (prior == FINAL_RECEIPT_MONOTONIC_PREDECESSOR
+                   ? advance_final_receipt(pdb, &receipt)
+                   : write_final_receipt(pdb, &receipt)));
     if (ok)
         ok = exec_checked(pdb, "COMMIT");
     if (ok)

@@ -20,6 +20,7 @@
 #include "event/event.h"
 #include "sync/sync_state.h"
 #include "util/log_macros.h"
+#include "util/thread_registry.h"
 #include "support/log_throttle.h"
 #include "util/safe_alloc.h"
 #include "util/sync.h"
@@ -576,10 +577,10 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
      * block fast-relay path (BIP152 "sendcmpct"/"cmpctblock") is the
      * one place a peer legitimately pushes block data unsolicited, and
      * that goes through process_cmpctblock() in msg_compact.c, never
-     * here. So requester_id == 0 (no in-flight slot for this hash, from
+     * here. So requester_id == UINT32_MAX (no in-flight slot for this hash, from
      * ANY peer) is normally a provable unsolicited push.
      *
-     * Two honest sources can produce the exact same "requester_id == 0"
+     * Two honest sources can produce the exact same "requester_id == UINT32_MAX"
      * signal though, so this is NOT simply "never in-flight == ban":
      * dl_drain_for_backpressure() (tip-stall backpressure) and
      * dl_check_timeouts() reassigning a slow peer's block to someone
@@ -593,12 +594,18 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
      * risk banning an honest-but-slow peer. */
     struct download_manager *dm = get_download_mgr();
     uint32_t requester_id = dl_mark_received(dm, &hash);
-    if (requester_id == 0) {
+    if (requester_id == UINT32_MAX) {
         int64_t now_s = (int64_t)platform_time_wall_time_t();
         int64_t last_settle = dl_last_forced_settle_time(dm);
         bool within_settle_grace =
             last_settle != 0 && (now_s - last_settle) < DL_STALL_TIMEOUT_SECS;
-        if (!within_settle_grace) {
+        /* An orderly respawn can begin after getdata was sent but before its
+         * reply arrives.  Shutdown drains/tears down request bookkeeping
+         * ahead of the socket reader, so UINT32_MAX no longer proves
+         * an unsolicited push in that window.  Never turn our own lifecycle
+         * transition into a peer offence. */
+        if (!within_settle_grace &&
+            !thread_registry_shutdown_requested()) {
             peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_UNREQUESTED,
                                 "block body we never requested");
         }

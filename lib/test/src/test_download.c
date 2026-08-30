@@ -104,7 +104,7 @@ static int test_dl_mark_received(void)
 
         /* Receive unknown hash */
         struct uint256 h4 = make_hash(4);
-        ASSERT(dl_mark_received(&dm, &h4) == 0);
+        ASSERT(dl_mark_received(&dm, &h4) == UINT32_MAX);
 
         uint64_t req, recv, tout, inflight, queued;
         dl_get_stats(&dm, &req, &recv, &tout, &inflight, &queued);
@@ -570,7 +570,7 @@ static int test_dl_last_forced_settle_time_drain(void)
          * "received" for the same hash looks exactly like an unrequested
          * push (returns 0), which is precisely the ambiguity the grace
          * window exists to cover. */
-        ASSERT(dl_mark_received(&dm, &h1) == 0);
+        ASSERT(dl_mark_received(&dm, &h1) == UINT32_MAX);
 
         dl_free(&dm);
         PASS();
@@ -595,7 +595,7 @@ static int test_dl_last_forced_settle_time_timeout(void)
 
         /* Same trace as the drain case: the original (slow) peer's late
          * reply, if it ever arrives, is indistinguishable from unsolicited. */
-        ASSERT(dl_mark_received(&dm, &h1) == 0);
+        ASSERT(dl_mark_received(&dm, &h1) == UINT32_MAX);
 
         dl_free(&dm);
         PASS();
@@ -620,7 +620,7 @@ static int test_dl_last_forced_settle_time_untouched(void)
          * reads as provably unrequested — the grace window only fires
          * around an ACTUAL drain/timeout event. */
         struct uint256 never_asked = make_hash(99);
-        ASSERT(dl_mark_received(&dm, &never_asked) == 0);
+        ASSERT(dl_mark_received(&dm, &never_asked) == UINT32_MAX);
         ASSERT(dl_last_forced_settle_time(&dm) == 0);
 
         dl_free(&dm);

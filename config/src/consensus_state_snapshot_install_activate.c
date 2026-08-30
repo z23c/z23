@@ -38,6 +38,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "consensus_state_snapshot_install_activate_internal.h"
+#include "consensus_state_proof_prefix.h"
 /* Reuse the content-verify heartbeat primitive for the multi-minute activate
  * phases so a long install is never silent (VALIDATE_SUBSYS aliases here). */
 #define VALIDATE_SUBSYS ACTIVATE_SUBSYS
@@ -362,6 +363,19 @@ static bool activate_apply_in_tx(
                              "failed");
     if (!activate_clear_generation_metadata(progress_db, result))
         return false; // raw-return-ok:logged-by-activate_fail
+
+    /* The installed bundle's producer session/receipt were just purged: they
+     * belong to a foreign generation and must never become this node's local
+     * authority.  Retain the distinct, already-admitted proof PREFIX before
+     * clearing to an anchor, however.  Without it every successful install
+     * destroys the only genesis..anchor evidence a later standing exporter
+     * needs, making fresh generations impossible by construction.  This write
+     * joins the cutover transaction, so prefix and state land or roll back as
+     * one generation. */
+    if (!consensus_state_proof_prefix_install_in_tx(
+            progress_db, bundle_db, m))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "retaining admitted bundle proof prefix failed");
 
     /* 4. Stream coins + anchors (by pool) + nullifiers from the bundle. */
     uint64_t coins = 0, sprout = 0, sapling = 0, nfs = 0;

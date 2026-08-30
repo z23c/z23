@@ -8,6 +8,9 @@
 #include "config/boot.h"  /* boot_mint_anchor_export_bundle (lane A1 wiring) */
 #include "config/consensus_state_snapshot_export.h"
 #include "config/consensus_state_snapshot_install.h"
+#include "config/consensus_state_bundle_validate.h"
+#include "config/consensus_state_producer_receipt.h"
+#include "../../../config/src/consensus_state_proof_prefix.h"
 #include "jobs/tip_finalize_stage.h"
 #include "chain/checkpoints.h"
 #include "crypto/sha3.h"
@@ -1693,6 +1696,152 @@ int test_consensus_state_snapshot_export(void)
                                                &malformed_result) &&
               malformed_result.status == CONSENSUS_EXPORT_MISSING_PROOF &&
               access(malformed_output, F_OK) != 0);
+
+    /* An admitted bundle is a durable genesis..H prefix, not authority to
+     * pretend its deleted source rows are locally present. Retain that exact
+     * prefix, remove the local genesis header, prove one new linked suffix
+     * height under a fresh producer epoch, and require the emitted artifact to
+     * disclose a validator-recomputable composition boundary. */
+    sqlite3 *base_bundle = NULL;
+    struct consensus_state_bundle_manifest base_manifest;
+    struct consensus_state_install_result base_validation;
+    memset(&base_manifest, 0, sizeof(base_manifest));
+    memset(&base_validation, 0, sizeof(base_validation));
+    bool prefix_installed =
+        sqlite3_open_v2(output, &base_bundle, SQLITE_OPEN_READONLY, NULL) ==
+            SQLITE_OK &&
+        consensus_state_bundle_validate(base_bundle, &base_manifest,
+                                        &base_validation);
+    progress_store_tx_lock();
+    if (prefix_installed)
+        prefix_installed = cse_exec(db, "BEGIN IMMEDIATE") &&
+            consensus_state_proof_prefix_install_in_tx(
+                db, base_bundle, &base_manifest) &&
+            cse_exec(db, "COMMIT");
+    if (!prefix_installed)
+        (void)cse_exec(db, "ROLLBACK");
+    progress_store_tx_unlock();
+    if (base_bundle)
+        sqlite3_close(base_bundle);
+    CSE_CHECK("composed: admitted base proof retained", prefix_installed);
+
+    static const char composed_source_id[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    consensus_state_producer_receipt_test_set_identity(composed_source_id,
+                                                       true);
+    char producer_error[256] = {0};
+    CSE_CHECK("composed: fresh local producer epoch begins",
+              cse_exec(db, "DELETE FROM consensus_state_source_receipt") &&
+              consensus_state_producer_receipt_begin(
+                  db, CONSENSUS_STATE_VALIDATION_FULL, producer_error,
+                  sizeof(producer_error)));
+
+    uint8_t composed_hash[32];
+    for (size_t i = 0; i < sizeof(composed_hash); i++)
+        composed_hash[i] = (uint8_t)(0xd1u + i);
+    bool suffix_seeded =
+        cse_exec(db, "DELETE FROM header_admit_log WHERE height=0") &&
+        cse_insert_header(db, 2, composed_hash, hash[1]) &&
+        cse_insert_hash_row(
+            db, "INSERT INTO validate_headers_log VALUES(?,?,1)", 2,
+            composed_hash) &&
+        cse_insert_hash_row(
+            db, "INSERT INTO body_fetch_log VALUES(?,?,1)", 2,
+            composed_hash) &&
+        cse_exec(db, "INSERT INTO body_persist_log VALUES(2,1)") &&
+        cse_insert_hash_row(
+            db, "INSERT INTO script_validate_log("
+                "height,block_hash,ok,status,source_epoch_digest) "
+                "VALUES(?,?,1,'verified',(SELECT value FROM progress_meta "
+                "WHERE key='" CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "'))",
+            2, composed_hash) &&
+        cse_insert_hash_row(
+            db, "INSERT INTO proof_validate_log("
+                "height,block_hash,ok,status,source_epoch_digest) "
+                "VALUES(?,?,1,'verified',(SELECT value FROM progress_meta "
+                "WHERE key='" CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "'))",
+            2, composed_hash) &&
+        cse_exec(db, "INSERT INTO utxo_apply_log VALUES(2,1,'verified')") &&
+        cse_insert_hash_row(
+            db, "INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,"
+                "added_blob) VALUES(?,?,X'',X'')",
+            2, composed_hash) &&
+        cse_insert_hash_row(
+            db, "UPDATE tip_finalize_log SET tip_hash=?2 WHERE height=?1",
+            1, composed_hash) &&
+        cse_insert_tip(db, 2, "anchor", composed_hash) &&
+        cse_exec(db,
+            "UPDATE stage_cursor SET cursor=3 WHERE name!='tip_finalize';"
+            "UPDATE stage_cursor SET cursor=2 WHERE name='tip_finalize'");
+    progress_store_tx_lock();
+    bool applied_advanced = suffix_seeded && cse_exec(db, "BEGIN IMMEDIATE") &&
+        coins_kv_set_applied_height_in_tx(db, 3) && cse_exec(db, "COMMIT");
+    if (!applied_advanced)
+        (void)cse_exec(db, "ROLLBACK");
+    progress_store_tx_unlock();
+    CSE_CHECK("composed: only the linked local suffix is materialized",
+              suffix_seeded && applied_advanced);
+    CSE_CHECK("composed: receipt finalizes over prefix plus suffix",
+              consensus_state_producer_receipt_finalize(
+                  db, 2, composed_hash, producer_error,
+                  sizeof(producer_error)));
+
+    char composed_output[512];
+    snprintf(composed_output, sizeof(composed_output),
+             "%s/composed.bundle.db", export_dir);
+    request.output_name = "composed.bundle.db";
+    request.expected_height = 2;
+    memcpy(request.expected_block_hash, composed_hash, 32);
+    struct consensus_state_export_result composed_result;
+    CSE_CHECK("composed: prefix plus independently proven suffix exports",
+              consensus_state_snapshot_export(db, &request,
+                                              &composed_result) &&
+              composed_result.status == CONSENSUS_EXPORT_EXPORTED &&
+              composed_result.height == 2);
+    struct consensus_state_snapshot_install_request composed_install = {
+        .bundle_path = composed_output,
+        .expected_height = 2,
+        .failpoint = CONSENSUS_INSTALL_FAIL_NONE,
+    };
+    memcpy(composed_install.expected_block_hash, composed_hash, 32);
+    struct consensus_state_install_result composed_install_result;
+    CSE_CHECK("composed: production validator recomputes disclosed lineage",
+              !consensus_state_snapshot_install(
+                  db, &composed_install, &composed_install_result) &&
+              composed_install_result.status ==
+                  CONSENSUS_INSTALL_VERIFIED_CONTAINED);
+    bool lineage_tampered = chmod(composed_output, 0600) == 0 &&
+        sqlite3_open_v2(composed_output, &base_bundle,
+                        SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK &&
+        cse_insert_hash_row(
+            base_bundle,
+            "UPDATE proof_parent_component SET suffix_digest=?2 "
+            "WHERE ordinal=?1",
+            3, composed_hash);
+    if (base_bundle)
+        sqlite3_close(base_bundle);
+    base_bundle = NULL;
+    lineage_tampered = lineage_tampered && chmod(composed_output, 0444) == 0;
+    CSE_CHECK("composed: exact parent and suffix rows are independently mutable",
+              lineage_tampered);
+    struct consensus_state_install_result tampered_lineage;
+    struct consensus_state_bundle_manifest tampered_manifest;
+    memset(&tampered_lineage, 0, sizeof(tampered_lineage));
+    memset(&tampered_manifest, 0, sizeof(tampered_manifest));
+    bool tampered_open =
+        sqlite3_open_v2(composed_output, &base_bundle, SQLITE_OPEN_READONLY,
+                        NULL) == SQLITE_OK;
+    bool tampered_valid = tampered_open && consensus_state_bundle_validate(
+        base_bundle, &tampered_manifest, &tampered_lineage);
+    if (base_bundle)
+        sqlite3_close(base_bundle);
+    base_bundle = NULL;
+    CSE_CHECK("composed: changed suffix lineage is refused",
+              tampered_open && !tampered_valid &&
+              tampered_lineage.status == CONSENSUS_INSTALL_REFUSED &&
+              strstr(tampered_lineage.reason, "proof") != NULL);
+    consensus_state_producer_receipt_test_set_identity(NULL, false);
+    (void)unlink(composed_output);
 
     reducer_frontier_test_set_compiled_anchor(-1);
     checkpoints_reset_sha3_override_for_test();
