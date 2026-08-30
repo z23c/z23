@@ -5,6 +5,7 @@
 
 #include "net/file_market.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "core/amount.h"
 #include "crypto/ed25519.h"
@@ -19,16 +20,6 @@
 static const uint8_t k_offer_magic[8] = {'Z','F','M','O','F','F','\r','\n'};
 static const char k_body_domain[] = "zcl.file.market.offer.v1";
 static const char k_id_domain[] = "zcl.file.market.offer.id.v1";
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static void put_bytes(uint8_t *wire, size_t *off, const void *src, size_t len)
 {
@@ -205,7 +196,7 @@ static size_t offer_body_size(uint16_t version)
 
 static bool bytes_all_zero(const uint8_t *bytes, size_t len)
 {
-    return !bytes_nonzero(bytes, len);
+    return !zcl_bytes_any_set(bytes, len);
 }
 
 /* The endpoint half of field validation. v1 wires carry only the clearnet
@@ -215,18 +206,18 @@ static enum file_offer_auth_error offer_endpoint_fields(
     const struct file_offer *offer)
 {
     if (offer->auth_version == FILE_MARKET_OFFER_VERSION)
-        return bytes_nonzero(offer->peer_ip, sizeof(offer->peer_ip)) &&
+        return zcl_bytes_any_set(offer->peer_ip, sizeof(offer->peer_ip)) &&
                    offer->peer_port != 0
                    ? FILE_OFFER_AUTH_OK : FILE_OFFER_AUTH_ERR_ENDPOINT;
     /* v2 */
     if (offer->endpoint_type == FILE_MARKET_ENDPOINT_CLEARNET)
-        return bytes_nonzero(offer->peer_ip, sizeof(offer->peer_ip)) &&
+        return zcl_bytes_any_set(offer->peer_ip, sizeof(offer->peer_ip)) &&
                    offer->peer_port != 0 &&
                    bytes_all_zero(offer->onion_pubkey,
                                   sizeof(offer->onion_pubkey))
                    ? FILE_OFFER_AUTH_OK : FILE_OFFER_AUTH_ERR_ENDPOINT;
     if (offer->endpoint_type == FILE_MARKET_ENDPOINT_ONION)
-        return bytes_nonzero(offer->onion_pubkey,
+        return zcl_bytes_any_set(offer->onion_pubkey,
                              sizeof(offer->onion_pubkey)) &&
                    bytes_all_zero(offer->peer_ip, sizeof(offer->peer_ip)) &&
                    offer->peer_port == 0
@@ -245,11 +236,11 @@ static enum file_offer_auth_error offer_fields(const struct file_offer *offer,
         return FILE_OFFER_AUTH_ERR_NULL;
     if (!file_offer_auth_version_supported(offer->auth_version))
         return FILE_OFFER_AUTH_ERR_VERSION;
-    if (!bytes_nonzero(offer->network_genesis, 32))
+    if (!zcl_bytes_any_set(offer->network_genesis, 32))
         return FILE_OFFER_AUTH_ERR_NETWORK;
-    if (!bytes_nonzero(offer->root_hash, 32))
+    if (!zcl_bytes_any_set(offer->root_hash, 32))
         return FILE_OFFER_AUTH_ERR_CONTENT_ROOT;
-    if (!bytes_nonzero(offer->seller_pubkey, 32))
+    if (!zcl_bytes_any_set(offer->seller_pubkey, 32))
         return FILE_OFFER_AUTH_ERR_SELLER_KEY;
     if (offer->nonce == 0 || offer->nonce > (uint64_t)INT64_MAX)
         return FILE_OFFER_AUTH_ERR_NONCE;
@@ -279,7 +270,7 @@ static enum file_offer_auth_error offer_fields(const struct file_offer *offer,
         FILE_MARKET_OFFER_MAX_LIFETIME_SECS)
         return FILE_OFFER_AUTH_ERR_LIFETIME;
     if (require_signature &&
-        !bytes_nonzero(offer->seller_signature,
+        !zcl_bytes_any_set(offer->seller_signature,
                        sizeof(offer->seller_signature)))
         return FILE_OFFER_AUTH_ERR_SIGNATURE;
     return FILE_OFFER_AUTH_OK;

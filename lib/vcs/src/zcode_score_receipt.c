@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_score_receipt.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
 #include "vcs/signed_evidence.h"
@@ -14,13 +15,6 @@
 static const uint8_t score_magic[8] = {
     'Z', 'C', 'S', 'C', 'O', 'R', '\r', '\n'
 };
-
-static bool score_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static uint8_t score_popcount(uint8_t value)
 {
@@ -96,16 +90,16 @@ static enum vcs_zcode_score_error score_fields(
         receipt->lane_signer,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!score_nonzero(roots[i])) return VCS_ZCODE_SCORE_SHAPE;
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_SCORE_SHAPE;
     for (size_t i = 0; i < VCS_ZCODE_SCORE_UNITS; i++) {
         bool awarded = (receipt->awarded_mask & (UINT8_C(1) << i)) != 0;
-        if (awarded && !score_nonzero(receipt->evidence_roots[i]))
+        if (awarded && !zcl_bytes_any_set(receipt->evidence_roots[i], 32))
             return VCS_ZCODE_SCORE_SHAPE;
     }
     if (receipt->awarded_mask &
         (UINT8_C(1) << VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION))
         return VCS_ZCODE_SCORE_SHAPE;
-    if (signed_wire && !score_nonzero(receipt->signature))
+    if (signed_wire && !zcl_bytes_any_set(receipt->signature, 32))
         return VCS_ZCODE_SCORE_SIGNATURE;
     return VCS_ZCODE_SCORE_OK;
 }
@@ -445,9 +439,9 @@ enum vcs_zcode_score_error vcs_zcode_score_plan(
     memcpy(out->dependency_lock_root, input->dependency_lock_root, 32);
     memcpy(out->api_capsule_root, input->api_capsule_root, 32);
     memcpy(out->lane_signer, input->proven_lane->signer_pubkey, 32);
-    if (!score_nonzero(out->package_root) ||
-        !score_nonzero(out->release_root) ||
-        !score_nonzero(out->recipe_root) ||
+    if (!zcl_bytes_any_set(out->package_root, 32) ||
+        !zcl_bytes_any_set(out->release_root, 32) ||
+        !zcl_bytes_any_set(out->recipe_root, 32) ||
         memcmp(out->dependency_lock_root,
                input->task->dependency_lock_root, 32) != 0 ||
         memcmp(out->api_capsule_root,
@@ -473,7 +467,7 @@ enum vcs_zcode_score_error vcs_zcode_score_plan(
         if (work->work_kind !=
             score_unit_work_kind((enum vcs_zcode_score_unit)unit))
             continue;
-        if (score_nonzero(out->evidence_roots[unit]))
+        if (zcl_bytes_any_set(out->evidence_roots[unit], 32))
             return VCS_ZCODE_SCORE_DUPLICATE;
         memcpy(out->evidence_roots[unit], work->evidence_root, 32);
         bool awarded = unit != VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION ||

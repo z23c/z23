@@ -3,19 +3,12 @@
 
 #include "vcs/zcode_dht_delegation.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "vcs/zcode_dht.h"
 #include "zid/zendp.h"
 
 #include <string.h>
-
-static bool nonzero32(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    if (!value) return false;
-    for (size_t i = 0; i < 32; i++) any |= value[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_dht_delegation_error_string(
     enum vcs_zcode_dht_delegation_error error)
@@ -79,8 +72,8 @@ enum vcs_zcode_dht_delegation_error vcs_zcode_dht_delegation_sign(
         !noise_static_pubkey || !beacon_hash || !master_seed)
         return VCS_ZCODE_DHT_DELEGATION_NULL;
     memset(out, 0, sizeof(*out));
-    if (!nonzero32(network_genesis) || !nonzero32(online_pubkey) ||
-        !nonzero32(noise_static_pubkey) || !nonzero32(beacon_hash) ||
+    if (!zcl_bytes_any_set(network_genesis, 32) || !zcl_bytes_any_set(online_pubkey, 32) ||
+        !zcl_bytes_any_set(noise_static_pubkey, 32) || !zcl_bytes_any_set(beacon_hash, 32) ||
         beacon_height == 0)
         return VCS_ZCODE_DHT_DELEGATION_ZERO_KEY;
     if (zendp_window_check(not_before, expiry) != ZENDP_WINDOW_OK)
@@ -132,11 +125,11 @@ enum vcs_zcode_dht_delegation_error vcs_zcode_dht_delegation_verify(
     if (delegation->doc.body_len != VCS_ZCODE_DHT_DELEGATION_BODY_BYTES ||
         memcmp(delegation->doc.body, VCS_ZCODE_DHT_DELEGATION_TAG, 4) != 0)
         return VCS_ZCODE_DHT_DELEGATION_BODY;
-    if (!nonzero32(delegation->doc.master_pubkey) ||
-        !nonzero32(delegation->network_genesis) ||
-        !nonzero32(delegation->online_pubkey) ||
-        !nonzero32(delegation->noise_static_pubkey) ||
-        !nonzero32(delegation->beacon_hash) || delegation->beacon_height == 0)
+    if (!zcl_bytes_any_set(delegation->doc.master_pubkey, 32) ||
+        !zcl_bytes_any_set(delegation->network_genesis, 32) ||
+        !zcl_bytes_any_set(delegation->online_pubkey, 32) ||
+        !zcl_bytes_any_set(delegation->noise_static_pubkey, 32) ||
+        !zcl_bytes_any_set(delegation->beacon_hash, 32) || delegation->beacon_height == 0)
         return VCS_ZCODE_DHT_DELEGATION_ZERO_KEY;
     if (zendp_window_check(delegation->not_before,
                            delegation->doc.expiry) != ZENDP_WINDOW_OK)

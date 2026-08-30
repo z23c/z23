@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_discovery_rank.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "util/safe_alloc.h"
@@ -37,14 +38,6 @@ struct rank_order_entry {
     uint8_t root[32];
     uint64_t mass;
 };
-
-static bool rank_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static int rank_root_cmp(const void *a, const void *b)
 {
@@ -127,7 +120,7 @@ static enum vcs_zcode_discovery_rank_error rank_normalize(
     if (!out->nodes) return VCS_ZCODE_DISCOVERY_RANK_ERR_ALLOCATION;
     out->node_count = node_count;
     for (size_t i = 0; i < node_count; i++) {
-        if (!rank_nonzero(nodes[i].property_root)) {
+        if (!zcl_bytes_any_set(nodes[i].property_root, 32)) {
             rank_normalized_free(out);
             return VCS_ZCODE_DISCOVERY_RANK_ERR_ROOT_ZERO;
         }
@@ -151,8 +144,8 @@ static enum vcs_zcode_discovery_rank_error rank_normalize(
     }
     out->edge_count = edge_count;
     for (size_t i = 0; i < edge_count; i++) {
-        if (!rank_nonzero(edges[i].citing_property_root) ||
-            !rank_nonzero(edges[i].cited_property_root)) {
+        if (!zcl_bytes_any_set(edges[i].citing_property_root, 32) ||
+            !zcl_bytes_any_set(edges[i].cited_property_root, 32)) {
             rank_normalized_free(out);
             return VCS_ZCODE_DISCOVERY_RANK_ERR_ROOT_ZERO;
         }
@@ -186,7 +179,7 @@ static enum vcs_zcode_discovery_rank_error rank_normalize(
     }
     out->seed_count = seed_count;
     for (size_t i = 0; i < seed_count; i++) {
-        if (!rank_nonzero(seeds[i].property_root)) {
+        if (!zcl_bytes_any_set(seeds[i].property_root, 32)) {
             rank_normalized_free(out);
             return VCS_ZCODE_DISCOVERY_RANK_ERR_ROOT_ZERO;
         }
@@ -378,7 +371,7 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_compute(
         entry_capacity > VCS_ZCODE_DISCOVERY_RANK_MAX_NODES)
         return VCS_ZCODE_DISCOVERY_RANK_ERR_LIMIT;
     memset(entries, 0, entry_capacity * sizeof(*entries));
-    if (!rank_nonzero(filter_policy_root))
+    if (!zcl_bytes_any_set(filter_policy_root, 32))
         return VCS_ZCODE_DISCOVERY_RANK_ERR_ROOT_ZERO;
 
     struct rank_normalized normalized;
@@ -509,9 +502,9 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_validate(
         return VCS_ZCODE_DISCOVERY_RANK_ERR_NULL;
     if (result->schema_version != VCS_ZCODE_DISCOVERY_RANK_VERSION)
         return VCS_ZCODE_DISCOVERY_RANK_ERR_VERSION;
-    if (!rank_nonzero(result->graph_root) ||
-        !rank_nonzero(result->seed_set_root) ||
-        !rank_nonzero(result->filter_policy_root))
+    if (!zcl_bytes_any_set(result->graph_root, 32) ||
+        !zcl_bytes_any_set(result->seed_set_root, 32) ||
+        !zcl_bytes_any_set(result->filter_policy_root, 32))
         return VCS_ZCODE_DISCOVERY_RANK_ERR_ROOT_ZERO;
     if (result->node_count == 0 ||
         result->node_count > VCS_ZCODE_DISCOVERY_RANK_MAX_NODES ||
@@ -523,7 +516,7 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_validate(
     for (size_t i = 0; i < result->entry_count; i++) {
         const struct vcs_zcode_discovery_rank_entry_v1 *entry =
             &result->entries[i];
-        if (!rank_nonzero(entry->property_root) ||
+        if (!zcl_bytes_any_set(entry->property_root, 32) ||
             entry->mass > VCS_ZCODE_DISCOVERY_RANK_MASS)
             return VCS_ZCODE_DISCOVERY_RANK_ERR_COVERAGE;
         if (i > 0) {

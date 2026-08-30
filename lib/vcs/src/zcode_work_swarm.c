@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_work_swarm.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "util/log_macros.h"
 #include "vcs/signed_evidence.h"
@@ -23,16 +24,9 @@
 
 static const uint8_t zcws_magic[4] = { 'Z', 'C', 'W', 'S' };
 
-static bool zcws_nonzero(const uint8_t *value, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= value[i];
-    return any != 0;
-}
-
 static bool zcws_zero(const uint8_t *value, size_t len)
 {
-    return !zcws_nonzero(value, len);
+    return !zcl_bytes_any_set(value, len);
 }
 
 static bool zcws_work_kind(uint8_t kind)
@@ -51,8 +45,8 @@ static bool zcws_capability_valid(
         (UINT32_C(1) << VCS_ZCODE_WORK_REVIEW) |
         (UINT32_C(1) << VCS_ZCODE_WORK_REPRODUCE) |
         (UINT32_C(1) << VCS_ZCODE_WORK_DIAGNOSE);
-    return c && zcws_nonzero(c->signer_pubkey, 32) &&
-           zcws_nonzero(c->toolchain_capsule_root, 32) &&
+    return c && zcl_bytes_any_set(c->signer_pubkey, 32) &&
+           zcl_bytes_any_set(c->toolchain_capsule_root, 32) &&
            c->work_kinds != 0 && (c->work_kinds & ~known) == 0 &&
            c->target == VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3 &&
            (c->confinement & ~VCS_ZCODE_WORK_CONFINEMENT_V1_MASK) == 0 &&
@@ -69,13 +63,13 @@ static bool zcws_capability_valid(
 static bool zcws_request_valid(const struct vcs_zcode_work_request_v1 *r)
 {
     if (!r || r->request_id == 0 ||
-        !zcws_nonzero(r->requester_pubkey, 32) ||
-        !zcws_nonzero(r->task_root, 32) || !zcws_work_kind(r->work_kind) ||
-        !zcws_nonzero(r->action_root, 32) ||
-        !zcws_nonzero(r->input_root, 32) ||
-        !zcws_nonzero(r->context_root, 32) ||
-        !zcws_nonzero(r->proof_policy_root, 32) ||
-        !zcws_nonzero(r->toolchain_capsule_root, 32) ||
+        !zcl_bytes_any_set(r->requester_pubkey, 32) ||
+        !zcl_bytes_any_set(r->task_root, 32) || !zcws_work_kind(r->work_kind) ||
+        !zcl_bytes_any_set(r->action_root, 32) ||
+        !zcl_bytes_any_set(r->input_root, 32) ||
+        !zcl_bytes_any_set(r->context_root, 32) ||
+        !zcl_bytes_any_set(r->proof_policy_root, 32) ||
+        !zcl_bytes_any_set(r->toolchain_capsule_root, 32) ||
         r->target != VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3 ||
         r->max_cpu_seconds == 0 || r->max_memory_bytes == 0 ||
         r->max_memory_bytes > VCS_ZCODE_TASK_MAX_MEMORY_BYTES ||
@@ -85,43 +79,43 @@ static bool zcws_request_valid(const struct vcs_zcode_work_request_v1 *r)
         return false;
     return r->work_kind == VCS_ZCODE_WORK_PROPOSE
         ? zcws_zero(r->candidate_root, 32)
-        : zcws_nonzero(r->candidate_root, 32);
+        : zcl_bytes_any_set(r->candidate_root, 32);
 }
 
 static bool zcws_result_shape(const struct vcs_zcode_work_result_v1 *r)
 {
-    return r && r->request_id != 0 && zcws_nonzero(r->task_root, 32) &&
-           zcws_nonzero(r->candidate_root, 32) &&
-           zcws_nonzero(r->action_root, 32) &&
-           zcws_nonzero(r->output_root, 32) &&
+    return r && r->request_id != 0 && zcl_bytes_any_set(r->task_root, 32) &&
+           zcl_bytes_any_set(r->candidate_root, 32) &&
+           zcl_bytes_any_set(r->action_root, 32) &&
+           zcl_bytes_any_set(r->output_root, 32) &&
            vcs_zcode_work_receipt_validate(&r->receipt) == VCS_ZCODE_DEV_OK;
 }
 
 static bool zcws_cancel_valid(const struct vcs_zcode_work_cancel_v1 *c)
 {
-    return c && c->request_id != 0 && zcws_nonzero(c->task_root, 32) &&
-           zcws_nonzero(c->requester_pubkey, 32);
+    return c && c->request_id != 0 && zcl_bytes_any_set(c->task_root, 32) &&
+           zcl_bytes_any_set(c->requester_pubkey, 32);
 }
 
 static bool zcws_progress_valid(
     const struct vcs_zcode_work_progress_v1 *p)
 {
     return p && p->request_id != 0 &&
-           zcws_nonzero(p->task_root, 32) &&
-           zcws_nonzero(p->candidate_root, 32) &&
-           zcws_nonzero(p->action_root, 32) &&
+           zcl_bytes_any_set(p->task_root, 32) &&
+           zcl_bytes_any_set(p->candidate_root, 32) &&
+           zcl_bytes_any_set(p->action_root, 32) &&
            (p->stage == VCS_ZCODE_WORK_PROGRESS_CONTEXT_READY ||
             p->stage == VCS_ZCODE_WORK_PROGRESS_EXECUTION_STARTED) &&
-           p->observed_unix > 0 && zcws_nonzero(p->signer_pubkey, 32);
+           p->observed_unix > 0 && zcl_bytes_any_set(p->signer_pubkey, 32);
 }
 
 static bool zcws_admission_valid(
     const struct vcs_zcode_work_admission_v1 *a)
 {
     if (!a || a->request_id == 0 ||
-        !zcws_nonzero(a->requester_pubkey, 32) ||
-        !zcws_nonzero(a->action_root, 32) ||
-        !zcws_nonzero(a->worker_signer, 32))
+        !zcl_bytes_any_set(a->requester_pubkey, 32) ||
+        !zcl_bytes_any_set(a->action_root, 32) ||
+        !zcl_bytes_any_set(a->worker_signer, 32))
         return false;
     if (a->disposition == VCS_ZCODE_WORK_ADMISSION_GRANTED ||
         a->disposition == VCS_ZCODE_WORK_ADMISSION_ATTACHED)
@@ -314,7 +308,7 @@ bool vcs_zcode_work_capability_seal(
     struct vcs_zcode_work_capability_v1 *c,
     const uint8_t secret[32], const uint8_t pubkey[32])
 {
-    if (!c || !secret || !pubkey || !zcws_nonzero(pubkey, 32)) return false;
+    if (!c || !secret || !pubkey || !zcl_bytes_any_set(pubkey, 32)) return false;
     memcpy(c->signer_pubkey, pubkey, 32);
     uint8_t id[32];
     if (!zcws_signed_id(VCS_ZCODE_WORK_SWARM_CAPABILITY, c, id)) return false;
@@ -335,7 +329,7 @@ bool vcs_zcode_work_request_seal(
     struct vcs_zcode_work_request_v1 *r,
     const uint8_t secret[32], const uint8_t pubkey[32])
 {
-    if (!r || !secret || !pubkey || !zcws_nonzero(pubkey, 32)) return false;
+    if (!r || !secret || !pubkey || !zcl_bytes_any_set(pubkey, 32)) return false;
     memcpy(r->requester_pubkey, pubkey, 32);
     uint8_t id[32];
     if (!zcws_signed_id(VCS_ZCODE_WORK_SWARM_REQUEST, r, id)) return false;
@@ -355,7 +349,7 @@ bool vcs_zcode_work_cancel_seal(
     struct vcs_zcode_work_cancel_v1 *c,
     const uint8_t secret[32], const uint8_t pubkey[32])
 {
-    if (!c || !secret || !pubkey || !zcws_nonzero(pubkey, 32)) return false;
+    if (!c || !secret || !pubkey || !zcl_bytes_any_set(pubkey, 32)) return false;
     memcpy(c->requester_pubkey, pubkey, 32);
     uint8_t id[32];
     if (!zcws_signed_id(VCS_ZCODE_WORK_SWARM_CANCEL, c, id)) return false;
@@ -376,7 +370,7 @@ bool vcs_zcode_work_progress_seal(
     struct vcs_zcode_work_progress_v1 *p,
     const uint8_t secret[32], const uint8_t pubkey[32])
 {
-    if (!p || !secret || !pubkey || !zcws_nonzero(pubkey, 32)) return false;
+    if (!p || !secret || !pubkey || !zcl_bytes_any_set(pubkey, 32)) return false;
     memcpy(p->signer_pubkey, pubkey, 32);
     uint8_t id[32];
     if (!zcws_signed_id(VCS_ZCODE_WORK_SWARM_PROGRESS, p, id)) return false;
@@ -410,7 +404,7 @@ bool vcs_zcode_work_admission_seal(
     struct vcs_zcode_work_admission_v1 *a,
     const uint8_t secret[32], const uint8_t pubkey[32])
 {
-    if (!a || !secret || !pubkey || !zcws_nonzero(pubkey, 32)) return false;
+    if (!a || !secret || !pubkey || !zcl_bytes_any_set(pubkey, 32)) return false;
     memcpy(a->worker_signer, pubkey, 32);
     uint8_t id[32];
     if (!zcws_signed_id(VCS_ZCODE_WORK_SWARM_ADMISSION, a, id)) return false;

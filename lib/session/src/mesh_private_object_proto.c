@@ -3,6 +3,7 @@
 
 #include "session/mesh_private_object_proto.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -24,16 +25,6 @@ static const char offer_transfer_id_domain[] =
 
 #define OFFER_UNSIGNED_BYTES \
     (MESH_PRIVATE_OBJECT_OFFER_V1_WIRE_BYTES - 64u)
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < count; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static uint32_t expected_chunks(uint64_t size)
 {
@@ -96,16 +87,16 @@ static enum mesh_private_object_proto_error offer_shape(
         offer->plaintext_root, offer->ephemeral_x25519_pubkey,
     };
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
-        if (!bytes_nonzero(critical[i], 32))
+        if (!zcl_bytes_any_set(critical[i], 32))
             return MESH_PRIVATE_OBJECT_PROTO_FIELD;
-    if (require_grant_id && !bytes_nonzero(offer->grant_id, 32))
+    if (require_grant_id && !zcl_bytes_any_set(offer->grant_id, 32))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     if (offer->connection_generation == 0)
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
-    if (require_request_id && !bytes_nonzero(offer->request_id, 32))
+    if (require_request_id && !zcl_bytes_any_set(offer->request_id, 32))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     if (require_ciphertext_root &&
-        !bytes_nonzero(offer->ciphertext_root, 32))
+        !zcl_bytes_any_set(offer->ciphertext_root, 32))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     uint32_t chunk_count = expected_chunks(offer->object_size_bytes);
     uint64_t expected_ciphertext = offer->object_size_bytes +
@@ -129,7 +120,7 @@ static enum mesh_private_object_proto_error offer_shape(
             MESH_PRIVATE_OBJECT_DENY_REQUIRED ||
         (offer->deny_mask & ~MESH_PRIVATE_OBJECT_DENY_KNOWN) != 0)
         return MESH_PRIVATE_OBJECT_PROTO_DENY;
-    if (require_signature && !bytes_nonzero(offer->signature, 64))
+    if (require_signature && !zcl_bytes_any_set(offer->signature, 64))
         return MESH_PRIVATE_OBJECT_PROTO_SIGNATURE;
     return MESH_PRIVATE_OBJECT_PROTO_OK;
 }
@@ -196,7 +187,7 @@ mesh_private_object_offer_request_id_v1_derive(
 {
     if (!offer || !grant_nonce || !out)
         return MESH_PRIVATE_OBJECT_PROTO_NULL;
-    if (!bytes_nonzero(grant_nonce, 32))
+    if (!zcl_bytes_any_set(grant_nonce, 32))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     struct mesh_private_object_offer_v1 material = *offer;
     memset(material.request_id, 0, sizeof(material.request_id));
@@ -270,7 +261,7 @@ mesh_private_object_offer_transfer_id_v1(
 {
     if (!offer || !out)
         return MESH_PRIVATE_OBJECT_PROTO_NULL;
-    if (!bytes_nonzero(offer->ciphertext_root, 32))
+    if (!zcl_bytes_any_set(offer->ciphertext_root, 32))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     uint8_t context[32];
     enum mesh_private_object_proto_error error =

@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_dht_record.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
@@ -13,19 +14,9 @@
 static const uint8_t record_magic[8] = {'Z', 'C', 'D', 'H',
                                         'T', 'R', 0x0d, 0x0a};
 
-static bool record_nonzero(const uint8_t *value, size_t length)
-{
-  uint8_t any = 0;
-  if (!value)
-    return false;
-  for (size_t i = 0; i < length; i++)
-    any |= value[i];
-  return any != 0;
-}
-
 static bool record_zero(const uint8_t *value, size_t length)
 {
-  return !record_nonzero(value, length);
+  return !zcl_bytes_any_set(value, length);
 }
 
 const char *vcs_zcode_dht_record_error_string(
@@ -93,7 +84,7 @@ bool vcs_zcode_dht_record_key(
     const uint8_t root[32], uint8_t out[32])
 {
   if (!network_genesis || !namespace_name || !root || !out ||
-      !record_nonzero(network_genesis, 32) || !record_nonzero(root, 32) ||
+      !zcl_bytes_any_set(network_genesis, 32) || !zcl_bytes_any_set(root, 32) ||
       !namespace_valid(namespace_name, NULL) ||
       kind < VCS_ZCODE_DHT_RECORD_PROVIDER ||
       kind > VCS_ZCODE_DHT_RECORD_AGENT_SCOPE)
@@ -138,30 +129,30 @@ static enum vcs_zcode_dht_record_error record_shape(
     return VCS_ZCODE_DHT_RECORD_KIND;
   if (!namespace_valid(record->namespace_name, NULL))
     return VCS_ZCODE_DHT_RECORD_NAMESPACE;
-  if (!record_nonzero(record->network_genesis, 32) ||
-      !record_nonzero(record->transport_root, 32))
+  if (!zcl_bytes_any_set(record->network_genesis, 32) ||
+      !zcl_bytes_any_set(record->transport_root, 32))
     return VCS_ZCODE_DHT_RECORD_ROOT;
   if (record->kind == VCS_ZCODE_DHT_RECORD_POINTER) {
-    if (!record_nonzero(record->semantic_root, 32) ||
+    if (!zcl_bytes_any_set(record->semantic_root, 32) ||
         !record_zero(record->owner_group, 32))
-      return record_nonzero(record->owner_group, 32)
+      return zcl_bytes_any_set(record->owner_group, 32)
                  ? VCS_ZCODE_DHT_RECORD_OWNER_GROUP
                  : VCS_ZCODE_DHT_RECORD_ROOT;
   } else if (record->kind ==
              VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) {
-    if (!record_nonzero(record->semantic_root, 32))
+    if (!zcl_bytes_any_set(record->semantic_root, 32))
       return VCS_ZCODE_DHT_RECORD_ROOT;
   } else if (!record_zero(record->semantic_root, 32)) {
     return VCS_ZCODE_DHT_RECORD_ROOT;
   }
   if (record->kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK ||
       record->kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK) {
-    if (!record_nonzero(record->owner_group, 32))
+    if (!zcl_bytes_any_set(record->owner_group, 32))
       return VCS_ZCODE_DHT_RECORD_OWNER_GROUP;
   } else if (!record_zero(record->owner_group, 32)) {
     return VCS_ZCODE_DHT_RECORD_OWNER_GROUP;
   }
-  if (!record_nonzero(record->provider_node_id, 32))
+  if (!zcl_bytes_any_set(record->provider_node_id, 32))
     return VCS_ZCODE_DHT_RECORD_PROVIDER_ID;
   if (!record->sequence || record->sequence > (uint64_t)INT64_MAX)
     return VCS_ZCODE_DHT_RECORD_SEQUENCE;
@@ -286,7 +277,7 @@ enum vcs_zcode_dht_record_error vcs_zcode_dht_record_encode(
   error = record_delegation_binding(record);
   if (error != VCS_ZCODE_DHT_RECORD_OK)
     return error;
-  if (!record_nonzero(record->signature, sizeof(record->signature)))
+  if (!zcl_bytes_any_set(record->signature, sizeof(record->signature)))
     return VCS_ZCODE_DHT_RECORD_SIGNATURE;
   size_t off = record_write_unsigned(record, wire);
   if (!off)

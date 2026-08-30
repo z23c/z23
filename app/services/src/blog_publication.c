@@ -3,6 +3,7 @@
 
 #include "services/blog_publication_service.h"
 
+#include "base/bytes.h"
 #include "chain/chainparams.h"
 #include "keys/key_io.h"
 #include "models/app_event.h"
@@ -33,14 +34,6 @@ enum blog_publication_error {
     BLOG_ERR_VALIDATION = -9,
     BLOG_ERR_TX = -10,
 };
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static void write_u16_le(uint8_t out[2], uint16_t value)
 {
@@ -462,7 +455,7 @@ struct zcl_result blog_anchor_script_build(
         *out_len = 0;
     size_t name_len = 0;
     if (!blog_name || !event_id || !out || !out_len || out_capacity == 0 ||
-        !bytes_nonzero(event_id, 32) ||
+        !zcl_bytes_any_set(event_id, 32) ||
         !payload_field_size(blog_name, BLOG_NAME_MAX, &name_len))
         return ZCL_ERR(BLOG_ERR_ARGS,
                        "Blog anchor requires canonical name, event ID, and output");

@@ -5,6 +5,7 @@
 
 #include "zswap/zswap_quote.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
@@ -13,17 +14,9 @@
 
 static const uint8_t quote_magic[8] = {'Z','S','W','Q','T','E','\r','\n'};
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool root_nonzero(const uint8_t root[32])
 {
-    return bytes_nonzero(root, 32);
+    return zcl_bytes_any_set(root, 32);
 }
 
 static void put_bytes(uint8_t *wire, size_t *off, const void *src, size_t len)
@@ -123,7 +116,7 @@ static enum zswap_quote_error quote_fields(const struct zswap_quote_v1 *quote,
         ZSWAP_QUOTE_MAX_LIFETIME_SECS)
         return ZSWAP_QUOTE_ERR_LIFETIME;
     if (require_signature &&
-        !bytes_nonzero(quote->seller_signature,
+        !zcl_bytes_any_set(quote->seller_signature,
                        sizeof(quote->seller_signature)))
         return ZSWAP_QUOTE_ERR_SIGNATURE;
     return ZSWAP_QUOTE_OK;

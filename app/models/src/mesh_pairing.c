@@ -3,6 +3,7 @@
 
 #include "models/mesh_pairing.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "crypto/sha3.h"
 #include "util/log_macros.h"
@@ -12,23 +13,15 @@
 
 DEFINE_MODEL_CALLBACKS(mesh_pairing)
 
-static bool mesh_pairing_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= value[i];
-    return any != 0;
-}
-
 bool mesh_pairing_id_derive(
     const uint8_t network_genesis[32], const uint8_t peer_master_pubkey[32],
     const uint8_t peer_noise_pubkey[32],
     char out[MESH_PAIRING_ID_HEX + 1])
 {
     if (!network_genesis || !peer_master_pubkey || !peer_noise_pubkey ||
-        !out || !mesh_pairing_nonzero(network_genesis) ||
-        !mesh_pairing_nonzero(peer_master_pubkey) ||
-        !mesh_pairing_nonzero(peer_noise_pubkey))
+        !out || !zcl_bytes_any_set(network_genesis, 32) ||
+        !zcl_bytes_any_set(peer_master_pubkey, 32) ||
+        !zcl_bytes_any_set(peer_noise_pubkey, 32))
         LOG_FAIL("mesh_pairing", "derive: missing or zero identity input");
     static const uint8_t domain[] = "zcl.mesh.pairing.v1";
     struct sha3_256_ctx hash;
@@ -77,9 +70,9 @@ bool db_mesh_pairing_validate(const struct db_mesh_pairing *row,
         return false;
     }
     char derived[MESH_PAIRING_ID_HEX + 1] = {0};
-    bool identities = mesh_pairing_nonzero(row->network_genesis) &&
-                      mesh_pairing_nonzero(row->peer_master_pubkey) &&
-                      mesh_pairing_nonzero(row->peer_noise_pubkey);
+    bool identities = zcl_bytes_any_set(row->network_genesis, 32) &&
+                      zcl_bytes_any_set(row->peer_master_pubkey, 32) &&
+                      zcl_bytes_any_set(row->peer_noise_pubkey, 32);
     bool id_ok = identities && mesh_pairing_id_derive(
         row->network_genesis, row->peer_master_pubkey,
         row->peer_noise_pubkey, derived);

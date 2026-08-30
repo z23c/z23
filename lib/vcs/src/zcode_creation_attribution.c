@@ -2,6 +2,7 @@
  * Purpose: canonical factual attribution for policy-eligible ZC23 creation. */
 #include "vcs/zcode_creation_attribution.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
@@ -14,17 +15,9 @@ static const uint8_t creation_magic[8] = {
     'Z', 'C', 'C', 'R', 'E', 'A', '\r', '\n'
 };
 
-static bool creation_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= root[i];
-    return any != 0;
-}
-
 static bool creation_root_zero(const uint8_t root[32])
 {
-    return !creation_root_nonzero(root);
+    return !zcl_bytes_any_set(root, 32);
 }
 
 const char *vcs_zcode_creation_error_string(
@@ -108,7 +101,7 @@ enum vcs_zcode_creation_error vcs_zcode_creation_attribution_validate(
         a->license_evidence_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!creation_root_nonzero(roots[i]))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_CREATION_ROOT;
 
     uint64_t expected_height = 0;

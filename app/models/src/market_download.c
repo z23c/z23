@@ -3,6 +3,7 @@
 
 #include "models/market_download.h"
 
+#include "base/bytes.h"
 #include "models/model_fields.h"
 #include "models/def/market_download_fields.def"
 
@@ -44,14 +45,6 @@ ZCL_MODEL_BIND_FN(market_download_chunk_bind,
                   struct market_download_chunk_record,
                   MARKET_DOWNLOAD_CHUNK_FIELDS)
 
-static bool market_download_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= value[i];
-    return any != 0;
-}
-
 const char *market_download_state_name(enum market_download_state state)
 {
     switch (state) {
@@ -71,11 +64,11 @@ bool db_market_download_validate(const struct market_download_record *record,
         return false;
     }
     uint32_t expected_chunks = 0;
-    validates_custom(errors, market_download_nonzero(record->plan_id),
+    validates_custom(errors, zcl_bytes_any_set(record->plan_id, 32),
                      "plan_id", "can't be all zero");
-    validates_custom(errors, market_download_nonzero(record->offer_id),
+    validates_custom(errors, zcl_bytes_any_set(record->offer_id, 32),
                      "offer_id", "can't be all zero");
-    validates_custom(errors, market_download_nonzero(record->root_hash),
+    validates_custom(errors, zcl_bytes_any_set(record->root_hash, 32),
                      "root_hash", "can't be all zero");
     validates_custom(errors, record->private_destination[0] == '/' &&
         strnlen(record->private_destination, MARKET_DOWNLOAD_PATH_MAX) <
@@ -118,13 +111,13 @@ bool db_market_download_chunk_validate(
         ar_errors_add(errors, "record", "is NULL");
         return false;
     }
-    validates_custom(errors, market_download_nonzero(record->plan_id),
+    validates_custom(errors, zcl_bytes_any_set(record->plan_id, 32),
                      "plan_id", "can't be all zero");
     validates_max(errors, record, chunk_index,
                   MARKET_DOWNLOAD_MAX_CHUNKS - 1u);
     validates_range(errors, record, size_bytes, 1,
                     FILE_MARKET_CHUNK_SIZE);
-    validates_custom(errors, market_download_nonzero(record->chunk_sha3),
+    validates_custom(errors, zcl_bytes_any_set(record->chunk_sha3, 32),
                      "chunk_sha3", "can't be all zero");
     validates_positive(errors, record, created_at);
     return !ar_errors_any(errors);

@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_work_node.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
@@ -156,9 +157,7 @@ bool vcs_zcode_work_node_set_local_signer(
     const uint8_t pubkey[32])
 {
     if (!node || !secret || !pubkey) return false;
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= pubkey[i];
-    if (any == 0) return false;
+    if (!zcl_bytes_any_set(pubkey, 32)) return false;
     pthread_mutex_lock(&node->lock);
     bool compatible = !node->has_local_capability ||
         memcmp(node->local_capability.signer_pubkey, pubkey, 32) == 0;

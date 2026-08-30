@@ -3,6 +3,7 @@
 
 #include "models/mesh_capability_grant.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
@@ -12,14 +13,6 @@
 #include <string.h>
 
 DEFINE_MODEL_CALLBACKS(mesh_capability_grant)
-
-static bool capability_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= value[i];
-    return any != 0;
-}
 
 static bool capability_hex_id(const char *value)
 {
@@ -108,16 +101,16 @@ bool db_mesh_capability_grant_validate(
                      "grant_id", "must match every immutable grant field");
     validates_custom(errors, pairing_ok, "pairing_id",
                      "must be 64 canonical lowercase hex chars");
-    validates_custom(errors, capability_nonzero(grant->target_master_pubkey),
+    validates_custom(errors, zcl_bytes_any_set(grant->target_master_pubkey, 32),
                      "target_master_pubkey", "must be non-zero");
-    validates_custom(errors, capability_nonzero(grant->target_noise_static),
+    validates_custom(errors, zcl_bytes_any_set(grant->target_noise_static, 32),
                      "target_noise_static", "must be non-zero");
     validates_custom(errors,
                      grant->operation == MESH_CAPABILITY_PRIVATE_OBJECT_RECEIVE,
                      "operation", "must be private-object receive");
-    validates_custom(errors, capability_nonzero(grant->plaintext_root),
+    validates_custom(errors, zcl_bytes_any_set(grant->plaintext_root, 32),
                      "plaintext_root", "must be non-zero");
-    validates_custom(errors, capability_nonzero(grant->ciphertext_root),
+    validates_custom(errors, zcl_bytes_any_set(grant->ciphertext_root, 32),
                      "ciphertext_root", "must be non-zero");
     validates_custom(errors, capability_geometry_valid(grant), "geometry",
                      "must use canonical sealed 64 KiB chunks");
@@ -143,7 +136,7 @@ bool db_mesh_capability_grant_validate(
                          grant->wall_limit_seconds <=
                              MESH_CAPABILITY_GRANT_MAX_WALL_SECONDS,
                      "wall_limit_seconds", "is outside the wall-time cap");
-    validates_custom(errors, capability_nonzero(grant->nonce), "nonce",
+    validates_custom(errors, zcl_bytes_any_set(grant->nonce, 32), "nonce",
                      "must be non-zero");
     validates_custom(errors,
                      grant->deny_mask == MESH_CAPABILITY_DENY_MANDATORY,
@@ -156,7 +149,7 @@ bool db_mesh_capability_grant_validate(
                          grant->expires_at - grant->issued_at <=
                              MESH_CAPABILITY_GRANT_MAX_LIFETIME_SECONDS,
                      "validity", "has an invalid or excessive window");
-    bool transfer_set = capability_nonzero(grant->transfer_id);
+    bool transfer_set = zcl_bytes_any_set(grant->transfer_id, 32);
     validates_custom(errors,
                      (grant->claimed_at == 0 && !transfer_set &&
                       grant->consumed_at == 0) ||
@@ -258,7 +251,7 @@ bool db_mesh_capability_grant_insert(
     struct node_db *ndb, const struct db_mesh_capability_grant *grant)
 {
     if (!ndb || !ndb->open || !grant || grant->claimed_at != 0 ||
-        grant->consumed_at != 0 || capability_nonzero(grant->transfer_id) ||
+        grant->consumed_at != 0 || zcl_bytes_any_set(grant->transfer_id, 32) ||
         grant->revoked_at != 0 || grant->revocation_generation != 0)
         LOG_FAIL("mesh_capability", "insert: bad arguments or mutable state");
     struct db_mesh_pairing pairing;
@@ -422,7 +415,7 @@ enum mesh_capability_claim_result db_mesh_capability_grant_claim(
 {
     struct db_mesh_capability_grant row;
     if (!ndb || !ndb->open || !transfer_id ||
-        !capability_nonzero(transfer_id) || now <= 0 ||
+        !zcl_bytes_any_set(transfer_id, 32) || now <= 0 ||
         pairing_generation > (uint64_t)INT64_MAX ||
         grant_generation > (uint64_t)INT64_MAX ||
         !db_mesh_capability_grant_find(ndb, grant_id, &row) ||
@@ -497,7 +490,7 @@ enum mesh_capability_complete_result db_mesh_capability_grant_complete(
 {
     struct db_mesh_capability_grant row;
     if (!ndb || !ndb->open || !transfer_id ||
-        !capability_nonzero(transfer_id) || now <= 0 ||
+        !zcl_bytes_any_set(transfer_id, 32) || now <= 0 ||
         pairing_generation > (uint64_t)INT64_MAX ||
         grant_generation > (uint64_t)INT64_MAX ||
         !db_mesh_capability_grant_find(ndb, grant_id, &row) ||

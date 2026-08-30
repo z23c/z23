@@ -6,6 +6,7 @@
  * there so server policy has exactly one home. */
 
 #include "net/file_market_delivery.h"
+#include "base/bytes.h"
 #include "net/file_market_delivery_internal.h"
 
 #include "net/file_market.h"
@@ -81,7 +82,7 @@ enum file_market_delivery_status file_market_delivery_fetch_session_until(
     if (reply.status != FILE_MARKET_DELIVERY_READY)
         return reply.status;
     if (reply.size == 0 || reply.size > FILE_MARKET_CHUNK_SIZE ||
-        !delivery_bytes_nonzero(reply.sha3, 32))
+        !zcl_bytes_any_set(reply.sha3, 32))
         return FILE_MARKET_DELIVERY_MALFORMED;
 
     uint8_t *data = NULL;
@@ -122,7 +123,7 @@ static platform_socket_t delivery_connect_endpoint(const uint8_t peer_ip[16],
                                                    uint16_t peer_port,
                                                    int64_t deadline_ms)
 {
-    if (!peer_ip || !delivery_bytes_nonzero(peer_ip, 16) || peer_port == 0)
+    if (!peer_ip || !zcl_bytes_any_set(peer_ip, 16) || peer_port == 0)
         return PLATFORM_SOCKET_INVALID;
     int64_t now_ms = platform_time_monotonic_ms();
     if (deadline_ms != INT64_MAX &&

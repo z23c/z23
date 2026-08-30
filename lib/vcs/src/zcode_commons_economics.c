@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_commons.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -16,14 +17,6 @@ static const uint64_t award_schedule[VCS_ZCODE_COMMONS_CATEGORY_COUNT] = {
     UINT64_C(25000000), UINT64_C(25000000), UINT64_C(25000000),
     UINT64_C(25000000), UINT64_C(12500000),
 };
-
-static bool cv2_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static void cv2_hash_u16(struct sha3_256_ctx *sha, uint16_t value)
 {
@@ -107,10 +100,10 @@ enum vcs_zcode_commons_error vcs_zcode_policy_candidate_v2_validate(
     if (policy->challenge_blocks != VCS_ZCODE_COMMONS_CHALLENGE_BLOCKS ||
         policy->challenge_seconds != VCS_ZCODE_COMMONS_CHALLENGE_SECONDS)
         return VCS_ZCODE_COMMONS_POLICY;
-    if (!cv2_nonzero(policy->network_genesis_root) ||
-        !cv2_nonzero(policy->moderation_policy_root) ||
-        !cv2_nonzero(policy->qualification_predicates_root) ||
-        !cv2_nonzero(policy->backlog_algorithm_root))
+    if (!zcl_bytes_any_set(policy->network_genesis_root, 32) ||
+        !zcl_bytes_any_set(policy->moderation_policy_root, 32) ||
+        !zcl_bytes_any_set(policy->qualification_predicates_root, 32) ||
+        !zcl_bytes_any_set(policy->backlog_algorithm_root, 32))
         return VCS_ZCODE_COMMONS_ROOT;
     for (size_t i = 0; i < VCS_ZCODE_COMMONS_CATEGORY_COUNT; i++)
         if (policy->award_atoms[i] != award_schedule[i])
@@ -153,12 +146,12 @@ static enum vcs_zcode_commons_error claim_shape(
     if (claim->reserved != 0 ||
         claim->category >= VCS_ZCODE_COMMONS_CATEGORY_COUNT)
         return VCS_ZCODE_COMMONS_ENUM;
-    if (!cv2_nonzero(claim->claim_root) ||
-        !cv2_nonzero(claim->recipient_binding_root) ||
-        !cv2_nonzero(claim->workspace_lineage_root) ||
-        !cv2_nonzero(claim->semantic_lineage_root) ||
-        !cv2_nonzero(claim->evidence_root) ||
-        !cv2_nonzero(claim->commons_admission_root))
+    if (!zcl_bytes_any_set(claim->claim_root, 32) ||
+        !zcl_bytes_any_set(claim->recipient_binding_root, 32) ||
+        !zcl_bytes_any_set(claim->workspace_lineage_root, 32) ||
+        !zcl_bytes_any_set(claim->semantic_lineage_root, 32) ||
+        !zcl_bytes_any_set(claim->evidence_root, 32) ||
+        !zcl_bytes_any_set(claim->commons_admission_root, 32))
         return VCS_ZCODE_COMMONS_ROOT;
     if (claim->maturity_height == 0 || claim->maturity_mtp <= 0)
         return VCS_ZCODE_COMMONS_IMMATURE;
@@ -284,7 +277,7 @@ enum vcs_zcode_commons_error vcs_zcode_epoch_select_v2(
         per_root_cap = input->epoch_capacity_atoms;
     out->recipient_cap_atoms = per_root_cap;
     out->lineage_cap_atoms = per_root_cap;
-    out->first_category = cv2_nonzero(input->previous_epoch_root)
+    out->first_category = zcl_bytes_any_set(input->previous_epoch_root, 32)
         ? (uint8_t)((input->previous_epoch_root[0] + 1u) %
                     VCS_ZCODE_COMMONS_CATEGORY_COUNT)
         : 0;

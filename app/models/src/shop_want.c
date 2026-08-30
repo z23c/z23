@@ -16,6 +16,7 @@
 
 #include "models/shop_want.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -32,14 +33,6 @@
 DEFINE_MODEL_CALLBACKS(shop_want)
 
 static const uint8_t want_magic[8] = {'Z','S','H','P','W','T','\r','\n'};
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 const char *shop_want_error_string(enum shop_want_error error)
 {
@@ -79,7 +72,7 @@ enum shop_want_error shop_want_validate(const struct shop_want_v1 *want)
     if (!want) return SHOP_WANT_ERR_NULL;
     if (want->schema_version != SHOP_WANT_VERSION)
         return SHOP_WANT_ERR_VERSION;
-    if (!bytes_nonzero(want->buyer_pubkey, 32))
+    if (!zcl_bytes_any_set(want->buyer_pubkey, 32))
         return SHOP_WANT_ERR_PUBKEY_ZERO;
     if (want->nonce == 0)
         return SHOP_WANT_ERR_NONCE;
@@ -91,7 +84,7 @@ enum shop_want_error shop_want_validate(const struct shop_want_v1 *want)
         return SHOP_WANT_ERR_TIME_ORDER;
     if (want->expires_unix - want->issued_unix > SHOP_WANT_MAX_LIFETIME_SECS)
         return SHOP_WANT_ERR_LIFETIME;
-    if (!bytes_nonzero(want->buyer_signature, 64))
+    if (!zcl_bytes_any_set(want->buyer_signature, 64))
         return SHOP_WANT_ERR_SIGNATURE;
     return SHOP_WANT_OK;
 }
@@ -255,9 +248,9 @@ bool db_shop_want_validate(const struct shop_want *row,
         ar_errors_add(errors, "row", "is NULL");
         return false;
     }
-    validates_custom(errors, bytes_nonzero(row->want_id, 32),
+    validates_custom(errors, zcl_bytes_any_set(row->want_id, 32),
                      "want_id", "can't be all zero");
-    validates_custom(errors, bytes_nonzero(row->want.buyer_pubkey, 32),
+    validates_custom(errors, zcl_bytes_any_set(row->want.buyer_pubkey, 32),
                      "buyer_pubkey", "can't be all zero");
     validates_custom(errors, row->want.nonce != 0,
                      "nonce", "can't be zero");

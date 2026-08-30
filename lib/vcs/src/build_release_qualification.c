@@ -3,6 +3,7 @@
 
 #include "vcs/build_release_qualification.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
@@ -15,13 +16,6 @@ static const uint8_t k_confirmation_magic[8] = {
 static const uint8_t k_qualification_magic[8] = {
     'Z', 'B', 'R', 'Q', 'U', 'A', '2', '\0'
 };
-
-static bool brq_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static bool brq_distinct3(const uint8_t a[32], const uint8_t b[32],
                           const uint8_t c[32])
@@ -51,7 +45,7 @@ static enum vcs_build_release_evidence_error brq_confirmation_valid(
         c->confirmer_pubkey,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!brq_nonzero(roots[i]))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_BUILD_RELEASE_EVIDENCE_ROOT;
     if (!brq_distinct3(c->candidate_receipt_root, c->shadow_receipt_root,
                        c->reproduction_receipt_root) ||
@@ -220,7 +214,7 @@ static enum vcs_build_release_evidence_error brq_qualification_valid(
         q->regression_action_root, q->regression_proof_set_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!brq_nonzero(roots[i]))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_BUILD_RELEASE_EVIDENCE_ROOT;
     if (!brq_distinct3(q->candidate_receipt_root, q->shadow_receipt_root,
                        q->reproduction_receipt_root))
