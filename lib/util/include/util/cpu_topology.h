@@ -1,8 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * CPU topology organ: discovers the machine's real CPU topology (physical
- * cores, SMT siblings, L3 cache domains / CCDs) from /sys so worker pools
- * can be sized and pinned by physical reality instead of a bare
+ * cores, SMT siblings, L3 cache domains / CCDs) from the native host
+ * authority (/sys on Linux; sysctl on Darwin) so worker pools can be sized
+ * by physical reality instead of a bare
  * sysconf(_SC_NPROCESSORS_ONLN) core count. Pure, allocation-free after
  * init; degrades gracefully (sysconf fallback) when /sys is unreadable
  * (containers) — see docs/DEFENSIVE_CODING.md + CLAUDE.md "Adding state
@@ -28,6 +29,7 @@
  * logical cpus, a handful of CCDs per socket). */
 #define CPU_TOPOLOGY_MAX_CPUS    1024
 #define CPU_TOPOLOGY_MAX_DOMAINS 64
+#define CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS 8
 
 struct json_value; /* fwd; see json/json.h */
 
@@ -39,6 +41,17 @@ struct cpu_topology_domain {
     int64_t l3_size_bytes;                 /* 0 if unknown */
     int     cpu_count;
     int     cpus[CPU_TOPOLOGY_MAX_CPUS];   /* logical cpu ids in this domain */
+};
+
+/* A scheduler performance level reported by the host. Darwin arm64 exposes
+ * these as hw.perflevelN sysctls (for example Performance and Efficiency on
+ * Apple Silicon). They are observations only: Z23 does not infer CPU ids or
+ * pin work to a level because macOS does not publish a stable affinity map. */
+struct cpu_topology_performance_level {
+    char    name[32];
+    int     logical_cpus;
+    int     physical_cores;
+    int64_t l2_size_bytes; /* 0 when the host does not publish it */
 };
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
@@ -99,11 +112,17 @@ int cpu_topology_largest_l3_domain_cpus(int *out, int cap);
  * `out` unwritten if `idx` is out of range. */
 bool cpu_topology_domain_at(int idx, struct cpu_topology_domain *out);
 
-/* "sysfs" once a real /sys topology was parsed, "fallback" once only
- * sysconf(_SC_NPROCESSORS_ONLN) was available (containers, non-Linux
- * /sys layouts, permission failures). Calls cpu_topology_init() if not
- * yet initialized. */
+/* "sysfs" once a real /sys topology was parsed, "darwin_sysctl" once the
+ * Darwin host authority was observed, or "fallback" once only
+ * sysconf(_SC_NPROCESSORS_ONLN) was available. Calls cpu_topology_init() if
+ * not yet initialized. */
 const char *cpu_topology_source(void);
+
+/* Host-published scheduler performance levels. Zero means unavailable, not
+ * homogeneous. `at` fails without modifying `out` for an invalid index. */
+int cpu_topology_performance_levels(void);
+bool cpu_topology_performance_level_at(
+    int idx, struct cpu_topology_performance_level *out);
 
 /* ── Pinning (advisory; never fatal) ──────────────────────────────────── */
 

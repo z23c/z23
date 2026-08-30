@@ -33,13 +33,15 @@
  *
  * Darwin implementation:
  *   - process memory and start time: proc_pid_rusage/proc_pidinfo; virtual
- *     size: Mach task_info; total RAM: sysctl hw.memsize.
+ *     size: Mach task_info; total RAM: sysctl hw.memsize; available RAM:
+ *     reclaimable free (already inclusive of speculative) + inactive pages
+ *     from HOST_VM_INFO64.
  *   - executable path and argv: dyld and crt_externs APIs.
  *   - os_proc_open_self_exe(): _NSGetExecutablePath() then fopen() of that
  *     name. This is a PATHNAME reopen, so it reports
  *     OS_PROC_IMAGE_IDENTITY_RESOLVED_PATH and not the Linux rung. Callers
  *     must publish the rung alongside the digest, never the digest alone.
- *   - cgroup fields and available-system-memory remain -1 (unavailable).
+ *   - cgroup fields remain -1 (unavailable).
  *
  * Windows implementation:
  *   - os_proc_open_self_exe(): GetModuleFileNameW() then CreateFileW() with
@@ -97,8 +99,8 @@ struct os_proc_mem {
     int64_t cgroup_current;    /* cgroup v2 memory.current, -1 if unavailable */
     int64_t cgroup_high;       /* cgroup v2 memory.high, -1 if unset/unavailable */
     int64_t cgroup_max;        /* cgroup v2 memory.max, -1 if unset/unavailable */
-    int64_t sys_total_bytes;   /* /proc/meminfo MemTotal */
-    int64_t sys_avail_bytes;   /* /proc/meminfo MemAvailable */
+    int64_t sys_total_bytes;   /* platform host-memory total */
+    int64_t sys_avail_bytes;   /* platform reclaimable/available memory */
 };
 
 enum os_proc_environment {

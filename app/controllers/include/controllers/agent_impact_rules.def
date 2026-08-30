@@ -874,7 +874,11 @@ AGENT_IMPACT_RULE("lib/util/include/util/blocker.h|lib/util/src/blocker.c|lib/te
 /* CPU topology organ (wf/organ-cpu-topology, 2026-07-13): sysfs-derived
  * physical core / L3 cache domain discovery + advisory pin_thread. */
 AGENT_IMPACT_RULE("lib/util/src/cpu_topology.c|lib/util/include/util/cpu_topology.h|lib/test/src/test_cpu_topology.c", "cpu_topology make_lint_gates")
-AGENT_IMPACT_RULE("lib/util/src/hw_profile.c|lib/util/include/util/hw_profile.h|lib/test/src/test_hw_profile.c", "hw_profile cpu_topology make_lint_gates")
+AGENT_IMPACT_RULE("lib/util/src/hw_profile.c|lib/util/include/util/hw_profile.h|lib/test/src/test_hw_profile.c", "hw_profile hw_bench arm_hw_tiers cpu_topology make_lint_gates")
+/* Hardware benchmark cache identity binds the complete native profile. A
+ * fingerprint change must exercise cache invalidation and pure batch sizing,
+ * not fall through to lint alone. */
+AGENT_IMPACT_RULE("lib/util/src/hw_bench.c|lib/util/include/util/hw_bench.h|lib/test/src/test_hw_bench.c", "hw_bench hw_profile make_lint_gates")
 
 /* os-substrate Rung 0 (lane L2): no-shell process-spawn primitives. */
 AGENT_IMPACT_RULE("lib/util/include/util/spawn.h|lib/util/src/spawn.c|lib/test/src/test_spawn.c", "spawn make_lint_gates")

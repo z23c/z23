@@ -13,7 +13,8 @@
  *   - domain_at / domain_of: valid + out-of-range behavior
  *   - pin_thread: succeeds for a valid domain on the real box, fails
  *     (advisory, no crash) for an invalid domain
- *   - dump_state_json: keys present, domains array well-formed */
+ *   - Darwin performance levels: host-published counts are sane and exact
+ *   - dump_state_json: keys present, domains and performance arrays formed */
 
 #include "test/test_core.h"
 #include "util/cpu_topology.h"
@@ -50,8 +51,59 @@ int test_cpu_topology(void)
     CPT_CHECK("physical_cores >= 1", cores >= 1);
     CPT_CHECK("physical_cores <= logical_cpus", cores <= logical);
     CPT_CHECK("l3_domains >= 1", domains >= 1);
-    CPT_CHECK("source is sysfs or fallback",
-              strcmp(source, "sysfs") == 0 || strcmp(source, "fallback") == 0);
+    CPT_CHECK("source is a native authority or fallback",
+              strcmp(source, "sysfs") == 0 ||
+              strcmp(source, "darwin_sysctl") == 0 ||
+              strcmp(source, "windows") == 0 ||
+              strcmp(source, "fallback") == 0);
+
+    int performance_levels = cpu_topology_performance_levels();
+    CPT_CHECK("performance level count is bounded",
+              performance_levels >= 0 &&
+              performance_levels <= CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS);
+    {
+        int level_logical = 0;
+        int level_physical = 0;
+        bool levels_sane = true;
+        for (int i = 0; i < performance_levels; i++) {
+            struct cpu_topology_performance_level level;
+            if (!cpu_topology_performance_level_at(i, &level) ||
+                level.name[0] == '\0' || level.logical_cpus < 0 ||
+                level.physical_cores < 0 || level.l2_size_bytes < 0) {
+                levels_sane = false;
+                break;
+            }
+            level_logical += level.logical_cpus;
+            level_physical += level.physical_cores;
+        }
+        CPT_CHECK("published performance levels are sane", levels_sane);
+        if (performance_levels > 0) {
+            CPT_CHECK("performance-level logical CPUs cover the host",
+                      level_logical == logical);
+            CPT_CHECK("performance-level physical cores cover the host",
+                      level_physical == cores);
+        }
+    }
+    {
+        struct cpu_topology_performance_level sentinel = {
+            .name = "unchanged", .logical_cpus = 23,
+            .physical_cores = 23, .l2_size_bytes = 23,
+        };
+        CPT_CHECK("performance_level_at(-1) refuses",
+                  !cpu_topology_performance_level_at(-1, &sentinel));
+        CPT_CHECK("refusal leaves performance-level output unchanged",
+                  strcmp(sentinel.name, "unchanged") == 0 &&
+                  sentinel.logical_cpus == 23);
+        CPT_CHECK("performance_level_at(count) refuses",
+                  !cpu_topology_performance_level_at(performance_levels,
+                                                     &sentinel));
+    }
+#if defined(__APPLE__) && defined(__aarch64__)
+    CPT_CHECK("Apple Silicon publishes Darwin sysctl topology",
+              strcmp(source, "darwin_sysctl") == 0);
+    CPT_CHECK("Apple Silicon publishes at least one performance level",
+              performance_levels >= 1);
+#endif
 
     /* Every logical cpu resolves to a valid domain id, and per-domain
      * cpu_count sums to exactly logical_cpus (no cpu double-counted or
@@ -156,6 +208,14 @@ int test_cpu_topology(void)
                   json_get(&v, "domains") != NULL);
         CPT_CHECK("dump has largest_l3_domain",
                   json_get(&v, "largest_l3_domain") != NULL);
+        CPT_CHECK("dump has exact performance_level_count",
+                  json_get(&v, "performance_level_count") &&
+                  json_get_int(json_get(&v, "performance_level_count")) ==
+                      performance_levels);
+        CPT_CHECK("dump has exact performance_levels array",
+                  json_get(&v, "performance_levels") &&
+                  (int)json_size(json_get(&v, "performance_levels")) ==
+                      performance_levels);
         json_free(&v);
     }
 
@@ -177,6 +237,8 @@ int test_cpu_topology(void)
               cpu_topology_physical_cores() == cpu_topology_logical_cpus());
     CPT_CHECK("fallback has exactly one L3 domain",
               cpu_topology_l3_domains() == 1);
+    CPT_CHECK("fallback does not invent performance levels",
+              cpu_topology_performance_levels() == 0);
 
     {
         struct cpu_topology_domain snap;
