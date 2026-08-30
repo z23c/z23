@@ -341,8 +341,13 @@ int test_hw_profile(void)
                       ((snap.cpus[0] == 2 && snap.cpus[1] == 3) ||
                        (snap.cpus[0] == 3 && snap.cpus[1] == 2)));
 
+#if defined(__APPLE__)
+            HWP_CHECK("pin_reducer_thread refuses where Darwin has no affinity API",
+                      !hw_profile_pin_reducer_thread(pthread_self()));
+#else
             HWP_CHECK("pin_reducer_thread succeeds on asymmetric fixture",
                       hw_profile_pin_reducer_thread(pthread_self()));
+#endif
         }
 
         /* restore real topology for anything running after this test */

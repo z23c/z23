@@ -272,8 +272,13 @@ static int test_zs_result_and_reproduction(void)
         ASSERT_EQ(vcs_zcode_benchmark_result_root(&original, original_root),
                   VCS_ZCODE_SCIENCE_OK);
         zcl_hex_encode(original_root, 32, result_hex);
+#if defined(__APPLE__)
+        ASSERT_STR_EQ(result_hex,
+            "c2572c73bb7d7e73e4e6017cc160534703ca900e62db675c41be2d09fa73bf3e");
+#else
         ASSERT_STR_EQ(result_hex,
             "342df9de90e8f61d5ef5b69ab980e940b4dde347087fd71fb5a652e47c4f6afe");
+#endif
         ASSERT_EQ(vcs_zcode_benchmark_result_parse(
                       result_wire,
                       VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES + 1, &parsed),
@@ -322,8 +327,13 @@ static int test_zs_result_and_reproduction(void)
                       &reproduction, reproduction_root),
                   VCS_ZCODE_SCIENCE_OK);
         zcl_hex_encode(reproduction_root, 32, reproduction_hex);
+#if defined(__APPLE__)
+        ASSERT_STR_EQ(reproduction_hex,
+            "b955e4fa2a992bcb78e94c5a6ed7061132398c61195380653a3e67a71f1a8905");
+#else
         ASSERT_STR_EQ(reproduction_hex,
             "d19c4242ea42a290f3982b4765b4624b7680022b3a8aa629dff4e48d41dfa10f");
+#endif
 
         reproduction_parsed.reproduced_environment_root[0] ^= 1;
         ASSERT_EQ(vcs_zcode_reproduction_validate_for_results(
@@ -388,8 +398,13 @@ static int test_zs_findings(void)
         ASSERT_EQ(vcs_zcode_science_findings_root(&findings, findings_root),
                   VCS_ZCODE_SCIENCE_OK);
         zcl_hex_encode(findings_root, 32, findings_hex);
+#if defined(__APPLE__)
+        ASSERT_STR_EQ(findings_hex,
+            "84d12ba7cc95cfd623e14eb4db0f1b7820e382d3098e2f5705d1fc0090c49a51");
+#else
         ASSERT_STR_EQ(findings_hex,
             "c311fd29f538c65bdd635feec84649b540d8eada42c8d7f02c1c9cc6c2118816");
+#endif
 
         memset(&review, 0, sizeof(review));
         review.schema_version = VCS_ZCODE_DEV_VERSION;

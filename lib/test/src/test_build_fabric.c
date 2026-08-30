@@ -81,7 +81,8 @@ static void bf_action(struct db_build_action *row)
     (void)snprintf(row->state, sizeof(row->state), "SNAPSHOTTED");
     (void)snprintf(row->input_root_sha3, sizeof(row->input_root_sha3), "%s",
                    id_c);
-    (void)snprintf(row->target, sizeof(row->target), "linux-x86_64-v3");
+    (void)snprintf(row->target, sizeof(row->target), "%s",
+                   VCS_BUILD_TARGET_V1);
     uint8_t fixed_flags[32], fixed_environment[32];
     vcs_build_action_v1_fixed_flags_root(fixed_flags);
     vcs_build_action_v1_fixed_environment_root(fixed_environment);
@@ -977,6 +978,17 @@ static int test_bf_confined_worker(void)
             &ndb, dir, dir, action_id, id_d, secret, pubkey, &receipt, NULL);
         if (!executed.ok)
             printf("worker detail: %s\n", executed.message);
+#if defined(__APPLE__)
+        /* The worker requires Linux's full Landlock confinement.  Darwin may
+         * capture and identify Apple Clang, but that does not grant an
+         * equivalent execution sandbox; refusal is the honest contract. */
+        ASSERT(!executed.ok);
+        ASSERT(strstr(executed.message, "LOCAL_FALLBACK") != NULL);
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+        goto _test_next;
+#endif
         ASSERT(executed.ok);
         ASSERT(db_build_action_find(&ndb, action_id, &action));
         ASSERT_STR_EQ(action.state, "VERIFYING");
@@ -1510,6 +1522,14 @@ static int test_bf_confined_test_worker(void)
         struct zcl_result executed = build_fabric_worker_execute(
             &ndb, dir, dir, action_id, id_d, secret, pubkey, &receipt, NULL);
         if (!executed.ok) printf("test worker detail: %s\n", executed.message);
+#if defined(__APPLE__)
+        ASSERT(!executed.ok);
+        ASSERT(strstr(executed.message, "LOCAL_FALLBACK") != NULL);
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+        goto _test_next;
+#endif
         ASSERT(executed.ok);
         ASSERT_EQ(receipt.exit_status, 0);
         ASSERT(receipt.work_receipt_sha3[0] == '\0');
