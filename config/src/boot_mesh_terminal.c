@@ -12,6 +12,7 @@
 #include "boot_mesh_terminal_internal.h"
 
 #include "config/boot_internal.h"
+#include "config/boot_zcode_dht.h"
 #include "config/boot_zcode_dht_access.h"
 #include "config/file_ops.h"
 #include "config/runtime.h"
@@ -241,10 +242,19 @@ enum mesh_terminal_receipt_status boot_mesh_terminal_decide(
     if (live_count != 1)
         return MESH_TERMINAL_RECEIPT_DELEGATION_INVALID;
 
+    /* Pairing ids are per-side: each node derives its row id from the
+     * PEER's master+noise identity, so the id an open carries names the
+     * requester's own row and can never name ours. The only row that can
+     * authorize this session is the one the live delegation (already
+     * matched to the session's remote static) points at — derive its id. */
     char pairing_id[MESH_PAIRING_ID_HEX + 1];
-    zcl_hex_encode(open->pairing_id, 32, pairing_id);
-    enum mesh_pairing_reason authorized = mesh_pairing_service_authorize_terminal(
-        ndb, pairing_id, live, session->remote_static, (int64_t)now_unix);
+    if (!mesh_pairing_id_derive(network_genesis, live->doc.master_pubkey,
+                                live->noise_static_pubkey, pairing_id))
+        return MESH_TERMINAL_RECEIPT_DELEGATION_INVALID;
+    enum mesh_pairing_reason authorized =
+        mesh_pairing_service_authorize_terminal(
+            ndb, network_genesis, pairing_id, live, session->remote_static,
+            (int64_t)now_unix);
     if (authorized != MESH_PAIRING_OK)
         return terminal_from_pairing_reason(authorized);
     /* The pairing row carries the receipt's revocation-generation evidence.
@@ -346,15 +356,22 @@ bool boot_mesh_terminal_render_close_capsule(
 }
 
 bool boot_mesh_terminal_pairing_lost(
-    struct node_db *ndb, const uint8_t pairing_id[32], uint64_t now_unix,
-    enum mesh_terminal_close_reason *reason_out)
+    struct node_db *ndb, const struct mesh_terminal_open_v1 *open,
+    uint64_t now_unix, enum mesh_terminal_close_reason *reason_out)
 {
     enum mesh_terminal_close_reason lost = MESH_TERMINAL_CLOSE_REVOKED;
     bool is_lost = true;
     char pairing_hex[MESH_PAIRING_ID_HEX + 1];
     struct db_mesh_pairing row;
-    if (pairing_id && reason_out && ndb && ndb->open) {
-        zcl_hex_encode(pairing_id, 32, pairing_hex);
+    /* The session's authority is THIS node's row for the requester's
+     * identity pair — the open's own pairing_id names the requester-side
+     * row (ids are per-side), so derive the local id exactly as the open
+     * decision did. A derive failure is authority lost, like every other
+     * unusable input. */
+    if (open && reason_out && ndb && ndb->open &&
+        mesh_pairing_id_derive(open->network_genesis,
+                               open->requester_master_pubkey,
+                               open->requester_noise_static, pairing_hex)) {
         if (db_mesh_pairing_find(ndb, pairing_hex, &row)) {
             if (row.revoked_at != 0)
                 lost = MESH_TERMINAL_CLOSE_REVOKED;
@@ -1011,8 +1028,8 @@ static void terminal_pump_tick(struct liveness_contract *contract)
          * evidence, whatever the budget says. */
         enum mesh_terminal_close_reason authority_reason =
             MESH_TERMINAL_CLOSE_REQUESTED;
-        if (boot_mesh_terminal_pairing_lost(app_runtime_node_db(),
-                                            s->open.pairing_id, (uint64_t)now,
+        if (boot_mesh_terminal_pairing_lost(app_runtime_node_db(), &s->open,
+                                            (uint64_t)now,
                                             &authority_reason)) {
             s->worker.close_reason = authority_reason;
             struct node_db *ndb = app_runtime_node_db();

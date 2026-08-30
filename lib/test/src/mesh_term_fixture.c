@@ -170,8 +170,9 @@ bool mesh_term_fixture_open(struct mesh_term_fixture *f, const char *dir)
     mesh_term_fill32(f->genesis, 0x11);
     mesh_term_fill32(beacon, 0x22);
     mesh_term_fill32(tip, 0x33);
-    if (!mesh_term_seed_block(&f->ndb, 0, f->genesis) ||
-        !mesh_term_seed_block(&f->ndb, ZCL_FINALITY_DEPTH, beacon) ||
+    /* No genesis row is seeded: a locally-mining node never persists one,
+     * and the authority must bind the caller-supplied genesis instead. */
+    if (!mesh_term_seed_block(&f->ndb, ZCL_FINALITY_DEPTH, beacon) ||
         !mesh_term_seed_block(&f->ndb, 2 * ZCL_FINALITY_DEPTH, tip))
         return false;
 
@@ -255,7 +256,7 @@ bool mesh_term_pair_accept(struct mesh_term_fixture *f,
     uint8_t fingerprint[32];
     if (!v2_identity_public_fingerprint(peer->noise_pub, fingerprint))
         return false;
-    return mesh_pairing_service_accept(&f->ndb, &peer->delegation,
+    return mesh_pairing_service_accept(&f->ndb, f->genesis, &peer->delegation,
                                        fingerprint, peer->noise_pub, true,
                                        capability_mask, 2000, 3000,
                                        &peer->pairing) == MESH_PAIRING_OK;

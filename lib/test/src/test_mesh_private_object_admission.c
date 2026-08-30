@@ -25,6 +25,7 @@ struct admission_fixture {
     uint8_t local_master[32];
     uint8_t local_noise[32];
     uint8_t online_seed[32];
+    uint8_t genesis[32];
 };
 
 static void admission_fill(uint8_t out[32], uint8_t first)
@@ -98,11 +99,13 @@ static bool admission_fixture_open(struct admission_fixture *f,
             ZCL_FINALITY_DEPTH, beacon,
             1000, 4000, 7, master_seed) != VCS_ZCODE_DHT_DELEGATION_OK)
         return false;
-    if (!admission_seed_block(&f->ndb, 0, genesis) ||
-        !admission_seed_block(&f->ndb, ZCL_FINALITY_DEPTH, beacon) ||
+    /* No genesis row is seeded: a locally-mining node never persists one,
+     * and the authority must bind the caller-supplied genesis instead. */
+    if (!admission_seed_block(&f->ndb, ZCL_FINALITY_DEPTH, beacon) ||
         !admission_seed_block(
             &f->ndb, 2 * ZCL_FINALITY_DEPTH, tip))
         return false;
+    memcpy(f->genesis, genesis, 32);
     struct zid_identity identity = {0};
     memcpy(identity.master_pubkey, f->delegation.doc.master_pubkey, 32);
     admission_fill(identity.anchor_txid, 0x52);
@@ -201,7 +204,7 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
         admission_fill(tip, 0x41);
         ASSERT(admission_remove_tip(&f->ndb));
         struct zcl_result result = mesh_private_object_admit_offer(
-            &f->ndb, &f->offer, &f->session, &f->delegation,
+            &f->ndb, f->genesis, &f->offer, &f->session, &f->delegation,
             f->local_master, f->local_noise, 2200, &admitted);
         ASSERT(result.ok);
         ASSERT_EQ(admitted.reason,
@@ -209,12 +212,12 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
         ASSERT(admission_seed_block(
             &f->ndb, 2 * ZCL_FINALITY_DEPTH, tip));
         result = mesh_private_object_admit_offer(
-            &f->ndb, &f->offer, &f->session, &f->delegation,
+            &f->ndb, f->genesis, &f->offer, &f->session, &f->delegation,
             f->local_master, f->local_noise, 2200, &admitted);
         ASSERT(result.ok);
         ASSERT_EQ(admitted.reason, MESH_PRIVATE_OBJECT_ADMISSION_NEW);
         result = mesh_private_object_admit_offer(
-            &f->ndb, &f->offer, &f->session, &f->delegation,
+            &f->ndb, f->genesis, &f->offer, &f->session, &f->delegation,
             f->local_master, f->local_noise, 2201, &resumed);
         ASSERT(result.ok);
         ASSERT_EQ(resumed.reason, MESH_PRIVATE_OBJECT_ADMISSION_RESUME);
@@ -235,7 +238,7 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
         memcpy(new_session.transcript_hash, reoffer.transcript_hash, 32);
         new_session.connection_generation = reoffer.connection_generation;
         result = mesh_private_object_admit_offer(
-            &f->ndb, &reoffer, &new_session, &f->delegation,
+            &f->ndb, f->genesis, &reoffer, &new_session, &f->delegation,
             f->local_master, f->local_noise, 2202, &reconnected);
         ASSERT(result.ok);
         ASSERT_EQ(reconnected.reason, MESH_PRIVATE_OBJECT_ADMISSION_RESUME);
@@ -243,7 +246,7 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
                       reconnected.transfer_id, 32) == 0);
         ASSERT(memcmp(admitted.offer_root, reconnected.offer_root, 32) != 0);
         result = mesh_private_object_admit_offer(
-            &f->ndb, &f->offer, &new_session, &f->delegation,
+            &f->ndb, f->genesis, &f->offer, &new_session, &f->delegation,
             f->local_master, f->local_noise, 2202, &reconnected);
         ASSERT(result.ok);
         ASSERT_EQ(reconnected.reason,
@@ -258,7 +261,7 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
         ASSERT_EQ(mesh_private_object_offer_v1_sign(&trial, f->online_seed),
                   MESH_PRIVATE_OBJECT_PROTO_OK);
         result = mesh_private_object_admit_offer(
-            &f->ndb, &trial, &f->session, &f->delegation,
+            &f->ndb, f->genesis, &trial, &f->session, &f->delegation,
             f->local_master, f->local_noise, 2201, &resumed);
         ASSERT(result.ok);
         ASSERT_EQ(resumed.reason, MESH_PRIVATE_OBJECT_ADMISSION_NONCE_MISMATCH);
@@ -266,7 +269,7 @@ static int admission_claim_and_refuse(struct admission_fixture *f)
         struct noise_transport_snapshot wrong_session = f->session;
         wrong_session.transcript_hash[0] ^= 1;
         result = mesh_private_object_admit_offer(
-            &f->ndb, &f->offer, &wrong_session, &f->delegation,
+            &f->ndb, f->genesis, &f->offer, &wrong_session, &f->delegation,
             f->local_master, f->local_noise, 2201, &resumed);
         ASSERT(result.ok);
         ASSERT_EQ(resumed.reason,

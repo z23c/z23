@@ -69,13 +69,17 @@ struct mesh_pairing_revoke_result {
 
 const char *mesh_pairing_reason_token(enum mesh_pairing_reason reason);
 
-/* Accept one peer only after its public Noise fingerprint was compared out of
- * band. The signed delegation is rechecked against this node's connected
- * genesis, active ZID projection, finality-delayed beacon, and current time.
+/* `network_genesis` is THIS node's own network identity — the compiled
+ * consensus genesis the caller resolves (boot_zcode_dht_network_genesis), not
+ * a node.db row: a locally-mining node never persists a genesis row, because
+ * ConnectBlock special-cases the genesis hash and returns before any block
+ * write. Accept one peer only after its public Noise fingerprint was compared
+ * out of band. The signed delegation is rechecked against that genesis, the
+ * active ZID projection, the finality-delayed beacon row, and current time.
  * The capability set is status-read by default, with confined terminal-exec
  * as the only opt-in addition at accept time. */
 enum mesh_pairing_reason mesh_pairing_service_accept(
-    struct node_db *ndb,
+    struct node_db *ndb, const uint8_t network_genesis[32],
     const struct vcs_zcode_dht_delegation *delegation,
     const uint8_t expected_noise_fingerprint[32],
     const uint8_t authenticated_session_noise_static[32],
@@ -104,10 +108,13 @@ enum mesh_pairing_reason mesh_pairing_service_revoke_commit(
     struct mesh_pairing_revoke_result *out);
 
 /* Authorize the private status operation against current local revocation and
- * chain state plus the exact established Noise peer. The delegation is live
- * session evidence, never a substitute for the local pairing record. */
+ * chain state plus the exact established Noise peer. `network_genesis` is the
+ * caller-resolved local consensus genesis (see mesh_pairing_service_accept).
+ * The delegation is live session evidence, never a substitute for the local
+ * pairing record. */
 enum mesh_pairing_reason mesh_pairing_service_authorize_status(
-    struct node_db *ndb, const char *pairing_id,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], int64_t now);
 
@@ -117,7 +124,8 @@ enum mesh_pairing_reason mesh_pairing_service_authorize_status(
  * delegation is live session evidence, never a substitute for the local
  * pairing record. */
 enum mesh_pairing_reason mesh_pairing_service_authorize_terminal(
-    struct node_db *ndb, const char *pairing_id,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], int64_t now);
 
@@ -125,7 +133,8 @@ enum mesh_pairing_reason mesh_pairing_service_authorize_terminal(
  * identity converge on this node's active chain. This grants no operation;
  * the caller must separately require one exact local capability. */
 enum mesh_pairing_reason mesh_pairing_service_authorize_delegation(
-    struct node_db *ndb, const char *pairing_id,
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const char *pairing_id,
     const struct vcs_zcode_dht_delegation *live_delegation,
     const uint8_t session_noise_static[32], int64_t now);
 

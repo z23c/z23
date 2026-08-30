@@ -395,9 +395,18 @@ enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
     uint64_t capability_mask = MESH_PAIRING_CAP_STATUS_READ;
     if (grant_terminal)
         capability_mask |= MESH_PAIRING_CAP_TERMINAL_EXEC;
+    /* This node's own compiled genesis, via the same accessor the DHT
+     * service authenticates delegations with — never a node.db row, which
+     * locally-mining nodes do not persist for height 0. */
+    uint8_t network_genesis[32];
+    if (!boot_zcode_dht_network_genesis(network_genesis)) {
+        LOG_ERROR("net.mesh_pairing",
+                  "commit: local network genesis unavailable");
+        return MESH_PAIR_COMMIT_UNAVAILABLE;
+    }
     enum mesh_pairing_reason reason = mesh_pairing_service_accept(
-        ndb, &delegation, expected_fingerprint, session.remote_static,
-        session.established, capability_mask, now,
+        ndb, network_genesis, &delegation, expected_fingerprint,
+        session.remote_static, session.established, capability_mask, now,
         boot_mesh_pairing_expiry(now, days), out);
     if (reason != MESH_PAIRING_OK) {
         if (service_reason_out)

@@ -145,13 +145,17 @@ bool boot_mesh_terminal_render_close_capsule(
 /* Mid-session authority re-check for a live responder session: true when
  * the local pairing row no longer grants terminal-exec — vanished row or
  * revoked_at stamped (REVOKED), capability stripped (REVOKED), past its
- * expiry (EXPIRED). The pump tick runs this for every live session so an
- * `ops mesh pair revoke` ends the terminal within one tick. The
- * delegation itself was verified and bound at OPEN; the row is the
- * operator's live authority over the grant, and an unreadable row fails
- * closed. Exported so the wire group test drives the exact check. */
+ * expiry (EXPIRED). The row is keyed by the id derived from the OPEN's
+ * requester identity, exactly as the open decision keyed it — pairing ids
+ * are per-side, so the open's own pairing_id (the requester-side row)
+ * can never be the lookup key here. The pump tick runs this for every
+ * live session so an `ops mesh pair revoke` ends the terminal within one
+ * tick. The delegation itself was verified and bound at OPEN; the row is
+ * the operator's live authority over the grant, and an unreadable row or
+ * a failed derivation fails closed. Exported so the wire group test
+ * drives the exact check. */
 bool boot_mesh_terminal_pairing_lost(struct node_db *ndb,
-                                     const uint8_t pairing_id[32],
+                                     const struct mesh_terminal_open_v1 *open,
                                      uint64_t now_unix,
                                      enum mesh_terminal_close_reason *reason_out);
 
