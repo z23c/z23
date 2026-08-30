@@ -1,0 +1,37 @@
+#!/bin/sh
+# Copyright 2026 Rhett Creighton - Apache License 2.0
+#
+# mktemp(1) shim for the byte-identical FreeBSD bin/sh codegen scripts
+# (mkbuiltins, mktokens). Both call the BSD form `mktemp -t ka`, which
+# GNU coreutils mktemp rejects ("too few X's in template"). The Makefile
+# prepends this directory to PATH for the codegen step only. The shim
+# translates exactly that one form and delegates everything else to the
+# system mktemp after removing itself from PATH.
+
+set -u
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+new_path=
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+	[ "$dir" = "$self_dir" ] && continue
+	if [ -z "$new_path" ]; then
+		new_path=$dir
+	else
+		new_path=$new_path:$dir
+	fi
+done
+IFS=$old_ifs
+PATH=$new_path
+export PATH
+
+if [ "${1:-}" = "-t" ] && [ $# -eq 2 ]; then
+	template=$2
+	case $template in
+	*XXX*) ;;
+	*) template=$template.XXXXXXXXXX ;;
+	esac
+	exec mktemp -t "$template"
+fi
+exec mktemp "$@"

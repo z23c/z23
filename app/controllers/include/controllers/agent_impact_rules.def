@@ -2964,3 +2964,7 @@ AGENT_IMPACT_RULE("app/services/src/agent_session_service.c|app/services/include
 AGENT_IMPACT_RULE("app/services/src/seed_integrity_gate.c|app/services/include/services/seed_integrity_gate.h|lib/test/src/test_seed_integrity_gate.c", "seed_integrity_gate make_lint_gates")
 AGENT_IMPACT_RULE("lib/policy/src/anchor_finality.c|lib/policy/include/policy/anchor_finality.h|lib/test/src/test_anchor_finality.c", "anchor_finality make_lint_gates")
 AGENT_IMPACT_RULE("lib/storage/src/topology_store.c|lib/storage/include/storage/topology_store.h|lib/test/src/test_topology_store.c", "topology_store make_lint_gates")
+/* Vendored FreeBSD /bin/sh (vendor/freebsd-sh) and its smoke acceptance.
+ * Editing any vendored source, the compat shim, or the smoke test itself
+ * selects the freebsd_sh group. */
+AGENT_IMPACT_RULE("vendor/freebsd-sh/*|vendor/freebsd-sh/bin/*|vendor/freebsd-sh/bin/sh/*|vendor/freebsd-sh/bin/sh/bltin/*|vendor/freebsd-sh/bin/kill/*|vendor/freebsd-sh/bin/test/*|vendor/freebsd-sh/usr.bin/*|vendor/freebsd-sh/usr.bin/printf/*|vendor/freebsd-sh/compat/*|vendor/freebsd-sh/compat/bin/*|vendor/patches/freebsd-sh-dirent-d-namlen.patch|lib/test/src/test_freebsd_sh.c", "freebsd_sh make_lint_gates")
