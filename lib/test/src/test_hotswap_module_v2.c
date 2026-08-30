@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Tests for the MULTI-LEAF (ABI v2) Tier-1 hot-swap module: one shared library,
+ * Tests for the MULTI-LEAF (ABI v3) Tier-1 hot-swap module: one shared library,
  * many leaves, ONE atomic commit — plus probe-before-publish.
  *
  * The whole post-dlsym sequence lives in hotswap_module_publish() (admit ->
@@ -45,6 +45,7 @@
 #define V2_TU_METAVERSE "app/controllers/src/metaverse_controller.c"
 #define V2_TU_DIAGNOSTICS \
     "app/controllers/src/diagnostics_native_handlers.c"
+#define V2_TU_OPS "app/controllers/src/ops_native_handlers.c"
 
 static void v2_handler(const struct zcl_command_request *request,
                        struct zcl_command_reply *reply)
@@ -505,6 +506,7 @@ static int t_allowlist_is_per_file(void)
     TEST("config/hotswap_swappable.def resolves leaves to their owning file") {
         ASSERT(hotswap_handler_is_swappable("core.status"));
         ASSERT(hotswap_handler_is_swappable("ops.metrics"));
+        ASSERT(hotswap_handler_is_swappable("ops.health"));
         ASSERT(!hotswap_handler_is_swappable("core.consensus.pow.verify"));
         ASSERT(!hotswap_handler_is_swappable(""));
         ASSERT(!hotswap_handler_is_swappable(NULL));
@@ -514,6 +516,8 @@ static int t_allowlist_is_per_file(void)
         ASSERT_EQ(strcmp(owner, V2_TU_STATUS), 0);
         ASSERT_EQ(strcmp(hotswap_swappable_source_for_leaf("ops.metrics"),
                          V2_TU_META), 0);
+        ASSERT_STR_EQ(hotswap_swappable_source_for_leaf("ops.health"),
+                      V2_TU_OPS);
         ASSERT(hotswap_swappable_source_for_leaf("core.consensus.pow.verify")
                == NULL);
 

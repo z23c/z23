@@ -1,0 +1,50 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * prompt_sections — the declared SHAPE of a dispatch prompt.
+ *
+ * The prompt a unit receives used to be whatever string concatenation in
+ * tools/engine_unit.c happened to produce. That is how the rules block went
+ * missing from every CLI dispatch this repository has ever made: no test
+ * links that tool, so nothing could state what the prompt is supposed to
+ * contain, so nothing could notice a part of it was gone.
+ *
+ * This file states it. Each row names one section, when it must be present,
+ * and a literal substring that proves it is. engine_prompt_audit_text()
+ * checks a composed prompt against these rows and engine_unit refuses to
+ * dispatch a prompt missing a required one. A section that is present but
+ * empty is a section whose marker is missing, so the same check covers both.
+ *
+ *   PROMPT_SECTION(id, need, marker)
+ *
+ *   id      short stable name; it is what a refusal names, so it appears in
+ *           operator output and should read as a noun.
+ *   need    ENGINE_PROMPT_NEED_ALWAYS               every wire, every run.
+ *           ENGINE_PROMPT_NEED_NO_SYSTEM_CHANNEL    required only for a wire
+ *                                                   with no system channel of
+ *                                                   its own; a wire that has
+ *                                                   one must NOT repeat it.
+ *           ENGINE_PROMPT_NEED_OPTIONAL             carried when the caller
+ *                                                   supplied it; never
+ *                                                   required, never refused.
+ *   marker  an exact substring of the composed prompt. Not a pattern: a
+ *           pattern that drifts still matches, and a check that still matches
+ *           after the thing it checks changed is worse than no check.
+ *
+ * Order is the order a reader meets them. The audit enforces it, because a
+ * task placed after the output protocol reads as an example of the protocol.
+ *
+ * Changing any row changes engine_prompt_shape_sha3(), which is the version
+ * identity of the prompt shape. That is deliberate: two runs that composed
+ * differently shaped prompts are not comparable evidence.
+ */
+
+ENGINE_PROMPT_SECTION(rules, ENGINE_PROMPT_NEED_NO_SYSTEM_CHANNEL,
+                      "You are writing C23 for the Z23 repository")
+ENGINE_PROMPT_SECTION(task, ENGINE_PROMPT_NEED_ALWAYS,
+                      "# Your unit of work")
+ENGINE_PROMPT_SECTION(territory, ENGINE_PROMPT_NEED_OPTIONAL,
+                      "# Territory ")
+ENGINE_PROMPT_SECTION(protocol, ENGINE_PROMPT_NEED_ALWAYS,
+                      "# OUTPUT PROTOCOL")
+ENGINE_PROMPT_SECTION(judging, ENGINE_PROMPT_NEED_ALWAYS,
+                      "# How this unit will be judged")

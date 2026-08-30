@@ -372,6 +372,7 @@ AGENT_IMPACT_RULE("lib/vcs/src/package_reward.c|lib/vcs/src/package_reward_label
 AGENT_IMPACT_RULE("lib/storage/src/progress_store.c|lib/storage/src/progress_meta_store.c|lib/storage/include/storage/progress_store.h|lib/test/src/test_progress_store.c", "progress_store node_db_catchup_service reducer_forward_progress_gate make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_kill9_recovery.c", "kill9_recovery make_lint_gates")
 AGENT_IMPACT_RULE("config/include/config/boot_background_workers.h|config/src/boot_worker_supervisor.c|lib/test/src/test_chain_tip_watchdog_bounded_restart.c", "chain_tip_watchdog_bounded_restart supervisor make_lint_gates")
+AGENT_IMPACT_RULE("config/include/config/boot_background_workers.h|config/include/config/boot_internal.h|config/src/boot_background_workers.c|config/src/boot_frontend_services.c|config/src/boot_services.c|lib/kernel/include/kernel/service_kernel.h|lib/kernel/src/service_kernel.c|lib/test/src/test_payment_shutdown_owner.c", "payment_shutdown_owner service_kernel shutdown_stagewatch make_lint_gates")
 AGENT_IMPACT_RULE("config/include/config/db_service.h|config/src/db_service.c|config/src/runtime.c", "node_db_catchup_service snapshot_sync_service node_health_service make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/sticky_escalator.c|app/services/src/sticky_escalator_resnapshot.c|app/services/src/sticky_escalator_trigger.c|app/services/include/services/sticky_escalator.h|app/services/include/services/sticky_escalator_resnapshot.h|app/services/include/services/sticky_escalator_trigger.h|lib/test/src/test_sticky_escalator.c|lib/test/src/test_stall_totality_matrix.c|lib/test/src/test_boot_reindex_terminates.c|lib/test/src/test_always_sync_selfheal.c|docs/work/fail-safe-architecture.md", "sticky_escalator stall_totality_matrix boot_reindex_terminates always_sync_selfheal make_lint_gates")
 AGENT_IMPACT_RULE("app/services/src/recovery_coordinator.c|app/services/include/services/recovery_coordinator.h|lib/test/src/test_recovery_coordinator.c", "recovery_coordinator rpc always_sync_selfheal make_lint_gates")
@@ -895,7 +896,7 @@ AGENT_IMPACT_RULE("lib/storage/src/coins_kv_generation.c|lib/storage/src/coins_k
 /* Canonical export readers pin one proven coins_kv WAL generation before a
  * long scan. This is the authority boundary beneath fast-sync artifacts. */
 AGENT_IMPACT_RULE("lib/storage/src/coins_kv_read_snapshot.c|lib/storage/include/storage/coins_kv_read_snapshot.h|lib/test/src/test_coins_kv_read_snapshot.c", "coins_kv_read_snapshot progress_store coins_kv fast_sync make_lint_gates")
-AGENT_IMPACT_RULE("config/src/consensus_state_snapshot_install.c|config/src/consensus_state_snapshot_install_activate.c|config/src/consensus_state_snapshot_install_internal.h|config/src/consensus_state_snapshot_candidate*.c|config/src/consensus_state_bundle_validate.c|config/src/consensus_state_bundle_validate_schema.c|config/src/consensus_state_bundle_validate_schema.h|config/src/consensus_state_bundle_validate_heartbeat.h|config/src/consensus_state_install_verify_receipt.c|config/include/config/consensus_state_install_verify_receipt.h|config/src/boot_snapshot_install.c|config/src/boot_install_consensus_bundle.c|config/include/config/consensus_state_snapshot_install.h|config/include/config/consensus_state_bundle_validate.h|config/include/config/boot_snapshot_install.h|lib/storage/src/consensus_state_bundle_codec.c|lib/storage/include/storage/consensus_state_bundle_codec.h|lib/test/src/test_consensus_state_snapshot_install.c", "consensus_state_snapshot_install consensus_state_snapshot_export make_lint_gates")
+AGENT_IMPACT_RULE("config/src/consensus_state_snapshot_install.c|config/src/consensus_state_snapshot_install_activate.c|config/src/consensus_state_snapshot_install_internal.h|config/src/consensus_state_proof_prefix.c|config/src/consensus_state_proof_prefix.h|config/src/consensus_state_snapshot_candidate*.c|config/src/consensus_state_bundle_validate.c|config/src/consensus_state_bundle_validate_schema.c|config/src/consensus_state_bundle_validate_schema.h|config/src/consensus_state_bundle_validate_heartbeat.h|config/src/consensus_state_install_verify_receipt.c|config/include/config/consensus_state_install_verify_receipt.h|config/src/boot_snapshot_install.c|config/src/boot_install_consensus_bundle.c|config/include/config/consensus_state_snapshot_install.h|config/include/config/consensus_state_bundle_validate.h|config/include/config/boot_snapshot_install.h|lib/storage/src/consensus_state_bundle_codec.c|lib/storage/include/storage/consensus_state_bundle_codec.h|lib/test/src/test_consensus_state_snapshot_install.c", "consensus_state_snapshot_install consensus_state_snapshot_export make_lint_gates")
 AGENT_IMPACT_RULE("config/src/consensus_state_snapshot_export*.c|config/src/consensus_state_snapshot_output_seal.c|config/src/consensus_state_sqlite_text.h|config/src/consensus_state_snapshot_export_internal.h|config/include/config/consensus_state_snapshot_export.h|config/src/bundle_exporter.c|config/include/config/bundle_exporter.h|lib/test/src/test_consensus_state_snapshot_export.c|lib/test/src/test_bundle_publish_serve.c", "consensus_state_snapshot_export consensus_state_snapshot_install bundle_publish_serve make_lint_gates")
 /* CHECKPOINT_ROM ACTIVATE authority (the header-independent shielded-ROM
  * keystone binding, split from install_activate.c into
@@ -2744,6 +2745,21 @@ AGENT_IMPACT_RULE("lib/metaverse/include/metaverse/property_id.h|lib/test/src/te
  * test_metaverse_vocabulary(), which is where its assertions actually run. */
 AGENT_IMPACT_RULE("lib/test/src/test_metaverse_vocabulary_bits.c", "metaverse_vocabulary make_lint_gates")
 
+/* The property-grant authority — who may do what to which property, for how
+ * much. Three files that are one decision: the pure rules, the store/PLAN
+ * half of the service, and the COMMIT half (which shares one lock and one set
+ * of arrays with it through property_grant_store.h). They had NO rule at all,
+ * so a change to the cumulative budget or the idempotency contract mapped to
+ * no group and the push gate had to refuse for want of a mapping.
+ *
+ * The consumers ride it because they hold the other end: agent_broker_provider
+ * and agent_broker_catalog_seam decide over this service's snapshots
+ * (metaverse_broker_authority, metaverse_broker_idempotency), agent_broker_grant
+ * projects a session grant into a struct metaverse_grant and calls
+ * metaverse_grant_record_commit on it (metaverse_agent_broker), and both the
+ * vocabulary and catalog groups assert against these headers' types. */
+AGENT_IMPACT_RULE("lib/metaverse/src/property_grant.c|lib/metaverse/include/metaverse/property_grant.h|app/services/src/property_grant_service.c|app/services/src/property_grant_commit.c|app/services/src/property_grant_store.h|app/services/include/services/property_grant_service.h|lib/test/src/test_metaverse_grant.c", "metaverse_grant metaverse_broker_authority metaverse_broker_idempotency metaverse_agent_broker metaverse_vocabulary metaverse_catalog make_lint_gates")
+
 /* Metaverse telemetry: the .def is the field list and the filler is its
  * only writer, so neither can change alone without the other going stale. */
 AGENT_IMPACT_RULE("app/services/src/metaverse_telemetry_fill.c|lib/util/include/util/telemetry/metaverse_fields.def", "telemetry_metaverse metaverse_catalog make_lint_gates")
@@ -2820,8 +2836,39 @@ AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src
  * engine group comes along because tools/engine_unit.c includes the .def as
  * an X-macro and would stop compiling if a row lost its shape. */
 AGENT_IMPACT_RULE("lib/engine/include/engine/personas.def|tools/lint/check_persona_resolves.sh", "engine make_lint_gates")
+/* The declared shape of a dispatch prompt. prompt_sections.def is data —
+ * one row per section, with the literal marker that proves the section is
+ * there — and lib/engine pastes it in as an X-macro, so a malformed row
+ * stops the engine group compiling. It carries no gate of its own: the
+ * audit runs inside test_engine, which is where a prompt shape can
+ * actually be checked against a composed prompt rather than against
+ * another document. */
+AGENT_IMPACT_RULE("lib/engine/include/engine/prompt_sections.def", "engine make_lint_gates")
 /* The proof receipt: the canonical form a claim travels in, its id, and the
  * rule a receiver applies to it. Rides its own group and nothing else — the
  * module depends only on base and sha3, deliberately, so that a receipt can
  * be recomputed and compared by code holding no keys and no index. */
 AGENT_IMPACT_RULE("lib/receipt/src/*.c|lib/receipt/include/receipt/*.h|lib/test/src/test_receipt.c", "receipt make_lint_gates")
+/* Ranked retrieval. Rides its own group only: the module depends on base and
+ * libm and nothing else, and nothing depends on it yet — `code have` still
+ * answers by substring match. When that call site lands, the codeindex group
+ * joins this rule; adding it now would claim a coverage relationship that
+ * does not exist. */
+AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib/test/src/test_retrieval.c", "retrieval make_lint_gates")
+/* The durable hash-chained log. Rides its own group and the platform group:
+ * every byte it reads or writes goes through the lib/platform file seam, so a
+ * change to that seam's locking, truncation or fsync behaviour changes what
+ * this module's recovery rule actually does. */
+AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/test/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")
+/* Test-group determinism: the classifier, the perturbation vocabulary, the
+ * per-group verdict, and the scan that drives them. The lint gate rides along
+ * because the ratchet it guards is the whole point — the recorded set of
+ * groups that do not reproduce may only shrink, and a change to the classifier
+ * that quietly reclassifies a group would move that record without anyone
+ * measuring anything. */
+AGENT_IMPACT_RULE("lib/determinism/src/*.c|lib/determinism/include/determinism/*.h|lib/test/src/test_determinism.c|tools/determinism_scan.c|tools/lint/check_determinism_ratchet.sh|tools/lint/determinism_baseline.txt", "determinism make_lint_gates")
+/* The cookbook: the answers to "how do I do X here", as a checked registry
+ * plus the document generated from it. It rides make_lint_gates only — the
+ * gate IS the coverage, and it runs the recipes rather than reading about
+ * them. */
+AGENT_IMPACT_RULE("config/cookbook.def|tools/lint/check_cookbook.sh|docs/COOKBOOK.md", "make_lint_gates")

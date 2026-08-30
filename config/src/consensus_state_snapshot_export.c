@@ -495,15 +495,17 @@ bool consensus_export_prove_write(
     struct consensus_state_bundle_proof_summary
         proofs[CONSENSUS_STATE_BUNDLE_PROOF_COUNT];
     memset(proofs, 0, sizeof(proofs));
+    struct consensus_state_bundle_proof_parent parent;
+    memset(&parent, 0, sizeof(parent));
     sqlite3 *destination = NULL;
 
-    bool ok = consensus_export_prove_source(source, request, manifest, &receipt,
-                                            proofs, result);
+    bool ok = consensus_export_prove_source(
+        source, request, manifest, &receipt, proofs, &parent, result);
     if (ok)
         ok = consensus_export_open_temp(output, &destination, result);
     if (ok)
         ok = consensus_export_write_bundle(source, destination, manifest,
-                                           &receipt, proofs, result);
+                                           &receipt, proofs, &parent, result);
     if (destination) {
         if (!output_sqlite_close_strict(output, &destination) && ok) {
             (void)consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,

@@ -36,6 +36,37 @@ static char *ops_rpc_passthrough_body(const char *method,
     return raw;
 }
 
+char *zcl_native_ops_health_body(const struct json_value *args,
+                                 struct zcl_native_body_err *err)
+{
+    (void)args;
+    char *raw = node_rpc_call("healthcheck", NULL);
+    if (!raw) {
+        err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
+        (void)snprintf(err->message, sizeof(err->message),
+                       "healthcheck RPC returned null");
+        LOG_NULL("ops.native", "healthcheck RPC returned null");
+    }
+    struct json_value root;
+    bool parsed = status_parse_rpc_json(&root, raw, JSON_OBJ);
+    const struct json_value *status = parsed ? json_get(&root, "status") : NULL;
+    const struct json_value *healthy = parsed ? json_get(&root, "healthy") : NULL;
+    const struct json_value *serving = parsed ? json_get(&root, "serving") : NULL;
+    if (!status || status->type != JSON_STR ||
+        !healthy || healthy->type != JSON_BOOL ||
+        !serving || serving->type != JSON_BOOL) {
+        json_free(&root);
+        free(raw);
+        err->status = ZCL_NATIVE_BODY_PROTOCOL;
+        (void)snprintf(err->message, sizeof(err->message),
+                       "healthcheck returned an incompatible success body");
+        LOG_NULL("ops.native",
+                 "healthcheck returned an incompatible success body");
+    }
+    json_free(&root);
+    return raw;
+}
+
 char *zcl_native_operator_snapshot_body(const struct json_value *args,
                                         struct zcl_native_body_err *err)
 {
@@ -131,11 +162,12 @@ char *zcl_native_self_heal_stats_body(const struct json_value *args,
  * Dev-only (compiled only under -DZCL_HOTSWAP_GEN; expands to nothing in the
  * node/release TU). Stages every native command leaf this controller owns.
  *
- * All five bodies are no-argument read projections ((void)args) over operator
+ * All six bodies are no-argument read projections ((void)args) over operator
  * rollups the node already computes: four forward a read-only node RPC
- * verbatim, and self-heal reads a counter snapshot. None decides a consensus
- * rule, validates a block, or touches a state root — process_block's self-heal
- * stats are observability counters reached through a snapshot accessor.
+ * verbatim, one projects its summary, and self-heal reads a counter snapshot.
+ * None decides a consensus rule, validates a block, or touches a state root —
+ * process_block's self-heal stats are observability counters reached through
+ * a snapshot accessor.
  * ops.debug.dash.summary is the declared probe: it ignores args and its
  * declared output schema is zcl.operator_summary.v1. */
 #ifdef ZCL_HOTSWAP_GEN
@@ -146,6 +178,8 @@ char *zcl_native_self_heal_stats_body(const struct json_value *args,
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_operator_snapshot, zcl_native_operator_snapshot_body)
 
+ZCL_HOTSWAP_TRAMPOLINE(tramp_ops_health, zcl_native_ops_health_body)
+
 ZCL_HOTSWAP_TRAMPOLINE(tramp_operator_summary, zcl_native_operator_summary_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_milestone, zcl_native_milestone_body)
@@ -154,7 +188,8 @@ ZCL_HOTSWAP_TRAMPOLINE(tramp_mirror_status, zcl_native_mirror_status_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(tramp_self_heal_stats, zcl_native_self_heal_stats_body)
 
-static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "ops.debug.dash.snapshot",  tramp_operator_snapshot },
+static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-static-ok: leaf registration tables are immutable */    { "ops.health",               tramp_ops_health },
+    { "ops.debug.dash.snapshot",  tramp_operator_snapshot },
     { "ops.debug.dash.summary",   tramp_operator_summary },
     { "ops.debug.dash.milestone", tramp_milestone },
     { "ops.debug.dash.mirror",    tramp_mirror_status },
@@ -164,7 +199,7 @@ static const struct zcl_hotswap_leaf_replacement k_leaves[] = { /* hotswap-stati
 ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #endif /* ZCL_HOTSWAP_GEN */
 
-/* REAL (activatable) multi-leaf module ABI export. All five leaves are
+/* REAL (activatable) multi-leaf module ABI export. All six leaves are
  * re-pointed in ONE all-or-nothing registry batch; every body is defined in
  * THIS TU, so each one is genuinely recompiled by the swap rather than merely
  * re-dispatched into resident code. */
@@ -174,6 +209,8 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves, sizeof(k_leaves) / sizeof(k_leaves[0]))
 #include "command/native_command.h"
 
 ZCL_HOTSWAP_TRAMPOLINE(module_tramp_operator_snapshot, zcl_native_operator_snapshot_body)
+
+ZCL_HOTSWAP_TRAMPOLINE(module_tramp_ops_health, zcl_native_ops_health_body)
 
 ZCL_HOTSWAP_TRAMPOLINE(module_tramp_operator_summary, zcl_native_operator_summary_body)
 
@@ -192,7 +229,8 @@ static bool module_selftest_ops_dash(char *err, size_t cap)
     return true;
 }
 
-static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "ops.debug.dash.snapshot",  module_tramp_operator_snapshot },
+static const struct zcl_hotswap_leaf k_module_leaves[] = { /* hotswap-static-ok: immutable leaf registration tables */    { "ops.health",               module_tramp_ops_health },
+    { "ops.debug.dash.snapshot",  module_tramp_operator_snapshot },
     { "ops.debug.dash.summary",   module_tramp_operator_summary },
     { "ops.debug.dash.milestone", module_tramp_milestone },
     { "ops.debug.dash.mirror",    module_tramp_mirror_status },

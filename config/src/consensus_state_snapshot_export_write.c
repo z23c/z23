@@ -62,6 +62,24 @@ static const char k_bundle_schema_sql[] =
     "pool INTEGER NOT NULL CHECK(pool IN(0,1)),nf BLOB NOT NULL,"
     "height INTEGER NOT NULL,PRIMARY KEY(pool,nf)) WITHOUT ROWID;";
 
+static const char k_proof_parent_schema_sql[] =
+    "CREATE TABLE proof_parent("
+    "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+    "base_height INTEGER NOT NULL CHECK(base_height>=0),"
+    "base_block_hash BLOB NOT NULL CHECK(length(base_block_hash)=32),"
+    "validation_profile INTEGER NOT NULL CHECK(validation_profile IN(1,2)),"
+    "proof_manifest_digest BLOB NOT NULL "
+        "CHECK(length(proof_manifest_digest)=32),"
+    "source_digest BLOB NOT NULL CHECK(length(source_digest)=32),"
+    "artifact_digest BLOB NOT NULL CHECK(length(artifact_digest)=32));"
+    "CREATE TABLE proof_parent_component("
+    "ordinal INTEGER PRIMARY KEY CHECK(ordinal>=0 AND ordinal<8),"
+    "component TEXT NOT NULL UNIQUE,cursor INTEGER NOT NULL,"
+    "first_height INTEGER NOT NULL,last_height INTEGER NOT NULL,"
+    "row_count INTEGER NOT NULL,hash_bound_count INTEGER NOT NULL,"
+    "component_digest BLOB NOT NULL CHECK(length(component_digest)=32),"
+    "suffix_digest BLOB NOT NULL CHECK(length(suffix_digest)=32));";
+
 static bool prepare_pair(sqlite3 *source, const char *select_sql,
                          sqlite3 *destination, const char *insert_sql,
                          sqlite3_stmt **read, sqlite3_stmt **write)
@@ -514,6 +532,72 @@ static bool write_proof_summaries(
     return ok;
 }
 
+static bool write_proof_parent(
+    sqlite3 *db, const struct consensus_state_bundle_proof_parent *parent)
+{
+    if (!parent || !parent->present)
+        return true;
+    if (sqlite3_exec(db, k_proof_parent_schema_sql, NULL, NULL, NULL) !=
+        SQLITE_OK)
+        return false;
+    static const char base_sql[] =
+        "INSERT INTO proof_parent("
+        "singleton,base_height,base_block_hash,validation_profile,"
+        "proof_manifest_digest,source_digest,artifact_digest) "
+        "VALUES(1,?,?,?,?,?,?)";
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db, base_sql, -1, &st, NULL) == SQLITE_OK &&
+              sqlite3_bind_int(st, 1, parent->base_height) == SQLITE_OK &&
+              sqlite3_bind_blob(st, 2, parent->base_block_hash, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_int(st, 3, parent->validation_profile) ==
+                  SQLITE_OK &&
+              sqlite3_bind_blob(st, 4, parent->proof_manifest_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(st, 5, parent->source_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_blob(st, 6, parent->artifact_digest, 32,
+                                SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:consensus-bundle-artifact
+    if (st)
+        sqlite3_finalize(st);
+
+    static const char component_sql[] =
+        "INSERT INTO proof_parent_component("
+        "ordinal,component,cursor,first_height,last_height,row_count,"
+        "hash_bound_count,component_digest,suffix_digest) "
+        "VALUES(?,?,?,?,?,?,?,?,?)";
+    st = NULL;
+    if (ok)
+        ok = sqlite3_prepare_v2(db, component_sql, -1, &st, NULL) ==
+             SQLITE_OK;
+    for (size_t i = 0; ok && i < CONSENSUS_STATE_BUNDLE_PROOF_COUNT; i++) {
+        const struct consensus_state_bundle_proof_summary *component =
+            &parent->components[i];
+        ok = sqlite3_bind_int(st, 1, (int)i) == SQLITE_OK &&
+             sqlite3_bind_text(st, 2, component->component, -1,
+                               SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_int64(st, 3, (sqlite3_int64)component->cursor) ==
+                 SQLITE_OK &&
+             sqlite3_bind_int64(st, 4, component->first_height) == SQLITE_OK &&
+             sqlite3_bind_int64(st, 5, component->last_height) == SQLITE_OK &&
+             sqlite3_bind_int64(st, 6,
+                                (sqlite3_int64)component->row_count) ==
+                 SQLITE_OK &&
+             sqlite3_bind_int64(
+                 st, 7, (sqlite3_int64)component->hash_bound_count) ==
+                 SQLITE_OK &&
+             sqlite3_bind_blob(st, 8, component->component_digest, 32,
+                               SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_blob(st, 9, parent->suffix_digest[i], 32,
+                               SQLITE_STATIC) == SQLITE_OK &&
+             step_insert(st);
+    }
+    if (st)
+        sqlite3_finalize(st);
+    return ok;
+}
+
 static bool compiled_checkpoint_matches(
     const struct consensus_state_bundle_manifest *manifest)
 {
@@ -533,6 +617,7 @@ bool consensus_export_write_bundle(
     const struct consensus_state_source_receipt *receipt,
     const struct consensus_state_bundle_proof_summary
         proofs[CONSENSUS_STATE_BUNDLE_PROOF_COUNT],
+    const struct consensus_state_bundle_proof_parent *parent,
     struct consensus_state_export_result *result)
 {
     char *error = NULL;
@@ -567,6 +652,8 @@ bool consensus_export_write_bundle(
         ok = write_source_receipt(destination, receipt);
     if (ok)
         ok = write_proof_summaries(destination, proofs);
+    if (ok)
+        ok = write_proof_parent(destination, parent);
     if (ok)
         ok = write_manifest(destination, manifest);
     const char *finish = ok ? "COMMIT" : "ROLLBACK";

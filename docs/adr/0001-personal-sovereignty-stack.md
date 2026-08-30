@@ -17,7 +17,7 @@ Adopt the **AI-Integrated Personal Sovereignty Stack** vision and the layer-cake
 Concretely:
 
 1. **Target architecture** = the L1–L7 layer cake. North star: *the database is the only truth; chain progress is a stage cursor on disk.*
-2. **Positioning** = one ~23 MB dynamically-linked C23 binary on a $200 SBC providing bank + identity + inbox + market + swap + web host + games + AI co-pilot, all behind Tor. <!-- stale-ok: historical ADR positioning statement; current size via tools/scripts/binary_size.sh -->
+2. **Positioning** = one ~30 MB dynamically-linked C23 binary on a $200 SBC providing bank + identity + inbox + market + swap + web host + games + AI co-pilot, all behind Tor. <!-- stale-ok: historical ADR positioning statement; current size via tools/scripts/binary_size.sh -->
 
 3. **Mode** = build forward. Recent work is bedrock for the destination, not cruft to be torn out. Pure deletions are bounded at ~2,500 LOC (Wave F-1, five dead helpers + dormant mirror-consensus machinery + three deprecated import-orchestrator files).
 4. **Roadmap** = six waves (F, S, M, Z, T, R) in `~/.claude/plans/zclassic23-plan.md`. The wedge dissolves naturally at the Wave S cutover; no targeted patch ships before then.

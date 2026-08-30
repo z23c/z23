@@ -68,6 +68,10 @@ LIB_MODULE("base")
  * that has to be honest in that context too. Ranked above base only so base
  * keeps its documented place as the sink. */
 LIB_MODULE("install")
+/* BM25 ranked retrieval over an in-memory corpus. Depends on base and the C
+ * math library and nothing else, so it takes the lowest rank the order rule
+ * allows. Nothing below it (base, install) references it. */
+LIB_MODULE("retrieval")
 /* Scalar FIPS-202 primitives depend only on base.  Crypto owns optional
  * batched acceleration and reaches down through sha3/sha3.h. */
 LIB_MODULE("sha3")
@@ -75,11 +79,17 @@ LIB_MODULE("sha3")
  * over an exactly identified source tree, in the fixed form it travels in.
  * Depends on base and sha3 and NOTHING else — deliberately. It does not sign
  * and knows no identity: a caller hands the canonical bytes to zid_doc_sign,
- * which is why this sits at rank 4 instead of above lib/zid. It also does not
+ * which is why this sits at rank 5 instead of above lib/zid. It also does not
  * COMPUTE a verdict vector; it carries one a caller measured. */
 LIB_MODULE("receipt")
 /* Bounded wire cursors depend only on base fixed-width byte helpers. */
 LIB_MODULE("codec")
+/* Verdict vectors, their digest, the four-bucket classifier and the
+ * determinism receipt. Depends only on base, sha3 and codec — all strictly
+ * lower ranks — and deliberately on nothing that knows what a test IS: it
+ * consumes the runner's transcript, so it can never grow an opinion about
+ * which group deserves to pass. */
+LIB_MODULE("determinism")
 LIB_MODULE("primitives")
 LIB_MODULE("support")
 LIB_MODULE("json")
@@ -106,6 +116,12 @@ LIB_MODULE("astro")
 LIB_MODULE("presentation")
 LIB_MODULE("overlay")
 LIB_MODULE("platform")
+/* An append-only file whose history cannot be edited quietly: every frame
+ * is SHA3-linked to the one before it, seeded from the file header. It reads
+ * and writes only through the lib/platform file seam, so it ranks directly
+ * above it, and it holds no key material — a chain proves nothing was edited,
+ * never who wrote it. */
+LIB_MODULE("chainlog")
 LIB_MODULE("core")
 LIB_MODULE("crypto")
 LIB_MODULE("zid")

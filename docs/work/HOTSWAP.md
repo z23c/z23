@@ -834,10 +834,10 @@ minority that name `zcl_native_bridge_command` as their handler (re-derive with
 drop the one comment-line hit) sit behind this seam. The rest carry bespoke
 `zcl_native_handle_*` handlers, which are not this seam.
 
-Of those native-bridge leaves, **31 are now swappable** (the other 10 swappable leaves —
-metaverse, and others — reach the registry by a different registered handler),
-leaving 30 addressable-but-not-yet-swapped. Those 30 split into three very
-different costs:
+Of those native-bridge leaves, **32 are now swappable**, leaving 29
+addressable-but-not-yet-swapped. The complete manifest contains 63 READY
+read-only leaves, including leaves reached through other registered handlers.
+Those 29 split into three very different costs:
 
 - **~20 have no controller body at all.** They are declarative rows in an
   RPC-passthrough table inside `tools/command/native_command.c`
@@ -848,7 +848,7 @@ different costs:
   controller TU as a real `zcl_native_*_body`, bind it, then admit — roughly a
   30-line change each, plus a probe case. This covers most of the remaining
   `core.network.*`, `core.wallet.balance/status/audit`, `core.storage.stats`,
-  `core.mining.*`, `ops.health`, and `ops.lanes` leaves.
+  `core.mining.*` and `ops.lanes` leaves.
 - **2 are withheld on the consensus line**: `core.chain.block.get`,
   `core.chain.transaction.get` (see above). Cost: an owner decision, not code.
 - **The rest are consensus/sync projections** (`core.consensus.integrity`,
@@ -866,9 +866,8 @@ sketches. Neither is an allowlist edit.
 
 #### One provider per artifact
 
-`make hotswap-so` refuses more than one file per generation with *"v2 pilot
-admits one atomic provider per generation"*. That wording suggests pilot
-caution. It is not: it is a hard property of the ABI. Both emitters define a
+`make hotswap-so` admits one atomic provider per generation. This is a hard
+property of the ABI: both emitters define a
 **single, fixed, well-known symbol**, so two provider TUs in one `.so` is a
 duplicate-definition link error:
 
@@ -901,7 +900,7 @@ design needs that; widen the island instead.
 | `app/controllers/src/meta_native_handlers.c` | `ops.metrics` | 2 |
 | `app/controllers/src/chain_native_handlers.c` | `core.consensus.utxo.audit` | 1 |
 | `app/controllers/src/app_native_handlers.c` | `app.names.list` | 9 |
-| `app/controllers/src/ops_native_handlers.c` | `ops.debug.dash.summary` | 5 |
+| `app/controllers/src/ops_native_handlers.c` | `ops.debug.dash.summary` | 6 |
 | `app/controllers/src/metaverse_controller.c` | `metaverse.property.list` | 6 |
 | `app/controllers/src/diagnostics_native_handlers.c` | `ops.logs` with a fixed one-row, one-second case | 2 |
 

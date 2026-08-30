@@ -48,7 +48,6 @@ config/src/boot_snapshot_install.c
 config/src/consensus_state_install_assisted_seam.c
 config/src/consensus_state_install_verify_receipt.c
 config/src/consensus_state_producer_receipt.c
-config/src/consensus_state_producer_receipt_corpus.c
 config/src/consensus_state_snapshot_export_proof_rows.c
 config/src/consensus_state_snapshot_install.c
 config/src/mint_anchor_progress.c

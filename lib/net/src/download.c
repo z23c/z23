@@ -686,7 +686,7 @@ uint32_t dl_mark_received(struct download_manager *dm,
     struct dl_in_flight *s = find_slot(dm, hash, false);
     if (!s || !s->active) {
         zcl_mutex_unlock(&dm->cs);
-        return 0;
+        return UINT32_MAX;
     }
 
     uint32_t peer_id = s->peer_id;

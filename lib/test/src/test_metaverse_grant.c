@@ -1216,6 +1216,101 @@ static int t_distinct_key_is_not_replay(void)
     return failures;
 }
 
+/* A replay must match the REQUEST, not just the key. Matching on
+ * (grant, key) alone means a caller that reuses a key for a DIFFERENT action,
+ * property, value or counterparty is handed the earlier, unrelated receipt
+ * with status OK and `replayed` set: its own request never runs, and nothing
+ * in the answer says so. The two ways out of that are both worse than a
+ * refusal — replaying answers a question nobody asked, and executing the new
+ * request would mean one key names two receipts — so the mismatch itself is
+ * the named refusal. */
+static int t_replay_must_match_the_request(void)
+{
+    int failures = 0;
+    TEST("a reused key with a different request is refused, not replayed") {
+        struct metaverse_property_id prop = make_id(METAVERSE_KIND_CONTENT, 52);
+        struct metaverse_property_id other =
+            make_id(METAVERSE_KIND_CONTENT, 53);
+        fixture_reset(&prop);
+        struct metaverse_grant g;
+        memset(&g, 0, sizeof(g));
+        snprintf(g.holder, sizeof(g.holder), "%s", k_holder);
+        snprintf(g.issuer, sizeof(g.issuer), "%s", k_holder);
+        g.scope_form = METAVERSE_SCOPE_IDS;
+        g.ids[0] = prop;
+        g.ids[1] = other;
+        g.id_count = 2;
+        g.actions = ACT(BUY) | ACT(HOST);
+        g.max_value_zat = 100000;
+        ASSERT_EQ((int)property_grant_service_mint(&g), (int)PROPERTY_GRANT_OK);
+
+        struct metaverse_action_request r =
+            request_for(&prop, METAVERSE_ACTION_BUY, NULL, 25000);
+        struct property_grant_plan plan;
+        ASSERT_EQ((int)property_grant_service_plan(g.grant_id, &r, &plan),
+                  (int)PROPERTY_GRANT_OK);
+        struct property_grant_commit_result first;
+        ASSERT_EQ((int)property_grant_service_commit(plan.plan_id, "order-7",
+                                                     &first),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)first.receipt.seq, 1);
+
+        /* Four requests that differ from the receipt in exactly one field.
+         * Each is planned successfully — the grant genuinely permits it — and
+         * each is refused at COMMIT because the key is spoken for. */
+        struct metaverse_action_request diff[4] = {
+            request_for(&prop, METAVERSE_ACTION_BUY, NULL, 30000),
+            request_for(&prop, METAVERSE_ACTION_HOST, NULL, 0),
+            request_for(&prop, METAVERSE_ACTION_BUY, k_buyer, 25000),
+            request_for(&other, METAVERSE_ACTION_BUY, NULL, 25000),
+        };
+        for (size_t i = 0; i < 4; i++) {
+            /* The catalog answers for whichever property this case names. */
+            g_cat.id = diff[i].property;
+            struct property_grant_plan p2;
+            ASSERT_EQ((int)property_grant_service_plan(g.grant_id, &diff[i],
+                                                       &p2),
+                      (int)PROPERTY_GRANT_OK);
+            struct property_grant_commit_result res;
+            ASSERT_EQ((int)property_grant_service_commit(p2.plan_id, "order-7",
+                                                         &res),
+                      (int)PROPERTY_GRANT_IDEMPOTENCY_KEY_REUSED);
+            /* Refused, so it is not a replay and carries no receipt. */
+            ASSERT(!res.replayed);
+            ASSERT_EQ((int)res.receipt.seq, 0);
+        }
+        g_cat.id = prop;
+
+        /* The stored receipt is exactly what it was, there is still only one,
+         * and nothing was charged for the four refusals. */
+        struct metaverse_receipt rc[8];
+        ASSERT_EQ((int)property_grant_service_receipts(g.grant_id, rc, 8), 1);
+        ASSERT_EQ((int)rc[0].seq, 1);
+        ASSERT_EQ((int)rc[0].value_zat, 25000);
+        ASSERT_EQ((int)rc[0].action, (int)METAVERSE_ACTION_BUY);
+        ASSERT(memcmp(rc[0].chain_hash, first.receipt.chain_hash,
+                      METAVERSE_HASH_LEN) == 0);
+        struct metaverse_grant after;
+        ASSERT_EQ((int)property_grant_service_get(g.grant_id, &after),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)after.spent_zat, 25000);
+
+        /* And the genuine retry — same key, same request — still replays. */
+        struct property_grant_commit_result again;
+        ASSERT_EQ((int)property_grant_service_commit(plan.plan_id, "order-7",
+                                                     &again),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT(again.replayed);
+        ASSERT_EQ((int)again.receipt.seq, 1);
+
+        ASSERT_STR_EQ(
+            property_grant_reason_token(PROPERTY_GRANT_IDEMPOTENCY_KEY_REUSED),
+            "IDEMPOTENCY_KEY_REUSED");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── 6. Tamper evidence ─────────────────────────────────────────────────── */
 
 static int t_tamper_edit_detected(void)
@@ -1471,6 +1566,172 @@ static int t_budget_is_cumulative(void)
         struct property_grant_plan plan;
         ASSERT_EQ((int)property_grant_service_plan(g.grant_id, &r, &plan),
                   (int)PROPERTY_GRANT_BUDGET_EXCEEDED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── 8b. The cumulative ceiling bounds the WHOLE delegation subtree ────────
+ *
+ * A per-child attenuation check is not a budget either, for exactly the reason
+ * the header gives about per-action ceilings: a 5000-zat parent that may mint
+ * two 5000-zat children has authorized 5000 and is exposed to 10000, and the
+ * number the operator wrote down is decorative again. Delegation cannot fix
+ * this by reserving the child's declared maximum at mint time — that charges
+ * the operator for money a child may never spend, and it would make revoking
+ * an unused child a refund rather than a no-op. The ceiling therefore binds
+ * where value actually MOVES: a commit charges its grant AND every ancestor,
+ * and is refused unless all of them can pay. */
+
+static int t_parent_budget_bounds_its_children(void)
+{
+    int failures = 0;
+    TEST("a parent's cumulative ceiling bounds what its children may move") {
+        struct metaverse_property_id prop = make_id(METAVERSE_KIND_CONTENT, 82);
+        fixture_reset(&prop);
+        struct metaverse_grant parent =
+            grant_over_id(&prop, ACT(BUY) | ACT(DELEGATE), 5000);
+        parent.delegation_allowed = true;
+        parent.max_delegation_depth = 2;
+        ASSERT_EQ((int)property_grant_service_mint(&parent),
+                  (int)PROPERTY_GRANT_OK);
+
+        /* Two siblings, each minted with the parent's FULL remaining budget.
+         * Each is a legal attenuation ON ITS OWN — which is the whole point:
+         * nothing at mint time is wrong, so nothing at mint time can be the
+         * check that saves the operator. */
+        struct metaverse_grant a = grant_over_id(&prop, ACT(BUY), 5000);
+        struct metaverse_grant b = grant_over_id(&prop, ACT(BUY), 5000);
+        ASSERT_EQ((int)property_grant_service_delegate(parent.grant_id, &a),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)property_grant_service_delegate(parent.grant_id, &b),
+                  (int)PROPERTY_GRANT_OK);
+
+        /* BOTH quotes are taken BEFORE either commits, so the refusal below
+         * cannot come from a plan-time reading of the parent's budget: at plan
+         * time the parent has spent nothing. It can only come from the charge
+         * the commit itself puts on the lineage. */
+        struct metaverse_action_request r =
+            request_for(&prop, METAVERSE_ACTION_BUY, NULL, 5000);
+        struct property_grant_plan pa, pb;
+        ASSERT_EQ((int)property_grant_service_plan(a.grant_id, &r, &pa),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)property_grant_service_plan(b.grant_id, &r, &pb),
+                  (int)PROPERTY_GRANT_OK);
+
+        struct property_grant_commit_result ra, rb;
+        ASSERT_EQ((int)property_grant_service_commit(pa.plan_id, "sib-a", &ra),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)property_grant_service_commit(pb.plan_id, "sib-b", &rb),
+                  (int)PROPERTY_GRANT_BUDGET_EXCEEDED);
+
+        /* 5000 authorized, 5000 at risk. */
+        struct metaverse_grant pnow, anow, bnow;
+        ASSERT_EQ((int)property_grant_service_get(parent.grant_id, &pnow),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)property_grant_service_get(a.grant_id, &anow),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)property_grant_service_get(b.grant_id, &bnow),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)pnow.spent_zat, 5000);
+        ASSERT_EQ((int)anow.spent_zat, 5000);
+        ASSERT_EQ((int)bnow.spent_zat, 0);
+        ASSERT_EQ((int)metaverse_grant_budget_remaining(&pnow), 0);
+
+        /* The refused sibling wrote no evidence. */
+        struct metaverse_receipt rc[4];
+        ASSERT_EQ((int)property_grant_service_receipts(b.grant_id, rc, 4), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_lineage_charge_reaches_a_grandparent(void)
+{
+    int failures = 0;
+    TEST("a grandchild's spend is charged to every ancestor, all or none") {
+        struct metaverse_property_id prop = make_id(METAVERSE_KIND_CONTENT, 83);
+        fixture_reset(&prop);
+
+        struct metaverse_grant root =
+            grant_over_id(&prop, ACT(BUY) | ACT(DELEGATE), 10000);
+        root.delegation_allowed = true;
+        root.max_delegation_depth = 3;
+        ASSERT_EQ((int)property_grant_service_mint(&root),
+                  (int)PROPERTY_GRANT_OK);
+
+        struct metaverse_grant mid =
+            grant_over_id(&prop, ACT(BUY) | ACT(DELEGATE), 9000);
+        mid.delegation_allowed = true;
+        mid.max_delegation_depth = 3;
+        ASSERT_EQ((int)property_grant_service_delegate(root.grant_id, &mid),
+                  (int)PROPERTY_GRANT_OK);
+
+        struct metaverse_grant leaf = grant_over_id(&prop, ACT(BUY), 9000);
+        ASSERT_EQ((int)property_grant_service_delegate(mid.grant_id, &leaf),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)leaf.depth, 2);
+        ASSERT_EQ((int)leaf.lineage_count, 2);
+
+        /* The MIDDLE grant spends most of its own budget. Nothing about the
+         * leaf's record changes, so the leaf still believes it holds 9000. */
+        struct metaverse_action_request big =
+            request_for(&prop, METAVERSE_ACTION_BUY, NULL, 8000);
+        struct property_grant_plan pm;
+        ASSERT_EQ((int)property_grant_service_plan(mid.grant_id, &big, &pm),
+                  (int)PROPERTY_GRANT_OK);
+        struct property_grant_commit_result rm;
+        ASSERT_EQ((int)property_grant_service_commit(pm.plan_id, "mid-1", &rm),
+                  (int)PROPERTY_GRANT_OK);
+
+        struct metaverse_grant now;
+        ASSERT_EQ((int)property_grant_service_get(root.grant_id, &now),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)now.spent_zat, 8000);   /* the root paid for it too */
+
+        /* A leaf spend two levels down lands on BOTH ancestors. */
+        struct metaverse_action_request small =
+            request_for(&prop, METAVERSE_ACTION_BUY, NULL, 800);
+        struct property_grant_plan pl;
+        ASSERT_EQ((int)property_grant_service_plan(leaf.grant_id, &small, &pl),
+                  (int)PROPERTY_GRANT_OK);
+        struct property_grant_commit_result rl;
+        ASSERT_EQ((int)property_grant_service_commit(pl.plan_id, "leaf-1", &rl),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)property_grant_service_get(root.grant_id, &now),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)now.spent_zat, 8800);
+        ASSERT_EQ((int)property_grant_service_get(mid.grant_id, &now),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)now.spent_zat, 8800);
+        ASSERT_EQ((int)property_grant_service_get(leaf.grant_id, &now),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)now.spent_zat, 800);
+
+        /* ATOMICITY. The leaf can afford 1000 (8200 left) and so can the ROOT
+         * (1200 left); the MIDDLE grant cannot (200 left). The root is the
+         * first ancestor charged, so this is the case where a partial charge
+         * would leave the root debited for a commit that never happened. */
+        struct metaverse_action_request over =
+            request_for(&prop, METAVERSE_ACTION_BUY, NULL, 1000);
+        struct property_grant_plan po;
+        ASSERT_EQ((int)property_grant_service_plan(leaf.grant_id, &over, &po),
+                  (int)PROPERTY_GRANT_OK);
+        struct property_grant_commit_result ro;
+        ASSERT_EQ((int)property_grant_service_commit(po.plan_id, "leaf-2", &ro),
+                  (int)PROPERTY_GRANT_BUDGET_EXCEEDED);
+
+        ASSERT_EQ((int)property_grant_service_get(root.grant_id, &now),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)now.spent_zat, 8800);   /* not left holding the charge */
+        ASSERT_EQ((int)property_grant_service_get(mid.grant_id, &now),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)now.spent_zat, 8800);
+        ASSERT_EQ((int)property_grant_service_get(leaf.grant_id, &now),
+                  (int)PROPERTY_GRANT_OK);
+        ASSERT_EQ((int)now.spent_zat, 800);
+        struct metaverse_receipt rc[8];
+        ASSERT_EQ((int)property_grant_service_receipts(leaf.grant_id, rc, 8), 1);
         PASS();
     } _test_next:;
     return failures;
@@ -1824,6 +2085,28 @@ static int t_failed_commit_window_stays_locked(void)
             cur = u + 1;
         }
         ASSERT(unlocks >= 2);   /* the debit refusal and the seal refusal */
+
+        /* The lineage charge moves ANCESTOR records inside the same window,
+         * and an ancestor left debited for a commit that minted no receipt is
+         * the same defect one record over. So from the charge onward, every
+         * exit restores the ancestors it charged before it unlocks. The scan
+         * starts AT the charge because the exits above it have charged no
+         * ancestor and correctly restore none. */
+        const char *charge = strstr(win,
+                                    "metaverse_grant_record_descendant_charge(");
+        ASSERT(charge != NULL && charge < win_end);
+        cur = charge;
+        int lineage_unlocks = 0;
+        for (;;) {
+            const char *u = strstr(cur, "pthread_mutex_unlock(");
+            if (!u || u > win_end) break;
+            const char *restore = strstr(cur, "] = lineage_before[");
+            ASSERT(restore != NULL && restore < u);
+            lineage_unlocks++;
+            cur = u + 1;
+        }
+        /* The ancestor refusal and the seal refusal. */
+        ASSERT(lineage_unlocks >= 2);
         PASS();
     } _test_next:;
     return failures;
@@ -1994,6 +2277,7 @@ int test_metaverse_grant(void)
     failures += t_idempotent_commit();
     failures += t_unkeyed_commit_not_replayable();
     failures += t_distinct_key_is_not_replay();
+    failures += t_replay_must_match_the_request();
 
     failures += t_tamper_edit_detected();
     failures += t_tamper_foreign_signature();
@@ -2005,6 +2289,8 @@ int test_metaverse_grant(void)
     failures += t_delegation_attenuates();
 
     failures += t_budget_is_cumulative();
+    failures += t_parent_budget_bounds_its_children();
+    failures += t_lineage_charge_reaches_a_grandparent();
     failures += t_rate_window();
 
     failures += t_quoted_value_is_never_charged();

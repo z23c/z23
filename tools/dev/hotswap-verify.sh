@@ -120,6 +120,7 @@ build_verifier() {
         lib/base/src/safe_alloc.c \
         lib/hotswap/src/hotswap_sealed_image.c \
         lib/hotswap/src/hotswap_elf_probe.c \
+        lib/hotswap/src/hotswap_elf_probe_tables.c \
         lib/hotswap/src/hotswap_artifact_digest.c \
         lib/sha3/src/sha3.c \
         -Wl,--gc-sections -ldl || return 1

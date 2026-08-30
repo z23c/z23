@@ -22,6 +22,12 @@ development convenience.
 8. Run the integration gates and push a coherent slice.
 9. Continue the mission while deeper proof runs asynchronously.
 
+When you know WHAT you want to do and have forgotten HOW, do not re-read this
+document: [`COOKBOOK.md`](COOKBOOK.md) is the lookup table — one question, one
+answer, and every recipe in it is executed by `make check-cookbook`, so a
+recipe that stopped working fails the build instead of costing you an hour.
+This document is the ORDER; the cookbook is the incantations.
+
 A push is a checkpoint, not completion. Remote proof must not block the
 developer's ability to continue editing. Acceptance remains a local policy
 decision over exact canonical task, candidate, action, and receipt objects.

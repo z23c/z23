@@ -2178,7 +2178,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves \
+        check-persona-resolves check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
@@ -3102,7 +3102,7 @@ worktree-gc:
 # tools/agent/gate-receipt.sh — this is EVIDENCE, not proof.
 .PHONY: gate-receipt check-claims agent-velocity agent-sha3
 
-AGENT_SHA3_SRCS := tools/agent/agent_sha3.c lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c
+AGENT_SHA3_SRCS := tools/agent/agent_sha3.c lib/sha3/src/sha3.c
 agent-sha3: $(BIN_DIR)/agent_sha3
 $(BIN_DIR)/agent_sha3: $(AGENT_SHA3_SRCS)
 	@mkdir -p $(dir $@)
@@ -6192,6 +6192,64 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
 	    packages/zutf8/src/zutf8.c
 
+# ── determinism scan ────────────────────────────────────────────────────────
+# Measures whether every registered test group gives the SAME answer under
+# deliberately perturbed environments. It shells out to build/bin/test_parallel
+# once per perturbation, so it is a long measurement, never part of `make lint`
+# or a push gate; the cheap ratchet below guards the recorded result instead.
+DETERMINISM_LIB_SRCS = \
+    lib/determinism/src/verdict.c \
+    lib/determinism/src/classify.c \
+    lib/determinism/src/perturbation.c \
+    lib/determinism/src/receipt.c
+DETERMINISM_DEP_SRCS = \
+    lib/codec/src/cursor.c lib/sha3/src/sha3.c lib/base/src/log_level.c
+DETERMINISM_CPPFLAGS = -Ilib/determinism/include -Ilib/codec/include \
+    -Ilib/sha3/include -Ilib/base/include -Itools/dev
+DETERMINISM_SCAN_BIN = $(BIN_DIR)/determinism_scan
+.PHONY: determinism-scan determinism-receipt-abi
+determinism-scan: $(DETERMINISM_SCAN_BIN)
+$(DETERMINISM_SCAN_BIN): tools/determinism_scan.c $(DETERMINISM_LIB_SRCS) \
+    $(DETERMINISM_DEP_SRCS) tools/dev/test_group_catalog.def
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    $(DETERMINISM_CPPFLAGS) -o $@ tools/determinism_scan.c \
+	    $(DETERMINISM_LIB_SRCS) $(DETERMINISM_DEP_SRCS)
+
+# The receipt encoding must be byte-identical at every optimisation level. A
+# previous lane in this tree found two -O2-only defects, one of them struct
+# padding leaking into a hash; padding bytes are not required to be zero and
+# -O0 and -O2 need not pick the same ones. Build the SAME source twice and
+# require one line of hex out of both.
+determinism-receipt-abi:
+	@mkdir -p $(BIN_DIR)/determinism-abi
+	@for opt in 0 2; do \
+	    $(CC) -std=c23 -O$$opt -Wall -Wextra -Werror -pedantic \
+	        -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	        $(DETERMINISM_CPPFLAGS) \
+	        -o $(BIN_DIR)/determinism-abi/scan-O$$opt \
+	        tools/determinism_scan.c $(DETERMINISM_LIB_SRCS) \
+	        $(DETERMINISM_DEP_SRCS) || exit 1; \
+	    $(BIN_DIR)/determinism-abi/scan-O$$opt receipt-golden \
+	        > $(BIN_DIR)/determinism-abi/golden-O$$opt.hex || exit 1; \
+	done
+	@cmp $(BIN_DIR)/determinism-abi/golden-O0.hex \
+	     $(BIN_DIR)/determinism-abi/golden-O2.hex \
+	  || { echo "determinism-receipt-abi: FAIL — the receipt encoding differs between -O0 and -O2"; exit 1; }
+	@echo "determinism-receipt-abi: OK — identical receipt bytes at -O0 and -O2"
+	@cat $(BIN_DIR)/determinism-abi/golden-O2.hex
+
+# Gate — the NONDETERMINISTIC set may only shrink (HARD).
+# Wiring lives in THREE files: this recipe, the gate_command() case in
+# tools/lint/run_lint.sh, and the LINT-GATES block in docs/DEFENSIVE_CODING.md.
+# It reads git history, so tools/lint/lint_cache.sh refuses to cache it.
+.PHONY: check-determinism-ratchet
+check-determinism-ratchet:
+	@echo "══ LINT: determinism ratchet (shrink-only) ══"
+	@./tools/lint/check_determinism_ratchet.sh --selftest
+	@./tools/lint/check_determinism_ratchet.sh
+
 # ── Behavioral fingerprinting (lib/fingerprint) ──────────────────────────
 # `make fingerprint-scan` indexes what every in-tree function DOES rather than
 # what it is called: it derives which functions are pure and synthesisable,
@@ -7296,7 +7354,9 @@ mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
 # Binary-path argument: ZCL_BIN=/path/to/zclassic23 make
 # mvp-coldstart-to-tip-stopwatch points the stopwatch at any built binary
 # (e.g. an orchestrator's freshly-integrated candidate) without editing this
-# file or the script. ZCL_PEER=HOST:PORT names the serving peer, and it is
+# file or the script. ZCL_PEER=HOST:PORT names one serving peer; a comma list
+# names several and becomes one -connect per endpoint. Repeated --peer flags
+# are equivalent when invoking the harness directly. The peer set is
 # REQUIRED: there is deliberately no default. It used to default to
 # 127.0.0.1:8033 — the canonical node's own P2P port — so a bare
 # `make mvp-coldstart-to-tip-stopwatch` on an operator host quietly synced a
@@ -7425,7 +7485,7 @@ mvp-coldstart-to-tip-triple: zclassic23
 # (SEAM), 4 (STALLED-NAMED), 5 (FRONTIER-BUSY-TIMEOUT) and 6
 # (READBACK-FAILED) are honest verdicts and propagate as a failing recipe —
 # a remote peer that refuses the handshake is NOT laundered into a SKIP, it
-# is labelled peer_precheck=accept_close in the artifact and the run reports
+# is labelled in peer_prechecks[] as accept_close and the run reports
 # what the node actually earned.
 .PHONY: mvp-coldstart-to-tip-remote
 mvp-coldstart-to-tip-remote: zclassic23
@@ -9796,19 +9856,23 @@ ENGINE_UNIT_BIN = $(BIN_DIR)/zclassic23-engine-unit
 ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	tools/acme/tls_client.c \
 	lib/engine/src/engine_registry.c \
+	lib/engine/src/engine_cli.c \
 	lib/engine/src/engine_err.c \
 	lib/engine/src/engine_patch.c \
+	lib/engine/src/engine_prompt.c \
 	lib/engine/src/engine_secret.c \
 	lib/engine/src/engine_verdict.c \
 	lib/engine/src/engine_wire_request.c \
 	lib/engine/src/engine_wire_response.c \
 	lib/json/src/json.c \
+	lib/sha3/src/sha3.c \
 	lib/util/src/spawn.c \
 	lib/base/src/log_level.c \
 	lib/base/src/result.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
 ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
+	-Ilib/sha3/include \
 	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
 .PHONY: engine-unit
 engine-unit: $(ENGINE_UNIT_BIN)
@@ -10096,6 +10160,12 @@ check-model-sql-literals:
 # territory must still hold tracked C, and the file it cites as evidence must
 # still be tracked. There is no baseline — a row that stopped being true is
 # not a debt, it is a false statement.
+.PHONY: check-cookbook
+check-cookbook: $(ZCLASSIC23_DEV_BIN)
+	@echo "══ LINT: every cookbook recipe still works ══"
+	@./tools/lint/check_cookbook.sh --selftest
+	@./tools/lint/check_cookbook.sh
+
 check-persona-resolves:
 	@echo "══ LINT: every authored persona still resolves ══"
 	@./tools/lint/check_persona_resolves.sh --selftest
@@ -11546,12 +11616,14 @@ LINT_GATES := \
     check-tu-random-seed \
     check-outparam-init-before-return \
     check-equihash-params \
+    check-determinism-ratchet \
     check-before-save-hooks \
     check-pthread-create \
     check-model-validation \
     check-model-ar-lifecycle \
     check-model-sql-literals \
     check-persona-resolves \
+    check-cookbook \
     check-long-functions \
     check-rpc-registrar \
     check-lag-slo-observable \

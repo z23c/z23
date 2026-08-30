@@ -1,16 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: rederive the self-hosted package DAG and its root projection. */
 
-/* realpath() reaches this TU only through the glibc fortify inline that
- * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
- * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
- * compiles by accident of optimisation and breaks at -O0, under
- * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
- * include: after them it does nothing. See lib/util/src/hw_profile.c. */
-#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
-#define _DEFAULT_SOURCE
-#endif
-
 #include "test/test_core.h"
 
 #include "base/hex.h"
@@ -18,6 +8,7 @@
 #include "core/uint256.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
+#include "platform/directory_compat.h"
 #include "services/package_lifecycle.h"
 #include "util/spawn.h"
 #include "vcs/package_build.h"
@@ -347,8 +338,10 @@ static bool registry_dogfood_consumer(
     char scratch[256], scratch_abs[PATH_MAX], source_abs[PATH_MAX];
     test_make_tmpdir(scratch, sizeof(scratch), "zcode_registry", "dogfood");
     if (ok)
-        ok = realpath(scratch, scratch_abs) != NULL &&
-             realpath(expected->dir, source_abs) != NULL;
+        ok = platform_directory_canonical_real(
+                 scratch, scratch_abs, sizeof(scratch_abs)) &&
+             platform_directory_canonical_real(
+                 expected->dir, source_abs, sizeof(source_abs));
     char recipe_path[PATH_MAX] = {0}, emit_dir[PATH_MAX] = {0};
     if (ok) {
         int rn = snprintf(recipe_path, sizeof(recipe_path), "%s/recipe.wire",
