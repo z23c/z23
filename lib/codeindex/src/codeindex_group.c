@@ -146,6 +146,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/chain") == 0) return "chain index primitives: MMB/MMR fast-sync proofs, UTXO-root ladder, snapshot loader";
     if (strcmp(group, "lib/codec") == 0) return "allocation-free bounded reader/writer cursors over caller-owned buffers";
     if (strcmp(group, "lib/commons_demo") == 0) return "standalone C23 Commons application core composed from base, codec, and JSON packages";
+    if (strcmp(group, "lib/determinism") == 0) return "verdict vectors and their digest, the three-bucket determinism classifier, and the determinism receipt (evidence, never permission)";
     if (strcmp(group, "lib/coins") == 0) return "the UTXO set: coins view, undo data, compression, SHA3 UTXO commitment";
     if (strcmp(group, "lib/core") == 0) return "small consensus-adjacent primitives: amount, random, time-since-epoch helpers";
     if (strcmp(group, "lib/sha3") == 0) return "scalar FIPS-202 SHA3/SHAKE primitives";

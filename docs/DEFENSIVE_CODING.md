@@ -961,6 +961,30 @@ clean bill of health**, because the external mode deliberately drops the
 non-empty-claim floor (a plan directory legitimately starts with none). A plan
 only becomes checkable once its author binds an open item to a predicate.
 
+**Determinism is not hygiene here.** A receipt saying "I ran this group at this
+commit and it passed" is worth nothing if re-running the same thing gives a
+different answer, so the set of groups that do not reproduce is a debt with its
+own shrink-only ratchet in `tools/lint/determinism_baseline.txt`.
+
+Each row is `<group> <PERTURBATION>[+<PERTURBATION>...]`: the perturbation names
+the cause, because "it varies" is not a finding and "it varies when `CC` is set"
+is. `check-determinism-ratchet` guards the record — it refuses a row that names
+no cause, a row for a group that is not registered, a header count that
+disagrees with the rows, a missing baseline, and any row that was not already
+present at the merge-base with `origin/main`. There is no flag that admits a new
+row: a group appearing here means a test stopped giving the same answer twice,
+and the fix is the test.
+
+The gate does not re-measure — measuring is `make determinism-scan` driving
+`build/bin/test_parallel` once per perturbation, which is hours of wall clock
+and belongs nowhere near `make lint`. What it measures is the **verdict vector**:
+the ordered `(check name, outcome)` sequence the harness already prints, never
+the raw transcript, which carries durations, temp paths, pids and pointer
+values and would measure the clock instead of the test. Read
+`lib/determinism/include/determinism/perturbation.h` for what each perturbation
+means, which ones this host can apply, and why the result is a lower bound: a
+test that is wrong the same way every time has a perfectly stable vector.
+
 **Canonical lint-gate list (E11 source of truth).** This block is machine-checked
 against the Makefile `lint:` target. Keep it sorted; edit it whenever you
 add/remove a gate.
@@ -1130,6 +1154,7 @@ add/remove a gate.
 - `check-tu-random-seed`
 - `check-outparam-init-before-return`
 - `check-equihash-params`
+- `check-determinism-ratchet`
 <!-- LINT-GATES-END -->
 
 (`check-consensus-parity` [E13, the parity mechanism — see

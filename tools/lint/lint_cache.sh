@@ -155,6 +155,8 @@ lint_cache_never_reason() {
             echo "reads the byte size of build/bin/zclassic23" ;;
         check-observability-pairing)
             echo "runs a built binary that scans git history via merge-base/diff" ;;
+        check-determinism-ratchet)
+            echo "reads git history (the baseline as of the merge-base with origin/main) and the built determinism_scan, so its verdict depends on state no tree hash covers" ;;
         check-core-seal)
             echo "runs the built core_seal binary and reads the untracked .core-unseal-token; core/ is byte-sealed" ;;
         check-git-hooks-installed)

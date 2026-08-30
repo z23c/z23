@@ -1,0 +1,31 @@
+# Determinism ratchet baseline — registered test groups whose verdict vector
+# is NOT bitwise identical across every applied perturbation.
+#
+# One row per group: "<group> <PERTURBATION>[+<PERTURBATION>...]". The
+# perturbation names the CAUSE. "It varies" is not a finding; "it varies when
+# CC is set" is. A row with no cause is rejected by
+# tools/lint/check_determinism_ratchet.sh.
+#
+# THIS LIST MAY ONLY SHRINK. A group appearing here means a test stopped
+# giving the same answer twice, and the fix is the test, not this file. There
+# is no flag, allowlist or environment variable that admits a new row.
+#
+# PROVISIONAL — this is a THREE-perturbation result (BASE, BASE_REPEAT,
+# CC_SET) over 1013 dispatched groups. The full eight-perturbation sweep is
+# still running and will replace this file wholesale; it can only ADD rows,
+# never remove them, so this is the floor and not the answer. Do not treat
+# this count as the measured non-reproducing set until the header says so.
+#
+# Re-measure with:
+#   make determinism-scan
+#   build/bin/determinism_scan collect --profile=<P> --out=<dir>   (once per P)
+#   build/bin/determinism_scan classify --in=<dir> --profiles=BASE,... \
+#       --baseline=tools/lint/determinism_baseline.txt
+# It drives build/bin/test_parallel once per perturbation, so it is hours of
+# wall clock and is never part of `make lint`.
+#
+# count: 4
+test_snapshot_serve_loopback BASE_REPEAT+CC_SET
+test_hw_bench BASE_REPEAT
+test_parallel_range_fold BASE_REPEAT+CC_SET
+test_telemetry_sync_compat BASE_REPEAT+CC_SET

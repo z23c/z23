@@ -66,6 +66,12 @@ LIB_MODULE("base")
 LIB_MODULE("sha3")
 /* Bounded wire cursors depend only on base fixed-width byte helpers. */
 LIB_MODULE("codec")
+/* Verdict vectors, their digest, the three-bucket classifier and the
+ * determinism receipt. Depends only on base, sha3 and codec — all strictly
+ * lower ranks — and deliberately on nothing that knows what a test IS: it
+ * consumes the runner's transcript, so it can never grow an opinion about
+ * which group deserves to pass. */
+LIB_MODULE("determinism")
 LIB_MODULE("primitives")
 LIB_MODULE("support")
 LIB_MODULE("json")
