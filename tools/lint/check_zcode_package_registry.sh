@@ -43,8 +43,6 @@ platform_alternative_groups=(
     "lib/platform/src/os_sandbox_linux.c lib/platform/src/os_sandbox_stub.c"
     "lib/vcs/src/vcs_devloop.c lib/vcs/src/vcs_devloop_windows.c"
 )
-# Empty on purpose, and kept rather than deleted.
-#
 # The devloop pair used to live here, because the Windows implementation was
 # compiled on EVERY host: only the POSIX one was host-optional, so "expected 1
 # on Linux, 0 on MSYS" described the build exactly. That was the defect, not
@@ -52,10 +50,14 @@ platform_alternative_groups=(
 # Linux binary, and once the Makefile stopped doing it the pair became a
 # straightforward platform alternative like the sandbox pair above.
 #
-# The mechanism stays because "this source is genuinely optional on this host"
-# is a different claim from "exactly one of these alternatives is chosen", and
-# the day something is the former, describing it as the latter would hide it.
-host_optional_sources=()
+# The terminal-worker sandbox extension is genuinely Linux-only in addition
+# to the linux-or-stub base sandbox alternative.  It therefore belongs in the
+# host-optional set: exactly once in the Linux monolith and absent from native
+# Windows/macOS builds, whose worker implementation refuses before sandbox
+# entry.
+host_optional_sources=(
+    lib/platform/src/os_sandbox_terminal_worker.c
+)
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
     echo "check-zcode-package-registry: FAIL — empty package or monolith source projection" >&2
@@ -87,9 +89,9 @@ for optional in "${host_optional_sources[@]}"; do
     for compiled in "${monolith_sources[@]}"; do
         [[ "$compiled" == "$optional" ]] && ((count += 1))
     done
-    expected=1
+    expected=0
     case "$host_name" in
-        MINGW*|MSYS*) expected=0 ;;
+        Linux*) expected=1 ;;
     esac
     if (( count != expected )); then
         echo "check-zcode-package-registry: FAIL — host-optional $optional appears $count times in LIB_SRCS (expected $expected on $host_name)" >&2

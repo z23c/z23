@@ -23,6 +23,7 @@
 #include "models/mesh_pairing.h"
 #include "net/net.h"
 #include "net/noise_transport.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "services/mesh_pairing_service.h"
 #include "supervisors/domains.h"
@@ -33,11 +34,9 @@
 #include "vcs/zcode_dht_identity.h"
 #include "vcs/zcode_dht_service.h"
 
-#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 static zcl_mutex_t g_term_lock;
 static _Atomic int g_term_lock_state;
@@ -670,9 +669,9 @@ static bool terminal_workdir(const char *datadir,
     n = snprintf(parent, sizeof(parent), "%s/terminals", datadir);
     if (n <= 0 || (size_t)n >= sizeof(parent))
         return false;
-    if (mkdir(parent, 0700) != 0 && errno != EEXIST)
+    if (!platform_private_directory_ensure(parent))
         return false;
-    if (mkdir(out, 0700) != 0 && errno != EEXIST)
+    if (!platform_private_directory_ensure(out))
         return false;
     return true;
 }
