@@ -961,6 +961,21 @@ static int test_ic_code_capsule_stays_with_code_owner(void)
     return failures;
 }
 
+static int test_ic_generated_inventory_stays_focused(void)
+{
+    int failures = 0;
+    TEST("impact composition: generated inventory selects only its native proof") {
+        struct agent_impact_acc impact = {0};
+        ASSERT(agent_impact_apply_shared_rules(
+            "docs/CAPABILITY_INVENTORY.jsonl", &impact));
+        ASSERT(impact.shared_rule_hits == 1);
+        ASSERT(ic_acc_has_group(&impact, "code_inventory"));
+        ASSERT(!ic_acc_has_group(&impact, "make_lint_gates"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_dev_proof_contract_is_direct(void)
 {
     int failures = 0;
@@ -1175,6 +1190,7 @@ int test_impact_composition(void)
     failures += test_ic_dimension_applicability_and_exact_execution();
     failures += test_ic_snapshot_overlays_current_symbols();
     failures += test_ic_code_capsule_stays_with_code_owner();
+    failures += test_ic_generated_inventory_stays_focused();
     failures += test_ic_dev_proof_contract_is_direct();
     failures += test_ic_lint_helpers_exclude_onion_stress();
     failures += test_ic_dev_proof_receipt_admission();
