@@ -13,6 +13,11 @@
 extern "C" {
 #endif
 
+/* ops.health — the healthcheck RPC payload after validating the stable
+ * status/healthy/serving success shape. */
+char *zcl_native_ops_health_body(const struct json_value *args,
+                                 struct zcl_native_body_err *err);
+
 /* ops.debug.dash.snapshot — the exact native operatorsnapshot payload
  * (bounded target-owned component snapshots, capture coherence, typed
  * blockers, invariants, and the native summary projection), forwarded

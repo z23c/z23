@@ -578,6 +578,14 @@ static char *bridge_rpc_error_mock(const char *method,
     return strdup(g_bridge_rpc_error_fixture);
 }
 
+static char *bridge_rpc_null_mock(const char *method,
+                                  const char *params_json)
+{
+    (void)method;
+    (void)params_json;
+    return NULL;
+}
+
 static int test_messaging_inbox_wraps_rpc_array(void)
 {
     int failures = 0;
@@ -1032,9 +1040,6 @@ static int test_bridge_rpc_success_shapes_fail_closed(void)
         { "core.mining.benchmark",
           "{\"primary_benchmark_source\":\"local\",\"primary_benchmarks\":[]}",
           "{}" },
-        { "ops.health",
-          "{\"status\":\"blocked\",\"healthy\":false,\"serving\":false}",
-          "{\"status\":\"blocked\",\"healthy\":false}" },
         { "ops.lanes", "{\"status\":\"ok\",\"lanes\":[]}", "{}" },
         { "ops.recovery.status",
           "{\"ready_for_refold\":false,\"primary_blocker\":\"missing\"}",
@@ -1087,6 +1092,49 @@ static int test_bridge_rpc_success_shapes_fail_closed(void)
             ASSERT(strstr(out, "\"items\":[]") != NULL);
             ASSERT(strstr(out, "\"total_items\":0") != NULL);
         }
+        PASS();
+    } _test_next:;
+    g_bridge_rpc_error_fixture = NULL;
+    g_bridge_rpc_method_fixture = NULL;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+static int test_ops_health_body_fails_closed(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("ops.health body preserves and validates the healthcheck payload") {
+        const struct zcl_command_spec *s = find_spec(reg, "ops.health");
+        ASSERT(s != NULL);
+        ASSERT(s->handler == zcl_native_bridge_command);
+        ASSERT(zcl_native_bridge_body_for_path(s->path) != NULL);
+        ASSERT(zcl_native_bridge_rpc_for_path(s->path) == NULL);
+
+        g_bridge_rpc_method_fixture = "healthcheck";
+        node_rpc_client_set_test_hook(bridge_rpc_error_mock);
+        char out[ZCL_COMMAND_RESULT_BUDGET + 1];
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+
+        g_bridge_rpc_error_fixture =
+            "{\"status\":\"blocked\",\"healthy\":false,\"serving\":false}";
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "\"status\":\"blocked\"") != NULL);
+        ASSERT(strstr(out, "\"serving\":false") != NULL);
+
+        g_bridge_rpc_error_fixture =
+            "{\"status\":\"blocked\",\"healthy\":false}";
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(strstr(out, "incompatible success body") != NULL);
+
+        node_rpc_client_set_test_hook(bridge_rpc_null_mock);
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_TRANSIENT);
+        ASSERT(strstr(out, "healthcheck RPC returned null") != NULL);
         PASS();
     } _test_next:;
     g_bridge_rpc_error_fixture = NULL;
@@ -4169,6 +4217,7 @@ int test_command_registry_catalog(void)
     failures += test_raw_transaction_verbose_bool();
     failures += test_raw_transaction_error_string();
     failures += test_bridge_rpc_success_shapes_fail_closed();
+    failures += test_ops_health_body_fails_closed();
     failures += test_status_brief_flat_lean_envelope();
     failures += test_status_journey_safe_money_frontdoor();
     failures += test_wallet_utxo_list_envelope();
