@@ -71,6 +71,13 @@ LIB_MODULE("install")
 /* Scalar FIPS-202 primitives depend only on base.  Crypto owns optional
  * batched acceleration and reaches down through sha3/sha3.h. */
 LIB_MODULE("sha3")
+/* A proof receipt: one claim that a named test group reached a named verdict
+ * over an exactly identified source tree, in the fixed form it travels in.
+ * Depends on base and sha3 and NOTHING else — deliberately. It does not sign
+ * and knows no identity: a caller hands the canonical bytes to zid_doc_sign,
+ * which is why this sits at rank 4 instead of above lib/zid. It also does not
+ * COMPUTE a verdict vector; it carries one a caller measured. */
+LIB_MODULE("receipt")
 /* Bounded wire cursors depend only on base fixed-width byte helpers. */
 LIB_MODULE("codec")
 LIB_MODULE("primitives")
