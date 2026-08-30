@@ -118,7 +118,7 @@ static bool purpose_line_is_license(const char *line)
  * overrides (mirrors the // suffix-ok convention). Writes "" when no comment
  * precedes the first code token. Walks only the one leading comment's bytes via
  * the offsets already captured in c->comments[] — NO second file parse. */
-void ci_file_purpose(const struct scan_ctx *c, char out[160])
+void ci_file_purpose(const struct scan_ctx *c, char out[CI_FILE_PURPOSE_MAX])
 {
     out[0] = '\0';
     if (c->ncomments == 0) return;
@@ -147,7 +147,7 @@ void ci_file_purpose(const struct scan_ctx *c, char out[160])
 
     /* walk body lines of [start,end), mirroring capture_doc's fill-stripping */
     size_t i = start;
-    char line[256];
+    char line[CI_FILE_PURPOSE_CAPTURE_MAX];
     while (i < end) {
         while (i < end && (c->src[i] == ' ' || c->src[i] == '\t' ||
                            c->src[i] == '*' || c->src[i] == '\r'))
@@ -169,7 +169,7 @@ void ci_file_purpose(const struct scan_ctx *c, char out[160])
             if (strncasecmp(line, "purpose:", 8) == 0) {
                 const char *p = line + 8;
                 while (*p == ' ' || *p == '\t') p++;
-                (void)zcl_text_fit(out, 160, p, "codeindex", "file_purpose");
+                (void)zcl_text_fit(out, CI_FILE_PURPOSE_MAX, p, "codeindex", "file_purpose");
                 return;
             }
             if (purpose_line_is_license(line)) { i = j + 1; continue; }
@@ -186,7 +186,7 @@ void ci_file_purpose(const struct scan_ctx *c, char out[160])
                     p += 1; while (*p == ' ') p++; desc = p;
                 }
             }
-            (void)zcl_text_fit(out, 160, desc, "codeindex", "file_purpose");
+            (void)zcl_text_fit(out, CI_FILE_PURPOSE_MAX, desc, "codeindex", "file_purpose");
             return;
         }
         i = j + 1;

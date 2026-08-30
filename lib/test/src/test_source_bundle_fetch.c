@@ -34,6 +34,7 @@
 #include "kernel/command_registry.h"
 #include "net/file_service.h"
 #include "net/rom_fetch.h"
+#include "net/rom_journal.h"
 #include "net/rom_peer_scoring.h"
 #include "net/rom_seed.h"
 #include "platform/time_compat.h"
@@ -97,9 +98,19 @@ static bool sbft_bundle(const char *dir, uint8_t root_out[32],
 
 /* Start the real file service on `datadir` and return its OS-assigned port
  * (0 on failure). Port 0 everywhere: a fixed port would collide with a second
- * copy of this suite, or with anything else on the box. */
+ * copy of this suite, or with anything else on the box.
+ *
+ * The leading stop is not decoration. fs_server_start() returns SILENTLY when
+ * a server is already running (lib/net/src/file_service.c) and keeps the
+ * datadir it was started with, so a case that exits early — an ASSERT jumps
+ * straight to _test_next: and skips its own fs_server_stop() — would leave the
+ * NEXT case serving chunk reads out of a stale, already-deleted directory.
+ * That reads as "read_chunk: validated open failed" on every chunk and turns
+ * one honest failure into a second, unrelated-looking one. Each case owns its
+ * own server. */
 static uint16_t sbft_serve(const char *datadir)
 {
+    fs_server_stop();
     fs_server_start(datadir, 0);
     for (int w = 0; w < 40 && !fs_server_is_running(); w++)
         platform_sleep_ms(50);
@@ -1072,6 +1083,292 @@ static int test_leaf_end_to_end(void)
     return failures;
 }
 
+/* ── (h) A PRE-PLANTED resume state cannot substitute the answer ─────── */
+
+/* ADVERSARIAL. Every case above attacks the WIRE. This one attacks the
+ * staging directory, which is the other way bytes can reach the caller: the
+ * download layer keeps a durable resume journal, and a set journal bit is
+ * defined to mean "this chunk is already on disk AND digest-verified", so a
+ * `.part` plus a journal that marks every chunk done is a claim that the
+ * download is already finished. The fetch leaf hands the download layer the
+ * OUTPUT'S OWN PARENT DIRECTORY as staging
+ * (tools/command/native_zcode_source_bundle_command.c, zsb_parent_dir), so
+ * anything that can write to the operator's scratch directory can plant that
+ * claim — and the staging leaf name is derived from the artifact's chunk_root,
+ * which is public in every peer's directory listing.
+ *
+ * So: plant a WELL-FORMED impostor bundle (one that verifies perfectly under
+ * its own root, relabelled to the honest root — the same substitution case (b)
+ * builds) under all three staging names, padded to the honest artifact's exact
+ * byte length so nothing but a content digest can tell them apart, with a
+ * journal that says every chunk is done and verified. Then ask for the honest
+ * root.
+ *
+ * The requirement is not "the plant is detected" but the same one the whole
+ * module rests on: the caller gets bytes that rederive to the root it asked
+ * for, or it gets nothing. */
+static int test_planted_resume_state_refused(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: a staging directory pre-planted with a "
+         "well-formed impostor and a journal claiming the download is already "
+         "complete still yields only bytes that rederive to the asked-for "
+         "root") {
+        sbft_open_caps();
+        char hroot[] = "/tmp/zcl_sbfetch_plant_honest_XXXXXX";
+        char eroot[] = "/tmp/zcl_sbfetch_plant_evil_XXXXXX";
+        char sroot[] = "/tmp/zcl_sbfetch_plant_srv_XXXXXX";
+        char croot[] = "/tmp/zcl_sbfetch_plant_cli_XXXXXX";
+        char *hdir = mkdtemp(hroot), *edir = mkdtemp(eroot),
+             *sdir = mkdtemp(sroot), *cdir = mkdtemp(croot);
+        ASSERT(hdir && edir && sdir && cdir);
+        ASSERT(sbft_make_tree(hdir, 'A'));
+        ASSERT(sbft_make_tree(edir, 'B'));
+
+        uint8_t honest_root[32], evil_root[32];
+        uint8_t *honest = NULL, *evil = NULL;
+        size_t honest_len = 0, evil_len = 0;
+        ASSERT(sbft_bundle(hdir, honest_root, &honest, &honest_len));
+        ASSERT(sbft_bundle(edir, evil_root, &evil, &evil_len));
+        ASSERT(memcmp(honest_root, evil_root, 32) != 0);
+
+        /* Well-formed under its OWN root before it is relabelled — so what
+         * follows is about the content check, never about a malformed file. */
+        struct vcs_source_bundle_metrics vm;
+        ASSERT(vcs_source_bundle_verify(evil, evil_len, evil_root, &vm) ==
+               VCS_SOURCE_BUNDLE_OK);
+        memcpy(evil + ROM_SEED_SOURCE_BUNDLE_ROOT_OFFSET, honest_root, 32);
+
+        /* The honest seeder, and the artifact identity a planter can read
+         * straight out of its public directory listing. */
+        ASSERT(sbft_write(sdir, "tree.zvsb", honest, honest_len));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "tree.zvsb", NULL, &art) == ROM_REG_OK);
+        ASSERT(art.num_chunks >= 1);
+        uint16_t port = sbft_serve(sdir);
+        ASSERT(port != 0);
+
+        /* The staging leaf the fetcher will use: the FULL 32-byte chunk_root
+         * in hex, exactly as app/services/src/source_bundle_fetch.c derives
+         * it (sbf_download_candidate). The width is load-bearing on both
+         * sides. If this name stops matching the one the fetcher picks, the
+         * plant simply sits in a file the fetcher never looks at, and the test
+         * quietly stops testing anything — which is how it last broke: the
+         * service moved from an 8-byte stem to the whole root and this side
+         * did not follow. The staging-directory-empty assertion below is what
+         * catches that, because a plant the fetcher never named is also a
+         * plant it never cleans up. */
+        char stem[65];
+        sbft_hex32(art.chunk_root, stem);
+        char name[128], part[1200], jrnl[1300];
+        snprintf(name, sizeof(name), "zvsb-stage-%s.stage", stem);
+        snprintf(part, sizeof(part), "%s%s", name, ROM_FETCH_PART_SUFFIX);
+        snprintf(jrnl, sizeof(jrnl), "%s.journal", part);
+
+        /* Padded to the honest artifact's EXACT length, so size alone can
+         * never be what rejects it. */
+        uint8_t *plant = calloc(1, honest_len);
+        ASSERT(plant != NULL);
+        memcpy(plant, evil, evil_len < honest_len ? evil_len : honest_len);
+        ASSERT(memcmp(plant, honest, honest_len) != 0);
+        ASSERT(sbft_write(cdir, name, plant, honest_len));
+        ASSERT(sbft_write(cdir, part, plant, honest_len));
+
+        /* A journal that claims every chunk is durable AND digest-verified —
+         * the strongest lie the resume format can tell. */
+        char jpath[1400];
+        snprintf(jpath, sizeof(jpath), "%s/%s", cdir, jrnl);
+        struct rom_journal *j = rom_journal_open(jpath, art.chunk_root,
+                                                 art.whole_sha3,
+                                                 art.chunk_size,
+                                                 art.num_chunks);
+        ASSERT(j != NULL);
+        for (uint32_t i = 0; i < art.num_chunks; i++)
+            ASSERT(rom_journal_mark(j, i));
+        ASSERT(rom_journal_count_done(j) == art.num_chunks);
+        rom_journal_close(j);
+
+        struct rom_fetch_peer peer;
+        sbft_peer(&peer, port);
+        uint8_t *got = NULL;
+        size_t got_len = 0;
+        struct source_bundle_fetch_metrics m;
+        ASSERT(source_bundle_fetch(&peer, 1, honest_root, cdir, &got, &got_len,
+                                   &m) == SOURCE_BUNDLE_FETCH_OK);
+
+        /* The planted bytes are NOT what came back; the honest ones are, and
+         * they re-prove against the caller's own root. */
+        ASSERT(got != NULL && got_len == honest_len);
+        ASSERT(memcmp(got, plant, honest_len) != 0);
+        ASSERT(memcmp(got, honest, honest_len) == 0);
+        ASSERT(vcs_source_bundle_verify(got, got_len, honest_root, &vm) ==
+               VCS_SOURCE_BUNDLE_OK);
+        /* And the plant is gone rather than left to poison the next call. */
+        ASSERT(sbft_dir_empty(cdir));
+
+        free(plant);
+        free(got);
+        free(honest);
+        free(evil);
+        fs_server_stop();
+        test_cleanup_tmpdir(cdir);
+        test_cleanup_tmpdir(sdir);
+        test_cleanup_tmpdir(edir);
+        test_cleanup_tmpdir(hdir);
+        sbft_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
+/* ── (i) ONE seeder can consume the whole candidate budget ───────────── */
+
+/* ADVERSARIAL, and this one is about a BOUND rather than about bytes. Every
+ * case above proves the content check cannot be talked past. This one asks the
+ * next question: what does a hostile seeder get to spend of the SEARCH?
+ *
+ * The arithmetic. A directory listing carries at most ROM_FETCH_MAX_ARTIFACTS
+ * entries, the candidate set holds at most SOURCE_BUNDLE_FETCH_MAX_CANDIDATES,
+ * and today those two numbers are equal. The advertised source_root is read
+ * out of each file's OWN ZVSB header at registration (rom_seed_register), so a
+ * seeder that writes the honest 32 bytes into the header of eight different
+ * bundles advertises eight artifacts, with eight DIFFERENT chunk_roots, all
+ * claiming the honest tree. sbf_candidate_add groups on the artifact's whole
+ * identity — chunk_root, whole_sha3, size, chunk_size and chunk count, all
+ * five — so those do not merge; they are eight separate candidates, and this
+ * one peer is the only peer, so it fills the set.
+ *
+ * What this test pins, and why each half matters:
+ *
+ *   FAIL-CLOSED holds absolutely. Eight impostors buy the attacker nothing:
+ *   every one is downloaded, every one is refused by the caller's own root,
+ *   the refusal is the CONTENT check's ("tree-root-mismatch", not a transport
+ *   error), and the staging directory is empty afterwards. That half must
+ *   never change.
+ *
+ *   A SOLE SEEDER STILL GETS THE WHOLE BUDGET, and that is now correct rather
+ *   than a finding. When this case was written, sbf_discover_peer had no
+ *   per-peer share at all, so the first peer asked took every slot and a
+ *   HONEST peer asked afterwards had its offer dropped by the cap rather than
+ *   tried; the comment here said so and asked to be re-stated if fairness
+ *   ever landed. Fairness landed: sbf_discover_peer now takes a
+ *   candidate_limit and source_bundle_fetch reserves one slot for every peer
+ *   not yet asked (limit = MAX_CANDIDATES - peers_after), which
+ *   test_one_peer_cannot_fill_candidate_set pins end-to-end with a flooder
+ *   ahead of an honest peer. This case is the OTHER side of that rule: with
+ *   exactly one peer in the list there is nobody to reserve for, so the
+ *   reservation is zero and the sole seeder may legitimately spend all
+ *   MAX_CANDIDATES slots — and every one of them must still be downloaded,
+ *   refused by the caller's own root, and left unmaterialized. The assertion
+ *   below therefore pins the fairness arithmetic at peers_after == 0; a
+ *   regression that made the reservation unconditional would starve an honest
+ *   single-peer fetch and fail here.
+ *
+ *   RESIDUAL, stated so it is not mistaken for solved: the reservation
+ *   saturates. limit is only reduced while peers_after < MAX_CANDIDATES, so a
+ *   caller passing MORE than MAX_CANDIDATES peers gives the FIRST one the
+ *   whole set again. That is not a regression — it is the old behaviour
+ *   surviving in the tail — but it is the case per-peer fairness does not yet
+ *   cover. */
+static int test_one_seeder_fills_the_candidate_set(void)
+{
+    int failures = 0;
+    TEST("source_bundle_fetch: a single seeder advertising the honest source "
+         "root on SOURCE_BUNDLE_FETCH_MAX_CANDIDATES distinct artifacts is "
+         "refused on every one of them with nothing materialized — and "
+         "consumes the entire candidate budget by itself") {
+        sbft_open_caps();
+        char hroot[] = "/tmp/zcl_sbfetch_flood_honest_XXXXXX";
+        char sroot[] = "/tmp/zcl_sbfetch_flood_srv_XXXXXX";
+        char croot[] = "/tmp/zcl_sbfetch_flood_cli_XXXXXX";
+        char *hdir = mkdtemp(hroot), *sdir = mkdtemp(sroot),
+             *cdir = mkdtemp(croot);
+        ASSERT(hdir && sdir && cdir);
+
+        /* The tree the caller actually wants. It is never served by anyone in
+         * this fixture: the point is what happens to the SEARCH, not whether
+         * an honest copy would have verified. */
+        ASSERT(sbft_make_tree(hdir, 'A'));
+        uint8_t honest_root[32];
+        uint8_t *honest = NULL;
+        size_t honest_len = 0;
+        ASSERT(sbft_bundle(hdir, honest_root, &honest, &honest_len));
+
+        /* One impostor per candidate slot. Each is a WELL-FORMED bundle of a
+         * different tree — proven well-formed under its own root first — then
+         * relabelled so its header advertises the honest root. Distinct
+         * contents mean distinct chunk_roots, which is what keeps them from
+         * merging into a single candidate. */
+        /* One listing carries at most ROM_FETCH_MAX_ARTIFACTS entries and the
+         * registry holds ROM_SEED_MAX_ARTIFACTS, and both equal the candidate
+         * cap today — which is exactly why one seeder is enough. */
+        for (unsigned i = 0; i < SOURCE_BUNDLE_FETCH_MAX_CANDIDATES; i++) {
+            char iroot[] = "/tmp/zcl_sbfetch_flood_tree_XXXXXX";
+            char *idir = mkdtemp(iroot);
+            ASSERT(idir != NULL);
+            ASSERT(sbft_make_tree(idir, (char)('a' + (int)i)));
+
+            uint8_t evil_root[32];
+            uint8_t *evil = NULL;
+            size_t evil_len = 0;
+            ASSERT(sbft_bundle(idir, evil_root, &evil, &evil_len));
+            ASSERT(memcmp(evil_root, honest_root, 32) != 0);
+            struct vcs_source_bundle_metrics vm;
+            ASSERT(vcs_source_bundle_verify(evil, evil_len, evil_root, &vm) ==
+                   VCS_SOURCE_BUNDLE_OK);
+            memcpy(evil + ROM_SEED_SOURCE_BUNDLE_ROOT_OFFSET, honest_root, 32);
+
+            char name[64];
+            snprintf(name, sizeof(name), "impostor-%u.zvsb", i);
+            ASSERT(sbft_write(sdir, name, evil, evil_len));
+            ASSERT(rom_seed_register(sdir, name, NULL, NULL) == ROM_REG_OK);
+            free(evil);
+            test_cleanup_tmpdir(idir);
+        }
+        ASSERT(rom_seed_count() == (int)SOURCE_BUNDLE_FETCH_MAX_CANDIDATES);
+
+        uint16_t port = sbft_serve(sdir);
+        ASSERT(port != 0);
+        struct rom_fetch_peer peer;
+        sbft_peer(&peer, port);
+
+        uint8_t *got = NULL;
+        size_t got_len = 0;
+        struct source_bundle_fetch_metrics m;
+        ASSERT(source_bundle_fetch(&peer, 1, honest_root, cdir, &got, &got_len,
+                                   &m) == SOURCE_BUNDLE_FETCH_ERR_ROOT);
+
+        /* Fail-closed, on every one of them. */
+        ASSERT(got == NULL && got_len == 0);
+        ASSERT(m.candidates_refused == m.candidates_tried);
+        ASSERT(m.last_refusal == VCS_SOURCE_BUNDLE_ERR_ROOT);
+        ASSERT(sbft_dir_empty(cdir));
+        ASSERT(rom_peer_is_deprioritized("127.0.0.1", port));
+
+        /* One seeder, one directory listing, and the whole candidate budget
+         * is spent — legitimately, because it is the ONLY peer and the
+         * per-peer reservation (MAX_CANDIDATES - peers_after) is zero here.
+         * Reserving a slot with nobody to reserve it for would starve an
+         * honest single-peer fetch, so this is the arithmetic's lower edge and
+         * it must hold. The upper edge — a flooder ahead of an honest peer
+         * getting only its share — is test_one_peer_cannot_fill_candidate_set.
+         * peers_offering counts a peer only when at least one of its offers
+         * was actually taken, which for this seeder is all eight. */
+        ASSERT(m.peers_asked == 1 && m.peers_offering == 1);
+        ASSERT(m.candidates_tried == SOURCE_BUNDLE_FETCH_MAX_CANDIDATES);
+
+        free(honest);
+        fs_server_stop();
+        test_cleanup_tmpdir(cdir);
+        test_cleanup_tmpdir(sdir);
+        test_cleanup_tmpdir(hdir);
+        sbft_open_caps();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_source_bundle_fetch(void)
 {
     int failures = 0;
@@ -1085,5 +1382,7 @@ int test_source_bundle_fetch(void)
     failures += test_same_chunk_root_divergent_manifest();
     failures += test_one_peer_cannot_fill_candidate_set();
     failures += test_leaf_end_to_end();
+    failures += test_planted_resume_state_refused();
+    failures += test_one_seeder_fills_the_candidate_set();
     return failures;
 }

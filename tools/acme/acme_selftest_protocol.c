@@ -34,6 +34,8 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include "platform/temp_directory.h"
+
 #include <dirent.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -44,15 +46,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-/* A private scratch directory, and its removal. Local rather than borrowed
- * from lib/test: this program is not linked against the test harness. */
+/* A private scratch directory, and its removal. Removal is local rather than
+ * borrowed from lib/test: this program is not linked against the test
+ * harness. The CREATE is not local, because mkdtemp(3) is POSIX-only — the
+ * mingw CRT neither declares nor exports it — and this worker now ships for
+ * Windows too. platform_temp_directory_create() is the seam's own answer to
+ * exactly that, and it is race-free on both arms (see its header). */
 static bool selftest_tmpdir(char *buf, size_t n)
 {
-    const char *base = getenv("TMPDIR");
-    if (snprintf(buf, n, "%s/zcl-acme-selftest-XXXXXX",
-                 base && base[0] ? base : "/tmp") >= (int)n)
-        return false;
-    return mkdtemp(buf) != NULL;
+    return platform_temp_directory_create("zcl-acme-selftest-", buf, n);
 }
 
 static void selftest_rmrf(const char *dir)

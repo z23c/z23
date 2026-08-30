@@ -5,6 +5,7 @@
  * A node_db is a connection/lifecycle object, not a persisted row. */
 
 #include "models/database.h"
+#include "models/ar_after_commit.h"
 #include "models/database_internal.h"
 #include "util/log_macros.h"
 
@@ -76,14 +77,24 @@ static bool node_db_tx_op(struct node_db *ndb, const char *sql,
     return ok;
 }
 
+/* These four are the transaction boundary the after_commit hook queue keys
+ * on (models/ar_after_commit.h): a hook registered with
+ * ar_register_after_commit fires only when the OUTERMOST transaction commits,
+ * and is discarded on rollback, so an external observer is never told about a
+ * row a later ROLLBACK erases. A handle with no after_commit hooks anywhere
+ * pays one increment. */
 bool node_db_begin(struct node_db *ndb)
 {
-    return node_db_tx_op(ndb, "BEGIN TRANSACTION", true);
+    bool ok = node_db_tx_op(ndb, "BEGIN TRANSACTION", true);
+    if (ok) ar_after_commit_note_begin();
+    return ok;
 }
 
 bool node_db_begin_immediate(struct node_db *ndb)
 {
-    return node_db_tx_op(ndb, "BEGIN IMMEDIATE", true);
+    bool ok = node_db_tx_op(ndb, "BEGIN IMMEDIATE", true);
+    if (ok) ar_after_commit_note_begin();
+    return ok;
 }
 
 /* If a write VM is abandoned in RUN state, SQLite rejects every later COMMIT
@@ -109,8 +120,15 @@ static int node_db_reset_abandoned_write_vms(struct node_db *ndb)
 
 bool node_db_commit(struct node_db *ndb)
 {
-    if (node_db_tx_op(ndb, "COMMIT", false))
+    if (node_db_tx_op(ndb, "COMMIT", false)) {
+        /* Durable. If this closed the outermost transaction, the queued
+         * after_commit hooks fire here and nowhere earlier. */
+        ar_after_commit_note_commit(true);
         return true;
+    }
+    /* A failed COMMIT can leave the transaction open; keep the queue for the
+     * ROLLBACK the caller must now issue. */
+    ar_after_commit_note_commit(false);
     const char *msg = ndb && ndb->db ? sqlite3_errmsg(ndb->db) : NULL;
     if (msg && strstr(msg, "statements in progress")) {
         int reset = node_db_reset_abandoned_write_vms(ndb);
@@ -125,7 +143,12 @@ bool node_db_commit(struct node_db *ndb)
 
 bool node_db_rollback(struct node_db *ndb)
 {
-    return node_db_tx_op(ndb, "ROLLBACK", false);
+    bool ok = node_db_tx_op(ndb, "ROLLBACK", false);
+    /* Discard the queue whether or not the ROLLBACK statement itself
+     * succeeded. Not firing a hook is recoverable; announcing a row that was
+     * rolled back is not. */
+    ar_after_commit_note_rollback();
+    return ok;
 }
 
 #ifdef ZCL_TESTING

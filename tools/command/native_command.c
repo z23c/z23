@@ -3803,11 +3803,47 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
         return ZCL_COMMAND_EXIT_INVALID;
     }
 
-    /* Discovery leaves render their native document directly. */
+    /* Discovery leaves render their native document directly.
+     *
+     * They read the POSITIONAL argument, but their declared contract also
+     * lists that argument as an input key (`discover.schema` declares
+     * "path,side"), and every other leaf in the tree accepts its keys through
+     * --input. Ignoring --input here broke the one loop these leaves exist to
+     * close: an INVALID_INPUT reply suggests `discover.schema` with
+     * `{"path":"<leaf>"}`, and following that suggestion literally answered
+     * UNKNOWN_PATH because the object was never read. Honour the declared
+     * keys: the positional still wins when both are given, so no existing
+     * invocation changes meaning. */
     if (spec->layer == ZCL_COMMAND_LAYER_DISCOVER &&
         spec->mode != ZCL_COMMAND_MODE_BRANCH) {
         const char *arg = npos > 0 ? positional[0] : NULL;
+        struct json_value disc_input;
+        json_init(&disc_input);
+        bool have_disc_input =
+            !arg && input_flag && strcmp(input_flag, "-") != 0 &&
+            json_read(&disc_input, input_flag, strlen(input_flag)) &&
+            disc_input.type == JSON_OBJ;
+        if (have_disc_input) {
+            /* The leaf's own first positional key names the argument. */
+            const char *pk = spec->positional_keys ? spec->positional_keys : "";
+            const char *end = strchr(pk, ',');
+            char key[64];
+            size_t klen = end ? (size_t)(end - pk) : strlen(pk);
+            if (klen > 0 && klen < sizeof(key)) {
+                memcpy(key, pk, klen);
+                key[klen] = '\0';
+                const char *v = json_get_str(json_get(&disc_input, key));
+                if (v && v[0]) arg = v;
+            }
+            if (!side) {
+                const char *s = json_get_str(json_get(&disc_input, "side"));
+                if (s && s[0] && (strcmp(s, "input") == 0 ||
+                                  strcmp(s, "output") == 0))
+                    side = s;
+            }
+        }
         int rc = nc_run_discover(spec, arg, side);
+        json_free(&disc_input);
         json_free(&flags);
         return rc;
     }
@@ -3947,11 +3983,22 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
         (void)used;
     }
 
-    /* Reject unknown keys and duplicates before any side effect. */
+    /* Reject unknown keys and duplicates before any side effect.
+     *
+     * The message NAMES the keys this leaf accepts. A rejection that only says
+     * which key was wrong, and points at a second command to learn the right
+     * one, costs a caller one round trip it usually will not spend: the
+     * observed failure was an agent guessing `name` for `code find`, reading
+     * "inspect the input schema", and falling back to grep. The accepted set
+     * is already in the spec at this point, so carrying it in the error is
+     * free and removes the trip entirely. */
     if (!zcl_command_registry_input_validate(spec, &input, why, sizeof(why))) {
         json_free(&input);
+        char detail[ZCL_COMMAND_MAX_PATH + 512];
+        (void)zcl_command_registry_input_reject_detail(spec, why, detail,
+                                                       sizeof(detail));
         nc_print_error_next_string(
-            spec->path, "INVALID_INPUT", "normalize", why, spec->path,
+            spec->path, "INVALID_INPUT", "normalize", detail, spec->path,
             "discover.schema", "path", spec->path,
             "inspect the input schema");
         return ZCL_COMMAND_EXIT_INVALID;

@@ -293,3 +293,58 @@ CLEAN**, and nothing fires for months.
   top-level directory: `git grep -n '"<dirname>"' -- lib/test tools/lint tools/scripts lib/framework`
   and `git grep -n '<dirname>/' -- tools/lint tools/scripts`. A directory with
   no `.c` files can still be a scan root, a `roots[]` entry, or a runtime path.
+
+---
+
+## (5) BUILD & GATE TRAPS — a red that is not a test failure
+
+Every trap in this section cost a real agent real time, and every one of them is
+now **answered by a command or refused by a gate**. Read the table for the
+command; do not memorize the prose. A row marked *refusal* cannot be committed
+past — you will meet it whether or not you read this file, which is the point.
+
+| # | The trap | What it is now | Where |
+|---|---|---|---|
+| 1 | A fresh `git worktree` does not inherit submodules, so `vendor/tor` is empty, the binary links a **stub** Tor, and nothing notices until the ship step ~25 minutes in | **command** | `make worktree-prime` initializes `vendor/tor` FIRST, then copies the four Tor archives and `vendor/lib/*.a`. `tools/ship.sh` preflights the same fact in seconds instead of at the finish line. |
+| 2 | A submodule with files but no `.git` stops EVERY build with "exact source capture failed", having run no tests | **command** | Same `make worktree-prime` — the order matters and is enforced there: copying archives into an uninitialized gitlink is what produces that message, and the message itself now names the fix. |
+| 3 | `make test_parallel ONLY=x` only **builds**; nothing runs and `ONLY=` is never read | **refusal** | `ONLY_IGNORING_GOALS` in `Makefile`. `ONLY=` on `test`, `test_parallel`, `test-parallel`, `test-asan`, `test-tsan` and friends is a parse-time `$(error)` naming `make t-fast ONLY=…` and `build/bin/test_parallel --only=…`. |
+| 4 | `test_parallel` needs `ulimit -s unlimited`; deep wallet groups SIGSEGV without it and 64 MB is not enough | **refusal (self-healing)** | `raise_stack_limit()` in `lib/test/src/test_parallel.c` raises the soft limit to the hard limit before any group forks, so a direct `build/bin/test_parallel` run no longer depends on the caller remembering. The Makefile's `ulimit` stays as the second guard. |
+| 5 | A `test_*.c` file that exists proves nothing runs — the group must be REGISTERED | **refusal** | `check-test-registration` (`tools/scripts/check_test_registration.sh`) fails the build for any `test_<name>.c` entry point dispatched by neither `tools/dev/test_group_catalog.def` nor the serial runner, and names both fixes. |
+| 6 | `printf … \| grep -q` under `set -o pipefail` returns 141 on a **match**, inverting the decision | **refusal** | `check-pipefail-status-pipe`. Shrink-only baseline, no per-line escape hatch. Fix with `str_contains`/`str_lacks` from `tools/scripts/sh_str.sh`, a here-string, or by extracting the match into a variable. |
+| 7 | `! cmd` does not fail a script under `set -e` — bash exempts an inverted command from errexit **and** from the ERR trap — so the assertion can never fire | **refusal** | `check-discarded-status` prong A. Fix with a `refute()` helper that exits for itself (`tools/ship.sh --selftest` is the reference spelling). `if ! cmd`, `while ! cmd`, `! cmd \|\| die` and `! cmd && …` all consume the status and are never counted. |
+| 8 | An apostrophe inside `${var:-default}` or an `awk '…'` program swallows the rest of the file, and the error is reported at EOF | **refusal** | The push gate parses **every** tracked `*.sh` plus the extensionless entrypoints (`shell_parse_all` in `tools/agent_fast_ci.sh`) — 415 files, ~0.5 s. Build the default outside the expansion; do not escape inside it. |
+| 9 | Piping `make` output to `tail` HIDES the exit code — without pipefail the pipeline reports `tail`'s 0 | **refusal** | `check-discarded-status` prong B, HARD with no baseline. Use `make <goal> > build.log 2>&1 \|\| { tail -20 build.log; exit 1; }`, or set pipefail, or read `${PIPESTATUS[0]}`. |
+| 10 | A relative `-datadir=./foo` silently breaks the store/directory writers and the explorer cache while chain sync keeps working | **prose + a message that names the fix** | Not gated: see below. The failure now reads "cannot resolve the parent directory of '…' — pass an ABSOLUTE `-datadir=`" instead of "destination parent is not a safe real directory". |
+| 11 | A lint gate needs wiring in **three** files (`run_lint.sh` case, Makefile recipe, and the `<!-- LINT-GATES-BEGIN/END -->` block in `docs/DEFENSIVE_CODING.md`); a missing `run_lint.sh` case makes `make lint` exit 2 with no gate results at all | **refusal** | `check-lint-gate-wiring` asserts exact parity between `LINT_GATES`/`LINT_FAST_GATES` and `gate_command()`, in both directions, plus a real Make target and a script that exists. It does NOT know about the doc block, so it passes you and `check-doc-accuracy` fails you afterwards. |
+| 12 | Evidence from a failed gate is deleted before anyone can read it — a 25-minute `make ship` failure left nothing but "full suite did not pass" | **fixed** | `tools/ship.sh` keeps the suite log at `${GATE_CACHE_DIR}/last-failed-suite.log`, names it in the die message, and removes it only on success. A suite that died before printing any verdict now says so instead of leaving an empty block. When you add a gate, keep its log on the FAILURE path — that is the path where somebody needs it. |
+
+### Why trap 10 is still prose
+
+Two candidate refusals were measured and both rejected, so the reasoning is
+recorded here rather than rediscovered:
+
+- **A commit-time gate over documented commands has no signal.** Scanning every
+  tracked `*.md` and `*.sh` for a relative `-datadir=` value returns 44 hits and
+  **zero** real ones: they are argument-parser `case` patterns (`-datadir=*)`),
+  usage-line placeholders (`--dev-datadir=ABSOLUTE_DIR`), and systemd `%h`
+  specifiers. A gate whose entire yield is a hand-curated exemption list is
+  noise, not a rail.
+- **A runtime refusal is an owner decision, not a lane decision.** Refusing a
+  relative `-datadir` at startup changes node semantics, and `test_cli_render.c`
+  asserts the CLI's own guidance text renders a relative datadir. The choice
+  between "canonicalize the datadir at boot" and "refuse it loudly" also has to
+  settle the *separate* trigger with the same root cause — a relative
+  destination passed as an RPC argument (`storebuy_collect 3 ./mybook.pdf`),
+  which no datadir fix reaches.
+
+What was in scope, and is done, is the third thing that memo asked for
+regardless of which option wins: the failure names the next action.
+
+### The rule this section is an instance of
+
+**A trap that has to be read and remembered is not fixed.** When you lose an
+hour to something here, the deliverable is not a paragraph — it is a command
+that answers the question or a gate that refuses the mistake, and an error
+message whose last line is a concrete next action rather than a symptom. Prose
+is the fallback, and it owes the reader the measurement that ruled the other two
+out.

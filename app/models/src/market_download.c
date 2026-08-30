@@ -3,6 +3,9 @@
 
 #include "models/market_download.h"
 
+#include "models/model_fields.h"
+#include "models/def/market_download_fields.def"
+
 #include "net/file_market.h"
 #include "util/log_macros.h"
 
@@ -11,6 +14,35 @@
 
 DEFINE_MODEL_CALLBACKS(market_download)
 DEFINE_MODEL_CALLBACKS(market_download_chunk)
+
+/* ── Column mapping ───────────────────────────────────────────────────────
+ * SQL column list, read index and bind position all come from the field
+ * lists in models/def/market_download_fields.def. The blob-width guards
+ * below reference columns by derived name, so not even those spell an
+ * index. */
+#define MARKET_DOWNLOAD_COLUMNS ZCL_MODEL_COLUMNS(MARKET_DOWNLOAD_FIELDS)
+#define MARKET_DOWNLOAD_VALUES  ZCL_MODEL_PLACEHOLDERS(MARKET_DOWNLOAD_FIELDS)
+#define MARKET_DOWNLOAD_CHUNK_COLUMNS \
+    ZCL_MODEL_COLUMNS(MARKET_DOWNLOAD_CHUNK_FIELDS)
+#define MARKET_DOWNLOAD_CHUNK_VALUES \
+    ZCL_MODEL_PLACEHOLDERS(MARKET_DOWNLOAD_CHUNK_FIELDS)
+
+#define MD_IX(kind, col, member, extra) MD_IX_##col,
+enum { ZCL_MODEL_EXPAND(MD_IX, MARKET_DOWNLOAD_FIELDS) MD_IX_COUNT };
+#define MDC_IX(kind, col, member, extra) MDC_IX_##col,
+enum { ZCL_MODEL_EXPAND(MDC_IX, MARKET_DOWNLOAD_CHUNK_FIELDS) MDC_IX_COUNT };
+
+ZCL_MODEL_READ_ROW_FN(market_download_read_row,
+                      struct market_download_record, MARKET_DOWNLOAD_FIELDS)
+ZCL_MODEL_BIND_FN(market_download_bind, struct market_download_record,
+                  MARKET_DOWNLOAD_FIELDS)
+
+ZCL_MODEL_READ_ROW_FN(market_download_chunk_read_row,
+                      struct market_download_chunk_record,
+                      MARKET_DOWNLOAD_CHUNK_FIELDS)
+ZCL_MODEL_BIND_FN(market_download_chunk_bind,
+                  struct market_download_chunk_record,
+                  MARKET_DOWNLOAD_CHUNK_FIELDS)
 
 static bool market_download_nonzero(const uint8_t value[32])
 {
@@ -108,26 +140,14 @@ bool db_market_download_save(struct node_db *ndb,
     sqlite3_stmt *s = NULL;
     struct ar_callbacks *cbs = db_market_download_callbacks();
     AR_ADHOC_SAVE(ndb, s,
-        "INSERT INTO market_downloads(plan_id,offer_id,root_hash,"
-        "private_destination,private_staging,size_bytes,num_chunks,"
-        "chunks_received,bytes_received,state,created_at,updated_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(plan_id) DO UPDATE SET "
+        "INSERT INTO market_downloads(" MARKET_DOWNLOAD_COLUMNS ")"
+        " VALUES(" MARKET_DOWNLOAD_VALUES ")"
+        " ON CONFLICT(plan_id) DO UPDATE SET "
         "chunks_received=excluded.chunks_received,"
         "bytes_received=excluded.bytes_received,state=excluded.state,"
         "updated_at=excluded.updated_at",
         cbs, "market_download", record, db_market_download_validate,
-        AR_BIND_BLOB(s, 1, record->plan_id, 32);
-        AR_BIND_BLOB(s, 2, record->offer_id, 32);
-        AR_BIND_BLOB(s, 3, record->root_hash, 32);
-        AR_BIND_TEXT(s, 4, record->private_destination);
-        AR_BIND_TEXT(s, 5, record->private_staging);
-        AR_BIND_INT(s, 6, record->size_bytes);
-        AR_BIND_INT(s, 7, record->num_chunks);
-        AR_BIND_INT(s, 8, record->chunks_received);
-        AR_BIND_INT(s, 9, record->bytes_received);
-        AR_BIND_INT(s, 10, record->state);
-        AR_BIND_INT(s, 11, record->created_at);
-        AR_BIND_INT(s, 12, record->updated_at));
+        market_download_bind(s, record));
 }
 
 bool db_market_download_find(struct node_db *ndb,
@@ -138,32 +158,17 @@ bool db_market_download_find(struct node_db *ndb,
         LOG_FAIL("market", "download find: invalid arguments");
     sqlite3_stmt *s = NULL;
     AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT plan_id,offer_id,root_hash,private_destination,"
-        "private_staging,size_bytes,num_chunks,chunks_received,"
-        "bytes_received,state,created_at,updated_at "
-        "FROM market_downloads WHERE plan_id=?",
+        "SELECT " MARKET_DOWNLOAD_COLUMNS " FROM market_downloads "
+        "WHERE plan_id=?",
         AR_BIND_BLOB(s, 1, plan_id, 32),
-        memset(out, 0, sizeof(*out));
-        if (sqlite3_column_bytes(s, 0) != 32 ||
-            sqlite3_column_bytes(s, 1) != 32 ||
-            sqlite3_column_bytes(s, 2) != 32) {
+        if (sqlite3_column_bytes(s, MD_IX_plan_id) != 32 ||
+            sqlite3_column_bytes(s, MD_IX_offer_id) != 32 ||
+            sqlite3_column_bytes(s, MD_IX_root_hash) != 32) {
+            memset(out, 0, sizeof(*out));
             AR_FINALIZE(s);
             return false;
         }
-        AR_READ_BLOB(s, 0, out->plan_id, 32);
-        AR_READ_BLOB(s, 1, out->offer_id, 32);
-        AR_READ_BLOB(s, 2, out->root_hash, 32);
-        AR_READ_STR(s, 3, out->private_destination,
-                    sizeof(out->private_destination));
-        AR_READ_STR(s, 4, out->private_staging,
-                    sizeof(out->private_staging));
-        out->size_bytes = (uint64_t)AR_COL_INT(s, 5);
-        out->num_chunks = (uint32_t)AR_COL_INT(s, 6);
-        out->chunks_received = (uint32_t)AR_COL_INT(s, 7);
-        out->bytes_received = (uint64_t)AR_COL_INT(s, 8);
-        out->state = (enum market_download_state)AR_COL_INT(s, 9);
-        out->created_at = AR_COL_INT(s, 10);
-        out->updated_at = AR_COL_INT(s, 11));
+        market_download_read_row(out, s));
 }
 
 bool db_market_download_chunk_find(
@@ -174,21 +179,17 @@ bool db_market_download_chunk_find(
         LOG_FAIL("market", "download chunk find: invalid arguments");
     sqlite3_stmt *s = NULL;
     AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT plan_id,chunk_index,size_bytes,chunk_sha3,created_at "
-        "FROM market_download_chunks WHERE plan_id=? AND chunk_index=?",
+        "SELECT " MARKET_DOWNLOAD_CHUNK_COLUMNS " FROM market_download_chunks "
+        "WHERE plan_id=? AND chunk_index=?",
         AR_BIND_BLOB(s, 1, plan_id, 32);
         AR_BIND_INT(s, 2, chunk_index),
-        memset(out, 0, sizeof(*out));
-        if (sqlite3_column_bytes(s, 0) != 32 ||
-            sqlite3_column_bytes(s, 3) != 32) {
+        if (sqlite3_column_bytes(s, MDC_IX_plan_id) != 32 ||
+            sqlite3_column_bytes(s, MDC_IX_chunk_sha3) != 32) {
+            memset(out, 0, sizeof(*out));
             AR_FINALIZE(s);
             return false;
         }
-        AR_READ_BLOB(s, 0, out->plan_id, 32);
-        out->chunk_index = (uint32_t)AR_COL_INT(s, 1);
-        out->size_bytes = (uint32_t)AR_COL_INT(s, 2);
-        AR_READ_BLOB(s, 3, out->chunk_sha3, 32);
-        out->created_at = AR_COL_INT(s, 4));
+        market_download_chunk_read_row(out, s));
 }
 
 bool db_market_download_chunk_save(
@@ -206,16 +207,12 @@ bool db_market_download_chunk_save(
     sqlite3_stmt *s = NULL;
     struct ar_callbacks *cbs = db_market_download_chunk_callbacks();
     AR_ADHOC_SAVE(ndb, s,
-        "INSERT INTO market_download_chunks(plan_id,chunk_index,size_bytes,"
-        "chunk_sha3,created_at) VALUES(?,?,?,?,?) "
+        "INSERT INTO market_download_chunks(" MARKET_DOWNLOAD_CHUNK_COLUMNS ")"
+        " VALUES(" MARKET_DOWNLOAD_CHUNK_VALUES ") "
         "ON CONFLICT(plan_id,chunk_index) DO NOTHING",
         cbs, "market_download_chunk", record,
         db_market_download_chunk_validate,
-        AR_BIND_BLOB(s, 1, record->plan_id, 32);
-        AR_BIND_INT(s, 2, record->chunk_index);
-        AR_BIND_INT(s, 3, record->size_bytes);
-        AR_BIND_BLOB(s, 4, record->chunk_sha3, 32);
-        AR_BIND_INT(s, 5, record->created_at));
+        market_download_chunk_bind(s, record));
 }
 
 int db_market_download_chunk_count(struct node_db *ndb,

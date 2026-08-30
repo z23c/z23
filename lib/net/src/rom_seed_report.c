@@ -125,7 +125,10 @@ size_t rom_seed_directory_json(char *buf, size_t max)
 
     size_t off = 0;
     int w = snprintf(buf + off, max - off, "[");
-    if (w < 0 || (size_t)w >= max - off) return 0;
+    if (w < 0 || (size_t)w >= max - off) {
+        free(arts);   /* the ~1 MB snapshot must not outlive this refusal */
+        return 0;
+    }
     off += (size_t)w;
 
     int emitted = 0;

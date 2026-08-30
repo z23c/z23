@@ -49,6 +49,7 @@
 #define ZCL_DB_ACTIVERECORD_H
 
 #include "event/event.h"
+#include "models/ar_after_commit.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -490,9 +491,17 @@ static inline void ar_errors_full_messages(const struct ar_errors *e,
  * cbs: callbacks for the model
  * record: saved model pointer
  * ok: bool result from SQL execution
- * Effect: runs after_save when ok, then returns ok from the function. */
+ * Effect: runs after_save when ok — unchanged, still at STATEMENT time — then
+ * queues the record's after_commit hooks for the open transaction (or fires
+ * them now if there is none), then returns ok. A model with no after_commit
+ * hook is byte-for-byte unaffected. A save whose after_commit can neither
+ * fire nor be queued returns false, so an observer is never silently skipped;
+ * the caller's transaction then rolls back the row too. */
 #define AR_FINISH_SAVE(cbs, record, ok) do { \
-    if (ok) ar_run_after_save((cbs), (void *)(record)); \
+    if (ok) { \
+        ar_run_after_save((cbs), (void *)(record)); \
+        if (!ar_run_after_commit((cbs), (void *)(record))) return false; \
+    } \
     return (ok); \
 } while (0)
 
@@ -706,6 +715,7 @@ struct ar_callbacks {
     ar_before_cb before_validate[AR_MAX_CALLBACKS];
     ar_before_cb before_save[AR_MAX_CALLBACKS];
     ar_after_cb  after_save[AR_MAX_CALLBACKS];
+    ar_after_cb  after_commit[AR_MAX_CALLBACKS];
     ar_before_cb before_destroy[AR_MAX_CALLBACKS];
     ar_after_cb  after_destroy[AR_MAX_CALLBACKS];
     ar_after_cb  after_validate[AR_MAX_CALLBACKS];
@@ -715,6 +725,7 @@ struct ar_callbacks {
     int n_after_validate;
     int n_before_save;
     int n_after_save;
+    int n_after_commit;
     int n_before_destroy;
     int n_after_destroy;
     int n_after_save_async;
@@ -762,6 +773,30 @@ static inline bool ar_register_after_save(struct ar_callbacks *cb,
 {
     if (cb->n_after_save >= AR_MAX_CALLBACKS) return false;
     cb->after_save[cb->n_after_save++] = fn;
+    return true;
+}
+
+/* Register a hook that must not outrun durability: it fires once, in
+ * registration order, after the OUTERMOST transaction COMMITS, and not at all
+ * if the transaction rolls back. Outside a transaction it fires immediately
+ * after the statement succeeds, which is the same instant. Use this — not
+ * after_save — for anything an external observer can see: an emitted event, a
+ * pushed projection, a notification. after_save still fires when the
+ * STATEMENT steps and is unchanged.
+ *
+ * `record_size` is mandatory because a queued hook is handed a COPY (the
+ * caller's record is routinely a stack local that is gone by commit time).
+ * Pass sizeof(*record) for the model's row struct. Registering the same
+ * callbacks with two different record sizes is refused. */
+static inline bool ar_register_after_commit(struct ar_callbacks *cb,
+                                             ar_after_cb fn,
+                                             size_t record_size)
+{
+    if (!fn || record_size == 0) return false;
+    if (cb->n_after_commit >= AR_MAX_CALLBACKS) return false;
+    if (cb->record_size == 0) cb->record_size = record_size;
+    else if (cb->record_size != record_size) return false;
+    cb->after_commit[cb->n_after_commit++] = fn;
     return true;
 }
 
@@ -821,6 +856,19 @@ static inline bool ar_run_before_save(struct ar_callbacks *cb, void *record)
 {
     for (int i = 0; i < cb->n_before_save; i++)
         if (!cb->before_save[i](record, cb->ctx)) return false;
+    return true;
+}
+
+/* Queue this record's after_commit hooks against the open transaction (or
+ * fire them now if there is none). Returns false when a hook can neither fire
+ * nor be queued, which the save must treat as a failure — see
+ * models/ar_after_commit.h. */
+static inline bool ar_run_after_commit(struct ar_callbacks *cb, void *record)
+{
+    for (int i = 0; i < cb->n_after_commit; i++)
+        if (!ar_after_commit_enqueue(cb->after_commit[i], cb->ctx, record,
+                                     cb->record_size))
+            return false;
     return true;
 }
 

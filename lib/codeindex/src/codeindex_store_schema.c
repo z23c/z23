@@ -55,6 +55,12 @@ bool ci_store_ensure_schema(sqlite3 *db)
         "CREATE INDEX IF NOT EXISTS idx_refs_callee ON refs(callee_name);"
         "CREATE INDEX IF NOT EXISTS idx_refs_enclosing ON refs(enclosing);"
         "CREATE INDEX IF NOT EXISTS idx_files_group ON files(\"group\");"
+        /* The capability query asks "which symbols does this FILE own" once
+         * per ranked candidate. Without these two it is a full 69k-row scan
+         * each time, which turns a reflexive lookup into something an agent
+         * learns not to run. */
+        "CREATE INDEX IF NOT EXISTS idx_symbols_def_path ON symbols(def_path);"
+        "CREATE INDEX IF NOT EXISTS idx_symbols_decl_path ON symbols(decl_path);"
         "CREATE INDEX IF NOT EXISTS idx_includes_dep ON includes(dep_path);";
     char *err = NULL;
     if (sqlite3_exec(db, ddl, NULL, NULL, &err) != SQLITE_OK) {

@@ -198,7 +198,7 @@ AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_handshake
 AGENT_IMPACT_RULE("lib/net/src/fast_sync*.c|lib/net/include/net/fast_sync*.h|lib/test/src/test_fast_sync_coins_export.c|lib/test/src/test_fast_sync_coins_artifact.c|lib/test/src/test_file_service_pow_gate.c", "fast_sync fast_sync_coins_export fast_sync_coins_artifact file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/puzzle.c|lib/net/include/net/puzzle.h|lib/test/src/test_puzzle.c", "puzzle net file_service_pow_gate snapshot_sync_service make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/onion_service.c|lib/net/include/net/onion_service.h|lib/net/src/onion_ratelimit.c|lib/net/include/net/onion_ratelimit.h", "net onion_bootstrap tor make_lint_gates")
-AGENT_IMPACT_RULE("lib/net/src/rom_fetch.c|lib/net/src/rom_fetch_directory.c|lib/net/src/rom_fetch_transport.c|lib/net/src/rom_fetch_transport.h|lib/net/src/rom_fetch_status.c|lib/net/src/rom_fetch_internal.h|lib/net/include/net/rom_fetch.h|lib/test/src/test_rom_fetch.c|lib/test/src/test_rom_fetch_onion.c|app/controllers/src/rom_fetch_controller.c", "rom_fetch rom_fetch_onion rom_manifest rom_journal_resume file_controller source_bundle_fetch make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/rom_fetch.c|lib/net/src/rom_fetch_directory.c|lib/net/src/rom_fetch_session.c|lib/net/src/rom_fetch_transport.c|lib/net/src/rom_fetch_transport.h|lib/net/src/rom_fetch_status.c|lib/net/src/rom_fetch_internal.h|lib/net/include/net/rom_fetch.h|lib/test/src/test_rom_fetch.c|lib/test/src/test_rom_fetch_onion.c|app/controllers/src/rom_fetch_controller.c", "rom_fetch rom_fetch_onion rom_manifest rom_journal_resume file_controller source_bundle_fetch make_lint_gates")
 AGENT_IMPACT_RULE("lib/net/src/rom_seed.c|lib/net/src/rom_seed_classify.c|lib/net/src/rom_seed_throttle.c|lib/net/src/rom_seed_report.c|lib/net/src/rom_seed_internal.h|lib/net/include/net/rom_seed.h|lib/test/src/test_rom_seed.c|app/controllers/src/rom_seed_controller.c", "rom_seed rom_manifest file_controller source_bundle_fetch source_bundle_publish make_lint_gates")
 /* Identity-free source retrieval rides the ROM artifact transport, so its own
  * group AND the ROM groups are the honest impact set: a change to either half
@@ -2697,9 +2697,77 @@ AGENT_IMPACT_RULE("lib/util/include/util/telemetry_ontology.def|lib/util/src/tel
 /* The ZENDP group's own test source. */
 AGENT_IMPACT_RULE("lib/test/src/test_zendp.c", "zendp zendp_records make_lint_gates")
 
+/* The dev.agent.* command surface: the pure primitives, both handlers, and
+ * the group that proves the primitives. The handlers spawn `make` and
+ * build/bin/test_parallel, and they are READY in the release catalog, so a
+ * change here must also re-prove the catalog and native-API contracts that
+ * decide what the release binary advertises. */
+AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent.h|tools/command/native_devagent_command.c|tools/command/native_devagent_mutate_command.c|lib/test/src/test_devagent_surface.c", "devagent_surface command_registry_catalog native_api_contract command_input_bounds make_lint_gates")
+/* The install front door. lib/install is pure judgement with no in-tree
+ * dependencies, so the only things that can observe a change to it are its
+ * own group and check-z23-release-install, which drives the real
+ * build/bin/z23-bootstrap and the served shim end to end. The shim and the
+ * PowerShell twin ride the same rule because their contract with the
+ * bootstrap — the digest gate and the forwarded argv — is asserted there. */
+AGENT_IMPACT_RULE("lib/install/src/*|lib/install/include/install/*|tools/install/*|packaging/install/*|lib/test/src/test_z23_front_door.c", "z23_front_door make_lint_gates")
+/* lib/astro is a self-contained leaf: it references no other module, so its
+ * only proof is its own group. */
+AGENT_IMPACT_RULE("lib/astro/src/*|lib/astro/include/astro/*|lib/test/src/test_astro.c", "astro make_lint_gates")
 /* NAT reachability probe + mapping-lease renewal worker: the blocking
  * NAT-PMP/UPnP probe (peer_strategy.c over nat.c) and the background
  * worker that owns it off the boot path. The directory self-row it
  * publishes is read by the onion_directory refresh round, so that group
  * rides along. */
 AGENT_IMPACT_RULE("lib/net/src/peer_strategy.c|lib/net/include/net/peer_strategy.h|lib/net/src/peer_strategy_worker.c|lib/net/include/net/peer_strategy_worker.h|lib/net/src/nat.c|lib/net/include/net/nat.h|lib/test/src/test_peer_strategy_worker.c|lib/test/src/test_nat_route_dump.c", "peer_strategy_worker nat_route_dump net onion_directory make_lint_gates")
+
+/* ── Behavioural fingerprinting ───────────────────────────────────────
+ * The index that answers "do we already have something that does this"
+ * by what a function COMPUTES rather than what it is called. Everything
+ * here is pure analysis with no runtime consumer, so it rides its own
+ * group alone. tools/fingerprint_scan.c is named explicitly even though
+ * the broad tools-wide rule already reaches make_lint_gates: a change to
+ * the scanner is a change to the thing test_fingerprint grades. */
+AGENT_IMPACT_RULE("lib/fingerprint/src/*.c|lib/fingerprint/include/fingerprint/*.h|lib/fingerprint/src/fp_priv.h|tools/fingerprint_scan.c|lib/test/src/test_fingerprint.c", "fingerprint make_lint_gates")
+
+/* ── A node as a character ────────────────────────────────────────────
+ * node_character derives FORM from the identity root and STANDING from
+ * observed work; character_sheet renders the pair. The sheet reads the
+ * character, so a change to the character reaches both groups, and the
+ * text renderer rides with the sheet it prints. */
+AGENT_IMPACT_RULE("lib/metaverse/src/node_character.c|lib/metaverse/include/metaverse/node_character.h", "node_character character_sheet metaverse_catalog make_lint_gates")
+AGENT_IMPACT_RULE("lib/metaverse/src/character_sheet.c|lib/metaverse/src/character_sheet_text.c|lib/metaverse/include/metaverse/character_sheet.h|lib/test/src/test_character_sheet.c", "character_sheet node_character make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_node_character.c", "node_character make_lint_gates")
+/* property_id.c already rides the metaverse rule above; its header did
+ * not, and a struct layout change reaches every adapter that includes it. */
+AGENT_IMPACT_RULE("lib/metaverse/include/metaverse/property_id.h|lib/test/src/test_metaverse_catalog.c", "metaverse_catalog make_lint_gates")
+/* The bits file has no group entry point of its own — it is compiled into
+ * test_metaverse_vocabulary(), which is where its assertions actually run. */
+AGENT_IMPACT_RULE("lib/test/src/test_metaverse_vocabulary_bits.c", "metaverse_vocabulary make_lint_gates")
+
+/* Metaverse telemetry: the .def is the field list and the filler is its
+ * only writer, so neither can change alone without the other going stale. */
+AGENT_IMPACT_RULE("app/services/src/metaverse_telemetry_fill.c|lib/util/include/util/telemetry/metaverse_fields.def", "telemetry_metaverse metaverse_catalog make_lint_gates")
+
+/* ── Model column definitions ─────────────────────────────────────────
+ * These .def files ARE the schema: model_fields.h expands them into the
+ * column lists that database.c creates tables from and that
+ * check-model-column-drift grades against the live schema. Moving one
+ * column silently changes what the database looks like, so each rides
+ * both the focused model_fields group and the broad models group. */
+AGENT_IMPACT_RULE("app/models/include/models/def/model_fields_tables.def|app/models/include/models/model_fields.h|lib/test/src/test_model_fields.c", "model_fields models schema_migration make_lint_gates")
+AGENT_IMPACT_RULE("app/models/include/models/def/blog_post_fields.def", "model_fields models blog make_lint_gates")
+AGENT_IMPACT_RULE("app/models/include/models/def/tx_index_fields.def", "model_fields models make_lint_gates")
+AGENT_IMPACT_RULE("app/models/include/models/def/market_download_fields.def", "model_fields models make_lint_gates")
+
+/* ── Remote authority for command leaves ──────────────────────────────
+ * One row per leaf, deciding what a stranger may make this node do. The
+ * lint gate is the primary grader, but the command catalog groups read
+ * the same table, so a row added without a leaf (or a leaf without a
+ * row) fails there too. */
+AGENT_IMPACT_RULE("config/remote_command_classes.def", "command_registry_catalog native_api_contract make_lint_gates")
+
+/* ── The capability lookup and the mutation harness ───────────────────
+ * Both are developer tools with no runtime consumer; each rides only its
+ * own group. */
+AGENT_IMPACT_RULE("lib/test/src/test_code_have.c", "code_have make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_mutation_harness.c", "mutation_harness make_lint_gates")
