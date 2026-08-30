@@ -1700,6 +1700,8 @@ int main(int argc, char **argv)
     { extern int test_vcs_core(void); failures += test_vcs_core(); }
     { extern int test_vcs_release(void); failures += test_vcs_release(); }
     { extern int test_vcs_accept(void); failures += test_vcs_accept(); }
+    { extern int test_package_capability_claim(void);
+      failures += test_package_capability_claim(); }
     { extern int test_zcode_store(void); failures += test_zcode_store(); }
     { extern int test_zcode_publish(void); failures += test_zcode_publish(); }
     { extern int test_zcode_package_dev(void); failures += test_zcode_package_dev(); }
