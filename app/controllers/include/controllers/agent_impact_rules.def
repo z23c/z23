@@ -2815,3 +2815,9 @@ AGENT_IMPACT_RULE("lib/territory/include/territory/territory.h|lib/territory/src
  * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
  * which is the exact reason this module has no transport in it. */
 AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine cold_join_sovereign make_lint_gates")
+/* Authored personas. personas.def is prose, so nothing it says can be proven
+ * by running code — which is exactly why it needs a gate rather than a test.
+ * check_persona_resolves.sh is that gate, and it rides make_lint_gates. The
+ * engine group comes along because tools/engine_unit.c includes the .def as
+ * an X-macro and would stop compiling if a row lost its shape. */
+AGENT_IMPACT_RULE("lib/engine/include/engine/personas.def|tools/lint/check_persona_resolves.sh", "engine make_lint_gates")
