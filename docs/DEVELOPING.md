@@ -119,6 +119,21 @@ show a file or directory surface. Ask `discover schema <leaf>` for exact input
 keys rather than guessing — and if you guess wrong anyway, the refusal names
 the keys the leaf accepts, so a wrong key costs one call, not a source dive.
 
+Before creating a reusable helper or importing a library, search the generated
+capability census in [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl).
+It includes package public headers that the interactive code index does not,
+and records exposed symbols, verified direct-use file counts, registered-test
+reachability, ranked normalized duplicate bodies, and untested declared header
+invariants. Header prose and alpha-shape matches are explicitly `UNPROVEN`;
+definition, use, and registered-test call edges are path-bound, and every
+macro-generated or platform-ambiguous test root is emitted as a named
+`test_root_gap` with the evidence needed to resolve it.
+Regenerate the entire report from source with:
+
+```bash
+make docs-capability-inventory
+```
+
 When the navigator cannot answer a prose or non-symbol question, use `git grep`
 or `git ls-files`; never recursively scan the repository root. Scratch
 datadirs, test debris, and untracked worktrees can contain full duplicate trees.

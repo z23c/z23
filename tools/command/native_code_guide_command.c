@@ -35,10 +35,16 @@ void zcl_native_handle_code_guide(
         json_push_kv_str(&reply->data, "proof_command",
                          "make -j\"$(getconf _NPROCESSORS_ONLN)\" t-fast ONLY=<group>") &&
         json_push_kv_str(&reply->data, "lint_command", "make lint-fast") &&
+        json_push_kv_str(&reply->data, "capability_inventory",
+                         "docs/CAPABILITY_INVENTORY.jsonl") &&
+        json_push_kv_str(&reply->data, "inventory_regenerate",
+                         "make docs-capability-inventory") &&
+        json_push_kv_str(&reply->data, "full_gate_before_push",
+                         "make lint") &&
         json_push_kv_str(&reply->data, "push_command", "make pre-push-ci") &&
         json_push_kv_str(
             &reply->data, "never",
-            "full make lint; test_zcl; omit -datadir; stash; restart") &&
+            "test_zcl; omit -datadir; stash; restart") &&
         json_push_kv_str(&reply->data, "docs", "docs/DEVELOPING.md");
     if (!ok) {
         LOG_ERROR(CG_TAG, "CODE_GUIDE_OUTPUT: the develop guide could not "
