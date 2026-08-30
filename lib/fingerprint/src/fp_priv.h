@@ -49,6 +49,20 @@ struct fp_file {
     char *text;
     size_t len;
     bool  is_header;
+    /* This unit defines main(). Including it into a probe translation unit
+     * would collide with the generated driver's own main() at link time and
+     * take the whole link down, so a file-local function living here has no
+     * reachable definition at all. Decided once, at scan time, rather than
+     * discovered as a link failure that costs a whole round. */
+    bool  defines_main;
+    /* This unit exports an external symbol that some OTHER unit also
+     * exports. In a tree that links, that only happens between mutually
+     * exclusive `#if` variants — foo_posix.c and foo_win32.c — and the
+     * scanner does not run the preprocessor, so it sees both. Including both
+     * into two probe TUs would define the symbol twice and fail the whole
+     * link, and a link failure costs a round and blames the wrong probes.
+     * Refused up front instead, and counted. */
+    bool  dup_export;
 };
 
 struct fp_index {
@@ -66,6 +80,9 @@ struct fp_index {
      * actionable — the commonest unresolved call target is the next
      * allowlist entry, or the next real impurity. */
     char cause[FP_MAX_NAME];
+    /* Whether a file-local function may be reached by including its defining
+     * unit. On by default; turned off only to measure the difference. */
+    bool allow_source_route;
     struct fp_cause {
         char name[FP_MAX_NAME];
         unsigned char verdict;
