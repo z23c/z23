@@ -132,6 +132,7 @@ check-no-python
 check-no-trust-state-ordering check-no-gnu-va-args check-no-warning-suppression
 check-result-discard
 check-published-platforms
+check-platform-header-guards
 "
 
 # Why each never-cached gate can never be cached. A reason is MANDATORY —
@@ -149,6 +150,8 @@ lint_cache_never_reason() {
             echo "invokes x86_64-w64-mingw32-gcc over the platform seam; reports UNOBSERVED (not a pass) when mingw is absent from the box" ;;
         check-windows-cross-syntax)
             echo "invokes x86_64-w64-mingw32-gcc -fsyntax-only over every _WIN32 translation unit; reports SKIP (not a pass) when mingw is absent from the box" ;;
+        check-macos-acceptance)
+            echo "reports UNOBSERVED (not a pass) for the native darwin-arm64 leg, so its verdict names the HOST as well as the tree; caching it would carry one box's UNOBSERVED onto a box that could have closed it" ;;
         check-api-reference-generated)
             echo "compiles and runs a C generator with cc" ;;
         check-describe-budget)

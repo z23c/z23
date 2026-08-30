@@ -10675,6 +10675,23 @@ check-windows-cross-syntax:
 	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
 	@./tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh
 
+# A platform-only system header may not be included outside a conditional that
+# names that platform. Every gate above needs a cross-compiler; this one needs
+# nothing, because an unguarded <mach-o/fat.h> is a lexical fact. It closes the
+# class in all three directions (Apple, Win32, Linux) on whatever host is
+# running lint. Zero baseline: the tree is clean and stays clean.
+.PHONY: check-platform-header-guards
+check-platform-header-guards:
+	@./tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh
+
+# The STATIC half of tools/scripts/macos_acceptance.sh: the closed darwin-arm64
+# capability matrix must validate and every capability must name a REGISTERED
+# test group. The native leg (`make macos-acceptance`) needs a darwin-arm64
+# host and is reported UNOBSERVED here, never as a pass.
+.PHONY: check-macos-acceptance
+check-macos-acceptance:
+	@./tools/lint/check_macos_acceptance.sh --self-test && ./tools/lint/check_macos_acceptance.sh
+
 
 # C23 lets a `(void)` cast suppress [[nodiscard]], so annotating
 # struct zcl_result fences off NEW silent discards but cannot excavate the
@@ -11790,6 +11807,8 @@ LINT_GATES := \
     check-windows-platform-seam \
     check-windows-acceptance \
     check-windows-cross-syntax \
+    check-platform-header-guards \
+    check-macos-acceptance \
     check-result-discard \
     check-c23-only \
     check-no-python \

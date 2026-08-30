@@ -264,6 +264,8 @@ gate_command() {
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
         check-windows-acceptance)          echo './tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh' ;;
         check-windows-cross-syntax)        echo './tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh' ;;
+        check-platform-header-guards)      echo './tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh' ;;
+        check-macos-acceptance)            echo './tools/lint/check_macos_acceptance.sh --self-test && ./tools/lint/check_macos_acceptance.sh' ;;
         check-app-bundle-reproducible)     echo './tools/lint/check_app_bundle_reproducible.sh --selftest && ./tools/lint/check_app_bundle_reproducible.sh' ;;
         check-result-discard)              echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_result_discard.sh' ;;
         *) return 1 ;;
