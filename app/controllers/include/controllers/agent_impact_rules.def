@@ -1783,6 +1783,11 @@ AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progr
 /* Native macOS compatibility surfaces share the platform contract groups.
  * The rules stay exact so unrelated future platform files fail closed. */
 AGENT_IMPACT_RULE("lib/base/include/base/compiler.h|lib/crypto/src/blake2b_avx2.c|lib/platform/include/platform/allocator_compat.h|lib/platform/include/platform/barrier.h|lib/platform/include/platform/device_compat.h|lib/platform/include/platform/fd_path.h|lib/platform/include/platform/file_advice.h|lib/platform/include/platform/file_sync.h|lib/platform/include/platform/file_watch_compat.h|lib/platform/include/platform/path_compat.h|lib/platform/include/platform/pipe_compat.h|lib/platform/include/platform/process_compat.h|lib/platform/include/platform/rename_compat.h|lib/platform/include/platform/socket_compat.h|lib/platform/include/platform/system_memory.h|lib/platform/include/platform/thread_compat.h|lib/platform/src/os_sandbox_stub.c|lib/platform/src/rng.c|lib/util/src/self_backtrace_stub.c|lib/util/src/thread_qos.c", "dev_platform os_proc os_sandbox self_backtrace thread_qos hw_profile crypto crypto_perf_selftest socket_resolve make_lint_gates")
+/* The timed-join seam is shared by shutdown owners across config, net,
+ * services, and util. Route every directly affected lifecycle family so a
+ * platform-only edit cannot green on its primitive test while a caller's
+ * ownership or final-drain contract silently regresses. */
+AGENT_IMPACT_RULE("lib/platform/include/platform/thread_compat.h", "thread_registry supervisor shutdown_stagewatch peer_strategy_worker file_controller file_service_pow_gate tor download gap_fill_frontier_window connman_addnode_fallback make_lint_gates")
 
 /* Reverted platform storage shims remain explicit changed paths until every
  * clone has integrated their additive reverts. Keep their deleted names and
@@ -2836,6 +2841,8 @@ AGENT_IMPACT_RULE("app/models/include/models/query_schema.def|app/models/include
  * the toolchain changes and not only when this tree does; that is why it
  * rides make_lint_gates rather than any subject group. */
 AGENT_IMPACT_RULE("tools/lint/check_fortify_masked_decls.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/check_no_snapshot_struct_memcmp.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("packaging/install/install_selftest.sh|tools/scripts/deploy_z23_release.sh", "make_lint_gates")
 
 /* One comment/string stripper, shared by check_fortify_masked_decls and
  * check_model_sql_literals. Both are text scanners whose verdict changes

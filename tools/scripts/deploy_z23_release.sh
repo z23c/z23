@@ -193,6 +193,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         *)
             running="$(sha256sum "/proc/$pid/exe" 2>/dev/null | awk '{print $1}' || true)"
             running_path="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+            installed_z23_path="$(readlink -f "$prefix/bin/z23" 2>/dev/null || true)"
             installed_z23="$(sha256sum "$prefix/bin/z23" 2>/dev/null | awk '{print $1}' || true)"
             installed_verifier="$(sha256sum "$prefix/bin/zclassic23-package-verify" 2>/dev/null | awk '{print $1}' || true)"
             installed_acme="$(sha256sum "$prefix/bin/zclassic23-acme" 2>/dev/null | awk '{print $1}' || true)"
@@ -206,9 +207,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
             # alias points where it claims to.
 
             if [ "$running" = "$want_node" ] && \
-               [ "$running_path" = "$prefix/bin/z23" ] && \
+               [ -n "$installed_z23_path" ] && \
+               [ "$running_path" = "$installed_z23_path" ] && \
                [ "$(readlink -f "$prefix/bin/zclassic23" 2>/dev/null || true)" \
-                 = "$prefix/bin/z23" ] && \
+                 = "$installed_z23_path" ] && \
                [ "$installed_z23" = "$want_z23" ] && \
                [ "$installed_verifier" = "$want_verifier" ] && \
                [ -x "$prefix/bin/zclassic23-package-verify" ] && \
@@ -443,20 +445,37 @@ selftest_stop_nodes() {
     done
 }
 
+selftest_cleanup() {
+    case "${SELFTEST_TMP:-}" in
+        /tmp/z23-release-deploy-selftest.*)
+            find "$SELFTEST_TMP" -depth -delete 2>/dev/null || true ;;
+    esac
+}
+
 selftest() {
     local tmp
     tmp="$(mktemp -d /tmp/z23-release-deploy-selftest.XXXXXX)" \
         || die "selftest: mktemp failed"
-    trap 'find "$tmp" -depth -delete 2>/dev/null || true' EXIT
-    selftest_make_fixtures "$tmp"
     SELFTEST_TMP="$tmp"
+    trap selftest_cleanup EXIT
+    selftest_make_fixtures "$tmp"
+    if [ ! -e /proc/self/exe ]; then
+        selftest_assert_cleanup_guard "$tmp"
+        say "UNOBSERVED Linux process-image activation: /proc/self/exe is unavailable"
+        say "selftest PARTIAL (cleanup refusal/ownership guard PASS)"
+        trap - EXIT
+        selftest_cleanup
+        SELFTEST_TMP=""
+        return 0
+    fi
     selftest_assert_success "$tmp"
     selftest_assert_failures "$tmp"
     selftest_assert_cleanup_guard "$tmp"
     selftest_stop_nodes "$tmp"
     say "selftest PASS"
     trap - EXIT
-    find "$tmp" -depth -delete
+    selftest_cleanup
+    SELFTEST_TMP=""
 }
 
 # One vocabulary for platform names. build_release.sh now packages more than

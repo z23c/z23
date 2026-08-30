@@ -33,10 +33,12 @@
  *     shutdown paths call it too.
  *
  *   thread_registry_join_all(timeout_sec)
- *     Walks the registry, pthread_timedjoin_np's each entry with
- *     `timeout_sec` seconds, and returns the count that failed to
- *     exit in time. Diagnostic output names any stragglers so the
- *     operator can see which subsystem is hanging shutdown.
+ *     Walks the registry, bounded-joins each entry for `timeout_sec`, and
+ *     returns the count that failed to exit in time. Linux uses
+ *     pthread_timedjoin_np, Windows a waitable thread handle, and Darwin a
+ *     cancel-safe join waiter that leaves a timed-out target joinable.
+ *     Diagnostic output names any stragglers so the operator can see which
+ *     subsystem is hanging shutdown.
  *
  * Ownership is explicit at spawn: NULL out_tid means the registry owns the
  * join and retains a finished thread until join_all reaps it. A non-NULL
@@ -89,9 +91,9 @@ void thread_registry_request_shutdown(void);
  * tid and must join it. The spawn trampoline calls this automatically. */
 void thread_registry_unregister_self(void);
 
-/* pthread_timedjoin_np each registered thread with `timeout_sec`.
- * Returns the number that failed to join in time (0 on clean
- * shutdown). Prints the name of every straggler. */
+/* Bounded-join each registered thread with `timeout_sec`. Returns the number
+ * that failed to join in time (0 on clean shutdown). Prints the name of every
+ * straggler. */
 int thread_registry_join_all(int timeout_sec);
 
 /* Same diagnostic sweep, but leave the exact pthread_t values in `excluded`
