@@ -2489,6 +2489,38 @@ struct partial_reply_server {
     int accepted_fd;
 };
 
+static bool partial_reply_consume_request(int fd)
+{
+    char request[4096];
+    size_t have = 0;
+    while (have + 1 < sizeof(request)) {
+        ssize_t got = recv(fd, request + have, sizeof(request) - have - 1, 0);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            return false;
+        have += (size_t)got;
+        request[have] = 0;
+        char *headers_end = strstr(request, "\r\n\r\n");
+        if (!headers_end)
+            continue;
+        char *content_length = strstr(request, "Content-Length:");
+        if (!content_length || content_length >= headers_end)
+            return false;
+        errno = 0;
+        char *end = NULL;
+        unsigned long body_len = strtoul(
+            content_length + strlen("Content-Length:"), &end, 10);
+        size_t header_len = (size_t)(headers_end + 4 - request);
+        if (errno != 0 || !end || end <= content_length ||
+            body_len > sizeof(request) - header_len - 1)
+            return false;
+        if (have >= header_len + (size_t)body_len)
+            return true;
+    }
+    return false;
+}
+
 static void *delayed_vault_plan_serve(void *arg)
 {
     struct partial_reply_server *s = arg;
@@ -2503,6 +2535,15 @@ static void *delayed_vault_plan_serve(void *arg)
     if (fd < 0)
         return NULL;
     s->accepted_fd = fd;
+
+    /* A close with unread request bytes may become an RST on Darwin and
+     * discard the response.  Consume the exact bounded POST before modeling
+     * a slow proof operation, so this fixture observes only the deadline. */
+    if (!partial_reply_consume_request(fd)) {
+        close(fd);
+        s->accepted_fd = -1;
+        return NULL;
+    }
 
     /* Longer than the deliberately tiny generic test deadline below, but
      * comfortably inside the compile-time vault proof budget. */
@@ -2618,38 +2659,7 @@ static void *partial_reply_serve(void *arg)
      * failed its second send() before it could observe the intended partial
      * response.  Consume exactly the bounded request framing first.  This is
      * a causal handshake, not a sleep or retry. */
-    char request[4096];
-    size_t have = 0, required = 0;
-    bool request_complete = false;
-    while (have + 1 < sizeof(request)) {
-        ssize_t got = recv(fd, request + have, sizeof(request) - have - 1, 0);
-        if (got < 0 && errno == EINTR)
-            continue;
-        if (got <= 0)
-            break;
-        have += (size_t)got;
-        request[have] = 0;
-        char *headers_end = strstr(request, "\r\n\r\n");
-        if (!headers_end)
-            continue;
-        char *content_length = strstr(request, "Content-Length:");
-        if (!content_length || content_length >= headers_end)
-            break;
-        errno = 0;
-        char *end = NULL;
-        unsigned long body_len = strtoul(
-            content_length + strlen("Content-Length:"), &end, 10);
-        size_t header_len = (size_t)(headers_end + 4 - request);
-        if (errno != 0 || !end || end <= content_length ||
-            body_len > sizeof(request) - header_len - 1)
-            break;
-        required = header_len + (size_t)body_len;
-        if (have >= required) {
-            request_complete = true;
-            break;
-        }
-    }
-    if (!request_complete) {
+    if (!partial_reply_consume_request(fd)) {
         close(fd);
         s->accepted_fd = -1;
         return NULL;
