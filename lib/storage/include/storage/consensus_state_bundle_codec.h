@@ -85,6 +85,25 @@ struct consensus_state_bundle_proof_summary {
     uint8_t component_digest[32];
 };
 
+/* Optional, explicit lineage for a proof summary that extends an installed
+ * bundle rather than rescanning genesis rows which the atomic install no
+ * longer stores.  The parent summary was admitted with the parent artifact;
+ * suffix_digest commits only rows this producer inspected above base_height.
+ * The final component_digest is re-derived from this structure, so lineage is
+ * inspectable evidence rather than an opaque narrative field. */
+struct consensus_state_bundle_proof_parent {
+    bool present;
+    int32_t base_height;
+    uint8_t base_block_hash[32];
+    uint8_t validation_profile;
+    uint8_t proof_manifest_digest[32];
+    uint8_t source_digest[32];
+    uint8_t artifact_digest[32];
+    struct consensus_state_bundle_proof_summary
+        components[CONSENSUS_STATE_BUNDLE_PROOF_COUNT];
+    uint8_t suffix_digest[CONSENSUS_STATE_BUNDLE_PROOF_COUNT][32];
+};
+
 struct consensus_state_bundle_manifest {
     int32_t height;
     uint8_t block_hash[32];
@@ -129,5 +148,8 @@ void consensus_state_source_epoch_digest(
 void consensus_state_bundle_proof_manifest_digest(
     const struct consensus_state_bundle_proof_summary *summaries,
     size_t count, uint8_t out[32]);
+bool consensus_state_bundle_proof_extension_digest(
+    const struct consensus_state_bundle_proof_parent *parent,
+    size_t ordinal, uint8_t out[32]);
 
 #endif /* ZCL_STORAGE_CONSENSUS_STATE_BUNDLE_CODEC_H */

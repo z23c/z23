@@ -328,6 +328,7 @@ bool consensus_export_prove_source(
     struct consensus_state_source_receipt *receipt,
     struct consensus_state_bundle_proof_summary
         proofs[CONSENSUS_STATE_BUNDLE_PROOF_COUNT],
+    struct consensus_state_bundle_proof_parent *parent,
     struct consensus_state_export_result *result)
 {
     int64_t prove_t0 = consensus_export_clock_ms();
@@ -413,9 +414,9 @@ bool consensus_export_prove_source(
     manifest->nullifier_source_cursor = 0;
     manifest->source_fold_cursor = (int64_t)request->expected_height + 1;
     uint8_t chain_corpus_digest[32];
-    if (!consensus_export_prove_header_chain(source, request->expected_height,
-                                             request->expected_block_hash,
-                                             chain_corpus_digest))
+    if (!consensus_export_prove_header_chain(
+            source, request->expected_height, request->expected_block_hash,
+            chain_corpus_digest, parent))
         return consensus_export_fail(
             result, CONSENSUS_EXPORT_MISSING_PROOF,
             "complete genesis-to-height header proof is unavailable "
@@ -539,7 +540,7 @@ bool consensus_export_prove_source(
         if (!consensus_export_prove_stage_rows(
                 source, &k_stages[i], request->expected_height, cursor,
                 manifest->validation_profile, receipt->source_epoch_digest,
-                &proofs[i + 1]))
+                &proofs[i + 1], parent, i + 1))
             return consensus_export_fail(
                 result, CONSENSUS_EXPORT_MISSING_PROOF,
                 "complete reducer proof rows unavailable stage=%s",

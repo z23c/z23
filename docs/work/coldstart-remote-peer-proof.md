@@ -87,12 +87,19 @@ from the same source IP and is refused at accept. This is the sybil defence
 working as written; the consequence is that a second node behind one IP (or any
 NAT) cannot cold-start off that peer.
 
-## Harness changes landed with this record
+## Harness behavior
+
+The first two changes landed with this record. The third is the subsequent
+multi-peer extension driven by repeated single-peer stopwatch seams.
 
 1. **Peer precheck** (`peer_precheck` / `classify_peer_precheck`). The old
    check treated "TCP connect succeeded" as "serving peer present" — true on
    loopback, false here. The probe now connects without sending a byte and
-   classifies `unreachable` / `held_open` / `accept_close`. `accept_close`
+   classifies `unreachable` / `held_open` / `protocol_idle_close` /
+   `accept_close`. `protocol_idle_close` means the peer waited through the
+   passive five-second window for a version message the probe deliberately
+   never sends; it is usable-but-unproven, not an immediate refusal.
+   `accept_close`
    prints a loud warning naming the per-IP cap and the `ss` command to confirm
    it, and is recorded as `peer_precheck` in `proof.json`. It is deliberately
    **advisory**: it never converts a verdict, and an accept-closing peer is
@@ -103,14 +110,20 @@ NAT) cannot cold-start off that peer.
    question a remote non-pass verdict raises — did we ever handshake, and did
    we ban our only peer — was previously unanswerable from the artifact alone,
    because a loopback peer always handshakes.
+3. **Multiple serving peers.** Repeat `--peer=HOST:PORT` or provide a
+   comma-separated value. The harness deduplicates the ordered set, passes one
+   `-connect` per endpoint, and records both the aggregate `peer_precheck` and
+   every endpoint/classification pair in `peer_prechecks`. The legacy `peer`
+   field remains the first stated endpoint for existing artifact readers.
 
 ## What a next remote run needs
 
 Either a peer whose per-IP inbound allowance for this host is not already
 consumed (free a slot, use a different source IP, or `-whitelist` the client on
-the serving node), or a different serving peer. Until a run reaches
-`peer_precheck=held_open` and a completed handshake, no remote run can measure
-the reducer at all.
+the serving node), or a different serving peer. A passive precheck of
+`held_open` or `protocol_idle_close` is only advisory; the real prerequisite is
+at least one completed node handshake with an advertised height. Without that,
+no remote run can measure the reducer against a network tip.
 
 ## Code changes landed in response (lane B)
 

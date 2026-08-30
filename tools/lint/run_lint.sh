@@ -98,6 +98,7 @@ gate_command() {
         check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;
         check-tu-random-seed)              echo './tools/lint/check_tu_random_seed.sh' ;;
         check-equihash-params)             echo './tools/lint/check_equihash_params.sh --selftest && ./tools/lint/check_equihash_params.sh' ;;
+        check-determinism-ratchet)         echo './tools/lint/check_determinism_ratchet.sh --selftest && ./tools/lint/check_determinism_ratchet.sh' ;;
         check-git-hooks-installed)         echo './tools/scripts/check_git_hooks_installed.sh' ;;
         check-malloc)                      echo './tools/lint/check_malloc.sh' ;;
         check-hotswap-dev-only)            echo './tools/lint/check_hotswap_dev_only.sh' ;;
@@ -122,6 +123,7 @@ gate_command() {
         check-fortify-masked-decls)        echo './tools/lint/check_fortify_masked_decls.sh --selftest && ./tools/lint/check_fortify_masked_decls.sh' ;;
         check-model-sql-literals)          echo './tools/lint/check_model_sql_literals.sh --selftest && ./tools/lint/check_model_sql_literals.sh' ;;
         check-persona-resolves)            echo './tools/lint/check_persona_resolves.sh --selftest && ./tools/lint/check_persona_resolves.sh' ;;
+        check-cookbook)                    echo './tools/lint/check_cookbook.sh --selftest && ./tools/lint/check_cookbook.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-zcode-package-standalone)    echo './tools/lint/check_zcode_package_standalone.sh' ;;
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;

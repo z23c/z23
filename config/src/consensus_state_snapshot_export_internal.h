@@ -58,6 +58,7 @@ bool consensus_export_prove_source(
     struct consensus_state_source_receipt *receipt,
     struct consensus_state_bundle_proof_summary
         proofs[CONSENSUS_STATE_BUNDLE_PROOF_COUNT],
+    struct consensus_state_bundle_proof_parent *parent,
     struct consensus_state_export_result *result);
 
 /* Reducer-stage row-scan proof descriptor + the fixed k_stages fixture table
@@ -80,12 +81,15 @@ extern const struct export_stage_proof k_stages[CONSENSUS_EXPORT_STAGE_COUNT];
 
 bool consensus_export_prove_header_chain(sqlite3 *db, int32_t height,
                                          const uint8_t expected_hash[32],
-                                         uint8_t source_digest[32]);
+                                         uint8_t source_digest[32],
+                                         struct consensus_state_bundle_proof_parent
+                                             *parent);
 bool consensus_export_prove_stage_rows(
     sqlite3 *db, const struct export_stage_proof *stage, int32_t height,
     uint64_t cursor, uint8_t validation_profile,
     const uint8_t source_epoch_digest[32],
-    struct consensus_state_bundle_proof_summary *summary);
+    struct consensus_state_bundle_proof_summary *summary,
+    struct consensus_state_bundle_proof_parent *parent, size_t ordinal);
 
 bool consensus_export_write_bundle(
     sqlite3 *source, sqlite3 *destination,
@@ -93,6 +97,7 @@ bool consensus_export_write_bundle(
     const struct consensus_state_source_receipt *receipt,
     const struct consensus_state_bundle_proof_summary
         proofs[CONSENSUS_STATE_BUNDLE_PROOF_COUNT],
+    const struct consensus_state_bundle_proof_parent *parent,
     struct consensus_state_export_result *result);
 
 bool consensus_export_open_temp(struct consensus_export_output_binding *output,
