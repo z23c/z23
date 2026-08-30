@@ -88,7 +88,6 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "base/hex.h"
 #include "chain/mmb.h"
 #include "chain/mmr.h"          /* MMR_COMMITMENT_INTERVAL */
 
@@ -305,6 +304,18 @@ static bool db_boundary_root_at(sqlite3 *db, bool has_kdb, int32_t height,
     }
     sqlite3_finalize(s);
     return ok;
+}
+
+/* ── hex ─────────────────────────────────────────────────────────── */
+
+static void hex32(const uint8_t h[32], char out[65])
+{
+    static const char d[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        out[i * 2] = d[h[i] >> 4];
+        out[i * 2 + 1] = d[h[i] & 0x0f];
+    }
+    out[64] = '\0';
 }
 
 /* ── CLI ─────────────────────────────────────────────────────────── */
@@ -681,14 +692,14 @@ int main(int argc, char **argv)
                        "(still folding) — single-source rung\n", h);
             } else if (memcmp(bh, bh2, 32) != 0) {
                 char hx1[65], hx2[65];
-                zcl_hex_encode(bh, 32, hx1); zcl_hex_encode(bh2, 32, hx2);
+                hex32(bh, hx1); hex32(bh2, hx2);
                 fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%d: "
                                 "block_hash source=%s second=%s (DIFFERENT CHAINS)\n",
                         h, hx1, hx2);
                 divergences++;
             } else if (memcmp(ur, ur2, 32) != 0) {
                 char hx1[65], hx2[65];
-                zcl_hex_encode(ur, 32, hx1); zcl_hex_encode(ur2, 32, hx2);
+                hex32(ur, hx1); hex32(ur2, hx2);
                 fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%d: "
                                 "SAME block_hash, utxo_root source=%s second=%s "
                                 "(state-wrong-coin class)\n",
@@ -724,7 +735,7 @@ int main(int argc, char **argv)
         if (db_block_hash_at(src, cp->height, bh)) {
             if (memcmp(bh, cp->block_hash, 32) != 0) {
                 char hx1[65], hx2[65];
-                zcl_hex_encode(bh, 32, hx1); zcl_hex_encode(cp->block_hash, 32, hx2);
+                hex32(bh, hx1); hex32(cp->block_hash, hx2);
                 fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%d "
                                 "(zclassicd-verified checkpoint): source "
                                 "block_hash=%s checkpoint block_hash=%s\n",
@@ -779,7 +790,7 @@ int main(int argc, char **argv)
             memset(dense_root, 0, 32);
         } else if (dense_height >= 0) {
             char hx[65];
-            zcl_hex_encode(dense_root, 32, hx);
+            hex32(dense_root, hx);
             printf("[gen_utxo_root_ladder] dense mmb_root @ h=%d: %s\n",
                    dense_height, hx);
         }
