@@ -679,6 +679,13 @@ ZCL_TEST_GROUP(retrieval)
  * exactly where it is. Confusing the two would either lose history or
  * destroy the evidence that history was changed. */
 ZCL_TEST_GROUP(chainlog)
+/* The build's own numbers, recorded rather than remembered. The group exists
+ * for one distinction: a metric whose artifact could not be read is
+ * UNAVAILABLE and encodes differently from a metric that honestly measured
+ * zero. Collapsing those two would make every delta computed across the
+ * boundary a fiction, so the encoding is asserted directly rather than
+ * inferred from a rendered number. */
+ZCL_TEST_GROUP(kpi)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)

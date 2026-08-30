@@ -196,6 +196,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/chainlog") == 0) return "a durable append-only log whose every frame is SHA3-linked to the one before it, so an edit anywhere shows up as a named first bad sequence number";
     if (strcmp(group, "lib/receipt") == 0) return "a proof receipt: one node's claim that a named test group reached a named verdict over an exactly identified source tree, in the fixed form it travels in";
     if (strcmp(group, "lib/territory") == 0) return "generated per-module scorecard: what a module owns, what proves it (routed vs actually reached), what it depends on, where it is weak";
+    if (strcmp(group, "lib/kpi") == 0) return "the durable ledger of the numbers this build already produces: canonical frames appended to a hash-chained log, where a metric nobody could read is UNAVAILABLE and never 0";
     if (strcmp(group, "lib/metaverse") == 0) return "sovereign digital property: property identity, action vocabulary, read-only per-kind catalog adapters, the pure grant/delegation rule evaluator, signed hash-chained receipts";
 
     /* domain/<ctx> — one line per bounded context in k_domain_contexts[] above. */
