@@ -198,6 +198,10 @@ if [ "${1:-}" = "--selftest" ]; then
 bool f(void) { return true; }'
     expect pass "a SELECT shown in a documentation comment, not carried" ""
 
+    # The same shape with the whole declaration commented out.
+    plant innocent.c '/* static const char *k = "SELECT id FROM peers"; */'
+    expect pass "a SQL example inside a C comment" ""
+
     # ── ...and stripping comments must not become a way to hide SQL ──
     plant innocent.c 'static const char *a = "x /* y";
 static const char *k = "SELECT id FROM peers";'
@@ -226,7 +230,7 @@ static const char *k = "SELECT id FROM peers";'
     fi
     echo "  selftest ok: an empty scan set fails LOUD (exit 2), never clean"
 
-    echo "[$GATE] SELFTEST PASS (SELECT/INSERT/UPDATE/DELETE/split literals fail; baselined tolerated; stale row and regression fail; lowercase token, continuation fragment, builder caller and the builder itself pass; hollow scan exits 2)"
+    echo "[$GATE] SELFTEST PASS (SELECT/INSERT/UPDATE/DELETE/split literals fail; baselined tolerated; stale row and regression fail; lowercase token, continuation fragment, commented SQL, builder caller and the builder itself pass; hollow scan exits 2)"
     exit 0
 fi
 

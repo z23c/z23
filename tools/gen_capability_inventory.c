@@ -49,7 +49,10 @@ static void render_symbol(FILE *out, const struct ci_inventory_symbol *symbol)
             symbol->definition_line);
     json_string(out, symbol->definition_evidence);
     fputs(",\"definition_proof_needed\":", out);
-    if (strcmp(symbol->definition_evidence, "unresolved_UNPROVEN") == 0)
+    if (strcmp(symbol->definition_evidence,
+               "multiple_preprocessor_arms_UNPROVEN") == 0)
+        json_string(out, "consume the generated arm baseline, preprocess every named arm, and bind each emitted definition separately");
+    else if (strcmp(symbol->definition_evidence, "unresolved_UNPROVEN") == 0)
         json_string(out, "preprocess the exact build profile and bind this declaration to one emitted definition");
     else fputs("null", out);
     fputs(",\"declaration\":{\"path\":", out);
@@ -68,7 +71,10 @@ static void render_symbol(FILE *out, const struct ci_inventory_symbol *symbol)
     if (symbol->test_evidence != CI_INVENTORY_TEST_REGISTERED_REACHABLE)
         json_string(out, "a canonical registered root with an unambiguous path-bound direct-call chain to this exact definition");
     else fputs("null", out);
-    fprintf(out, ",\"constant_return_body\":%s,\"constant_return_value\":",
+    fprintf(out, ",\"multi_arm_definition\":%s,\"definition_arm_count\":%d,"
+                 "\"constant_return_body\":%s,\"constant_return_value\":",
+            symbol->multi_arm_definition ? "true" : "false",
+            symbol->definition_arm_count,
             symbol->constant_return_body ? "true" : "false");
     if (symbol->constant_return_body) json_string(out, symbol->constant_return_value);
     else fputs("null", out);
@@ -136,12 +142,77 @@ static void render_invariant(FILE *out, const struct ci_inventory_invariant *gap
     fputs(",\"registered_test_group\":", out);
     if (gap->registered_test_group[0]) json_string(out, gap->registered_test_group);
     else fputs("null", out);
+    fprintf(out, ",\"multi_arm_definition\":%s,\"definition_scope\":",
+            gap->multi_arm_definition ? "true" : "false");
+    json_string(out, gap->definition_scope);
+    fputs(",\"preprocessor_guard\":", out);
+    if (gap->preprocessor_guard[0]) json_string(out, gap->preprocessor_guard);
+    else fputs("null", out);
+    fputs(",\"constant_return_evidence\":", out);
+    json_string(out, gap->constant_return_evidence);
     fprintf(out, ",\"constant_return_body\":%s,\"constant_return_value\":",
             gap->constant_return_body ? "true" : "false");
     if (gap->constant_return_body) json_string(out, gap->constant_return_value);
     else fputs("null", out);
     fputs(",\"verdict\":", out); json_string(out, gap->verdict);
     fputs(",\"proof_needed\":", out); json_string(out, gap->proof_needed);
+    fputs("}\n", out);
+}
+
+static void render_multi_arm_symbol(
+    FILE *out, const struct ci_inventory_report *report,
+    const struct ci_inventory_capability *cap,
+    const struct ci_inventory_symbol *symbol)
+{
+    const char *source_path = NULL;
+    bool multiple_paths = false;
+    for (int i = 0; i < report->definition_arm_count; i++) {
+        const struct ci_inventory_definition_arm *arm =
+            &report->definition_arms[i];
+        if (strcmp(arm->header, cap->header) != 0 ||
+            strcmp(arm->symbol, symbol->name) != 0)
+            continue;
+        if (!source_path) source_path = arm->definition_path;
+        else if (strcmp(source_path, arm->definition_path) != 0)
+            multiple_paths = true;
+    }
+    fputs("{\"record\":\"multi_arm_symbol\",\"header\":", out);
+    json_string(out, cap->header);
+    fputs(",\"symbol\":", out); json_string(out, symbol->name);
+    fputs(",\"source_path\":", out);
+    if (source_path && !multiple_paths) json_string(out, source_path);
+    else fputs("null", out);
+    fprintf(out, ",\"definition_arm_count\":%d,"
+                 "\"aggregate_definition\":\"UNPROVEN\","
+                 "\"aggregate_constant_return\":\"UNPROVEN\","
+                 "\"verdict\":\"UNPROVEN\",\"proof_needed\":",
+            symbol->definition_arm_count);
+    json_string(out, "preprocess every definition_arm under its named guard and prove exactly one selected implementation per build profile");
+    fputs("}\n", out);
+}
+
+static void render_definition_arm(
+    FILE *out, const struct ci_inventory_definition_arm *arm)
+{
+    fputs("{\"record\":\"definition_arm\",\"header\":", out);
+    json_string(out, arm->header);
+    fputs(",\"symbol\":", out); json_string(out, arm->symbol);
+    fputs(",\"definition\":{\"path\":", out);
+    json_string(out, arm->definition_path);
+    fprintf(out, ",\"line\":%d},\"preprocessor_guard\":",
+            arm->definition_line);
+    if (arm->preprocessor_guard[0]) json_string(out, arm->preprocessor_guard);
+    else fputs("null", out);
+    fputs(",\"constant_return_evidence\":", out);
+    json_string(out, arm->constant_return_evidence);
+    fprintf(out, ",\"constant_return_body\":%s,\"constant_return_value\":",
+            arm->constant_return_body ? "true" : "false");
+    if (arm->constant_return_body) json_string(out, arm->constant_return_value);
+    else fputs("null", out);
+    fputs(",\"definition_scope\":\"preprocessor_arm_UNPROVEN\",\"verdict\":",
+          out);
+    json_string(out, arm->verdict);
+    fputs(",\"proof_needed\":", out); json_string(out, arm->proof_needed);
     fputs("}\n", out);
 }
 
@@ -164,6 +235,14 @@ static bool render_report(FILE *out, const struct ci_inventory_report *report)
                    sizeof(report->source_root_sha3), root);
     fprintf(out,
         "{\"record\":\"inventory\",\"schema\":\"zcl.code_capability_inventory.v1\","
+        "\"generated_artifact_schema\":\"zcl.generated_artifact.v1\","
+        "\"artifact_id\":\"zcl.code_capability_inventory.v1\","
+        "\"asserts\":[\"public_capability_definition\",\"definition_arm_constant_return\",\"registered_test_reachability\"],"
+        "\"generated_by\":\"tools/gen_capability_inventory.c\","
+        "\"regenerate\":\"make docs-capability-inventory\","
+        "\"consumes\":[{\"path\":\"tools/lint/arm_symbol_single_baseline.txt\","
+        "\"artifact_id\":\"zcl.arm_symbol_single_baseline.v1\","
+        "\"asserts\":\"multi_arm_definition(path,symbol)\"}],"
         "\"source_root_sha3\":\"%s\",\"scope\":"
         "\"maintained C23 public headers under lib/app/core/config/domain/ports/"
         "adapters/packages plus their sources, tests, tools, and examples; vendor and build output excluded\","
@@ -180,7 +259,8 @@ static bool render_report(FILE *out, const struct ci_inventory_report *report)
         "\"ambiguous_symbol_use_sites\":%d,"
         "\"ambiguous_test_call_edges\":%d,"
         "\"unresolved_symbol_definitions\":%d,"
-        "\"scanner_partial_symbols\":%d,\"duplicates\":%d,"
+        "\"scanner_partial_symbols\":%d,\"arm_baseline_symbols\":%d,"
+        "\"multi_arm_symbols\":%d,\"definition_arms\":%d,\"duplicates\":%d,"
         "\"untested_invariants\":%d,\"test_root_gaps\":%d}\n",
         root, report->files_scanned, report->production_files, report->test_files,
         report->capability_count, report->symbol_count,
@@ -192,10 +272,23 @@ static bool render_report(FILE *out, const struct ci_inventory_report *report)
         report->ambiguous_test_call_edges,
         report->unresolved_symbol_definitions,
         report->scanner_partial_symbols,
+        report->arm_baseline_symbols,
+        report->multi_arm_symbol_count,
+        report->definition_arm_count,
         report->duplicate_count, report->invariant_count,
         report->test_root_gap_count);
     for (int i = 0; i < report->capability_count; i++)
         render_capability(out, report, &report->capabilities[i]);
+    for (int c = 0; c < report->capability_count; c++) {
+        const struct ci_inventory_capability *cap = &report->capabilities[c];
+        for (int i = cap->symbol_offset;
+             i < cap->symbol_offset + cap->symbol_count; i++)
+            if (report->symbols[i].multi_arm_definition)
+                render_multi_arm_symbol(out, report, cap,
+                                        &report->symbols[i]);
+    }
+    for (int i = 0; i < report->definition_arm_count; i++)
+        render_definition_arm(out, &report->definition_arms[i]);
     for (int i = 0; i < report->duplicate_count; i++)
         render_duplicate(out, &report->duplicates[i]);
     for (int i = 0; i < report->invariant_count; i++)

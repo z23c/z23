@@ -360,6 +360,84 @@ static bool inv_hash_extra(struct inv_scan *s, struct sha3_256_ctx *sha,
     return ok;
 }
 
+bool inv_read_arm_symbol_baseline(struct inv_scan *s)
+{
+    char path[INV_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", s->root,
+                     "tools/lint/arm_symbol_single_baseline.txt");
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        LOG_ERROR("codeindex.inventory",
+                  "arm-symbol artifact absent; multi-arm claims UNPROVEN: %s",
+                  path);
+        return false;
+    }
+    bool schema = false, artifact = false, assertion = false;
+    bool generated_by = false, regenerate = false, ok = true;
+    char line[768];
+    while (ok && fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        if (len == sizeof(line) - 1 && line[len - 1] != '\n') {
+            ok = false;
+            break;
+        }
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        if (strcmp(line,
+                   "# z23-generated-artifact: zcl.generated_artifact.v1") == 0)
+            schema = true;
+        else if (strcmp(line,
+                        "# artifact-id: zcl.arm_symbol_single_baseline.v1") == 0)
+            artifact = true;
+        else if (strcmp(line,
+                        "# asserts: multi_arm_definition(path,symbol)") == 0)
+            assertion = true;
+        else if (strcmp(line,
+                        "# generated-by: tools/lint/check_arm_symbol_single.sh") == 0)
+            generated_by = true;
+        else if (strcmp(line,
+                        "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh") == 0)
+            regenerate = true;
+        if (!line[0] || line[0] == '#') continue;
+        char *tab = strchr(line, '\t');
+        if (!tab || tab == line || !tab[1] || strchr(tab + 1, '\t')) {
+            ok = false;
+            break;
+        }
+        *tab++ = '\0';
+        for (int i = 0; i < s->arm_symbol_count; i++)
+            if (strcmp(s->arm_symbols[i].path, line) == 0 &&
+                strcmp(s->arm_symbols[i].name, tab) == 0)
+                ok = false;
+        if (!ok) break;
+        if (s->arm_symbol_count == s->arm_symbol_cap) {
+            int cap = s->arm_symbol_cap ? s->arm_symbol_cap * 2 : 256;
+            void *p = zcl_realloc(s->arm_symbols,
+                                  (size_t)cap * sizeof(*s->arm_symbols),
+                                  "ci_inventory_arm_symbols");
+            if (!p) { ok = false; break; }
+            s->arm_symbols = p;
+            s->arm_symbol_cap = cap;
+        }
+        struct inv_arm_symbol *row = &s->arm_symbols[s->arm_symbol_count++];
+        memset(row, 0, sizeof(*row));
+        inv_cpy(row->path, sizeof(row->path), line);
+        inv_cpy(row->name, sizeof(row->name), tab);
+    }
+    if (ferror(f)) ok = false;
+    fclose(f);
+    if (!schema || !artifact || !assertion || !generated_by || !regenerate) {
+        LOG_ERROR("codeindex.inventory",
+                  "arm-symbol artifact lacks self-describing generated header; claims UNPROVEN");
+        ok = false;
+    }
+    if (!ok)
+        LOG_ERROR("codeindex.inventory",
+                  "arm-symbol artifact malformed or stale-looking; claims UNPROVEN");
+    return ok;
+}
+
 bool inv_scan_all(struct inv_scan *s, uint8_t source_root[32])
 {
     if (!s || !source_root || !inv_collect_paths(s)) return false;
@@ -395,7 +473,10 @@ bool inv_scan_all(struct inv_scan *s, uint8_t source_root[32])
         if (s->failed) return false;
     }
     if (!inv_hash_extra(s, &sha, "tools/dev/test_group_catalog.def") ||
-        !inv_read_registered_groups(s))
+        !inv_hash_extra(s, &sha,
+                        "tools/lint/arm_symbol_single_baseline.txt") ||
+        !inv_read_registered_groups(s) ||
+        !inv_read_arm_symbol_baseline(s))
         return false;
     sha3_256_finalize(&sha, source_root);
     return true;
@@ -411,6 +492,7 @@ void inv_scan_release(struct inv_scan *s)
     free(s->includes);
     free(s->bodies);
     free(s->groups);
+    free(s->arm_symbols);
     memset(s, 0, sizeof(*s));
 }
 
@@ -433,14 +515,19 @@ bool codeindex_inventory_stat_root(const char *root, uint8_t out[32])
         inv_sha_u64(&sha, (uint64_t)p->mtime_ns);
         inv_sha_u64(&sha, (uint64_t)p->ctime_ns);
     }
-    char catalog[INV_PATH_MAX];
-    int n = snprintf(catalog, sizeof(catalog), "%s/%s", root,
-                     "tools/dev/test_group_catalog.def");
-    struct stat st;
-    bool ok = n > 0 && (size_t)n < sizeof(catalog) && stat(catalog, &st) == 0;
-    if (ok) {
-        sha3_256_write(&sha, (const unsigned char *)"test_group_catalog.def",
-                       sizeof("test_group_catalog.def"));
+    static const char *const extras[] = {
+        "tools/dev/test_group_catalog.def",
+        "tools/lint/arm_symbol_single_baseline.txt",
+    };
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(extras) / sizeof(extras[0]); i++) {
+        char path[INV_PATH_MAX];
+        int n = snprintf(path, sizeof(path), "%s/%s", root, extras[i]);
+        struct stat st;
+        ok = n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0;
+        if (!ok) break;
+        sha3_256_write(&sha, (const unsigned char *)extras[i],
+                       strlen(extras[i]) + 1);
         inv_sha_u64(&sha, (uint64_t)st.st_size);
         inv_sha_u64(&sha, (uint64_t)INV_MTIME_SEC(st));
         inv_sha_u64(&sha, (uint64_t)INV_MTIME_NSEC(st));
