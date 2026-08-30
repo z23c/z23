@@ -51,7 +51,7 @@ static void compact_submit_block(struct msg_processor *mp,
     /* Clear any download-manager in-flight slot created when this block was
      * first announced via inv at tip (msg_tx.c at-tip getdata path), so a
      * compact-reconstructed block does not leave a slot to time out into a
-     * spurious re-fetch. No-op (returns 0) when no slot exists. */
+     * spurious re-fetch. No-op (returns UINT32_MAX) when no slot exists. */
     (void)dl_mark_received(get_download_mgr(), &hash);
 
     if (block_already_seen(&hash)) {

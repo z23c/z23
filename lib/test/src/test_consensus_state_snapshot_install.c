@@ -1231,6 +1231,23 @@ static bool candidate_query_i64(sqlite3 *db,const char *sql,int64_t *out)
     return ok;
 }
 
+static bool candidate_query_blob32(sqlite3 *db, const char *sql,
+                                   uint8_t out[32])
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW && // raw-sql-ok:test-read-only-assertion
+              sqlite3_column_type(stmt, 0) == SQLITE_BLOB &&
+              sqlite3_column_bytes(stmt, 0) == 32;
+    if (ok)
+        memcpy(out, sqlite3_column_blob(stmt, 0), 32);
+    if (ok)
+        ok = sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:test-read-only-assertion
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
 static bool candidate_progress_parity(
     sqlite3 *db,const struct csi_fixture *f,const uint8_t admission[32])
 {
@@ -2974,6 +2991,50 @@ int test_consensus_state_snapshot_install(void)
         CSI_CHECK("activate: installed coins/anchors/nullifiers match the bundle "
                   "with COMPLETE (cursor 0) history",
                   active_is(pdb, &b));
+        int64_t retained_prefix_base = -1;
+        int64_t retained_prefix_components = -1;
+        uint8_t retained_prefix_hash[32] = {0};
+        uint8_t retained_prefix_proof[32] = {0};
+        uint8_t retained_prefix_source[32] = {0};
+        uint8_t retained_prefix_artifact[32] = {0};
+        CSI_CHECK("activate: admitted genesis prefix proof survives as evidence "
+                  "distinct from foreign producer authority",
+                  candidate_query_i64(
+                      pdb,
+                      "SELECT height FROM "
+                      "consensus_state_proof_prefix_base WHERE singleton=1",
+                      &retained_prefix_base) &&
+                  retained_prefix_base == b.height &&
+                  candidate_query_i64(
+                      pdb,
+                      "SELECT count(*) FROM "
+                      "consensus_state_proof_prefix_component",
+                      &retained_prefix_components) &&
+                  retained_prefix_components == 8 &&
+                  candidate_query_blob32(
+                      pdb,
+                      "SELECT block_hash FROM "
+                      "consensus_state_proof_prefix_base WHERE singleton=1",
+                      retained_prefix_hash) &&
+                  candidate_query_blob32(
+                      pdb,
+                      "SELECT proof_manifest_digest FROM "
+                      "consensus_state_proof_prefix_base WHERE singleton=1",
+                      retained_prefix_proof) &&
+                  candidate_query_blob32(
+                      pdb,
+                      "SELECT source_digest FROM "
+                      "consensus_state_proof_prefix_base WHERE singleton=1",
+                      retained_prefix_source) &&
+                  candidate_query_blob32(
+                      pdb,
+                      "SELECT artifact_digest FROM "
+                      "consensus_state_proof_prefix_base WHERE singleton=1",
+                      retained_prefix_artifact) &&
+                  memcmp(retained_prefix_hash, b.block_hash, 32) == 0 &&
+                  memcmp(retained_prefix_proof, b.proof, 32) == 0 &&
+                  memcmp(retained_prefix_source, b.source, 32) == 0 &&
+                  memcmp(retained_prefix_artifact, b.artifact, 32) == 0);
         int64_t activated_empty_scripts = -1;
         CSI_CHECK("activate: preserves empty script as zero-length BLOB",
                   candidate_query_i64(

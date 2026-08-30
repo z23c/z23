@@ -42,8 +42,11 @@
 #   - process-group SIGKILL teardown on every exit path.
 #
 # Usage:
-#   tools/scripts/cold_start_to_tip_stopwatch.sh [--bin=PATH] [--peer=HOST:PORT]
+#   tools/scripts/cold_start_to_tip_stopwatch.sh [--bin=PATH]
+#       [--peer=HOST:PORT ...]
 #       [--file-peer=HOST:PORT] [--budget=SECS] [--sample=SECS]
+#   # A comma-separated ZCL_CS_PEER / --peer value is equivalent to repeated
+#   # --peer flags. Every stated endpoint becomes its own -connect argument.
 #   ZCL_CS_NODE_BIN=/path/to/zclassic23 ZCL_CS_PEER=127.0.0.1:8033 \
 #       ZCL_CS_FILE_PEER=127.0.0.1:18034 \
 #       ZCL_CS_HEADER_SOURCE=/path/to/zclassicd-datadir-copy \
@@ -66,8 +69,10 @@
 #                        / peer unreachable). Not a verdict on C3 either way.
 #                        A peer that accepts the TCP connection and closes it
 #                        immediately is NOT a SKIP — it is labelled
-#                        peer_precheck=accept_close, warned about loudly, and
-#                        the run still reports the verdict the node earned.
+#                        peer_prechecks[].classification=accept_close, warned
+#                        about loudly, and the run still reports the verdict
+#                        the node earned. With several peers, peer_precheck is
+#                        the aggregate best observed serving shape.
 #   5  FRONTIER-BUSY-TIMEOUT — `dumpstate reducer_frontier` kept returning a
 #                        partial `{"snapshot_status":"progress_store_busy",
 #                        "retryable":true}` doc that carried no usable provable
@@ -109,7 +114,10 @@ NODE_BIN="${ZCL_CS_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 # lane dials is part of the proof, so it must be stated, not inherited: with
 # nothing set the run SKIPs (exit 2) and names the variable. See the
 # no_peer_configured skip below.
-PEER="${ZCL_CS_PEER:-}"
+PEER=""
+PEER_CONFIG="${ZCL_CS_PEER:-}"
+declare -a PEERS=()
+declare -a PEER_PRECHECKS=()
 FILE_PEER="${ZCL_CS_FILE_PEER:-}"
 HEADER_SOURCE="${ZCL_CS_HEADER_SOURCE:-}"
 BUNDLE_PATH="${ZCL_CS_BUNDLE_PATH:-}"
@@ -121,8 +129,9 @@ ARTIFACT_ROOT="${ZCL_CS_ARTIFACT_ROOT:-$REPO_ROOT/build/c3-stopwatch}"
 # silently folding busy reads into "no forward progress" (see D6 / the
 # is_busy_response()/rpc_frontier() comment below).
 FRONTIER_BUSY_TIMEOUT_SECS="${ZCL_CS_FRONTIER_BUSY_TIMEOUT_SECS:-120}"
-# Classification of what the peer did with a bare TCP connect (see
-# peer_precheck below). Recorded in proof.json; never changes the verdict.
+# Aggregate classification of what the stated peers did with bare TCP connects
+# (see peer_precheck below). Per-peer rows are recorded beside it in proof.json;
+# neither form changes the verdict.
 PEER_PRECHECK="unknown"
 # Bounded number of supervised self-respawns this harness will FOLLOW before
 # calling it a runaway (see the respawn-seam handling in the main loop). A
@@ -140,10 +149,49 @@ MAX_BOOTS="${ZCL_CS_MAX_BOOTS:-12}"
 #    below (is_busy_response()) and exits — no binary, network, or mktemp
 #    datadir touched.
 SELFTEST=0
+CLI_PEER_SEEN=0
+
+# peer_add <HOST:PORT> / peer_add_csv <comma-list> — append one or more stated
+# endpoints, preserving order and suppressing exact duplicates. A duplicate
+# -connect wastes one outbound slot and makes an artifact look more redundant
+# than the node really was, so the harness removes it before launch.
+peer_add() {
+    local candidate="${1:-}" existing
+    [ -n "$candidate" ] || return 0
+    for existing in "${PEERS[@]}"; do
+        [ "$existing" = "$candidate" ] && return 0
+    done
+    PEERS+=("$candidate")
+}
+
+peer_add_csv() {
+    local raw="${1:-}" candidate
+    local -a split=()
+    [ -n "$raw" ] || return 0
+    IFS=',' read -r -a split <<<"$raw"
+    for candidate in "${split[@]}"; do
+        peer_add "$candidate"
+    done
+}
+
+append_peer_connect_args() {
+    local endpoint
+    for endpoint in "${PEERS[@]}"; do
+        node_args+=("-connect=$endpoint")
+    done
+}
+
+peer_add_csv "$PEER_CONFIG"
 for arg in "$@"; do
     case "$arg" in
         --bin=*)    NODE_BIN="${arg#--bin=}" ;;
-        --peer=*)   PEER="${arg#--peer=}" ;;
+        --peer=*)
+            if [ "$CLI_PEER_SEEN" = "0" ]; then
+                PEERS=()
+                CLI_PEER_SEEN=1
+            fi
+            peer_add_csv "${arg#--peer=}"
+            ;;
         --file-peer=*) FILE_PEER="${arg#--file-peer=}" ;;
         --budget=*) BUDGET="${arg#--budget=}" ;;
         --sample=*) SAMPLE_SECS="${arg#--sample=}" ;;
@@ -152,11 +200,16 @@ for arg in "$@"; do
         --*)        echo "cold-start-wipe-stopwatch: unknown flag: $arg" >&2; exit 2 ;;
         *)
             if [ "${_POSN:-0}" = "0" ]; then NODE_BIN="$arg"; _POSN=1;
-            elif [ "${_POSN:-0}" = "1" ]; then PEER="$arg"; _POSN=2;
+            elif [ "${_POSN:-0}" = "1" ]; then
+                [ "$CLI_PEER_SEEN" = "1" ] || PEERS=()
+                CLI_PEER_SEEN=1
+                peer_add_csv "$arg"
+                _POSN=2
             fi
             ;;
     esac
 done
+PEER="${PEERS[0]:-}"
 
 P2P=39170; RPC=39171; FS=39172; HTTPS=39173
 RUN_ID="${ZCL_CS_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -1398,13 +1451,17 @@ classify_final_verdict() {
 #   unreachable  — TCP connect failed or the whole probe timed out.
 #   held_open    — the peer kept the socket open (or spoke first): the serving
 #                  shape. An outbound handshake can proceed (we send version).
-#   accept_close — the peer accepted the TCP connection and closed it
-#                  immediately, before a single byte could be exchanged. No
-#                  handshake is possible, so `network_tip` can never be read
-#                  and the PASS predicate is unreachable by construction.
+#   protocol_idle_close — the peer held the socket for the whole passive probe
+#                  window, then closed without sending first. The probe sent
+#                  no version message, while the real node does, so this is a
+#                  usable-but-unproven serving shape, not an immediate refusal.
+#   accept_close — the peer accepted the TCP connection and closed it quickly,
+#                  before a single byte could be exchanged. No handshake is
+#                  possible on that attempt.
 classify_peer_precheck() {
     case "${1:-}" in
         10|11) printf 'held_open' ;;
+        13)    printf 'protocol_idle_close' ;;
         12)    printf 'accept_close' ;;
         *)     printf 'unreachable' ;;
     esac
@@ -1426,12 +1483,34 @@ classify_peer_precheck() {
 peer_precheck() {
     ZCL_PP_HOST="$1" ZCL_PP_PORT="$2" timeout 8 bash -c '
         exec 3<>/dev/tcp/$ZCL_PP_HOST/$ZCL_PP_PORT || exit 9
+        started=$SECONDS
         if IFS= read -r -t 5 -n 1 -u 3 _b; then exit 10; fi
         rc=$?
         if [ "$rc" -gt 128 ]; then exit 11; fi
+        if [ $((SECONDS - started)) -ge 4 ]; then exit 13; fi
         exit 12
     ' >/dev/null 2>&1
     classify_peer_precheck "$?"
+}
+
+peers_json() {
+    local out="" peer
+    for peer in "${PEERS[@]}"; do
+        [ -n "$out" ] && out="$out,"
+        out="$out$(json_string "$peer")"
+    done
+    printf '%s' "$out"
+}
+
+peer_prechecks_json() {
+    local out="" i peer cls
+    for i in "${!PEERS[@]}"; do
+        peer="${PEERS[$i]}"
+        cls="${PEER_PRECHECKS[$i]:-unknown}"
+        [ -n "$out" ] && out="$out,"
+        out="$out{\"peer\":$(json_string "$peer"),\"classification\":$(json_string "$cls")}"
+    done
+    printf '%s' "$out"
 }
 
 # --selftest: hermetic classification self-check for is_busy_response() /
@@ -1530,8 +1609,29 @@ if [ "$SELFTEST" = "1" ]; then
     st_ps_check "whole probe timed out -> unreachable" unreachable "$(classify_peer_precheck 124)"
     st_ps_check "peer spoke first -> held_open" held_open "$(classify_peer_precheck 10)"
     st_ps_check "peer kept the socket open waiting for our version -> held_open" held_open "$(classify_peer_precheck 11)"
+    st_ps_check "peer waited out passive probe then closed -> protocol_idle_close" protocol_idle_close "$(classify_peer_precheck 13)"
     st_ps_check "peer closed at accept, zero bytes -> accept_close" accept_close "$(classify_peer_precheck 12)"
     st_ps_check "unknown probe rc -> unreachable (never silently held_open)" unreachable "$(classify_peer_precheck 77)"
+
+    # Multi-peer input is one ordered set: comma lists and repeated flags feed
+    # the same helper, and exact duplicates cannot spend extra outbound slots.
+    PEERS=()
+    peer_add_csv '198.51.100.1:8033,198.51.100.2:8033'
+    peer_add '198.51.100.1:8033'
+    st_ps_check "comma peer list expands and exact duplicates are suppressed" 2 "${#PEERS[@]}"
+    st_ps_check "peer list preserves the first stated endpoint" 198.51.100.1:8033 "${PEERS[0]}"
+    st_ps_check "peer list preserves the second stated endpoint" 198.51.100.2:8033 "${PEERS[1]}"
+    node_args=()
+    append_peer_connect_args
+    st_ps_check "two stated peers become two node argv entries" 2 "${#node_args[@]}"
+    st_ps_check "first node argv entry retains the first endpoint" -connect=198.51.100.1:8033 "${node_args[0]}"
+    st_ps_check "second node argv entry retains the second endpoint" -connect=198.51.100.2:8033 "${node_args[1]}"
+    PEER_PRECHECKS=(held_open protocol_idle_close)
+    st_ps_check "artifact peer list retains both endpoints" \
+        '"198.51.100.1:8033","198.51.100.2:8033"' "$(peers_json)"
+    st_ps_check "artifact precheck rows bind each endpoint to its own class" \
+        '{"peer":"198.51.100.1:8033","classification":"held_open"},{"peer":"198.51.100.2:8033","classification":"protocol_idle_close"}' \
+        "$(peer_prechecks_json)"
 
     # No-implicit-peer guardrail. This harness once defaulted its serving peer
     # to 127.0.0.1:8033 — the canonical node's own P2P port — so a bare
@@ -2323,7 +2423,9 @@ write_artifact() {
         printf '  "boots": %s,\n' "$(json_number_or_null "$boots")"
         printf '  "last_respawn_reason": %s,\n' "$(json_string "$last_respawn_reason")"
         printf '  "peer": %s,\n' "$(json_string "$PEER")"
+        printf '  "peers": [%s],\n' "$(peers_json)"
         printf '  "peer_precheck": %s,\n' "$(json_string "$PEER_PRECHECK")"
+        printf '  "peer_prechecks": [%s],\n' "$(peer_prechecks_json)"
         printf '  "file_peer": %s,\n' "$(json_string "$FILE_PEER")"
         printf '  "header_source": %s,\n' "$(json_string "$HEADER_SOURCE")"
         printf '  "staged_bundle": %s,\n' "$(json_string "$BUNDLE_PATH")"
@@ -2361,7 +2463,9 @@ write_artifact() {
         printf '    "node_bin_source_id_source": "zcl_binary_source_id (tools/scripts/source_identity_lib.sh) over `%s agentbuild`",\n' \
             "$(json_escape "$(basename -- "$NODE_BIN")")"
         printf '    "peer": %s,\n' "$(json_string "$PEER")"
+        printf '    "peers": [%s],\n' "$(peers_json)"
         printf '    "peer_precheck": %s,\n' "$(json_string "$PEER_PRECHECK")"
+        printf '    "peer_prechecks": [%s],\n' "$(peer_prechecks_json)"
         printf '    "peer_advertised_tip": %s,\n' "$(json_number_or_null "$last_network_tip")"
         printf '    "peer_advertised_tip_source": "dumpstate reducer_frontier network_tip (best height any handshake-complete peer advertised); -1 means no handshake ever completed"\n'
         printf '  },\n'
@@ -2419,33 +2523,45 @@ echo "cold-start-wipe-stopwatch: node_bin_source_id=${NODE_BIN_SOURCE_ID:-<unava
 # node and pulled chain data off it. Refuse instead: SKIP is already this
 # harness's "prerequisite absent" verdict (exit 2, which the Make wrapper turns
 # into a clean no-op), and it records an honest artifact naming what is missing.
-if [ -z "$PEER" ]; then
+if [ "${#PEERS[@]}" -eq 0 ]; then
     skip "no_peer_configured — set ZCL_CS_PEER=HOST:PORT (or pass --peer=HOST:PORT / ZCL_PEER= via make). This harness has NO default peer on purpose: it used to default to 127.0.0.1:8033, the operator's canonical node, so a bare run silently synced off it. Point it at a stopwatch fixture peer (e.g. 127.0.0.1:39070), or name the canonical node explicitly if that is genuinely what you mean."
 fi
 
-peer_host="${PEER%:*}"
-peer_port="${PEER##*:}"
-[ -n "$peer_host" ] && [ -n "$peer_port" ] && [ "$peer_host" != "$peer_port" ] \
-    || skip "invalid peer address: $PEER"
-PEER_PRECHECK="$(peer_precheck "$peer_host" "$peer_port")"
-if [ "$PEER_PRECHECK" = "unreachable" ]; then
-    skip "serving peer not reachable: $PEER"
+reachable_peers=0
+PEER_PRECHECK="unreachable"
+for peer_i in "${!PEERS[@]}"; do
+    peer="${PEERS[$peer_i]}"
+    peer_host="${peer%:*}"
+    peer_port="${peer##*:}"
+    [ -n "$peer_host" ] && [ -n "$peer_port" ] && [ "$peer_host" != "$peer_port" ] \
+        || skip "invalid peer address: $peer"
+    peer_cls="$(peer_precheck "$peer_host" "$peer_port")"
+    PEER_PRECHECKS[$peer_i]="$peer_cls"
+    if [ "$peer_cls" != "unreachable" ]; then
+        reachable_peers=$((reachable_peers + 1))
+    fi
+    case "$peer_cls" in
+        held_open) PEER_PRECHECK="held_open" ;;
+        protocol_idle_close)
+            [ "$PEER_PRECHECK" = "held_open" ] || PEER_PRECHECK="protocol_idle_close"
+            echo "cold-start-wipe-stopwatch: INFO peer $peer held the passive socket for the probe window, then closed without receiving version."
+            echo "cold-start-wipe-stopwatch: INFO this probe sends no bytes; the real node sends version immediately, so this is not an immediate-close refusal."
+            ;;
+        accept_close)
+            [ "$PEER_PRECHECK" = "unreachable" ] && PEER_PRECHECK="accept_close"
+            # ADVISORY, never a verdict: this attempt accept()ed and closed
+            # before a byte moved. Other stated peers can still serve the run.
+            echo "cold-start-wipe-stopwatch: WARNING peer $peer accepted the TCP connection and CLOSED IT IMMEDIATELY (zero bytes)."
+            echo "cold-start-wipe-stopwatch: WARNING likely the peer's per-IP inbound cap — count local sockets with: ss -tn state established \"dst $peer\""
+            echo "cold-start-wipe-stopwatch: WARNING continuing anyway — the node will try every stated peer and report the verdict it earns."
+            ;;
+    esac
+    echo "cold-start-wipe-stopwatch: peer=$peer peer_precheck=$peer_cls"
+done
+if [ "$reachable_peers" -eq 0 ]; then
+    skip "no stated serving peer reachable: ${PEERS[*]}"
 fi
-if [ "$PEER_PRECHECK" = "accept_close" ]; then
-    # ADVISORY, never a verdict: the peer accept()ed and closed before a byte
-    # moved, so no P2P handshake can complete, `network_tip` stays unreadable,
-    # and the PASS predicate is unreachable for the whole budget. Say so up
-    # front instead of leaving an operator to infer it from 600s of -1 rows.
-    # Most likely cause on a shared host: the peer's per-IP inbound sybil cap
-    # (lib/net/src/net.c, max 3 inbound per IP) is already consumed by another
-    # node on THIS machine. Check with:
-    #   ss -tn state established "dst $peer_host:$peer_port"
-    echo "cold-start-wipe-stopwatch: WARNING peer $PEER accepted the TCP connection and CLOSED IT IMMEDIATELY (zero bytes)."
-    echo "cold-start-wipe-stopwatch: WARNING no P2P handshake can complete, so network_tip will stay unreadable and PASS is unreachable this run."
-    echo "cold-start-wipe-stopwatch: WARNING likely the peer's per-IP inbound cap (max 3/IP, lib/net/src/net.c) — count local sockets with: ss -tn state established \"dst $PEER\""
-    echo "cold-start-wipe-stopwatch: WARNING continuing anyway — the run still reports the verdict the node genuinely earned, never a SKIP."
-fi
-echo "cold-start-wipe-stopwatch: peer_precheck=$PEER_PRECHECK"
+echo "cold-start-wipe-stopwatch: peer_precheck=$PEER_PRECHECK reachable_peers=$reachable_peers/${#PEERS[@]}"
 if [ -n "$FILE_PEER" ]; then
     file_peer_host="${FILE_PEER%:*}"
     file_peer_port="${FILE_PEER##*:}"
@@ -2479,7 +2595,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "cold-start-wipe-stopwatch: bin=$NODE_BIN peer=$PEER budget=${BUDGET}s sample=${SAMPLE_SECS}s"
+echo "cold-start-wipe-stopwatch: bin=$NODE_BIN peers=${PEERS[*]} budget=${BUDGET}s sample=${SAMPLE_SECS}s"
 echo "cold-start-wipe-stopwatch: file_peer=${FILE_PEER:-<none>}"
 echo "cold-start-wipe-stopwatch: header_source=${HEADER_SOURCE:-<autonomous>} staged_bundle=${BUNDLE_PATH:-<autonomous>}"
 echo "cold-start-wipe-stopwatch: datadir=$DATADIR (freshly wiped)"
@@ -2511,11 +2627,11 @@ node_args=(
     -fsport=$FS \
     -httpsport=$HTTPS \
     -listen=0 \
-    -connect="$PEER" \
     -nolegacyimport \
     -nobgvalidation \
     -showmetrics=0
 )
+append_peer_connect_args
 [ -n "$FILE_PEER" ] && node_args+=( -fileservice="$FILE_PEER" )
 
 # launch_node — (re)start the node against the SAME fresh datadir with the SAME
