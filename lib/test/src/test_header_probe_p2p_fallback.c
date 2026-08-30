@@ -35,6 +35,7 @@
 /* Case 3 (net scoring) harness. */
 #include "mining/miner.h"
 #include "net/download.h"
+#include "net/header_serve_repair.h"
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "net/peer_scoring.h"
@@ -315,6 +316,7 @@ static bool case_setup(const char *tag, char *dir, size_t dir_n,
     condition_engine_reset_for_testing();
     stale_validate_headers_repair_test_reset();
     header_probe_reset_for_test();
+    header_serve_repair_test_reset();
     blocker_reset_for_testing();
     reducer_frontier_test_set_compiled_anchor(1);
     stale_validate_headers_repair_test_set_hstar_override(0);
@@ -338,6 +340,7 @@ static void case_teardown(const char *dir, struct main_state *ms,
     sync_monitor_set_context(NULL, NULL, NULL);
     condition_engine_set_main_state(NULL);
     header_probe_reset_for_test();
+    header_serve_repair_test_reset();
     dl_free(dm);
     main_state_free(ms);
     progress_store_close();
@@ -447,11 +450,15 @@ static int run_p2p_repair_case(void)
     ok = ok && s1.p2p_no_peer_events == 0;                   /* peers available */
     ok = ok && s1.p2p_repairs == 0;                          /* not served yet */
     ok = ok && s1.last_repair_height == 1;
+    ok = ok && header_serve_repair_test_armed();
+    ok = ok && header_serve_repair_test_expected_count() == 1;
+    ok = ok && header_serve_repair_wants(&blocks[1]);
     ok = ok && dm.queue_len == 1 && dm.queue_heights[0] == 1;
     ok = ok && uint256_eq(&dm.queue[0], &rhash);
     ok = ok && !blocker_exists(HPF_NO_SOURCE_BLOCKER_ID);
-    HPF_CHECK("oracle dead → P2P getdata re-fetch requested + observable "
-              "(no premature repair, no missing-input blocker)", ok);
+    HPF_CHECK("oracle dead → bounded header-only repair armed + full-block "
+              "fallback requested (no premature repair or missing-input "
+              "blocker)", ok);
 
     /* Simulate the honest peer's block arriving: reducer_cache_ingested_solution
      * saves the re-validated solution hash-bound into the repair table. */
