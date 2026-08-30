@@ -454,18 +454,22 @@ not hold the transcript says so instead of asserting it away. The propositions,
 and which are narrower than the story, are enumerated at the top of
 [`lib/test/src/test_cold_join_sovereign.c`](../lib/test/src/test_cold_join_sovereign.c).
 
-For a push checkpoint:
+For an exact push checkpoint, commit first. The notification hook schedules
+the commit/base proof in the existing development service and returns. Inspect
+or wait for that immutable receipt with:
 
 ```bash
-make pre-push-ci
+build/bin/z23-dev dev proof status
+build/bin/z23-dev dev proof wait
 ```
 
-It gates whatever your branch would actually push. When the working tree
-has uncommitted edits it uses those; when the tree is clean — the normal
-state at push time — it falls back to the commits between your upstream
-(or `origin/main`) and `HEAD`. The log says which source it used and how
-many files it found, so `count=0` is legible as "nothing to push" rather
-than passing silently over untested commits.
+`dev.proof.ensure` is idempotent and normally runs from `post-commit`,
+`post-merge`, or `post-checkout`. It binds the local commit and advertised
+remote base to exact source/CAS and mutation roots, changed-set and impact
+policy, compiler/flags/environment/build graph, and complete generated,
+compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
+tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
+legacy parity oracle; it is not called by the installed push hook.
 
 Full `make lint` is the umbrella (every gate, including whole-node tool links).
 Run it only when an impact rule names a gate that `lint-fast` excludes, or at
@@ -516,15 +520,16 @@ Before committing:
    unrelated local work.
 5. Rerun the minimum gates affected by that integration.
 6. Commit one coherent change with an evidence-backed message.
-7. Push normally; the pre-push hook runs `make pre-push-ci`.
+7. Wait for `dev proof status` to report `passed`, then push normally. The
+   native pre-push hook reads only the exact sealed receipt.
 8. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 Every changed C path must map to focused proof through the repository's impact
-rules. The pre-push hook runs those mapped groups only; an unmapped code path
-fails closed so it cannot expand to the full suite. If the pre-push hook reports a write/SIGPIPE failure after its underlying
-gate genuinely completed, inspect the saved log and reproduce the gate
-out-of-band before considering the documented verified bypass. Never bypass an
-unknown or failing gate.
+rules. Unmapped or incomplete closure refuses receipt publication. The hook
+never builds, tests, lints, waits, invokes a shell, or fetches; a missing or
+running receipt refuses within the bounded read path and prints the exact
+`z23-dev dev proof wait` command for that commit/base pair. A normal
+non-fast-forward race also refuses without deleting reusable child evidence.
 
 Canonical deployment remains owner-gated. Development generation activation is
 an explicit plan/commit transaction with source, resident-CAS, process, probe,

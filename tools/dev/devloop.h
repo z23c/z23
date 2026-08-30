@@ -15,9 +15,11 @@ extern "C" {
 #define ZCL_DEVLOOP_PATH_MAX 1024
 #define ZCL_DEVLOOP_OUTPUT_MAX 65536
 #define ZCL_DEVLOOP_RESTART_SOURCE_MAX 32
-/* Proof-group set bounds for a plan (mirrors ZCL_AGENT_IMPACT_* so a plan can
- * hold the full path floor plus its symbol-closure additions). */
-#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 32
+/* A graph plan can legitimately reach hundreds of registered proof owners
+ * through a central header. Retain a measured 512-group envelope while the
+ * per-path accumulator remains separate; overflow still refuses.
+ * The rendered command document has an independent byte ceiling. */
+#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 512
 #define ZCL_DEVLOOP_GROUP_MAX 64
 /* Union across every dimension: the path floor plus the closure additions,
  * so a full path set and a full closure set both fit without either evicting
@@ -484,6 +486,9 @@ enum zcl_dev_source_admission {
  * with a bounded current mutation CAS. A receipt mismatch falls back to full
  * byte capture, preserving safe edit/revert and copied-checkout reuse. */
 enum zcl_dev_source_admission zcl_dev_executable_source_admit(
+    const char *repo_root, int executable_fd, const char *display_path,
+    struct dev_source_record *out, char *why, size_t why_len);
+bool zcl_dev_executable_source_record_read(
     const char *repo_root, int executable_fd, const char *display_path,
     struct dev_source_record *out, char *why, size_t why_len);
 const char *zcl_dev_source_admission_name(

@@ -96,6 +96,7 @@ gate_command() {
         check-no-stray-root-files)         echo './tools/lint/check_no_stray_root_files.sh' ;;
         check-scanner-immunity)            echo './tools/lint/selftest_scanner_immunity.sh' ;;
         check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;
+        check-dev-proof-native-fast-path)  echo './tools/lint/check_dev_proof_native_fast_path.sh' ;;
         check-tu-random-seed)              echo './tools/lint/check_tu_random_seed.sh' ;;
         check-equihash-params)             echo './tools/lint/check_equihash_params.sh --selftest && ./tools/lint/check_equihash_params.sh' ;;
         check-determinism-ratchet)         echo './tools/lint/check_determinism_ratchet.sh --selftest && ./tools/lint/check_determinism_ratchet.sh' ;;

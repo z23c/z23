@@ -644,7 +644,7 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
         char src_real[WALLET_BACKUP_RECEIPT_PATH_MAX];
         char backup_real[WALLET_BACKUP_RECEIPT_PATH_MAX];
         const char *src_compare = platform_directory_canonical_real(
-                                      src_dir, src_real, sizeof(src_real))
+                                       src_dir, src_real, sizeof(src_real))
             ? src_real : src_dir;
         const char *backup_compare = platform_directory_canonical_real(
                                          cfg->backup_dir, backup_real,

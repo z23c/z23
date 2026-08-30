@@ -113,12 +113,12 @@
     "tools/scripts/check_no_trust_state_ordering.sh"
 #define TRUST_ORDER_FIXTURE_DST \
     "app/services/src/_trust_order_fixture_tmp.c"
-#define GIT_HOOKS_PRE_PUSH_REL "tools/githooks/pre-push"
+#define GIT_HOOKS_PRE_PUSH_REL "tools/dev/z23_git_hook.c"
 /* Fixture path PREFIXES, not whole paths: these two checks live in the
  * REALROOT lane, which runs inside the worker pool, so they are resolved
  * through repo_path_pid() and carry the pid. */
 #define GIT_HOOKS_PRE_PUSH_FIXTURE_REL \
-    "test-tmp/_pre_push_hook_fixture_tmp"
+    "test-tmp/_pre_push_hook_fixture_tmp.c"
 #define GIT_HOOKS_PRECOMMIT_REL "tools/githooks/pre-commit"
 #define GIT_HOOKS_PRECOMMIT_FIXTURE_REL \
     "test-tmp/_pre_commit_hook_fixture_tmp"
