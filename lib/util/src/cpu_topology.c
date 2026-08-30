@@ -14,14 +14,16 @@
  *      list are in the same domain/CCD). size is parsed from the
  *      kernel's "<N>K" format.
  *
- * If /sys is unreadable at all (containers, non-Linux layouts) the whole
+ * On Darwin, the host-published hw.logicalcpu/hw.physicalcpu and
+ * hw.perflevelN sysctls provide the scheduler-facing shape. Performance
+ * levels are descriptive only: macOS does not publish a stable CPU-id map,
+ * so Z23 deliberately leaves placement to the Apple scheduler.
+ *
+ * If the native topology source is unreadable at all (containers,
+ * non-Linux layouts, restricted hosts) the whole
  * scan degrades to ONE synthetic domain covering
  * sysconf(_SC_NPROCESSORS_ONLN) cpus with unknown L3 size — always usable,
- * never fatal. cpu_topology_source() reports which path was taken. macOS and
- * Windows always take that fallback: it is the honest shape there (source
- * reads "fallback", smt_width stays 0 = unknown, L3 size stays 0 = unknown),
- * and only the raw online-cpu count differs per OS — see
- * sysconf_cpu_count(), which is the one call this file ports. */
+ * never fatal. cpu_topology_source() reports which path was taken. */
 #define _GNU_SOURCE /* pthread_setaffinity_np, CPU_SET */
 
 #include "util/cpu_topology.h"
@@ -53,6 +55,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 #define CPU_TOPOLOGY_DEFAULT_ROOT "/sys/devices/system/cpu"
 #define CPU_TOPOLOGY_ROOT_MAX     256
 #define CPU_TOPOLOGY_LINE_MAX     256
@@ -69,7 +75,10 @@ struct cpu_topology_state {
     int     domain_count;
     int     domain_of[CPU_TOPOLOGY_MAX_CPUS]; /* -1 == unassigned */
     struct cpu_topology_domain domains[CPU_TOPOLOGY_MAX_DOMAINS];
-    char    source[16]; /* "sysfs" | "fallback" */
+    int     performance_level_count;
+    struct cpu_topology_performance_level
+        performance_levels[CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS];
+    char    source[24]; /* "sysfs" | "darwin_sysctl" | "windows" | "fallback" */
 };
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -207,6 +216,102 @@ static void fill_fallback(struct cpu_topology_state *st)
     snprintf(st->source, sizeof(st->source), "fallback");
     st->valid = true;
 }
+
+#if defined(__APPLE__)
+static bool darwin_sysctl_int(const char *name, int *out)
+{
+    int value = 0;
+    size_t size = sizeof(value);
+    if (sysctlbyname(name, &value, &size, NULL, 0) != 0 ||
+        size != sizeof(value) || value < 0)
+        return false;
+    *out = value;
+    return true;
+}
+
+static bool darwin_sysctl_i64(const char *name, int64_t *out)
+{
+    uint64_t value = 0;
+    size_t size = sizeof(value);
+    if (sysctlbyname(name, &value, &size, NULL, 0) != 0 ||
+        size != sizeof(value) || value > (uint64_t)INT64_MAX)
+        return false;
+    *out = (int64_t)value;
+    return true;
+}
+
+static void darwin_sysctl_text(const char *name, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    size_t size = out_size;
+    if (sysctlbyname(name, out, &size, NULL, 0) != 0 || size == 0 ||
+        size > out_size) {
+        out[0] = '\0';
+        return;
+    }
+    out[out_size - 1] = '\0';
+}
+
+static bool scan_darwin(struct cpu_topology_state *st)
+{
+    fill_fallback(st);
+
+    int logical = 0;
+    int physical = 0;
+    bool have_logical = darwin_sysctl_int("hw.logicalcpu", &logical) &&
+                        logical > 0;
+    bool have_physical = darwin_sysctl_int("hw.physicalcpu", &physical) &&
+                         physical > 0;
+    if (!have_logical && !have_physical)
+        return false;
+
+    if (have_logical) {
+        if (logical > CPU_TOPOLOGY_MAX_CPUS)
+            logical = CPU_TOPOLOGY_MAX_CPUS;
+        st->logical_cpus = logical;
+        st->domains[0].cpu_count = logical;
+        for (int i = 0; i < CPU_TOPOLOGY_MAX_CPUS; i++)
+            st->domain_of[i] = -1;
+        for (int i = 0; i < logical; i++) {
+            st->domains[0].cpus[i] = i;
+            st->domain_of[i] = 0;
+        }
+    }
+    if (have_physical)
+        st->physical_cores = physical > st->logical_cpus
+            ? st->logical_cpus : physical;
+
+    int levels = 0;
+    if (darwin_sysctl_int("hw.nperflevels", &levels) && levels > 0) {
+        if (levels > CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS)
+            levels = CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS;
+        for (int i = 0; i < levels; i++) {
+            char key[64];
+            struct cpu_topology_performance_level *level =
+                &st->performance_levels[st->performance_level_count];
+            snprintf(key, sizeof(key), "hw.perflevel%d.logicalcpu", i);
+            bool level_logical = darwin_sysctl_int(key, &level->logical_cpus);
+            snprintf(key, sizeof(key), "hw.perflevel%d.physicalcpu", i);
+            bool level_physical =
+                darwin_sysctl_int(key, &level->physical_cores);
+            if (!level_logical && !level_physical)
+                continue;
+            snprintf(key, sizeof(key), "hw.perflevel%d.name", i);
+            darwin_sysctl_text(key, level->name, sizeof(level->name));
+            if (level->name[0] == '\0')
+                snprintf(level->name, sizeof(level->name), "level%d", i);
+            snprintf(key, sizeof(key), "hw.perflevel%d.l2cachesize", i);
+            (void)darwin_sysctl_i64(key, &level->l2_size_bytes);
+            st->performance_level_count++;
+        }
+    }
+
+    snprintf(st->source, sizeof(st->source), "darwin_sysctl");
+    st->valid = st->logical_cpus > 0;
+    return st->valid;
+}
+#endif
 
 #if defined(_WIN32)
 static int windows_group_cpu_id(WORD group, BYTE bit)
@@ -487,6 +592,16 @@ bool cpu_topology_init(void)
 #if defined(_WIN32)
     if (!scan_windows(&st))
         fill_fallback(&st);
+#elif defined(__APPLE__)
+    if (strcmp(g_sysfs_root, CPU_TOPOLOGY_DEFAULT_ROOT) == 0) {
+        if (!scan_darwin(&st))
+            fill_fallback(&st);
+    } else if (!scan_sysfs(g_sysfs_root, &st)) {
+        /* Preserve the deterministic fixture seam on Darwin. A nonexistent
+         * override still proves the generic fallback; a real fixture can
+         * exercise the platform-neutral sysfs parser without Linux hardware. */
+        fill_fallback(&st);
+    }
 #else
     if (!scan_sysfs(g_sysfs_root, &st)) {
         fill_fallback(&st);
@@ -586,6 +701,22 @@ const char *cpu_topology_source(void)
     return g_state.source;
 }
 
+int cpu_topology_performance_levels(void)
+{
+    cpu_topology_init();
+    return g_state.performance_level_count;
+}
+
+bool cpu_topology_performance_level_at(
+    int idx, struct cpu_topology_performance_level *out)
+{
+    cpu_topology_init();
+    if (!out || idx < 0 || idx >= g_state.performance_level_count)
+        return false;
+    *out = g_state.performance_levels[idx];
+    return true;
+}
+
 /* ── Pinning ───────────────────────────────────────────────────────── */
 
 bool cpu_topology_pin_thread(pthread_t thread, int domain)
@@ -632,6 +763,8 @@ bool cpu_topology_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "physical_cores", g_state.physical_cores);
     json_push_kv_int(out, "smt_threads_per_core", g_state.smt_width);
     json_push_kv_int(out, "l3_domains", g_state.domain_count);
+    json_push_kv_int(out, "performance_level_count",
+                     g_state.performance_level_count);
 
     int largest = 0;
     for (int i = 1; i < g_state.domain_count; i++) {
@@ -672,6 +805,25 @@ bool cpu_topology_dump_state_json(struct json_value *out, const char *key)
     }
     json_push_kv(out, "domains", &domains_arr);
     json_free(&domains_arr);
+
+    struct json_value levels_arr;
+    json_init(&levels_arr);
+    json_set_array(&levels_arr);
+    for (int i = 0; i < g_state.performance_level_count; i++) {
+        const struct cpu_topology_performance_level *level =
+            &g_state.performance_levels[i];
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        json_push_kv_str(&row, "name", level->name);
+        json_push_kv_int(&row, "logical_cpus", level->logical_cpus);
+        json_push_kv_int(&row, "physical_cores", level->physical_cores);
+        json_push_kv_int(&row, "l2_size_bytes", level->l2_size_bytes);
+        json_push_back(&levels_arr, &row);
+        json_free(&row);
+    }
+    json_push_kv(out, "performance_levels", &levels_arr);
+    json_free(&levels_arr);
 
     diag_push_health(out, g_state.valid,
                      g_state.valid ? "" : "topology scan produced no usable cpus");

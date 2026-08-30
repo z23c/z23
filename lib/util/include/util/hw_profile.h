@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Hardware profile organ: probes the machine ONCE at boot (online cores,
- * total RAM, x86 ISA extensions, datadir storage rotational flag) and
+ * total RAM, native x86/arm64 ISA extensions, datadir storage rotational flag) and
  * derives runtime tunables from that measured reality instead of pinned
  * constants — SQLite cache/mmap sizing, background-validation verify
  * parallelism, and an optional reducer-thread pin onto the large-L3 CCD on
@@ -33,10 +33,10 @@ enum hw_profile_ram_class {
     HW_PROFILE_RAM_HIGH,      /* >= 32 GiB */
 };
 
-/* x86_64 ISA extensions relevant to this codebase's crypto/hash paths
- * (Equihash, SHA3, ChaCha/Poly1305, BLS12-381 field arithmetic). All are
- * false on non-x86_64 builds or when the compiler's __builtin_cpu_supports
- * cannot see the feature. */
+/* Native ISA extensions relevant to this codebase's crypto/hash paths
+ * (Equihash, SHA2/SHA3, checksums, ChaCha/Poly1305, BLS12-381 field
+ * arithmetic). Each architecture's fields remain false elsewhere. arm64
+ * fields come from the OS feature authority, never from build-host flags. */
 struct hw_profile_isa {
     bool avx2;
     bool avx512f;
@@ -47,6 +47,11 @@ struct hw_profile_isa {
     bool vaes;
     bool gfni;
     bool sha_ni;
+    bool arm_neon;
+    bool arm_sha256;
+    bool arm_sha3;
+    bool arm_crc32;
+    bool arm_aes;
 };
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
