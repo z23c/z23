@@ -16,6 +16,16 @@
  * wallet_backup_crypto.c. The split happened when verification grew from
  * one table to eight and this file passed the 800-line shape ceiling.
  */
+
+/* realpath() is declared in <stdlib.h> only under a POSIX feature-test
+ * macro. Without one, glibc still supplies it through the fortify inline,
+ * which is enabled only when optimising — so the omission is invisible at
+ * -O1 and up and only shows as an implicit declaration at -O0. The guard
+ * must precede every include, or the first header pulled in fixes the
+ * feature set before this is seen. */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include "base/result.h"
 #include "base/text_fit.h"
 #include "crypto/sha3.h"

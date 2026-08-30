@@ -3,6 +3,16 @@
  *
  * Platform specifics (GCC on Linux, Apple Clang on Darwin) live here; the
  * rest of the tree consumes a neutral descriptor. */
+/* realpath() is declared in <stdlib.h> only under a POSIX feature-test
+ * macro. Without one, glibc still supplies it through the fortify inline,
+ * which is enabled only when optimising — so the omission is invisible at
+ * -O1 and up and only shows as an implicit declaration at -O0. The guard
+ * must precede every include, or the first header pulled in fixes the
+ * feature set before this is seen. */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+
 
 #include "platform/toolchain.h"
 
