@@ -112,6 +112,52 @@ static const char *tmh_cc(void)
     return cc && cc[0] ? cc : "cc";
 }
 
+/* $CC is a COMMAND LINE, not a program name, and the difference is not
+ * academic here.
+ *
+ * This tree sets CC to the compiler-cache wrapper followed by the compiler --
+ * "<abs>/build/bin/zcc cc" -- and make exports that to every recipe. So a run
+ * from `make t-fast` sees TWO tokens where a run straight from a shell sees
+ * none at all. Handing the whole string to execve as argv[0] asks the kernel
+ * for a program whose filename contains a space, which cannot exist, so the
+ * fixture failed to build and the group failed.
+ *
+ * It failed only under the build. Every by-hand run passed, because a
+ * developer's shell has no CC. That is the worst shape a defect can have: it
+ * is invisible exactly where people look for it, and it fails only in the
+ * gate, where it reads as flakiness.
+ *
+ * Split on spaces and tabs, and no quote handling on purpose: make splits CC
+ * the same way, so a compiler path containing a space would have broken the
+ * build long before it reached this test.
+ *
+ * `buf` receives a mutable copy and must outlive the argv pointing into it.
+ * Returns the token count, or 0 if CC does not fit -- never a partial argv,
+ * because a truncated compiler invocation would fail somewhere much less
+ * obvious than here. */
+static int tmh_cc_split(char *buf, size_t bufsz, char *out[], int max)
+{
+    const char *cc = tmh_cc();
+    size_t len = strlen(cc);
+    if (len >= bufsz)
+        return 0;
+    memcpy(buf, cc, len + 1u);
+    int n = 0;
+    char *p = buf;
+    while (*p) {
+        while (*p == ' ' || *p == '\t')
+            *p++ = '\0';
+        if (!*p)
+            break;
+        if (n >= max)
+            return 0;
+        out[n++] = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+    }
+    return n;
+}
+
 /* Build the runner object once, and the response file that names it beside
  * the placeholder the campaign swaps for its own mutant object. */
 static bool tmh_prepare(const char *dir)
@@ -123,9 +169,15 @@ static bool tmh_prepare(const char *dir)
             (int)sizeof runner_c ||
         snprintf(rsp, sizeof rsp, "%s/link.rsp.in", dir) >= (int)sizeof rsp)
         return false;
-    char *argv[8];
-    int n = 0;
-    argv[n++] = (char *)tmh_cc();
+    char ccbuf[512];
+    char *argv[16];
+    int n = tmh_cc_split(ccbuf, sizeof ccbuf, argv, 8);
+    if (n == 0) {
+        fprintf(stderr, "tmh_prepare: cannot use CC=\"%s\" — empty, or more "
+                        "than 8 tokens, or longer than %zu bytes\n",
+                tmh_cc(), sizeof ccbuf);
+        return false;
+    }
     argv[n++] = (char *)"-std=c23";
     argv[n++] = (char *)"-O0";
     argv[n++] = (char *)"-c";
@@ -133,8 +185,16 @@ static bool tmh_prepare(const char *dir)
     argv[n++] = runner_o;
     argv[n++] = runner_c;
     argv[n] = NULL;
-    if (zcl_mut_spawn(dir, argv, 120000, NULL, NULL) != 0)
+    /* Name the compiler and the directory on failure. Without this the group
+     * reports only "FAIL ... (tmh_prepare(dir))", which is true and useless:
+     * it does not distinguish a compiler that could not be spawned from one
+     * that ran and rejected the fixture. */
+    if (zcl_mut_spawn(dir, argv, 120000, NULL, NULL) != 0) {
+        fprintf(stderr, "tmh_prepare: fixture compile failed in %s using "
+                        "CC=\"%s\" (argv[0]=\"%s\")\n",
+                dir, tmh_cc(), argv[0]);
         return false;
+    }
     if (snprintf(rsp_text, sizeof rsp_text, "%s/PLACEHOLDER.o %s\n", dir,
                  runner_o) >= (int)sizeof rsp_text)
         return false;
