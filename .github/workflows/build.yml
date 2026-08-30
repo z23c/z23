@@ -315,9 +315,11 @@ jobs:
           # uses. libclang-rt-20-dev is the separate package that carries
           # the sanitizer/fuzzer runtime archives (libclang_rt.fuzzer.a,
           # libclang_rt.asan*.a) those fuzz targets link against — the
-          # `clang-20` compiler package alone does not include them.
+          # `clang-20` compiler package alone does not include them. MinGW is
+          # mandatory here so the Windows lint legs compile real inputs
+          # instead of reporting an unobserved compiler gap.
           sudo apt-get install -y --no-install-recommends \
-            gcc-14 clang-20 libclang-rt-20-dev
+            gcc-14 clang-20 libclang-rt-20-dev gcc-mingw-w64-x86-64
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
           sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-20 100
@@ -326,6 +328,7 @@ jobs:
           sudo update-alternatives --set clang /usr/bin/clang-20
           gcc --version
           clang --version
+          x86_64-w64-mingw32-gcc --version
 
       # Restore-only: JOB 2 is the sole writer (same key, same condition —
       # push to main only). This job never builds vendor from source when
@@ -340,6 +343,9 @@ jobs:
             vendor/include
             vendor/provenance
           key: vendor-${{ runner.os }}-${{ hashFiles('tools/scripts/build_vendor.sh', 'vendor/patches/**') }}
+
+      - name: Arm the fresh checkout
+        run: make setup
 
       - name: make lint
         env:
@@ -481,6 +487,9 @@ jobs:
             vendor/include
             vendor/provenance
           key: vendor-${{ runner.os }}-${{ hashFiles('tools/scripts/build_vendor.sh', 'vendor/patches/**') }}
+
+      - name: Arm the fresh checkout
+        run: make setup
 
       - name: make test-parallel
         run: |

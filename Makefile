@@ -1923,7 +1923,7 @@ endef
 $(foreach test,$(ZCL_WINDOWS_ACCEPTANCE_TESTS), \
 	$(eval $(call ZCL_WINDOWS_ACCEPTANCE_RULE,$(test))))
 
-.PHONY: windows-acceptance-compile windows-acceptance
+.PHONY: windows-acceptance-compile windows-acceptance windows-acceptance-wine
 windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
 	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS'
 
@@ -1941,25 +1941,33 @@ windows-acceptance: windows-headless-run-selftest
 	done; \
 	printf '%s\n' 'windows-acceptance: native execution PASS (explicit runtime refusals reported above)'
 else
-	@command -v wine >/dev/null 2>&1 || { \
-		printf '%s\n' 'windows-acceptance: REFUSE: Wine unavailable; use windows-acceptance-compile for cross-link evidence'; \
+	@printf '%s\n' \
+	  'windows-acceptance: native runtime UNOBSERVED (host=$(ZCL_HOST_OS)); MinGW cross-link PASS; run make windows-acceptance on native Windows to close it'
+endif
+
+windows-acceptance-wine: windows-acceptance-compile
+	@if test '$(ZCL_HOST_WINDOWS)' = 1; then \
+		printf '%s\n' 'windows-acceptance-wine: REFUSE: this optional compatibility leg is for a POSIX Wine host, not native Windows'; \
+		exit 2; \
+	fi; \
+	command -v wine >/dev/null 2>&1 || { \
+		printf '%s\n' 'windows-acceptance-wine: REFUSE: Wine unavailable'; \
 		exit 2; \
 	}; \
 	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
 		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		WINEDEBUG=-all wine "$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
-			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
+			printf '%s\n' "windows-acceptance-wine: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
-	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
-endif
+	printf '%s\n' 'windows-acceptance-wine: Wine compatibility execution PASS (not native Windows evidence)'
 
 .PHONY: macos-acceptance
 # Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived
 # from the closed capability matrix; unavailable rows run their refusal proof
 # rather than disappearing as hand-maintained skips.
-macos-acceptance:
+macos-acceptance: z23
 	@./tools/scripts/macos_acceptance.sh --run
 
 .PHONY: windows-service-install windows-service-status windows-service-remove
@@ -10878,8 +10886,10 @@ check-windows-platform-seam:
 #      ZCL_PLATFORM_CPPFLAGS so the two can never drift apart again).
 #
 # Compile, not execute: these are Windows binaries and this is a POSIX host.
-# `make windows-acceptance` additionally runs them under Wine and REFUSES
-# rather than skipping when Wine is absent.
+# `make windows-acceptance` executes them only on native Windows. On a POSIX
+# host it still performs every cross-link, then reports native runtime
+# UNOBSERVED. Optional Wine compatibility execution is a separately labelled
+# target and can never close the native observation.
 #
 # UNOBSERVED contract: with no mingw toolchain the compile step prints
 # UNOBSERVED, in that word, and exits 0 -- an outside contributor is never
@@ -12069,6 +12079,12 @@ LINT_GATES := \
 # it had not been built, `make lint` failed check-ship-remote-transaction in
 # about 30 ms and — because that gate's selftest was a silent assertion chain —
 # with a completely empty failure log.
+# The umbrella also runs capability-closure and cookbook checks over the DEV
+# object graph, and several gates inspect the confined dev package verifier.
+# Name those artifacts here so a parallel cold lint never depends on ambient
+# output from an earlier development build.
+lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN)
+
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
