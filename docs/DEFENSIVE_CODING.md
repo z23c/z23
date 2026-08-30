@@ -1080,6 +1080,63 @@ clean bill of health**, because the external mode deliberately drops the
 non-empty-claim floor (a plan directory legitimately starts with none). A plan
 only becomes checkable once its author binds an open item to a predicate.
 
+**Determinism is not hygiene here.** A receipt saying "I ran this group at this
+commit and it passed" is worth nothing if re-running the same thing gives a
+different answer, so the set of groups that do not reproduce is a debt with its
+own shrink-only ratchet in `tools/lint/determinism_baseline.txt`.
+
+Each row is `<group> <CLASS> <PERTURBATION>[+<PERTURBATION>...]`: the
+perturbation names the cause, because "it varies" is not a finding and "it
+varies when `CC` is set" is. `check-determinism-ratchet` guards the record — it
+refuses a row that names no cause, a row whose class is not one the classifier
+emits, a row for a group that is not registered, a header count that disagrees
+with the rows, a missing baseline, and any row that was not already present at
+the merge-base with `origin/main`. There is no flag that admits a new row: a
+group appearing here means a test stopped giving the same answer twice, and the
+fix is the test.
+
+`CLASS` is `NONDETERMINISTIC` or `TIMING_SENSITIVE`, and they are different
+defects. A `NONDETERMINISTIC` group answered differently on a plain re-run at
+identical load, or answered differently when the environment moved: its own
+logic does not settle, so fix the logic. A `TIMING_SENSITIVE` group answered
+differently *only* when the machine got busier: its logic is settled and its
+grading rule reads a wall clock, so replace the grading rule.
+
+The second is the one that matters for a corroboration network. An honest node
+re-running a `TIMING_SENSITIVE` group on a loaded box computes a different
+verdict vector and **refutes a receipt that was never wrong** — a false
+accusation manufactured by scheduling, which the producer cannot answer. Folding
+the two together would hide exactly the population that generates those
+refutations. Neither class may carry a receipt.
+
+This is the dynamic half of a pair. `check-no-wallclock-assertion` is the static
+half: it finds assertions *shaped* like a wall-clock grade, and its own header
+lists what that shape cannot see — sleep-and-check races, shell fixtures, a
+bound handed to an external tool, a duration compared inside a helper, and
+fixed-iteration retry loops with a hand-rolled `failures++`. The measurement
+here finds them by *behaviour* instead, and cannot see a group whose timing
+dependence did not trip on this box at these loads. Neither subsumes the other;
+receipt eligibility is the union.
+
+The gate does not re-measure — measuring is `make determinism-scan` driving
+`build/bin/test_parallel` once per perturbation, which is hours of wall clock
+and belongs nowhere near `make lint`. What it measures is the **verdict vector**:
+the ordered `(check name, outcome)` sequence the harness already prints, never
+the raw transcript, which carries durations, temp paths, pids and pointer
+values and would measure the clock instead of the test. Read
+`lib/determinism/include/determinism/perturbation.h` for what each perturbation
+means, which ones this host can apply, and why the result is a lower bound: a
+test that is wrong the same way every time has a perfectly stable vector.
+
+The scan records the 1-minute load average at the start and end of every
+profile, in integer hundredths, into the digests file the verdict is derived
+from. If `BASE` and `BASE_REPEAT` — the same environment run twice — did not run
+at comparable load, `classify` **refuses to write a baseline** and reports the
+whole varying set as `UNCONFIRMED`. That rail exists because the first sweep of
+this tree was contaminated invisibly: an unrelated `make lint` ran beside
+`BASE_REPEAT`, 587 s of work took 847 s, and every finding in that sweep came
+from the one probe that is supposed to be unstable against nothing.
+
 **Canonical lint-gate list (E11 source of truth).** This block is machine-checked
 against the Makefile `lint:` target. Keep it sorted; edit it whenever you
 add/remove a gate.
@@ -1261,6 +1318,7 @@ add/remove a gate.
 - `check-tu-random-seed`
 - `check-outparam-init-before-return`
 - `check-equihash-params`
+- `check-determinism-ratchet`
 <!-- LINT-GATES-END -->
 
 (`check-consensus-parity` [E13, the parity mechanism — see
