@@ -46,6 +46,11 @@ bool platform_private_file_write_at(struct platform_private_file *file,
                                     const void *data, size_t size,
                                     uint64_t offset);
 bool platform_private_file_flush(struct platform_private_file *file);
+/* Strong persistence barrier for custody/canonical authority.  This is
+ * F_FULLFSYNC on Darwin, FlushFileBuffers on Windows, and fsync elsewhere.
+ * Keep rebuildable or content-addressed writes on the ordinary flush above. */
+bool platform_private_file_authority_flush(
+    struct platform_private_file *file);
 /* Make a staged binary owner-executable on POSIX. Windows executability is
  * determined by the PE image and extension, so this is a validated no-op. */
 bool platform_private_file_mark_executable(struct platform_private_file *file);

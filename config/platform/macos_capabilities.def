@@ -9,7 +9,7 @@
  * unavailable and still name evidence: that group proves the refusal path. */
 ZCL_MACOS_CAPABILITY(node, available, native_public_node, test_boot_shutdown_marker_persistence,test_net,test_rpc)
 ZCL_MACOS_CAPABILITY(arm_acceleration, available, runtime_gated_and_oracle_checked_apple_arm_tiers, test_arm_hw_tiers,test_sha256_isa_parity,test_blake2b_batch_parity,test_sha3_256_x4,test_sha3_512_x4,test_encoding,test_hw_profile)
-ZCL_MACOS_CAPABILITY(wallet, available, native_wallet_custody, test_wallet,test_wallet_backup)
+ZCL_MACOS_CAPABILITY(wallet, available, native_wallet_custody_with_f_fullfsync_backup_publication, test_wallet,test_wallet_backup)
 ZCL_MACOS_CAPABILITY(tor, available, embedded_full_tor_when_archive_present, test_tor)
 ZCL_MACOS_CAPABILITY(noise, available, native_noise_transport, test_noise_nk_handshake,test_noise_xx_handshake,test_noise_transport_parity)
 ZCL_MACOS_CAPABILITY(kqueue, available, native_recursive_directory_watcher, test_directory_watcher,test_watcher_record)
