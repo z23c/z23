@@ -68,6 +68,10 @@ LIB_MODULE("base")
  * that has to be honest in that context too. Ranked above base only so base
  * keeps its documented place as the sink. */
 LIB_MODULE("install")
+/* BM25 ranked retrieval over an in-memory corpus. Depends on base and the C
+ * math library and nothing else, so it takes the lowest rank the order rule
+ * allows. Nothing below it (base, install) references it. */
+LIB_MODULE("retrieval")
 /* Scalar FIPS-202 primitives depend only on base.  Crypto owns optional
  * batched acceleration and reaches down through sha3/sha3.h. */
 LIB_MODULE("sha3")
@@ -75,7 +79,7 @@ LIB_MODULE("sha3")
  * over an exactly identified source tree, in the fixed form it travels in.
  * Depends on base and sha3 and NOTHING else — deliberately. It does not sign
  * and knows no identity: a caller hands the canonical bytes to zid_doc_sign,
- * which is why this sits at rank 4 instead of above lib/zid. It also does not
+ * which is why this sits at rank 5 instead of above lib/zid. It also does not
  * COMPUTE a verdict vector; it carries one a caller measured. */
 LIB_MODULE("receipt")
 /* Bounded wire cursors depend only on base fixed-width byte helpers. */

@@ -191,6 +191,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/zdir") == 0) return "ZCL Directory (ZDIR) on-chain node directory overlay — .onion peer discovery folded from block history";
     if (strcmp(group, "lib/zid") == 0) return "sovereign identity Phase 1: signed identity documents + blinded record keys (ed25519/SHA3, pure codec)";
     if (strcmp(group, "lib/codeindex") == 0) return "the in-binary source-code navigator index: scan, store, query, the `code` CLI";
+    if (strcmp(group, "lib/retrieval") == 0) return "BM25 ranked retrieval over an in-memory corpus: an inverted index that answers \"which records are about this?\" in rank order rather than in match order";
     if (strcmp(group, "lib/receipt") == 0) return "a proof receipt: one node's claim that a named test group reached a named verdict over an exactly identified source tree, in the fixed form it travels in";
     if (strcmp(group, "lib/territory") == 0) return "generated per-module scorecard: what a module owns, what proves it (routed vs actually reached), what it depends on, where it is weak";
     if (strcmp(group, "lib/metaverse") == 0) return "sovereign digital property: property identity, action vocabulary, read-only per-kind catalog adapters, the pure grant/delegation rule evaluator, signed hash-chained receipts";

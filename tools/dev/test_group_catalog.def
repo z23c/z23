@@ -661,6 +661,12 @@ ZCL_TEST_GROUP(vcs_devloop)
 ZCL_TEST_GROUP(codeindex)
 ZCL_TEST_GROUP(fingerprint)
 ZCL_TEST_GROUP(territory)
+/* BM25 ranked retrieval. The group exists for the properties a ranking has
+ * to have before one node can quote it to another: the same corpus and the
+ * same query give the same list, ties included; a rarer term outranks a
+ * common one; and an index that failed an insertion answers nothing at all
+ * rather than answering from a corpus with holes in it. */
+ZCL_TEST_GROUP(retrieval)
 /* A proof receipt: one node's claim that a named group reached a named
  * verdict over an exactly identified tree, and the rule a receiver applies.
  * The group exists for the refusals: only a PASS carrying a measured vector

@@ -2825,3 +2825,9 @@ AGENT_IMPACT_RULE("lib/engine/include/engine/personas.def|tools/lint/check_perso
  * module depends only on base and sha3, deliberately, so that a receipt can
  * be recomputed and compared by code holding no keys and no index. */
 AGENT_IMPACT_RULE("lib/receipt/src/*.c|lib/receipt/include/receipt/*.h|lib/test/src/test_receipt.c", "receipt make_lint_gates")
+/* Ranked retrieval. Rides its own group only: the module depends on base and
+ * libm and nothing else, and nothing depends on it yet — `code have` still
+ * answers by substring match. When that call site lands, the codeindex group
+ * joins this rule; adding it now would claim a coverage relationship that
+ * does not exist. */
+AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib/test/src/test_retrieval.c", "retrieval make_lint_gates")
