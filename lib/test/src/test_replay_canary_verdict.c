@@ -27,6 +27,7 @@
 
 #include "test/test_core.h"
 #include "crypto/sha256.h"
+#include "platform/os_proc.h"
 #include "platform/time_compat.h"
 
 #include <errno.h>
@@ -63,11 +64,9 @@ static const char *repo_root(void)
     if (cached) return root[0] ? root : NULL;
 
     char exe[PATH_MAX];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (n <= 0 || n >= (ssize_t)sizeof(exe) - 1) {
+    if (!os_proc_exe_path(exe, sizeof(exe))) {
         cached = 1; root[0] = '\0'; return NULL;
     }
-    exe[n] = '\0';
 
     for (int depth = 0; depth < 8; depth++) {
         char *slash = strrchr(exe, '/');
@@ -1187,7 +1186,7 @@ static int test_source_guard_mvp_binds_canary_to_running_binary(void)
 
 /* ── Registration ───────────────────────────────────────────────── */
 
-int test_replay_canary_verdict(void)
+static int test_replay_canary_verdict_platform_arm(void)
 {
     int failures = 0;
     failures += test_pass_writes_pass_sentinel();
@@ -1219,9 +1218,14 @@ int test_replay_canary_verdict(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork/exec verdict-child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_replay_canary_verdict(void)
+static int test_replay_canary_verdict_platform_arm(void)
 {
     printf("replay_canary_verdict: SKIP (Windows): fork/exec verdict-child lane\n");
     return 0;
 }
 #endif
+
+int test_replay_canary_verdict(void)
+{
+    return test_replay_canary_verdict_platform_arm();
+}

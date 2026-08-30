@@ -710,8 +710,8 @@ static int fip_proof2_crash_resume(void)
     return failures;
 }
 
-int test_fold_inram_crash_proof(void);
-int test_fold_inram_crash_proof(void)
+static int test_fold_inram_crash_proof_platform_arm(void);
+static int test_fold_inram_crash_proof_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== test_fold_inram_crash_proof: the coins_ram fold-IO cure's "
@@ -729,7 +729,7 @@ int test_fold_inram_crash_proof(void)
 /* Both proof items drive crash injection through fork()+SIGKILL children;
  * the Windows TerminateProcess analogue of the fold-recovery invariant is
  * carried by test_kill9_recovery.c's mint-fold phase. */
-int test_fold_inram_crash_proof(void)
+static int test_fold_inram_crash_proof_platform_arm(void)
 {
     printf("fold_inram_crash_proof: SKIP (Windows): fork+SIGKILL "
            "crash-injection lane; kill9_recovery mint-fold covers the "
@@ -737,3 +737,8 @@ int test_fold_inram_crash_proof(void)
     return 0;
 }
 #endif
+
+int test_fold_inram_crash_proof(void)
+{
+    return test_fold_inram_crash_proof_platform_arm();
+}

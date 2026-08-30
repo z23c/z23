@@ -21,12 +21,12 @@
 
 #include "test/test_core.h"
 #include "platform/os_sandbox.h"
+#include "platform/time_compat.h"
 #include "session/mesh_terminal_worker.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 #define FBSH_BIN "build/bin/fbsh"
@@ -49,6 +49,8 @@ static void live_config(struct mesh_terminal_worker_config *cfg)
     cfg->idle_seconds = 30;
 }
 
+#if defined(__linux__)
+
 /* Drain worker output into a rolling buffer until `needle` appears or the
  * deadline passes. Returns true when found. `err` (optional) captures a
  * terminal worker error — BYTE_LIMIT in particular is how the output
@@ -63,12 +65,13 @@ static bool drain_until(struct mesh_terminal_worker *w, const char *needle,
     size_t cap = sizeof rolling - 1;
     size_t fill = 0;
     rolling[0] = '\0';
-    time_t deadline = time(NULL) + timeout_seconds;
-    while (time(NULL) < deadline) {
+    time_t deadline = platform_time_wall_time_t() + timeout_seconds;
+    while (platform_time_wall_time_t() < deadline) {
         uint8_t chunk[MESH_TERMINAL_WORKER_IO_CHUNK];
         size_t n = 0;
         struct zcl_result r = mesh_terminal_worker_output(
-            w, chunk, sizeof chunk, &n, (int64_t)time(NULL));
+            w, chunk, sizeof chunk, &n,
+            (int64_t)platform_time_wall_time_t());
         if (!r.ok && r.code != MESH_TERMINAL_WORKER_ERR_NONE) {
             if (err) *err = r;
             break;
@@ -103,14 +106,16 @@ static bool drain_until(struct mesh_terminal_worker *w, const char *needle,
 
 static bool wait_exit(struct mesh_terminal_worker *w, int timeout_seconds)
 {
-    time_t deadline = time(NULL) + timeout_seconds;
-    while (time(NULL) < deadline) {
+    time_t deadline = platform_time_wall_time_t() + timeout_seconds;
+    while (platform_time_wall_time_t() < deadline) {
         if (!mesh_terminal_worker_alive(w))
             return true;
         usleep(20000);
     }
     return false;
 }
+
+#endif
 
 static int check(int failures, bool ok, const char *label)
 {
@@ -122,7 +127,7 @@ static int check(int failures, bool ok, const char *label)
 
 /* The worker must refuse honestly on platforms with no confinement
  * stack — every entry by name, never a simulated success. */
-int test_mesh_terminal_worker(void)
+static int test_mesh_terminal_worker_platform_arm(void)
 {
     printf("\n=== mesh terminal worker tests ===\n");
     int failures = 0;
@@ -155,7 +160,7 @@ int test_mesh_terminal_worker(void)
 
 #else /* __linux__ */
 
-int test_mesh_terminal_worker(void)
+static int test_mesh_terminal_worker_platform_arm(void)
 {
     printf("\n=== mesh terminal worker tests ===\n");
     int failures = 0;
@@ -226,7 +231,7 @@ int test_mesh_terminal_worker(void)
         struct mesh_terminal_worker_config cfg;
         struct mesh_terminal_worker w;
         live_config(&cfg);
-        int64_t t0 = (int64_t)time(NULL);
+        int64_t t0 = (int64_t)platform_time_wall_time_t();
         struct zcl_result r = mesh_terminal_worker_spawn(&cfg, t0, &w);
         failures = check(failures, r.ok, "spawn fbsh in the cage");
         if (r.ok) {
@@ -269,13 +274,15 @@ int test_mesh_terminal_worker(void)
         struct mesh_terminal_worker_config cfg;
         struct mesh_terminal_worker w;
         live_config(&cfg);
-        int64_t t0 = (int64_t)time(NULL);
+        int64_t t0 = (int64_t)platform_time_wall_time_t();
         struct zcl_result r = mesh_terminal_worker_spawn(&cfg, t0, &w);
         failures = check(failures, r.ok, "spawn for natural exit");
         if (r.ok) {
             const uint8_t line[] = "exit\n";
-            (void)mesh_terminal_worker_input(&w, line, sizeof line - 1,
-                                             t0 + 1);
+            r = mesh_terminal_worker_input(&w, line, sizeof line - 1,
+                                           t0 + 1);
+            failures = check(failures, r.ok,
+                             "exit command input accepted");
             failures = check(failures, wait_exit(&w, 5),
                              "shell exits on `exit`");
             failures = check(failures,
@@ -302,7 +309,7 @@ int test_mesh_terminal_worker(void)
         struct mesh_terminal_worker w;
         live_config(&cfg);
         cfg.max_bytes_in = 16;
-        int64_t t0 = (int64_t)time(NULL);
+        int64_t t0 = (int64_t)platform_time_wall_time_t();
         struct zcl_result r = mesh_terminal_worker_spawn(&cfg, t0, &w);
         failures = check(failures, r.ok, "spawn for input budget");
         if (r.ok) {
@@ -334,15 +341,17 @@ int test_mesh_terminal_worker(void)
         struct mesh_terminal_worker w;
         live_config(&cfg);
         cfg.max_bytes_out = 64;
-        int64_t t0 = (int64_t)time(NULL);
+        int64_t t0 = (int64_t)platform_time_wall_time_t();
         struct zcl_result r = mesh_terminal_worker_spawn(&cfg, t0, &w);
         failures = check(failures, r.ok, "spawn for output budget");
         if (r.ok) {
             const uint8_t line[] =
                 "echo 0123456789012345678901234567890123456789"
                 "0123456789012345678901234567890123456789\n";
-            (void)mesh_terminal_worker_input(&w, line, sizeof line - 1,
-                                             t0 + 1);
+            r = mesh_terminal_worker_input(&w, line, sizeof line - 1,
+                                           t0 + 1);
+            failures = check(failures, r.ok,
+                             "output-budget command input accepted");
             struct zcl_result err = { .ok = true };
             (void)drain_until(&w, "ZZZ_NEVER", 5, &err, NULL, 0);
             failures = check(failures,
@@ -367,7 +376,7 @@ int test_mesh_terminal_worker(void)
         cfg.idle_seconds = 0; /* isolate the lifetime check: at t0+59 the
                                * idle window (30 s) would otherwise fire
                                * first and name the kill idle-timeout */
-        int64_t t0 = (int64_t)time(NULL);
+        int64_t t0 = (int64_t)platform_time_wall_time_t();
         struct zcl_result r = mesh_terminal_worker_spawn(&cfg, t0, &w);
         failures = check(failures, r.ok, "spawn for lifetime budget");
         if (r.ok) {
@@ -409,7 +418,7 @@ int test_mesh_terminal_worker(void)
         struct mesh_terminal_worker_config cfg;
         struct mesh_terminal_worker w;
         live_config(&cfg);
-        int64_t t0 = (int64_t)time(NULL);
+        int64_t t0 = (int64_t)platform_time_wall_time_t();
         struct zcl_result r = mesh_terminal_worker_spawn(&cfg, t0, &w);
         failures = check(failures, r.ok, "spawn for resize/confinement");
         if (r.ok) {
@@ -431,8 +440,10 @@ int test_mesh_terminal_worker(void)
             /* Attack through the shell: cat is NOT granted, so the read
              * cannot happen — and nothing secret may appear on screen. */
             const uint8_t shadow[] = "cat /etc/shadow\n";
-            (void)mesh_terminal_worker_input(&w, shadow,
-                                             sizeof shadow - 1, t0 + 1);
+            r = mesh_terminal_worker_input(&w, shadow,
+                                           sizeof shadow - 1, t0 + 1);
+            failures = check(failures, r.ok,
+                             "confined attack input accepted");
             struct zcl_result err = { .ok = true };
             (void)drain_until(&w, "not found", 5, &err, NULL, 0);
             (void)err;
@@ -460,3 +471,8 @@ int test_mesh_terminal_worker(void)
 }
 
 #endif /* __linux__ */
+
+int test_mesh_terminal_worker(void)
+{
+    return test_mesh_terminal_worker_platform_arm();
+}

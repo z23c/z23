@@ -655,8 +655,8 @@ static bool scs_cycle(const char *base_dir, int64_t n, uint64_t g,
     return pass;
 }
 
-int test_stage_crash_sweep(void);
-int test_stage_crash_sweep(void)
+static int test_stage_crash_sweep_platform_arm(void);
+static int test_stage_crash_sweep_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== test_stage_crash_sweep: deterministic kill -9 sweep "
@@ -795,10 +795,15 @@ int test_stage_crash_sweep(void)
  * fork()+SIGKILL+waitpid children. The Windows kill9 analogue lives in
  * test_kill9_recovery.c (TerminateProcess re-exec lanes); this sweep's
  * per-stage fork machinery is POSIX-only. */
-int test_stage_crash_sweep(void)
+static int test_stage_crash_sweep_platform_arm(void)
 {
     printf("stage_crash_sweep: SKIP (Windows): fork+SIGKILL stage sweep "
            "lane; kill9_recovery covers the TerminateProcess analogue\n");
     return 0;
 }
 #endif
+
+int test_stage_crash_sweep(void)
+{
+    return test_stage_crash_sweep_platform_arm();
+}

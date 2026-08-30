@@ -1398,8 +1398,29 @@ static int test_zbex_reproduction(void)
     return failures;
 }
 
-int test_zcode_benchmark_exec(void)
+static int test_zcode_benchmark_exec_platform_arm(void)
 {
+#if defined(__APPLE__)
+    int failures = 0;
+    (void)test_zbex_codec_kats;
+    (void)test_zbex_execute_happy;
+    (void)test_zbex_tamper_rejected;
+    (void)test_zbex_environment_mismatch;
+    (void)test_zbex_null_negative;
+    (void)test_zbex_sandbox_selfcheck;
+    (void)test_zbex_crash_discipline;
+    (void)test_zbex_closed_inputs;
+    (void)test_zbex_reproduction;
+    struct zcl_result isolation =
+        zcode_benchmark_executor_sandbox_selfcheck("/tmp");
+    TEST("zcode benchmark: Darwin refuses without full worker isolation") {
+        ASSERT(!isolation.ok);
+        ASSERT(strstr(isolation.message, "confinement backend unavailable") !=
+               NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+#else
     int failures = 0;
     failures += test_zbex_codec_kats();
     failures += test_zbex_execute_happy();
@@ -1411,6 +1432,7 @@ int test_zcode_benchmark_exec(void)
     failures += test_zbex_closed_inputs();
     failures += test_zbex_reproduction();
     return failures;
+#endif
 }
 
 #else /* _WIN32 */
@@ -1418,7 +1440,7 @@ int test_zcode_benchmark_exec(void)
 /* The benchmark executor is fail-closed on Windows (its refusal is the
  * acceptance in zcode_benchmark_executor_windows_refusal_acceptance.c), and
  * the fixtures here need fork + Landlock sandbox canaries. */
-int test_zcode_benchmark_exec(void)
+static int test_zcode_benchmark_exec_platform_arm(void)
 {
     printf("test_zcode_benchmark_exec: SKIP (Windows): executor refuses on "
            "Windows by design (see the refusal acceptance)\n");
@@ -1426,3 +1448,8 @@ int test_zcode_benchmark_exec(void)
 }
 
 #endif /* !_WIN32 */
+
+int test_zcode_benchmark_exec(void)
+{
+    return test_zcode_benchmark_exec_platform_arm();
+}

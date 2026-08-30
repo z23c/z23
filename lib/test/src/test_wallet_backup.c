@@ -25,7 +25,9 @@
 #endif
 
 #include "platform/directory_compat.h"
+#include "platform/file_sync.h"
 #include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "test/test_core.h"
 #include "json/json.h"
 
@@ -1099,10 +1101,43 @@ static int t_rotation_counts_enc(void)
 
 /* ── Aggregator ─────────────────────────────────────────────── */
 
+static int t_authority_sync_backend(void)
+{
+    int failures = 0;
+    const char *scratch = wb_enc_ensure_scratch();
+    char path[640];
+    snprintf(path, sizeof(path), "%s/wbauth_%d.bin", scratch,
+             (int)getpid());
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    const char payload[] = "wallet-authority-barrier";
+    bool barrier_ok = platform_private_file_create(path, &file) &&
+                      platform_private_file_write_at(
+                          &file, payload, sizeof(payload), 0) &&
+                      platform_private_file_authority_flush(&file);
+    platform_private_file_close(&file);
+    (void)unlink(path);
+#if defined(__APPLE__)
+    WB_RUN("wallet backup uses Darwin F_FULLFSYNC authority barrier",
+           barrier_ok && strcmp(platform_authority_sync_backend(),
+                                "fcntl(F_FULLFSYNC)") == 0);
+#elif defined(_WIN32)
+    WB_RUN("wallet backup uses Windows FlushFileBuffers authority barrier",
+           barrier_ok && strcmp(platform_authority_sync_backend(),
+                                "FlushFileBuffers") == 0);
+#else
+    WB_RUN("wallet backup uses POSIX fsync authority barrier",
+           barrier_ok &&
+           strcmp(platform_authority_sync_backend(), "fsync") == 0);
+#endif
+    return failures;
+}
+
 int test_wallet_backup(void)
 {
     printf("\n=== wallet_backup tests ===\n");
     int failures = 0;
+    failures += t_authority_sync_backend();
     failures += t_happy();
     failures += t_missing_dir_created();
     failures += t_zero_keys();

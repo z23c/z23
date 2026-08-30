@@ -149,8 +149,21 @@ CAP_CLOSURE_MIN_OBJECTS_SCANNED=500
 # not extra baseline headroom. If a dependency shape changes, the baseline
 # may only move DOWN without review — a rise means either a legitimate new
 # standalone exemption (document it above) or the partial-scan regression
-# this floor exists to catch.
-CAP_CLOSURE_COVERAGE_BASELINE="${ZCL_CAP_CLOSURE_COVERAGE_BASELINE:-2}"
+# this floor exists to catch. Darwin has two additional honest platform
+# alternatives: os_sandbox_linux.c and self_backtrace.c are replaced by their
+# fail-closed stubs, so its measured floor is 4.
+CAP_CLOSURE_HOST_BASELINE=2
+[ "$(uname -s 2>/dev/null || true)" = "Darwin" ] &&
+    CAP_CLOSURE_HOST_BASELINE=4
+CAP_CLOSURE_COVERAGE_BASELINE="${ZCL_CAP_CLOSURE_COVERAGE_BASELINE:-$CAP_CLOSURE_HOST_BASELINE}"
+
+# Linux produced the portable declaration snapshot and remains the
+# shrink-only symmetry authority. Darwin still enforces closure and every
+# undeclared reach, but cannot call Linux-only compiler lowering stale.
+CAP_CLOSURE_HOST_SYMMETRY=1
+[ "$(uname -s 2>/dev/null || true)" = "Darwin" ] &&
+    CAP_CLOSURE_HOST_SYMMETRY=0
+CAP_CLOSURE_ENFORCE_SYMMETRY="${ZCL_CAP_CLOSURE_ENFORCE_SYMMETRY:-$CAP_CLOSURE_HOST_SYMMETRY}"
 
 CAP_CLOSURE_HOST_WINDOWS=false
 case "$(uname -s 2>/dev/null || true)" in
@@ -176,7 +189,7 @@ cap_closure_coverage_applicable() {
 }
 
 # ── nm output parsing ───────────────────────────────────────────────────────
-# One line of `nm --print-file-name` (with or without -u) looks like:
+# One line of `nm --print-file-name` looks like:
 #   <path>:<16-hex-or-blank> <TYPE> <name>          (defined: has an address)
 #   <path>:                  <type> <name>          (undefined: no address)
 # Split on the first colon AFTER an optional Windows drive prefix, then take
@@ -187,7 +200,10 @@ cap_closure_coverage_applicable() {
 # Prints "<path>\t<type>\t<name>" per input line; unparsable lines are
 # dropped silently (nm's own banner/error lines, if any leak through).
 cap_closure_parse_nm() {
-    awk '
+    local strip_linker_prefix=0
+    [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] &&
+        strip_linker_prefix=1
+    awk -v strip_linker_prefix="$strip_linker_prefix" '
         {
             line = $0
             colon = index(line, ":")
@@ -206,6 +222,18 @@ cap_closure_parse_nm() {
             if (m == 2) { type = b[1]; name = b[2] }
             else if (m == 3) { type = b[2]; name = b[3] }
             else next
+            # Mach-O prefixes every external C symbol with one underscore.
+            # Normalize that ABI decoration so the shared capability table
+            # continues to name source-level symbols (connect, open, ...).
+            if (strip_linker_prefix && substr(name, 1, 1) == "_")
+                name = substr(name, 2)
+            # Darwin decorates some POSIX entry points with ABI variants
+            # such as open$UNIX2003 and fopen$DARWIN_EXTSN. They are the
+            # same source-level authority as open/fopen and must match the
+            # shared capability declaration rather than inventing a second
+            # platform-only spelling.
+            if (strip_linker_prefix)
+                sub(/\$[A-Z0-9_]+$/, "", name)
             print path "\t" type "\t" name
         }
     '
@@ -459,7 +487,11 @@ check_root() {
     # `2>/dev/null` is exactly what let that reach the report as violations
     # instead of failing loud. Treat either signal as UNPROVEN, never as a
     # trustworthy partial result.
-    xargs -0 nm -u --print-file-name < "$work/objs.z" 2>"$work/nm_u.err" \
+    # Do not use `nm -u` here: Apple nm removes the U/w/v type column in
+    # undefined-only mode, making strong and weak references
+    # indistinguishable and unparsable. The full symbol listing retains the
+    # type on GNU and Darwin; undef_uw.tsv below performs the exact filter.
+    xargs -0 nm --print-file-name < "$work/objs.z" 2>"$work/nm_u.err" \
         | cap_closure_parse_nm > "$work/undef.tsv"
     local nm_u_rc="${PIPESTATUS[0]}"
     xargs -0 nm -U --print-file-name < "$work/objs.z" 2>"$work/nm_U.err" \
@@ -612,7 +644,7 @@ check_root() {
 
     # ── item 3a: symmetry — a granted class must actually be used ──────────
     # item 3b: a row's source file must still exist.
-    local overdeclared=0 missing_src=0 path raw tok
+    local overdeclared=0 platform_unobserved=0 missing_src=0 path raw tok
     for path in "${!CAP_MOD_RAW[@]}"; do
         raw="${CAP_MOD_RAW[$path]}"
         if [ ! -f "$root/$path" ]; then
@@ -632,6 +664,10 @@ check_root() {
         for tok in "${toks[@]}"; do
             [ -n "$tok" ] && [ "$tok" != "CAP_NONE" ] || continue
             if ! grep -qF "$(printf '%s\t%s' "$path" "$tok")" "$work/file_uses.tsv"; then
+                if [ "$CAP_CLOSURE_ENFORCE_SYMMETRY" != "1" ]; then
+                    platform_unobserved=$((platform_unobserved + 1))
+                    continue
+                fi
                 echo "check_capability_closure: VIOLATION — $path declares $tok but its"
                 echo "  compiled object does not reference any symbol classified $tok."
                 echo "  Shrink the row: ZCL_MODULE_CAPABILITY(\"$path\", <without $tok>, why)"
@@ -691,6 +727,7 @@ check_root() {
     echo "check_capability_closure: scanned $n_obj objects under $epoch,"
     echo "  $n_sym classified symbols, $n_mod module rows."
     echo "  unclassified=$unclassified undeclared=$undeclared overdeclared=$overdeclared"
+    echo "  platform-unobserved=$platform_unobserved symmetry-enforced=$CAP_CLOSURE_ENFORCE_SYMMETRY"
     echo "  missing-source-rows=$missing_src raw-syscall=$syscall_violations"
     echo "  declared-but-unobserved=$unobserved (coverage baseline=$CAP_CLOSURE_COVERAGE_BASELINE)"
     echo "  platform-target-excluded=$platform_excluded"
@@ -819,6 +856,7 @@ run_selftest() {
     # cases exercise exactly what they intend to and nothing else; cases F
     # and G below set it explicitly for what they are testing.
     CAP_CLOSURE_COVERAGE_BASELINE=0
+    CAP_CLOSURE_ENFORCE_SYMMETRY=1
 
     echo "== check_capability_closure selftest =="
 

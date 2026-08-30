@@ -235,7 +235,7 @@ static int spb_hard_limit_readable(void)
     return failures;
 }
 
-int test_sandbox_process_budget(void)
+static int test_sandbox_process_budget_platform_arm(void)
 {
     printf("\n=== sandbox process budget tests ===\n");
     int failures = 0;
@@ -251,9 +251,14 @@ int test_sandbox_process_budget(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's forked sandbox-budget child lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_sandbox_process_budget(void)
+static int test_sandbox_process_budget_platform_arm(void)
 {
     printf("sandbox_process_budget: SKIP (Windows): forked sandbox-budget child lane\n");
     return 0;
 }
 #endif
+
+int test_sandbox_process_budget(void)
+{
+    return test_sandbox_process_budget_platform_arm();
+}

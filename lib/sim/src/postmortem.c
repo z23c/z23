@@ -66,12 +66,19 @@ static int write_bytes_file(const char *path, const void *buf, size_t len)
 
 static int copy_proc_status(const char *dst_path)
 {
+#if defined(__linux__)
     FILE *in = fopen("/proc/self/status", "rb");
     if (!in) return write_bytes_file(dst_path, "", 0);
     uint8_t buf[8192];
     size_t n = fread(buf, 1, sizeof(buf), in);
     fclose(in);
     return write_bytes_file(dst_path, buf, n);
+#else
+    static const char unavailable[] =
+        "unavailable: /proc/self/status is Linux-only\n";
+    return write_bytes_file(dst_path, unavailable,
+                            sizeof(unavailable) - 1u);
+#endif
 }
 
 static int copy_log_tail(const char *src_path, const char *dst_path)
@@ -304,6 +311,7 @@ static int signal_write_empty_file(const char *path)
     return signal_write_file(path, "", 0);
 }
 
+#if defined(__linux__)
 static int signal_copy_file_limited(const char *src, const char *dst,
                                     size_t max_bytes)
 {
@@ -341,6 +349,7 @@ static int signal_copy_file_limited(const char *src, const char *dst,
     if (close(in) != 0 && ok == 0) ok = -1;
     return ok;
 }
+#endif
 
 static int signal_copy_tail_limited(const char *src, const char *dst,
                                     size_t max_bytes)
@@ -732,8 +741,16 @@ static void postmortem_crash_hook(int sig, zcl_signal_info_t *info,
         (void)signal_write_manifest(path, sig, crash_unix, tape_written,
                                     rng_count, clock_advance_count,
                                     inject_count);
-    if (signal_join_path(path, sizeof(path), cap_dir, "procstatus.txt") == 0)
+    if (signal_join_path(path, sizeof(path), cap_dir, "procstatus.txt") == 0) {
+#if defined(__linux__)
         (void)signal_copy_file_limited("/proc/self/status", path, 8192);
+#else
+        static const char unavailable[] =
+            "unavailable: /proc/self/status is Linux-only\n";
+        (void)signal_write_file(path, unavailable,
+                                sizeof(unavailable) - 1u);
+#endif
+    }
     if (signal_join_path(path, sizeof(path), cap_dir, "log.txt") == 0) {
         if (g_postmortem_signal_log_path[0] == '\0' ||
             signal_copy_tail_limited(g_postmortem_signal_log_path, path,

@@ -650,7 +650,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_RESULT_BUDGET,
     "mesh,pair,commit,noise,fingerprint,ceremony,status-read",
     "zcl.ops_mesh_pair_commit.input.v1", "zcl.mesh.pairing.commit.v1",
-    "peer,fingerprint,days", "peer",
+    "peer,fingerprint,days,terminal", "peer",
     "z23 ops mesh pair commit --peer=<selector> --fingerprint=<64hex> [--days=7]",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,

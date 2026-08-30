@@ -75,7 +75,7 @@
 #define UCR_RNG_SEED    0x5EEDu  /* fixed: kill offsets reproduce exactly */
 #define UCR_BUDGET_SECS 60
 
-int test_utxo_apply_crash_replay(void);
+static int test_utxo_apply_crash_replay_platform_arm(void);
 
 #define UCR_CHECK(name, expr) do { \
     printf("utxo_apply_crash_replay: %s... ", (name)); \
@@ -538,7 +538,7 @@ static int ucr_one_cycle(const char *dir, int cycle, long delay_us)
     return -1;
 }
 
-int test_utxo_apply_crash_replay(void)
+static int test_utxo_apply_crash_replay_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== utxo_apply crash-replay (SIGKILL the co-commit) ===\n");
@@ -620,9 +620,14 @@ int test_utxo_apply_crash_replay(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork+SIGKILL UTXO-apply crash-replay lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_utxo_apply_crash_replay(void)
+static int test_utxo_apply_crash_replay_platform_arm(void)
 {
     printf("utxo_apply_crash_replay: SKIP (Windows): fork+SIGKILL UTXO-apply crash-replay lane\n");
     return 0;
 }
 #endif
+
+int test_utxo_apply_crash_replay(void)
+{
+    return test_utxo_apply_crash_replay_platform_arm();
+}

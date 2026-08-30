@@ -10,6 +10,10 @@
 #ifndef ZCL_VENDOR_FREEBSD_SH_COMPAT_H
 #define ZCL_VENDOR_FREEBSD_SH_COMPAT_H
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+
 /* _GNU_SOURCE must precede every system header: eaccess (bin/test/test.c),
  * stpcpy (bin/sh/mystring.c), O_CLOEXEC (bin/sh/jobs.c), and the _PATH_*
  * macros (paths.h) all sit behind it or _DEFAULT_SOURCE on glibc. */
@@ -59,6 +63,14 @@
 #define O_VERIFY 0
 #endif
 
+/* FreeBSD exposes eaccess(2); Darwin exposes the same effective-ID check
+ * through faccessat(2) with AT_EACCESS. Keep the shell's permission query
+ * exact instead of silently weakening it to real-ID access(2). */
+#if defined(__APPLE__)
+#define eaccess fbsh_eaccess
+int fbsh_eaccess(const char *path, int mode);
+#endif
+
 /* FreeBSD <sys/param.h> ALIGN() (bin/sh/memalloc.c): round up to machine
  * pointer alignment. glibc sys/param.h does not define it. */
 #ifndef ALIGN
@@ -72,33 +84,50 @@
 #define MAXLOGNAME 33
 #endif
 
+/* Darwin's stat(2) keeps BSD's timespec field spelling; the imported shell
+ * uses the POSIX spelling when comparing `test file1 -nt file2`. */
+#if defined(__APPLE__) && !defined(st_mtim)
+#define st_mtim st_mtimespec
+#endif
+
 /* strlcpy landed in glibc 2.38. Rename the shell's calls to our compat
  * symbol so the build is identical on older glibc and on libcs that
  * already provide the name; the macro also rewrites any later libc
  * declaration, keeping prototype and definition consistent. */
+#if !defined(__APPLE__)
 #define strlcpy fbsh_strlcpy
 size_t fbsh_strlcpy(char *dst, const char *src, size_t siz);
+#endif
 
 /* setmode(3)/getmode(3): BSD-only, used by the umask builtin
  * (bin/sh/miscbltin.c). Implemented in compat.c. */
+#if !defined(__APPLE__)
 void *setmode(const char *p);
 mode_t getmode(const void *set, mode_t mode);
+#endif
 
 /* fwopen(3) is a BSD funopen-family helper (bin/sh/output.c). glibc's
  * fopencookie(3) is the same mechanism with a ssize_t write callback;
  * compat.c adapts the BSD signature onto it. */
 #include <stdio.h>
+#if !defined(__APPLE__)
 #define fwopen fbsh_fwopen
 FILE *fbsh_fwopen(void *cookie, int (*writefn)(void *, const char *, int));
+#endif
 
 /* BSD libc exports sys_signame[] / sys_nsig (bin/kill/kill.c,
  * bin/sh/trap.c). glibc exports neither since 2.32; compat.c supplies a
  * canonical Linux table. Renamed like strlcpy so a libc that does
  * provide them cannot clash. */
 #include <signal.h>
+#if !defined(__APPLE__)
 #define sys_signame fbsh_sys_signame
 extern const char *const fbsh_sys_signame[];
 #define sys_nsig fbsh_sys_nsig
 extern const int fbsh_sys_nsig;
+#else
+/* Darwin exports the BSD name table but spells the table bound NSIG. */
+#define sys_nsig NSIG
+#endif
 
 #endif /* ZCL_VENDOR_FREEBSD_SH_COMPAT_H */

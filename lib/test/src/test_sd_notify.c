@@ -91,6 +91,7 @@ static int sdn_bind_path_socket(char *path_out, size_t path_out_len)
  * NOTIFY_SOCKET-style name (what a caller would export) into
  * `name_out`. Caller only needs to close (no unlink — abstract sockets
  * have no filesystem path to remove). */
+#if defined(__linux__)
 static int sdn_bind_abstract_socket(char *name_out, size_t name_out_len)
 {
     snprintf(name_out, name_out_len, "@zcl_test_sd_notify_abs_%d",
@@ -116,6 +117,7 @@ static int sdn_bind_abstract_socket(char *name_out, size_t name_out_len)
     }
     return fd;
 }
+#endif
 
 /* Poll fd for one datagram with a short bound (the sender is
  * synchronous local IPC, so this never has to wait for real network
@@ -231,7 +233,7 @@ static int sdn_observe_pet_thread(int fd, int64_t deadline_us,
     return watchdog_count;
 }
 
-int test_sd_notify(void)
+static int test_sd_notify_platform_arm(void)
 {
     int failures = 0;
 
@@ -331,6 +333,7 @@ int test_sd_notify(void)
     }
 
     /* ── abstract-namespace NOTIFY_SOCKET (leading '@') ──────────── */
+#if defined(__linux__)
     {
         char name[64];
         int fd = sdn_bind_abstract_socket(name, sizeof(name));
@@ -354,6 +357,9 @@ int test_sd_notify(void)
             sd_notify_reset_for_testing();
         }
     }
+#else
+    SDN_CHECK("abstract namespace is unavailable off Linux", true);
+#endif
 
     /* ── health-check gate suppresses WATCHDOG=1 when unhealthy ──── */
     {
@@ -872,7 +878,7 @@ int test_sd_notify(void)
 /* Production sd_notify is a no-op stub on Windows (lib/util/src/sd_notify.c)
  * and there is no AF_UNIX datagram socket or systemd to speak the protocol
  * to, so none of these fixtures can run. */
-int test_sd_notify(void)
+static int test_sd_notify_platform_arm(void)
 {
     printf("test_sd_notify: SKIP (Windows): sd_notify is a no-op stub and "
            "AF_UNIX datagram sockets are unavailable\n");
@@ -880,3 +886,8 @@ int test_sd_notify(void)
 }
 
 #endif /* !_WIN32 */
+
+int test_sd_notify(void)
+{
+    return test_sd_notify_platform_arm();
+}

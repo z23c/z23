@@ -69,7 +69,7 @@
 #include <unistd.h>
 #if !defined(_WIN32)
 
-int test_chain_advance_atomicity(void);
+static int test_chain_advance_atomicity_platform_arm(void);
 
 /* ── Local helpers (kept in-file to mirror test_kill9_recovery's
  * standalone style; the two tests intentionally don't share scaffolding
@@ -369,7 +369,7 @@ static int ca_run_stage(int worker, enum process_block_crash_stage stage)
     return rc;
 }
 
-int test_chain_advance_atomicity(void)
+static int test_chain_advance_atomicity_platform_arm(void)
 {
     printf("\n=== chain_advance atomicity (Move 2 / A5) ===\n");
     printf("chain_advance_atomicity: kill at each PBCS_AFTER_* stage... ");
@@ -403,9 +403,14 @@ int test_chain_advance_atomicity(void)
 #else  /* _WIN32 */
 /* Windows has no fork()/waitpid process model; this group's fork crash-atomicity window lane
  * cannot run here. Skipped loudly rather than faked. */
-int test_chain_advance_atomicity(void)
+static int test_chain_advance_atomicity_platform_arm(void)
 {
     printf("chain_advance_atomicity: SKIP (Windows): fork crash-atomicity window lane\n");
     return 0;
 }
 #endif
+
+int test_chain_advance_atomicity(void)
+{
+    return test_chain_advance_atomicity_platform_arm();
+}
