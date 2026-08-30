@@ -24,7 +24,18 @@
 
 enum { INV_PATH_MAX = 4096 };
 
-#if defined(__APPLE__)
+/* Three shapes for the same two timestamps. Windows is the odd one out: its
+ * struct stat carries only whole-second st_mtime/st_ctime, with no
+ * nanosecond field of any spelling, so the sub-second component is reported
+ * as zero rather than faked. Callers compare (sec, nsec) pairs, and a
+ * constant zero nsec degrades that to second resolution on Windows instead
+ * of making it wrong. */
+#if defined(_WIN32)
+#define INV_MTIME_SEC(st)  ((st).st_mtime)
+#define INV_MTIME_NSEC(st) (0)
+#define INV_CTIME_SEC(st)  ((st).st_ctime)
+#define INV_CTIME_NSEC(st) (0)
+#elif defined(__APPLE__)
 #define INV_MTIME_SEC(st)  ((st).st_mtimespec.tv_sec)
 #define INV_MTIME_NSEC(st) ((st).st_mtimespec.tv_nsec)
 #define INV_CTIME_SEC(st)  ((st).st_ctimespec.tv_sec)

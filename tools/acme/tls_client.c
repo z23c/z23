@@ -201,10 +201,23 @@ static bool header_span(const char *blob, size_t blob_len, const char *name,
     return false;
 }
 
+/* Resolve a caller-supplied body cap. 0 means "the default"; anything over
+ * the absolute ceiling is a caller bug and is refused by returning 0, which
+ * every call site below treats as a hard failure. Clamping silently would
+ * turn an over-large ask into a truncated body somewhere far away. */
+static size_t effective_body_cap(size_t requested)
+{
+    if (requested == 0)
+        return TLS_CLIENT_MAX_BODY;
+    if (requested > TLS_CLIENT_ABS_MAX_BODY)
+        return 0;
+    return requested;
+}
+
 /* Parse a decimal Content-Length. Rejects anything that is not a plain
- * non-negative integer within the body cap — a duplicated or ambiguous
- * length is a smuggling primitive, not a rounding problem. */
-static bool parse_content_length(const char *v, size_t n, size_t *out)
+ * non-negative integer within `cap` — a duplicated or ambiguous length is a
+ * smuggling primitive, not a rounding problem. */
+static bool parse_content_length(const char *v, size_t n, size_t cap, size_t *out)
 {
     if (n == 0 || n > 20)
         return false;
@@ -212,7 +225,7 @@ static bool parse_content_length(const char *v, size_t n, size_t *out)
     for (size_t i = 0; i < n; i++) {
         if (v[i] < '0' || v[i] > '9')
             return false;
-        if (value > (TLS_CLIENT_MAX_BODY + 1) / 10)
+        if (value > (cap + 1) / 10)
             return false;
         value = value * 10 + (size_t)(v[i] - '0');
     }
@@ -232,7 +245,7 @@ static bool header_is_chunked(const char *blob, size_t blob_len)
 /* Walk a chunked body. `complete` reports whether the terminating zero chunk
  * and trailer were seen; `decoded_len` counts payload bytes. Writes into
  * `decoded` when non-NULL (caller sized it with a prior sizing pass). */
-static bool chunked_walk(const char *p, size_t len, bool *complete,
+static bool chunked_walk(const char *p, size_t len, size_t cap, bool *complete,
                          size_t *decoded_len, char *decoded)
 {
     size_t off = 0;
@@ -258,7 +271,7 @@ static bool chunked_walk(const char *p, size_t len, bool *complete,
             const int d = zcl_hex_nibble(c, true);
             if (d < 0)
                 return false;
-            if (size > (TLS_CLIENT_MAX_BODY + 1) / 16)
+            if (size > (cap + 1) / 16)
                 return false;
             size = size * 16 + (size_t)d;
             digits++;
@@ -285,7 +298,7 @@ static bool chunked_walk(const char *p, size_t len, bool *complete,
                 }
             }
         }
-        if (total > TLS_CLIENT_MAX_BODY - size)
+        if (total > cap - size)
             return false;
         if (off + size + 2 > len) {
             *decoded_len = total;
@@ -300,8 +313,12 @@ static bool chunked_walk(const char *p, size_t len, bool *complete,
     }
 }
 
-bool tls_client_response_complete(const char *raw, size_t len)
+bool tls_client_response_complete_bounded(const char *raw, size_t len,
+                                          size_t body_cap)
 {
+    const size_t cap = effective_body_cap(body_cap);
+    if (cap == 0)
+        return true; /* caller bug: stop reading, let parse refuse it */
     const size_t hdr_end = header_block_end(raw, len);
     if (hdr_end == 0)
         return false;
@@ -312,7 +329,7 @@ bool tls_client_response_complete(const char *raw, size_t len)
     if (header_is_chunked(blob, blob_len)) {
         bool complete = false;
         size_t decoded = 0;
-        if (!chunked_walk(raw + hdr_end, len - hdr_end, &complete, &decoded, NULL))
+        if (!chunked_walk(raw + hdr_end, len - hdr_end, cap, &complete, &decoded, NULL))
             return true; /* malformed: stop reading, let parse report it */
         return complete;
     }
@@ -320,12 +337,17 @@ bool tls_client_response_complete(const char *raw, size_t len)
     size_t n = 0;
     size_t content_length = 0;
     if (header_span(blob, blob_len, "Content-Length", &v, &n)) {
-        if (!parse_content_length(v, n, &content_length))
+        if (!parse_content_length(v, n, cap, &content_length))
             return true; /* malformed: stop reading */
         return len - hdr_end >= content_length;
     }
     /* No framing header: the message ends when the peer closes. */
     return false;
+}
+
+bool tls_client_response_complete(const char *raw, size_t len)
+{
+    return tls_client_response_complete_bounded(raw, len, 0);
 }
 
 static bool parse_status_line(const char *raw, size_t len, int *status,
@@ -352,15 +374,21 @@ static bool parse_status_line(const char *raw, size_t len, int *status,
     return true;
 }
 
-bool tls_client_response_parse(const char *raw, size_t len,
-                               struct tls_client_response *out)
+bool tls_client_response_parse_bounded(const char *raw, size_t len,
+                                       size_t body_cap,
+                                       struct tls_client_response *out)
 {
     if (!out)
         return false;
     memset(out, 0, sizeof(*out));
     if (!raw || len == 0)
         return false;
-    if (len > TLS_CLIENT_MAX_RESPONSE)
+    const size_t cap = effective_body_cap(body_cap);
+    if (cap == 0)
+        LOG_FAIL("tlsclient",
+                 "refusing a %zu-byte body cap: over the %u-byte ceiling",
+                 body_cap, (unsigned)TLS_CLIENT_ABS_MAX_BODY);
+    if (len > cap + TLS_CLIENT_MAX_HEADER_BLOB)
         LOG_FAIL("tlsclient", "refusing a %zu-byte response: over the read cap", len);
 
     int status = 0;
@@ -392,17 +420,17 @@ bool tls_client_response_parse(const char *raw, size_t len,
     if (chunked) {
         bool complete = false;
         size_t decoded = 0;
-        if (!chunked_walk(raw + hdr_end, len - hdr_end, &complete, &decoded, NULL))
+        if (!chunked_walk(raw + hdr_end, len - hdr_end, cap, &complete, &decoded, NULL))
             LOG_FAIL("tlsclient", "refusing a response with a malformed chunked body");
         if (!complete)
             LOG_FAIL("tlsclient", "refusing a truncated chunked response body");
-        if (decoded > TLS_CLIENT_MAX_BODY)
+        if (decoded > cap)
             LOG_FAIL("tlsclient", "refusing a %zu-byte chunked body: over the cap", decoded);
         body = zcl_malloc(decoded + 1, "tls_client_body");
         if (!body)
             LOG_FAIL("tlsclient", "cannot allocate %zu bytes for a response body", decoded + 1);
         size_t written = 0;
-        if (!chunked_walk(raw + hdr_end, len - hdr_end, &complete, &written, body) ||
+        if (!chunked_walk(raw + hdr_end, len - hdr_end, cap, &complete, &written, body) ||
             written != decoded) {
             free(body);
             LOG_FAIL("tlsclient", "chunked body decode disagreed with its sizing pass");
@@ -413,16 +441,16 @@ bool tls_client_response_parse(const char *raw, size_t len,
         size_t available = len - hdr_end;
         if (has_len) {
             size_t declared = 0;
-            if (!parse_content_length(v, n, &declared))
+            if (!parse_content_length(v, n, cap, &declared))
                 LOG_FAIL("tlsclient", "refusing a response with an unparsable Content-Length");
-            if (declared > TLS_CLIENT_MAX_BODY)
+            if (declared > cap)
                 LOG_FAIL("tlsclient", "refusing a %zu-byte body: over the cap", declared);
             if (available < declared)
                 LOG_FAIL("tlsclient", "refusing a truncated response body: %zu of %zu bytes",
                          available, declared);
             available = declared;
         }
-        if (available > TLS_CLIENT_MAX_BODY)
+        if (available > cap)
             LOG_FAIL("tlsclient", "refusing a %zu-byte body: over the cap", available);
         body = zcl_malloc(available + 1, "tls_client_body");
         if (!body)
@@ -446,6 +474,12 @@ bool tls_client_response_parse(const char *raw, size_t len,
     out->body = body;
     out->body_len = body_len;
     return true;
+}
+
+bool tls_client_response_parse(const char *raw, size_t len,
+                               struct tls_client_response *out)
+{
+    return tls_client_response_parse_bounded(raw, len, 0, out);
 }
 
 bool tls_client_response_header(const struct tls_client_response *r,
@@ -610,6 +644,44 @@ static bool ssl_write_all(SSL *ssl, const char *data, size_t len, int64_t deadli
     return true;
 }
 
+/* Validate one caller-supplied header. A CR, LF, or NUL in either half is
+ * response splitting: it would let a caller append headers of its choosing to
+ * the request line block. A colon in the name produces a header whose name is
+ * not the name that was asked for. Both are refusals of the whole request —
+ * there is no sanitizing pass, because a sanitizer that silently drops a byte
+ * sends a DIFFERENT request from the one the caller asked for. */
+static bool header_field_ok(const char *s, bool is_name)
+{
+    if (!s || !s[0])
+        return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f)
+            return false;
+        if (is_name && (*p == ':' || *p == ' '))
+            return false;
+    }
+    return true;
+}
+
+static bool extra_headers_ok(const struct tls_client_request *req)
+{
+    if (req->header_count == 0)
+        return true;
+    if (!req->headers)
+        LOG_FAIL("tlsclient", "refusing a request declaring headers it does not carry");
+    if (req->header_count > TLS_CLIENT_MAX_EXTRA_HEADERS)
+        LOG_FAIL("tlsclient", "refusing %zu extra headers: over the cap of %d",
+                 req->header_count, TLS_CLIENT_MAX_EXTRA_HEADERS);
+    for (size_t i = 0; i < req->header_count; i++) {
+        if (!header_field_ok(req->headers[i].name, true)
+            || !header_field_ok(req->headers[i].value, false))
+            LOG_FAIL("tlsclient",
+                     "refusing an extra header with a control byte or a colon "
+                     "in its name: that is response splitting");
+    }
+    return true;
+}
+
 bool tls_client_fetch(const struct tls_client_request *req,
                       struct tls_client_response *out)
 {
@@ -618,11 +690,19 @@ bool tls_client_fetch(const struct tls_client_request *req,
     memset(out, 0, sizeof(*out));
     if (!req || !req->url)
         LOG_FAIL("tlsclient", "refusing a request with no URL");
-    if (req->body_len > TLS_CLIENT_MAX_BODY)
+    const size_t body_cap = effective_body_cap(req->max_body);
+    if (body_cap == 0)
+        LOG_FAIL("tlsclient",
+                 "refusing a %zu-byte body cap: over the %u-byte ceiling",
+                 req->max_body, (unsigned)TLS_CLIENT_ABS_MAX_BODY);
+    if (req->body_len > body_cap)
         LOG_FAIL("tlsclient", "refusing a %zu-byte request body: over the cap",
                  req->body_len);
     if (req->body_len && !req->body)
         LOG_FAIL("tlsclient", "refusing a request declaring a body it does not carry");
+    if (!extra_headers_ok(req))
+        return false;
+    const size_t read_cap = body_cap + TLS_CLIENT_MAX_HEADER_BLOB;
 
     struct tls_client_url url;
     if (!tls_client_url_parse(req->url, &url))
@@ -720,19 +800,47 @@ bool tls_client_fetch(const struct tls_client_request *req,
             }
             n += m;
         }
-        if ((size_t)n + 2 >= sizeof(head)) {
-            LOG_WARN("tlsclient", "request head does not fit its buffer");
-            goto done;
+        /* Caller-supplied headers last, after this client's own, so a caller
+         * cannot displace Host or Connection. Each was validated above for
+         * control bytes; this is the point at which an API credential enters
+         * the process's outbound path. */
+        bool head_ok = true;
+        for (size_t i = 0; i < req->header_count && head_ok; i++) {
+            const int m = snprintf(head + n, sizeof(head) - (size_t)n,
+                                   "%s: %s\r\n", req->headers[i].name,
+                                   req->headers[i].value);
+            if (m < 0 || (size_t)(n + m) >= sizeof(head)) {
+                LOG_WARN("tlsclient", "request head does not fit its buffer");
+                head_ok = false;
+            } else {
+                n += m;
+            }
         }
-        head[n++] = '\r';
-        head[n++] = '\n';
-        if (!ssl_write_all(ssl, head, (size_t)n, deadline))
+        if (head_ok && (size_t)n + 2 >= sizeof(head)) {
+            LOG_WARN("tlsclient", "request head does not fit its buffer");
+            head_ok = false;
+        }
+        if (head_ok) {
+            head[n++] = '\r';
+            head[n++] = '\n';
+            head_ok = ssl_write_all(ssl, head, (size_t)n, deadline);
+        }
+        /* An Authorization header may have lived in this buffer. Wipe it
+         * before the scope ends rather than leaving a credential in a stack
+         * page that a later core dump would carry off the machine. The write
+         * is through a volatile pointer so it survives optimization. */
+        {
+            volatile char *wipe = head;
+            for (size_t i = 0; i < sizeof(head); i++)
+                wipe[i] = 0;
+        }
+        if (!head_ok)
             goto done;
         if (req->body_len && !ssl_write_all(ssl, req->body, req->body_len, deadline))
             goto done;
     }
 
-    buf = zcl_malloc(TLS_CLIENT_MAX_RESPONSE + 1, "tls_client_read");
+    buf = zcl_malloc(read_cap + 1, "tls_client_read");
     if (!buf) {
         LOG_WARN("tlsclient", "cannot allocate the bounded response buffer");
         goto done;
@@ -743,13 +851,12 @@ bool tls_client_fetch(const struct tls_client_request *req,
             LOG_WARN("tlsclient", "response read exceeded the deadline");
             goto done;
         }
-        if (used >= TLS_CLIENT_MAX_RESPONSE) {
+        if (used >= read_cap) {
             LOG_WARN("tlsclient",
-                     "refusing a response over the %u-byte read cap",
-                     (unsigned)TLS_CLIENT_MAX_RESPONSE);
+                     "refusing a response over the %zu-byte read cap", read_cap);
             goto done;
         }
-        const int want = (int)(TLS_CLIENT_MAX_RESPONSE - used);
+        const int want = (int)(read_cap - used);
         const int got = SSL_read(ssl, buf + used, want);
         if (got <= 0) {
             const int err = SSL_get_error(ssl, got);
@@ -759,10 +866,10 @@ bool tls_client_fetch(const struct tls_client_request *req,
             goto done;
         }
         used += (size_t)got;
-        if (tls_client_response_complete(buf, used))
+        if (tls_client_response_complete_bounded(buf, used, body_cap))
             break;
     }
-    ok = tls_client_response_parse(buf, used, out);
+    ok = tls_client_response_parse_bounded(buf, used, body_cap, out);
 
 done:
     free(buf);

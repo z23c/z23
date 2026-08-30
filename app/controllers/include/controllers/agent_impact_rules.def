@@ -2784,3 +2784,33 @@ AGENT_IMPACT_RULE("lib/metaverse/src/node_character_wire.c|lib/metaverse/include
  * converted model is able to say, which is why it rides the broad models
  * group and not only its own. */
 AGENT_IMPACT_RULE("app/models/include/models/query_schema.def|app/models/include/models/query_builder.h|app/models/src/query_builder.c|lib/test/src/test_activerecord_query_builder.c", "activerecord_query_builder activerecord models make_lint_gates")
+
+/* The gate that forbids a declaration arriving only via a fortify inline.
+ * It has no baseline file on purpose — the empty set IS the contract — so
+ * the rule covers the script alone. It re-measures the masked set against
+ * the live compiler on each run, which means its verdict can change when
+ * the toolchain changes and not only when this tree does; that is why it
+ * rides make_lint_gates rather than any subject group. */
+AGENT_IMPACT_RULE("tools/lint/check_fortify_masked_decls.sh", "make_lint_gates")
+
+/* One comment/string stripper, shared by check_fortify_masked_decls and
+ * check_model_sql_literals. Both are text scanners whose verdict changes
+ * if it changes, so it rides the model group the SQL gate reports through
+ * as well as the lint-gate group. */
+AGENT_IMPACT_RULE("tools/lint/strip_c_comments.awk|tools/lint/check_model_sql_literals.sh|tools/lint/model_sql_literal_baseline.txt", "activerecord_query_builder models make_lint_gates")
+
+/* Territory: a module's generated scorecard, and the general brief and
+ * roll-up built on it. Every number is a projection of the code index and
+ * the registered-test call-graph closure, so a change to the reach walk or
+ * the scorecard changes what `general` asserts about every module — the
+ * two cannot be proven apart, and they ride codeindex because a change to
+ * the index changes both. */
+AGENT_IMPACT_RULE("lib/territory/include/territory/territory.h|lib/territory/src/territory_reach.c|lib/territory/src/territory_scorecard.c|lib/territory/src/territory_general.c|lib/test/src/test_territory.c", "territory codeindex command_registry_catalog make_lint_gates")
+/* The engine-dispatch harness. lib/engine is the pure half (registry, request
+ * document, hardened response decoder, file envelope, key holder, verdict);
+ * tools/engine_unit.c is the program that carries the transport and is already
+ * covered by the broad tools rule above. The key gate rides along because its
+ * self-test lives inside the engine group, and cold_join_sovereign rides along
+ * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
+ * which is the exact reason this module has no transport in it. */
+AGENT_IMPACT_RULE("lib/engine/src/*.c|lib/engine/include/engine/*.h|lib/test/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine cold_join_sovereign make_lint_gates")

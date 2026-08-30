@@ -32,7 +32,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <signal.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 extern char **environ;
@@ -111,6 +113,12 @@ static bool ab_pinned_bytes_equal(int fd, const char *expected)
 static volatile sig_atomic_t g_ab_hang_fired;
 static void ab_hang_handler(int sig) { (void)sig; g_ab_hang_fired = 1; }
 
+/* struct sigaction, sigaction(2), SIGALRM, and alarm(2) are POSIX-only —
+ * mingw has none of them. The hang guard below is not exercised on
+ * Windows, only kept syntactically valid there; the stub arm/disarm pair
+ * reports "no hang" unconditionally, which is correct for code that never
+ * runs. */
+#if !defined(_WIN32)
 static struct sigaction g_ab_old_alrm;
 static void ab_hang_guard_arm(unsigned secs)
 {
@@ -129,6 +137,10 @@ static bool ab_hang_guard_disarm(void)
     (void)sigaction(SIGALRM, &g_ab_old_alrm, NULL);
     return g_ab_hang_fired == 0;
 }
+#else
+static void ab_hang_guard_arm(unsigned secs) { (void)secs; }
+static bool ab_hang_guard_disarm(void) { return true; }
+#endif /* !defined(_WIN32) */
 
 /* Print a measured duration next to a check WITHOUT grading anything on it.
  * The load average is printed too, so a reader looking at a red run can tell
@@ -154,6 +166,11 @@ static bool ab_fexecve_true(int fd)
     char *const args[] = { (char *)AB_TRUE_PATH, NULL };
     errno = 0;
     return platform_execve_fd(fd, args, environ) == -1 && errno == ENOTSUP;
+#elif defined(_WIN32)
+    /* fork()/waitpid() have no Windows equivalent; this descriptor-bound
+     * exec path is POSIX-only and not exercised there. */
+    (void)fd;
+    return false;
 #else
     pid_t child = fork();
     if (child < 0)
@@ -169,6 +186,10 @@ static bool ab_fexecve_true(int fd)
 #endif
 }
 
+/* fork()/pipe()/waitpid() have no Windows equivalent; this native-launch
+ * adapter is POSIX-only and is not exercised on Windows, only kept
+ * syntactically valid there. */
+#if !defined(_WIN32)
 static bool ab_run_nodectl(const char *slots, const char *threshold,
                            const char *echo_value, const char *node,
                            char *output, size_t output_size,
@@ -239,6 +260,17 @@ static bool ab_run_nodectl(const char *slots, const char *threshold,
     *exit_status = WEXITSTATUS(status);
     return true;
 }
+#else
+static bool ab_run_nodectl(const char *slots, const char *threshold,
+                           const char *echo_value, const char *node,
+                           char *output, size_t output_size,
+                           int *exit_status)
+{
+    (void)slots; (void)threshold; (void)echo_value; (void)node;
+    (void)output; (void)output_size; (void)exit_status;
+    return false;
+}
+#endif /* !defined(_WIN32) */
 
 int test_binary_ab_fallback(void)
 {

@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 757 |
+| Registry entries (branches + leaves) | 759 |
 | Top-level roots | 12 |
 | Branches | 175 |
-| Leaves (dispatchable command paths) | 582 |
-| … `ready` (live handler in this build) | 526 |
+| Leaves (dispatchable command paths) | 584 |
+| … `ready` (live handler in this build) | 528 |
 | … `compat` (metadata only, names a fallback) | 25 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 24 |
@@ -97,7 +97,7 @@ Per source file:
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
 | `config/commands/dev.def` | 59 | 14 | 45 |
-| `config/commands/code.def` | 18 | 2 | 16 |
+| `config/commands/code.def` | 20 | 2 | 18 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
 | `config/commands/zcode.def` | 245 | 58 | 187 |
@@ -967,6 +967,8 @@ represented by its children's sections.
 | `code impact` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_impact.v1` | `z23 code impact lib/util/include/util/safe_alloc.h` | The reverse-dependency blast radius of one changed file |
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank N symbols by name, with a one-line context per hit |
 | `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Ask whether this checkout already does X, before building it |
+| `code territory` | ready | read / read / public · background/moderate | **`name`** | `zcl.code_territory.v1` | `z23 code territory lib/net` | One module's generated scorecard: owns, proves, depends, weak |
+| `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general lib/net` | A territory's dispatch brief, or the roll-up ranked by weakest evidence |
 
 #### `code.provenance` — Attribute output back to the code that produced it
 
@@ -1661,6 +1663,7 @@ Every alias resolves through the same grammar as its canonical path
 | `dev.agent.shippable` | `dev.agent.ready` |
 | `dev.agent.group` | `dev.agent.test` |
 | `dev.agent.mutation` | `dev.agent.mutate` |
+| `general` | `code.general` |
 | `zcode.create` | `zcode.package.dev.create` |
 | `zcode.use` | `zcode.package.dev.use` |
 | `zcode.improve` | `zcode.package.dev.improve` |

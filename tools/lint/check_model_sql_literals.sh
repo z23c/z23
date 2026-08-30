@@ -93,31 +93,6 @@ is_the_rail() {
     esac
 }
 
-# Preserve string literals while removing C comments. Documentation may show
-# the old statement shape so long as no compiled token carries that literal.
-strip_c_comments() {
-    awk '
-    BEGIN { inc = 0; inq = 0 }
-    {
-        out = ""; n = length($0)
-        for (i = 1; i <= n; i++) {
-            c = substr($0, i, 1); d = substr($0, i, 2)
-            if (inc) { if (d == "*/") { inc = 0; i++ } ; continue }
-            if (inq) {
-                out = out c
-                if (c == "\\") { out = out substr($0, i + 1, 1); i++; continue }
-                if (c == "\"") { inq = 0 }
-                continue
-            }
-            if (d == "/*") { inc = 1; i++; continue }
-            if (d == "//") { break }
-            if (c == "\"") { inq = 1; out = out c; continue }
-            out = out c
-        }
-        print out
-    }' "$@"
-}
-
 # ── --selftest ───────────────────────────────────────────────────────────
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
@@ -216,8 +191,22 @@ if [ "${1:-}" = "--selftest" ]; then
     plant innocent.c 'static const char *k = " FROM peers WHERE ip=?";'
     expect pass "a continuation fragment with no opening keyword" ""
 
+    # ── documentation is not evidence ──
+    # model_fields.h was reported for exactly this shape: a header comment
+    # that TEACHES the SQL a caller would otherwise hand-write.
+    plant innocent.c '/* Example: AR_PREPARE(ndb, s, "SELECT id FROM peers"); */
+bool f(void) { return true; }'
+    expect pass "a SELECT shown in a documentation comment, not carried" ""
+
+    # The same shape with the whole declaration commented out.
     plant innocent.c '/* static const char *k = "SELECT id FROM peers"; */'
     expect pass "a SQL example inside a C comment" ""
+
+    # ── ...and stripping comments must not become a way to hide SQL ──
+    plant innocent.c 'static const char *a = "x /* y";
+static const char *k = "SELECT id FROM peers";'
+    expect fail "a comment opener inside a literal cannot blind the scan" \
+        "innocent.c"
 
     plant innocent.c 'void f(struct qb *q) { qb_select(q, QB_T_peers); }'
     expect pass "a file that uses the query builder" ""
@@ -269,11 +258,53 @@ gate_require_scanned "${#scan_files[@]}" "$FILE_FLOOR" "$GATE" \
     "every scanned file was the builder itself — impossible"
 
 # ── Detect ───────────────────────────────────────────────────────────────
-FOUND=()
-for f in "${scan_files[@]}"; do
-    hits="$(strip_c_comments "$f" | grep -E "$RE_SQL_LITERAL" || true)"
-    [ -n "$hits" ] && FOUND+=("$f")
-done
+# Comments are stripped before matching, so a file that DOCUMENTS a
+# statement is not read as carrying one. This is not hypothetical: the
+# header of app/models/include/models/model_fields.h explains the column
+# macros with example lines like
+#     "SELECT " BLOG_POST_COLUMNS " FROM blog_posts WHERE event_id=?"
+# and was reported for it. The file contains no SQL whatsoever. A gate that
+# treats documentation as evidence makes deleting the explanation the
+# cheapest fix, and the only other option it offers is a row in a baseline
+# whose own header says a row is not a fix.
+#
+# String literals are kept VERBATIM here (strings=0), because a literal is
+# precisely what this gate is looking for; they are still tracked, so a /*
+# inside a literal cannot open a comment.
+STRIPPER="tools/lint/strip_c_comments.awk"
+[ -f "$STRIPPER" ] || {
+    echo "[$GATE] FATAL — $STRIPPER is missing; refusing to scan without it" >&2
+    exit 2
+}
+SCAN_TMP="$(mktemp -d)" || {
+    echo "[$GATE] FATAL — cannot create a scratch directory" >&2
+    exit 2
+}
+trap 'rm -rf "$SCAN_TMP"' EXIT
+: > "$SCAN_TMP/fatal"
+
+mapfile -t FOUND < <(
+    for f in "${scan_files[@]}"; do
+        if ! awk -f "$STRIPPER" "$f" > "$SCAN_TMP/stripped" 2> "$SCAN_TMP/err"; then
+            printf '%s\n' "$f" >> "$SCAN_TMP/fatal"
+            continue
+        fi
+        # Deliberately NOT `awk ... | grep -q`: grep -q exits on first match,
+        # awk takes SIGPIPE, and under `set -o pipefail` the pipeline reports
+        # 141 — so a MATCH would be read as "no match" and the gate would
+        # fail open. The intermediate file makes the status grep's own.
+        if grep -qE "$RE_SQL_LITERAL" "$SCAN_TMP/stripped"; then
+            printf '%s\n' "$f"
+        fi
+    done | sed '/^$/d' | sort -u
+)
+
+if [ -s "$SCAN_TMP/fatal" ]; then
+    echo "[$GATE] FATAL — the comment stripper failed on:" >&2
+    sed 's/^/    /' "$SCAN_TMP/fatal" >&2
+    echo "  Refusing to report a clean scan off a broken strip." >&2
+    exit 2
+fi
 
 declare -A BASELINED=()
 gate_load_list_file "$BASELINE" BASELINED baseline_count

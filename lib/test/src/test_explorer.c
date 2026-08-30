@@ -1,6 +1,17 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Explorer controller unit tests — routing, edge cases, factoids. */
 
+/* realpath() reaches this TU only through the glibc fortify inline that
+ * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
+ * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
+ * compiles by accident of optimisation and breaks at -O0, under
+ * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
+ * include: after them it does nothing. See lib/util/src/hw_profile.c. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
+#include "platform/directory_compat.h"
 #include "test/test_core.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/explorer_internal.h"
@@ -180,7 +191,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_hodl_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -284,7 +295,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_hodl_sparse_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -343,7 +354,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_hodl_latest_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -419,7 +430,7 @@ int test_explorer(void)
          * directory"). A relative datadir means the cache file is never
          * written and the cache assertion below can never pass. */
         ex_abs_dbdir(dbdir, sizeof(dbdir), "hodl_cache");
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         snprintf(cachepath, sizeof(cachepath),
                  "%s/explorer/hodl-current-v1.cache", dbdir);
@@ -528,7 +539,7 @@ int test_explorer(void)
         sqlite3 *db = NULL;
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_factoids_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
@@ -705,7 +716,7 @@ int test_explorer(void)
         uint8_t css_resp[20000];
         snprintf(dbdir, sizeof(dbdir), ".zcl_test_explorer_css_%d",
                  (int)getpid());
-        mkdir(dbdir, 0755);
+        platform_directory_create(dbdir, 0755);
         explorer_set_state(NULL, NULL, NULL, NULL, dbdir);
         snprintf(csspath, sizeof(csspath), "%s/explorer/style.css", dbdir);
         FILE *f = fopen(csspath, "w");

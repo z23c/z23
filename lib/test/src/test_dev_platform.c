@@ -21,6 +21,7 @@
 #include "hotswap/hotswap_module.h"
 #include "json/json.h"
 #include "keys/key.h"
+#include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "platform/file_watch_compat.h"
 #include "services/dev_reflex_policy_service.h"
@@ -36,7 +37,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -350,7 +353,7 @@ static bool dp_mk_write(const char *dir, const char *rel, const char *content)
     char full[4096];
     snprintf(full, sizeof(full), "%s/%s", dir, rel);
     for (char *p = full + 1; *p; p++) {
-        if (*p == '/') { *p = '\0'; mkdir(full, 0755); *p = '/'; }
+        if (*p == '/') { *p = '\0'; platform_directory_create(full, 0755); *p = '/'; }
     }
     FILE *f = fopen(full, "wb");
     if (!f) return false;
@@ -1697,6 +1700,11 @@ static void fill_hex(char out[65], char digit)
     out[64] = 0;
 }
 
+/* The whole fixture below is POSIX process-and-locking semantics: fork(2)/
+ * waitpid(2) concurrent writers, O_CLOEXEC, and AT_FDCWD/utimensat. It is
+ * exercised only on POSIX; it is never expected to run on Windows, only to
+ * stay syntactically valid there (mingw ships none of the above). */
+#if !defined(_WIN32)
 static bool failure_record_path(char out[PATH_MAX], const char *home,
                                 const struct zcl_dev_failure_record *record,
                                 const char *leaf)
@@ -2108,6 +2116,14 @@ cleanup:
 #undef FS_REQUIRE
     return ok;
 }
+#else
+static bool run_failure_store_fixture(void)
+{
+    /* Not exercised on Windows: fork/waitpid concurrency and flock-style
+     * locking below have no Windows equivalent in this fixture. */
+    return true;
+}
+#endif /* !defined(_WIN32) */
 
 static int test_failure_store(void)
 {

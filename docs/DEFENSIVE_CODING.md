@@ -384,6 +384,17 @@ assert green).
   `tools/lint/check_model_sql_literals.sh`, with a mandatory `--selftest`
   that plants each statement shape, a stale row, and a converted-file
   regression and requires a rejection on every one.
+  **Comments are stripped before matching** (`tools/lint/strip_c_comments.awk`,
+  shared with `check-fortify-masked-decls`), so a header that *documents* a
+  statement is not read as carrying one — `model_fields.h` was reported for
+  explaining the column macros with an example `"SELECT " BLOG_POST_COLUMNS
+  " FROM blog_posts …"` line while containing no SQL at all, and a gate that
+  treats documentation as evidence makes deleting the explanation the
+  cheapest fix. String literals are kept verbatim, since a literal is exactly
+  what this gate is looking for, but they are still tracked so a `/*` inside
+  one cannot open a comment and hide real SQL after it. Stripping shrank the
+  baseline from 67 rows to 62: five of them were headers whose only SQL was
+  in prose.
 
 - **Gate #12: `check-long-functions`** — flags any top-level function whose
   body spans >500 lines. Two tiers (a split Gate E1 no longer uses — E1 is
@@ -741,6 +752,25 @@ assert green).
   and the `lib/test/` fixtures are out of scope. Override `// shellout-ok` for
   a documented, reviewed exception.
 
+- **Gate: `check-no-api-keys`** (FAIL) —
+  `tools/lint/check_no_api_keys.sh`. No API credential is committed to this
+  tree. `tools/engine_unit.c` dispatches work to a paid API, so this tree now
+  has a reason to hold a key near it, and a key that lands in a tracked file is
+  spent: it is in the history, on every clone, and on every mirror. The rule
+  that a key lives in the environment or in a 0600 file **outside** the
+  repository is enforced in code (`lib/engine/include/engine/engine_secret.h`);
+  this gate is the half that notices when somebody pastes one in anyway. It
+  matches credential *shapes* — vendor-prefixed tokens, a `Bearer` header with
+  a long opaque value, and the two-part `<32+ hex>.<16+ alnum>` form — not a
+  list of known keys. A bare long hex run is deliberately **not** matched,
+  because digests, seeds, and consensus constants are all long hex and a gate
+  that cries wolf gets switched off. Binary fixtures and fuzz corpora are out
+  of scope for the same reason. No baseline and no WARN tier: a committed
+  credential is not something to ratchet down over time. Override with the
+  marker `api-key-example-ok` on the line for a documented non-credential.
+  `lib/test/src/test_engine.c` plants a key in a fixture tree and requires this
+  gate to fail on it, so it is a gate that has been seen to fail.
+
 - **Gate: `check-no-writer-below-sealed-frontier`** (FAIL) —
   `tools/lint/check_no_writer_below_sealed_frontier.sh`. The North Star's
   single-writer-per-frontier invariant
@@ -887,6 +917,7 @@ current green tree.
 | **`check-hex-codec-single`** | RATCHET | Base-16 encode/decode lives only in `lib/base/include/base/hex.h` (`zcl_hex_encode`, `zcl_hex_decode`, `zcl_hex_decode_lower`, `zcl_hex_decode_n`, `zcl_hex_nibble`). Per-file shape detectors: a hex-digit table **plus** a high-nibble index (encoder), or nibble-ladder arithmetic / `sscanf("%2x")` (decoder). Baseline `tools/lint/hex_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because a known-answer fixture must not parse its vectors with the implementation under test. No inline override — the fix is to call the codec. `--selftest` plants a fresh encoder and decoder and requires the scan to reject them. |
 | **`check-byte-order-codec-single`** | RATCHET | Packing/unpacking a fixed-width 16/32/64-bit integer at a byte address lives only in `lib/base/include/base/serialize_le.h` (`zcl_write_u{16,32,64}_le` / `zcl_read_u{16,32,64}_le`, the `i32`/`i64` forms, and the `u32`/`u64` big-endian pair); `crypto/common.h`'s `ReadLE`/`WriteLE` forward to it. Per-file shape detectors: an indexed shift loop (`>> (8 * i)` in either operand order), an unrolled ladder (a shift by 24 or 56 **plus** a byte-array subscript on the same line — a bare `>> 24` is ordinary bit work and does not match), or a hand-rolled byte-swap mask. Baseline `tools/lint/byte_order_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because `test_byte_order_codec.c` deliberately keeps a verbatim copy of every replaced helper and asserts the canonical functions agree with it byte for byte; `core/` is excluded because it is byte-sealed. No inline override — the fix is to call the codec. `--selftest` plants each detected shape and requires rejection, plus innocent bit work and a canonical caller and requires acceptance. |
 | **`check-arm-symbol-single`** | RATCHET | A non-static function is DEFINED (has a body) only ONCE per translation unit. Since the C standard already forbids two unconditional definitions of one external symbol, any hit is necessarily two disjoint preprocessor arms (platform, feature flag, test-vs-release, ...) — a place two bodies can silently drift apart under one name. Found live 2026-08-29: `lib/net/src/file_service.c`'s `fs_parse_rom_request`/`_manifest_request`/`_list_request` had a full body in both its `#if defined(_WIN32)` and POSIX arms, and the two had drifted on exact-length vs. `>=`-length and on NULL-output handling — a Windows node and a Linux node could disagree about whether identical wire bytes were a valid request. Scans every production `.c` under `app config lib src tools` with a brace/paren-depth-tracking awk analyzer (not a compiler — see the gate's own header for its stated blind spots: function-generating macros, and a `static` keyword wrapped onto its own line above the signature). Baseline `tools/lint/arm_symbol_single_baseline.txt` (`<path>\t<function>`; may only shrink, and a row that no longer duplicates must be deleted) — most rows are reviewed, accepted platform-seam/SIMD-dispatch/test-arm pairs, not bugs; the gate makes them visible for that per-row human judgment rather than proving each one wrong. `--selftest` plants a cross-arm non-static duplicate (must fail) and a static duplicate, a function-generating-macro pair, and an `__attribute__`-prefixed function (must all pass). |
+| **`check-fortify-masked-decls`** | EMPTY BASELINE | A `.c` file may not call a POSIX/GNU function whose declaration reaches it ONLY through a glibc fortify inline — that is, only when optimisation is on. Found live 2026-08-30: the build compiles with `-D_POSIX_C_SOURCE=200809L -D_FORTIFY_SOURCE=2`, but glibc declares `realpath()` under `__USE_MISC`/`__USE_XOPEN_EXTENDED`, which `_POSIX_C_SOURCE` sets neither of. The only route to the declaration was the fortify inline, and glibc enables fortify **only when optimisation is on** — so 17 translation units were compiling purely as a side effect of `-O1+`, and an implicit declaration is a hard error in C23, not a warning. Every one broke at `-O0`, under `-U_FORTIFY_SOURCE`, and on any non-glibc libc; the class was invisible because nobody builds at `-O0` here. The gate **re-measures** the masked set on every run — for each candidate it compiles a four-line TU with the project's real flags at `-O0` and `-O2` and calls it masked when it fails at `-O0` and succeeds at `-O2` — because which functions are masked is a property of the compiler and libc in use, not of this tree, and a hardcoded list would go stale in the silent direction. It refuses (exit 2) rather than passing vacuously if its own control probe will not compile. Scans with comments and string literals stripped, so prose naming a function does not trigger it; it does not expand macros, so a call produced by macro expansion is invisible. Fix by adding the `_DEFAULT_SOURCE` guard **before the first `#include`** — after them it does nothing, since feature-test macros are read when `<features.h>` is first pulled in. **The baseline is empty by design:** unlike a platform seam there is no legitimate reason to depend on optimisation for a declaration, so all 17 callers were fixed rather than recorded. `--selftest` plants an unguarded caller (must fail), a guarded caller (must pass) and a comment-only mention (must pass), and refuses if no function is masked at all. |
 | **`check-zcode-package-registry`** | HARD | Re-derives the content manifest, unsigned release/signing root, recipe, target-inclusive exact dependency lock, and API capsule roots for the nine real C23 Commons Alpha packages directly from their authoritative `lib/<module>` trees. The public alpha-fixture publisher, sequences, empty reward address, `zclassic-main`, exact roots, and closed dependency DAG are projected in `config/zcode_package_registry.def`. Drift, an unresolved dependency, or a selected package source/API change without regenerating the projection fails. Production source ownership remains the unique `LIB_MODULE` row checked independently by `check-lib-module-order`, so the monolith compiles each package module source exactly once. No baseline or override. |
 | **`check-zcode-package-standalone`** | HARD | Every registry package compiles from its OWN declared dependencies and nothing else. A package ships to a node that has only the packages its manifest names, so an include reaching outside that set makes it unbuildable there however well it builds inside this monolith, where every `-I` is already on the command line. For each `ZCODE_PACKAGE` in `config/zcode_package_registry.def` and `config/zcode_c23_commons_app.def`, every shipped source is compiled with `-I<pkg>/include` plus the include dir of each declared dependency, under the recipe's own quick profile read from `config/include/config/c23_commons_build_profile.h` so the gate cannot drift from the contract it mirrors. A manifest declaring `files[]` is honoured exactly. Include CLOSURE only: it does not link, run tests, or judge roots. Hollow scans (zero packages parsed, or zero sources compiled) exit 2. No baseline or override. |
 | **E2: `check-one-result-type`** | RATCHET | New `app/services/src/*.c` reference `struct zcl_result` (§2) instead of bare bool/int. File-granularity. Baseline `one_result_type_baseline.txt` (empty; 9 originals migrated). Override `// one-result-type-ok:<tag>` (pure table/registry helper). |
@@ -1091,6 +1122,7 @@ add/remove a gate.
 - `check-blob-read-bounds`
 - `check-byte-order-codec-single`
 - `check-arm-symbol-single`
+- `check-fortify-masked-decls`
 - `check-zcode-package-registry`
 - `check-zcode-package-standalone`
 - `check-package-anatomy`
@@ -1135,6 +1167,7 @@ add/remove a gate.
 - `check-sandbox-wired`
 - `check-no-raw-sqlite-in-controllers`
 - `check-model-column-drift`
+- `check-no-api-keys`
 - `check-no-shellouts`
 - `check-no-writer-below-sealed-frontier`
 - `check-peer-floor-single-source`

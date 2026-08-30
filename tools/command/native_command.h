@@ -348,6 +348,32 @@ void zcl_native_handle_code_impact(
 void zcl_native_handle_code_merkle(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.territory — one module's generated scorecard: the files/bytes it owns,
+ * its purpose, the registered groups its files ROUTE to, and — kept strictly
+ * apart from routing — how many of its public functions a registered test
+ * entry point actually REACHES through the call graph, plus include-edge
+ * neighbours both ways and the weak spots. reached + unreached + unknown
+ * always equals public_symbols. Backed by lib/territory; the registered
+ * catalog (tools/dev) and the changed-file router (app/controllers) are handed
+ * in as ports because lib/ sits below both. */
+void zcl_native_handle_code_territory(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* general — the dispatch brief for one territory (owns / proves / trusts /
+ * weak at / refuses), or with no argument the roll-up across every territory
+ * ranked by where the evidence is weakest. Every field is generated per call
+ * from the code index, the registered test catalog, the shared impact router,
+ * and the lint gate wiring; nothing is stored, because a written brief goes
+ * stale the way a MAINTAINERS file does.
+ *
+ * A GENERAL GRANTS NO AUTHORITY. It reports and never decides — no approval,
+ * no gate, no veto, no privileged owner. "No referee, no authority — everyone
+ * runs a full node" is the project's rule, and metaverse_grant_check() stays
+ * the only answer to what anything may do. Do not add an approval path here. */
+void zcl_native_handle_general(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* code.provenance.facts — the writer census: every durable named slot (a key in
  * progress_meta / stage_cursor / node_state) with the count of distinct FILES

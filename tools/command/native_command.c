@@ -89,6 +89,13 @@ bool zcl_native_command_is_root(const char *word)
          * for exactly the reason above: a four-word canonical path is not
          * what someone types on their first day. */
         "join", "update",
+        /* `general` is the dispatch brief for one territory (config/commands/
+         * code.def). It is a root rather than a `code.*` child because it is
+         * what an agent runs BEFORE it starts work, and putting a prefix
+         * between an agent and the inventory it keeps mis-remembering is how
+         * the inventory keeps getting mis-remembered. It grants no authority:
+         * it reports and never decides. */
+        "general",
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
         if (strcmp(word, roots[i]) == 0)
