@@ -231,8 +231,10 @@ endif
 NODE_VENDOR_ARCHIVES = $(notdir $(NODE_SECP_ARCHIVE)) libcrypto.a libssl.a libevent.a \
 	libevent_openssl.a libevent_pthreads.a libsqlite3.a libz.a libtor_stub.a
 # A focused `make z23` (or legacy `make zclassic23`) needs no C++ toolchain.
+# Bare `make` is the same build because `.DEFAULT_GOAL := z23`; keep its
+# dependency and source-identity scope identical to the explicit spelling.
 # Test/dev builds retain LevelDB strictly as a differential oracle.
-ZCL_NODE_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23 zclassic23,$(MAKECMDGOALS))),,1),)
+ZCL_NODE_ONLY_BUILD := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23 zclassic23,$(MAKECMDGOALS))),,1),1)
 VENDOR_ARCHIVES = $(NODE_VENDOR_ARCHIVES) \
 	$(if $(ZCL_NODE_ONLY_BUILD),,libleveldb.a)
 VENDOR_LIBS = $(addprefix vendor/lib/,$(VENDOR_ARCHIVES))
@@ -323,7 +325,14 @@ ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
 	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
-ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
+# With no explicit goal GNU Make executes `.DEFAULT_GOAL := z23`; selecting
+# every compiler profile here did not make that node build safer.  It only
+# fingerprinted nine toolchain/flag combinations that the default recipe can
+# never consume.  Keep unknown explicit goals conservative, while making the
+# documented first build pay for exactly its node-c23 authority.
+ifeq ($(strip $(MAKECMDGOALS)),)
+ZCL_EPOCH_PROFILES := node-c23
+else ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ZCL_EPOCH_PROFILES :=
@@ -1329,11 +1338,11 @@ $(DEV_TSAN_LEASE): FORCE
 	  "$(DEV_TSAN_EPOCH_COMPILE_FLAGS)" "$(DEV_TSAN_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-# Make normally imports four large immutable depfile graphs even when one
-# profile (or no compiler at all) is requested.  Narrow only an exact,
-# explicitly-known single goal.  Empty/default, mixed, and unknown goals keep
-# the conservative source-wide fallback so a new target cannot accidentally
-# lose header invalidation merely because this table was not updated.
+# Make normally imports large immutable depfile graphs even when one profile
+# is requested. Narrow an exact known goal, including the empty spelling of
+# `.DEFAULT_GOAL := z23`. Mixed and unknown explicit goals keep the
+# conservative source-wide fallback so a new target cannot accidentally lose
+# header invalidation merely because this table was not updated.
 ZCL_DEPFILE_ALL_PROFILES := build-only dev test-fast test-strict coverage fuzz \
 	node-c23
 ZCL_DEPFILE_PROFILES := $(ZCL_DEPFILE_ALL_PROFILES)
@@ -1343,6 +1352,8 @@ ifeq ($(ZCL_HOTSWAP_DEPFILE_LEAN_ONLY),1)
 # tracks its own single-TU depfile. Skip every depfile graph — an unmatched
 # single goal below would otherwise fall through to importing all four.
 ZCL_DEPFILE_PROFILES :=
+else ifeq ($(strip $(MAKECMDGOALS)),)
+ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
 ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
