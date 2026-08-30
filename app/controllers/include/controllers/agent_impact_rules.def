@@ -2844,3 +2844,8 @@ AGENT_IMPACT_RULE("lib/chainlog/src/*.c|lib/chainlog/include/chainlog/*.h|lib/te
  * that quietly reclassifies a group would move that record without anyone
  * measuring anything. */
 AGENT_IMPACT_RULE("lib/determinism/src/*.c|lib/determinism/include/determinism/*.h|lib/test/src/test_determinism.c|tools/determinism_scan.c|tools/lint/check_determinism_ratchet.sh|tools/lint/determinism_baseline.txt", "determinism make_lint_gates")
+/* The cookbook: the answers to "how do I do X here", as a checked registry
+ * plus the document generated from it. It rides make_lint_gates only — the
+ * gate IS the coverage, and it runs the recipes rather than reading about
+ * them. */
+AGENT_IMPACT_RULE("config/cookbook.def|tools/lint/check_cookbook.sh|docs/COOKBOOK.md", "make_lint_gates")

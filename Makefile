@@ -2178,7 +2178,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves \
+        check-persona-resolves check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
@@ -10140,6 +10140,12 @@ check-model-sql-literals:
 # territory must still hold tracked C, and the file it cites as evidence must
 # still be tracked. There is no baseline — a row that stopped being true is
 # not a debt, it is a false statement.
+.PHONY: check-cookbook
+check-cookbook: $(ZCLASSIC23_DEV_BIN)
+	@echo "══ LINT: every cookbook recipe still works ══"
+	@./tools/lint/check_cookbook.sh --selftest
+	@./tools/lint/check_cookbook.sh
+
 check-persona-resolves:
 	@echo "══ LINT: every authored persona still resolves ══"
 	@./tools/lint/check_persona_resolves.sh --selftest
@@ -11597,6 +11603,7 @@ LINT_GATES := \
     check-model-ar-lifecycle \
     check-model-sql-literals \
     check-persona-resolves \
+    check-cookbook \
     check-long-functions \
     check-rpc-registrar \
     check-lag-slo-observable \
