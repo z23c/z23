@@ -1939,6 +1939,13 @@ else
 	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
 endif
 
+.PHONY: macos-acceptance
+# Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived
+# from the closed capability matrix; unavailable rows run their refusal proof
+# rather than disappearing as hand-maintained skips.
+macos-acceptance:
+	@./tools/scripts/macos_acceptance.sh --run
+
 .PHONY: windows-service-install windows-service-status windows-service-remove
 windows-service-install: z23
 	@packaging/windows/install-service.sh install

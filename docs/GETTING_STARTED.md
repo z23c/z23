@@ -134,7 +134,7 @@ make lint            # defensive-coding + doc-accuracy gates
 | --- | --- | --- | --- | --- |
 | Linux | Full node | Full native workflow | Eligible read-only C23 leaves | Noise transport + DHT identity |
 | WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow | Noise transport + DHT identity |
-| macOS arm64 | Native node | Build and focused tests; native kqueue directory watcher | Unavailable; rebuild/restart | Noise transport works; DHT identity requires on-chain provisioning |
+| macOS arm64 | Native node; `make macos-acceptance` | Build and focused tests; native kqueue directory watcher | Unavailable; rebuild/restart | Noise transport works; DHT identity requires on-chain provisioning |
 | Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart | Not yet measured |
 
 Windows setup and the boundary between native MSYS2 and WSL2 are documented in
@@ -151,8 +151,10 @@ same cross-platform prerequisite as Linux. The following Linux-specific
 facilities currently report unavailable or refuse safely on macOS:
 Landlock/seccomp package confinement, signal-context self-backtraces, native
 hot-swap activation, and consensus snapshot export that requires `O_TMPFILE`.
-The directory watcher now uses kqueue on macOS. Intel macOS has not yet been
-measured.
+The directory watcher now uses kqueue on macOS. `make macos-acceptance`
+validates the closed matrix in `config/platform/macos_capabilities.def`, derives
+its exact registered-test set from that matrix, and refuses any self-skip or
+unobserved eligible environment. Intel macOS has not yet been measured.
 
 Embedded full Tor is not in that list. It was, because the build pinned Darwin
 to the offline stub regardless of whether the Tor archives existed; that pin is
