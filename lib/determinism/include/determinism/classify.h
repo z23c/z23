@@ -1,14 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Purpose: place every measured group in exactly one of three buckets, and
+ * Purpose: place every measured group in exactly one of four buckets, and
  * refuse to guess when it could not be measured.
  *
  * THE BUCKETS PARTITION. Every group lands in exactly one of DETERMINISTIC,
- * NONDETERMINISTIC and UNKNOWN. The counts sum to the registry size. This is
- * asserted, not assumed — test_determinism enumerates observation tables
- * exhaustively and checks that exactly one bucket is chosen every time.
+ * NONDETERMINISTIC, TIMING_SENSITIVE and UNKNOWN. The counts sum to the
+ * registry size. This is asserted, not assumed — test_determinism enumerates
+ * observation tables exhaustively and checks that exactly one bucket is chosen
+ * every time.
  *
- * UNKNOWN IS NEVER FOLDED INTO EITHER OTHER BUCKET. A group that could not be
+ * UNKNOWN IS NEVER FOLDED INTO ANY OTHER BUCKET. A group that could not be
  * measured — the runner never dispatched it, it produced no verdict vector at
  * all, it was dispatched under some perturbations and gated out under others —
  * is UNKNOWN and is named and counted as UNKNOWN. Folding it into
@@ -16,9 +17,39 @@
  * into NONDETERMINISTIC would accuse a group nobody observed. A tool that
  * guesses here is worse than no tool.
  *
- * WHICH PERTURBATION SPLIT IT. A NONDETERMINISTIC verdict carries the set of
- * perturbations whose digest differs from BASE. That set is the finding — it
- * names the cause. A verdict that only said "varies" would be useless. */
+ * WHY TIMING_SENSITIVE IS ITS OWN BUCKET, NOT A NOTE ON NONDETERMINISTIC.
+ * These are two different defects and only one of them is a bug in the test's
+ * logic.
+ *
+ *   NONDETERMINISTIC  the vector moved on a plain re-run at identical load, or
+ *                     moved when the environment moved. The test does not
+ *                     settle on one answer, and no amount of care by the
+ *                     re-runner will make it.
+ *   TIMING_SENSITIVE  the vector moved ONLY when the machine's load moved. The
+ *                     logic is settled; the grading rule reads a wall clock.
+ *
+ * The second is the dangerous one for a corroboration network. An honest node
+ * re-running such a group on a busier box computes a different verdict vector
+ * and REFUTES a receipt that was never wrong. That is a false accusation
+ * manufactured by scheduling, and the producer cannot answer it — it has no
+ * evidence to offer except "my box was quieter". Collapsing the two buckets
+ * would hide exactly the population that generates those accusations.
+ *
+ * Neither class may carry a receipt. The buckets differ in what to DO: a
+ * NONDETERMINISTIC group needs its logic fixed, a TIMING_SENSITIVE group needs
+ * its grading rule replaced with something that is not a clock.
+ *
+ * WHICH PERTURBATION SPLIT IT. A NONDETERMINISTIC or TIMING_SENSITIVE verdict
+ * carries the set of perturbations whose digest differs from the reference.
+ * That set is the finding — it names the cause. A verdict that only said
+ * "varies" would be useless.
+ *
+ * AND THE CEILING ON THE SEPARATION ITSELF. What the SCHEDULING perturbations
+ * measure is "the answer changed between a small worker pool and a large one
+ * on an otherwise quiet box". That is not "the answer changed under arbitrary
+ * contention". A group can read DETERMINISTIC here and still refute a receipt
+ * on a loaded node, so DETERMINISTIC is necessary for receipt eligibility and
+ * is not sufficient for it. */
 #ifndef ZCL_DETERMINISM_CLASSIFY_H
 #define ZCL_DETERMINISM_CLASSIFY_H
 
@@ -33,6 +64,10 @@ enum zcl_det_class {
     ZCL_DET_CLASS_DETERMINISTIC = 1,
     ZCL_DET_CLASS_NONDETERMINISTIC = 2,
     ZCL_DET_CLASS_UNKNOWN = 3,
+    /* Appended, so the values above keep their numbers and the golden receipt
+     * bytes are unchanged. Once a receipt exists outside this branch, adding
+     * another value here requires a version bump, not another append. */
+    ZCL_DET_CLASS_TIMING_SENSITIVE = 4,
 };
 
 enum zcl_det_unknown_reason {
@@ -64,10 +99,22 @@ struct zcl_det_verdict {
     uint32_t check_count;    /* BASE's vector length, 0 when not measured */
 };
 
-/* `obs` is indexed by enum zcl_det_perturbation, length `n`. Returns false
- * only on a malformed call (null, n == 0, n > 32); a group that cannot be
- * classified is reported as UNKNOWN, which is an answer, not an error. */
-bool zcl_det_classify(const struct zcl_det_observation *obs, size_t n,
+/* `obs` and `order` are parallel arrays of length `n`: slot i holds the
+ * observation made under perturbation order[i]. Slot 0 is the reference every
+ * other slot is compared against, and it must be ZCL_DET_P_BASE.
+ *
+ * `order` is required, not optional, because it is what separates
+ * NONDETERMINISTIC from TIMING_SENSITIVE: the classifier has to know which
+ * CLASS each splitting slot belongs to, and a slot index alone does not say.
+ * An earlier version took only the table and hardcoded slot 0 as BASE, which
+ * was correct only for a caller measuring the whole enum in enum order — any
+ * caller measuring a subset got the right verdict for the wrong reason.
+ *
+ * Returns false only on a malformed call (null, n == 0, n > 32, order[0] not
+ * BASE); a group that cannot be classified is reported as UNKNOWN, which is an
+ * answer, not an error. */
+bool zcl_det_classify(const struct zcl_det_observation *obs,
+                      const enum zcl_det_perturbation *order, size_t n,
                       struct zcl_det_verdict *out);
 
 const char *zcl_det_class_name(enum zcl_det_class klass);
@@ -90,6 +137,7 @@ void zcl_det_split_mask_string(uint32_t mask,
 struct zcl_det_partition {
     size_t deterministic;
     size_t nondeterministic;
+    size_t timing_sensitive;
     size_t unknown_not_run;
     size_t unknown_no_vector;
     size_t unknown_partial;

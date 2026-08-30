@@ -91,7 +91,16 @@ bool zcl_det_receipt_set_commit(struct zcl_det_receipt *r, const char *hex);
  * one: when the commit or the toolchain a receipt names is not what the fresh
  * run used, the honest answer is that this run says nothing about that claim.
  * It must never default to CORROBORATED (which would accept unverified
- * evidence) nor to REFUTED (which would condemn a claim nobody re-ran). */
+ * evidence) nor to REFUTED (which would condemn a claim nobody re-ran).
+ *
+ * INDETERMINATE also covers the case where the difference is EXPLAINED. If
+ * either side's verdict is TIMING_SENSITIVE, the group is known to answer
+ * differently when the machine's load differs — and load is a property of the
+ * moment, not of the environment class, so it cannot be pinned by either side.
+ * A differing vector is then precisely what an honest re-runner on a busier
+ * box produces, and REFUTED would be a false accusation manufactured by
+ * scheduling against a producer with no way to answer it. REFUTED is reserved
+ * for a disagreement about something reproducible. */
 enum zcl_det_corroboration {
     ZCL_DET_INDETERMINATE = 0,
     ZCL_DET_CORROBORATED = 1,

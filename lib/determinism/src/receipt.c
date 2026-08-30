@@ -7,6 +7,7 @@
 
 #include "determinism/receipt.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "codec/cursor.h"
 #include "sha3/sha3.h"
@@ -47,7 +48,9 @@ bool zcl_det_receipt_set_commit(struct zcl_det_receipt *r, const char *hex)
         LOG_FAIL("determinism",
                  "commit id must be 40 or 64 hex characters, got %zu", n);
     memset(r->commit, 0, sizeof(r->commit));
-    return zcl_det_unhex(hex, r->commit, n / 2);
+    /* zcl_hex_decode, not the _lower form: a commit id is operator-facing
+     * and arrives from git, a paste, or a receipt someone else produced. */
+    return zcl_hex_decode(hex, r->commit, n / 2);
 }
 
 /* A fixed-width text field: exactly `width` bytes, the string then NUL fill.
@@ -164,7 +167,7 @@ bool zcl_det_receipt_decode(const uint8_t *bytes, size_t len,
                       zcl_codec_error_string(rd.error));
 
     if (r.verdict < ZCL_DET_CLASS_DETERMINISTIC ||
-        r.verdict > ZCL_DET_CLASS_UNKNOWN)
+        r.verdict > ZCL_DET_CLASS_TIMING_SENSITIVE)
         LOG_FAIL("determinism", "receipt verdict %u out of range",
                  (unsigned)r.verdict);
     if (r.reason > ZCL_DET_UNKNOWN_PARTIAL)
@@ -178,14 +181,21 @@ bool zcl_det_receipt_decode(const uint8_t *bytes, size_t len,
     } else if (r.reason != ZCL_DET_UNKNOWN_NONE) {
         LOG_FAIL("determinism", "measured receipt carries an unknown-reason");
     }
-    /* Only a NONDETERMINISTIC verdict may name a splitting perturbation. */
-    if (r.verdict != ZCL_DET_CLASS_NONDETERMINISTIC && r.split_mask != 0)
+    /* Exactly the two verdicts that mean "it varied" may name a splitting
+     * perturbation, and both MUST name one. A DETERMINISTIC or UNKNOWN
+     * receipt carrying a cause, or a varying receipt carrying none, is a
+     * record that says two things at once. */
+    const bool names_a_cause =
+        (r.verdict == ZCL_DET_CLASS_NONDETERMINISTIC ||
+         r.verdict == ZCL_DET_CLASS_TIMING_SENSITIVE);
+    if (!names_a_cause && r.split_mask != 0)
         LOG_FAIL("determinism", "non-empty split mask on a %s receipt",
                  zcl_det_class_name((enum zcl_det_class)r.verdict));
-    if (r.verdict == ZCL_DET_CLASS_NONDETERMINISTIC && r.split_mask == 0)
+    if (names_a_cause && r.split_mask == 0)
         LOG_FAIL("determinism",
-                 "NONDETERMINISTIC receipt names no perturbation; "
-                 "\"it varies\" is not a finding");
+                 "%s receipt names no perturbation; "
+                 "\"it varies\" is not a finding",
+                 zcl_det_class_name((enum zcl_det_class)r.verdict));
 
     if (!zcl_codec_reader_finish(&rd))
         LOG_FAIL("determinism", "trailing bytes after the receipt");
@@ -249,6 +259,30 @@ enum zcl_det_corroboration zcl_det_receipt_check(
         say(why, why_cap, "same commit, same toolchain, same verdict vector");
         return ZCL_DET_CORROBORATED;
     }
+
+    /* THE DIFFERENCE IS EXPLAINED BEFORE IT IS BLAMED.
+     *
+     * A group measured TIMING_SENSITIVE answers differently when the machine's
+     * load differs, and load is not part of the environment class — it cannot
+     * be, since it is a property of the moment rather than of the box. So for
+     * such a group a differing vector is exactly what an honest re-runner on a
+     * busier machine produces, and calling that REFUTED would manufacture a
+     * false accusation against a producer who did nothing wrong and has no
+     * evidence to offer in reply except "my box was quieter".
+     *
+     * REFUTED has to mean "these two disagree about something reproducible".
+     * When either side carries this verdict, it does not, so the answer is
+     * INDETERMINATE. This costs nothing in detection: a TIMING_SENSITIVE group
+     * is barred from carrying a receipt in the first place, and this is the
+     * backstop for a receipt produced before that was known. */
+    if (claim->verdict == ZCL_DET_CLASS_TIMING_SENSITIVE ||
+        fresh->verdict == ZCL_DET_CLASS_TIMING_SENSITIVE) {
+        say(why, why_cap,
+            "the group's verdict vector is known to move with machine load, "
+            "so a difference here is not evidence against the claim");
+        return ZCL_DET_INDETERMINATE;
+    }
+
     say(why, why_cap,
         "same commit and toolchain, different verdict vector or verdict");
     return ZCL_DET_REFUTED;

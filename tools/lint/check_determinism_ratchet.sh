@@ -132,28 +132,64 @@ check_root() {
     fi
 
     # ── B and C, row by row ─────────────────────────────────────────────────
-    local line group cause tok bad_group="" no_cause="" bad_pert=""
+    # Row format: <group> <CLASS> <CAUSE>[+<CAUSE>...]
+    #
+    # The CLASS column exists because two very different defects were being
+    # recorded as one number. A group that answers differently on a re-run at
+    # identical load has genuine internal nondeterminism. A group that answers
+    # differently only when the machine is busier is grading a real assertion
+    # against a wall clock. Both make a receipt worthless, but only the first
+    # is a bug in the test's logic, so they must not share a bucket.
+    #
+    # NOTE ON grep BELOW: these are here-strings, not `printf ... | grep -q`
+    # pipelines. Under `set -o pipefail` a `grep -q` MATCH closes the pipe
+    # early, printf takes SIGPIPE, and the pipeline's status becomes 141 —
+    # so the success case reports failure and the check silently inverts.
+    # This gate shipped with that bug and announced it by rejecting CC_SET on
+    # exactly one of the three rows naming it. A gate that polices determinism
+    # must not itself be non-deterministic.
+    local line group rest class cause tok
+    local bad_group="" no_cause="" bad_pert="" bad_class=""
     while IFS= read -r line; do
         case "$line" in ''|'#'*) continue ;; esac
         group="${line%% *}"
-        cause="${line#* }"
-        if [ "$cause" = "$line" ] || [ -z "${cause//[[:space:]]/}" ]; then
+        rest="${line#* }"
+        if [ "$rest" = "$line" ] || [ -z "${rest//[[:space:]]/}" ]; then
             no_cause="$no_cause$group"$'\n'
             continue
         fi
-        if ! printf '%s\n' "$groups" | grep -qx -- "$group"; then
+        class="${rest%% *}"
+        cause="${rest#* }"
+        if [ "$cause" = "$rest" ] || [ -z "${cause//[[:space:]]/}" ]; then
+            no_cause="$no_cause$group"$'\n'
+            continue
+        fi
+        if ! grep -qxF -- "$group" <<<"$groups"; then
             bad_group="$bad_group$group"$'\n'
         fi
+        case "$class" in
+            NONDETERMINISTIC|TIMING_SENSITIVE) ;;
+            *) bad_class="$bad_class$group -> $class"$'\n' ;;
+        esac
         local IFS_SAVE="$IFS"
         IFS='+'
         for tok in $cause; do
             [ -n "$tok" ] || continue
-            if ! printf '%s\n' "$perturbations" | grep -qx -- "$tok"; then
+            if ! grep -qxF -- "$tok" <<<"$perturbations"; then
                 bad_pert="$bad_pert$group -> $tok"$'\n'
             fi
         done
         IFS="$IFS_SAVE"
     done < "$baseline"
+
+    if [ -n "${bad_class//[[:space:]]/}" ]; then
+        fail=1
+        echo "FAIL: $BASELINE_REL names a class that is not a recorded verdict:"
+        printf '%s' "$bad_class" | sed 's/^/    /'
+        echo "  The second column must be NONDETERMINISTIC or TIMING_SENSITIVE."
+        echo "  A row exists to say WHICH kind of unreproducibility was measured;"
+        echo "  a class the classifier never emits means the row was hand-written."
+    fi
 
     if [ -n "${no_cause//[[:space:]]/}" ]; then
         fail=1
@@ -161,7 +197,7 @@ check_root() {
         printf '%s' "$no_cause" | sed 's/^/    /'
         echo ""
         echo "  \"It varies\" is not a finding; \"it varies when CC is set\" is."
-        echo "  Each row is '<group> <PERTURBATION>[+<PERTURBATION>...]'."
+        echo "  Each row is '<group> <CLASS> <PERTURBATION>[+<PERTURBATION>...]'."
     fi
     if [ -n "${bad_group//[[:space:]]/}" ]; then
         fail=1
@@ -253,7 +289,7 @@ HEADER
     {
         echo "# fixture baseline"
         echo "# count: 1"
-        echo "test_alpha CC_SET"
+        echo "test_alpha NONDETERMINISTIC CC_SET"
     } > "$d/$BASELINE_REL"
     git -C "$d" init -q 2>/dev/null
     git -C "$d" -c user.email=fixture@example.invalid \
@@ -309,7 +345,7 @@ run_selftest() {
 
     # A. the baseline GREW — THE defect this gate exists for.
     d="$FIXTURE_ROOT/a"; mkdir -p "$d"; make_fixture "$d"
-    write_baseline "$d" "# count: 2" "test_alpha CC_SET" "test_bravo ENV_PAD"
+    write_baseline "$d" "# count: 2" "test_alpha NONDETERMINISTIC CC_SET" "test_bravo TIMING_SENSITIVE ENV_PAD"
     expect_reject "A: a baseline that grew is caught" "test_bravo" "$d" || rc=1
 
     # B. a row with no cause.
@@ -320,19 +356,19 @@ run_selftest() {
 
     # C. a row naming a group that is not registered.
     d="$FIXTURE_ROOT/c"; mkdir -p "$d"; make_fixture "$d"
-    write_baseline "$d" "# count: 1" "test_ghost CC_SET"
+    write_baseline "$d" "# count: 1" "test_ghost NONDETERMINISTIC CC_SET"
     expect_reject "C: a row naming an unregistered group is caught" \
                   "test_ghost" "$d" || rc=1
 
     # D. a row naming an unknown perturbation.
     d="$FIXTURE_ROOT/d"; mkdir -p "$d"; make_fixture "$d"
-    write_baseline "$d" "# count: 1" "test_alpha VIBES"
+    write_baseline "$d" "# count: 1" "test_alpha NONDETERMINISTIC VIBES"
     expect_reject "D: a row naming an unknown perturbation is caught" \
                   "VIBES" "$d" || rc=1
 
     # E. the declared count and the rows disagree.
     d="$FIXTURE_ROOT/e"; mkdir -p "$d"; make_fixture "$d"
-    write_baseline "$d" "# count: 7" "test_alpha CC_SET"
+    write_baseline "$d" "# count: 7" "test_alpha NONDETERMINISTIC CC_SET"
     expect_reject "E: a count header that disagrees with the rows is caught" \
                   "declares" "$d" || rc=1
 
@@ -359,8 +395,23 @@ run_selftest() {
     write_baseline "$d" "# count: 0"
     expect_accept "I: shrinking the baseline to empty passes" "$d" || rc=1
 
+    # J. a row naming a class the classifier never emits. A hand-edited row is
+    #    the failure mode here: someone widening the record by inventing a
+    #    softer-sounding verdict rather than by measuring one.
+    d="$FIXTURE_ROOT/j"; mkdir -p "$d"; make_fixture "$d"
+    write_baseline "$d" "# count: 1" "test_alpha FLAKY CC_SET"
+    expect_reject "J: a row naming an unrecorded class is caught" \
+                  "FLAKY" "$d" || rc=1
+
+    # K. a row with a class but no cause. The three-column format must not let
+    #    a two-token row through by reading the class as the cause.
+    d="$FIXTURE_ROOT/k"; mkdir -p "$d"; make_fixture "$d"
+    write_baseline "$d" "# count: 1" "test_alpha NONDETERMINISTIC"
+    expect_reject "K: a row with a class but no perturbation is caught" \
+                  "name no splitting perturbation" "$d" || rc=1
+
     if [ "$rc" -eq 0 ]; then
-        echo "══ selftest: PASS (9/9) ══"
+        echo "══ selftest: PASS (11/11) ══"
     else
         echo "══ selftest: FAIL ══"
     fi

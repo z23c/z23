@@ -428,6 +428,14 @@ static int test_buckets_partition(void)
         const size_t n = 4;
         struct zcl_det_partition part = {0};
         size_t cases = 0;
+        /* Slot 3 is the only SCHEDULING profile, so a split confined to it is
+         * the one shape that may come back TIMING_SENSITIVE. Slots 1 and 2 are
+         * REPEAT and ENVIRONMENT, and either of them in a split forces the
+         * stronger NONDETERMINISTIC claim. */
+        const enum zcl_det_perturbation order[4] = {
+            ZCL_DET_P_BASE, ZCL_DET_P_BASE_REPEAT,
+            ZCL_DET_P_CC_SET, ZCL_DET_P_LOAD_HIGH,
+        };
 
         /* Every observed mask x every assignment of two distinct digests to
          * the observed slots x an empty/non-empty vector per slot. 2^4 masks
@@ -444,11 +452,12 @@ static int test_buckets_partition(void)
                                ZCL_DET_DIGEST_LEN);
                     }
                     struct zcl_det_verdict v;
-                    ASSERT(zcl_det_classify(obs, n, &v));
+                    ASSERT(zcl_det_classify(obs, order, n, &v));
                     /* Exactly one bucket, always. */
                     int in_bucket =
                         (v.klass == ZCL_DET_CLASS_DETERMINISTIC) +
                         (v.klass == ZCL_DET_CLASS_NONDETERMINISTIC) +
+                        (v.klass == ZCL_DET_CLASS_TIMING_SENSITIVE) +
                         (v.klass == ZCL_DET_CLASS_UNKNOWN);
                     ASSERT_EQ(in_bucket, 1);
                     /* UNKNOWN always carries a reason; the others never do. */
@@ -456,11 +465,24 @@ static int test_buckets_partition(void)
                         ASSERT(v.reason != ZCL_DET_UNKNOWN_NONE);
                     else
                         ASSERT_EQ((int)v.reason, (int)ZCL_DET_UNKNOWN_NONE);
-                    /* Only NONDETERMINISTIC names a splitting perturbation. */
-                    if (v.klass == ZCL_DET_CLASS_NONDETERMINISTIC)
+                    /* Exactly the two varying verdicts name a cause. */
+                    const bool varies =
+                        (v.klass == ZCL_DET_CLASS_NONDETERMINISTIC ||
+                         v.klass == ZCL_DET_CLASS_TIMING_SENSITIVE);
+                    if (varies)
                         ASSERT(v.split_mask != 0);
                     else
                         ASSERT_EQ(v.split_mask, 0u);
+                    /* TIMING_SENSITIVE is earned ONLY when scheduling is the
+                     * entire explanation. If any non-scheduling slot split,
+                     * the verdict must be the stronger one. */
+                    if (v.klass == ZCL_DET_CLASS_TIMING_SENSITIVE) {
+                        for (size_t i = 1; i < n; i++) {
+                            if (!(v.split_mask & ((uint32_t)1u << i))) continue;
+                            ASSERT_EQ((int)zcl_det_perturbation_class(order[i]),
+                                      (int)ZCL_DET_PC_SCHEDULING);
+                        }
+                    }
                     zcl_det_partition_add(&part, &v);
                     cases++;
                 }
@@ -469,10 +491,12 @@ static int test_buckets_partition(void)
         ASSERT_EQ(cases, (size_t)4096);
         ASSERT_EQ(part.total, cases);
         ASSERT(zcl_det_partition_is_exact(&part));
-        /* All three buckets are actually reachable, or the partition would be
-         * trivially exact for the wrong reason. */
+        /* All four buckets are actually reachable, or the partition would be
+         * trivially exact for the wrong reason. TIMING_SENSITIVE especially:
+         * a rule that never fires would make the separation a comment. */
         ASSERT(part.deterministic > 0);
         ASSERT(part.nondeterministic > 0);
+        ASSERT(part.timing_sensitive > 0);
         ASSERT(part.unknown_not_run > 0);
         ASSERT(part.unknown_partial > 0);
         ASSERT(part.unknown_no_vector > 0);
@@ -487,9 +511,12 @@ static int test_unknown_is_never_folded(void)
     TEST("classification: an unmeasured group is UNKNOWN, never DETERMINISTIC") {
         struct zcl_det_observation obs[3];
         struct zcl_det_verdict v;
+        const enum zcl_det_perturbation ord[3] = {
+            ZCL_DET_P_BASE, ZCL_DET_P_BASE_REPEAT, ZCL_DET_P_CC_SET,
+        };
 
         memset(obs, 0, sizeof(obs));
-        ASSERT(zcl_det_classify(obs, 3, &v));
+        ASSERT(zcl_det_classify(obs, ord, 3, &v));
         ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_UNKNOWN);
         ASSERT_EQ((int)v.reason, (int)ZCL_DET_UNKNOWN_NOT_RUN);
 
@@ -497,7 +524,7 @@ static int test_unknown_is_never_folded(void)
          * named and counted, not quietly called clean. */
         memset(obs, 0, sizeof(obs));
         for (size_t i = 0; i < 3; i++) obs[i].observed = true;
-        ASSERT(zcl_det_classify(obs, 3, &v));
+        ASSERT(zcl_det_classify(obs, ord, 3, &v));
         ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_UNKNOWN);
         ASSERT_EQ((int)v.reason, (int)ZCL_DET_UNKNOWN_NO_VECTOR);
 
@@ -505,14 +532,127 @@ static int test_unknown_is_never_folded(void)
         memset(obs, 0, sizeof(obs));
         obs[0].observed = true; obs[0].check_count = 2;
         obs[2].observed = true; obs[2].check_count = 2;
-        ASSERT(zcl_det_classify(obs, 3, &v));
+        ASSERT(zcl_det_classify(obs, ord, 3, &v));
         ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_UNKNOWN);
         ASSERT_EQ((int)v.reason, (int)ZCL_DET_UNKNOWN_PARTIAL);
 
         /* Malformed calls are refused rather than answered. */
-        ASSERT(!zcl_det_classify(NULL, 3, &v));
-        ASSERT(!zcl_det_classify(obs, 0, &v));
-        ASSERT(!zcl_det_classify(obs, 33, &v));
+        ASSERT(!zcl_det_classify(NULL, ord, 3, &v));
+        ASSERT(!zcl_det_classify(obs, NULL, 3, &v));
+        ASSERT(!zcl_det_classify(obs, ord, 0, &v));
+        ASSERT(!zcl_det_classify(obs, ord, 33, &v));
+
+        /* Slot 0 must be BASE. Every split is stated as "differs from slot
+         * 0", and if slot 0 is not the reference run that sentence is a
+         * different claim, so this is refused rather than answered. */
+        const enum zcl_det_perturbation bad[3] = {
+            ZCL_DET_P_CC_SET, ZCL_DET_P_BASE, ZCL_DET_P_BASE_REPEAT,
+        };
+        ASSERT(!zcl_det_classify(obs, bad, 3, &v));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── 4b. TIMING_SENSITIVE is separated, not folded ────────────────────────
+ *
+ * The rule this pins down is the eligibility rule for carrying a receipt: a
+ * group that only moves under load produces a different verdict vector on a
+ * busier machine, so an honest re-runner REFUTES a receipt that was never
+ * wrong. That population has to be visible on its own or the refutations look
+ * like fraud. */
+static int test_timing_sensitive_is_separated(void)
+{
+    int failures = 0;
+    TEST("classification: load-only splits are TIMING_SENSITIVE, not NONDETERMINISTIC") {
+        /* BASE, BASE_REPEAT, CC_SET, JOBS_LOW, LOAD_HIGH */
+        const enum zcl_det_perturbation ord[5] = {
+            ZCL_DET_P_BASE, ZCL_DET_P_BASE_REPEAT, ZCL_DET_P_CC_SET,
+            ZCL_DET_P_JOBS_LOW, ZCL_DET_P_LOAD_HIGH,
+        };
+        struct zcl_det_observation obs[5];
+        struct zcl_det_verdict v;
+
+        /* Helper shape: everything observed, everything asserting, all
+         * digests equal to BASE unless a slot is named below. */
+        #define RESET_ALL_EQUAL()                                      \
+            do {                                                       \
+                memset(obs, 0, sizeof(obs));                           \
+                for (size_t i = 0; i < 5; i++) {                       \
+                    obs[i].observed = true;                            \
+                    obs[i].check_count = 7;                            \
+                    memset(obs[i].digest, 0x11, ZCL_DET_DIGEST_LEN);   \
+                }                                                      \
+            } while (0)
+
+        /* Nothing moved. */
+        RESET_ALL_EQUAL();
+        ASSERT(zcl_det_classify(obs, ord, 5, &v));
+        ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_DETERMINISTIC);
+        ASSERT_EQ(v.split_mask, 0u);
+
+        /* Only LOAD_HIGH moved: settled logic, clock-graded assertion. */
+        RESET_ALL_EQUAL();
+        memset(obs[4].digest, 0x22, ZCL_DET_DIGEST_LEN);
+        ASSERT(zcl_det_classify(obs, ord, 5, &v));
+        ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_TIMING_SENSITIVE);
+        ASSERT_EQ(v.split_mask, 1u << 4);
+
+        /* Both scheduling profiles moved: still scheduling alone. */
+        RESET_ALL_EQUAL();
+        memset(obs[3].digest, 0x22, ZCL_DET_DIGEST_LEN);
+        memset(obs[4].digest, 0x33, ZCL_DET_DIGEST_LEN);
+        ASSERT(zcl_det_classify(obs, ord, 5, &v));
+        ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_TIMING_SENSITIVE);
+
+        /* A plain re-run moved: internal, and no scheduling excuse. */
+        RESET_ALL_EQUAL();
+        memset(obs[1].digest, 0x22, ZCL_DET_DIGEST_LEN);
+        ASSERT(zcl_det_classify(obs, ord, 5, &v));
+        ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_NONDETERMINISTIC);
+
+        /* The environment moved: internal. */
+        RESET_ALL_EQUAL();
+        memset(obs[2].digest, 0x22, ZCL_DET_DIGEST_LEN);
+        ASSERT(zcl_det_classify(obs, ord, 5, &v));
+        ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_NONDETERMINISTIC);
+
+        /* THE ASYMMETRY. Scheduling AND something else both split. The weaker
+         * TIMING_SENSITIVE verdict is an excuse ("your box was busy"), and a
+         * group that also moves on a plain re-run has not earned it. One
+         * non-scheduling slot outvotes any number of scheduling ones. */
+        RESET_ALL_EQUAL();
+        memset(obs[1].digest, 0x22, ZCL_DET_DIGEST_LEN);
+        memset(obs[3].digest, 0x33, ZCL_DET_DIGEST_LEN);
+        memset(obs[4].digest, 0x44, ZCL_DET_DIGEST_LEN);
+        ASSERT(zcl_det_classify(obs, ord, 5, &v));
+        ASSERT_EQ((int)v.klass, (int)ZCL_DET_CLASS_NONDETERMINISTIC);
+        /* and the scheduling slots are still named in the cause */
+        ASSERT(v.split_mask & (1u << 3));
+        ASSERT(v.split_mask & (1u << 4));
+
+        /* The two classes are distinct values with distinct names, so a
+         * report cannot print one and mean the other. */
+        ASSERT(ZCL_DET_CLASS_TIMING_SENSITIVE != ZCL_DET_CLASS_NONDETERMINISTIC);
+        ASSERT(strcmp(zcl_det_class_name(ZCL_DET_CLASS_TIMING_SENSITIVE),
+                      "TIMING_SENSITIVE") == 0);
+
+        /* And the vocabulary itself: exactly the two scheduling profiles are
+         * SCHEDULING, or the rule above would quietly change meaning. */
+        ASSERT_EQ((int)zcl_det_perturbation_class(ZCL_DET_P_JOBS_LOW),
+                  (int)ZCL_DET_PC_SCHEDULING);
+        ASSERT_EQ((int)zcl_det_perturbation_class(ZCL_DET_P_LOAD_HIGH),
+                  (int)ZCL_DET_PC_SCHEDULING);
+        ASSERT_EQ((int)zcl_det_perturbation_class(ZCL_DET_P_BASE_REPEAT),
+                  (int)ZCL_DET_PC_REPEAT);
+        ASSERT_EQ((int)zcl_det_perturbation_class(ZCL_DET_P_BASE),
+                  (int)ZCL_DET_PC_REFERENCE);
+        for (int i = 0; i < ZCL_DET_P__COUNT; i++) {
+            enum zcl_det_perturbation p = (enum zcl_det_perturbation)i;
+            if (p == ZCL_DET_P_JOBS_LOW || p == ZCL_DET_P_LOAD_HIGH) continue;
+            ASSERT(zcl_det_perturbation_class(p) != ZCL_DET_PC_SCHEDULING);
+        }
+        #undef RESET_ALL_EQUAL
         PASS();
     } _test_next:;
     return failures;
@@ -556,8 +696,11 @@ static int test_end_to_end_env_sensitivity(void)
         (void)unsetenv("ZCL_DET_FIXTURE_CC");
 
         struct zcl_det_verdict v_nd, v_ok;
-        ASSERT(zcl_det_classify(nd, 3, &v_nd));
-        ASSERT(zcl_det_classify(ok, 3, &v_ok));
+        const enum zcl_det_perturbation e2e[3] = {
+            ZCL_DET_P_BASE, ZCL_DET_P_CC_SET, ZCL_DET_P_CC_UNSET,
+        };
+        ASSERT(zcl_det_classify(nd, e2e, 3, &v_nd));
+        ASSERT(zcl_det_classify(ok, e2e, 3, &v_ok));
 
         /* CAUGHT: slot 1 had CC set and asserted one more check. */
         ASSERT_EQ((int)v_nd.klass, (int)ZCL_DET_CLASS_NONDETERMINISTIC);
@@ -723,6 +866,29 @@ static int test_receipt_rejects(void)
         ASSERT(zcl_det_receipt_encode(&causeless, bad, sizeof(bad), &len));
         ASSERT(!zcl_det_receipt_decode(bad, len, &back));
 
+        /* TIMING_SENSITIVE is a real verdict and obeys the same rule in both
+         * directions: it must name a cause, and it round-trips when it does.
+         * A verdict the encoding refuses to carry could not be reported. */
+        struct zcl_det_receipt ts_causeless = r;
+        ts_causeless.verdict = ZCL_DET_CLASS_TIMING_SENSITIVE;
+        ts_causeless.split_mask = 0;
+        ASSERT(zcl_det_receipt_encode(&ts_causeless, bad, sizeof(bad), &len));
+        ASSERT(!zcl_det_receipt_decode(bad, len, &back));
+
+        struct zcl_det_receipt ts_ok = r;
+        ts_ok.verdict = ZCL_DET_CLASS_TIMING_SENSITIVE;
+        ts_ok.split_mask = 1u << ZCL_DET_P_LOAD_HIGH;
+        ASSERT(zcl_det_receipt_encode(&ts_ok, bad, sizeof(bad), &len));
+        ASSERT(zcl_det_receipt_decode(bad, len, &back));
+        ASSERT_EQ((int)back.verdict, (int)ZCL_DET_CLASS_TIMING_SENSITIVE);
+        ASSERT_EQ(back.split_mask, 1u << ZCL_DET_P_LOAD_HIGH);
+
+        /* 5 is one past the widened range and must still be refused, so the
+         * range check tracks the enum rather than being left permanently open. */
+        memcpy(bad, wire, ZCL_DET_RECEIPT_SIZE);
+        bad[198] = 5;
+        ASSERT(!zcl_det_receipt_decode(bad, ZCL_DET_RECEIPT_SIZE, &back));
+
         /* An UNKNOWN record with no reason, and a measured record carrying
          * one, are both self-contradictory. */
         struct zcl_det_receipt reasonless = r;
@@ -791,6 +957,50 @@ static int test_receipt_verification(void)
         fresh.reason = ZCL_DET_UNKNOWN_NOT_RUN;
         ASSERT_EQ((int)zcl_det_receipt_check(&claim, &fresh, why, sizeof(why)),
                   (int)ZCL_DET_INDETERMINATE);
+
+        /* A DIFFERENCE THAT IS ALREADY EXPLAINED IS NOT EVIDENCE.
+         *
+         * This is the case the whole TIMING_SENSITIVE bucket exists for. The
+         * group is known to answer differently when the machine's load
+         * differs; load is a property of the moment, so neither side's
+         * environment class can pin it. An honest node re-running on a busier
+         * box therefore computes a different vector — and if that came back
+         * REFUTED, the network would manufacture an accusation against a
+         * producer who did nothing wrong and could offer nothing in reply.
+         * Reserve REFUTED for a disagreement about something reproducible. */
+        fresh = claim;
+        fresh.verdict = ZCL_DET_CLASS_TIMING_SENSITIVE;
+        fresh.split_mask = 1u << ZCL_DET_P_LOAD_HIGH;
+        fresh.vector[0] ^= 0xFF;
+        ASSERT_EQ((int)zcl_det_receipt_check(&claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+
+        /* Symmetric: it holds whichever side carries the verdict. */
+        struct zcl_det_receipt ts_claim = claim;
+        ts_claim.verdict = ZCL_DET_CLASS_TIMING_SENSITIVE;
+        ts_claim.split_mask = 1u << ZCL_DET_P_JOBS_LOW;
+        fresh = ts_claim;
+        fresh.vector[0] ^= 0xFF;
+        ASSERT_EQ((int)zcl_det_receipt_check(&ts_claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_INDETERMINATE);
+
+        /* But two TIMING_SENSITIVE runs that DID agree still corroborate —
+         * the rule above softens a disagreement, it does not discard an
+         * agreement. */
+        fresh = ts_claim;
+        ASSERT_EQ((int)zcl_det_receipt_check(&ts_claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_CORROBORATED);
+
+        /* And the softening is SPECIFIC to that verdict: a plain
+         * NONDETERMINISTIC disagreement is still a refutation, or the rule
+         * would have quietly disabled refutation altogether. */
+        struct zcl_det_receipt nd_claim = claim;
+        nd_claim.verdict = ZCL_DET_CLASS_NONDETERMINISTIC;
+        nd_claim.split_mask = 1u << ZCL_DET_P_CC_SET;
+        fresh = nd_claim;
+        fresh.vector[0] ^= 0xFF;
+        ASSERT_EQ((int)zcl_det_receipt_check(&nd_claim, &fresh, why, sizeof(why)),
+                  (int)ZCL_DET_REFUTED);
 
         /* Different groups are not comparable at all. */
         fresh = claim;
@@ -869,6 +1079,7 @@ int test_determinism(void)
            test_parser_ignores_chatter() +
            test_header_parser() +
            test_buckets_partition() +
+           test_timing_sensitive_is_separated() +
            test_unknown_is_never_folded() +
            test_end_to_end_env_sensitivity() +
            test_receipt_roundtrip() +

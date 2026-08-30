@@ -397,39 +397,3 @@ bool zcl_det_transcript_scan(FILE *in, zcl_det_group_sink sink, void *ctx,
     return true;
 }
 
-/* ── hex ──────────────────────────────────────────────────────────────────*/
-
-void zcl_det_hex(const uint8_t *bytes, size_t len, char *out, size_t out_cap)
-{
-    static const char k_digits[] = "0123456789abcdef";
-    if (!out || out_cap == 0) return;
-    out[0] = '\0';
-    if (!bytes) return;
-    if (out_cap < len * 2 + 1) return;
-    for (size_t i = 0; i < len; i++) {
-        out[i * 2]     = k_digits[(bytes[i] >> 4) & 0x0F];
-        out[i * 2 + 1] = k_digits[bytes[i] & 0x0F];
-    }
-    out[len * 2] = '\0';
-}
-
-static int hex_nibble(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-bool zcl_det_unhex(const char *hex, uint8_t *out, size_t out_len)
-{
-    if (!hex || !out) return false;
-    if (strnlen(hex, out_len * 2 + 1) != out_len * 2) return false;
-    for (size_t i = 0; i < out_len; i++) {
-        int hi = hex_nibble(hex[i * 2]);
-        int lo = hex_nibble(hex[i * 2 + 1]);
-        if (hi < 0 || lo < 0) return false;
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return true;
-}

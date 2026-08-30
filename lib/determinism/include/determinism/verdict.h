@@ -167,7 +167,5 @@ bool zcl_det_parse_group_header(const char *line, char *out_group,
                                 size_t out_cap,
                                 enum zcl_det_group_status *out_status);
 
-void zcl_det_hex(const uint8_t *bytes, size_t len, char *out, size_t out_cap);
-bool zcl_det_unhex(const char *hex, uint8_t *out, size_t out_len);
 
 #endif /* ZCL_DETERMINISM_VERDICT_H */

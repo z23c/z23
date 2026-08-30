@@ -15,6 +15,7 @@ const char *zcl_det_class_name(enum zcl_det_class klass)
     case ZCL_DET_CLASS_DETERMINISTIC: return "DETERMINISTIC";
     case ZCL_DET_CLASS_NONDETERMINISTIC: return "NONDETERMINISTIC";
     case ZCL_DET_CLASS_UNKNOWN: return "UNKNOWN";
+    case ZCL_DET_CLASS_TIMING_SENSITIVE: return "TIMING_SENSITIVE";
     }
     return "INVALID";
 }
@@ -30,12 +31,20 @@ const char *zcl_det_unknown_reason_name(enum zcl_det_unknown_reason reason)
     return "invalid";
 }
 
-bool zcl_det_classify(const struct zcl_det_observation *obs, size_t n,
+bool zcl_det_classify(const struct zcl_det_observation *obs,
+                      const enum zcl_det_perturbation *order, size_t n,
                       struct zcl_det_verdict *out)
 {
-    if (!obs || !out) LOG_FAIL("determinism", "null observations or verdict");
+    if (!obs || !order || !out)
+        LOG_FAIL("determinism", "null observations, order or verdict");
     if (n == 0 || n > 32)
         LOG_FAIL("determinism", "perturbation count %zu out of range 1..32", n);
+    /* Slot 0 is the reference. Refuse rather than compare against whatever
+     * happens to be first: every split below is "differs from slot 0", and if
+     * slot 0 is not BASE that sentence means something else. */
+    if (order[0] != ZCL_DET_P_BASE)
+        LOG_FAIL("determinism", "slot 0 must be BASE, got %s",
+                 zcl_det_perturbation_name(order[0]));
 
     memset(out, 0, sizeof(*out));
 
@@ -78,17 +87,43 @@ bool zcl_det_classify(const struct zcl_det_observation *obs, size_t n,
      * a different SET of assertions, which is exactly a split. The digest of
      * an empty vector is well defined (the domain tag plus a zero count), so
      * the comparison below already covers that case with no special path. */
-    out->check_count = obs[ZCL_DET_P_BASE].check_count;
+    out->check_count = obs[0].check_count;
 
     uint32_t split = 0;
     for (size_t i = 1; i < n; i++) {
-        if (memcmp(obs[i].digest, obs[ZCL_DET_P_BASE].digest,
-                   ZCL_DET_DIGEST_LEN) != 0)
+        if (memcmp(obs[i].digest, obs[0].digest, ZCL_DET_DIGEST_LEN) != 0)
             split |= (uint32_t)1u << i;
     }
     out->split_mask = split;
-    out->klass = split ? ZCL_DET_CLASS_NONDETERMINISTIC
-                       : ZCL_DET_CLASS_DETERMINISTIC;
+
+    if (split == 0) {
+        out->klass = ZCL_DET_CLASS_DETERMINISTIC;
+        return true;
+    }
+
+    /* Which bucket the split earns depends on WHAT split it.
+     *
+     * The rule is deliberately asymmetric: a single non-scheduling
+     * perturbation in the split is enough to make the whole verdict
+     * NONDETERMINISTIC, no matter how many scheduling perturbations also
+     * split. TIMING_SENSITIVE is the WEAKER claim — it says "the logic is
+     * fine, the grading rule is a clock" — and it is only earned when
+     * scheduling is the entire explanation. A group that also moves on a
+     * plain re-run has not earned that excuse.
+     *
+     * A REFERENCE-class perturbation appearing at a slot other than 0 means
+     * the caller measured BASE twice, which is a repeat run, so it counts as
+     * the strong claim too. */
+    bool non_scheduling = false;
+    for (size_t i = 1; i < n; i++) {
+        if (!(split & ((uint32_t)1u << i))) continue;
+        if (zcl_det_perturbation_class(order[i]) != ZCL_DET_PC_SCHEDULING) {
+            non_scheduling = true;
+            break;
+        }
+    }
+    out->klass = non_scheduling ? ZCL_DET_CLASS_NONDETERMINISTIC
+                                : ZCL_DET_CLASS_TIMING_SENSITIVE;
     return true;
 }
 
@@ -121,6 +156,7 @@ void zcl_det_partition_add(struct zcl_det_partition *p,
     switch (v->klass) {
     case ZCL_DET_CLASS_DETERMINISTIC:    p->deterministic++; return;
     case ZCL_DET_CLASS_NONDETERMINISTIC: p->nondeterministic++; return;
+    case ZCL_DET_CLASS_TIMING_SENSITIVE: p->timing_sensitive++; return;
     case ZCL_DET_CLASS_UNKNOWN:
         switch (v->reason) {
         case ZCL_DET_UNKNOWN_NOT_RUN:    p->unknown_not_run++; return;
@@ -135,7 +171,7 @@ void zcl_det_partition_add(struct zcl_det_partition *p,
 bool zcl_det_partition_is_exact(const struct zcl_det_partition *p)
 {
     if (!p) return false;
-    size_t sum = p->deterministic + p->nondeterministic + p->unknown_not_run +
-                 p->unknown_no_vector + p->unknown_partial;
+    size_t sum = p->deterministic + p->nondeterministic + p->timing_sensitive +
+                 p->unknown_not_run + p->unknown_no_vector + p->unknown_partial;
     return sum == p->total;
 }

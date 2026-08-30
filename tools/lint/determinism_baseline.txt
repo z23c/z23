@@ -1,20 +1,40 @@
 # Determinism ratchet baseline — registered test groups whose verdict vector
 # is NOT bitwise identical across every applied perturbation.
 #
-# One row per group: "<group> <PERTURBATION>[+<PERTURBATION>...]". The
-# perturbation names the CAUSE. "It varies" is not a finding; "it varies when
-# CC is set" is. A row with no cause is rejected by
+# One row per group: "<group> <CLASS> <PERTURBATION>[+<PERTURBATION>...]".
+#
+# CLASS says WHICH kind of unreproducibility was measured. They are not the
+# same defect and must not share a bucket:
+#
+#   NONDETERMINISTIC  the vector changed on a plain re-run at identical load,
+#                     or changed with the environment. The test's own logic
+#                     does not settle on one answer.
+#   TIMING_SENSITIVE  the vector changed ONLY when the machine's load changed.
+#                     The test's logic is settled; it is grading a real
+#                     assertion against a wall clock.
+#
+# The distinction is the whole point of the record. A node that re-runs a
+# TIMING_SENSITIVE group on a busier box gets a different verdict vector and
+# REFUTES a receipt that was never wrong — a false accusation manufactured by
+# scheduling. Neither class may carry a receipt, but only NONDETERMINISTIC is
+# a bug in the test's logic.
+#
+# The perturbation names the CAUSE. "It varies" is not a finding; "it varies
+# when CC is set" is. A row with no cause is rejected by
 # tools/lint/check_determinism_ratchet.sh.
 #
 # THIS LIST MAY ONLY SHRINK. A group appearing here means a test stopped
 # giving the same answer twice, and the fix is the test, not this file. There
 # is no flag, allowlist or environment variable that admits a new row.
 #
-# PROVISIONAL — this is a THREE-perturbation result (BASE, BASE_REPEAT,
-# CC_SET) over 1013 dispatched groups. The full eight-perturbation sweep is
-# still running and will replace this file wholesale; it can only ADD rows,
-# never remove them, so this is the floor and not the answer. Do not treat
-# this count as the measured non-reproducing set until the header says so.
+# PROVISIONAL — MEASURED UNDER CONTAMINATION, DO NOT CITE.
+# These four rows are a THREE-perturbation result (BASE, BASE_REPEAT, CC_SET),
+# and every one of them comes from BASE_REPEAT — the probe that is supposed to
+# be unstable against NOTHING. That run was not clean: an unrelated `make lint`
+# ran on the same box inside the BASE_REPEAT window (587 s of work took 847 s),
+# so load, not the tests, is the leading candidate for all four. They are
+# carried here as a FLOOR, not as findings. The full sweep replaces this file
+# wholesale and is expected to shrink it.
 #
 # Re-measure with:
 #   make determinism-scan
@@ -25,7 +45,7 @@
 # wall clock and is never part of `make lint`.
 #
 # count: 4
-test_snapshot_serve_loopback BASE_REPEAT+CC_SET
-test_hw_bench BASE_REPEAT
-test_parallel_range_fold BASE_REPEAT+CC_SET
-test_telemetry_sync_compat BASE_REPEAT+CC_SET
+test_snapshot_serve_loopback NONDETERMINISTIC BASE_REPEAT+CC_SET
+test_hw_bench NONDETERMINISTIC BASE_REPEAT
+test_parallel_range_fold NONDETERMINISTIC BASE_REPEAT+CC_SET
+test_telemetry_sync_compat NONDETERMINISTIC BASE_REPEAT+CC_SET
