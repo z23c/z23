@@ -40,6 +40,7 @@
 #include "models/wallet_identity.h"
 #include "platform/time_compat.h"
 #include "rpc/server.h"
+#include "services/legacy_balance_observer.h"
 #include "services/vault_read.h"
 #include "wallet/wallet.h"
 
@@ -58,6 +59,30 @@
  * substituted; the store is genuine. */
 static struct rpc_table g_vd_rpc_table;
 static bool g_vd_rpc_ready;
+
+static bool vd_legacy_balance_rpc(const char *body_json,
+                                  uint32_t timeout_ms,
+                                  char **out_resp,
+                                  char *err, size_t err_sz)
+{
+    static const char response[] =
+        "HTTP/1.1 200 OK\r\n\r\n"
+        "{\"result\":{\"transparent\":\"0.00999662\","
+        "\"private\":\"0.01970000\",\"total\":\"0.02969662\"},"
+        "\"error\":null}";
+    bool request_ok = body_json &&
+        strstr(body_json, "\"method\":\"z_gettotalbalance\"") &&
+        timeout_ms == LEGACY_BALANCE_OBSERVER_TIMEOUT_MS;
+    if (!request_ok) {
+        if (err && err_sz)
+            (void)snprintf(err, err_sz, "unexpected legacy RPC request");
+        return false;
+    }
+    *out_resp = strdup(response);
+    if (!*out_resp && err && err_sz)
+        (void)snprintf(err, err_sz, "fixture allocation failed");
+    return *out_resp != NULL;
+}
 
 static char *vd_rpc_hook(const char *method, const char *params_json)
 {
@@ -420,9 +445,13 @@ int test_vault_dispatch(void)
                 json_init(&input);
                 json_set_object(&input);
                 struct zcl_command_reply reply;
+                legacy_balance_observer_set_test_call(vd_legacy_balance_rpc);
                 vd_run_list(list, &owner, &input, &reply);
+                legacy_balance_observer_set_test_call(NULL);
                 const struct json_value *classes =
                     json_get(&reply.data, "classes");
+                const struct json_value *legacy =
+                    json_get(&reply.data, "legacy_wallet");
                 const struct json_value *first =
                     classes && classes->type == JSON_ARR &&
                             json_size(classes) > 0
@@ -448,6 +477,17 @@ int test_vault_dispatch(void)
                 VD_CHECK("vault.list no false unavailable blocker",
                          strcmp(reply.error.code,
                                 "VAULT_READ_UNAVAILABLE") != 0);
+                VD_CHECK("vault.list keeps legacy custody separate and exact",
+                         legacy &&
+                         json_get_bool(json_get(legacy, "complete")) &&
+                         strcmp(json_get_str(json_get(legacy, "aggregation")),
+                                "excluded") == 0 &&
+                         json_get_int(json_get(legacy,
+                                               "transparent_zat")) == 999662 &&
+                         json_get_int(json_get(legacy,
+                                               "shielded_zat")) == 1970000 &&
+                         json_get_int(json_get(legacy,
+                                               "total_zat")) == 2969662);
                 zcl_command_reply_free(&reply);
                 json_free(&input);
             }

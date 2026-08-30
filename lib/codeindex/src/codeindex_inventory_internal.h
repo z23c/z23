@@ -23,7 +23,7 @@ struct inv_path {
 struct inv_file {
     char path[256];
     char group[64];
-    char purpose[160];
+    char purpose[CI_FILE_PURPOSE_MAX];
     bool is_header;
     bool is_public_header;
     bool is_test;

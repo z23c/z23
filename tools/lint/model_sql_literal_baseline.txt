@@ -1,0 +1,86 @@
+# check_model_sql_literals baseline — model files that still carry a hand-written
+# SQL statement instead of building it with
+# app/models/include/models/query_builder.h.
+#
+# One path per line. THE LIST MAY ONLY SHRINK. Adding a row is
+# not a fix; a row whose file no longer carries literal SQL must
+# be DELETED, and this gate fails until it is.
+#
+# Fix a row by converting the model:
+#   1. add its table + columns to
+#      app/models/include/models/query_schema.def
+#   2. replace each statement with qb_select/qb_insert/
+#      qb_update/qb_delete + qb_where_*/qb_value_*/qb_set_*
+#   3. run its existing test group, then delete the line here.
+#
+# Migration and schema files are ordinary rows: a query builder
+# cannot express CREATE TABLE, so those are expected to stay.
+#
+# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_model_sql_literals.sh
+app/models/include/models/activerecord.h
+app/models/include/models/db_txn.h
+app/models/include/models/explorer_index.h
+app/models/include/models/schema_migration.h
+app/models/include/models/utxo.h
+app/models/src/agent_session.c
+app/models/src/block.c
+app/models/src/block_projection.c
+app/models/src/blog_post.c
+app/models/src/build_fabric.c
+app/models/src/build_proof_event.c
+app/models/src/contact.c
+app/models/src/database.c
+app/models/src/database_migrate.c
+app/models/src/database_migrate_features.c
+app/models/src/database_migrate_features_v30_up.c
+app/models/src/database_migrate_features_v49_up.c
+app/models/src/database_migrate_features_v67_up.c
+app/models/src/database_modes.c
+app/models/src/database_schema.c
+app/models/src/database_schema_preflight.c
+app/models/src/explorer_index.c
+app/models/src/explorer_index_zslp.c
+app/models/src/file_offer.c
+app/models/src/file_service.c
+app/models/src/header_admit_log.c
+app/models/src/hodl_wave.c
+app/models/src/market_content.c
+app/models/src/market_download.c
+app/models/src/market_payment_claim.c
+app/models/src/market_seller_key.c
+app/models/src/mempool_entry.c
+app/models/src/mesh_capability_grant.c
+app/models/src/mesh_machine_observation.c
+app/models/src/mesh_pairing.c
+app/models/src/onion_directory.c
+app/models/src/principal.c
+app/models/src/sapling_note.c
+app/models/src/schema_migration.c
+app/models/src/shop_fulfill.c
+app/models/src/shop_want.c
+app/models/src/store_blob.c
+app/models/src/store.c
+app/models/src/store_purchase.c
+app/models/src/swap_contract.c
+app/models/src/tx_index.c
+app/models/src/utxo.c
+app/models/src/vault_intent.c
+app/models/src/wallet_backup_receipt.c
+app/models/src/wallet_identity.c
+app/models/src/wallet_key.c
+app/models/src/wallet_label.c
+app/models/src/wallet_metadata_crypto.c
+app/models/src/wallet_tx.c
+app/models/src/wallet_tx_reads.c
+app/models/src/wallet_tx_reorg.c
+app/models/src/yardsale_plan.c
+app/models/src/zanc.c
+app/models/src/zcode_lane.c
+app/models/src/zcode_science.c
+app/models/src/zid_domain.c
+app/models/src/zid_identity.c
+app/models/src/zmsg.c
+app/models/src/znam.c
+app/models/src/zslp.c
+app/models/src/zslp_ledger.c
+app/models/src/zslp_validity.c

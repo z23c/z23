@@ -1,6 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: hermetic preparation, capsule, and detached sealing proofs. */
 
+/* realpath() is declared by <stdlib.h> only under
+ * __USE_MISC/__USE_XOPEN_EXTENDED, which the build's
+ * -D_POSIX_C_SOURCE=200809L does not set. Without this the declaration
+ * arrives only via the glibc fortify inline that -D_FORTIFY_SOURCE=2 pulls in
+ * at -O1 and above, so the file compiles by accident of optimisation and
+ * fails at -O0. Matches lib/util/src/hw_profile.c and 24 other TUs. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"

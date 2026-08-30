@@ -61,6 +61,7 @@ ZCL_TEST_GROUP(accept_to_mempool)
 ZCL_TEST_GROUP(rpc)
 ZCL_TEST_GROUP(sqlite)
 ZCL_TEST_GROUP(activerecord)
+ZCL_TEST_GROUP(activerecord_query_builder)
 ZCL_TEST_GROUP(validation)
 ZCL_TEST_GROUP(sapling_lazy_init)
 ZCL_TEST_GROUP(sapling)
@@ -662,6 +663,14 @@ ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)
 ZCL_TEST_GROUP(metaverse_catalog)
 ZCL_TEST_GROUP(node_character)
+/* A node's character with a birthday, in the fixed 128-byte form it travels
+ * in, and the rule a receiving node applies to it. The assertion the group
+ * exists for is that verify() accepts EXACTLY the self-consistent frames —
+ * driven against an independent oracle over every single-bit mutation — and
+ * that a claimed standing never becomes a believed one: a stranger recomputes
+ * form and chart, refuses any disagreement, and still believes zero energy
+ * however much the sheet claims. */
+ZCL_TEST_GROUP(node_character_wire)
 /* A role-playing character held as content-addressed property, whose six
  * attributes are derived from a birth chart. The assertion the group exists
  * for is that the attribute TOTAL is identical for every character over many

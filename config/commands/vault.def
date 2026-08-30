@@ -23,7 +23,10 @@ ZCL_COMMAND_READY_READ(
     "One row per vault asset class — transparent, shielded, tokens, names, "
     "market, swaps — projected from the vault read model at call time. "
     "Fungible rows carry zatoshi totals, non-fungible rows carry item counts; "
-    "each row names its own `source` and carries `complete`. A class whose "
+    "each row names its own `source` and carries `complete`. A co-located "
+    "legacy zclassicd wallet is reported in a separate `legacy_wallet` "
+    "section with aggregation=excluded; it is never added to canonical Z23 "
+    "custody. A class whose "
     "reader is absent is emitted with status=unavailable and a reason, never "
     "dropped — a missing reader can never read as a zero balance.",
     ZCL_COMMAND_LIST_BUDGET,

@@ -4,6 +4,7 @@
 #include "util/log_macros.h"
 #include "models/onion_announcement.h"
 #include "models/model_text.h"
+#include "models/query_builder.h"
 #include "storage/small_projections.h"
 #include <string.h>
 #include <time.h>
@@ -98,15 +99,16 @@ bool db_onion_announcement_save(struct node_db *ndb,
     AR_BEGIN_SAVE(cbs, "onion_announcement", a,
                   db_onion_announcement_validate);
 
-    if (sqlite3_prepare_v2(ndb->db,
-            "INSERT OR REPLACE INTO onion_announcements "
-            "(onion_address,announced_at,script_hex) VALUES (?,?,?)",
-            -1, &s, NULL) != SQLITE_OK || !s)
-        return false;
+    struct qb q;
+    qb_insert(&q, QB_T_onion_announcements, QB_INSERT_OR_REPLACE);
+    qb_value_text(&q, QB_C_onion_announcements_onion_address,
+                  a->onion_address);
+    qb_value_int(&q, QB_C_onion_announcements_announced_at, a->announced_at);
+    qb_value_text(&q, QB_C_onion_announcements_script_hex, a->script_hex);
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("model", "onion_announcement save refused: %s",
+                 qb_error(&q));
 
-    AR_BIND_TEXT(s, 1, a->onion_address);
-    AR_BIND_INT(s, 2, a->announced_at);
-    AR_BIND_TEXT(s, 3, a->script_hex);
     if (!AR_STEP_DONE(s)) {
         fprintf(stderr, "onion_announcement save failed: %s\n",
                 sqlite3_errmsg(ndb->db));
@@ -120,44 +122,36 @@ bool db_onion_announcement_save(struct node_db *ndb,
 bool db_onion_announcement_exists(struct node_db *ndb,
                                   const char *onion_address)
 {
-    sqlite3_stmt *s = NULL;
-    bool exists = false;
-
     if (!ndb || !ndb->open || !onion_address)
         return false;
 
-    if (sqlite3_prepare_v2(ndb->db,
-            "SELECT 1 FROM onion_announcements WHERE onion_address=?",
-            -1, &s, NULL) != SQLITE_OK || !s)
-        return false;
-
-    AR_BIND_TEXT(s, 1, onion_address);
-    exists = AR_STEP_ROW(s);
-    AR_FINALIZE(s);
-    return exists;
+    struct qb q;
+    qb_select(&q, QB_T_onion_announcements);
+    qb_select_one(&q);
+    qb_where_text(&q, QB_C_onion_announcements_onion_address, QB_EQ,
+                  onion_address);
+    QB_QUERY_EXISTS(ndb, &q, s);
 }
 
 int db_onion_announcement_recent(struct node_db *ndb,
                                  struct db_onion_announcement *out,
                                  size_t max)
 {
-    sqlite3_stmt *s = NULL;
-    int count = 0;
-
     if (!ndb || !ndb->open || !out || max == 0)
         return 0;
-    AR_PREPARE_RET(ndb, s,
-            "SELECT onion_address,announced_at,script_hex "
-            "FROM onion_announcements "
-            "ORDER BY announced_at DESC, onion_address ASC LIMIT ?",
-            0);
 
-    AR_BIND_INT(s, 1, (int)max);
-    AR_LIST_ROWS(s, out, max,
+    struct qb q;
+    qb_select(&q, QB_T_onion_announcements);
+    qb_select_column(&q, QB_C_onion_announcements_onion_address);
+    qb_select_column(&q, QB_C_onion_announcements_announced_at);
+    qb_select_column(&q, QB_C_onion_announcements_script_hex);
+    qb_order_by(&q, QB_C_onion_announcements_announced_at, QB_DESC);
+    qb_order_by(&q, QB_C_onion_announcements_onion_address, QB_ASC);
+    qb_limit(&q, (int64_t)max);
+    QB_QUERY_LIST(ndb, &q, s, out, max,
         AR_READ_STR(s, 0, out[count].onion_address,
                     sizeof(out[count].onion_address));
         out[count].announced_at = AR_COL_INT(s, 1);
-        AR_READ_STR(s, 2, out[count].script_hex, sizeof(out[count].script_hex)));
-    AR_FINALIZE(s);
-    return count;
+        AR_READ_STR(s, 2, out[count].script_hex,
+                    sizeof(out[count].script_hex)));
 }
