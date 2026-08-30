@@ -108,6 +108,11 @@ from a hash, signature, test, or reproduction receipt.
   architecture rules.
 - [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its
   source definitions, not the generated file.
+- [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl) — generated
+  public-header capability map: exposed symbols, verified direct-use counts,
+  registered-test reachability, ranked duplicate candidates, and untested
+  declared invariants. Regenerate it with `make docs-capability-inventory`;
+  never hand-edit it.
 - [`BUILD.md`](BUILD.md) — vendored dependencies, profiles, and reproducibility.
 - [`AI_SAFETY_GATES.md`](AI_SAFETY_GATES.md) — claim and evidence discipline.
 - [`SECURITY_AND_INTEGRITY.md`](SECURITY_AND_INTEGRITY.md) — project security
