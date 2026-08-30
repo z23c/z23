@@ -41,6 +41,16 @@ struct tq_apple_result {
     qos_class_t qos_class;
 };
 
+static void *tq_apple_observe_worker(void *arg)
+{
+    struct tq_apple_result *result = arg;
+    int relative_priority = 0;
+    result->call_ok = true;
+    (void)pthread_get_qos_class_np(pthread_self(), &result->qos_class,
+                                   &relative_priority);
+    return NULL;
+}
+
 static void *tq_apple_worker(void *arg)
 {
     struct tq_apple_result *result = arg;
@@ -61,6 +71,26 @@ static int t_thread_qos_applies_sched_batch_and_ioprio_idle(void)
         ASSERT_EQ(pthread_join(thread, NULL), 0);
         ASSERT(applied.call_ok);
         ASSERT_EQ(applied.qos_class, QOS_CLASS_BACKGROUND);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_thread_qos_background_attr_applies_before_entry(void)
+{
+    int failures = 0;
+    TEST("thread_qos: pthread attribute starts macOS worker at background QoS") {
+        struct tq_apple_result observed = {0};
+        pthread_attr_t attr;
+        pthread_t thread;
+        ASSERT_EQ(pthread_attr_init(&attr), 0);
+        ASSERT(zcl_thread_qos_background_attr(&attr));
+        ASSERT_EQ(pthread_create(&thread, &attr, tq_apple_observe_worker,
+                                 &observed), 0);
+        ASSERT_EQ(pthread_attr_destroy(&attr), 0);
+        ASSERT_EQ(pthread_join(thread, NULL), 0);
+        ASSERT(observed.call_ok);
+        ASSERT_EQ(observed.qos_class, QOS_CLASS_BACKGROUND);
         PASS();
     } _test_next:;
     return failures;
@@ -157,6 +187,19 @@ static int t_thread_qos_applies_sched_batch_and_ioprio_idle(void)
     return failures;
 }
 
+static int t_thread_qos_background_attr_applies_before_entry(void)
+{
+    int failures = 0;
+    TEST("thread_qos: background pthread attribute preserves non-Darwin attrs") {
+        pthread_attr_t attr;
+        ASSERT_EQ(pthread_attr_init(&attr), 0);
+        ASSERT(zcl_thread_qos_background_attr(&attr));
+        ASSERT_EQ(pthread_attr_destroy(&attr), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 #endif
 
 /* Idempotency: calling the helper twice from the same thread must not
@@ -196,6 +239,7 @@ int test_thread_qos(void)
     printf("\n=== thread_qos tests ===\n");
     int failures = 0;
     failures += t_thread_qos_applies_sched_batch_and_ioprio_idle();
+    failures += t_thread_qos_background_attr_applies_before_entry();
     failures += t_thread_qos_idempotent();
     return failures;
 }
