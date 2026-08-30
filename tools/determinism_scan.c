@@ -612,6 +612,48 @@ static int run_classify(const char *in_dir, const char *profile_csv,
         }
     }
 
+    /* ── did the scheduling contrast actually happen? ──────────────────────
+     * The load guard above asks whether the two REFERENCE profiles matched.
+     * This asks the opposite question about the SCHEDULING ones, and it is a
+     * separate failure that the first check cannot see.
+     *
+     * LOAD_HIGH exists to be the busiest profile in the sweep. If an unrelated
+     * job happened to saturate the box during BASE and then finished before
+     * LOAD_HIGH ran, LOAD_HIGH is the QUIETEST profile instead, and the
+     * contrast the TIMING_SENSITIVE verdict rests on never occurred. Nothing
+     * in the digests would look wrong: a genuinely load-sensitive group simply
+     * would not split, and would be reported DETERMINISTIC. A false green, not
+     * a false accusation.
+     *
+     * So when a SCHEDULING profile did not reach a higher load than BASE, the
+     * separation is UNMEASURED and says so. NONDETERMINISTIC rows are
+     * unaffected — they do not depend on the load contrast — so the baseline
+     * is still written, but the run cannot be mistaken for a clean one. */
+    bool sched_ok = true;
+    for (size_t i = 1; i < n; i++) {
+        if (zcl_det_perturbation_class(order[i]) != ZCL_DET_PC_SCHEDULING)
+            continue;
+        if (!loads[0].present || !loads[i].present ||
+            loads[0].start < 0 || loads[i].start < 0) {
+            sched_ok = false;
+            continue;
+        }
+        const long base_peak = loads[0].start > loads[0].end
+                                 ? loads[0].start : loads[0].end;
+        const long this_peak = loads[i].start > loads[i].end
+                                 ? loads[i].start : loads[i].end;
+        if (this_peak <= base_peak) {
+            sched_ok = false;
+            fprintf(stderr,
+                    "determinism_scan: %s peaked at %ld.%02ld, no higher than "
+                    "BASE at %ld.%02ld — the scheduling contrast did not "
+                    "happen\n",
+                    zcl_det_perturbation_name(order[i]),
+                    this_peak / 100, this_peak % 100,
+                    base_peak / 100, base_peak % 100);
+        }
+    }
+
     /* Pass one: count the rows the baseline will carry, so its "# count: N"
      * header is already correct. The gate rejects a header that disagrees with
      * the rows, and a tool that emitted a file its own gate rejects would be a
@@ -709,6 +751,15 @@ static int run_classify(const char *in_dir, const char *profile_csv,
                         "(limit %ld.%02ld)\n",
                     ref_delta / 100, ref_delta % 100,
                     max_load_delta / 100, max_load_delta % 100);
+        if (!sched_ok)
+            fprintf(bl,
+"#\n"
+"# WARNING — THE SCHEDULING CONTRAST DID NOT HAPPEN IN THIS SWEEP.\n"
+"# A SCHEDULING profile did not reach a higher load than BASE, so load\n"
+"# sensitivity was never actually tested. There may be TIMING_SENSITIVE\n"
+"# groups missing from this file, and a group absent from it has NOT been\n"
+"# shown to be load-insensitive. Re-measure before trusting the absence of\n"
+"# a row here as evidence of anything.\n");
         fprintf(bl, "#\n# count: %zu\n", nd_total);
     }
 
@@ -731,6 +782,14 @@ static int run_classify(const char *in_dir, const char *profile_csv,
                load_ok ? "comparable" : "NOT COMPARABLE, results UNCONFIRMED");
 
     const char *tag = load_ok ? "" : " [UNCONFIRMED — load not comparable]";
+    const char *sched_tag =
+        sched_ok ? "" : " [UNMEASURED — the scheduling contrast did not happen]";
+
+    if (!sched_ok)
+        printf("\n  WARNING: a SCHEDULING profile did not reach a higher load\n"
+               "  than BASE, so this sweep did not test load sensitivity at\n"
+               "  all. A group reading DETERMINISTIC below has NOT been shown\n"
+               "  to be insensitive to load — it was simply never loaded.\n");
 
     printf("\nNONDETERMINISTIC — the vector moved on a re-run or with the "
            "environment%s:\n", tag);
@@ -759,8 +818,8 @@ static int run_classify(const char *in_dir, const char *profile_csv,
     /* Its own section, never folded into the one above. A group here has
      * settled logic and a grading rule that reads a clock; re-running it on a
      * busier box refutes a receipt that was never wrong. */
-    printf("\nTIMING_SENSITIVE — the vector moved ONLY when load moved%s:\n",
-           tag);
+    printf("\nTIMING_SENSITIVE — the vector moved ONLY when load moved%s%s:\n",
+           tag, sched_tag);
     for (size_t g = 0; g < k_registry_len; g++) {
         struct zcl_det_verdict v;
         if (!zcl_det_classify(&t.cells[g * n], order, n, &v)) continue;
@@ -816,6 +875,9 @@ static int run_classify(const char *in_dir, const char *profile_csv,
     free(t.cells);
     /* A contaminated sweep is not a result, even when the partition is exact. */
     if (!load_ok) return 4;
+    /* Nor is one whose scheduling contrast never happened — the buckets are
+     * arithmetically fine and the TIMING_SENSITIVE one is uninformed. */
+    if (!sched_ok) return 5;
     return exact ? 0 : 1;
 }
 
