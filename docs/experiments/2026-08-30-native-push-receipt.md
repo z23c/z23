@@ -44,6 +44,22 @@ tracked source set and making the generated fact tool an explicit parent-Make
 prerequisite reduced the same warm gate to 46 milliseconds, with the same
 plant/trip/recover self-test and document comparison.
 
+At `2026-08-30T16:20:23-04:00` (`2026-08-30T20:20:23+00:00`), commit
+`330461e0bd7a2c85c80b2073c5dcc39029afb9d4` removed a second overlapping
+inventory rule that still selected `make_lint_gates`. A regression now requires
+one shared-rule hit, `code_inventory` present, and `make_lint_gates` absent for
+`docs/CAPABILITY_INVENTORY.jsonl`. The exact eight-group proof for the policy
+and regression edit ran eight groups, reused zero, failed zero, and skipped
+zero in 89.1 seconds. The resulting sealed receipt admitted the push.
+
+On the same 16-logical-CPU AMD Ryzen 7 PRO 8840U host with GCC 16.1.1, 1,000
+complete warm hook invocations measured 4,698 microseconds p95, 4,947
+microseconds p99, and 5,178 microseconds maximum. Each invocation performed
+the two bounded Git queries for repository root and ancestry plus native
+receipt/child validation; it launched no compiler, test, lint, Make, Bash, or
+PowerShell process. The bounded PASS output was 43 bytes. A real missing
+receipt refused in 6,985 microseconds with a 307-byte exact wait instruction.
+
 The combined 30-file integration delta selected 50 distinct registered test
 groups. The previous 32-group storage bound refused the complete result as
 `path-group-cap`; the shared impact accumulator now retains 64 distinct path
@@ -131,8 +147,9 @@ same isolated helper set; absence remains a hard failure.
 - Exact receipt admission is comfortably below the 250 millisecond target.
 - Missing evidence fails below the one-second target and does not start proof
   work at push time.
-- The former broad inventory impact route is not responsible for remaining
-  inventory latency.
+- The generated inventory has one impact-rule owner and cannot select the
+  broad lint family; the remaining inventory latency is inside its native
+  freshness and test work.
 - Make startup, repeated generator scanning, and test-runner startup dominate
   the current generated-inventory path. A five-second warm acceptance claim is
   not yet supported by measurement.

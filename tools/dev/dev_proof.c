@@ -11,6 +11,7 @@
 #include "base/serialize_le.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
@@ -36,6 +37,7 @@
 #endif
 
 #define PROOF_MAX_FILES ZCL_DEVLOOP_MAX_FILES
+#define PROOF_MAX_JOBS 16u
 #define PROOF_TIMEOUT_MS 900000
 #define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v1"
 
@@ -1034,6 +1036,14 @@ static bool environment_root(uint8_t out[32])
     return true;
 }
 
+static bool proof_make_jobs_arg(char out[16])
+{
+    uint32_t jobs = platform_logical_cpu_count();
+    if (jobs > PROOF_MAX_JOBS) jobs = PROOF_MAX_JOBS;
+    int written = snprintf(out, 16, "-j%u", jobs);
+    return written > 0 && written < 16;
+}
+
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
                              const struct dev_source_record *expected_source,
@@ -1175,7 +1185,7 @@ static bool test_depfiles_prepare(const struct proof_paths *paths,
 static bool test_helpers_prepare(
     const struct proof_paths *paths, const char *generation,
     const char *runner_source, const struct dev_source_record *expected_source,
-    char runner_target[PATH_MAX], uint8_t helper_root[32],
+    const char *make_jobs, char runner_target[PATH_MAX], uint8_t helper_root[32],
     char *why, size_t why_len)
 {
     char verifier_source[PATH_MAX], verifier_target[PATH_MAX];
@@ -1215,8 +1225,8 @@ static bool test_helpers_prepare(
         return false;
     }
     const char *prerequisite_argv[] = {
-        "make", "--no-print-directory", "zcl-nodectl", "zclassic23-acme",
-        "fbsh", NULL};
+        "make", "--no-print-directory", make_jobs, "zcl-nodectl",
+        "zclassic23-acme", "fbsh", NULL};
     if (run_logged(generation, paths->helper_log, prerequisite_argv,
                    120000) != 0) {
         proof_why(why, why_len, "proof_test_helper_build_failed");
@@ -1401,6 +1411,12 @@ static bool proof_worker(const struct proof_paths *paths,
     struct zcl_dev_proof_dimension *test =
         &receipt.dimensions[ZCL_DEV_PROOF_TEST];
 
+    char make_jobs[16];
+    if (!proof_make_jobs_arg(make_jobs)) {
+        proof_why(why, why_len, "proof_job_count_unavailable");
+        return false;
+    }
+
     generated->selected = inventory_only ? 1 : 0;
     bool compile_selected = !inventory_only && !plan.docs_only;
     compile->selected = compile_selected ? 1 : 0;
@@ -1419,7 +1435,7 @@ static bool proof_worker(const struct proof_paths *paths,
         paths, source_before.cas_root_sha3, receipt.dimensions);
     if (!cycle_reused) {
         if (generated->selected) {
-            const char *argv[] = {"make", "--no-print-directory",
+            const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                   "check-capability-inventory-generated", NULL};
             if (!run_dimension(&execution, ZCL_DEV_PROOF_GENERATED, argv,
                                generated, false, why, why_len))
@@ -1432,7 +1448,7 @@ static bool proof_worker(const struct proof_paths *paths,
             if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
                 !executable_reuse(paths, artifact,
                                   &source_before, compile)) {
-                const char *argv[] = {"make", "--no-print-directory",
+                const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                       "build-only", NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_COMPILE, argv,
                                    compile, false, why, why_len))
@@ -1440,7 +1456,7 @@ static bool proof_worker(const struct proof_paths *paths,
             }
         } else unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
         if (lint->selected) {
-            const char *argv[] = {"make", "--no-print-directory",
+            const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                   "lint-fast", NULL};
             if (!run_dimension(&execution, ZCL_DEV_PROOF_LINT, argv, lint,
                                false, why, why_len))
@@ -1461,7 +1477,7 @@ static bool proof_worker(const struct proof_paths *paths,
             bool runner_reused = test_binary_path(paths, binary) &&
                 test_helpers_prepare(
                     paths, generation, binary, &source_before,
-                    generation_binary, helper_root, why, why_len);
+                    make_jobs, generation_binary, helper_root, why, why_len);
             if (runner_reused) {
                 const char *argv[] = {generation_binary, only, "--cache",
                                       "--activate-proof-contracts", NULL};
@@ -1479,7 +1495,8 @@ static bool proof_worker(const struct proof_paths *paths,
                     return false;
                 }
                 const char *argv[] = {
-                    "make", "--no-print-directory", "t-fast-exact", make_only,
+                    "make", "--no-print-directory", make_jobs,
+                    "t-fast-exact", make_only,
                     "T_FAST_EXACT_ARGS=--cache --activate-proof-contracts",
                     NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv, test,
