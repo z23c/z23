@@ -46,9 +46,11 @@ plant/trip/recover self-test and document comparison.
 
 The combined 30-file integration delta selected 50 distinct registered test
 groups. The previous 32-group storage bound refused the complete result as
-`path-group-cap`; the bounded planner and shared impact accumulator now retain
-64 distinct groups and continue to fail closed beyond that bound. The plan's
-wire renderer remains independently bounded and abridges only presentation.
+`path-group-cap`; the shared impact accumulator now retains 64 distinct path
+groups and the composed planner retains 96 groups so graph-derived additions
+cannot consume the path floor's capacity. Both continue to fail closed beyond
+their bounds. The plan's wire renderer remains independently bounded and
+abridges only presentation.
 
 ## Knowledge gained
 

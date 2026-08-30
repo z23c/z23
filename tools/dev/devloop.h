@@ -15,9 +15,10 @@ extern "C" {
 #define ZCL_DEVLOOP_PATH_MAX 1024
 #define ZCL_DEVLOOP_OUTPUT_MAX 65536
 #define ZCL_DEVLOOP_RESTART_SOURCE_MAX 32
-/* Proof-group set bounds for a plan (mirrors ZCL_AGENT_IMPACT_* so a plan can
- * hold the full path floor plus its symbol-closure additions). */
-#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 64
+/* Proof-group storage covers the measured 64-group path floor plus distinct
+ * semantic/include additions. Each dimension still refuses at its explicit
+ * bound; the rendered command document has an independent byte ceiling. */
+#define ZCL_DEVLOOP_MAX_PLAN_GROUPS 96
 #define ZCL_DEVLOOP_GROUP_MAX 64
 /* Union across every dimension: the path floor plus the closure additions,
  * so a full path set and a full closure set both fit without either evicting
