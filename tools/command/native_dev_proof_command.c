@@ -34,7 +34,8 @@ static const char *proof_optional_text(const struct json_value *input,
 }
 
 static void proof_emit_status(struct zcl_command_reply *reply,
-                              const struct zcl_dev_proof_status *status)
+                              const struct zcl_dev_proof_status *status,
+                              bool add_wait_next)
 {
     (void)json_push_kv_str(&reply->data, "schema",
                            "zcl.dev_proof_status.v1");
@@ -64,7 +65,7 @@ static void proof_emit_status(struct zcl_command_reply *reply,
     int n = snprintf(input, sizeof(input),
                      "{\"local_commit\":\"%s\",\"remote_base\":\"%s\"}",
                      status->local_commit, status->remote_base);
-    if (n > 0 && (size_t)n < sizeof(input) &&
+    if (add_wait_next && n > 0 && (size_t)n < sizeof(input) &&
         status->state != ZCL_DEV_PROOF_STATE_PASSED)
         (void)zcl_command_reply_add_next(
             reply, "dev.proof.wait", input,
@@ -75,7 +76,7 @@ static void proof_fail(struct zcl_command_reply *reply,
                        const struct zcl_dev_proof_status *status,
                        const char *code, const char *phase)
 {
-    proof_emit_status(reply, status);
+    proof_emit_status(reply, status, false);
     zcl_command_reply_fail(
         reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
         code, phase, status->state == ZCL_DEV_PROOF_STATE_RUNNING, false,
@@ -99,7 +100,7 @@ void zcl_native_handle_dev_proof_status(
             proof_source_root(request),
             proof_optional_text(request->input, "local_commit"),
             proof_optional_text(request->input, "remote_base"), &status)) {
-        proof_emit_status(reply, &status);
+        proof_emit_status(reply, &status, true);
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "PROOF_STATUS_INVALID", "resolve", false, false,
@@ -107,7 +108,7 @@ void zcl_native_handle_dev_proof_status(
             status.detail);
         return;
     }
-    proof_emit_status(reply, &status);
+    proof_emit_status(reply, &status, true);
 #endif
 }
 
@@ -130,14 +131,14 @@ void zcl_native_handle_dev_proof_ensure(
             proof_source_root(request),
             proof_optional_text(request->input, "local_commit"),
             proof_optional_text(request->input, "remote_base"), &status)) {
-        proof_emit_status(reply, &status);
+        proof_emit_status(reply, &status, true);
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
             "PROOF_ENSURE_FAILED", "schedule", false, false,
             "could not schedule exact background verification", status.detail);
         return;
     }
-    proof_emit_status(reply, &status);
+    proof_emit_status(reply, &status, true);
 #endif
 }
 
@@ -166,7 +167,7 @@ void zcl_native_handle_dev_proof_wait(
         status.state = ZCL_DEV_PROOF_STATE_INVALID;
         (void)snprintf(status.detail, sizeof(status.detail), "%s",
                        "timeout_ms_must_be_1_through_900000");
-        proof_emit_status(reply, &status);
+        proof_emit_status(reply, &status, false);
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "PROOF_WAIT_INVALID", "normalize", false, false,
@@ -180,6 +181,6 @@ void zcl_native_handle_dev_proof_wait(
                    status.state == ZCL_DEV_PROOF_STATE_FAILED ? "prove" : "wait");
         return;
     }
-    proof_emit_status(reply, &status);
+    proof_emit_status(reply, &status, false);
 #endif
 }

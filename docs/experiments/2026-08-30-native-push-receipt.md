@@ -53,6 +53,14 @@ retains a measured 512-group envelope while continuing to fail closed beyond
 it. The plan's wire renderer remains independently bounded and abridges only
 presentation.
 
+The same closure exceeded the broker's unrelated 4,096-byte test-selector
+buffer after planning completed. The selector bound is now derived from the
+maximum selection count and canonical registered-group width. A failed
+`dev.proof.wait` also exposed a self-referential `next` action that the command
+registry correctly refused to serialize; wait replies no longer prescribe the
+same active wait leaf, and a 900,000 millisecond proof timeout is accepted only
+for this command. The resulting typed failure serialized in 87 microseconds.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.

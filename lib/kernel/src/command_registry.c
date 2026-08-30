@@ -1367,8 +1367,11 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
             /* Same low-rank mirror for ZCL_PRESENT_MODEL_ACTIONS_MAX. */
             type_ok = value->type == JSON_ARR && json_size(value) <= 4u;
         } else if (strcmp(key, "timeout_ms") == 0) {
+            int64_t timeout_max = spec->path &&
+                    strcmp(spec->path, "dev.proof.wait") == 0
+                ? 900000 : 300000;
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
-                      json_get_int(value) <= 300000;
+                      json_get_int(value) <= timeout_max;
         } else if (strcmp(key, "heartbeat_ms") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 100 &&
                       json_get_int(value) <= 60000;

@@ -944,7 +944,9 @@ static bool proof_worker(const struct proof_paths *paths,
     bool compile_selected = !inventory_only && !plan.docs_only;
     compile->selected = compile_selected ? 1 : 0;
     lint->selected = inventory_only ? 0 : 1;
-    char groups[4096] = {0}, only[sizeof(groups) + 8];
+    char groups[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
+                (ZCL_TEST_GROUP_FULL_MAX + 1)] = {0};
+    char only[sizeof(groups) + 8];
     uint32_t test_count = 0;
     if (!build_test_selector(&plan, inventory_only, groups, sizeof(groups),
                              &test_count)) {
