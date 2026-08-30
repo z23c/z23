@@ -9643,6 +9643,19 @@ check-byte-order-codec-single:
 	@./tools/lint/check_byte_order_codec_single.sh --selftest
 	@./tools/lint/check_byte_order_codec_single.sh
 
+# Gate — a non-static function is DEFINED once per translation unit. The
+# only way one name has two bodies in a compiling .c file is two disjoint
+# preprocessor arms (platform, feature flag, test-vs-release, ...), and each
+# such pair is a place two bodies can silently drift apart under one name —
+# exactly what happened to three pure ROM wire-parsers duplicated inside
+# lib/net/src/file_service.c's `#if defined(_WIN32)` split (RATCHET at
+# <path>\t<function> granularity; tools/lint/arm_symbol_single_baseline.txt
+# may only shrink).
+check-arm-symbol-single:
+	@echo "══ LINT: one definition per non-static function per TU ══"
+	@./tools/lint/check_arm_symbol_single.sh --selftest
+	@./tools/lint/check_arm_symbol_single.sh
+
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"
 	@tools/scripts/check_coins_lookup_nullcheck.sh
@@ -11335,6 +11348,7 @@ LINT_GATES := \
     check-git-hooks-installed \
     check-malloc \
     check-byte-order-codec-single \
+    check-arm-symbol-single \
     check-zcode-package-registry \
     check-zcode-package-standalone \
     check-package-anatomy \
