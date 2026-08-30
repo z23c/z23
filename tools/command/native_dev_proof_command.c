@@ -141,13 +141,32 @@ static void proof_ensure(
         return;
     }
     struct zcl_command_reply watcher;
+    struct json_value watcher_input;
+    json_init(&watcher_input);
+    json_set_object(&watcher_input);
+    bool watcher_input_ready =
+        json_push_kv_str(&watcher_input, "root", proof_source_root(request)) &&
+        json_push_kv_str(&watcher_input, "mode", "verify");
+    if (!watcher_input_ready) {
+        json_free(&watcher_input);
+        proof_emit_status(reply, &status, false);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "PROOF_QUEUE_INPUT_FAILED", "schedule", true, false,
+            "the resident watcher request could not be allocated",
+            "retry proof enqueue");
+        return;
+    }
+    struct zcl_command_request watcher_request = *request;
+    watcher_request.input = &watcher_input;
     zcl_command_reply_init(&watcher, "zcl.dev_loop_status.v1");
-    zcl_native_handle_dev_loop_start_async(request, &watcher);
+    zcl_native_handle_dev_loop_start_async(&watcher_request, &watcher);
     const struct json_value *created = json_get(&watcher.data, "created");
     bool queue_ready = watcher.exit_code == ZCL_COMMAND_EXIT_OK &&
         ((created && created->type == JSON_BOOL && json_get_bool(created)) ||
          zcl_native_dev_loop_proof_queue_ready(proof_source_root(request)));
     zcl_command_reply_free(&watcher);
+    json_free(&watcher_input);
     if (!queue_ready) {
         proof_emit_status(reply, &status, false);
         zcl_command_reply_fail(
