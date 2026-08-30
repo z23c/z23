@@ -1,12 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Extensive focused unit tests for split_host_port() (lib/net/src/netbase.c)
- * — a pure string state machine with no I/O, no clock, no allocation.
+ * — a pure string state machine with no I/O, no clock, no allocation —
+ * and for net_name_is_onion(), which this binary links and must actually
+ * call. A function nothing calls cannot fail a test.
  *
  * test_net.c exercises only two shallow paths (bare IPv4:port and
  * bracketed [::1]:port). This file pins the richer interior state
  * machine: bracket detection, multi-colon (bare IPv6) detection, the
- * ParseInt32 port-range guard, and the host_out truncation contract.
+ * ParseInt32 port-range guard (including the exclusive 0x10000 fence
+ * that a far-past overflow like 99999 cannot pin), and the host_out
+ * truncation contract.
  *
  * Read straight off lib/net/src/netbase.c (as of this writing):
  *
@@ -107,12 +111,48 @@ int test_netbase_split_host_port(void)
      * ParseInt32("99999", &n) SUCCEEDS (n=99999 fits int32), but the
      * range guard `n < 0x10000` rejects it, so the whole branch that
      * would set *port_out and truncate `len` never runs. The ENTIRE
-     * original string (colon and digits included) becomes the host. */
+     * original string (colon and digits included) becomes the host.
+     * This pins "far past the top" — it does NOT pin 65536, because
+     * both `n < 0x10000` and `n <= 0x10000` reject 99999. */
     memset(host, 0xAA, sizeof(host));
     port = PORT_SENTINEL;
     split_host_port("host:99999", host, sizeof(host), &port);
     NB_CHECK("port overflow (99999) falls through to whole-string host",
              strcmp(host, "host:99999") == 0 && port == PORT_SENTINEL);
+
+    /* Exclusive-upper fence, accepted side: 65535 is 0xFFFF, the last
+     * value for which `n < 0x10000` is true. A mutant that changes `<`
+     * to `<=` still accepts 65535, so this case alone cannot kill it;
+     * it pins that the last legal port is still written and that the
+     * host is truncated rather than left as "host:65535". The table
+     * row of the same input is the happy-path copy; this copy sits
+     * next to 65536 so the two sides of the fence are one pair. */
+    memset(host, 0xAA, sizeof(host));
+    port = PORT_SENTINEL;
+    split_host_port("host:65535", host, sizeof(host), &port);
+    NB_CHECK("port 65535 (0xFFFF) accepted, host truncated to exclude port",
+             strcmp(host, "host") == 0 && port == 65535);
+
+    /* Exclusive-upper fence, rejected side: 65536 is 0x10000, the
+     * first value `n < 0x10000` refuses and `n <= 0x10000` would
+     * accept. No other near-bound input distinguishes those two
+     * predicates. If this were accepted, host would become "host"
+     * and port 65536. */
+    memset(host, 0xAA, sizeof(host));
+    port = PORT_SENTINEL;
+    split_host_port("host:65536", host, sizeof(host), &port);
+    NB_CHECK("port 65536 (0x10000) rejected, whole string becomes host",
+             strcmp(host, "host:65536") == 0 && port == PORT_SENTINEL);
+
+    /* Same exclusive bound on the bracketed path, which still takes
+     * the ParseInt32 range check even though the host contains colons.
+     * If 65536 were accepted here, brackets would strip and port would
+     * be written (host "::1", port 65536). */
+    memset(host, 0xAA, sizeof(host));
+    port = PORT_SENTINEL;
+    split_host_port("[::1]:65536", host, sizeof(host), &port);
+    NB_CHECK("bracketed port 65536 rejected, no strip and no port write",
+             strcmp(host, "[::1]:65536") == 0 && port == PORT_SENTINEL);
 
     /* ── adversarial: port value == 0 is rejected (n>0 required) ───── */
     memset(host, 0xAA, sizeof(host));
@@ -272,6 +312,86 @@ int test_netbase_split_host_port(void)
         NB_CHECK("bracketed host with port: both host and port correct",
                  strcmp(h, "::1") == 0 && p == 443);
     }
+
+    /* Empty suffix after the colon: ParseInt32("") fails its length-0
+     * precheck, so the range guard is never reached. Pins that a
+     * trailing colon is not a port of 0 (already refused by n>0) and
+     * is not silently ignored either — the colon stays in the host. */
+    memset(host, 0xAA, sizeof(host));
+    port = PORT_SENTINEL;
+    split_host_port("host:", host, sizeof(host), &port);
+    NB_CHECK("empty port suffix rejected, whole string becomes host",
+             strcmp(host, "host:") == 0 && port == PORT_SENTINEL);
+
+    /* ── net_name_is_onion: suffix detection, not v3 validation ──────
+     * Header contract: true when the host part of "host[:port]" carries
+     * the ".onion" suffix. Detection only — no parsing, no resolution.
+     * Implementation (netbase.c): NULL is false; split_host_port first;
+     * strip at most one trailing '.'; require len > 6; case-fold A-Z
+     * on the last 6 bytes and compare to ".onion". These cases exist
+     * so mutations of a linked-but-uncalled function can go red. */
+
+    /* Pointer guard: the first line is `if (!name) return false`.
+     * Chosen because the function accepts NULL and a missing guard
+     * would dereference. Distinct from the empty-string path. */
+    NB_CHECK("net_name_is_onion NULL is false",
+             !net_name_is_onion(NULL));
+
+    /* Empty string: split_host_port copies "", len==0, 0 <= 6, false.
+     * Pins the length bound rather than the pointer guard. */
+    NB_CHECK("net_name_is_onion empty string is false",
+             !net_name_is_onion(""));
+
+    /* A name that is not an onion. Suffix mismatch. Chosen so a
+     * mutant that hardcodes `return true` after the length check
+     * goes red; example.com is the ordinary hostname this helper
+     * must never claim. */
+    NB_CHECK("net_name_is_onion example.com is false",
+             !net_name_is_onion("example.com"));
+
+    /* Real onion-shaped name: a v3-length local part plus ".onion".
+     * Detection does not require a valid checksum; this pins the
+     * true-return path a linked-but-uncalled function never hit. */
+    NB_CHECK("net_name_is_onion v3-shaped name is true",
+             net_name_is_onion(
+                 "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopq.onion"));
+
+    /* Shortest name that can carry the suffix: one local byte +
+     * ".onion" is len==7, which is the first length `len <= 6`
+     * does not refuse. Pins the true side of the length bound. */
+    NB_CHECK("net_name_is_onion x.onion (shortest true) is true",
+             net_name_is_onion("x.onion"));
+
+    /* Exact suffix with no local part: len==6, `len <= 6` is true,
+     * so this is false. Changing `<=` to `<` would accept ".onion"
+     * because the tail then matches. Distinct from the empty string
+     * (len==0) and from x.onion (len==7). */
+    NB_CHECK("net_name_is_onion exact suffix .onion is false",
+             !net_name_is_onion(".onion"));
+
+    /* Header says the HOST part carries the suffix: split_host_port
+     * must run first, or "x.onion:9050" would fail the tail compare
+     * against the port digits. */
+    NB_CHECK("net_name_is_onion host:port uses the host part",
+             net_name_is_onion("x.onion:9050"));
+
+    /* One trailing root dot is stripped before the suffix test
+     * (`host[len-1] == '.'` then len--). Chosen because DNS names
+     * may carry that dot and a detector that required a raw suffix
+     * would miss them. Only one dot is stripped. */
+    NB_CHECK("net_name_is_onion trailing root dot still matches",
+             net_name_is_onion("x.onion."));
+
+    /* A-Z on the suffix is folded to a-z; the compared literal is
+     * lowercase ".onion". Chosen so a case-sensitive compare of a
+     * wire-uppercase name would go red. */
+    NB_CHECK("net_name_is_onion uppercase suffix still matches",
+             net_name_is_onion("X.ONION"));
+
+    /* Suffix must be at the end of the (stripped) host, not in the
+     * middle. Pins that a contains-".onion" mutant is not enough. */
+    NB_CHECK("net_name_is_onion .onion in the middle is false",
+             !net_name_is_onion("x.onion.com"));
 
     return failures;
 }
