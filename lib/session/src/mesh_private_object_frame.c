@@ -3,6 +3,7 @@
 
 #include "session/mesh_private_object_frame.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 
 #include <string.h>
@@ -29,21 +30,11 @@ const char *mesh_private_object_frame_error_string(
     return "unknown";
 }
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes)
-        return false;
-    for (size_t i = 0; i < count; i++)
-        any |= bytes[i];
-    return any != 0;
-}
-
 static bool ids_valid(const uint8_t transfer_id[32],
                       const uint8_t offer_request_id[32])
 {
-    return bytes_nonzero(transfer_id, 32) &&
-           bytes_nonzero(offer_request_id, 32);
+    return zcl_bytes_any_set(transfer_id, 32) &&
+           zcl_bytes_any_set(offer_request_id, 32);
 }
 
 static enum mesh_private_object_frame_error frame_begin(

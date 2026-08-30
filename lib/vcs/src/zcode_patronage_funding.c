@@ -2,6 +2,7 @@
  * Purpose: canonical fully simulated ZC23 patronage funding receipts. */
 #include "vcs/zcode_patronage_funding.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
@@ -13,13 +14,6 @@
 
 static const uint8_t funding_magic[8] =
     {'Z','C','P','F','U','N','\r','\n'};
-
-static bool funding_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= value[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_patronage_funding_error_string(
     enum vcs_zcode_patronage_funding_error error)
@@ -48,7 +42,7 @@ vcs_zcode_patronage_simulation_plan_root(
     if (out) memset(out, 0, 32);
     if (!patronage_intent_root || !out)
         return VCS_ZCODE_PATRONAGE_FUNDING_NULL;
-    if (!funding_nonzero(patronage_intent_root))
+    if (!zcl_bytes_any_set(patronage_intent_root, 32))
         return VCS_ZCODE_PATRONAGE_FUNDING_ROOT;
     if (amount_atoms == 0) return VCS_ZCODE_PATRONAGE_FUNDING_AMOUNT;
     uint8_t amount[8]; zcl_write_u64_le(amount, amount_atoms);
@@ -78,7 +72,7 @@ static enum vcs_zcode_patronage_funding_error funding_fields(
         funding->funder_contributor_binding_root, funding->funder_zid_pubkey,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!funding_nonzero(roots[i]))
+        if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_PATRONAGE_FUNDING_ROOT;
     if (funding->amount_atoms == 0)
         return VCS_ZCODE_PATRONAGE_FUNDING_AMOUNT;
@@ -90,7 +84,7 @@ static enum vcs_zcode_patronage_funding_error funding_fields(
             expected) != VCS_ZCODE_PATRONAGE_FUNDING_OK ||
         memcmp(expected, funding->simulation_plan_root, 32) != 0)
         return VCS_ZCODE_PATRONAGE_FUNDING_ROOT;
-    if (signed_wire && !funding_nonzero(funding->signature))
+    if (signed_wire && !zcl_bytes_any_set(funding->signature, 32))
         return VCS_ZCODE_PATRONAGE_FUNDING_SIGNATURE;
     return VCS_ZCODE_PATRONAGE_FUNDING_OK;
 }

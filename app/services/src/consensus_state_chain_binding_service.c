@@ -6,6 +6,7 @@
 
 #include "services/consensus_state_chain_binding_service.h"
 
+#include "base/bytes.h"
 #include "chain/chain.h"
 #include "config/consensus_state_snapshot_install.h"
 #include "core/arith_uint256.h"
@@ -50,14 +51,6 @@ static const char *target_lane_name(enum consensus_state_target_lane lane)
     return NULL;
 }
 
-static bool bytes_nonzero(const uint8_t bytes[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++)
-        any |= bytes[i];
-    return any != 0;
-}
-
 static void digest_u32(struct sha3_256_ctx *ctx, uint32_t value)
 {
     uint8_t encoded[4];
@@ -85,11 +78,11 @@ static bool manifest_is_complete_and_self_bound(
         (manifest->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
          manifest->validation_profile !=
              CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !bytes_nonzero(manifest->block_hash) ||
-        !bytes_nonzero(manifest->sapling_frontier_root) ||
-        !bytes_nonzero(manifest->proof_manifest_digest) ||
-        !bytes_nonzero(manifest->source_digest) ||
-        !bytes_nonzero(manifest->artifact_digest))
+        !zcl_bytes_any_set(manifest->block_hash, 32) ||
+        !zcl_bytes_any_set(manifest->sapling_frontier_root, 32) ||
+        !zcl_bytes_any_set(manifest->proof_manifest_digest, 32) ||
+        !zcl_bytes_any_set(manifest->source_digest, 32) ||
+        !zcl_bytes_any_set(manifest->artifact_digest, 32))
         return false;
     uint8_t computed[32];
     consensus_state_bundle_artifact_digest(manifest, computed);
@@ -110,8 +103,8 @@ bool consensus_state_chain_binding_uses_checkpoint_authority(
      * bundle that disagrees with the compiled keystone gets no substitution
      * and falls through to the pure target-derived gate (which refuses). */
     return cp->available &&
-        bytes_nonzero(cp->block_hash) &&
-        bytes_nonzero(cp->sapling_frontier_root) &&
+        zcl_bytes_any_set(cp->block_hash, 32) &&
+        zcl_bytes_any_set(cp->sapling_frontier_root, 32) &&
         manifest->height == cp->height &&
         (int64_t)manifest->sapling_frontier_height ==
             (int64_t)cp->sapling_frontier_height &&
@@ -303,7 +296,7 @@ struct zcl_result consensus_state_chain_binding_decide(
         if (!observation->selected_sapling_source_known ||
             observation->selected_sapling_source_height !=
                 manifest->sapling_frontier_height ||
-            !bytes_nonzero(observation->selected_sapling_source_hash))
+            !zcl_bytes_any_set(observation->selected_sapling_source_hash, 32))
             return ZCL_ERR(-7, "chain binding: Sapling source height unavailable");
         if (!observation->selected_sapling_source_valid_scripts ||
             !observation->selected_sapling_source_failure_free ||
@@ -327,8 +320,8 @@ struct zcl_result consensus_state_chain_binding_decide(
      * checkpoint content. */
     if (!observation->selected_header_known ||
         observation->selected_header_height < manifest->height ||
-        !bytes_nonzero(observation->selected_header_hash) ||
-        !bytes_nonzero(observation->selected_header_chainwork) ||
+        !zcl_bytes_any_set(observation->selected_header_hash, 32) ||
+        !zcl_bytes_any_set(observation->selected_header_chainwork, 32) ||
         !observation->selected_header_valid_tree ||
         !observation->selected_header_failure_free)
         return ZCL_ERR(-11, "chain binding: selected-header work/validity missing");

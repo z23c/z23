@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
 #include "session/mesh_private_object_frame.h"
@@ -13,15 +14,6 @@ static void frame_fill(uint8_t *out, size_t len, uint8_t first)
 {
     for (size_t i = 0; i < len; i++)
         out[i] = (uint8_t)(first + i * 17u);
-}
-
-static bool frame_all_zero(const void *bytes, size_t count)
-{
-    const uint8_t *p = bytes;
-    uint8_t any = 0;
-    for (size_t i = 0; i < count; i++)
-        any |= p[i];
-    return any == 0;
 }
 
 static bool frame_make_offer(struct mesh_private_object_offer_v1 *offer)
@@ -104,7 +96,7 @@ static int frame_offer_roundtrip(void)
         ASSERT_EQ(mesh_private_object_frame_v1_decode(
                       &view, wire, wire_len),
                   MESH_PRIVATE_OBJECT_FRAME_PAYLOAD);
-        ASSERT(frame_all_zero(&view, sizeof(view)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&view, sizeof(view)));
     } TEST_END
     return failures;
 }
@@ -210,7 +202,7 @@ static int frame_refusals(void)
         ASSERT_EQ(mesh_private_object_frame_v1_decode(
                       &view, wire, wire_len - 1),
                   MESH_PRIVATE_OBJECT_FRAME_SIZE);
-        ASSERT(frame_all_zero(&view, sizeof(view)));
+        ASSERT(zcl_bytes_all_zero((const uint8_t *)&view, sizeof(view)));
         ASSERT_EQ(mesh_private_object_frame_v1_decode(
                       &view, wire, wire_len + 1),
                   MESH_PRIVATE_OBJECT_FRAME_SIZE);

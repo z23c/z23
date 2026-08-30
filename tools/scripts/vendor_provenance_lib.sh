@@ -9,11 +9,19 @@
 VP_SCHEMA="zclassic23.vendor-provenance.v1"
 
 vp_sha256_file() {
-    sha256sum "$1" | awk '{print $1}'
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
 }
 
 vp_sha256_text() {
-    printf '%s' "$1" | sha256sum | awk '{print $1}'
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | awk '{print $1}'
+    else
+        printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    fi
 }
 
 # Version text and target triples do not identify a compiler wrapper: its

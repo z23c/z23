@@ -3,6 +3,7 @@
 
 #include "services/shop_fulfill_evidence_service.h"
 
+#include "base/bytes.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "crypto/ed25519.h"
@@ -25,14 +26,6 @@
 #define SFE_TAG "shop.fulfill.evidence"
 #define SFE_PATH_MAX 4400u
 #define SFE_HASH_BUFFER 65536u
-
-static bool sfe_nonzero(const uint8_t value[32])
-{
-    uint8_t any = 0;
-    if (!value) return false;
-    for (size_t i = 0; i < 32; i++) any |= value[i];
-    return any != 0;
-}
 
 static bool sfe_same_snapshot(
     const struct platform_positioned_file_snapshot *a,
@@ -153,8 +146,8 @@ struct zcl_result shop_fulfill_artifact_verify(
     const uint8_t artifact_root[32], struct shop_fulfill_artifact_fact *out)
 {
     if (out) memset(out, 0, sizeof(*out));
-    if (!datadir || !datadir[0] || !sfe_nonzero(content_root) ||
-        !sfe_nonzero(artifact_root) || !out)
+    if (!datadir || !datadir[0] || !zcl_bytes_any_set(content_root, 32) ||
+        !zcl_bytes_any_set(artifact_root, 32) || !out)
         return artifact_fail(out, "invalid-artifact-proof-input");
 
     char content_hex[65], artifact_hex[65], manifest_path[SFE_PATH_MAX];
@@ -297,7 +290,7 @@ struct zcl_result shop_fulfill_receipt_verify(
 {
     if (out) memset(out, 0, sizeof(*out));
     if (!ndb || !ndb->open || !datadir || !datadir[0] || !receipt_id ||
-        !out || !sfe_nonzero(receipt_id) || now_unix <= 0)
+        !out || !zcl_bytes_any_set(receipt_id, 32) || now_unix <= 0)
         return receipt_fail(out, "invalid-receipt-proof-input");
     char receipt_hex[65];
     zcl_hex_encode(receipt_id, 32, receipt_hex);

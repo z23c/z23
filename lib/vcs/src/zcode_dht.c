@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_dht.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 
@@ -11,14 +12,6 @@
 
 static const uint8_t contacts_magic[8] =
     {'Z','C','D','H','T','C',0x0D,0x0A};
-
-static bool nonzero(const uint8_t *p, size_t n)
-{
-    uint8_t any = 0;
-    if (!p) return false;
-    for (size_t i = 0; i < n; i++) any |= p[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_dht_error_string(enum vcs_zcode_dht_error e)
 {
@@ -69,8 +62,8 @@ bool vcs_zcode_dht_node_id(uint8_t out[32], const uint8_t genesis[32],
 {
     if (!out) return false;
     memset(out, 0, 32);
-    if (!nonzero(genesis, 32) || !nonzero(master, 32) ||
-        !nonzero(beacon, 32)) return false;
+    if (!zcl_bytes_any_set(genesis, 32) || !zcl_bytes_any_set(master, 32) ||
+        !zcl_bytes_any_set(beacon, 32)) return false;
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)VCS_ZCODE_DHT_NODE_ID_DOMAIN,
@@ -129,7 +122,7 @@ bool vcs_zcode_dht_table_init(struct vcs_zcode_dht_table *t,
 {
     if (!t) return false;
     memset(t, 0, sizeof(*t));
-    if (!nonzero(self, 32)) return false;
+    if (!zcl_bytes_any_set(self, 32)) return false;
     memcpy(t->self_id, self, 32);
     return true;
 }
@@ -196,9 +189,9 @@ static bool identity_binding_same(const struct vcs_zcode_dht_contact *a,
 
 static bool contact_keys_valid(const struct vcs_zcode_dht_contact *c)
 {
-    return c && nonzero(c->node_id, 32) && nonzero(c->master_pubkey, 32) &&
-        nonzero(c->online_pubkey, 32) && nonzero(c->noise_static_pubkey, 32) &&
-        nonzero(c->beacon_hash, 32) && c->beacon_height > 0;
+    return c && zcl_bytes_any_set(c->node_id, 32) && zcl_bytes_any_set(c->master_pubkey, 32) &&
+        zcl_bytes_any_set(c->online_pubkey, 32) && zcl_bytes_any_set(c->noise_static_pubkey, 32) &&
+        zcl_bytes_any_set(c->beacon_hash, 32) && c->beacon_height > 0;
 }
 
 static struct vcs_zcode_dht_pending *pending_for(
@@ -244,7 +237,7 @@ enum vcs_zcode_dht_add_result vcs_zcode_dht_table_add_contact(
     struct vcs_zcode_dht_table *t, const struct vcs_zcode_dht_contact *c,
     int64_t now)
 {
-    if (!t || !c || !nonzero(c->node_id, 32))
+    if (!t || !c || !zcl_bytes_any_set(c->node_id, 32))
         return VCS_ZCODE_DHT_ADD_REJECTED_ZERO_ID;
     if (!contact_keys_valid(c)) return VCS_ZCODE_DHT_ADD_REJECTED_ZERO_KEY;
     if (c->last_success_unix < 0)
@@ -580,7 +573,7 @@ enum vcs_zcode_dht_error vcs_zcode_dht_contacts_parse(
     size_t off = VCS_ZCODE_DHT_CONTACTS_HEADER_BYTES;
     for (uint32_t i = 0; i < count; i++) {
         const uint8_t *node_id = wire + off; off += 32;
-        if (!nonzero(node_id, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
+        if (!zcl_bytes_any_set(node_id, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
         if (i && memcmp(out[i - 1].node_id, node_id, 32) >= 0)
             return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
         struct vcs_zcode_dht_delegation d;

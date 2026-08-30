@@ -16,6 +16,7 @@
  * at-rest representation. */
 
 #include "models/zswap_ad.h"
+#include "base/bytes.h"
 #include "models/query_builder.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
@@ -35,13 +36,6 @@ static const enum qb_column k_zswap_ad_cols[] = {
 #define K_ZSWAP_AD_NCOLS \
     (sizeof(k_zswap_ad_cols) / sizeof(k_zswap_ad_cols[0]))
 
-static bool bytes_nonzero_local(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
-
 bool db_zswap_ad_validate(const struct zswap_yardsale_ad *ad,
                           struct ar_errors *errors)
 {
@@ -52,13 +46,13 @@ bool db_zswap_ad_validate(const struct zswap_yardsale_ad *ad,
     }
 
     validates_custom(errors,
-        bytes_nonzero_local(ad->quote_root, 32),
+        zcl_bytes_any_set(ad->quote_root, 32),
         "quote_root", "can't be all zero");
     validates_custom(errors,
-        bytes_nonzero_local(ad->quote.seller_pubkey, 32),
+        zcl_bytes_any_set(ad->quote.seller_pubkey, 32),
         "seller_pubkey", "can't be all zero");
     validates_custom(errors,
-        bytes_nonzero_local(ad->quote.token_id, 32),
+        zcl_bytes_any_set(ad->quote.token_id, 32),
         "token_id", "can't be all zero");
     validates_positive(errors, ad, quote.token_amount);
     validates_positive(errors, ad, quote.zcl_amount);

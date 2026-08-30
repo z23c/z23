@@ -109,13 +109,6 @@ void consensus_state_snapshot_export_test_set_after_staging_create_hook(
 }
 #endif
 
-bool consensus_export_digest_nonzero(const uint8_t digest[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= digest[i];
-    return any != 0;
-}
-
 void consensus_export_fill_success(
     const struct consensus_state_bundle_manifest *manifest,
     struct consensus_state_export_result *result)

@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_work_context.h"
 
+#include "base/bytes.h"
 #include "vcs_priv.h"
 
 #include "codec/cursor.h"
@@ -71,13 +72,6 @@ vcs_zcode_work_context_import_authority(
         context->candidate_authority, context->candidate_authority_len);
 }
 
-static bool context_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static enum vcs_zcode_work_context_result context_validate(
     const struct vcs_zcode_work_context_v1 *context, int64_t now_unix)
 {
@@ -88,7 +82,7 @@ static enum vcs_zcode_work_context_result context_validate(
          (context->task_authority_len == 0)))
         return VCS_ZCODE_WORK_CONTEXT_NULL;
     size_t profile_len = strnlen(context->profile, sizeof(context->profile));
-    if (!context_nonzero(context->source_sha256, 32) || profile_len == 0 ||
+    if (!zcl_bytes_any_set(context->source_sha256, 32) || profile_len == 0 ||
         profile_len > VCS_ZCODE_WORK_CONTEXT_PROFILE_MAX)
         return VCS_ZCODE_WORK_CONTEXT_SHAPE;
     if (context->fixed_input_len == 0 ||

@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_dev.h"
 
+#include "base/bytes.h"
 #include "codec/cursor.h"
 #include "vcs/signed_evidence.h"
 
@@ -13,22 +14,6 @@ static const uint8_t candidate_magic[8] = {'Z','C','C','A','N','D','\r','\n'};
 static const uint8_t policy_magic[8] = {'Z','C','P','O','L','Y','\r','\n'};
 static const uint8_t review_magic[8] = {'Z','C','R','E','V','W','\r','\n'};
 static const uint8_t receipt_magic[8] = {'Z','C','W','R','C','P','\r','\n'};
-
-static bool nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < len; i++) any |= bytes[i];
-    return any != 0;
-}
 
 const char *vcs_zcode_dev_error_string(enum vcs_zcode_dev_error error)
 {
@@ -71,7 +56,7 @@ enum vcs_zcode_dev_error vcs_zcode_task_validate(
         task->model_policy_root, task->goal_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!nonzero(roots[i])) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
     const uint32_t required = VCS_ZCODE_TASK_CAP_SOURCE_READ |
                               VCS_ZCODE_TASK_CAP_CANDIDATE_WRITE;
     if ((task->capabilities & required) != required ||
@@ -147,8 +132,8 @@ enum vcs_zcode_dev_error vcs_zcode_candidate_validate(
         candidate->adapter_policy_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!nonzero(roots[i])) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
-    if (!nonzero(candidate->author_pubkey))
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+    if (!zcl_bytes_any_set(candidate->author_pubkey, 32))
         return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
     if (candidate->sequence == 0 || candidate->created_unix <= 0)
         return VCS_ZCODE_DEV_ERR_LIMIT;
@@ -167,8 +152,8 @@ enum vcs_zcode_dev_error vcs_zcode_review_validate(
         review->findings_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!nonzero(roots[i])) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
-    if (!nonzero(review->reviewer_pubkey))
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+    if (!zcl_bytes_any_set(review->reviewer_pubkey, 32))
         return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
     if (review->verdict < VCS_ZCODE_REVIEW_APPROVE ||
         review->verdict > VCS_ZCODE_REVIEW_REJECT)
@@ -191,8 +176,8 @@ static enum vcs_zcode_dev_error receipt_fields(
         receipt->lease_id, receipt->evidence_root, receipt->confinement_root,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!nonzero(roots[i])) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
-    if (!nonzero(receipt->signer_pubkey))
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
+    if (!zcl_bytes_any_set(receipt->signer_pubkey, 32))
         return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
     if (receipt->work_kind < VCS_ZCODE_WORK_PROPOSE ||
         receipt->work_kind > VCS_ZCODE_WORK_DIAGNOSE)
@@ -205,7 +190,7 @@ static enum vcs_zcode_dev_error receipt_fields(
         receipt->finished_unix < receipt->started_unix)
         return VCS_ZCODE_DEV_ERR_TIME_ORDER;
     if (require_signature &&
-        !bytes_nonzero(receipt->signature, sizeof(receipt->signature)))
+        !zcl_bytes_any_set(receipt->signature, sizeof(receipt->signature)))
         return VCS_ZCODE_DEV_ERR_SIGNATURE;
     return VCS_ZCODE_DEV_OK;
 }
@@ -375,8 +360,8 @@ enum vcs_zcode_dev_error vcs_zcode_acceptance_plan_root(
     if (!out || !task_root || !candidate_root || !proof_policy_root ||
         !proof_set_root)
         return VCS_ZCODE_DEV_ERR_NULL;
-    if (!nonzero(task_root) || !nonzero(candidate_root) ||
-        !nonzero(proof_policy_root) || !nonzero(proof_set_root))
+    if (!zcl_bytes_any_set(task_root, 32) || !zcl_bytes_any_set(candidate_root, 32) ||
+        !zcl_bytes_any_set(proof_policy_root, 32) || !zcl_bytes_any_set(proof_set_root, 32))
         return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
     uint8_t roots[4u * VCS_ZCODE_ROOT_BYTES];
     memcpy(roots, task_root, VCS_ZCODE_ROOT_BYTES);
@@ -630,7 +615,7 @@ enum vcs_zcode_dev_error vcs_zcode_work_receipt_seal(
     const uint8_t pubkey[32])
 {
     if (!r || !secret || !pubkey) return VCS_ZCODE_DEV_ERR_NULL;
-    if (!nonzero(pubkey)) return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
+    if (!zcl_bytes_any_set(pubkey, 32)) return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
     memcpy(r->signer_pubkey, pubkey, 32);
     uint8_t id[32];
     enum vcs_zcode_dev_error err = vcs_zcode_work_receipt_id(r, id);

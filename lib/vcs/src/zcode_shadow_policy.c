@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_shadow_policy.h"
 
+#include "base/bytes.h"
 #include "base/checked.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
@@ -17,17 +18,9 @@ static const uint8_t policy_magic[8] = {
     'Z', 'C', 'P', 'O', 'L', 'C', '\r', '\n'
 };
 
-static bool shadow_nonzero(const uint8_t bytes[32])
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < 32; i++) any |= bytes[i];
-    return any != 0;
-}
-
 static bool shadow_zero(const uint8_t bytes[32])
 {
-    return !shadow_nonzero(bytes);
+    return !zcl_bytes_any_set(bytes, 32);
 }
 
 const char *vcs_zcode_shadow_error_string(enum vcs_zcode_shadow_error error)
@@ -61,9 +54,9 @@ static enum vcs_zcode_shadow_error reproducer_entry_validate(
     const struct vcs_zcode_approved_reproducer_entry_v1 *entry)
 {
     if (!entry) return VCS_ZCODE_SHADOW_NULL;
-    if (!shadow_nonzero(entry->signer_pubkey) ||
-        !shadow_nonzero(entry->contributor_binding_root) ||
-        !shadow_nonzero(entry->operator_group_root))
+    if (!zcl_bytes_any_set(entry->signer_pubkey, 32) ||
+        !zcl_bytes_any_set(entry->contributor_binding_root, 32) ||
+        !zcl_bytes_any_set(entry->operator_group_root, 32))
         return VCS_ZCODE_SHADOW_ROOT;
     uint8_t expected[32];
     vcs_zcode_score_action_root(VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION,
@@ -120,10 +113,10 @@ enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_validate(
         return VCS_ZCODE_SHADOW_VERSION;
     if (set->flags != VCS_ZCODE_APPROVED_REPRODUCER_REQUIRED_FLAGS)
         return VCS_ZCODE_SHADOW_FLAGS;
-    if (set->sequence == 0 || !shadow_nonzero(set->network_genesis_root))
+    if (set->sequence == 0 || !zcl_bytes_any_set(set->network_genesis_root, 32))
         return VCS_ZCODE_SHADOW_ROOT;
     if ((set->sequence == 1 && !shadow_zero(set->predecessor_set_root)) ||
-        (set->sequence > 1 && !shadow_nonzero(set->predecessor_set_root)))
+        (set->sequence > 1 && !zcl_bytes_any_set(set->predecessor_set_root, 32)))
         return VCS_ZCODE_SHADOW_ROOT;
     if (set->entry_count == 0 ||
         set->entry_count > VCS_ZCODE_APPROVED_REPRODUCER_MAX_ENTRIES)
@@ -371,9 +364,9 @@ enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_validate(
         policy->base_epoch_tokens != VCS_ZC23_BASE_EPOCH_TOKENS ||
         policy->maximum_supply_atoms != VCS_ZC23_MAX_SUPPLY_ATOMS)
         return VCS_ZCODE_SHADOW_POLICY;
-    if (!shadow_nonzero(policy->network_genesis_root) ||
-        !shadow_nonzero(policy->approved_reproducer_set_root) ||
-        !shadow_nonzero(policy->covenant_document_root))
+    if (!zcl_bytes_any_set(policy->network_genesis_root, 32) ||
+        !zcl_bytes_any_set(policy->approved_reproducer_set_root, 32) ||
+        !zcl_bytes_any_set(policy->covenant_document_root, 32))
         return VCS_ZCODE_SHADOW_ROOT;
     static const uint64_t expected[6] = {
         VCS_ZC23_SHADOW_PUBLIC_SOURCE_ATOMS,

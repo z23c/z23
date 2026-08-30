@@ -4,6 +4,7 @@
 
 #include "vcs/package_swarm.h"
 
+#include "base/bytes.h"
 #include "vcs_priv.h"
 
 #include "util/log_macros.h"
@@ -18,22 +19,14 @@ static const uint8_t package_swarm_magic[4] = {'Z', 'P', 'S', 'W'};
 #define SWARM_DATA_FIXED_BYTES 96u
 #define SWARM_CANCEL_BYTES 48u
 
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
-
 static bool bytes_zero(const uint8_t *bytes, size_t len)
 {
-    return !bytes_nonzero(bytes, len);
+    return !zcl_bytes_any_set(bytes, len);
 }
 
 static bool announce_valid(const struct vcs_package_swarm_announce *a)
 {
-    if (!a || !bytes_nonzero(a->package_root, sizeof(a->package_root)) ||
+    if (!a || !zcl_bytes_any_set(a->package_root, sizeof(a->package_root)) ||
         a->manifest_bytes < VCS_PACKAGE_MANIFEST_WIRE_HEADER_BYTES ||
         a->manifest_bytes > VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES ||
         a->file_count > VCS_PACKAGE_MAX_FILES ||
@@ -61,7 +54,7 @@ static bool announce_valid(const struct vcs_package_swarm_announce *a)
 static bool object_valid(const struct vcs_package_swarm_object *object)
 {
     if (!object || object->request_id == 0 ||
-        !bytes_nonzero(object->package_root, sizeof(object->package_root)))
+        !zcl_bytes_any_set(object->package_root, sizeof(object->package_root)))
         return false;
     if (object->object_kind == VCS_PACKAGE_SWARM_OBJECT_MANIFEST)
         return object->file_index == UINT32_MAX &&
@@ -71,7 +64,7 @@ static bool object_valid(const struct vcs_package_swarm_object *object)
     if (object->object_kind == VCS_PACKAGE_SWARM_OBJECT_CHUNK)
         return object->file_index < VCS_PACKAGE_MAX_FILES &&
                object->chunk_index < VCS_PACKAGE_MAX_CHUNKS_PER_FILE &&
-               bytes_nonzero(object->expected_hash,
+               zcl_bytes_any_set(object->expected_hash,
                              sizeof(object->expected_hash));
     return false;
 }
@@ -90,7 +83,7 @@ static bool data_valid(const struct vcs_package_swarm_data *data)
 static bool cancel_valid(const struct vcs_package_swarm_cancel *cancel)
 {
     return cancel && cancel->request_id != 0 &&
-           bytes_nonzero(cancel->package_root, sizeof(cancel->package_root));
+           zcl_bytes_any_set(cancel->package_root, sizeof(cancel->package_root));
 }
 
 static bool manifest_has_canonical_file_order(

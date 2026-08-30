@@ -3,6 +3,7 @@
 
 #include "services/blog_publication_service.h"
 
+#include "base/bytes.h"
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "models/database.h"
@@ -24,14 +25,6 @@ enum blog_anchor_error {
     BLOG_ERR_VERIFY = -5,
     BLOG_ERR_TX = -10,
 };
-
-static bool bytes_nonzero(const uint8_t *bytes, size_t len)
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < len; i++)
-        any |= bytes[i];
-    return any != 0;
-}
 
 static void write_u16_le(uint8_t out[2], uint16_t value)
 {
@@ -60,7 +53,7 @@ static struct zcl_result blog_anchor_runtime_validate(
     const struct blog_anchor_runtime *rt, bool planning, bool committing)
 {
     if (!rt || !rt->node_db || !rt->node_db->open || !rt->read_money ||
-        rt->tip_height < 0 || !bytes_nonzero(rt->tip_hash, 32) ||
+        rt->tip_height < 0 || !zcl_bytes_any_set(rt->tip_hash, 32) ||
         rt->maximum_fee_zat <= 0 || rt->now_unix <= 0)
         return ZCL_ERR(BLOG_ERR_TX,
                        "Blog anchor requires current custody and chain runtime");
@@ -168,7 +161,7 @@ static bool blog_anchor_payload_decode(
     char parsed_name[BLOG_NAME_MAX + 1];
     uint8_t parsed_event[32];
     return off == raw_len && payload->actual_fee_zat >= 0 &&
-        bytes_nonzero(payload->txid, 32) &&
+        zcl_bytes_any_set(payload->txid, 32) &&
         blog_anchor_script_parse(payload->script, payload->script_len,
                                  parsed_name, parsed_event).ok &&
         strcmp(parsed_name, payload->blog_name) == 0 &&
@@ -290,7 +283,7 @@ struct zcl_result blog_publication_anchor_plan(
         (strcmp(request->wallet_scope, "dev") != 0 &&
          strcmp(request->wallet_scope, "prod") != 0) ||
         !znam_validate_name(request->blog_name) ||
-        !bytes_nonzero(request->event_id, 32) ||
+        !zcl_bytes_any_set(request->event_id, 32) ||
         request->idempotency_key[0] == 0 ||
         strlen(request->idempotency_key) > BLOG_ANCHOR_IDEMPOTENCY_MAX)
         return ZCL_ERR(BLOG_ERR_ARGS,
@@ -340,7 +333,7 @@ struct zcl_result blog_publication_anchor_plan(
         payload.txid, &payload.actual_fee_zat);
     if (!prepared.ok || raw_tx_len == 0 ||
         raw_tx_len > VAULT_INTENT_RAW_MAX ||
-        !bytes_nonzero(payload.txid, 32) || payload.actual_fee_zat < 0 ||
+        !zcl_bytes_any_set(payload.txid, 32) || payload.actual_fee_zat < 0 ||
         payload.actual_fee_zat > rt->maximum_fee_zat) {
         memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
         free(raw_tx);

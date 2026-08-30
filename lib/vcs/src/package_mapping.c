@@ -3,6 +3,7 @@
 
 #include "vcs/package_mapping.h"
 
+#include "base/bytes.h"
 #include "vcs/package_manifest.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_index.h"
@@ -33,14 +34,6 @@ struct package_mapping_work {
     bool cache_miss;
 };
 
-static bool mapping_root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    if (!root) return false;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
-
 static bool mapping_expected_chunks(uint64_t size, uint32_t *out)
 {
     uint64_t chunks = size == 0 ? 0 :
@@ -60,7 +53,7 @@ static bool blob_map_serialize(
     if (wire_len_out) *wire_len_out = 0;
     uint32_t expected = 0;
     if (!blob_root || !wire_out || !wire_len_out ||
-        !mapping_root_nonzero(blob_root) ||
+        !zcl_bytes_any_set(blob_root, 32) ||
         !mapping_expected_chunks(size, &expected) || expected != chunk_count ||
         (chunk_count > 0 && !hashes))
         return false;
@@ -218,8 +211,8 @@ static bool mapping_set_serialize(
     if (wire_len_out) *wire_len_out = 0;
     if (!set || !wire_out || !wire_len_out ||
         set->version != VCS_PACKAGE_MAPPING_VERSION ||
-        !mapping_root_nonzero(set->source_tree_root) ||
-        !mapping_root_nonzero(set->lane_receipt_root) ||
+        !zcl_bytes_any_set(set->source_tree_root, 32) ||
+        !zcl_bytes_any_set(set->lane_receipt_root, 32) ||
         !set->entries || set->count == 0 ||
         set->count > VCS_PACKAGE_MAX_FILES ||
         set->count > (SIZE_MAX - PACKAGE_MAPPING_SET_HEADER_BYTES) /
@@ -236,8 +229,8 @@ static bool mapping_set_serialize(
     memcpy(wire + off, set->lane_receipt_root, 32); off += 32;
     zcl_write_u32_le(wire + off, (uint32_t)set->count); off += 4;
     for (size_t i = 0; i < set->count; i++) {
-        if (!mapping_root_nonzero(set->entries[i].blob_root) ||
-            !mapping_root_nonzero(set->entries[i].mapping_root) ||
+        if (!zcl_bytes_any_set(set->entries[i].blob_root, 32) ||
+            !zcl_bytes_any_set(set->entries[i].mapping_root, 32) ||
             (i > 0 && memcmp(set->entries[i - 1u].blob_root,
                              set->entries[i].blob_root, 32) >= 0)) {
             free(wire);
@@ -386,8 +379,8 @@ bool vcs_package_mapping_set_build(
 {
     if (!repo_root || !repo_root[0] || !source_tree_root ||
         !lane_receipt_root || !metrics || !mapping_set_root ||
-        !mapping_root_nonzero(source_tree_root) ||
-        !mapping_root_nonzero(lane_receipt_root))
+        !zcl_bytes_any_set(source_tree_root, 32) ||
+        !zcl_bytes_any_set(lane_receipt_root, 32))
         return false;
     memset(metrics, 0, sizeof(*metrics));
     struct vcs_manifest tree;

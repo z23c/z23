@@ -163,6 +163,7 @@
 #define _GNU_SOURCE
 
 #include "base/checked.h"
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/hex.h"
 #include "base/log_macros.h"
@@ -354,13 +355,6 @@ static bool evidence_root(const char *domain, const uint8_t *wire,
                                   wire_len, out))
         LOG_FAIL(CENSUS_LOG, "evidence root failed for domain %s", domain);
     return true;
-}
-
-static bool root_nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
 }
 
 static void root_hex(const uint8_t root[32], char out[65])
@@ -581,7 +575,7 @@ static bool def_parse_package_line(struct scope_def *def, const char *line,
         } else if (field == 1 && key_value(t, "root", &value)) {
             if (strlen(value) != 64 ||
                 !zcl_hex_decode_lower(value, def->package_root, 32) ||
-                !root_nonzero(def->package_root)) {
+                !zcl_bytes_any_set(def->package_root, 32)) {
                 LOG_ERROR(CENSUS_LOG,
                           "line %zu: bad package root (want 64 lowercase "
                           "hex, nonzero)", line_no);
@@ -620,7 +614,7 @@ static bool def_parse_package_line(struct scope_def *def, const char *line,
         }
         field++;
     }
-    if (!def->name || !root_nonzero(def->package_root) || !def->store ||
+    if (!def->name || !zcl_bytes_any_set(def->package_root, 32) || !def->store ||
         !def->kind || !def->spdx) {
         LOG_ERROR(CENSUS_LOG,
                   "line %zu: package scope needs package, root, store, "
@@ -2252,7 +2246,7 @@ static bool scope_passport_proof(const struct scope_def *def,
 {
     struct buf wire = {0};
     uint8_t api_byte = m->has_api ? 1u : 0u;
-    uint8_t recipe_byte = root_nonzero(m->recipe_root) ? 1u : 0u;
+    uint8_t recipe_byte = zcl_bytes_any_set(m->recipe_root, 32) ? 1u : 0u;
     bool ok = buf_put(&wire, def->name, strlen(def->name) + 1u) &&
               buf_put(&wire, def->spdx, strlen(def->spdx) + 1u) &&
               buf_put(&wire, m->release_root, 32) &&
@@ -2664,7 +2658,7 @@ static bool args_parse(int argc, char **argv, struct census_args *args)
         args->cutoff_mtp <= 0 || !args->sequence)
         return false;
     bool pred_nonzero =
-        args->predecessor_given && root_nonzero(args->predecessor);
+        args->predecessor_given && zcl_bytes_any_set(args->predecessor, 32);
     /* sequence 1 requires the zero predecessor root; sequence >1 either
      * takes an explicit nonzero root or discovers it from the previous
      * sequence's report in the out dir (main, fail-closed). */
@@ -3055,18 +3049,18 @@ int main(int argc, char **argv)
          * succeeded. */
         uint64_t mask = 0;
         if (m->has_api) mask |= VCS_ZCODE_C23_EVIDENCE_API;
-        if (root_nonzero(m->recipe_root)) mask |= VCS_ZCODE_C23_EVIDENCE_RECIPE;
+        if (zcl_bytes_any_set(m->recipe_root, 32)) mask |= VCS_ZCODE_C23_EVIDENCE_RECIPE;
         if (m->has_tests_sem) mask |= VCS_ZCODE_C23_EVIDENCE_TESTS;
         if (m->license_ok)
             mask |= VCS_ZCODE_C23_EVIDENCE_PERMISSIVE_LICENSE;
         if (defs[s].is_package
-                ? (run->reproduced && root_nonzero(run->quality_root))
-                : (args.quality_attested && root_nonzero(run->quality_root)))
+                ? (run->reproduced && zcl_bytes_any_set(run->quality_root, 32))
+                : (args.quality_attested && zcl_bytes_any_set(run->quality_root, 32)))
             mask |= VCS_ZCODE_C23_EVIDENCE_QUALITY_PROFILE;
         mask |= VCS_ZCODE_C23_EVIDENCE_SOURCE_ASSIGNMENT;
         if (run->reproduced) mask |= VCS_ZCODE_C23_EVIDENCE_REPRODUCIBLE;
         mask |= VCS_ZCODE_C23_EVIDENCE_FAMILY_QUORUM;
-        if (m->possession_ok && root_nonzero(m->possession_root))
+        if (m->possession_ok && zcl_bytes_any_set(m->possession_root, 32))
             mask |= VCS_ZCODE_C23_EVIDENCE_COMPLETE_POSSESSION;
         run->evidence_mask = mask;
 

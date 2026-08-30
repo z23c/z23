@@ -4,25 +4,19 @@
 
 #include "services/zcode_workspace_view_service.h"
 
+#include "base/bytes.h"
 #include "hotswap/hotswap_service.h"
 
 #include <stdio.h>
 #include <string.h>
-
-static bool nonzero(const uint8_t root[32])
-{
-    uint8_t any = 0;
-    for (size_t i = 0; i < 32; i++) any |= root[i];
-    return any != 0;
-}
 
 static bool derive_binding(
     const struct zcode_workspace_binding_input_v1 *input,
     struct zcode_workspace_binding_result_v1 *out)
 {
     if (!input || !out || input->sequence == 0 ||
-        (input->sequence == 1 && nonzero(input->predecessor_release_root)) ||
-        (input->sequence > 1 && !nonzero(input->predecessor_release_root)))
+        (input->sequence == 1 && zcl_bytes_any_set(input->predecessor_release_root, 32)) ||
+        (input->sequence > 1 && !zcl_bytes_any_set(input->predecessor_release_root, 32)))
         return false;
     memset(out, 0, sizeof(*out));
     out->entry.sequence = input->sequence;

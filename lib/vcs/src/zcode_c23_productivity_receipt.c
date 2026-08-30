@@ -3,6 +3,7 @@
 
 #include "vcs/zcode_c23_corpus.h"
 
+#include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
 #include "crypto/ed25519.h"
@@ -13,14 +14,6 @@
 static const uint8_t receipt_magic[8] = {'Z','C','P','R','1',0,0,0};
 static const char receipt_signature_domain[] =
     "zcl.zcode.productivity_receipt.signature.v1";
-
-static bool productivity_nonzero(const uint8_t *bytes, size_t count)
-{
-    uint8_t any = 0;
-    if (!bytes) return false;
-    for (size_t i = 0; i < count; i++) any |= bytes[i];
-    return any != 0;
-}
 
 static enum vcs_zcode_c23_error receipt_shape(
     const struct vcs_zcode_productivity_receipt_v1 *receipt,
@@ -41,8 +34,8 @@ static enum vcs_zcode_c23_error receipt_shape(
         receipt->checkpoint_root, receipt->signer_pubkey,
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!productivity_nonzero(roots[i], 32)) return VCS_ZCODE_C23_ROOT;
-    if (require_signature && !productivity_nonzero(receipt->signature, 64))
+        if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_C23_ROOT;
+    if (require_signature && !zcl_bytes_any_set(receipt->signature, 64))
         return VCS_ZCODE_C23_SIGNATURE;
     return VCS_ZCODE_C23_OK;
 }

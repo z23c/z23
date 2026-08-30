@@ -174,6 +174,12 @@ vendor_target_os() {
     esac
 }
 VENDOR_TARGET_OS="$(vendor_target_os)"
+if [[ "$VENDOR_TARGET_OS" == darwin ]]; then
+    MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+    [[ "$MACOSX_DEPLOYMENT_TARGET" == "14.0" ]] ||
+        die "Darwin vendor archives require MACOSX_DEPLOYMENT_TARGET=14.0"
+    export MACOSX_DEPLOYMENT_TARGET
+fi
 
 # OpenSSL cannot probe a target it is not running on, so a cross build must
 # name its config target. Empty means "let Configure autodetect", which is the
@@ -289,7 +295,7 @@ fetch() {
     # fetch <url> <sha256> <dest-filename>  -> echoes cached path
     local url="$1" sha="$2" dest="$CACHE/$3"
     mkdir -p "$CACHE"
-    if [[ -f "$dest" ]] && echo "$sha  $dest" | sha256sum -c - >/dev/null 2>&1; then
+    if [[ -f "$dest" && "$(vp_sha256_file "$dest")" == "$sha" ]]; then
         say "cached  $(basename "$dest")"
     else
         [[ "$OFFLINE" == "1" ]] &&
@@ -300,7 +306,7 @@ fetch() {
         else
             need wget; wget -q -O "$dest.tmp" "$url"
         fi
-        echo "$sha  $dest.tmp" | sha256sum -c - >/dev/null 2>&1 \
+        [[ "$(vp_sha256_file "$dest.tmp")" == "$sha" ]] \
             || die "SHA256 mismatch for $url (expected $sha)"
         mv "$dest.tmp" "$dest"
     fi
@@ -376,10 +382,12 @@ recipe_flags() {
     # cross: the host descriptor stays byte-identical to the one every existing
     # vendor/lib stamp was written against.
     flags="$(recipe_flags_host "$group")" || return 1
+    printf '%s' "$flags"
     if [[ -n "$VENDOR_TARGET" ]]; then
-        printf '%s; target=%s' "$flags" "$VENDOR_TARGET"
-    else
-        printf '%s' "$flags"
+        printf '; target=%s' "$VENDOR_TARGET"
+    fi
+    if [[ "$VENDOR_TARGET_OS" == darwin ]]; then
+        printf '; macosx_deployment_target=%s' "$MACOSX_DEPLOYMENT_TARGET"
     fi
 }
 
@@ -910,7 +918,11 @@ build_secp_native() {
 }
 
 # --- orchestration ----------------------------------------------------------
-need "$VENDOR_CC"; need "$VENDOR_AR"; need sha256sum; need tar; need make
+need "$VENDOR_CC"; need "$VENDOR_AR"; need tar; need make
+if ! command -v sha256sum >/dev/null 2>&1 &&
+   ! command -v shasum >/dev/null 2>&1; then
+    die "need sha256sum or shasum"
+fi
 
 # ar carries no -dumpmachine, so its target can only be read from its name.
 # A cross VENDOR_CC left beside the host's plain `ar` is silent today: ar
