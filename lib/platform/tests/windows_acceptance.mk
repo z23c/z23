@@ -53,6 +53,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	snapshot_export_refusal \
 	snapshot_install_activate_refusal \
 	socket_compat \
+	sqlite_vfs_dir \
 	stale_lock_capability \
 	state_root \
 	thread_join \
@@ -404,6 +405,22 @@ ZCL_WINDOWS_ACCEPTANCE_snapshot_install_activate_refusal_FLAGS := -Iconfig/src
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_SOURCES := \
 	lib/platform/tests/socket_compat_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_LIBS := -lws2_32
+# The retained-directory SQLite VFS proof. private_acl_internal.h sits next to
+# its implementation, so -Ilib/platform/src rides the row like the codeindex
+# row carries -Ilib/codeindex/src. The vendored amalgamation links from the
+# private acceptance archive ($(ZCL_WINDOWS_ACCEPTANCE_SQLITE) in the top
+# Makefile), keeping the strict flags on our own sources only.
+ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_SOURCES := \
+	lib/test/src/sqlite_vfs_dir_windows_acceptance.c \
+	lib/storage/src/sqlite_vfs_dir_windows.c \
+	lib/platform/src/private_directory.c \
+	lib/platform/src/private_acl_internal.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_FLAGS := -Ilib/platform/src
+ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_LIBDEPS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE)
+ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE) -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_stale_lock_capability_SOURCES := \
 	lib/test/src/stale_lock_capability_acceptance.c \
 	lib/platform/src/os_proc.c \
