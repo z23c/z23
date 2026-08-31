@@ -205,6 +205,8 @@ struct zcl_result zcode_goal_context_select(
                                  out->tokens[i]);
                 break;
             }
+            if (count == ZGOAL_HITS_PER_TOKEN)
+                out->budget_exhausted = true;
             for (int j = 0; j < count; j++) {
                 if (!zgoal_add(out, &hits[j], out->tokens[i])) {
                     result = ZCL_ERR(-1, "selected symbol identity failed");

@@ -197,6 +197,30 @@ static const char *TEST_SOURCE_C =
     " */\n"
     "int test_fixture_indexed(void) { return 0; }\n";
 
+/* Seventeen literal matches prove the goal selector reports its sixteen-hit
+ * per-token ceiling. The first sixteen answers remain ordered exactly as the
+ * production selector already orders them; only completeness metadata is
+ * under test. */
+static const char *SATURATION_C =
+    "/* lib/net/src/saturation.c — literal selection cap fixture. */\n"
+    "int saturation_00(void) { return 0; }\n"
+    "int saturation_01(void) { return 0; }\n"
+    "int saturation_02(void) { return 0; }\n"
+    "int saturation_03(void) { return 0; }\n"
+    "int saturation_04(void) { return 0; }\n"
+    "int saturation_05(void) { return 0; }\n"
+    "int saturation_06(void) { return 0; }\n"
+    "int saturation_07(void) { return 0; }\n"
+    "int saturation_08(void) { return 0; }\n"
+    "int saturation_09(void) { return 0; }\n"
+    "int saturation_10(void) { return 0; }\n"
+    "int saturation_11(void) { return 0; }\n"
+    "int saturation_12(void) { return 0; }\n"
+    "int saturation_13(void) { return 0; }\n"
+    "int saturation_14(void) { return 0; }\n"
+    "int saturation_15(void) { return 0; }\n"
+    "int saturation_16(void) { return 0; }\n";
+
 /* ── call-graph fixture (WF4 lane 4A) ──────────────────────────────────
  * A self-contained module with two callers of one static helper and a call to
  * an external leaf, so callers/callees/enclosing are all exercised. */
@@ -352,6 +376,7 @@ static bool write_fixture(void)
            mk_write(FIX, "src/main.c", ROOT_MAIN_C) &&
            mk_write(FIX, "ports/include/ports/fixture_port.h", PORT_H) &&
            mk_write(FIX, "lib/test/src/test_fixture_indexed.c", TEST_SOURCE_C) &&
+           mk_write(FIX, "lib/net/src/saturation.c", SATURATION_C) &&
            mk_write(FIX, "lib/test/build/generated_should_not_index.c",
                     "int generated_should_not_index(void) { return 0; }\n");
 }
@@ -692,6 +717,11 @@ static int test_codeindex_platform_arm(void)
                  &selected).ok &&
              selected.selected.name[0] != '\0' &&
              strcmp(selected.why, "project_entry_fallback") == 0);
+    CI_CHECK("a saturated literal bucket reports incomplete ranking",
+             zcode_goal_context_select(
+                 FIX, "saturation", NULL, &selected).ok &&
+             selected.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
+             selected.budget_exhausted);
 
     /* refs */
     struct ci_ref refs[32];
