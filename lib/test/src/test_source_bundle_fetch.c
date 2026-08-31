@@ -1392,14 +1392,13 @@ static int test_source_bundle_fetch_platform_arm(void)
 }
 #else /* _WIN32 */
 
-/* Source-bundle fetch runs over the file-service transport, which is a
- * fail-closed refusal stub on native Windows (lib/net/src/file_service.c:26,
- * lib/net/src/rom_fetch.c:504): no case below can complete a real fetch on
- * this lane. */
+/* The production WinSock dialer, handshake, and frame/chunk transport are
+ * native. This fixture's adversarial peer harness still uses POSIX listener
+ * and fault-injection primitives, so it cannot yet provide Windows evidence. */
 static int test_source_bundle_fetch_platform_arm(void)
 {
-    printf("source_bundle_fetch: SKIP (Windows): file-service transport is "
-           "a refusal stub on native Windows (file_service.c:26)\n");
+    printf("source_bundle_fetch: SKIP (Windows): adversarial peer fixture "
+           "still requires POSIX listener primitives\n");
     return 0;
 }
 #endif

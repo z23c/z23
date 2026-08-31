@@ -209,7 +209,7 @@ AGENT_IMPACT_RULE("lib/base/src/safe_alloc.c|lib/base/include/base/safe_alloc.h|
  * seven allocation labels has a hand-rolled multi-pointer unwind. */
 AGENT_IMPACT_RULE("lib/crypto/src/equihash.c|lib/crypto/include/crypto/equihash.h|lib/test/src/test_equihash_oom.c", "equihash_oom crypto make_lint_gates")
 AGENT_IMPACT_RULE("lib/base/src/result.c|lib/base/include/base/result.h|lib/util/include/util/result.h", "zcl_result make_lint_gates")
-AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_handshake.c|lib/net/src/file_service_worker_internal.h|lib/net/include/net/file_service.h|app/controllers/src/file_controller.c|app/controllers/include/controllers/file_controller.h|lib/test/src/test_file_controller.c", "file_controller file_service_pow_gate file_market rom_manifest api hkdf_sha3_256 make_lint_gates")
+AGENT_IMPACT_RULE("lib/net/src/file_service.c|lib/net/src/file_service_transport.c|lib/net/src/file_service_handshake.c|lib/net/src/file_service_worker_internal.h|lib/net/include/net/file_service.h|app/controllers/src/file_controller.c|app/controllers/include/controllers/file_controller.h|lib/test/src/test_file_controller.c", "file_controller file_service_pow_gate file_market rom_manifest api hkdf_sha3_256 make_lint_gates")
 /* Fast-sync implementation splits retain one proof lane. The family pattern
  * keeps a newly extracted C23 policy/helper from becoming push-time-only
  * mapping work while unmapped files outside this owned family still fail

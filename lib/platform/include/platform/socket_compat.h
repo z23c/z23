@@ -479,6 +479,32 @@ static inline int platform_socket_set_send_timeout(platform_socket_t sock,
 #endif
 }
 
+static inline int platform_socket_get_send_timeout(platform_socket_t sock,
+                                                    int *timeout_ms)
+{
+    if (!timeout_ms)
+        return -1;
+#if defined(_WIN32)
+    DWORD timeout = 0;
+    int size = (int)sizeof(timeout);
+    int result = getsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                            (char *)&timeout, &size);
+    if (result == 0)
+        *timeout_ms = timeout > INT_MAX ? INT_MAX : (int)timeout;
+    return result;
+#else
+    struct timeval timeout = {0};
+    socklen_t size = sizeof(timeout);
+    int result = getsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, &size);
+    if (result == 0) {
+        uint64_t milliseconds = (uint64_t)timeout.tv_sec * 1000u +
+            ((uint64_t)timeout.tv_usec + 999u) / 1000u;
+        *timeout_ms = milliseconds > INT_MAX ? INT_MAX : (int)milliseconds;
+    }
+    return result;
+#endif
+}
+
 static inline int platform_socket_set_no_delay(platform_socket_t sock,
                                                 bool enabled)
 {

@@ -84,8 +84,6 @@ lib/net/src/file_service.c	fs_server_is_running
 lib/net/src/file_service.c	fs_server_refresh_manifest
 lib/net/src/file_service.c	fs_server_start
 lib/net/src/file_service.c	fs_server_stop
-lib/net/src/file_service.c	fs_session_init
-lib/net/src/file_service.c	fs_session_mbps
 lib/net/src/file_service.c	fs_test_range_worker_socket_lifecycle
 lib/net/src/file_service.c	fs_test_resolved_connect_lifecycle
 lib/platform/src/current_identity.c	platform_current_identity

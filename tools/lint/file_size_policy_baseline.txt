@@ -26,7 +26,7 @@ lib/kernel/src/command_registry.c 2403
 lib/net/src/connman.c 3081
 lib/net/src/download.c 1793
 lib/net/src/fast_sync.c 1684
-lib/net/src/file_service.c 3058
+lib/net/src/file_service.c 2517
 lib/net/src/msg_headers.c 2370
 lib/net/src/msgprocessor.c 3031
 lib/net/src/msgprocessor_snapshot.c 1810

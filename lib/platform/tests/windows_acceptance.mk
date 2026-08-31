@@ -26,6 +26,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	disk_space \
 	file_metadata \
 	file_ops_copy \
+	file_service_transport \
 	format_attribute \
 	glob_match \
 	headless_run \
@@ -207,6 +208,19 @@ ZCL_WINDOWS_ACCEPTANCE_file_ops_copy_SOURCES := \
 	lib/platform/src/file_metadata.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_file_ops_copy_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_file_service_transport_SOURCES := \
+	lib/platform/tests/file_service_transport_windows_acceptance.c \
+	lib/net/src/file_service_transport.c \
+	lib/crypto/src/sha3_avx512.c \
+	lib/crypto/src/keccak_x4.c \
+	lib/crypto/src/simd_dispatch.c \
+	lib/sha3/src/sha3.c \
+	lib/platform/src/clock.c \
+	lib/base/src/cleanse.c \
+	lib/base/src/log_level.c \
+	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_file_service_transport_LIBS := \
+	-lws2_32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_format_attribute_SOURCES := \
 	lib/base/tests/format_attribute_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_glob_match_SOURCES := \

@@ -37,6 +37,16 @@ can reuse sealed derived state after the source generation is unchanged. The
 read-only SQLite generation is mapped from its retained positioned-file handle
 instead of copied into a second roughly 100 MiB heap image on every command.
 
+The C23 Commons file-service client transport is also native. Windows uses the
+same bounded encrypted-frame and authenticated-chunk implementation as Linux
+and macOS, carried over `platform_socket_t`; native acceptance sends a 64 KiB
+encrypted frame and a 256 KiB authenticated chunk through a real WinSock
+loopback pair and verifies exact payload, digest, counter, and byte-accounting
+parity. The forward-secret X25519/HKDF handshake and ROM fetch dialer were
+already native, so Windows clients no longer stop at an `ENOTSUP` frame stub.
+The inbound file-service server and its manifest/snapshot transaction remain
+explicitly unavailable until their filesystem mutation path is qualified.
+
 Native execution still requires Windows, but producing a Windows artifact no
 longer does. A Linux host can build the pinned third-party archives into the
 target-qualified `vendor/cross/x86_64-w64-mingw32` tree, then use Clang 20+

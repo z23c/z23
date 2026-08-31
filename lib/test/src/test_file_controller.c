@@ -473,11 +473,11 @@ static int test_file_service_start_stop_and_lifetime(void)
 
     printf("file_controller: file service start/stop and connection lifetime... ");
 #if defined(_WIN32)
-    /* The file-service transport is a fail-closed refusal stub on native
-     * Windows (lib/net/src/file_service.c:26): fs_server_start/fs_handshake
-     * never succeed, so there is no live connection whose lifetime could be
-     * observed. */
-    printf("SKIP (Windows): file-service transport is a refusal stub on "
+    /* Frame/chunk transport and the handshake are native on Windows. The
+     * inbound server still refuses until its manifest/snapshot filesystem
+     * transaction is qualified, so there is no accepted connection whose
+     * server-owned lifetime can be observed here. */
+    printf("SKIP (Windows): inbound file-service server is unavailable on "
            "this lane\n");
     return failures;
 #else
@@ -569,8 +569,8 @@ static int test_file_service_range_worker_socket_lifecycle(void)
 
     printf("file_controller: range worker cancellation owns its socket... ");
 #if defined(_WIN32)
-    printf("SKIP (Windows): file-service transport is a refusal stub on "
-           "this lane\n");
+    printf("SKIP (Windows): inbound file-service range workers are "
+           "unavailable on this lane\n");
     return failures;
 #else
     if (fs_test_range_worker_socket_lifecycle())
@@ -589,8 +589,8 @@ static int test_file_service_resolved_connect_lifecycle(void)
 
     printf("file_controller: resolved connects are bounded and blocking on return... ");
 #if defined(_WIN32)
-    printf("SKIP (Windows): file-service transport is a refusal stub on "
-           "this lane\n");
+    printf("SKIP (Windows): legacy file-service client sync is unavailable "
+           "on this lane\n");
     return failures;
 #else
     if (fs_test_resolved_connect_lifecycle())
