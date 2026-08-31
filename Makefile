@@ -6617,6 +6617,7 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 	    lib/sha3/src/sha3.c
 
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
+    retrieval-gold-benchmark-scope-selftest \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
     retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check \
     retrieval-gold-current-receipt-check
@@ -6627,22 +6628,28 @@ retrieval-gold-corpus-check: jsonq agent-sha3
 	@./tools/dev/retrieval-gold-corpus-check.sh --selftest
 	@./tools/dev/retrieval-gold-corpus-check.sh --check
 
+retrieval-gold-benchmark-scope-selftest: dev-bin jsonq retrieval-eval
+	@./tools/dev/retrieval-gold-benchmark.sh --scope-selftest
+
 # The local rail exercises the complete historical benchmark before commit and
 # labels its evidence non-publishable. The publishable rail adds the exact,
 # clean origin/main admission without changing the benchmark core.
 retrieval-gold-benchmark: z23 dev-bin jsonq agent-sha3 retrieval-eval \
-    retrieval-eval-selftest retrieval-gold-corpus-check
+    retrieval-eval-selftest retrieval-gold-corpus-check \
+    retrieval-gold-benchmark-scope-selftest
 	@./tools/dev/retrieval-gold-benchmark.sh --run-local
 
 retrieval-gold-benchmark-publishable: z23 dev-bin jsonq agent-sha3 retrieval-eval \
-    retrieval-eval-selftest retrieval-gold-corpus-check
+    retrieval-eval-selftest retrieval-gold-corpus-check \
+    retrieval-gold-benchmark-scope-selftest
 	@./tools/dev/retrieval-gold-benchmark.sh --run
 
 # Capture-only rail: recursive prerequisite output goes to stderr, leaving
-# stdout as exactly the runner's nine JSON records for safe redirection.
+# stdout as exactly the runner's JSON records for safe redirection.
 retrieval-gold-benchmark-publishable-capture:
 	@$(MAKE) --no-print-directory z23 dev-bin jsonq agent-sha3 retrieval-eval \
-	    retrieval-eval-selftest retrieval-gold-corpus-check 1>&2
+	    retrieval-eval-selftest retrieval-gold-corpus-check \
+	    retrieval-gold-benchmark-scope-selftest 1>&2
 	@./tools/dev/retrieval-gold-benchmark.sh --run
 
 # Fast independent check of the frozen publishable receipt. This replays only

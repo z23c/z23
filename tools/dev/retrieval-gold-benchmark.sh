@@ -30,6 +30,7 @@ command_timeout=${ZCL_RETRIEVAL_BENCH_TIMEOUT_SECONDS:-300}
 keep=${ZCL_RETRIEVAL_BENCH_KEEP:-0}
 mode=${1:---run-local}
 publishable=false
+scope_selftest=false
 readonly eval_arm_keys='recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points'
 readonly eval_result_keys="schema,tasks_evaluated,aggregation_kind,tasks_denominator,eligible_relevance_judgments,binding_kind,context_cost_kind,token_basis,literal,$eval_arm_keys,bm25,$eval_arm_keys"
 
@@ -41,16 +42,22 @@ fail() {
 }
 
 [[ $# -le 1 ]] || {
-    printf 'usage: %s [--run-local|--run]\n' "$0" >&2
+    printf 'usage: %s [--run-local|--run|--scope-selftest]\n' "$0" >&2
     exit 64
 }
 case "$mode" in
     --run) publishable=true ;;
     --run-local) ;;
-    *) printf 'usage: %s [--run-local|--run]\n' "$0" >&2; exit 64 ;;
+    --scope-selftest) scope_selftest=true ;;
+    *) printf 'usage: %s [--run-local|--run|--scope-selftest]\n' "$0" >&2; exit 64 ;;
 esac
-for executable in "$jsonq" "$rank_bin" "$capture_bin" "$evaluator" "$sha3" \
-    "$corpus_check"; do
+if [[ $scope_selftest = true ]]; then
+    required_executables=("$jsonq" "$rank_bin" "$evaluator")
+else
+    required_executables=("$jsonq" "$rank_bin" "$capture_bin" "$evaluator" \
+        "$sha3" "$corpus_check")
+fi
+for executable in "${required_executables[@]}"; do
     [[ -x $executable ]] || fail "required executable is unavailable: $executable"
 done
 command -v base64 >/dev/null 2>&1 || fail "required executable is unavailable: base64"
@@ -217,8 +224,8 @@ validate_eval_arm() {
     validate_metric "$document" "$arm.recall_at_20"
     validate_metric "$document" "$arm.mrr"
     validate_metric "$document" "$arm.wrong_scope_at_5"
-    [[ $(bool_field "$document" "$arm.wrong_scope_at_5.available") = false ]] ||
-        fail "$arm wrong-scope must remain unavailable"
+    [[ $(bool_field "$document" "$arm.wrong_scope_at_5.available") = true ]] ||
+        fail "$arm wrong-scope group-membership proxy is unavailable"
     actual_files=$(uint_field "$document" "$arm.task_unique_file_selections_at_5" 9223372036854775807)
     actual_context=$(uint_field "$document" "$arm.projected_context_bytes_at_5" 9223372036854775807)
     actual_tokens=$(uint_field "$document" "$arm.approximate_tokens_at_5" 9223372036854775807)
@@ -236,8 +243,11 @@ validate_eval_arm() {
 
 canonical_path() {
     [[ -n $1 && $1 != /* && $1 != ./* && $1 != */ && $1 != *//* &&
-       $1 != *\\* && $1 =~ ^[A-Za-z0-9][A-Za-z0-9._/+@-]*$ &&
-       ! $1 =~ (^|/)(\.|\.\.)($|/) ]]
+       $1 != *\\* && $1 =~ ^[A-Za-z0-9][A-Za-z0-9._/+@-]*$ ]] || return 1
+    if [[ $1 =~ (^|/)(\.|\.\.)($|/) ]]; then
+        return 1
+    fi
+    return 0
 }
 
 tmp_base=$(cd "${TMPDIR:-/tmp}" && pwd -P) || fail "TMPDIR is unavailable"
@@ -392,7 +402,8 @@ check_rank_file() {
 }
 
 membership_check() {
-    local row=$1 eligibility=$2 count i path input room merkle room_found merkle_found kind tree_root
+    local row=$1 eligibility=$2 groups_file=${3:-}
+    local count i path input room merkle room_found merkle_found kind tree_root group
     count=$(array_count "$row" relevant_paths)
     for ((i = 0; i < count; i++)); do
         path=$(field "$row" "relevant_paths[$i]")
@@ -417,6 +428,11 @@ membership_check() {
                 fail "eligible relevant path is absent from exact codeindex: $path"
             kind=$(field "$merkle" data.kind)
             [[ $kind = file ]] || fail "relevant merkle leaf is not a file: $path"
+            group=$(field "$room" data.group)
+            canonical_path "$group" ||
+                fail "eligible relevant path has no canonical code.room group: $path"
+            [[ -n $groups_file ]] || fail "eligible membership check has no group sink"
+            printf '%s\n' "$group" >>"$groups_file"
         else
             [[ $room_found = false && $merkle_found = false ]] ||
                 fail "outside-index relevant path unexpectedly indexed: $path"
@@ -426,9 +442,98 @@ membership_check() {
     done
 }
 
+code_room_document() {
+    local path=$1 input output
+    input=$(printf '{"path":"%s"}' "$(json_escape "$path")")
+    output=$(printf '%s' "$input" | env ZCL_DEV_SOURCE_ROOT="$workspace" \
+        timeout "$command_timeout" "$rank_bin" code room --input=-) ||
+        fail "code.room failed for path: $path"
+    printf '%s' "$output"
+}
+
+validated_room_group() {
+    local document=$1 expected_path=$2 group
+    validate_envelope "$document" code.room zcl.code_room.v1 250
+    [[ $(field "$document" data.path) = "$expected_path" ]] ||
+        fail "code.room returned a different path during group classification"
+    [[ $(bool_field "$document" data.found) = true ]] ||
+        fail "path is absent from exact codeindex during group classification: $expected_path"
+    group=$(field "$document" data.group)
+    canonical_path "$group" ||
+        fail "path has no canonical code.room group: $expected_path"
+    printf '%s' "$group"
+}
+
+ranked_file_in_scope() {
+    local path=$1 groups_file=$2 room group
+    room=$(code_room_document "$path")
+    group=$(validated_room_group "$room" "$path")
+    if grep -Fqx -- "$group" "$groups_file"; then
+        printf '1'
+    else
+        printf '0'
+    fi
+}
+
+run_scope_selftest() {
+    local net_path=lib/net/src/acme_alpn_challenge.c
+    local test_path=lib/test/differential/groth16_comb_bench.c
+    local outside_path=config/src/app_context.c
+    local groups_file="$run_root/scope-selftest.groups"
+    local literal_file="$run_root/scope-selftest.literal.tsv"
+    local bm25_file="$run_root/scope-selftest.bm25.tsv"
+    local body="$run_root/scope-selftest.body"
+    local fixture="$run_root/scope-selftest.batch"
+    local row room group output bad arm
+    workspace=$repo_root
+    row=$(printf '{"query":"exact directory group union","relevant_paths":["%s","%s"]}' \
+        "$net_path" "$test_path")
+    : >"$groups_file"
+    unset invariant_membership_tree_root
+    membership_check "$row" c23_codeindex "$groups_file"
+    sort -u -o "$groups_file" "$groups_file"
+    [[ $(paste -sd, "$groups_file") = lib/net,lib/test ]] ||
+        fail "scope selftest relevant directory-group union changed"
+    room=$(code_room_document "$outside_path")
+    group=$(validated_room_group "$room" "$outside_path")
+    [[ $group = config ]] || fail "scope selftest outside directory group changed"
+    printf '1\t1\t%s\n2\t1\t%s\n' "$test_path" "$outside_path" >"$literal_file"
+    cp -- "$literal_file" "$bm25_file"
+    batch=$body; : >"$batch"
+    emit_batch_task "$row" scope_union "$literal_file" 2 true \
+        "$bm25_file" 2 true "$groups_file"
+    {
+        printf '%s\n' 'zcl.retrieval_eval_batch.v3 tasks=1 eligible_relevance_judgments=2'
+        cat "$body"
+        printf '%s\n' end
+    } >"$fixture"
+    output=$("$evaluator" <"$fixture") || fail "scope selftest evaluator refused fixture"
+    for arm in literal bm25; do
+        [[ $(bool_field "$output" "$arm.wrong_scope_at_5.available") = true &&
+           $(uint_field "$output" "$arm.wrong_scope_at_5.basis_points" 10000) -eq 5000 ]] ||
+            fail "$arm scope selftest metric did not rederive"
+    done
+    room=$(code_room_document "$test_path")
+    bad=${room/\"path\":\"$test_path\"/\"path\":\"wrong.c\"}
+    if (validated_room_group "$bad" "$test_path" >/dev/null 2>&1); then
+        fail "scope selftest accepted a mismatched echoed path"
+    fi
+    bad=${room/\"found\":true/\"found\":false}
+    if (validated_room_group "$bad" "$test_path" >/dev/null 2>&1); then
+        fail "scope selftest accepted missing membership"
+    fi
+    bad=${room/\"group\":\"lib\/test\"/\"group\":\"\"}
+    [[ $bad != "$room" ]] || fail "scope selftest empty-group mutation was hollow"
+    if (validated_room_group "$bad" "$test_path" >/dev/null 2>&1); then
+        fail "scope selftest accepted an empty group"
+    fi
+    printf 'retrieval-gold-benchmark: SCOPE SELFTEST PASS mutations=3\n'
+}
+
 emit_batch_task() {
     local row=$1 id=$2 literal_file=$3 literal_count=$4 literal_complete=$5
-    local bm25_file=$6 bm25_count=$7 bm25_complete=$8 n i path rank bytes query
+    local bm25_file=$6 bm25_count=$7 bm25_complete=$8 groups_file=$9
+    local n i path rank bytes query in_scope
     n=$(array_count "$row" relevant_paths)
     printf 'task %s %s\n' "$id" "$n" >>"$batch"
     query=$(field "$row" query)
@@ -443,23 +548,39 @@ emit_batch_task() {
     [[ $bm25_complete = true ]] && bm25_complete=1 || bm25_complete=0
     printf 'literal observed %s %s\n' "$literal_complete" "$literal_count" >>"$batch"
     while IFS=$'\t' read -r rank bytes path; do
-        printf 'rank %s 0 0 %s\n' "$bytes" "$path" >>"$batch"
+        if ((rank <= 5)); then
+            in_scope=$(ranked_file_in_scope "$path" "$groups_file")
+            printf 'rank %s 1 %s %s\n' "$bytes" "$in_scope" "$path" >>"$batch"
+        else
+            printf 'rank %s 0 0 %s\n' "$bytes" "$path" >>"$batch"
+        fi
     done <"$literal_file"
     printf 'bm25 observed %s %s\n' "$bm25_complete" "$bm25_count" >>"$batch"
     while IFS=$'\t' read -r rank bytes path; do
-        printf 'rank %s 0 0 %s\n' "$bytes" "$path" >>"$batch"
+        if ((rank <= 5)); then
+            in_scope=$(ranked_file_in_scope "$path" "$groups_file")
+            printf 'rank %s 1 %s %s\n' "$bytes" "$in_scope" "$path" >>"$batch"
+        else
+            printf 'rank %s 0 0 %s\n' "$bytes" "$path" >>"$batch"
+        fi
     done <"$bm25_file"
 }
+
+if [[ $scope_selftest = true ]]; then
+    run_scope_selftest
+    exit 0
+fi
 
 run_eligible_task() {
     local row=$1 id=$2 query=$3 expected_root=$4 task_dir=$5
     local literal_file="$task_dir/literal.tsv" bm25_file="$task_dir/bm25.tsv"
+    local scope_groups="$task_dir/relevant.groups"
     local offset=0 pages=0 output input started ended process_wall_us span next has_more
     local literal_display bm25_display max_display elapsed_us budget_ms exceeded
     local page_limit max_count remaining expected_span expected_more page_file literal_take bm25_take stream_file
     local total_elapsed=0 total_wall=0 any_budget_exceeded=false terminal=false
     local arm
-    : >"$literal_file"; : >"$bm25_file"
+    : >"$literal_file"; : >"$bm25_file"; : >"$scope_groups"
     unset invariant_task_id invariant_query invariant_expected_root \
         invariant_pre_root invariant_post_root invariant_codeindex_root \
         invariant_corpus_files invariant_document_profile \
@@ -586,13 +707,15 @@ run_eligible_task() {
     bm25_eval_files=$((bm25_eval_files + bm25_take))
     literal_eval_context=$((literal_eval_context + invariant_literal_context))
     bm25_eval_context=$((bm25_eval_context + invariant_bm25_context))
-    membership_check "$row" c23_codeindex
-    verify_checkout "$(field "$row" parent_commit)"
-    [[ $(capture_root) = "$expected_root" ]] || fail "post-task source root changed for $id"
+    membership_check "$row" c23_codeindex "$scope_groups"
+    sort -u -o "$scope_groups" "$scope_groups"
+    [[ -s $scope_groups ]] || fail "eligible task has no reviewed code.room groups: $id"
     emit_batch_task "$row" "$id" "$literal_file" "$invariant_literal_count" \
         "$invariant_literal_complete" "$bm25_file" "$invariant_bm25_count" \
-        "$invariant_bm25_complete"
-    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v2","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"ranking_compute":{"elapsed_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"wall_us":%s,"single_process":true,"buffered_before_write":true},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"scope_available":false,"files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
+        "$invariant_bm25_complete" "$scope_groups"
+    verify_checkout "$(field "$row" parent_commit)"
+    [[ $(capture_root) = "$expected_root" ]] || fail "post-task source root changed for $id"
+    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v3","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"ranking_compute":{"elapsed_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"wall_us":%s,"single_process":true,"buffered_before_write":true},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"scope_available":true,"scope_basis":"reviewed_relevant_codeindex_group_membership_v1","scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","scope_classifier_epoch":"current_driver_over_exact_parent_source","files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
         "$(json_escape "$id")" "$expected_root" "$invariant_codeindex_root" \
         "$invariant_membership_tree_root" "$pages" "$total_elapsed" \
         "$invariant_stream_budget_ms" "$any_budget_exceeded" "$total_wall" \
@@ -667,7 +790,7 @@ while IFS= read -r row || [[ -n $row ]]; do
         [[ $(capture_root) = "$expected_root" ]] ||
             fail "post-membership source root changed for $id"
         unsupported=$((unsupported + 1))
-        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v2","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null}\n' \
+        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v3","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null}\n' \
             "$(json_escape "$id")" "$expected_root" \
             "$invariant_membership_tree_root" >>"$task_rows"
     else
@@ -753,5 +876,5 @@ printf -v benchmark_record '{"record":"benchmark","schema":"zcl.retrieval_gold_b
     fail "benchmark tool identity fields do not match their observed inputs"
 printf '%s\n' "$benchmark_record"
 cat "$task_rows"
-printf '{"record":"aggregate","schema":"zcl.retrieval_gold_benchmark_aggregate.v1","metrics":%s,"files_read_observed":false,"observed_token_count_available":false,"wrong_scope_basis":"unavailable","reuse_success_available":false,"duplicate_avoidance_available":false,"new_unique_loc_avoided_available":false}\n' \
+printf '{"record":"aggregate","schema":"zcl.retrieval_gold_benchmark_aggregate.v2","metrics":%s,"files_read_observed":false,"observed_token_count_available":false,"wrong_scope_basis":"reviewed_relevant_codeindex_group_membership_v1","wrong_scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","wrong_scope_classifier_epoch":"current_driver_over_exact_parent_source","wrong_scope_aggregation_kind":"micro_task_file_selections_at_5","wrong_scope_denominator_kind":"sum_of_task_unique_file_selections_at_5","reuse_success_available":false,"duplicate_avoidance_available":false,"new_unique_loc_avoided_available":false}\n' \
     "$(raw_field "$metrics" .)"
