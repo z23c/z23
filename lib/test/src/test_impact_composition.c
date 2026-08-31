@@ -1172,6 +1172,153 @@ static int test_ic_resident_proof_queue(void)
     return failures;
 }
 
+static int test_ic_cycle_reuse_requires_exact_proof_inputs(void)
+{
+    int failures = 0;
+    static const char source[] =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    static const char inputs[] =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    static const char stale[] =
+        "3333333333333333333333333333333333333333333333333333333333333333";
+    static const char compile_root[] =
+        "4444444444444444444444444444444444444444444444444444444444444444";
+    static const char lint_root[] =
+        "5555555555555555555555555555555555555555555555555555555555555555";
+    static const char test_root[] =
+        "6666666666666666666666666666666666666666666666666666666666666666";
+    static const char shared_root[] =
+        "7777777777777777777777777777777777777777777777777777777777777777";
+    struct zcl_dev_proof_dimension dimensions[ZCL_DEV_PROOF_DIMENSIONS] = {0};
+    dimensions[ZCL_DEV_PROOF_COMPILE].selected = 1;
+    memset(dimensions[ZCL_DEV_PROOF_COMPILE].receipt_root, 0x44,
+           ZCL_DEV_PROOF_ROOT_BYTES);
+    dimensions[ZCL_DEV_PROOF_LINT].selected = 1;
+    memset(dimensions[ZCL_DEV_PROOF_LINT].receipt_root, 0x55,
+           ZCL_DEV_PROOF_ROOT_BYTES);
+    dimensions[ZCL_DEV_PROOF_TEST].selected = 2;
+    memset(dimensions[ZCL_DEV_PROOF_TEST].receipt_root, 0x66,
+           ZCL_DEV_PROOF_ROOT_BYTES);
+    char exact[1024];
+    int exact_len = snprintf(
+        exact, sizeof(exact),
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"status\":\"passed\","
+        "\"phase\":\"verify\",\"proof_complete\":true,"
+        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
+        "\"source_cas_sha3\":\"%s\",\"proof_inputs_sha3\":\"%s\","
+        "\"proof_compile_root_sha3\":\"%s\","
+        "\"proof_lint_root_sha3\":\"%s\","
+        "\"proof_test_root_sha3\":\"%s\"}",
+        source, inputs, compile_root, lint_root, test_root);
+    char missing[1024];
+    int missing_len = snprintf(
+        missing, sizeof(missing),
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"status\":\"passed\","
+        "\"phase\":\"verify\",\"proof_complete\":true,"
+        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
+        "\"source_cas_sha3\":\"%s\","
+        "\"proof_compile_root_sha3\":\"%s\","
+        "\"proof_lint_root_sha3\":\"%s\","
+        "\"proof_test_root_sha3\":\"%s\"}",
+        source, compile_root, lint_root, test_root);
+    char wrong_schema[1024];
+    int wrong_schema_len = snprintf(
+        wrong_schema, sizeof(wrong_schema),
+        "{\"schema\":\"zcl.dev_cycle.v2\",\"status\":\"passed\","
+        "\"phase\":\"verify\",\"proof_complete\":true,"
+        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
+        "\"source_cas_sha3\":\"%s\",\"proof_inputs_sha3\":\"%s\","
+        "\"proof_compile_root_sha3\":\"%s\","
+        "\"proof_lint_root_sha3\":\"%s\","
+        "\"proof_test_root_sha3\":\"%s\"}",
+        source, inputs, compile_root, lint_root, test_root);
+    char duplicate_source[1152];
+    int duplicate_source_len = snprintf(
+        duplicate_source, sizeof(duplicate_source),
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"status\":\"passed\","
+        "\"phase\":\"verify\",\"proof_complete\":true,"
+        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
+        "\"source_cas_sha3\":\"%s\",\"source_cas_sha3\":\"%s\","
+        "\"proof_inputs_sha3\":\"%s\","
+        "\"proof_compile_root_sha3\":\"%s\","
+        "\"proof_lint_root_sha3\":\"%s\","
+        "\"proof_test_root_sha3\":\"%s\"}",
+        source, stale, inputs, compile_root, lint_root, test_root);
+    char duplicate_dimension[1152];
+    int duplicate_dimension_len = snprintf(
+        duplicate_dimension, sizeof(duplicate_dimension),
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"status\":\"passed\","
+        "\"phase\":\"verify\",\"proof_complete\":true,"
+        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
+        "\"source_cas_sha3\":\"%s\",\"proof_inputs_sha3\":\"%s\","
+        "\"proof_compile_root_sha3\":\"%s\","
+        "\"proof_compile_root_sha3\":\"%s\","
+        "\"proof_lint_root_sha3\":\"%s\","
+        "\"proof_test_root_sha3\":\"%s\"}",
+        source, inputs, compile_root, shared_root, lint_root, test_root);
+    char shared_dimensions[1024];
+    int shared_dimensions_len = snprintf(
+        shared_dimensions, sizeof(shared_dimensions),
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"status\":\"passed\","
+        "\"phase\":\"verify\",\"proof_complete\":true,"
+        "\"proof_scope\":\"source_wide_compile_tests_lint_fast\","
+        "\"source_cas_sha3\":\"%s\",\"proof_inputs_sha3\":\"%s\","
+        "\"proof_compile_root_sha3\":\"%s\","
+        "\"proof_lint_root_sha3\":\"%s\","
+        "\"proof_test_root_sha3\":\"%s\"}",
+        source, inputs, shared_root, shared_root, shared_root);
+    TEST("impact composition: cycle reuse binds exact independent proof inputs") {
+        ASSERT(exact_len > 0 && (size_t)exact_len < sizeof(exact));
+        ASSERT(missing_len > 0 && (size_t)missing_len < sizeof(missing));
+        ASSERT(wrong_schema_len > 0 &&
+               (size_t)wrong_schema_len < sizeof(wrong_schema));
+        ASSERT(duplicate_source_len > 0 &&
+               (size_t)duplicate_source_len < sizeof(duplicate_source));
+        ASSERT(duplicate_dimension_len > 0 &&
+               (size_t)duplicate_dimension_len <
+                   sizeof(duplicate_dimension));
+        ASSERT(shared_dimensions_len > 0 &&
+               (size_t)shared_dimensions_len < sizeof(shared_dimensions));
+        ASSERT(zcl_dev_proof_cycle_reuse_admissible(
+            exact, (size_t)exact_len, source, inputs, dimensions));
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            exact, (size_t)exact_len, source, stale, dimensions));
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            missing, (size_t)missing_len, source, inputs, dimensions));
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            exact, (size_t)exact_len, source, NULL, dimensions));
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            wrong_schema, (size_t)wrong_schema_len, source, inputs,
+            dimensions));
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            duplicate_source, (size_t)duplicate_source_len, source, inputs,
+            dimensions));
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            duplicate_dimension, (size_t)duplicate_dimension_len,
+            source, inputs, dimensions));
+        struct zcl_dev_proof_dimension shared[ZCL_DEV_PROOF_DIMENSIONS] = {0};
+        shared[ZCL_DEV_PROOF_COMPILE].selected = 1;
+        shared[ZCL_DEV_PROOF_LINT].selected = 1;
+        shared[ZCL_DEV_PROOF_TEST].selected = 2;
+        memset(shared[ZCL_DEV_PROOF_COMPILE].receipt_root, 0x77,
+               ZCL_DEV_PROOF_ROOT_BYTES);
+        memset(shared[ZCL_DEV_PROOF_LINT].receipt_root, 0x77,
+               ZCL_DEV_PROOF_ROOT_BYTES);
+        memset(shared[ZCL_DEV_PROOF_TEST].receipt_root, 0x77,
+               ZCL_DEV_PROOF_ROOT_BYTES);
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            shared_dimensions, (size_t)shared_dimensions_len, source, inputs,
+            shared));
+        struct zcl_dev_proof_dimension mismatched[ZCL_DEV_PROOF_DIMENSIONS];
+        memcpy(mismatched, dimensions, sizeof(mismatched));
+        mismatched[ZCL_DEV_PROOF_TEST].receipt_root[0] ^= 1u;
+        ASSERT(!zcl_dev_proof_cycle_reuse_admissible(
+            exact, (size_t)exact_len, source, inputs, mismatched));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_native_compositor_selects_physical_proof(void)
 {
     int failures = 0;
@@ -1250,6 +1397,7 @@ int test_impact_composition(void)
     failures += test_ic_lint_helpers_exclude_onion_stress();
     failures += test_ic_dev_proof_receipt_admission();
     failures += test_ic_resident_proof_queue();
+    failures += test_ic_cycle_reuse_requires_exact_proof_inputs();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();

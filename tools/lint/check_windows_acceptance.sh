@@ -139,7 +139,7 @@ catalog_sources() {
             gsub(/\\/, " ", s)
             n = split(s, a, /[ \t]+/)
             for (i = 1; i <= n; i++)
-                if (a[i] ~ /^[A-Za-z0-9_./-]+\.c$/) print a[i]
+                if (a[i] ~ /^[-A-Za-z0-9_.\/]+[.]c$/) print a[i]
         }
         /^ZCL_WINDOWS_ACCEPTANCE_[A-Za-z_0-9]+_SOURCES[ \t]*:=/ {
             line = $0

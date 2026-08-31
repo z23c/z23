@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "name": "zdemo/zdemo",
+  "semver": "0.1.0",
+  "language": "c23",
+  "license": "Apache-2.0",
+  "include_dir": "include",
+  "source_dir": "src",
+  "dependencies": [],
+  "files": [
+    "LICENSE",
+    "README.md",
+    "app/main.c",
+    "include/zdemo/zdemo.h",
+    "src/zdemo.c",
+    "tests/test_zdemo.c",
+    "zcode-package.json"
+  ]
+}

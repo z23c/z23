@@ -7,8 +7,8 @@
  * objects: a reader should be able to hold the whole program in mind.
  */
 
-#ifndef ZDEMO_ZDEMO_H
-#define ZDEMO_ZDEMO_H
+#ifndef ZDEMO_H
+#define ZDEMO_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,4 +61,4 @@ uint64_t zdemo_canvas_digest(const struct zdemo_canvas *canvas);
 }
 #endif
 
-#endif /* ZDEMO_ZDEMO_H */
+#endif /* ZDEMO_H */

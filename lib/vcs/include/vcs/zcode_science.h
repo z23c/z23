@@ -15,6 +15,9 @@
 #define VCS_ZCODE_HARDWARE_PROFILE_VERSION 1u
 #define VCS_ZCODE_BENCHMARK_METHOD_VERSION 1u
 #define VCS_ZCODE_BENCHMARK_RESULT_V2_VERSION 2u
+#define VCS_ZCODE_SCIENCE_STATEMENT_VERSION 1u
+#define VCS_ZCODE_SCIENCE_RELATION_SET_VERSION 1u
+#define VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_VERSION 1u
 #define VCS_ZCODE_STUDY_SPEC_DOMAIN "zcl.zcode.study_spec.v1"
 #define VCS_ZCODE_BENCHMARK_RESULT_DOMAIN "zcl.zcode.benchmark_result.v1"
 #define VCS_ZCODE_REPRODUCTION_DOMAIN "zcl.zcode.reproduction.v1"
@@ -23,6 +26,13 @@
 #define VCS_ZCODE_HARDWARE_PROFILE_DOMAIN "zcl.zcode.hardware_profile.v1"
 #define VCS_ZCODE_BENCHMARK_METHOD_DOMAIN "zcl.zcode.benchmark_method.v1"
 #define VCS_ZCODE_BENCHMARK_RESULT_V2_DOMAIN "zcl.zcode.benchmark_result.v2"
+#define VCS_ZCODE_SCIENCE_STATEMENT_DOMAIN "zcl.science_statement.v1"
+#define VCS_ZCODE_SCIENCE_STATEMENT_SIGNING_DOMAIN \
+    "zcl.science_statement.signature.v1"
+#define VCS_ZCODE_SCIENCE_RELATION_SET_DOMAIN \
+    "zcl.science_statement_relations.v1"
+#define VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_DOMAIN \
+    "zcl.vector_navigation_preregistration.v1"
 
 #define VCS_ZCODE_STUDY_SPEC_WIRE_BYTES 422u
 #define VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES 299u
@@ -41,6 +51,18 @@
 /* benchmark_result.v2: the frozen 299-byte v1 body (magic "ZCBEN2\r\n",
  * version 2) + method_root 32 + hardware_profile_root 32. */
 #define VCS_ZCODE_BENCHMARK_RESULT_V2_WIRE_BYTES 363u
+/* statement.v1: magic 8 + version 2 + five closed enums + relation mask 1 +
+ * relation count 2 + thirteen roots + observed/embargo times 16 + signer 32
+ * + signature 64. */
+#define VCS_ZCODE_SCIENCE_STATEMENT_BODY_BYTES 482u
+#define VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES 546u
+#define VCS_ZCODE_SCIENCE_RELATION_MAX 64u
+#define VCS_ZCODE_SCIENCE_RELATION_SET_HEADER_BYTES 12u
+#define VCS_ZCODE_SCIENCE_RELATION_ROW_BYTES 33u
+#define VCS_ZCODE_SCIENCE_RELATION_SET_MAX_WIRE_BYTES \
+    (VCS_ZCODE_SCIENCE_RELATION_SET_HEADER_BYTES + \
+     VCS_ZCODE_SCIENCE_RELATION_MAX * VCS_ZCODE_SCIENCE_RELATION_ROW_BYTES)
+#define VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_WIRE_BYTES 696u
 
 #define VCS_ZCODE_STUDY_REQUIRED_MAX 64u
 #define VCS_ZCODE_BENCHMARK_METHOD_MAX_MEASURED_SAMPLES (1u << 20)
@@ -83,6 +105,120 @@ enum vcs_zcode_curation_signal {
     VCS_ZCODE_CURATION_INTERESTING = 2,
     VCS_ZCODE_CURATION_FLAG = 3,
 };
+
+/* Immutable wire values: never renumber or reuse a value; append before the
+ * matching *_COUNT sentinel and pin the new value in the enum KAT. */
+enum vcs_zcode_science_profile {
+    VCS_ZCODE_SCIENCE_PROFILE_IDEA = 1,
+    VCS_ZCODE_SCIENCE_PROFILE_QUESTION = 2,
+    VCS_ZCODE_SCIENCE_PROFILE_HYPOTHESIS = 3,
+    VCS_ZCODE_SCIENCE_PROFILE_PREREGISTRATION = 4,
+    VCS_ZCODE_SCIENCE_PROFILE_PROTOCOL = 5,
+    VCS_ZCODE_SCIENCE_PROFILE_DATASET = 6,
+    VCS_ZCODE_SCIENCE_PROFILE_OBSERVATION = 7,
+    VCS_ZCODE_SCIENCE_PROFILE_COMPUTATIONAL_RUN = 8,
+    VCS_ZCODE_SCIENCE_PROFILE_RESULT = 9,
+    VCS_ZCODE_SCIENCE_PROFILE_CLAIM = 10,
+    VCS_ZCODE_SCIENCE_PROFILE_REVIEW = 11,
+    VCS_ZCODE_SCIENCE_PROFILE_REPLICATION = 12,
+    VCS_ZCODE_SCIENCE_PROFILE_COUNTEREVIDENCE = 13,
+    VCS_ZCODE_SCIENCE_PROFILE_SUPERSESSION = 14,
+    VCS_ZCODE_SCIENCE_PROFILE_RETRACTION = 15,
+    VCS_ZCODE_SCIENCE_PROFILE_COUNT = 16,
+};
+
+enum vcs_zcode_science_access {
+    VCS_ZCODE_SCIENCE_ACCESS_PUBLIC = 1,
+    VCS_ZCODE_SCIENCE_ACCESS_CONTROLLED = 2,
+    VCS_ZCODE_SCIENCE_ACCESS_METADATA_ONLY = 3,
+    VCS_ZCODE_SCIENCE_ACCESS_COUNT = 4,
+};
+
+enum vcs_zcode_science_privacy {
+    VCS_ZCODE_SCIENCE_PRIVACY_PUBLIC = 1,
+    VCS_ZCODE_SCIENCE_PRIVACY_DEIDENTIFIED = 2,
+    VCS_ZCODE_SCIENCE_PRIVACY_SENSITIVE = 3,
+    VCS_ZCODE_SCIENCE_PRIVACY_COUNT = 4,
+};
+
+enum vcs_zcode_science_redistribution {
+    VCS_ZCODE_SCIENCE_REDISTRIBUTION_PERMITTED = 1,
+    VCS_ZCODE_SCIENCE_REDISTRIBUTION_METADATA_ONLY = 2,
+    VCS_ZCODE_SCIENCE_REDISTRIBUTION_PROHIBITED = 3,
+    VCS_ZCODE_SCIENCE_REDISTRIBUTION_COUNT = 4,
+};
+
+enum vcs_zcode_science_authorship {
+    VCS_ZCODE_SCIENCE_AUTHORSHIP_ASSERTED = 1,
+    VCS_ZCODE_SCIENCE_AUTHORSHIP_SIGNED = 2,
+    VCS_ZCODE_SCIENCE_AUTHORSHIP_COUNT = 3,
+};
+
+enum vcs_zcode_science_relation_type {
+    VCS_ZCODE_SCIENCE_RELATION_SUPPORT = 1,
+    VCS_ZCODE_SCIENCE_RELATION_CONFLICT = 2,
+    VCS_ZCODE_SCIENCE_RELATION_SUPERSESSION = 3,
+    VCS_ZCODE_SCIENCE_RELATION_RETRACTION = 4,
+    VCS_ZCODE_SCIENCE_RELATION_COUNT = 5,
+};
+
+#define VCS_ZCODE_SCIENCE_RELATION_MASK(type_) \
+    ((uint8_t)(1u << ((uint8_t)(type_) - 1u)))
+#define VCS_ZCODE_SCIENCE_RELATION_KNOWN_MASK \
+    ((uint8_t)(VCS_ZCODE_SCIENCE_RELATION_MASK( \
+                    VCS_ZCODE_SCIENCE_RELATION_SUPPORT) | \
+               VCS_ZCODE_SCIENCE_RELATION_MASK( \
+                    VCS_ZCODE_SCIENCE_RELATION_CONFLICT) | \
+               VCS_ZCODE_SCIENCE_RELATION_MASK( \
+                    VCS_ZCODE_SCIENCE_RELATION_SUPERSESSION) | \
+               VCS_ZCODE_SCIENCE_RELATION_MASK( \
+                    VCS_ZCODE_SCIENCE_RELATION_RETRACTION)))
+
+/* Immutable wire values: never renumber or reuse these values. Append new
+ * values before the matching *_COUNT sentinel and extend the enum KAT. */
+enum vcs_zcode_vector_navigation_arm {
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_EXACT = 1,
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_BM25 = 2,
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_TRIGRAM = 3,
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_DETERMINISTIC = 4,
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_LEARNED = 5,
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_RERANK = 6,
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_HYBRID = 7,
+    VCS_ZCODE_VECTOR_NAVIGATION_ARM_COUNT = 8,
+};
+
+enum vcs_zcode_vector_navigation_gate {
+    VCS_ZCODE_VECTOR_NAVIGATION_GATE_QUALITY = 1,
+    VCS_ZCODE_VECTOR_NAVIGATION_GATE_PRIVACY = 2,
+    VCS_ZCODE_VECTOR_NAVIGATION_GATE_RIGHTS = 3,
+    VCS_ZCODE_VECTOR_NAVIGATION_GATE_DETERMINISM = 4,
+    VCS_ZCODE_VECTOR_NAVIGATION_GATE_RESOURCE = 5,
+    VCS_ZCODE_VECTOR_NAVIGATION_GATE_COUNT = 6,
+};
+
+enum vcs_zcode_vector_navigation_evidence_kind {
+    VCS_ZCODE_VECTOR_NAVIGATION_EVIDENCE_MODEL_HINT = 1,
+};
+
+enum vcs_zcode_vector_navigation_prohibition {
+    VCS_ZCODE_VECTOR_NAVIGATION_CANNOT_ESTABLISH_TRUTH = 1u << 0,
+    VCS_ZCODE_VECTOR_NAVIGATION_CANNOT_ESTABLISH_COMPLETENESS = 1u << 1,
+    VCS_ZCODE_VECTOR_NAVIGATION_CANNOT_OMIT_MANDATORY_PROOF = 1u << 2,
+};
+
+#define VCS_ZCODE_VECTOR_NAVIGATION_REQUIRED_PROHIBITIONS \
+    ((uint16_t)(VCS_ZCODE_VECTOR_NAVIGATION_CANNOT_ESTABLISH_TRUTH | \
+                VCS_ZCODE_VECTOR_NAVIGATION_CANNOT_ESTABLISH_COMPLETENESS | \
+                VCS_ZCODE_VECTOR_NAVIGATION_CANNOT_OMIT_MANDATORY_PROOF))
+#define VCS_ZCODE_VECTOR_NAVIGATION_DEVELOPMENT_QUERIES 96u
+#define VCS_ZCODE_VECTOR_NAVIGATION_SEALED_HOLDOUT_QUERIES 48u
+#define VCS_ZCODE_VECTOR_NAVIGATION_BOOTSTRAP_SAMPLES 10000u
+#define VCS_ZCODE_VECTOR_NAVIGATION_BOOTSTRAP_CONFIDENCE_BP 9500u
+#define VCS_ZCODE_VECTOR_NAVIGATION_HIT_AT_10_GAIN_BP 1000u
+#define VCS_ZCODE_VECTOR_NAVIGATION_NDCG_AT_10_GAIN_PPM 30000u
+#define VCS_ZCODE_VECTOR_NAVIGATION_AGENT_NONINFERIORITY_BP 200u
+#define VCS_ZCODE_VECTOR_NAVIGATION_EFFICIENCY_GAIN_BP 1000u
+#define VCS_ZCODE_VECTOR_NAVIGATION_APPROX_RECALL_AT_20_BP 9900u
 
 /* x86 ISA bitmap for hardware_profile.v1. Bits 4-12 mirror the
  * lib/util/src/hw_profile.c probes (avx2, avx512f/vl/bw/dq, vpclmulqdq,
@@ -153,6 +289,13 @@ enum vcs_zcode_science_error {
     VCS_ZCODE_SCIENCE_ERR_DISTRIBUTION,
     VCS_ZCODE_SCIENCE_ERR_METHOD_MISMATCH,
     VCS_ZCODE_SCIENCE_ERR_HARDWARE_MISMATCH,
+    VCS_ZCODE_SCIENCE_ERR_PROFILE,
+    VCS_ZCODE_SCIENCE_ERR_RIGHTS,
+    VCS_ZCODE_SCIENCE_ERR_AUTHORSHIP,
+    VCS_ZCODE_SCIENCE_ERR_EMBARGO,
+    VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE,
+    VCS_ZCODE_SCIENCE_ERR_RELATION_ORDER,
+    VCS_ZCODE_SCIENCE_ERR_RELATION_MISMATCH,
 };
 
 const char *vcs_zcode_science_error_string(
@@ -300,6 +443,97 @@ struct vcs_zcode_benchmark_result_v2 {
     int64_t finished_unix;
     uint8_t method_root[32];
     uint8_t hardware_profile_root[32];
+};
+
+struct vcs_zcode_science_relation_v1 {
+    uint8_t type;
+    uint8_t statement_root[32];
+};
+
+/* Canonical row order is (type, statement_root), strictly ascending. This
+ * forbids duplicates and makes one semantic relation set have one wire. */
+struct vcs_zcode_science_relation_set_v1 {
+    uint16_t schema_version;
+    uint16_t row_count;
+    struct vcs_zcode_science_relation_v1
+        rows[VCS_ZCODE_SCIENCE_RELATION_MAX];
+};
+
+/* Universal evidence envelope. Roots preserve the identity of existing
+ * objects; empty collections use their schema's canonical nonzero empty-set
+ * root. relations_root binds vcs_zcode_science_relation_set_v1, while the
+ * count and mask are a bounded declaration that can be checked without I/O.
+ * Exact relation semantics require validate_relations() with the rooted set.
+ * This object records assertions and rights metadata only: codec, structural
+ * validation, and signature success grant no storage, publication, execution,
+ * correctness, or local-acceptance authority. */
+struct vcs_zcode_science_statement_v1 {
+    uint16_t schema_version;
+    uint8_t profile;
+    uint8_t access;
+    uint8_t privacy;
+    uint8_t redistribution;
+    uint8_t authorship;
+    uint8_t relation_types;
+    uint16_t relation_count;
+    uint8_t subject_root[32];
+    uint8_t predicate_body_root[32];
+    uint8_t profile_schema_root[32];
+    uint8_t provenance_root[32];
+    uint8_t activity_root[32];
+    uint8_t input_root[32];
+    uint8_t authorship_assertion_root[32];
+    uint8_t license_root[32];
+    uint8_t access_policy_root[32];
+    uint8_t privacy_policy_root[32];
+    uint8_t external_identifiers_root[32];
+    uint8_t citations_root[32];
+    uint8_t relations_root[32];
+    int64_t observed_unix;
+    int64_t embargo_until_unix;
+    uint8_t signer_pubkey[32];
+    uint8_t signature[64];
+};
+
+/* Frozen preregistration body for the optional vector-navigation adoption
+ * study. The seven arm roots identify exact, BM25, trigram, deterministic,
+ * learned, rerank, and hybrid methods in enum order; the five gate roots
+ * identify quality, privacy, rights, determinism, and resource policies in
+ * enum order. The result_root freezes the result/grade schema before the
+ * study, not an observed future outcome. All roots are exact nonzero object
+ * identities. This object and its MODEL_HINT evidence cannot establish truth
+ * or completeness, omit a mandatory proof, publish data, or authorize code. */
+struct vcs_zcode_vector_navigation_preregistration_v1 {
+    uint16_t schema_version;
+    uint8_t arm_count;
+    uint8_t gate_count;
+    uint8_t evidence_kind;
+    uint8_t reserved;
+    uint16_t prohibited_claims;
+    uint16_t development_queries;
+    uint16_t sealed_holdout_queries;
+    uint32_t paired_bootstrap_samples;
+    uint64_t bootstrap_seed;
+    uint16_t bootstrap_confidence_bp;
+    uint16_t paraphrase_hit_at_10_gain_bp;
+    uint32_t overall_ndcg_at_10_gain_ppm;
+    uint16_t agent_noninferiority_bp;
+    uint16_t efficiency_gain_bp;
+    uint16_t approximate_recall_at_20_bp;
+    uint16_t maximum_exact_identity_changes;
+    uint16_t maximum_mandatory_proof_omissions;
+    uint16_t maximum_vector_only_completeness_claims;
+    uint32_t reserved_tail;
+    uint8_t study_spec_root[32];
+    uint8_t source_root[32];
+    uint8_t task_root[32];
+    uint8_t ontology_root[32];
+    uint8_t concept_card_root[32];
+    uint8_t model_root[32];
+    uint8_t embedding_profile_root[32];
+    uint8_t result_root[32];
+    uint8_t arm_roots[VCS_ZCODE_VECTOR_NAVIGATION_ARM_COUNT - 1u][32];
+    uint8_t gate_roots[VCS_ZCODE_VECTOR_NAVIGATION_GATE_COUNT - 1u][32];
 };
 
 enum vcs_zcode_science_error vcs_zcode_study_spec_validate(
@@ -464,5 +698,65 @@ enum vcs_zcode_science_error vcs_zcode_benchmark_result_v2_validate_for_study(
     const struct vcs_zcode_benchmark_method_v1 *method,
     const struct vcs_zcode_hardware_profile_v1 *profile,
     const struct vcs_zcode_benchmark_result_v2 *result, int64_t now_unix);
+
+/* Statement parse and validate are structural only. They do not verify a signature,
+ * resolve relation bytes, establish truth, or grant any authority. */
+enum vcs_zcode_science_error vcs_zcode_science_statement_validate(
+    const struct vcs_zcode_science_statement_v1 *statement);
+enum vcs_zcode_science_error vcs_zcode_science_statement_serialize(
+    const struct vcs_zcode_science_statement_v1 *statement,
+    uint8_t out[VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES]);
+enum vcs_zcode_science_error vcs_zcode_science_statement_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_science_statement_v1 *out);
+enum vcs_zcode_science_error vcs_zcode_science_statement_root(
+    const struct vcs_zcode_science_statement_v1 *statement, uint8_t out[32]);
+enum vcs_zcode_science_error vcs_zcode_science_statement_seal(
+    struct vcs_zcode_science_statement_v1 *statement,
+    const uint8_t secret[32], const uint8_t pubkey[32]);
+enum vcs_zcode_science_error vcs_zcode_science_statement_verify(
+    const struct vcs_zcode_science_statement_v1 *statement,
+    const uint8_t expected_signer[32]);
+
+/* Relation-set parse and validate are likewise structural. Cross-validation
+ * proves only canonical root/count/type agreement, never truth or authority. */
+enum vcs_zcode_science_error vcs_zcode_science_relation_set_validate(
+    const struct vcs_zcode_science_relation_set_v1 *relations);
+enum vcs_zcode_science_error vcs_zcode_science_relation_set_serialize(
+    const struct vcs_zcode_science_relation_set_v1 *relations,
+    uint8_t out[VCS_ZCODE_SCIENCE_RELATION_SET_MAX_WIRE_BYTES],
+    size_t *out_len);
+enum vcs_zcode_science_error vcs_zcode_science_relation_set_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_science_relation_set_v1 *out);
+enum vcs_zcode_science_error vcs_zcode_science_relation_set_root(
+    const struct vcs_zcode_science_relation_set_v1 *relations,
+    uint8_t out[32]);
+enum vcs_zcode_science_error vcs_zcode_science_statement_validate_relations(
+    const struct vcs_zcode_science_statement_v1 *statement,
+    const struct vcs_zcode_science_relation_set_v1 *relations);
+
+/* These functions establish canonical structure and exact root bindings only.
+ * They do not evaluate study results, establish vector claims, or confer any
+ * publication, execution, proof-omission, or local-acceptance authority. */
+enum vcs_zcode_science_error
+vcs_zcode_vector_navigation_preregistration_validate(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg);
+enum vcs_zcode_science_error
+vcs_zcode_vector_navigation_preregistration_serialize(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg,
+    uint8_t out[VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_WIRE_BYTES]);
+enum vcs_zcode_science_error
+vcs_zcode_vector_navigation_preregistration_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_vector_navigation_preregistration_v1 *out);
+enum vcs_zcode_science_error vcs_zcode_vector_navigation_preregistration_root(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg,
+    uint8_t out[32]);
+enum vcs_zcode_science_error
+vcs_zcode_vector_navigation_preregistration_validate_bindings(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg,
+    const struct vcs_zcode_study_spec_v1 *study,
+    const struct vcs_zcode_science_statement_v1 *statement);
 
 #endif /* ZCL_VCS_ZCODE_SCIENCE_H */

@@ -75,6 +75,10 @@ LIB_MODULE("retrieval")
 /* Scalar FIPS-202 primitives depend only on base.  Crypto owns optional
  * batched acceleration and reaches down through sha3/sha3.h. */
 LIB_MODULE("sha3")
+/* Canonical source-universe and contextual ontology objects plus the bounded
+ * IO-free evaluator. Depends only on base and sha3; application services own
+ * extraction, CAS, projections, clocks and policy. */
+LIB_MODULE("ontology")
 /* A proof receipt: one claim that a named test group reached a named verdict
  * over an exactly identified source tree, in the fixed form it travels in.
  * Depends on base and sha3 and NOTHING else — deliberately. It does not sign

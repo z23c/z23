@@ -493,7 +493,7 @@ ZCL_MODULE_CAPABILITY("app/views/src/explorer_stats_view.c", CAP_CLOCK|CAP_FS_WR
 ZCL_MODULE_CAPABILITY("app/views/src/name_gateway_view.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/views/src/qr_popup.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/views/src/ui_present.c", CAP_FS_WRITE|CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("app/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
+ZCL_MODULE_CAPABILITY("app/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK|CAP_FS_WRITE, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
 ZCL_MODULE_CAPABILITY("app/views/src/ui_present_host_transport.c", CAP_NETWORK|CAP_FS_WRITE|CAP_FS_READ, "the owner-only local transport for native views: speaks over the AF_UNIX socket and persists the nonce that binds a session to it")
 ZCL_MODULE_CAPABILITY("app/views/src/wallet_gui.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("config/src/app_context.c", CAP_FS_WRITE, "")

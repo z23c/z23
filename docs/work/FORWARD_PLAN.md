@@ -22,22 +22,76 @@ to reproduce, is not the current mission.
 
 ## Product priority order
 
-1. **Public-node correctness and remaining V1 acceptance.** Consensus, wallet
-   custody, block processing, synchronization, peer health, and recovery have
-   absolute resource and authority priority.
-2. **C23 Commons Alpha complete user story.** An ordinary full node can
+1. **P0 — public-node correctness and remaining V1 acceptance.** Consensus,
+   wallet custody, block processing, synchronization, peer health, and recovery
+   retain absolute resource and authority priority.
+2. **Temporary P0.5 — Fearless Scale code, proof, and science fabric.** Build
+   the bounded, content-addressed navigation and evidence rails needed to work
+   safely across a federated billion-line C23 corpus. This program may consume
+   only resources left after P0 work and grants no consensus, custody,
+   deployment, publication-signing, or fetched-code execution authority.
+3. **C23 Commons Alpha complete user story.** An ordinary full node can
    publish, discover, fetch, verify, build, independently reproduce, and serve
    an exact C23 package without GitHub or a central registry.
-3. **Core consolidation only when driven by that user story.** Reuse existing
+4. **Core consolidation only when driven by that user story.** Reuse existing
    source, CAS, DHT, queue, lease, action, receipt, and policy authorities.
-4. **Developer tooling is frozen except for correctness or product blockers.**
-   The reflex reactor is factory equipment, not the product.
-5. **Token economics and speculative expansion remain simulation-only.** They
+5. **Developer tooling outside the P0.5 mission is frozen except for
+   correctness or product blockers.** The reflex reactor is factory equipment,
+   not the product.
+6. **Token economics and speculative expansion remain simulation-only.** They
    do not displace public-node or package-network acceptance.
 
 The blockchain wins every resource and authority conflict. Package work must
 remain bounded and asynchronous; it may not delay consensus, transaction relay,
 sync, peer health, wallet custody, or deployment.
+
+## Temporary P0.5: Fearless Scale
+
+The user outcome is one versioned native interface through which an agent can
+orient, query, assemble bounded context, plan conservative proof, and verify
+the exact evidence behind each answer across local and federated C23 source.
+The same existing Commons authorities carry immutable index shards and
+universal science statements. SQLite remains an optional rebuildable local
+catalog; metaverse remains a derived collection and visualization view.
+
+Work proceeds in this order:
+
+1. Govern one source universe and close the current index correctness gaps.
+2. Use native immutable receipt admission; push hooks never compile, lint,
+   test, wait, fetch, or invoke Make or shell.
+3. Ship local navigation v2 behind born-red fixtures and dual-run it against
+   v1 wherever v1 claims completeness.
+4. Federate immutable shards through the existing Commons CAS/DHT and prove
+   bounded 1M, 10M, 100M, and 1B non-deduplicated-line fixtures.
+5. Project existing science evidence into universal statement and realm-head
+   envelopes with rights-aware inert fetch and local action acceptance.
+6. Retire compatibility only after two green release cycles and demonstrated
+   reconstruction from immutable shards.
+
+Temporary P0.5 ends only when all of these exit gates are evidenced:
+
+- census, Merkle, inventory, and index agree on one governed source universe;
+- clean and incremental Linux/macOS builds produce identical manifest and
+  shard roots, with missing dimensions reported as typed `INCOMPLETE`;
+- warm exact, ranked, context, incremental-delta, and federated billion-line
+  acceptance meet their declared latency, RSS, and storage budgets without
+  silent truncation, false completeness, overflow, or root disagreement;
+- receipt admission and status meet their bounded latency contracts, ordinary
+  small changes reach verified green within the program budget, and cold
+  audits show no unexplained selector miss, cache disagreement, accounting
+  hole, duplicate action, or omitted mandatory P0/P1 gate;
+- the frozen multi-agent task corpus records exact model, prompt, tool schema,
+  source root, outcome, context cost, proof latency, and landed correctness;
+- three isolated peers can publish, discover, fetch, rederive, review,
+  replicate, conflict, supersede, and retract rights-compatible science
+  statements and realm heads while poisoned or incomplete evidence fails
+  closed; and
+- maximum corpus, science-radar, and indexing load demonstrably preserves
+  blockchain sync, peer health, wallet custody, and consensus priority.
+
+After these gates pass, public-node and Commons feature ordering above resumes
+without the temporary elevation; the proven fabric continues as ordinary
+Commons infrastructure.
 
 ## 1. Public-node V1 acceptance
 
@@ -124,6 +178,54 @@ Acceptance requires:
   runs the same journey with node B and node C on separate physical hosts,
   then takes host A down and proves host C still discovers, fetches,
   reproduces and runs the exact accepted bytes from B.
+
+### Token-efficient peer work inside the same journey
+
+Agents do not need a chat network or a second coordinator. They need the
+existing task, source, context, action, candidate, and receipt roots to be
+reusable across nodes without retransmitting repository copies or accumulated
+prose. Keep this asynchronous and content-addressed:
+
+```text
+exact task/source generation
+    -> bounded local context or navigator-fact root
+    -> peer asks for roots first and fetches only missing CAS chunks
+    -> receiver re-roots bytes and verifies task/source/generation bindings
+    -> exact active action attaches; exact completed work is revalidated
+    -> model sees only selected bytes and explicit completeness gaps
+```
+
+The ordered checkpoints are:
+
+1. Measure model-context bytes, approximate tokenizer counts, whole-file reads,
+   unchanged-source reads, corpus walks, CAS hits/misses, peer bytes, and
+   duplicate actions on the representative task corpus. Do not claim a token
+   win from transport bytes alone.
+2. Reuse the existing `agent_context.v1` wire by root. Transport it only as an
+   ordinary inert `content.v2` carrier through the existing package swarm.
+   Require the receiver to re-root it and check its expected task, source, goal,
+   and completeness before use. The fixed task carrier and task authority do
+   not change merely to make context convenient.
+3. Make navigator facts generation/configuration/query-bound, canonical, and
+   cursor-safe. A remote fact is a cacheable byte proposal; exact edit, impact,
+   or proof selection still requires local verification. Missing call/include/
+   build/policy dimensions widen proofs or refuse by name.
+4. Rendezvous before spending model tokens: resolve already accepted work for
+   the exact task, attach to an identical active action, or revalidate an exact
+   completed action and its locally held outputs. A stranger's receipt remains
+   `UNVERIFIED` until local policy and reproduction say otherwise.
+5. Only after those read-only savings are measured, add candidate-free remote
+   `DIAGNOSE`, then scoped `PROPOSE`, then independent `REVIEW` through the
+   existing ZCode work swarm. A missing qualified out-of-process isolation
+   backend, including on macOS, is a named refusal; fetched source never enters
+   the node process.
+
+Acceptance for the first checkpoint is two independent peers deriving the same
+context root for the same exact generation, a warm handoff transferring no
+excerpt chunks, no warm corpus-wide walk or unchanged-source read, explicit
+truncation and stale-generation refusals, and unchanged proof selection. The
+blockchain-priority assertion in the async-proof scaling gate remains
+mandatory.
 
 When the aggregate fails, fix the first violated ownership or identity boundary
 and add a permanent regression there. Do not add retries, sleeps, alternate
