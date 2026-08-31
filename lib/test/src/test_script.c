@@ -18,8 +18,10 @@
 #endif
 #include <sys/time.h>
 
-/* Process RSS in KB: ru_maxrss on POSIX, current working set via the
- * platform authority on Windows (same "<10 MB growth" assertion shape). */
+/* Process RSS in KiB: Linux ru_maxrss is already KiB, while Darwin reports
+ * ru_maxrss in bytes. Windows uses the current working set through the
+ * platform authority. Keep the unit normalized so the same "<10 MiB growth"
+ * assertion means the same thing on every platform. */
 static long ts_rss_kb(void)
 {
 #if defined(_WIN32)
@@ -31,7 +33,11 @@ static long ts_rss_kb(void)
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0)
         return 0;
+#if defined(__APPLE__)
+    return ru.ru_maxrss / 1024;
+#else
     return ru.ru_maxrss;
+#endif
 #endif
 }
 
