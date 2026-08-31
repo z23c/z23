@@ -23,6 +23,46 @@ function ConvertTo-Z23MsysPath {
     throw "z23-windows-path: REFUSE: expected an absolute drive or UNC path, got '$full'"
 }
 
+function Resolve-Z23Msys2Root {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+    if (-not [System.IO.Path]::IsPathFullyQualified($Path)) {
+        throw "z23-windows-path: REFUSE: MSYS2 root must be an absolute path, got '$Path'"
+    }
+    if ($Path.StartsWith('\\?\') -or $Path.StartsWith('\\.\')) {
+        throw "z23-windows-path: REFUSE: device-path MSYS2 roots are not qualified"
+    }
+    if ($Path.StartsWith('\\')) {
+        throw "z23-windows-path: REFUSE: UNC MSYS2 roots are not qualified"
+    }
+    if ($Path.Contains(';')) {
+        throw "z23-windows-path: REFUSE: MSYS2 root cannot contain the Windows PATH separator ';'"
+    }
+    return (Resolve-Path -LiteralPath $Path | Select-Object -ExpandProperty Path)
+}
+
+function Enable-Z23NativeErrorMode {
+    if (-not ('Z23.NativeErrorModeV2' -as [type])) {
+        Add-Type -TypeDefinition @'
+namespace Z23 {
+    using System.Runtime.InteropServices;
+    public static class NativeErrorModeV2 {
+        [DllImport("kernel32.dll")]
+        public static extern uint GetErrorMode();
+        [DllImport("kernel32.dll")]
+        public static extern uint SetErrorMode(uint mode);
+    }
+}
+'@
+    }
+    $PreviousErrorMode = [Z23.NativeErrorModeV2]::GetErrorMode()
+    [void][Z23.NativeErrorModeV2]::SetErrorMode($PreviousErrorMode -bor 0x00008003)
+}
+
 function Assert-Z23MsysPathContract {
     $cases = @(
         @{ Input = 'D:\msys64'; Expected = '/d/msys64' },

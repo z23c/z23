@@ -236,7 +236,9 @@ ADMISSION_LOCK_HELD=0
 
 acquire_admission_lock()
 {
-    local deadline pid start actual
+    local empty_deadline pid start actual owner_start now
+    local verify_pid verify_start verify_actual
+    local stale_pid= stale_start= stale_deadline=0
     [ -d "$OBJECT_ROOT" ] && [ ! -L "$OBJECT_ROOT" ] ||
         fail 'object root is not a regular directory'
     [ -d "$OBJECT_ROOT/epochs" ] && [ ! -L "$OBJECT_ROOT/epochs" ] ||
@@ -271,27 +273,74 @@ acquire_admission_lock()
         }
         return 0
     fi
-    deadline=$(($(date +%s) + 30))
+    empty_deadline=0
     while :; do
         if mkdir "$ADMISSION_LOCK_DIR" 2>/dev/null; then
-            printf 'pid=%s\nstart=%s\n' "$$" \
-                "$("$SELF_DIR/process-start-token.sh" "$$")" \
+            owner_start="$("$SELF_DIR/process-start-token.sh" "$$")" ||
+                fail 'could not identify epoch admission lock owner'
+            [ -n "$owner_start" ] ||
+                fail 'epoch admission lock owner start token is empty'
+            printf 'pid=%s\nstart=%s\n' "$$" "$owner_start" \
                 > "$ADMISSION_LOCK_OWNER"
             ADMISSION_LOCK_HELD=1
             return 0
         fi
         [ ! -L "$ADMISSION_LOCK_DIR" ] ||
             fail 'epoch admission lock directory is a symbolic link'
-        pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
-        start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
-        actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
-        if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
-            rm -f -- "$ADMISSION_LOCK_OWNER"
-            rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null || true
+        pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+        start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+        if [ -z "$pid" ] || [ -z "$start" ]; then
+            now="$(date +%s)"
+            if [ "$empty_deadline" -eq 0 ]; then
+                empty_deadline=$((now + 30))
+            elif [ "$now" -ge "$empty_deadline" ]; then
+                [ "$MODE" = acquire ] &&
+                [ "${EPOCH_GC_LOCK_HELD:-0}" = 1 ] ||
+                    fail 'epoch admission lock owner was not published'
+                rm -f -- "$ADMISSION_LOCK_OWNER"
+                rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null ||
+                    fail 'could not recover abandoned epoch admission lock'
+                empty_deadline=0
+            else
+                sleep 0.05
+            fi
             continue
         fi
-        [ "$(date +%s)" -lt "$deadline" ] ||
-            fail 'timed out waiting for epoch admission lock'
+        empty_deadline=0
+        actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
+        if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
+            now="$(date +%s)"
+            if [ "$pid" != "$stale_pid" ] || [ "$start" != "$stale_start" ]; then
+                stale_pid="$pid"
+                stale_start="$start"
+                stale_deadline=$((now + 30))
+                sleep 0.05
+                continue
+            fi
+            [ "$now" -ge "$stale_deadline" ] || {
+                sleep 0.05
+                continue
+            }
+            [ "$MODE" = acquire ] &&
+            [ "${EPOCH_GC_LOCK_HELD:-0}" = 1 ] ||
+                fail 'epoch admission lock owner remained stale'
+            verify_pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+            verify_start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+            verify_actual="$("$SELF_DIR/process-start-token.sh" "$verify_pid" 2>/dev/null || true)"
+            [ "$verify_pid" = "$pid" ] && [ "$verify_start" = "$start" ] &&
+            { [ -z "$verify_actual" ] || [ "$verify_actual" != "$verify_start" ]; } ||
+                continue
+            rm -f -- "$ADMISSION_LOCK_OWNER"
+            rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null ||
+                fail 'could not recover stale epoch admission lock'
+            stale_pid=
+            stale_start=
+            stale_deadline=0
+            continue
+        fi
+        stale_pid=
+        stale_start=
+        stale_deadline=0
         sleep 0.05
     done
 }

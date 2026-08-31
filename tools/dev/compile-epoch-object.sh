@@ -35,6 +35,19 @@ shift 9
 shift
 [ "$#" -gt 0 ] || fail 'empty compiler argv'
 
+# Every anticipated refusal below supplies its own context. This trap closes
+# the remaining set -e gap: if an unanticipated top-level command dies,
+# Make must still identify the source, output and exact script line instead of
+# reducing the event to a generic "Error 2".
+unexpected_failure()
+{
+    local rc=$1 line=$2
+    printf 'compile-epoch-object: unexpected rc=%s source=%s output=%s line=%s\n' \
+        "$rc" "$SOURCE" "$OUTPUT" "$line" >&2
+    exit "$rc"
+}
+trap 'unexpected_failure "$?" "$LINENO"' ERR
+
 case "$MODE" in dep|coverage) ;; *) fail "unknown compile mode: $MODE" ;; esac
 is_sha256 "$SOURCE_ID" || fail 'source id is not lowercase SHA-256'
 [ "$COMPLETE" = 1 ] || fail 'source capture is incomplete'
@@ -219,7 +232,9 @@ trap 'exit 2' HUP INT TERM
 compile_one()
 {
     local staging staging_base object dep note_record note_tmp marker_tmp
-    local host_system deadline pid start actual
+    local compiler_rc
+    local host_system empty_deadline pid start actual owner_start now
+    local stale_pid= stale_start= stale_deadline=0
     # Long source filenames can make the staging directory path breach Windows
     # MAX_PATH. Use a short deterministic prefix derived from OUTPUT_BASE; the
     # XXXXXX suffix still gives mktemp its uniqueness.
@@ -231,7 +246,13 @@ compile_one()
     STAGING="$staging"
     object="$staging/$OUTPUT_BASE"
     dep="$staging/${OUTPUT_BASE%.o}.d"
-    "$@" -MMD -MP -MF "$dep" -MT "$OUTPUT" -c -o "$object" "$SOURCE"
+    if "$@" -MMD -MP -MF "$dep" -MT "$OUTPUT" -c -o "$object" "$SOURCE"; then
+        compiler_rc=0
+    else
+        compiler_rc=$?
+    fi
+    [ "$compiler_rc" = 0 ] ||
+        fail "compiler exited rc=$compiler_rc source=$SOURCE; native loader or toolchain failure may have produced no diagnostic"
     [ -s "$object" ] || fail 'compiler did not create a nonempty object'
     [ -s "$dep" ] || fail 'compiler did not create a nonempty dependency file'
 
@@ -249,26 +270,54 @@ compile_one()
     host_system="$(uname -s 2>/dev/null || printf unknown)"
     case "$host_system" in
         MINGW*|MSYS*)
-            deadline=$(($(date +%s) + 30))
+            empty_deadline=0
             while ! mkdir "$ADMISSION_LOCK_DIR" 2>/dev/null; do
                 [ ! -L "$ADMISSION_LOCK_DIR" ] ||
                     fail 'epoch admission lock directory is a symlink'
-                pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
-                start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
-                actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
-                if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
-                    rm -f -- "$ADMISSION_LOCK_OWNER"
-                    rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null || true
+                pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+                start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+                # mkdir publishes before the winner can write its identity.
+                # An empty owner is therefore transitional, not proof of a
+                # stale lock. Wait boundedly; only the deadline may recover
+                # a creator that died in this narrow interval.
+                if [ -z "$pid" ] || [ -z "$start" ]; then
+                    now="$(date +%s)"
+                    if [ "$empty_deadline" -eq 0 ]; then
+                        empty_deadline=$((now + 30))
+                    elif [ "$now" -ge "$empty_deadline" ]; then
+                        fail 'epoch admission lock owner was not published; rerun for serialized recovery'
+                    else
+                        sleep 0.05
+                    fi
                     continue
                 fi
-                [ "$(date +%s)" -lt "$deadline" ] ||
-                    fail 'timed out waiting for epoch admission lock'
+                empty_deadline=0
+                actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
+                if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
+                    now="$(date +%s)"
+                    if [ "$pid" != "$stale_pid" ] ||
+                       [ "$start" != "$stale_start" ]; then
+                        stale_pid="$pid"
+                        stale_start="$start"
+                        stale_deadline=$((now + 30))
+                    elif [ "$now" -ge "$stale_deadline" ]; then
+                        fail 'epoch admission lock owner remained stale; rerun for serialized recovery'
+                    fi
+                    sleep 0.05
+                    continue
+                fi
+                stale_pid=
+                stale_start=
+                stale_deadline=0
                 sleep 0.05
             done
             [ -d "$ADMISSION_LOCK_DIR" ] && [ ! -L "$ADMISSION_LOCK_DIR" ] ||
                 fail 'epoch admission lock directory is not regular'
-            printf 'pid=%s\nstart=%s\n' "$$" \
-                "$("$SELF_DIR/process-start-token.sh" "$$")" \
+            owner_start="$("$SELF_DIR/process-start-token.sh" "$$")" ||
+                fail 'could not identify epoch admission lock owner'
+            [ -n "$owner_start" ] ||
+                fail 'epoch admission lock owner start token is empty'
+            printf 'pid=%s\nstart=%s\n' "$$" "$owner_start" \
                 > "$ADMISSION_LOCK_OWNER"
             ADMISSION_LOCK_HELD=1
             ;;

@@ -49,6 +49,12 @@ if ([string]::IsNullOrEmpty($CheckoutRoot)) {
     $CheckoutRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 }
 $CheckoutRoot = Resolve-Path -LiteralPath $CheckoutRoot | Select-Object -ExpandProperty Path
+try {
+    $Msys2Root = Resolve-Z23Msys2Root -Path $Msys2Root
+} catch {
+    Write-Refusal $_.Exception.Message
+    exit 1
+}
 
 $LogicalProcessors = [Environment]::ProcessorCount
 if ($BuildJobs -lt 1 -or $BuildJobs -gt [Math]::Min(32, $LogicalProcessors)) {
@@ -86,6 +92,7 @@ if (-not (Test-Path -LiteralPath $Pacman)) {
 # ---------------------------------------------------------------------------
 $RequiredPackages = @(
     'base-devel',
+    'gcc',
     'git',
     'curl',
     'wget',
@@ -103,6 +110,11 @@ $RequiredPackages = @(
 # without launching an interactive shell.
 $env:MSYSTEM = 'UCRT64'
 $env:CHERE_INVOKING = '1'
+$NativeUcrtBin = Join-Path $Msys2Root 'ucrt64\bin'
+$NativeUsrBin = Join-Path $Msys2Root 'usr\bin'
+# Native compiler children resolve their DLLs with Windows PATH semantics;
+# MSYS spellings added inside Bash are not sufficient for the PE loader.
+$env:Path = "$NativeUcrtBin;$NativeUsrBin;$env:Path"
 $repoRoot = ConvertTo-Z23MsysPath -Path $CheckoutRoot
 $msys2RootMsys = ConvertTo-Z23MsysPath -Path $Msys2Root
 $env:Z23_CHECKOUT_ROOT_MSYS = $repoRoot
@@ -114,6 +126,7 @@ $pkgList = $RequiredPackages -join ' '
 if ($DryRun) {
     Write-Output "Z23_CHECKOUT_ROOT_MSYS=$repoRoot"
     Write-Output "Z23_MSYS2_ROOT_MSYS=$msys2RootMsys"
+    Write-Output "NATIVE_PATH_PREFIX=$NativeUcrtBin;$NativeUsrBin"
     Write-Output "pacman -Syu --noconfirm (pass 1)"
     Write-Output "pacman -Syu --noconfirm (pass 2)"
     Write-Output "pacman -S --needed --noconfirm $pkgList"
@@ -133,18 +146,7 @@ if ($DryRun) {
 # before the repository's native Job-Object runner exists. Make those tools
 # inherit fail-fast, headless Windows error handling so a damaged compiler or
 # DLL reports failure instead of opening a blocking WER/critical-error popup.
-if (-not ('Z23.NativeErrorMode' -as [type])) {
-    Add-Type -TypeDefinition @'
-namespace Z23 {
-    using System.Runtime.InteropServices;
-    public static class NativeErrorMode {
-        [DllImport("kernel32.dll")]
-        public static extern uint SetErrorMode(uint mode);
-    }
-}
-'@
-}
-[void][Z23.NativeErrorMode]::SetErrorMode(0x00008003)
+Enable-Z23NativeErrorMode
 
 Write-Note "fully upgrading MSYS2 (rolling releases do not support partial upgrades)..."
 for ($UpgradePass = 1; $UpgradePass -le 2; $UpgradePass++) {
@@ -179,6 +181,28 @@ done
 & $Bash '-lc' $SmokeProgram 'z23-windows-setup' $msys2RootMsys
 if ($LASTEXITCODE -ne 0) {
     Write-Refusal "C23 compiler smoke probe failed (exit $LASTEXITCODE); repair the MSYS2 UCRT64 installation before building"
+    exit 1
+}
+
+Write-Note "running hosted zcc bootstrap and native-child smoke probe..."
+$ZccSmokeProgram = @'
+set -euo pipefail
+repo=$1
+msys_root=$2
+export PATH="$msys_root/ucrt64/bin:$msys_root/usr/bin:$PATH"
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+printf 'int main(void){return 0;}\n' >"$d/probe.c"
+zcc=$(ZCL_BIN_DIR="$d/bin" ZCC_DIR="$d/cache" \
+    "$repo/tools/dev/zcc_bootstrap.sh")
+[ -x "$zcc" ]
+ZCC_DIR="$d/cache" "$zcc" gcc -std=c23 -Wall -Wextra -Werror \
+    -pedantic "$d/probe.c" -o "$d/probe.exe"
+"$d/probe.exe"
+'@
+& $Bash '-lc' $ZccSmokeProgram 'z23-windows-zcc-smoke' $repoRoot $msys2RootMsys
+if ($LASTEXITCODE -ne 0) {
+    Write-Refusal "hosted zcc bootstrap/native-child smoke failed (exit $LASTEXITCODE); verify the MSYS gcc and UCRT64 toolchains"
     exit 1
 }
 

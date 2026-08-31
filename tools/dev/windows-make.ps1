@@ -60,10 +60,29 @@ if ([string]::IsNullOrEmpty($CheckoutRoot)) {
     $CheckoutRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 }
 $CheckoutRoot = Resolve-Path -LiteralPath $CheckoutRoot | Select-Object -ExpandProperty Path
+try {
+    $Msys2Root = Resolve-Z23Msys2Root -Path $Msys2Root
+} catch {
+    Write-Error -Message "z23-make: REFUSE: $($_.Exception.Message)" -ErrorAction Continue
+    exit 1
+}
 
 $Bash = Join-Path $Msys2Root 'usr\bin\bash.exe'
 if (-not (Test-Path -LiteralPath $Bash)) {
     Write-Error -Message "z23-make: REFUSE: MSYS2 bash not found at $Bash; run tools\dev\windows-setup.ps1 first" -ErrorAction Continue
+    exit 1
+}
+$SelectedMake = Join-Path $Msys2Root 'usr\bin\make.exe'
+$SelectedGcc = Join-Path $Msys2Root 'ucrt64\bin\gcc.exe'
+foreach ($RequiredTool in @($SelectedMake, $SelectedGcc)) {
+    if (-not (Test-Path -LiteralPath $RequiredTool -PathType Leaf)) {
+        Write-Error -Message "z23-make: REFUSE: selected MSYS2 root is missing $RequiredTool; run tools\dev\windows-setup.ps1 -Msys2Root $Msys2Root" -ErrorAction Continue
+        exit 1
+    }
+}
+$SelectedCc1 = @(Get-ChildItem -LiteralPath (Join-Path $Msys2Root 'ucrt64\lib\gcc\x86_64-w64-mingw32') -Filter 'cc1.exe' -File -Recurse -ErrorAction SilentlyContinue)
+if ($SelectedCc1.Count -lt 1) {
+    Write-Error -Message "z23-make: REFUSE: selected MSYS2 root has no root-owned UCRT64 cc1.exe; run tools\dev\windows-setup.ps1 -Msys2Root $Msys2Root" -ErrorAction Continue
     exit 1
 }
 
@@ -72,6 +91,13 @@ $msysRoot = ConvertTo-Z23MsysPath -Path $Msys2Root
 
 $env:MSYSTEM = 'UCRT64'
 $env:CHERE_INVOKING = '1'
+# Bash understands /c/msys64/... but the native Windows loader resolving
+# cc1.exe's runtime DLLs does not. Give the entire contained process tree the
+# equivalent native spellings as well; this is process-local and does not
+# mutate the user's or machine's persistent PATH.
+$NativeUcrtBin = Join-Path $Msys2Root 'ucrt64\bin'
+$NativeUsrBin = Join-Path $Msys2Root 'usr\bin'
+$env:Path = "$NativeUcrtBin;$NativeUsrBin;$env:Path"
 $env:Z23_CHECKOUT_ROOT_MSYS = $repoRoot
 $env:Z23_MSYS2_ROOT_MSYS = $msysRoot
 
@@ -84,6 +110,7 @@ $bashArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot, $msysRoot) + $
 if ($DryRun) {
     Write-Output "Z23_CHECKOUT_ROOT_MSYS=$repoRoot"
     Write-Output "Z23_MSYS2_ROOT_MSYS=$msysRoot"
+    Write-Output "NATIVE_PATH_PREFIX=$NativeUcrtBin;$NativeUsrBin"
     Write-Output 'BASH_ARGV:'
     foreach ($BashArgument in $bashArgs) {
         Write-Output "  $BashArgument"
@@ -116,18 +143,7 @@ if ($NeedsBootstrap) {
     # already be placed inside it. Suppress inherited Windows Error Reporting
     # and critical-error UI before spawning Bash: a broken cc1 must return an
     # exit status, never block an unattended setup behind a desktop popup.
-    if (-not ('Z23.NativeErrorMode' -as [type])) {
-        Add-Type -TypeDefinition @'
-namespace Z23 {
-    using System.Runtime.InteropServices;
-    public static class NativeErrorMode {
-        [DllImport("kernel32.dll")]
-        public static extern uint SetErrorMode(uint mode);
-    }
-}
-'@
-    }
-    [void][Z23.NativeErrorMode]::SetErrorMode(0x00008003)
+    Enable-Z23NativeErrorMode
     $BootstrapArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot,
                        $msysRoot, 'build/bin/z23-headless-run.exe')
     & $Bash @BootstrapArgs

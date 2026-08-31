@@ -1270,12 +1270,21 @@ BUILD_EPOCH_KEEP ?= 3
 # zcc_bootstrap keeps its historical nonfatal contract: a host where the
 # in-tree wrapper is unavailable defaults to the legacy oracle rather than
 # breaking an otherwise valid build. Explicit backend requests are validated.
-ZCL_OBJECT_BACKEND ?= $(if $(filter zcc,$(notdir $(firstword $(CC)))),native,legacy)
+# The hosted MSYS zcc can cache native UCRT compiler children, but its native
+# epoch publisher requires POSIX directory-fsync semantics that NTFS/MSYS does
+# not provide. Keep Windows on the retained shell publisher; zcc still wraps
+# the compiler inside that staging directory, so cache hits remain available.
+ZCL_OBJECT_BACKEND ?= $(if $(ZCL_HOST_WINDOWS),legacy,$(if $(filter zcc,$(notdir $(firstword $(CC)))),native,legacy))
 ifneq ($(words $(ZCL_OBJECT_BACKEND)),1)
 $(error ZCL_OBJECT_BACKEND must be exactly one word: native or legacy)
 endif
 ifeq ($(filter native legacy,$(ZCL_OBJECT_BACKEND)),)
 $(error ZCL_OBJECT_BACKEND must be native or legacy)
+endif
+ifeq ($(ZCL_HOST_WINDOWS),1)
+ifeq ($(ZCL_OBJECT_BACKEND),native)
+$(error ZCL_OBJECT_BACKEND=native is unavailable on Windows; use the retained legacy publisher)
+endif
 endif
 ifeq ($(ZCL_OBJECT_BACKEND),native)
 BUILD_FAST_EPOCH_OBJECT_COMMAND = $(ZCC_BIN) --epoch-object

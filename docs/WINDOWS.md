@@ -45,7 +45,7 @@ Install MSYS2 to `C:\msys64`, open **MSYS2 UCRT64**, and run:
 ```bash
 pacman -Syu
 # Reopen UCRT64 and repeat pacman -Syu if the runtime closes the shell.
-pacman -S --needed base-devel git \
+pacman -S --needed base-devel gcc git \
   mingw-w64-ucrt-x86_64-toolchain \
   mingw-w64-ucrt-x86_64-clang \
   mingw-w64-ucrt-x86_64-clang-tools-extra \
@@ -71,6 +71,12 @@ UCRT64 packages, runs `make setup`, and builds `z23.exe`:
 # Print the commands and converted MSYS paths without pacman/build mutations:
 .\tools\dev\windows-setup.ps1 -Msys2Root D:\msys64 -DryRun
 ```
+
+The unprefixed MSYS `gcc` package builds the hosted `zcc` cache courier; it
+does not build product objects. `zcc` launches the UCRT64 compiler for native
+COFF/PE output, while Windows compile epochs use the shell publisher because
+MSYS does not provide the directory-flush contract required by zcc's native
+publisher. The setup smoke proves this hosted-to-native boundary.
 
 `make setup` records the selected MSYS2 root in this worktree's Git config, so
 a later Git-for-Windows hook re-enters the same UCRT64 installation. The value

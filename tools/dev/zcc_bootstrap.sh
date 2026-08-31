@@ -52,7 +52,14 @@ if [ "$fresh" = 1 ]; then
 fi
 
 # Build with a bare compiler: the cache cannot be used to build itself.
-BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-cc}"
+HOST_SYSTEM="$(uname -s 2>/dev/null || printf unknown)"
+case "$HOST_SYSTEM" in
+    MSYS*|MINGW*|CYGWIN*)
+        BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-/usr/bin/cc}"
+        [ -x "$BOOTSTRAP_CC" ] || exit 0
+        ;;
+    *)                    BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-cc}" ;;
+esac
 BOOTSTRAP_FLAGS=(-std=c23 -O2 -D_POSIX_C_SOURCE=200809L)
 if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     BOOTSTRAP_FLAGS+=(-D_DARWIN_C_SOURCE -Dst_mtim=st_mtimespec)
