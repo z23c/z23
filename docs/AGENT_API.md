@@ -1153,9 +1153,12 @@ This is a C23 project, so the edit loop should compile only what changed.
   bounded consensus predicate changes before paying the heavier
   `make replay-canary-anchor` / `make replay-canary-genesis` gates.
 - `make build-only` compiles all node objects without linking. It uses
-  `build/obj/epochs/<compile-epoch>/` plus complete depfiles (`-MD -MP` and
-  included `.d` files). A source mutation selects a fresh object tree;
-  `ccache`/`sccache` recovers unchanged translation-unit work.
+  `build/obj/epochs/<compile-epoch>/` plus project-closure depfiles (`-MMD -MP`
+  and included `.d` files). The compiler identity separately binds the
+  toolchain search roots. Source mutations reuse the stable toolchain/flags
+  epoch; Make rebuilds the affected translation units and `ccache`/`sccache`
+  recovers unchanged work. A compiler, flag, policy, or build-system change
+  selects a fresh object tree.
 - `make fast-changed-compile` is a compatibility name for the source-wide dev
   compile proof. Changed paths are classification hints only; every current dev
   source resolves through `make fast-compile` in the exact compile epoch.

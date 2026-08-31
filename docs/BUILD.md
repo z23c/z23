@@ -300,15 +300,20 @@ This binary is for local AI/operator iteration only. `make z23`,
 run — is built from a **cached per-TU object tree**
 (`build/test-rel-obj/epochs/<compile-epoch>/`),
 not one whole-program `cc`. Each source is addressed under
-`build/test-rel-obj/epochs/<compile-epoch>/` with `-MD -MP` depfiles, and the
+`build/test-rel-obj/epochs/<compile-epoch>/` with `-MMD -MP` depfiles, and the
 exact candidate is linked under `build/bin/test-strict/epochs/`. Consequences:
 
-- **Every edit gets a fresh immutable epoch.** Make resolves every current
-  source in that epoch; compiler-cache hits recover unchanged TU work before
-  one plain link. A no-edit invocation reuses the exact verified epoch.
-- **Header/`.def` and system-header inputs are tracked** via complete `-MD -MP`
-  depfiles plus the epoch key, so a header-only edit reliably rebuilds
-  `test_parallel` — it is never a false-green no-op.
+- **Compiler and build-policy edits get a fresh isolated epoch.** Ordinary
+  source and project-header edits reuse the stable toolchain/flags epoch; Make
+  rebuilds the affected translation units and compiler-cache hits recover
+  unchanged work before one plain link. A no-edit invocation reuses the exact
+  verified objects.
+- **Header/`.def` and toolchain inputs are tracked.** `-MMD -MP` records the
+  exact project, generated, and vendored include closure; the compiler identity
+  binds default and environment-supplied toolchain search roots. A header-only
+  edit reliably rebuilds the affected objects and `test_parallel`; a compiler
+  or search-root authority change rotates the epoch instead of producing a
+  false-green no-op.
 - **`ccache` makes it cacheable.** A giant multi-source `cc` invocation cannot
   be cached; per-TU `.o` compiles hit the cache, so a clean object tree with a
   warm cache rebuilds in a few seconds. `ccache` stays optional (auto-detected

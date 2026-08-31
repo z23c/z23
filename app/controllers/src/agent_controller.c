@@ -501,7 +501,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_push_kv_str(&incremental, "fast_test_object_dir", "build/test-obj/epochs/<compile_epoch>");
     json_push_kv_bool(&incremental, "header_depfiles", true);
     json_push_kv_str(&incremental, "depfile_rule",
-                     "-MD -MP with included .d files inside each exact compile epoch");
+                     "-MMD -MP project depfiles plus compiler-root identity inside each exact compile epoch");
     json_push_kv_str(&incremental, "compile_check", "make build-only");
     json_push_kv_str(&incremental, "changed_compile_check",
                      "make fast-changed-compile");

@@ -766,6 +766,7 @@ DEVLOOP_INCLUDES = -Itools/dev
 DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
 	tools/dev/hotswap_verify_so.c \
 	tools/dev/mutation_campaign.c \
+	tools/dev/source_identity_batch.c \
 	tools/dev/windows_headless_run.c \
 	tools/dev/z23_git_hook.c \
 	tools/dev/z23_doctor.c
@@ -1243,7 +1244,7 @@ NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) $(ZCL_VENDOR_LIB)/libsqlite3.a \
 # without changing a tracked TU: compiler/tool/search-root fingerprint,
 # profile name, effective compile flags, effective link inputs, and
 # BUILD_SYSTEM_ID (the root Makefile — which holds every flag variable and
-# per-object/per-pattern override — plus the four epoch driver scripts,
+# per-object/per-pattern override — plus zcc and the epoch driver scripts,
 # hashed by `build-epoch-key.sh build-system-id`). A source edit therefore
 # recompiles exactly the TUs that make's timestamp+depfile graph marks stale
 # inside the STABLE epoch; a flags/Makefile/toolchain edit re-keys every
@@ -1256,6 +1257,25 @@ BUILD_EPOCH_OBJECT_TOOL = tools/dev/compile-epoch-object.sh
 BUILD_EPOCH_PUBLISH_TOOL = tools/dev/publish-build-alias.sh
 BUILD_EPOCH_SESSION_TOOL = tools/dev/build-epoch-session.sh
 BUILD_EPOCH_KEEP ?= 3
+
+# The first native rollout covers the build-only and fast-test object trees.
+# zcc_bootstrap keeps its historical nonfatal contract: a host where the
+# in-tree wrapper is unavailable defaults to the legacy oracle rather than
+# breaking an otherwise valid build. Explicit backend requests are validated.
+ZCL_OBJECT_BACKEND ?= $(if $(filter zcc,$(notdir $(firstword $(CC)))),native,legacy)
+ifneq ($(words $(ZCL_OBJECT_BACKEND)),1)
+$(error ZCL_OBJECT_BACKEND must be exactly one word: native or legacy)
+endif
+ifeq ($(filter native legacy,$(ZCL_OBJECT_BACKEND)),)
+$(error ZCL_OBJECT_BACKEND must be native or legacy)
+endif
+ifeq ($(ZCL_OBJECT_BACKEND),native)
+BUILD_FAST_EPOCH_OBJECT_COMMAND = $(ZCC_BIN) --epoch-object
+BUILD_FAST_EPOCH_OBJECT_PREREQ = $(ZCC_BIN)
+else
+BUILD_FAST_EPOCH_OBJECT_COMMAND = $(BUILD_EPOCH_OBJECT_TOOL)
+BUILD_FAST_EPOCH_OBJECT_PREREQ = $(BUILD_EPOCH_OBJECT_TOOL)
+endif
 
 # Checkout-wide counterpart to the per-profile epoch-GC lock above: the
 # per-profile lock only keeps two writers of the SAME object root from
@@ -1308,9 +1328,10 @@ define zcl_compile_epoch
 $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) key "$(BUILD_COMPILER_ID)" "$(1)" "$(strip $($(2)))" "$(strip $($(3)))" "$(BUILD_SYSTEM_ID)" 2>/dev/null))
 endef
 
-BUILD_ONLY_EPOCH_COMPILE_FLAGS := $(strip $(BUILD_ONLY_CFLAGS) deps=-MD,-MP)
+ZCL_EPOCH_DEPFILE_ID := deps=-MMD,-MP
+BUILD_ONLY_EPOCH_COMPILE_FLAGS := $(strip $(BUILD_ONLY_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 BUILD_ONLY_EPOCH_LINK_FLAGS := no-link
-DEV_EPOCH_COMPILE_FLAGS := $(strip normal=$(DEV_CFLAGS) hot=$(DEV_HOT_CFLAGS) deps=-MD,-MP)
+DEV_EPOCH_COMPILE_FLAGS := $(strip normal=$(DEV_CFLAGS) hot=$(DEV_HOT_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 DEV_EPOCH_LINK_FLAGS := $(strip $(DEV_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 
 ifneq ($(filter build-only,$(ZCL_EPOCH_PROFILES)),)
@@ -1341,7 +1362,7 @@ DEV_ACTIVE_BIN = $(DEV_CANDIDATE_BIN)
 # asserts above stay untouched.
 DEV_ASAN_EPOCH_COMPILE_FLAGS := $(strip $(DEV_ASAN_CFLAGS) \
 	adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS) \
-	deps=-MD,-MP)
+	$(ZCL_EPOCH_DEPFILE_ID))
 DEV_ASAN_EPOCH_LINK_FLAGS := $(strip $(DEV_ASAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter dev-asan,$(ZCL_EPOCH_PROFILES)),)
 DEV_ASAN_COMPILE_EPOCH := $(call zcl_compile_epoch,dev-asan-v2,DEV_ASAN_EPOCH_COMPILE_FLAGS,DEV_ASAN_EPOCH_LINK_FLAGS)
@@ -1366,7 +1387,7 @@ DEV_ASAN_LEASE = $(DEV_ASAN_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 # dev-tsan: epoch-keyed TSan dev node (build/bin/zclassic23-dev-tsan).
 # Own object root (build/dev-tsan-obj) and own candidate dir, mirroring the
 # dev-asan derivation; the shared *_EPOCHS_VALID asserts above stay untouched.
-DEV_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(DEV_TSAN_CFLAGS) deps=-MD,-MP)
+DEV_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(DEV_TSAN_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 DEV_TSAN_EPOCH_LINK_FLAGS := $(strip $(DEV_TSAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter dev-tsan,$(ZCL_EPOCH_PROFILES)),)
 DEV_TSAN_COMPILE_EPOCH := $(call zcl_compile_epoch,dev-tsan-v2,DEV_TSAN_EPOCH_COMPILE_FLAGS,DEV_TSAN_EPOCH_LINK_FLAGS)
@@ -1414,7 +1435,7 @@ DEV_TSAN_LEASE = $(DEV_TSAN_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 NODE_C23_OBJECT_CFLAGS_BASE = \
 	$(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(NODE_C23_CFLAGS)) \
 	-Wno-deprecated-declarations
-NODE_C23_EPOCH_COMPILE_FLAGS := $(strip $(NODE_C23_OBJECT_CFLAGS_BASE) deps=-MD,-MP)
+NODE_C23_EPOCH_COMPILE_FLAGS := $(strip $(NODE_C23_OBJECT_CFLAGS_BASE) $(ZCL_EPOCH_DEPFILE_ID))
 NODE_C23_EPOCH_LINK_FLAGS := $(strip $(LDFLAGS) $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS) cxx=$(CXX))
 ifneq ($(filter node-c23,$(ZCL_EPOCH_PROFILES)),)
 NODE_C23_COMPILE_EPOCH := $(call zcl_compile_epoch,node-c23-v1,NODE_C23_EPOCH_COMPILE_FLAGS,NODE_C23_EPOCH_LINK_FLAGS)
@@ -1539,8 +1560,9 @@ ZCL_DEPFILE_PROFILES :=
 endif
 endif
 
-# Header dependencies use -MD (including system headers) and live inside their
-# exact epoch. There is no mutable "current object directory" symlink.
+# Project, generated, and vendored header dependencies use -MMD and live inside
+# their exact epoch. Toolchain search roots are bound by BUILD_COMPILER_ID.
+# There is no mutable "current object directory" symlink.
 ifneq ($(filter build-only,$(ZCL_DEPFILE_PROFILES)),)
 -include $(ALL_OBJS:.o=.d)
 endif
@@ -2305,7 +2327,7 @@ TEST_FAST_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) \
 	$(ZCL_TEST_WINDOWS_COMPAT_FLAGS)
 TEST_FAST_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
-TEST_FAST_EPOCH_COMPILE_FLAGS := $(strip $(TEST_FAST_CFLAGS) deps=-MD,-MP)
+TEST_FAST_EPOCH_COMPILE_FLAGS := $(strip $(TEST_FAST_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 TEST_FAST_EPOCH_LINK_FLAGS := $(strip $(TEST_FAST_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-fast,$(ZCL_EPOCH_PROFILES)),)
 TEST_FAST_COMPILE_EPOCH := $(call zcl_compile_epoch,test-fast-v2,TEST_FAST_EPOCH_COMPILE_FLAGS,TEST_FAST_EPOCH_LINK_FLAGS)
@@ -2332,7 +2354,7 @@ endif
 # paid a full recompile (~90s here) even for a one-line edit — and, worse, the
 # monolith rule listed only .c files as prerequisites, so a header-only edit did
 # not rebuild at all (false green). Both are fixed by compiling into a dedicated
-# per-TU object tree with -MD -MP depfiles and linking the cached objects.
+# per-TU object tree with -MMD -MP depfiles and linking the cached objects.
 #
 # Flags are IDENTICAL to the old whole-program test_parallel rule with ONE
 # deliberate delta: `-flto=auto` is dropped. LTO is a *link-time* whole-program
@@ -2371,7 +2393,7 @@ endif
 TEST_REL_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS))
 INTEGRATION_CFLAGS := $(TEST_REL_CFLAGS)
 INTEGRATION_LDFLAGS := $(TEST_REL_LDFLAGS)
-TEST_REL_EPOCH_COMPILE_FLAGS := $(strip $(TEST_REL_CFLAGS) deps=-MD,-MP)
+TEST_REL_EPOCH_COMPILE_FLAGS := $(strip $(TEST_REL_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 TEST_REL_EPOCH_LINK_FLAGS := $(strip $(TEST_REL_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-strict,$(ZCL_EPOCH_PROFILES)),)
 TEST_REL_COMPILE_EPOCH := $(call zcl_compile_epoch,test-strict-v2,TEST_REL_EPOCH_COMPILE_FLAGS,TEST_REL_EPOCH_LINK_FLAGS)
@@ -2433,7 +2455,7 @@ TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O
 TEST_ASAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ASAN_COMMON_SAN_FLAGS)
 TEST_ASAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_ASAN_CFLAGS) \
 	adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS) \
-	deps=-MD,-MP)
+	$(ZCL_EPOCH_DEPFILE_ID))
 TEST_ASAN_EPOCH_LINK_FLAGS := $(strip $(TEST_ASAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-asan,$(ZCL_EPOCH_PROFILES)),)
 TEST_ASAN_COMPILE_EPOCH := $(call zcl_compile_epoch,test-asan-v2,TEST_ASAN_EPOCH_COMPILE_FLAGS,TEST_ASAN_EPOCH_LINK_FLAGS)
@@ -2485,7 +2507,7 @@ TEST_TSAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O
 	$(TSAN_COMMON_SAN_FLAGS) \
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED)
 TEST_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(TSAN_COMMON_SAN_FLAGS)
-TEST_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_TSAN_CFLAGS) deps=-MD,-MP)
+TEST_TSAN_EPOCH_COMPILE_FLAGS := $(strip $(TEST_TSAN_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 TEST_TSAN_EPOCH_LINK_FLAGS := $(strip $(TEST_TSAN_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter test-tsan,$(ZCL_EPOCH_PROFILES)),)
 TEST_TSAN_COMPILE_EPOCH := $(call zcl_compile_epoch,test-tsan-v2,TEST_TSAN_EPOCH_COMPILE_FLAGS,TEST_TSAN_EPOCH_LINK_FLAGS)
@@ -5845,9 +5867,15 @@ ZCC_BIN := $(BIN_DIR)/zcc
 ZCC_TRIM_MB ?= 4096
 CC_AUDIT_LOG := $(BUILD_DIR)/cc-cache-audit.log
 
+ZCC_BOOTSTRAP_CATALOG := tools/dev/zcc-bootstrap-inputs.list
+ZCC_BOOTSTRAP_INPUTS := $(filter-out license=%,$(file <$(ZCC_BOOTSTRAP_CATALOG)))
+
+$(ZCC_BIN): $(ZCC_BOOTSTRAP_INPUTS)
+	@ZCL_BIN_DIR=$(BIN_DIR) tools/dev/zcc_bootstrap.sh >/dev/null
+	@test -x "$@" || { echo "cc-cache: bootstrap did not produce $@" >&2; exit 2; }
+
 .PHONY: cc-cache cc-cache-stats cc-cache-clear cc-cache-trim cc-cache-audit
-cc-cache:
-	@tools/dev/zcc_bootstrap.sh >/dev/null
+cc-cache: $(ZCC_BIN)
 cc-cache-stats: cc-cache
 	@$(ZCC_BIN) --zcc-stats
 cc-cache-clear: cc-cache
@@ -8372,8 +8400,8 @@ ci-sync-smoke: zclassic23
 
 BUILD_ONLY_OBJECT_CFLAGS = $(BUILD_ONLY_CFLAGS)
 $(OBJ_DIR)/lib/util/src/clientversion.o: BUILD_ONLY_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
-$(OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(BUILD_ONLY_LEASE)
-	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
+$(OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(BUILD_ONLY_LEASE)
+	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(BUILD_ONLY_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(BUILD_ONLY_SESSION)" -- \
 	  $(CC) $(BUILD_ONLY_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
@@ -8473,8 +8501,8 @@ $(TEST_FAST_OBJ_DIR)/lib/test/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
 $(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_FAST_OBJ_DIR)/lib/test/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
-$(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_FAST_LEASE)
-	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
+$(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_FAST_LEASE)
+	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_SESSION)" -- \
 	  $(CC) $(TEST_FAST_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
@@ -8483,8 +8511,8 @@ $(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $
 $(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # Strict cached test_parallel object tree: same flags as the old whole-program
-# test_parallel minus -flto=auto (see the TEST_REL_* comment above). -MD -MP
-# records the complete include closure inside the exact epoch — no false green.
+# test_parallel minus -flto=auto (see the TEST_REL_* comment above). -MMD -MP
+# records the project include closure; compiler search roots bind the rest.
 TEST_REL_OBJECT_CFLAGS = $(TEST_REL_CFLAGS)
 # Same two module-mode injections as the fast tree (see above), so `make t` and
 # `make t-fast` agree about what the hot-swap loader is in a test binary.
@@ -8504,8 +8532,8 @@ $(TEST_REL_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 $(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # ASan/UBSan test harness object tree: TEST_FAST flags plus
-# ASAN_COMMON_SAN_FLAGS (see the TEST_ASAN_* block above). -MD -MP records
-# the complete include closure inside the exact epoch — no false green.
+# ASAN_COMMON_SAN_FLAGS (see the TEST_ASAN_* block above). -MMD -MP records
+# the project include closure; compiler search roots bind the rest.
 TEST_ASAN_OBJECT_CFLAGS = $(TEST_ASAN_CFLAGS)
 TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(TEST_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))
 $(TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): TEST_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)
@@ -8540,8 +8568,8 @@ $(DEV_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 $(DEV_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # TSan test harness object tree: TEST_FAST flags plus TSAN_COMMON_SAN_FLAGS
-# (see the TEST_TSAN_* block above). -MD -MP records the complete include
-# closure inside the exact epoch — no false green.
+# (see the TEST_TSAN_* block above). -MMD -MP records the project include
+# closure inside the exact epoch; compiler search roots bind the rest.
 TEST_TSAN_OBJECT_CFLAGS = $(TEST_TSAN_CFLAGS)
 $(TEST_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_TSAN_LEASE)
@@ -9647,7 +9675,7 @@ COV_CFLAGS = $(filter-out -flto -flto=% -O3 -march=native -Werror,$(CACHED_CFLAG
              --coverage -O1 -g -DCOVERAGE_BUILD -DZCL_TESTING
 COV_LDFLAGS = $(filter-out -flto -flto=%,$(LDFLAGS)) --coverage
 COV_TEST_BIN = $(BIN_DIR)/test_zcl_cov
-COV_EPOCH_COMPILE_FLAGS := $(strip $(COV_CFLAGS) -Wno-deprecated-declarations deps=-MD,-MP coverage-staging=v1)
+COV_EPOCH_COMPILE_FLAGS := $(strip $(COV_CFLAGS) -Wno-deprecated-declarations $(ZCL_EPOCH_DEPFILE_ID) coverage-staging=v1)
 COV_EPOCH_LINK_FLAGS := $(strip $(COV_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
 ifneq ($(filter coverage,$(ZCL_EPOCH_PROFILES)),)
 COV_COMPILE_EPOCH := $(call zcl_compile_epoch,coverage-v2,COV_EPOCH_COMPILE_FLAGS,COV_EPOCH_LINK_FLAGS)
@@ -11808,6 +11836,14 @@ check-zcc-cache:
 	@echo "══ LINT: compile cache serves correct bytes ══"
 	@./tools/lint/check_zcc_cache.sh
 
+check-zcc-epoch-object:
+	@echo "══ LINT: native epoch object depfile parity and publication safety ══"
+	@./tools/lint/check_zcc_epoch_object.sh
+
+check-zcc-epoch-batch:
+	@echo "══ LINT: epoch batch manifests refuse incomplete authority ══"
+	@./tools/lint/check_zcc_epoch_batch.sh
+
 check-dev-proof-native-fast-path:
 	@echo "══ LINT: native push admission has no shell or build authority ══"
 	@./tools/lint/check_dev_proof_native_fast_path.sh
@@ -11930,6 +11966,8 @@ LINT_GATES := \
     check-no-runtime-abort \
     check-wallet-raw-prepare-log \
     check-zcc-cache \
+    check-zcc-epoch-object \
+    check-zcc-epoch-batch \
     check-dev-proof-native-fast-path \
     check-tu-random-seed \
     check-outparam-init-before-return \
