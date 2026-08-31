@@ -162,8 +162,8 @@ validate() {
             *) fail "unknown record on line $line_no: $record" || return 1 ;;
         esac
     done <"$corpus"
-    ((headers == 1 && tasks == expected && tasks == 7)) ||
-        fail "expected seven tasks; header=$expected validated=$tasks" || return 1
+    ((headers == 1 && tasks == expected && tasks == 10)) ||
+        fail "expected ten tasks; header=$expected validated=$tasks" || return 1
     printf 'retrieval-gold-corpus-check: PASS tasks=%d exact_parent_epochs=%d\n' "$tasks" "$tasks"
 }
 selftest() {

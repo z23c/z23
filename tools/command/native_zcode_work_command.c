@@ -924,6 +924,15 @@ static bool zwork_render_selection(
                          (int64_t)selection->candidate_count) &&
         json_push_kv_int(out, "dropped_candidate_count",
                          (int64_t)selection->dropped_candidates) &&
+        json_push_kv_str(out, "retrieval", "bm25_story") &&
+        json_push_kv_int(out, "retrieval_corpus_files",
+                         (int64_t)selection->retrieval_corpus_files) &&
+        json_push_kv_int(out, "retrieval_ranked_files",
+                         (int64_t)selection->retrieval_ranked_files) &&
+        json_push_kv_bool(out, "retrieval_truncated",
+                          selection->retrieval_truncated) &&
+        json_push_kv_int(out, "retrieval_us",
+                         (int64_t)selection->retrieval_us) &&
         json_push_kv_bool(out, "budget_exhausted",
                           selection->budget_exhausted) &&
         json_push_kv_int(out, "generation_us",

@@ -3,17 +3,35 @@
 
 #include "services/zcode_goal_context_service.h"
 
+#include "base/safe_alloc.h"
 #include "hotswap/hotswap_service.h"
 #include "platform/time_compat.h"
 #include "services/zcode_goal_context_calc_service.h"
 
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ZGOAL_HITS_PER_TOKEN 16
 #define ZGOAL_FALLBACK_GROUPS 128
 #define ZGOAL_FALLBACK_FILES 64
 #define ZGOAL_FALLBACK_SYMBOLS 32
+#define ZGOAL_SELECTIVITY_STEP 10
+#define ZGOAL_STORY_FILES (ZCODE_GOAL_MAX_CANDIDATES + 1u)
+#define ZGOAL_STORY_RANK_BASE 2000
+#define ZGOAL_STORY_RANK_STEP 25
+
+struct zgoal_token_hits {
+    struct ci_search_hit hits[ZGOAL_HITS_PER_TOKEN];
+    int count;
+    size_t token_index;
+};
+
+struct zgoal_story_candidate {
+    struct zcode_goal_candidate candidate;
+    int strongest_evidence;
+};
 
 static void zgoal_why(uint32_t mask, char out[64])
 {
@@ -44,6 +62,253 @@ static bool zgoal_same(const struct zcode_goal_candidate *candidate,
 
 static bool zgoal_add(struct zcode_goal_selection *out,
                       const struct ci_search_hit *hit, const char *token);
+static int zgoal_fallback_score(const struct ci_symbol *symbol);
+
+static int zgoal_story_cmp(const void *left_opaque, const void *right_opaque)
+{
+    const struct zgoal_story_candidate *left = left_opaque;
+    const struct zgoal_story_candidate *right = right_opaque;
+    if (left->candidate.score != right->candidate.score)
+        return left->candidate.score > right->candidate.score ? -1 : 1;
+    int by_name = strcmp(left->candidate.symbol.name,
+                         right->candidate.symbol.name);
+    if (by_name) return by_name;
+    int by_def = strcmp(left->candidate.symbol.def_path,
+                        right->candidate.symbol.def_path);
+    return by_def ? by_def : strcmp(left->candidate.symbol.decl_path,
+                                    right->candidate.symbol.decl_path);
+}
+
+static bool zgoal_story_add(struct zgoal_story_candidate *pool,
+                            size_t *pool_count, size_t pool_cap,
+                            struct zcode_goal_selection *out,
+                            const struct ci_search_hit *hit,
+                            const char *token, int selectivity)
+{
+    if (hit->score < 0 || hit->score > INT_MAX - selectivity)
+        return false;
+    int evidence = hit->score + selectivity;
+    out->total_matches++;
+    for (size_t i = 0; i < *pool_count; i++) {
+        struct zcode_goal_candidate *candidate = &pool[i].candidate;
+        if (!zgoal_same(candidate, &hit->symbol))
+            continue; /* raw-return-ok:pure-symbol-identity-predicate */
+        if (candidate->score > INT_MAX - evidence) return false;
+        candidate->score += evidence;
+        candidate->match_mask |= hit->match_mask;
+        if (evidence > pool[i].strongest_evidence) {
+            pool[i].strongest_evidence = evidence;
+            (void)snprintf(candidate->matched_token,
+                           sizeof(candidate->matched_token), "%s", token);
+        }
+        zgoal_why(candidate->match_mask, candidate->why);
+        return true;
+    }
+    if (*pool_count >= pool_cap) return false;
+    struct zgoal_story_candidate *added = &pool[(*pool_count)++];
+    added->candidate.symbol = hit->symbol;
+    added->candidate.match_mask = hit->match_mask;
+    added->candidate.score = evidence;
+    added->strongest_evidence = evidence;
+    (void)snprintf(added->candidate.matched_token,
+                   sizeof(added->candidate.matched_token), "%s", token);
+    zgoal_why(added->candidate.match_mask, added->candidate.why);
+    return codeindex_symbol_record_id(&added->candidate.symbol,
+                                      added->candidate.symbol_id,
+                                      sizeof(added->candidate.symbol_id)) >= 0;
+}
+
+static struct zcl_result zgoal_literal_candidates(
+    struct codeindex *index, struct zcode_goal_selection *out)
+{
+    if (out->token_count == 0) return ZCL_OK;
+    struct zgoal_token_hits *batches = zcl_calloc(
+        out->token_count, sizeof(*batches), "goal token hit batches");
+    size_t pool_cap = out->token_count * ZGOAL_HITS_PER_TOKEN;
+    struct zgoal_story_candidate *pool = zcl_calloc(
+        pool_cap, sizeof(*pool), "goal story candidates");
+    if (!batches || !pool) {
+        free(pool);
+        free(batches);
+        return ZCL_ERR(-1, "goal token hit allocation failed");
+    }
+    struct zcl_result result = ZCL_OK;
+    for (size_t i = 0; i < out->token_count; i++) {
+        batches[i].token_index = i;
+        batches[i].count = codeindex_search_text(
+            index, out->tokens[i], batches[i].hits, ZGOAL_HITS_PER_TOKEN);
+        if (batches[i].count < 0) {
+            result = ZCL_ERR(-1, "indexed goal search failed for '%s'",
+                             out->tokens[i]);
+            break;
+        }
+        if (batches[i].count == ZGOAL_HITS_PER_TOKEN)
+            out->budget_exhausted = true;
+    }
+    if (result.ok) {
+        size_t pool_count = 0;
+        for (size_t i = 0; i < out->token_count && result.ok; i++) {
+            const char *token = out->tokens[batches[i].token_index];
+            int selectivity =
+                (ZGOAL_HITS_PER_TOKEN - batches[i].count) *
+                ZGOAL_SELECTIVITY_STEP;
+            for (int j = 0; j < batches[i].count; j++) {
+                if (!zgoal_story_add(pool, &pool_count, pool_cap, out,
+                                     &batches[i].hits[j], token,
+                                     selectivity)) {
+                    result = ZCL_ERR(-1,
+                                     "story candidate evidence overflowed");
+                    break;
+                }
+            }
+        }
+        if (result.ok) {
+            qsort(pool, pool_count, sizeof(*pool), zgoal_story_cmp);
+            out->candidate_count = pool_count < ZCODE_GOAL_MAX_CANDIDATES
+                ? pool_count : ZCODE_GOAL_MAX_CANDIDATES;
+            out->dropped_candidates = pool_count - out->candidate_count;
+            if (out->dropped_candidates != 0) out->budget_exhausted = true;
+            for (size_t i = 0; i < out->candidate_count; i++)
+                out->candidates[i] = pool[i].candidate;
+        }
+    }
+    free(pool);
+    free(batches);
+    return result;
+}
+
+static int zgoal_symbol_preference(const struct ci_symbol *symbol)
+{
+    int score = zgoal_fallback_score(symbol);
+    if (symbol->doc[0]) score += 20;
+    if (symbol->decl_path[0]) score += 10;
+    return score;
+}
+
+static const struct zcode_goal_candidate *zgoal_candidate_for_file(
+    const struct zcode_goal_candidate *candidates, size_t count,
+    const char *path)
+{
+    const struct zcode_goal_candidate *best = NULL;
+    for (size_t i = 0; i < count; i++) {
+        const struct ci_symbol *symbol = &candidates[i].symbol;
+        if (strcmp(symbol->def_path, path) != 0 &&
+            strcmp(symbol->decl_path, path) != 0)
+            continue;
+        if (!best || candidates[i].score > best->score)
+            best = &candidates[i];
+    }
+    return best;
+}
+
+static bool zgoal_file_candidate(
+    struct codeindex *index, const char *path, size_t rank,
+    const struct zcode_goal_candidate *literal, size_t literal_count,
+    struct zcode_goal_candidate *out, bool *truncated)
+{
+    const struct zcode_goal_candidate *observed = zgoal_candidate_for_file(
+        literal, literal_count, path);
+    if (observed) {
+        *out = *observed;
+    } else {
+        struct ci_symbol *symbols = zcl_calloc(
+            ZGOAL_FALLBACK_SYMBOLS, sizeof(*symbols),
+            "goal story file symbols");
+        if (!symbols) return false;
+        int count = codeindex_symbols_in_file(
+            index, path, symbols, ZGOAL_FALLBACK_SYMBOLS);
+        if (count < 0) {
+            free(symbols);
+            return false;
+        }
+        if (count == ZGOAL_FALLBACK_SYMBOLS) *truncated = true;
+        if (count == 0) {
+            free(symbols);
+            return true;
+        }
+        int best = 0;
+        for (int i = 1; i < count; i++) {
+            int preference = zgoal_symbol_preference(&symbols[i]);
+            int selected = zgoal_symbol_preference(&symbols[best]);
+            if (preference > selected ||
+                (preference == selected &&
+                 strcmp(symbols[i].name, symbols[best].name) < 0))
+                best = i;
+        }
+        memset(out, 0, sizeof(*out));
+        out->symbol = symbols[best];
+        bool identified = codeindex_symbol_record_id(
+            &out->symbol, out->symbol_id, sizeof(out->symbol_id)) >= 0;
+        free(symbols);
+        if (!identified) return false;
+    }
+    int rank_bonus = ZGOAL_STORY_RANK_BASE -
+        (int)rank * ZGOAL_STORY_RANK_STEP;
+    if (rank_bonus <= 0 || out->score > INT_MAX - rank_bonus) return false;
+    out->score += rank_bonus;
+    if (!out->matched_token[0])
+        (void)snprintf(out->matched_token, sizeof(out->matched_token), "%s",
+                       "story");
+    (void)snprintf(out->why, sizeof(out->why), "%s", "bm25_story_file");
+    return true;
+}
+
+static bool zgoal_candidate_present(
+    const struct zcode_goal_candidate *candidates, size_t count,
+    const struct zcode_goal_candidate *candidate)
+{
+    for (size_t i = 0; i < count; i++)
+        if (zgoal_same(&candidates[i], &candidate->symbol)) return true;
+    return false;
+}
+
+static struct zcl_result zgoal_story_candidates(
+    struct codeindex *index, const char *goal,
+    struct zcode_goal_selection *out)
+{
+    int64_t started = platform_time_monotonic_us();
+    struct ci_story_hit hits[ZGOAL_STORY_FILES];
+    bool truncated = false;
+    int count = codeindex_search_story(
+        index, goal, hits, ZGOAL_STORY_FILES,
+        &out->retrieval_corpus_files, &truncated);
+    int64_t elapsed = platform_time_monotonic_us() - started;
+    out->retrieval_us = elapsed > 0 ? (uint64_t)elapsed : 1u;
+    if (count < 0) return ZCL_ERR(-1, "story retrieval failed");
+    out->retrieval_truncated = truncated;
+    out->retrieval_ranked_files = (size_t)count;
+    if (count == 0) return ZCL_OK;
+
+    struct zcode_goal_candidate literal[ZCODE_GOAL_MAX_CANDIDATES];
+    size_t literal_count = out->candidate_count;
+    memcpy(literal, out->candidates, sizeof(literal));
+    memset(out->candidates, 0, sizeof(out->candidates));
+    out->candidate_count = 0;
+    for (int i = 0; i < count &&
+                    out->candidate_count < ZCODE_GOAL_MAX_CANDIDATES; i++) {
+        struct zcode_goal_candidate candidate = {0};
+        bool file_truncated = false;
+        if (!zgoal_file_candidate(index, hits[i].path, (size_t)i, literal,
+                                  literal_count, &candidate, &file_truncated))
+            return ZCL_ERR(-1, "story file symbol selection failed: %s",
+                           hits[i].path);
+        out->budget_exhausted = out->budget_exhausted || file_truncated;
+        if (!candidate.symbol.name[0] || zgoal_candidate_present(
+                out->candidates, out->candidate_count, &candidate))
+            continue;
+        out->candidates[out->candidate_count++] = candidate;
+    }
+    for (size_t i = 0; i < literal_count &&
+                       out->candidate_count < ZCODE_GOAL_MAX_CANDIDATES; i++) {
+        if (zgoal_candidate_present(out->candidates, out->candidate_count,
+                                    &literal[i]))
+            continue;
+        out->candidates[out->candidate_count++] = literal[i];
+    }
+    if (truncated || (size_t)count > out->candidate_count)
+        out->budget_exhausted = true;
+    return ZCL_OK;
+}
 
 static int zgoal_fallback_score(const struct ci_symbol *symbol)
 {
@@ -196,24 +461,10 @@ struct zcl_result zcode_goal_context_select(
             out->budget_exhausted = tokens.budget_exhausted;
             memcpy(out->tokens, tokens.values, sizeof(out->tokens));
         }
-        for (size_t i = 0; i < out->token_count && result.ok; i++) {
-            struct ci_search_hit hits[ZGOAL_HITS_PER_TOKEN];
-            int count = codeindex_search_text(index, out->tokens[i], hits,
-                                              ZGOAL_HITS_PER_TOKEN);
-            if (count < 0) {
-                result = ZCL_ERR(-1, "indexed goal search failed for '%s'",
-                                 out->tokens[i]);
-                break;
-            }
-            if (count == ZGOAL_HITS_PER_TOKEN)
-                out->budget_exhausted = true;
-            for (int j = 0; j < count; j++) {
-                if (!zgoal_add(out, &hits[j], out->tokens[i])) {
-                    result = ZCL_ERR(-1, "selected symbol identity failed");
-                    break;
-                }
-            }
-        }
+        if (result.ok)
+            result = zgoal_literal_candidates(index, out);
+        if (result.ok && out->candidate_count != 0)
+            result = zgoal_story_candidates(index, goal, out);
         if (result.ok && out->candidate_count == 0)
             result = zgoal_project_fallback(index, out);
         if (result.ok) {

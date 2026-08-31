@@ -172,6 +172,19 @@ int codeindex_find(struct codeindex *ci, const char *query,
 int codeindex_search_text(struct codeindex *ci, const char *query,
                           struct ci_search_hit *out, int cap);
 
+/* Rank indexed files from a plain-language story with the shared BM25
+ * retrieval engine. The document for each file is its path, group, purpose,
+ * and indexed symbol names/signatures/docs/guards. Results are deterministic
+ * for one verified code-index generation. `cap` is the observation bound;
+ * `truncated` is true when more positive-score files exist. */
+struct ci_story_hit {
+    char path[256];
+    double score;
+};
+int codeindex_search_story(struct codeindex *ci, const char *query,
+                           struct ci_story_hit *out, int cap,
+                           size_t *corpus_files, bool *truncated);
+
 /* Call sites referencing `callee`, ordered by (ref_file, ref_line). Fills up
  * to `cap` rows, returns count (>=0), -1 on error. */
 int codeindex_refs(struct codeindex *ci, const char *callee,

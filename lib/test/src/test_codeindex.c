@@ -698,7 +698,10 @@ static int test_codeindex_platform_arm(void)
                  &selected).ok &&
              strcmp(selected.selected.name, "foo_checksum") == 0 &&
              selected.token_count >= 3 && selected.candidate_count >= 1 &&
-             selected.generation_us > 0 && selected.why[0] != '\0');
+             selected.generation_us > 0 && selected.retrieval_us > 0 &&
+             selected.retrieval_corpus_files > 0 &&
+             selected.retrieval_ranked_files > 0 &&
+             strstr(selected.why, "bm25_story_file") != NULL);
     CI_CHECK("goal selection is deterministic across repeated runs",
              zcode_goal_context_select(
                  FIX, "Repair the data frame checksum length", NULL,
@@ -720,6 +723,12 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("a saturated literal bucket reports incomplete ranking",
              zcode_goal_context_select(
                  FIX, "saturation", NULL, &selected).ok &&
+             selected.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
+             selected.budget_exhausted);
+    CI_CHECK("a selective story term survives an earlier saturated term",
+             zcode_goal_context_select(
+                 FIX, "saturation checksum", NULL, &selected).ok &&
+             strcmp(selected.selected.name, "foo_checksum") == 0 &&
              selected.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
              selected.budget_exhausted);
 

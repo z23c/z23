@@ -34,6 +34,10 @@ struct zcode_goal_selection {
     char selected_symbol_id[400];
     char why[64];
     uint64_t generation_us;
+    uint64_t retrieval_us;
+    size_t retrieval_corpus_files;
+    size_t retrieval_ranked_files;
+    bool retrieval_truncated;
     uint32_t service_generation;
 };
 

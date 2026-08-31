@@ -5,7 +5,6 @@
 
 #include "base/hex.h"
 #include "base/log_macros.h"
-#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
@@ -16,7 +15,6 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define RB_TAG "native.dev.retrieval"
@@ -25,9 +23,6 @@
 
 enum {
     RB_MAX_ROWS = 20,
-    RB_QUERY_ROWS = RB_MAX_ROWS + 1,
-    RB_INITIAL_ROWS = 64,
-    RB_MAX_INDEX_ROWS = 65536,
 };
 
 struct rb_rank {
@@ -46,16 +41,6 @@ static void rb_fail(struct zcl_command_reply *reply, const char *code,
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_INVALID, code, phase, false, false,
                            message, evidence ? evidence : "");
-}
-
-static bool rb_add_size(size_t *total, size_t add)
-{
-    if (!total || SIZE_MAX - *total < add) {
-        LOG_ERROR(RB_TAG, "document size overflow");
-        return false;
-    }
-    *total += add;
-    return true;
 }
 
 static bool rb_canonical_repo_path(const char *path)
@@ -89,229 +74,6 @@ static const struct vcs_entry *rb_manifest_entry(
         strcmp(manifest->entries[lo].path, path) != 0)
         return NULL;
     return &manifest->entries[lo];
-}
-
-static bool rb_load_groups(struct codeindex *ci, struct ci_group **out,
-                           size_t *count)
-{
-    int cap = RB_INITIAL_ROWS;
-    struct ci_group *rows = NULL;
-    for (;;) {
-        struct ci_group *grown = zcl_realloc(
-            rows, (size_t)cap * sizeof(*rows), "retrieval benchmark groups");
-        if (!grown) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "group allocation failed at cap=%d", cap);
-            return false;
-        }
-        rows = grown;
-        int n = codeindex_groups(ci, rows, cap);
-        if (n < 0) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "codeindex group enumeration failed");
-            return false;
-        }
-        if (n < cap) {
-            *out = rows;
-            *count = (size_t)n;
-            return true;
-        }
-        if (cap >= RB_MAX_INDEX_ROWS) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "group enumeration exceeded %d rows", cap);
-            return false;
-        }
-        cap *= 2;
-    }
-}
-
-static bool rb_load_group_files(struct codeindex *ci, const char *group,
-                                struct ci_file **out, size_t *count)
-{
-    int cap = RB_INITIAL_ROWS;
-    struct ci_file *rows = NULL;
-    for (;;) {
-        struct ci_file *grown = zcl_realloc(
-            rows, (size_t)cap * sizeof(*rows), "retrieval benchmark files");
-        if (!grown) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "file allocation failed for group=%s", group);
-            return false;
-        }
-        rows = grown;
-        int n = codeindex_files_in_group(ci, group, rows, cap);
-        if (n < 0) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "file enumeration failed for group=%s", group);
-            return false;
-        }
-        if (n < cap) {
-            *out = rows;
-            *count = (size_t)n;
-            return true;
-        }
-        if (cap >= RB_MAX_INDEX_ROWS) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "file enumeration exceeded %d rows", cap);
-            return false;
-        }
-        cap *= 2;
-    }
-}
-
-static bool rb_load_symbols(struct codeindex *ci, const char *path,
-                            struct ci_symbol **out, size_t *count)
-{
-    int cap = RB_INITIAL_ROWS;
-    struct ci_symbol *rows = NULL;
-    for (;;) {
-        struct ci_symbol *grown = zcl_realloc(
-            rows, (size_t)cap * sizeof(*rows), "retrieval benchmark symbols");
-        if (!grown) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "symbol allocation failed for path=%s", path);
-            return false;
-        }
-        rows = grown;
-        int n = codeindex_symbols_in_file(ci, path, rows, cap);
-        if (n < 0) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "symbol enumeration failed for path=%s", path);
-            return false;
-        }
-        if (n < cap) {
-            *out = rows;
-            *count = (size_t)n;
-            return true;
-        }
-        if (cap >= RB_MAX_INDEX_ROWS) {
-            free(rows);
-            LOG_ERROR(RB_TAG, "symbol enumeration exceeded %d rows", cap);
-            return false;
-        }
-        cap *= 2;
-    }
-}
-
-static int rb_file_cmp(const void *a, const void *b)
-{
-    const struct ci_file *left = a;
-    const struct ci_file *right = b;
-    return strcmp(left->path, right->path);
-}
-
-static bool rb_collect_files(struct codeindex *ci, struct ci_file **out,
-                             size_t *count)
-{
-    struct ci_group *groups = NULL;
-    size_t group_count = 0, used = 0, cap = 0;
-    struct ci_file *all = NULL;
-    if (!rb_load_groups(ci, &groups, &group_count)) return false;
-    for (size_t g = 0; g < group_count; g++) {
-        struct ci_file *files = NULL;
-        size_t file_count = 0;
-        if (!rb_load_group_files(ci, groups[g].path, &files, &file_count)) {
-            free(groups);
-            free(all);
-            return false;
-        }
-        if (file_count > SIZE_MAX - used) {
-            free(files);
-            free(groups);
-            free(all);
-            LOG_ERROR(RB_TAG, "indexed file count overflow");
-            return false;
-        }
-        size_t want = used + file_count;
-        if (want > cap) {
-            size_t next = cap ? cap : RB_INITIAL_ROWS;
-            while (next < want && next <= SIZE_MAX / 2) next *= 2;
-            if (next < want || next > RB_MAX_INDEX_ROWS) {
-                free(files);
-                free(groups);
-                free(all);
-                LOG_ERROR(RB_TAG, "indexed file corpus exceeds bound");
-                return false;
-            }
-            struct ci_file *grown = zcl_realloc(
-                all, next * sizeof(*all), "retrieval benchmark file corpus");
-            if (!grown) {
-                free(files);
-                free(groups);
-                free(all);
-                LOG_ERROR(RB_TAG, "file corpus allocation failed");
-                return false;
-            }
-            all = grown;
-            cap = next;
-        }
-        memcpy(all + used, files, file_count * sizeof(*files));
-        used += file_count;
-        free(files);
-    }
-    free(groups);
-    qsort(all, used, sizeof(*all), rb_file_cmp);
-    for (size_t i = 1; i < used; i++) {
-        if (strcmp(all[i - 1].path, all[i].path) == 0) {
-            LOG_ERROR(RB_TAG, "indexed file belongs to multiple groups: %s",
-                      all[i].path);
-            free(all);
-            return false;
-        }
-    }
-    *out = all;
-    *count = used;
-    return true;
-}
-
-static bool rb_append(char *out, size_t cap, size_t *used, const char *field)
-{
-    size_t len = strlen(field);
-    if (*used > cap || len > cap - *used || cap - *used - len < 1) {
-        LOG_ERROR(RB_TAG, "retrieval document assembly exceeded allocation");
-        return false;
-    }
-    memcpy(out + *used, field, len);
-    *used += len;
-    out[(*used)++] = '\n';
-    return true;
-}
-
-static char *rb_document(const struct ci_file *file,
-                         const struct ci_symbol *symbols, size_t symbol_count)
-{
-    size_t need = 1;
-    const char *base[] = { file->path, file->group, file->purpose };
-    for (size_t i = 0; i < sizeof(base) / sizeof(base[0]); i++)
-        if (!rb_add_size(&need, strlen(base[i]) + 1)) return NULL;
-    for (size_t i = 0; i < symbol_count; i++) {
-        const char *fields[] = { symbols[i].name, symbols[i].signature,
-                                 symbols[i].doc, symbols[i].guard };
-        for (size_t j = 0; j < sizeof(fields) / sizeof(fields[0]); j++)
-            if (!rb_add_size(&need, strlen(fields[j]) + 1)) return NULL;
-    }
-    char *out = zcl_malloc(need, "retrieval benchmark document");
-    if (!out) {
-        LOG_ERROR(RB_TAG, "retrieval document allocation failed");
-        return NULL;
-    }
-    size_t used = 0;
-    for (size_t i = 0; i < sizeof(base) / sizeof(base[0]); i++)
-        if (!rb_append(out, need, &used, base[i])) {
-            free(out);
-            return NULL;
-        }
-    for (size_t i = 0; i < symbol_count; i++) {
-        const char *fields[] = { symbols[i].name, symbols[i].signature,
-                                 symbols[i].doc, symbols[i].guard };
-        for (size_t j = 0; j < sizeof(fields) / sizeof(fields[0]); j++)
-            if (!rb_append(out, need, &used, fields[j])) {
-                free(out);
-                return NULL;
-            }
-    }
-    out[used] = '\0';
-    return out;
 }
 
 static bool rb_rank_add(struct rb_rank *rank, const char *path,
@@ -377,63 +139,17 @@ static bool rb_bm25_rank(struct codeindex *ci, const char *query,
                          const struct vcs_manifest *manifest,
                          struct rb_rank *rank, size_t *corpus_files)
 {
-    struct ci_file *files = NULL;
-    size_t file_count = 0;
-    if (!rb_collect_files(ci, &files, &file_count) || file_count == 0) {
-        free(files);
-        LOG_ERROR(RB_TAG, "indexed file corpus is unavailable or empty");
-        return false;
-    }
-    struct zcl_retrieval *retrieval = zcl_retrieval_create();
-    if (!retrieval) {
-        free(files);
-        LOG_ERROR(RB_TAG, "BM25 index allocation failed");
-        return false;
-    }
-    bool ok = true;
-    for (size_t i = 0; i < file_count && ok; i++) {
-        if (!rb_manifest_entry(manifest, files[i].path)) {
-            LOG_ERROR(RB_TAG, "indexed file absent from manifest: %s",
-                      files[i].path);
-            ok = false;
-            break;
-        }
-        struct ci_symbol *symbols = NULL;
-        size_t symbol_count = 0;
-        if (!rb_load_symbols(ci, files[i].path, &symbols, &symbol_count)) {
-            ok = false;
-            break;
-        }
-        char *document = rb_document(&files[i], symbols, symbol_count);
-        free(symbols);
-        if (!document || zcl_retrieval_add(
-                retrieval, files[i].path, document) == 0) {
-            free(document);
-            LOG_ERROR(RB_TAG, "BM25 document insertion failed: %s",
-                      files[i].path);
-            ok = false;
-            break;
-        }
-        free(document);
-    }
-    if (ok) {
-        struct zcl_retrieval_hit hits[RB_QUERY_ROWS];
-        size_t n = 0;
-        if (!zcl_retrieval_query_checked(retrieval, query, hits,
-                                         RB_QUERY_ROWS, &n)) {
-            LOG_ERROR(RB_TAG, "checked BM25 query failed");
-            ok = false;
-        } else {
-            rank->complete = n <= RB_MAX_ROWS;
-            for (size_t i = 0; i < n && i < RB_MAX_ROWS && ok; i++)
-                ok = rb_rank_add(rank,
-                    zcl_retrieval_name(retrieval, hits[i].doc), manifest);
-        }
-    }
-    *corpus_files = file_count;
-    zcl_retrieval_destroy(retrieval);
-    free(files);
-    return ok;
+    struct ci_story_hit hits[RB_MAX_ROWS];
+    bool truncated = false;
+    int n = codeindex_search_story(ci, query, hits, RB_MAX_ROWS,
+                                   corpus_files, &truncated);
+    if (n < 0) return false;
+    rank->complete = !truncated;
+    for (int i = 0; i < n; i++)
+        if (!rb_manifest_entry(manifest, hits[i].path) ||
+            !rb_rank_add(rank, hits[i].path, manifest))
+            return false;
+    return true;
 }
 
 static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank)
