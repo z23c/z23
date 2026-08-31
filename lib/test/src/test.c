@@ -1755,6 +1755,7 @@ int main(int argc, char **argv)
     { extern int test_zcode_science(void); failures += test_zcode_science(); }
     { extern int test_zcode_science_store(void);
       failures += test_zcode_science_store(); }
+    { extern int test_ontology(void); failures += test_ontology(); }
     { extern int test_zcode_benchmark_exec(void);
       failures += test_zcode_benchmark_exec(); }
     { extern int test_zcode_discovery_projection(void);
