@@ -20,6 +20,8 @@
 #define VCS_BUILD_ACTION_KIND_BENCHMARK_REPRODUCE_V1 \
     "c23.benchmark.reproduce.v1"
 #define VCS_BUILD_ACTION_KIND_REVIEW_V1 "c23.review.v1"
+#define VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1 \
+    "z23.resident-proof-child.v1"
 #define VCS_BUILD_PACKAGE_PROFILE_LEGACY_V1 "zcode-v0.1"
 #define VCS_BUILD_PACKAGE_PROFILE_QUICK_V1 "zcode-quick-v0.1"
 #define VCS_BUILD_PACKAGE_PROFILE_STANDARD_A_V1 "zcode-standard-a-v0.1"
@@ -52,6 +54,10 @@
     "cpu=1,memory_mb=4096,timeout_s=600,network=0"
 #define VCS_BUILD_REVIEW_RESOURCE_POLICY_V1 \
     "cpu=1,memory_mb=1024,timeout_s=300,network=0"
+#define VCS_BUILD_RESIDENT_PROOF_VIRTUAL_ROOT_V1 "/zbuild/resident-proof"
+#define VCS_BUILD_RESIDENT_PROOF_OUTPUT_V1 "dev-proof-child.v2"
+#define VCS_BUILD_RESIDENT_PROOF_RESOURCE_POLICY_V1 \
+    "cpu=16,memory_mb=16384,processes=256,timeout_s=900,network=0"
 
 struct vcs_toolchain_capsule_v1 {
     uint8_t compiler_driver_sha3[32];

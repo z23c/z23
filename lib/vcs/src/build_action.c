@@ -458,6 +458,8 @@ uint8_t vcs_build_action_v1_work_kind(const char *kind)
         return VCS_ZCODE_WORK_REPRODUCE;
     if (strcmp(kind, VCS_BUILD_ACTION_KIND_REVIEW_V1) == 0)
         return VCS_ZCODE_WORK_REVIEW;
+    if (strcmp(kind, VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1) == 0)
+        return VCS_ZCODE_WORK_TEST;
     return 0;
 }
 
@@ -495,6 +497,11 @@ bool vcs_build_action_v1_descriptors(
         *workdir = VCS_BUILD_REVIEW_VIRTUAL_ROOT_V1;
         *output = VCS_BUILD_REVIEW_OUTPUT_V1;
         *resource = VCS_BUILD_REVIEW_RESOURCE_POLICY_V1;
+    } else if (strcmp(kind,
+                      VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1) == 0) {
+        *workdir = VCS_BUILD_RESIDENT_PROOF_VIRTUAL_ROOT_V1;
+        *output = VCS_BUILD_RESIDENT_PROOF_OUTPUT_V1;
+        *resource = VCS_BUILD_RESIDENT_PROOF_RESOURCE_POLICY_V1;
     } else {
         return false;
     }

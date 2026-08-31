@@ -1729,6 +1729,9 @@ static int test_bf_content_contracts(void)
         ASSERT_EQ(vcs_build_action_v1_work_kind(
                       VCS_BUILD_ACTION_KIND_REVIEW_V1),
                   VCS_ZCODE_WORK_REVIEW);
+        ASSERT_EQ(vcs_build_action_v1_work_kind(
+                      VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1),
+                  VCS_ZCODE_WORK_TEST);
         ASSERT_EQ(vcs_build_action_v1_work_kind("c23.shell.v1"), 0);
         uint8_t test_flags[32], test_env[32], test_action[32];
         ASSERT(vcs_build_action_v1_fixed_flags_root_for_kind(
@@ -1751,6 +1754,43 @@ static int test_bf_content_contracts(void)
         ASSERT(memcmp(action_b, test_action, 32) != 0);
         ASSERT(!vcs_build_action_v1_root_for_kind(
             "c23.shell.v1", &action, test_action));
+
+        uint8_t proof_action_a[32], proof_action_b[32];
+        ASSERT(vcs_build_action_v1_fixed_flags_root_for_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1, action.flags_sha3));
+        ASSERT(vcs_build_action_v1_fixed_environment_root_for_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
+            action.environment_sha3));
+        (void)snprintf(action.profile, sizeof(action.profile),
+                       "resident-proof-child-v1");
+        (void)snprintf(action.virtual_workdir,
+                       sizeof(action.virtual_workdir), "%s",
+                       VCS_BUILD_RESIDENT_PROOF_VIRTUAL_ROOT_V1);
+        (void)snprintf(action.declared_outputs,
+                       sizeof(action.declared_outputs), "%s",
+                       VCS_BUILD_RESIDENT_PROOF_OUTPUT_V1);
+        (void)snprintf(action.resource_policy,
+                       sizeof(action.resource_policy), "%s",
+                       VCS_BUILD_RESIDENT_PROOF_RESOURCE_POLICY_V1);
+        action.sequence = 3;
+        ASSERT(vcs_build_action_v1_root_for_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
+            &action, proof_action_a));
+        ASSERT(vcs_build_action_v1_root_for_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
+            &action, proof_action_b));
+        ASSERT(memcmp(proof_action_a, proof_action_b, 32) == 0);
+        action.input_root_sha3[0] ^= 1;
+        ASSERT(vcs_build_action_v1_root_for_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
+            &action, proof_action_b));
+        ASSERT(memcmp(proof_action_a, proof_action_b, 32) != 0);
+        action.input_root_sha3[0] ^= 1;
+        action.sequence = 2;
+        ASSERT(vcs_build_action_v1_root_for_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
+            &action, proof_action_b));
+        ASSERT(memcmp(proof_action_a, proof_action_b, 32) != 0);
 
         const uint8_t chunks[2][3] = {{'a','b','c'}, {'d','e','f'}};
         struct vcs_build_artifact_manifest_v1 manifest = {0}, parsed = {0};
