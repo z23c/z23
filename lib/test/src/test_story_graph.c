@@ -223,6 +223,7 @@ static int sg_canonical_work_projection(void)
             .proof_action_root = sg_hex(13),
             .build_output_root = sg_hex(14),
         };
+        facts.accepted_work_root = facts.lane_receipt_root;
         struct zcl_story_event_v1 events[7];
         struct zcl_story_graph_v1 graph;
         struct zcl_story_show_v1 show;
@@ -254,6 +255,12 @@ static int sg_canonical_work_projection(void)
 
         struct zcl_story_event_v1 changed_events[7];
         struct zcl_story_graph_v1 changed_graph;
+        facts.accepted_work_root = sg_hex(15);
+        ASSERT(zcl_story_graph_from_work_facts(
+            &facts, changed_events, &changed_graph));
+        ASSERT(changed_events[6].status == ZCL_ONTOLOGY_INCOMPLETE);
+        facts.accepted_work_root = facts.lane_receipt_root;
+
         facts.build_result = "failed";
         ASSERT(zcl_story_graph_from_work_facts(
             &facts, changed_events, &changed_graph));
@@ -360,6 +367,7 @@ static int sg_app_run_projection(void)
             .proof_set_root = sg_hex(12),
             .lane_created_unix = 101,
         };
+        facts.accepted_work_root = facts.lane_receipt_root;
         struct zcl_story_event_v1 events[7];
         struct zcl_story_graph_v1 graph;
         ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));

@@ -2174,6 +2174,37 @@ static __attribute__((unused)) int zpd_test_work_start(void)
                        status_confirmation);
         const struct json_value *status_expert =
             json_get(&reply.data, "expert");
+        const struct json_value *proof_receipt_roots =
+            json_get(status_proof, "receipt_roots");
+        ASSERT(json_get_bool(json_get(status_proof,
+                                      "receipt_roots_available")));
+        ASSERT(proof_receipt_roots &&
+               proof_receipt_roots->type == JSON_ARR &&
+               json_size(proof_receipt_roots) > 0);
+        uint8_t status_receipt_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
+        size_t status_receipt_count = json_size(proof_receipt_roots);
+        ASSERT(status_receipt_count <= VCS_ZCODE_PROOF_SET_MAX_RECEIPTS);
+        for (size_t i = 0; i < status_receipt_count; i++) {
+            const char *root_text = json_get_str(
+                json_at(proof_receipt_roots, i));
+            ASSERT(root_text && strlen(root_text) == 64);
+            ASSERT(zcl_hex_decode_lower(root_text,
+                                        status_receipt_roots[i], 32));
+            ASSERT(i == 0 || memcmp(status_receipt_roots[i - 1],
+                                    status_receipt_roots[i], 32) < 0);
+        }
+        uint8_t projected_proof_root[32], status_proof_root_bytes[32];
+        ASSERT(vcs_zcode_proof_set_root(
+                   (const uint8_t (*)[32])status_receipt_roots,
+                   status_receipt_count, projected_proof_root) ==
+               VCS_ZCODE_DEV_OK);
+        ASSERT(zcl_hex_decode_lower(json_get_str(json_get(
+                   status_expert, "proof_set_root")),
+                   status_proof_root_bytes, 32));
+        ASSERT(memcmp(projected_proof_root,
+                      status_proof_root_bytes, 32) == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          status_expert, "accepted_work_root")), "") == 0);
         ASSERT(strlen(json_get_str(json_get(
                    status_expert, "review_root"))) == 64);
         const char *status_action = json_get_str(json_get(
@@ -2336,6 +2367,10 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         const char *accepted_root_text = json_get_str(json_get(
             json_get(&reply.data, "expert"), "lane_receipt_root"));
         ASSERT(accepted_root_text && strlen(accepted_root_text) == 64);
+        ASSERT(strcmp(json_get_str(json_get(
+                          json_get(&reply.data, "expert"),
+                          "accepted_work_root")),
+                      accepted_root_text) == 0);
         char accepted_root_hex[65];
         (void)snprintf(accepted_root_hex, sizeof(accepted_root_hex), "%s",
                        accepted_root_text);

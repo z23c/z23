@@ -94,7 +94,8 @@ bool zcl_story_graph_from_work_facts(
     if (!facts || !events || !graph) return false;
     uint8_t task[32], source[32], goal[32], agent_context[32];
     uint8_t candidate[32], candidate_source[32], patch[32], action[32];
-    uint8_t receipt[32], output[32], lane[32], proof_set[32];
+    uint8_t receipt[32], output[32], lane[32], accepted_work[32];
+    uint8_t proof_set[32];
     uint8_t proof_action[32], build_output[32];
     uint8_t app_receipt[32], app_observation[32], app_artifact[32];
     uint8_t app_invocation[32], app_action[32];
@@ -125,6 +126,8 @@ bool zcl_story_graph_from_work_facts(
     bool have_app_action = story_decode(
         facts->app_run_action_root, app_action);
     bool have_lane = story_decode(facts->lane_receipt_root, lane);
+    bool have_accepted_work = story_decode(
+        facts->accepted_work_root, accepted_work);
     bool have_proof_set = story_decode(facts->proof_set_root, proof_set);
     uint8_t scene[32], relation[32], evidence[32];
 
@@ -218,16 +221,21 @@ bool zcl_story_graph_from_work_facts(
                      app_status, source, task, scene, task,
                      relation, evidence, events[4].event_root);
 
-    story_pick_root(lane, proof_set, scene);
+    story_pick_root(accepted_work, lane, scene);
+    story_pick_root(scene, proof_set, scene);
     story_pick_root(scene, task, scene);
-    story_pick_root(lane, proof_set, relation);
+    story_pick_root(accepted_work, lane, relation);
+    story_pick_root(relation, proof_set, relation);
     story_pick_root(relation, task, relation);
-    story_pick_root(lane, task, evidence);
+    story_pick_root(accepted_work, lane, evidence);
+    story_pick_root(evidence, task, evidence);
     bool state_proven = facts->state && strcmp(facts->state, "PROVEN") == 0;
-    enum zcl_ontology_status accept_status = state_proven && have_lane
+    bool acceptance_bound = have_lane && have_accepted_work &&
+        memcmp(lane, accepted_work, 32) == 0;
+    enum zcl_ontology_status accept_status = state_proven && acceptance_bound
         ? ZCL_ONTOLOGY_PROVED
-        : state_proven || have_lane ? ZCL_ONTOLOGY_INCOMPLETE
-                                   : ZCL_ONTOLOGY_UNKNOWN;
+        : state_proven || have_lane || have_accepted_work
+            ? ZCL_ONTOLOGY_INCOMPLETE : ZCL_ONTOLOGY_UNKNOWN;
     /* The two receipts remain valid facts independently, but an observation
      * that finishes after acceptance cannot prove the projected causal edge.
      * Missing time evidence also fails closed once app_runs itself is PROVED. */
@@ -397,6 +405,8 @@ static bool story_load_work(const struct zcl_command_request *request,
             expert, "app_run_finished_unix"),
         .lane_receipt_root = story_object_string(expert,
                                                   "lane_receipt_root"),
+        .accepted_work_root = story_object_string(expert,
+                                                   "accepted_work_root"),
         .lane_created_unix = story_object_int(expert,
                                                "lane_created_unix"),
         .proof_set_root = story_object_string(expert, "proof_set_root"),

@@ -42,6 +42,7 @@
 #include "vcs/vcs.h"
 #include "vcs/vcs_devloop.h"
 #include "vcs/vcs_object.h"
+#include "vcs/zcode_dev.h"
 #include "vcs/zcode_dev_product.h"
 #include "vcs/zcode_patch.h"
 #include "vcs/zcode_task_index.h"
@@ -178,6 +179,52 @@ static char *zwork_hex_alloc(const uint8_t *bytes, size_t len,
     char *hex = zcl_malloc(len * 2u + 1u, label);
     if (hex) zcl_hex_encode(bytes, len, hex);
     return hex;
+}
+
+/* Project the exact, already-canonical proof-set members. Missing or corrupt
+ * CAS bytes stay unavailable; this reader never reconstructs or stores a
+ * substitute authority. */
+static bool zwork_proof_receipt_roots(
+    const char *workspace, const char *proof_set_hex,
+    struct json_value *roots_json, bool *available)
+{
+    if (!roots_json || !available) return false;
+    json_init(roots_json);
+    json_set_array(roots_json);
+    *available = false;
+    uint8_t expected[32];
+    if (!workspace || !proof_set_hex ||
+        !zcl_hex_decode_lower(proof_set_hex, expected, 32))
+        return true;
+    uint8_t (*roots)[32] = zcl_malloc(
+        sizeof(*roots) * VCS_ZCODE_PROOF_SET_MAX_RECEIPTS,
+        "zcode.work.proof_receipt_roots");
+    if (!roots) return false;
+    uint8_t *wire = NULL, checked[32];
+    size_t wire_len = 0, count = 0;
+    bool exact = vcs_object_load_raw(
+            workspace, expected, &wire, &wire_len) == 0 &&
+        vcs_zcode_proof_set_parse(
+            wire, wire_len, roots, VCS_ZCODE_PROOF_SET_MAX_RECEIPTS,
+            &count) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_set_root(
+            (const uint8_t (*)[32])roots, count, checked) ==
+            VCS_ZCODE_DEV_OK &&
+        memcmp(expected, checked, 32) == 0;
+    free(wire);
+    bool ok = true;
+    for (size_t i = 0; exact && ok && i < count; i++) {
+        char hex[65];
+        struct json_value value;
+        zcl_hex_encode(roots[i], 32, hex);
+        json_init(&value);
+        json_set_str(&value, hex);
+        ok = json_push_back(roots_json, &value);
+        json_free(&value);
+    }
+    free(roots);
+    if (exact && ok) *available = true;
+    return ok;
 }
 
 static bool zwork_bind_accepted_publication(
@@ -1817,10 +1864,11 @@ void zcl_native_handle_zcode_work_status(
     else
         (void)snprintf(remaining_risks, sizeof(remaining_risks),
                        "proof policy remains unsatisfied by canonical evidence");
-    struct json_value expert, changed_paths, proof_json;
+    struct json_value expert, changed_paths, proof_json, proof_receipt_roots;
     json_init(&expert); json_set_object(&expert);
     json_init(&changed_paths); json_set_array(&changed_paths);
     json_init(&proof_json); json_set_object(&proof_json);
+    json_init(&proof_receipt_roots); json_set_array(&proof_receipt_roots);
     bool paths_ok = true;
     for (size_t i = 0; paths_ok && i < summary.patch.count; i++) {
         struct json_value path;
@@ -1841,7 +1889,15 @@ void zcl_native_handle_zcode_work_status(
             ? "request_changes" :
         entry->latest_review_verdict == VCS_ZCODE_REVIEW_REJECT
             ? "reject" : "not_started";
-    bool proof_ok =
+    const char *proof_set_root = proof.available &&
+        proof.facts.proof_set_root_sha3[0]
+            ? proof.facts.proof_set_root_sha3
+            : entry->latest_proof_set_root_hex;
+    bool receipt_roots_available = false;
+    bool proof_roots_ok = !details || zwork_proof_receipt_roots(
+        workspace, proof_set_root, &proof_receipt_roots,
+        &receipt_roots_available);
+    bool proof_ok = proof_roots_ok &&
         json_push_kv_bool(&proof_json, "facts_available", proof.available) &&
         json_push_kv_int(&proof_json, "valid_receipts",
                          (int64_t)proof.facts.valid_receipts) &&
@@ -1873,12 +1929,11 @@ void zcl_native_handle_zcode_work_status(
                           proof.facts.review_satisfied) &&
         json_push_kv_bool(&proof_json, "policy_satisfied",
                           proof.facts.policy_satisfied) &&
+        json_push_kv_bool(&proof_json, "receipt_roots_available",
+                          receipt_roots_available) &&
+        json_push_kv(&proof_json, "receipt_roots", &proof_receipt_roots) &&
         json_push_kv_str(&proof_json, "authority",
                          "canonical_readonly_receipt_evaluation");
-    const char *proof_set_root = proof.available &&
-        proof.facts.proof_set_root_sha3[0]
-            ? proof.facts.proof_set_root_sha3
-            : entry->latest_proof_set_root_hex;
     bool ok = paths_ok && proof_ok &&
         json_push_kv_str(&expert, "task_root", entry->task_root_hex) &&
         json_push_kv_str(&expert, "source_root", entry->source_root_hex) &&
@@ -1934,6 +1989,8 @@ void zcl_native_handle_zcode_work_status(
                          entry->latest_app_run_finished_unix) &&
         json_push_kv_str(&expert, "lane_receipt_root",
                          entry->latest_lane_receipt_hex) &&
+        json_push_kv_str(&expert, "accepted_work_root",
+                         accepted ? entry->latest_lane_receipt_hex : "") &&
         json_push_kv_int(&expert, "lane_created_unix",
                          entry->latest_lane_created_unix) &&
         json_push_kv_str(&expert, "proof_set_root",
@@ -2012,7 +2069,8 @@ void zcl_native_handle_zcode_work_status(
                   : "create only the behavior still missing from this exact work");
     }
     json_free(&next_input);
-    json_free(&changed_paths); json_free(&proof_json); json_free(&expert);
+    json_free(&changed_paths); json_free(&proof_receipt_roots);
+    json_free(&proof_json); json_free(&expert);
     vcs_zcode_patch_free(&summary.patch);
     free(goal); vcs_zcode_task_index_free(index);
     if (!ok || !paths_ok)
@@ -2685,6 +2743,11 @@ void zcl_native_handle_zcode_work_accept(
         }
         struct json_value expert;
         json_init(&expert); json_copy(&expert, &final_reply.data);
+        const struct json_value *accepted_root_value =
+            json_get(&final_reply.data, "lane_receipt_root");
+        const char *accepted_work_root = accepted_root_value &&
+                accepted_root_value->type == JSON_STR
+            ? json_get_str(accepted_root_value) : NULL;
         char publication_job_hex[65], publication_progress_hex[65];
         char publication_commit_hex[65], publication_proof_hex[65];
         zcl_hex_encode(publication.publication_job_root, 32,
@@ -2700,7 +2763,10 @@ void zcl_native_handle_zcode_work_accept(
                        entry->task_root_hex);
         struct json_value next_input;
         json_init(&next_input); json_set_object(&next_input);
-        bool ok = json_push_kv_str(&reply->data, "work_id", work_id) &&
+        bool ok = accepted_work_root &&
+            json_push_kv_str(&expert, "accepted_work_root",
+                             accepted_work_root) &&
+            json_push_kv_str(&reply->data, "work_id", work_id) &&
             json_push_kv_str(&reply->data, "goal_decision", "accepted") &&
             json_push_kv_str(&reply->data, "state", "PROVEN") &&
             json_push_kv_str(&reply->data, "stage", "Accepted") &&
