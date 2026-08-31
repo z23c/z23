@@ -5988,6 +5988,7 @@ static int test_zd_task_index(void)
                   VCS_ZCODE_APP_RUN_PROVED_FLAGS);
         ASSERT_EQ(entry_a->latest_app_run_status, VCS_ZCODE_WORK_PASS);
         ASSERT_EQ(entry_a->latest_app_run_exit_status, 0);
+        ASSERT_EQ(entry_a->latest_app_run_finished_unix, 1230);
         ASSERT_STR_EQ(entry_a->state, "EVIDENCE_READY");
 
         /* Search filters compose and report totals. */

@@ -228,6 +228,15 @@ bool zcl_story_graph_from_work_facts(
         ? ZCL_ONTOLOGY_PROVED
         : state_proven || have_lane ? ZCL_ONTOLOGY_INCOMPLETE
                                    : ZCL_ONTOLOGY_UNKNOWN;
+    /* The two receipts remain valid facts independently, but an observation
+     * that finishes after acceptance cannot prove the projected causal edge.
+     * Missing time evidence also fails closed once app_runs itself is PROVED. */
+    if (accept_status == ZCL_ONTOLOGY_PROVED &&
+        app_status == ZCL_ONTOLOGY_PROVED &&
+        (facts->app_run_finished_unix <= 0 ||
+         facts->lane_created_unix <= 0 ||
+         facts->app_run_finished_unix > facts->lane_created_unix))
+        accept_status = ZCL_ONTOLOGY_INCOMPLETE;
     story_fill_event(&events[6], ZCL_STORY_EVENT_USER_ACCEPTS, accept_status,
                      source, task, scene, task, relation, evidence,
                      events[5].event_root);
@@ -384,8 +393,12 @@ static bool story_load_work(const struct zcl_command_request *request,
             expert, "app_run_status"),
         .app_run_exit_status = (int32_t)story_object_int(
             expert, "app_run_exit_status"),
+        .app_run_finished_unix = story_object_int(
+            expert, "app_run_finished_unix"),
         .lane_receipt_root = story_object_string(expert,
                                                   "lane_receipt_root"),
+        .lane_created_unix = story_object_int(expert,
+                                               "lane_created_unix"),
         .proof_set_root = story_object_string(expert, "proof_set_root"),
     };
     bool ok = zcl_story_graph_from_work_facts(

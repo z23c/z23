@@ -417,11 +417,15 @@ static bool zpd_store_app_run_evidence(
         "-o", ".story-app", NULL,
     };
     struct zcl_devloop_process_result compiled = {0};
+    int64_t compile_started_unix = platform_time_wall_unix();
     bool compile_ok = zcl_devloop_process_run(
         candidate_workspace, compile_argv, 30000, &compiled) &&
         !compiled.timed_out && !compiled.cancelled &&
         compiled.term_signal == 0 && compiled.exit_code == 0 &&
         !compiled.output_truncated;
+    int64_t compile_finished_unix = platform_time_wall_unix();
+    compile_ok = compile_ok && compile_started_unix >= build.finished_unix &&
+        compile_finished_unix >= compile_started_unix;
     char *artifact = compile_ok
         ? zpd_read_bounded(app_binary, 16u * 1024u * 1024u) : NULL;
     struct stat artifact_stat;
@@ -467,8 +471,8 @@ static bool zpd_store_app_run_evidence(
         .work_kind = VCS_ZCODE_WORK_BUILD,
         .status = VCS_ZCODE_WORK_PASS,
         .exit_status = 0,
-        .started_unix = build.finished_unix + 1,
-        .finished_unix = build.finished_unix + 2,
+        .started_unix = compile_started_unix,
+        .finished_unix = compile_finished_unix,
     };
     memcpy(app_build.task_root, build.task_root, 32);
     memcpy(app_build.candidate_root, build.candidate_root, 32);
@@ -496,11 +500,15 @@ static bool zpd_store_app_run_evidence(
     static const uint8_t invocation[] = "./.story-app";
     struct zcl_devloop_process_result ran = {0};
     const char *run_argv[] = {"./.story-app", NULL};
+    int64_t run_started_unix = platform_time_wall_unix();
     bool ran_ok = sealed && zcl_devloop_process_run(
         candidate_workspace, run_argv, 10000, &ran) &&
         !ran.timed_out && !ran.cancelled && ran.term_signal == 0 &&
         ran.exit_code == 0 && !ran.output_truncated &&
         strcmp(ran.output, "x=10\n") == 0;
+    int64_t run_finished_unix = platform_time_wall_unix();
+    ran_ok = ran_ok && run_started_unix >= app_build.finished_unix &&
+        run_finished_unix >= run_started_unix;
     (void)unlink(app_source);
     (void)unlink(app_binary);
     static const uint8_t stream_note[] =
@@ -525,8 +533,8 @@ static bool zpd_store_app_run_evidence(
         .schema_version = VCS_ZCODE_APP_RUN_OBSERVATION_VERSION,
         .flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS,
         .exit_status = 0,
-        .started_unix = app_build.finished_unix + 1,
-        .finished_unix = app_build.finished_unix + 2,
+        .started_unix = run_started_unix,
+        .finished_unix = run_finished_unix,
     };
     memcpy(observation.task_root, build.task_root, 32);
     memcpy(observation.candidate_root, build.candidate_root, 32);

@@ -37,7 +37,9 @@ struct zcl_story_work_facts_v1 {
     uint16_t app_run_flags;
     uint8_t app_run_status;
     int32_t app_run_exit_status;
+    int64_t app_run_finished_unix;
     const char *lane_receipt_root;
+    int64_t lane_created_unix;
     const char *proof_set_root;
 };
 

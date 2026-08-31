@@ -597,6 +597,8 @@ static void index_derive_states(struct vcs_zcode_task_index *index,
                             e->latest_app_run_status = receipt->status;
                             e->latest_app_run_exit_status =
                                 receipt->exit_status;
+                            e->latest_app_run_finished_unix =
+                                receipt->finished_unix;
                         }
                     }
                 }
@@ -681,6 +683,7 @@ static void index_derive_states(struct vcs_zcode_task_index *index,
             (void)snprintf(e->latest_lane_receipt_hex,
                            sizeof(e->latest_lane_receipt_hex), "%s",
                            latest_lane->receipt_root_hex);
+            e->latest_lane_created_unix = latest_lane->created_unix;
             (void)snprintf(e->latest_proof_set_root_hex,
                            sizeof(e->latest_proof_set_root_hex), "%s",
                            latest_lane->proof_set_root_hex);

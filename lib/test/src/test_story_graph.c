@@ -358,6 +358,7 @@ static int sg_app_run_projection(void)
             .action_root = sg_hex(8), .work_receipt_root = sg_hex(9),
             .output_root = sg_hex(10), .lane_receipt_root = sg_hex(11),
             .proof_set_root = sg_hex(12),
+            .lane_created_unix = 101,
         };
         struct zcl_story_event_v1 events[7];
         struct zcl_story_graph_v1 graph;
@@ -377,8 +378,10 @@ static int sg_app_run_projection(void)
         facts.app_run_flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS;
         facts.app_run_status = VCS_ZCODE_WORK_PASS;
         facts.app_run_exit_status = 0;
+        facts.app_run_finished_unix = 100;
         ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));
         ASSERT_EQ(events[5].status, ZCL_ONTOLOGY_PROVED);
+        ASSERT_EQ(events[6].status, ZCL_ONTOLOGY_PROVED);
         uint8_t expected[32];
         ASSERT(zcl_hex_decode_lower(facts.app_run_artifact_root,
                                     expected, sizeof(expected)));
@@ -389,6 +392,15 @@ static int sg_app_run_projection(void)
         ASSERT(zcl_hex_decode_lower(facts.app_run_observation_root,
                                     expected, sizeof(expected)));
         ASSERT(memcmp(events[5].evidence_root, expected, 32) == 0);
+
+        /* A later observation cannot be projected as the cause of an
+         * earlier human acceptance, even though both receipts are valid
+         * facts independently. */
+        facts.app_run_finished_unix = 102;
+        ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));
+        ASSERT_EQ(events[5].status, ZCL_ONTOLOGY_PROVED);
+        ASSERT_EQ(events[6].status, ZCL_ONTOLOGY_INCOMPLETE);
+        facts.app_run_finished_unix = 100;
 
         facts.app_run_status = VCS_ZCODE_WORK_FAIL;
         facts.app_run_exit_status = 1;

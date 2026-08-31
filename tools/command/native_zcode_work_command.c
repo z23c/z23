@@ -1930,8 +1930,12 @@ void zcl_native_handle_zcode_work_status(
                          (int64_t)entry->latest_app_run_status) &&
         json_push_kv_int(&expert, "app_run_exit_status",
                          (int64_t)entry->latest_app_run_exit_status) &&
+        json_push_kv_int(&expert, "app_run_finished_unix",
+                         entry->latest_app_run_finished_unix) &&
         json_push_kv_str(&expert, "lane_receipt_root",
                          entry->latest_lane_receipt_hex) &&
+        json_push_kv_int(&expert, "lane_created_unix",
+                         entry->latest_lane_created_unix) &&
         json_push_kv_str(&expert, "proof_set_root",
                          proof_set_root) &&
         json_push_kv_str(&expert, "review_root",

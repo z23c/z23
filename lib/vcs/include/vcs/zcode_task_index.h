@@ -82,8 +82,10 @@ struct vcs_zcode_task_index_entry {
     uint16_t latest_app_run_flags;
     uint8_t latest_app_run_status;
     int32_t latest_app_run_exit_status;
+    int64_t latest_app_run_finished_unix;
     uint8_t latest_lane;
     char latest_lane_receipt_hex[65];
+    int64_t latest_lane_created_unix;
     char latest_proof_set_root_hex[65];
     char state[24];
 };
