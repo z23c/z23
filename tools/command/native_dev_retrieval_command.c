@@ -6,6 +6,7 @@
 
 #include "base/hex.h"
 #include "base/log_macros.h"
+#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
