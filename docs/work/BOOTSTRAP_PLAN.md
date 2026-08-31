@@ -26,13 +26,21 @@ providing that property.
 
 ## What exists
 
-`packaging/release/build_release.sh` packages a `linux-x86_64` runtime and a
-`windows-x86_64` runtime. It decides which by reading the object format of the
-binary it is handed, not by asking what machine it is running on.
+`packaging/release/build_release.sh` packages `linux-x86_64`, native
+`darwin-arm64`, and `windows-x86_64` runtimes. It decides which by reading the
+object format of the binary it is handed, not by asking what machine it is
+running on.
 `tools/scripts/install_z23.sh` accepts a local release directory or an HTTP(S)
 mirror, requires an independently supplied manifest digest for a remote
 mirror, checks the exact closed manifest, verifies every payload, and installs
-a systemd user unit. Its remote source is not hardcoded.
+the native user service. Linux gets a systemd user unit. On macOS the installer
+uses stock `shasum`, immutable manifest-named generations, atomic `current` and
+`last-good` links, `plutil`, and modern `launchctl bootstrap`/`bootout`/
+`kickstart`. It waits on the typed node boot status, checks the launchd PID's
+running-image digest, and restores the prior generation when either proof
+fails. Its remote source is not hardcoded. The lifecycle is fault-tested with
+isolated launchd fixtures; it has not yet passed the fresh-host physical-Mac
+publication acceptance below.
 
 `packaging/install/install.sh` and `install.ps1` are fail-closed front-door
 shims. Each is roughly thirty lines and makes exactly one decision: it names
@@ -116,10 +124,12 @@ authority.
 - **Linux-x86_64:** packaging and the systemd installer exist. Public bootstrap
   remains disabled until the external authority, immutable hosting, and mirror
   acceptance are complete.
-- **macOS:** the native node build exists, but there is no accepted release
-  package or launchd installer, and no Linux host can produce a Mach-O. Linux
-  confinement claims must not be made on macOS. The exact sequence a Mac
-  worker runs is below.
+- **macOS:** the native node build, audited `darwin-arm64` release package, and
+  transactional launchd installer exist. No Linux host can produce a Mach-O,
+  and Linux confinement claims are not made on macOS. Publication remains
+  blocked on a fresh physical-Mac install, login/reboot persistence, real
+  running-image qualification, failed-upgrade rollback, and the signed
+  platform index. The exact sequence a Mac worker runs is below.
 - **Windows-x86_64:** a runtime is BUILT and PACKAGED, and still not
   published. `build_release.sh --platform windows-x86_64` produces a real
   x86-64 PE with an exact closed SHA-256 manifest. It has never been executed
@@ -222,10 +232,11 @@ is a glibc-symbol question and runs only for `linux-x86_64`, and
 `tools/scripts/check_c23_node_binary.sh` already carries a Mach-O branch that
 audits `otool -L` dependencies and weak-undefined symbols.
 
-Runtime packaging does not add macOS to `PUBLISHED_PLATFORMS`. Publication
-still needs the release installed on a fresh Mac,
-the node started and stopped through its own launchd unit, and the exact
-running image qualified — the same bar the "Platform work" list above states.
+Runtime packaging does not add macOS to `PUBLISHED_PLATFORMS`. The native
+installer transaction now exists and its isolated fault proof is green, but
+publication still needs the exact packaged release installed on a fresh Mac,
+login/reboot persistence, physical-process qualification, and rollback of a
+real failed candidate — the same bar the "Platform work" list above states.
 
 ## Certificates and hosting
 

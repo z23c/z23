@@ -92,6 +92,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
+#include "platform/fd_path.h"
 #include "sha3/sha3.h"
 
 #include <ctype.h>
@@ -202,6 +203,15 @@ static bool read_file(const char *path, struct buf *out)
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return false;
+#if defined(__APPLE__)
+    /* Opening /dev/fd/N duplicates the existing open-file description on
+     * Darwin, including its current offset. Epoch compiler outputs therefore
+     * need an explicit rewind before cache capture. */
+    if (strncmp(path, "/dev/fd/", 8u) == 0 && lseek(fd, 0, SEEK_SET) < 0) {
+        close(fd);
+        return false;
+    }
+#endif
     unsigned char chunk[65536];
     for (;;) {
         ssize_t n = read(fd, chunk, sizeof chunk);
@@ -283,6 +293,22 @@ static bool copy_out(const char *cached, const char *dest)
         buf_free(&b);
         return false;
     }
+#if defined(__APPLE__)
+    /* Epoch staging on Darwin passes pre-opened output files through
+     * /dev/fd.  Those are already private scratch artifacts, so serving a
+     * cache hit writes the descriptor directly instead of trying to create
+     * an atomic sibling inside the non-traversable /dev/fd namespace. */
+    if (strncmp(dest, "/dev/fd/", 8u) == 0) {
+        int fd = open(dest, O_WRONLY | O_TRUNC);
+        bool ok = fd >= 0 && lseek(fd, 0, SEEK_SET) >= 0 &&
+                  write_all(fd, b.p, b.len) &&
+                  fchmod(fd, st.st_mode & 07777u) == 0;
+        if (fd >= 0 && close(fd) != 0)
+            ok = false;
+        buf_free(&b);
+        return ok;
+    }
+#endif
     char dir[PATH_MAX];
     snprintf(dir, sizeof dir, "%s", dest);
     char *slash = strrchr(dir, '/');
@@ -2031,6 +2057,9 @@ struct epoch_artifacts {
     struct stat staging_stamp;
     int parent_fd;
     int staging_fd;
+    int object_fd;
+    int dep_fd;
+    int note_fd;
     char parent_relative[PATH_MAX];
     char parent_path[PATH_MAX];
     char staging_name[NAME_MAX + 1u];
@@ -2042,6 +2071,7 @@ struct epoch_artifacts {
     char depfile[PATH_MAX];
     char object[PATH_MAX];
     char note[PATH_MAX];
+    char note_option[PATH_MAX + 32u];
 };
 
 static int epoch_fail(const char *message)
@@ -2457,13 +2487,19 @@ static bool epoch_names(const char *base, struct epoch_artifacts *artifacts)
                     "%s.lock", base) < (int)sizeof artifacts->lock_name;
 }
 
-static bool epoch_fd_path(int fd, const char *name, char path[PATH_MAX])
+static bool epoch_artifact_path(const struct epoch_artifacts *artifacts,
+                                const char *name, char path[PATH_MAX])
 {
 #if defined(__APPLE__)
-    return snprintf(path, PATH_MAX, "/dev/fd/%d/%s", fd, name) < PATH_MAX;
+    int fd = strcmp(name, artifacts->object_name) == 0
+                 ? artifacts->object_fd
+                 : strcmp(name, artifacts->dep_name) == 0
+                       ? artifacts->dep_fd
+                       : artifacts->note_fd;
+    return fd >= 0 && snprintf(path, PATH_MAX, "/dev/fd/%d", fd) < PATH_MAX;
 #else
-    return snprintf(path, PATH_MAX, "/proc/self/fd/%d/%s", fd, name) <
-           PATH_MAX;
+    return platform_dirfd_child_path(path, PATH_MAX, artifacts->staging_fd,
+                                     name);
 #endif
 }
 
@@ -2492,6 +2528,7 @@ static bool epoch_stage_prepare(const char *output,
 {
     memset(artifacts, 0, sizeof *artifacts);
     artifacts->parent_fd = artifacts->staging_fd = -1;
+    artifacts->object_fd = artifacts->dep_fd = artifacts->note_fd = -1;
     size_t root_len = strlen(authority->epoch_path);
     const char *relative = output + root_len + 1u;
     char base[NAME_MAX + 1u];
@@ -2503,15 +2540,33 @@ static bool epoch_stage_prepare(const char *output,
     if (artifacts->parent_fd < 0 || !epoch_make_staging(artifacts) ||
         fstat(artifacts->parent_fd, &artifacts->parent_stamp) != 0)
         return false;
+#if defined(__APPLE__)
+    artifacts->object_fd = openat(artifacts->staging_fd,
+                                  artifacts->object_name,
+                                  O_RDWR | O_CREAT | O_EXCL, 0600);
+    artifacts->dep_fd = openat(artifacts->staging_fd, artifacts->dep_name,
+                               O_RDWR | O_CREAT | O_EXCL, 0600);
+    artifacts->note_fd = openat(artifacts->staging_fd, artifacts->note_name,
+                                O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (artifacts->object_fd < 0 || artifacts->dep_fd < 0 ||
+        artifacts->note_fd < 0)
+        return false;
+#endif
     const char *ignored_base = NULL;
     if (!epoch_split_output(output, artifacts->parent_path, &ignored_base) ||
-        !epoch_fd_path(artifacts->staging_fd, artifacts->dep_name,
-                       artifacts->depfile) ||
-        !epoch_fd_path(artifacts->staging_fd, artifacts->object_name,
-                       artifacts->object) ||
-        !epoch_fd_path(artifacts->staging_fd, artifacts->note_name,
-                       artifacts->note))
+        !epoch_artifact_path(artifacts, artifacts->dep_name,
+                             artifacts->depfile) ||
+        !epoch_artifact_path(artifacts, artifacts->object_name,
+                             artifacts->object) ||
+        !epoch_artifact_path(artifacts, artifacts->note_name,
+                             artifacts->note))
         return false;
+#if defined(__APPLE__)
+    if (snprintf(artifacts->note_option, sizeof artifacts->note_option,
+                 "-coverage-notes-file=%s", artifacts->note) >=
+        (int)sizeof artifacts->note_option)
+        return false;
+#endif
     return true;
 }
 
@@ -2530,23 +2585,33 @@ static int epoch_compiler_start(int argc, char **argv)
 static char **epoch_compiler_argv(int argc, char **argv, const char *output,
                                   const char *source,
                                   const struct epoch_artifacts *artifacts,
+                                  bool coverage,
                                   int *compiler_argc)
 {
     int input_start = epoch_compiler_start(argc, argv);
     int input_argc = argc - input_start;
-    char **cc = zcl_calloc((size_t)input_argc + 12u, sizeof *cc,
+    char **cc = zcl_calloc((size_t)input_argc + 14u, sizeof *cc,
                            "zcc epoch compiler argv");
     if (!cc)
         return NULL;
     cc[0] = (char *)"zcc:epoch-compiler";
     for (int i = 0; i < input_argc; i++)
         cc[i + 1] = argv[i + input_start];
+    int next = input_argc + 1;
     const char *extra[] = { "-MMD", "-MP", "-MF", artifacts->depfile,
-                            "-MT", output, "-c", "-o", artifacts->object,
-                            source };
+                            "-MT", output, "-c", "-o", artifacts->object };
     for (size_t i = 0; i < sizeof extra / sizeof extra[0]; i++)
-        cc[input_argc + 1 + (int)i] = (char *)extra[i];
-    *compiler_argc = input_argc + 11;
+        cc[next++] = (char *)extra[i];
+#if defined(__APPLE__)
+    if (coverage) {
+        cc[next++] = (char *)"-Xclang";
+        cc[next++] = (char *)artifacts->note_option;
+    }
+#else
+    (void)coverage;
+#endif
+    cc[next++] = (char *)source;
+    *compiler_argc = next;
     return cc;
 }
 
@@ -2554,17 +2619,23 @@ static bool epoch_compile_complete(int rc, bool coverage,
                                    const struct epoch_artifacts *artifacts)
 {
     struct stat object_st, dep_st, note_st;
-    return rc == 0 &&
-           fstatat(artifacts->staging_fd, artifacts->object_name, &object_st,
-                   AT_SYMLINK_NOFOLLOW) == 0 &&
-           S_ISREG(object_st.st_mode) && object_st.st_size > 0 &&
-           fstatat(artifacts->staging_fd, artifacts->dep_name, &dep_st,
-                   AT_SYMLINK_NOFOLLOW) == 0 &&
-           S_ISREG(dep_st.st_mode) && dep_st.st_size > 0 &&
-           (!coverage ||
-            (fstatat(artifacts->staging_fd, artifacts->note_name, &note_st,
-                     AT_SYMLINK_NOFOLLOW) == 0 &&
-             S_ISREG(note_st.st_mode) && note_st.st_size > 0));
+    bool object_ok = fstatat(artifacts->staging_fd, artifacts->object_name,
+                             &object_st, AT_SYMLINK_NOFOLLOW) == 0 &&
+                     S_ISREG(object_st.st_mode) && object_st.st_size > 0;
+    bool dep_ok = fstatat(artifacts->staging_fd, artifacts->dep_name, &dep_st,
+                          AT_SYMLINK_NOFOLLOW) == 0 &&
+                  S_ISREG(dep_st.st_mode) && dep_st.st_size > 0;
+    bool note_ok = !coverage ||
+                   (fstatat(artifacts->staging_fd, artifacts->note_name,
+                            &note_st, AT_SYMLINK_NOFOLLOW) == 0 &&
+                    S_ISREG(note_st.st_mode) && note_st.st_size > 0);
+    if (rc == 0 && object_ok && dep_ok && note_ok)
+        return true;
+    fprintf(stderr,
+            "zcc --epoch-object: incomplete compiler output rc=%d "
+            "object=%d dep=%d note=%d coverage=%d\n",
+            rc, object_ok, dep_ok, note_ok, coverage);
+    return false;
 }
 
 static bool epoch_stage_current(const struct epoch_authority *authority,
@@ -2702,6 +2773,13 @@ static int epoch_admission_acquire(
 
 static void epoch_remove_staging(struct epoch_artifacts *artifacts)
 {
+    if (artifacts->object_fd >= 0)
+        close(artifacts->object_fd);
+    if (artifacts->dep_fd >= 0)
+        close(artifacts->dep_fd);
+    if (artifacts->note_fd >= 0)
+        close(artifacts->note_fd);
+    artifacts->object_fd = artifacts->dep_fd = artifacts->note_fd = -1;
     if (artifacts->staging_fd >= 0) {
         (void)unlinkat(artifacts->staging_fd, artifacts->object_name, 0);
         (void)unlinkat(artifacts->staging_fd, artifacts->dep_name, 0);
@@ -2719,11 +2797,20 @@ static void epoch_artifacts_close(struct epoch_artifacts *artifacts,
 {
     if (remove_staging)
         epoch_remove_staging(artifacts);
-    else if (artifacts->staging_fd >= 0)
-        close(artifacts->staging_fd);
+    else {
+        if (artifacts->object_fd >= 0)
+            close(artifacts->object_fd);
+        if (artifacts->dep_fd >= 0)
+            close(artifacts->dep_fd);
+        if (artifacts->note_fd >= 0)
+            close(artifacts->note_fd);
+        if (artifacts->staging_fd >= 0)
+            close(artifacts->staging_fd);
+    }
     if (artifacts->parent_fd >= 0)
         close(artifacts->parent_fd);
     artifacts->staging_fd = artifacts->parent_fd = -1;
+    artifacts->object_fd = artifacts->dep_fd = artifacts->note_fd = -1;
 }
 
 static bool epoch_prepare_record(const struct epoch_artifacts *artifacts,
@@ -2809,7 +2896,7 @@ static int epoch_compile_publish(int argc, char **argv, const char *mode,
     }
     int compiler_argc = 0;
     char **cc = epoch_compiler_argv(argc, argv, output, source, &artifacts,
-                                    &compiler_argc);
+                                    coverage, &compiler_argc);
     if (!cc) {
         epoch_artifacts_close(&artifacts, true);
         if (lock_fd >= 0)

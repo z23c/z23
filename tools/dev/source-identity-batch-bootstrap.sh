@@ -13,8 +13,10 @@ SHA256="$REPO_ROOT/packages/zsha256/src/zsha256.c"
 SHA256_HEADER="$REPO_ROOT/packages/zsha256/include/zsha256/zsha256.h"
 ALLOC="$REPO_ROOT/lib/base/src/safe_alloc.c"
 ALLOC_HEADER="$REPO_ROOT/lib/base/include/base/safe_alloc.h"
+HEX_HEADER="$REPO_ROOT/lib/base/include/base/hex.h"
 BIN="${ZCL_BIN_DIR:-$REPO_ROOT/build/bin}/source-identity-batch"
-INPUTS=("$0" "$SRC" "$SHA256" "$SHA256_HEADER" "$ALLOC" "$ALLOC_HEADER")
+INPUTS=("$0" "$SRC" "$SHA256" "$SHA256_HEADER" "$ALLOC" "$ALLOC_HEADER"
+        "$HEX_HEADER")
 
 sha256_stream()
 {

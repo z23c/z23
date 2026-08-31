@@ -8,3 +8,4 @@ lib/sha3/include/sha3/sha3.h
 lib/base/include/base/safe_alloc.h
 lib/base/include/base/hex.h
 lib/base/include/base/serialize_le.h
+lib/platform/include/platform/fd_path.h

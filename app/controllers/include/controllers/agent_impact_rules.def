@@ -1253,7 +1253,7 @@ AGENT_IMPACT_RULE("lib/hotswap/src/hotswap_retire_blocker.c|lib/hotswap/include/
  * is the only thing its content can affect. */
 AGENT_IMPACT_RULE("lib/test/src/test_stage_crash_sweep.c", "stage_crash_sweep make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_mailbox.c|lib/util/src/mailbox.c|lib/util/include/util/mailbox.h", "mailbox make_lint_gates")
-AGENT_IMPACT_RULE("lib/test/src/test_subsystem_snapshot.c", "subsystem_snapshot make_lint_gates")
+AGENT_IMPACT_RULE("lib/test/src/test_subsystem_snapshot.c|lib/util/src/subsystem_snapshot.c|lib/util/include/util/subsystem_snapshot.h", "subsystem_snapshot make_lint_gates")
 AGENT_IMPACT_RULE("lib/test/src/test_header_probe.c|app/services/src/header_probe.c|app/services/include/services/header_probe.h", "header_probe make_lint_gates")
 /* The legacy-oracle mock harness needs no row of its own: the
  * `lib/test/src/test_*oracle.c` pattern earlier in this file already claims it,

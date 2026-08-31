@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # Atomic cached-object compiler for one immutable host-local compile epoch.
 
-set -Eeuo pipefail
+set -euo pipefail
 export LC_ALL=C
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -35,7 +35,7 @@ shift
 [ "$#" -gt 0 ] || fail 'empty compiler argv'
 
 # Every anticipated refusal below supplies its own context. This trap closes
-# the remaining set -e gap: if an unanticipated shell/runtime command dies,
+# the remaining set -e gap: if an unanticipated top-level command dies,
 # Make must still identify the source, output and exact script line instead of
 # reducing the event to a generic "Error 2".
 unexpected_failure()
@@ -92,6 +92,21 @@ path_has_no_symlink()
             [ ! -L "$current" ] || return 1
         fi
     done
+}
+
+opened_regular_file_matches()
+{
+    local path="$1" fd="$2" host_system fd_inode path_inode
+    host_system="$(uname -s 2>/dev/null || printf unknown)"
+    if [ "$host_system" = Darwin ]; then
+        [ -x /usr/sbin/lsof ] || return 1
+        fd_inode=$(/usr/sbin/lsof -a -p "$$" -d "$fd" -Fi 2>/dev/null |
+            sed -n 's/^i//p')
+        path_inode=$(/usr/bin/stat -f '%i' "$path" 2>/dev/null)
+        [ -n "$fd_inode" ] && [ "$fd_inode" = "$path_inode" ]
+        return
+    fi
+    [ "$path" -ef "/dev/fd/$fd" ]
 }
 
 output_contained "$OUTPUT" || fail "object path is outside compile epoch $EPOCH"
@@ -166,7 +181,7 @@ SESSION_INITIAL="$SESSION_CAPTURE"
 session_unchanged()
 {
     [ -f "$SESSION" ] && [ ! -L "$SESSION" ] &&
-        [ "$SESSION" -ef /dev/fd/8 ] || return 1
+        opened_regular_file_matches "$SESSION" 8 || return 1
     if IFS= read -r -d '' session_binary_prefix < "$SESSION"; then
         return 1
     fi
@@ -231,7 +246,7 @@ compile_one()
 {
     local staging staging_base object dep note_record note_tmp marker_tmp
     local compiler_rc
-    local host_system deadline pid start actual
+    local host_system empty_deadline pid start actual owner_start now
     # Long source filenames can make the staging directory path breach Windows
     # MAX_PATH. Use a short deterministic prefix derived from OUTPUT_BASE; the
     # XXXXXX suffix still gives mktemp its uniqueness.
@@ -267,26 +282,41 @@ compile_one()
     host_system="$(uname -s 2>/dev/null || printf unknown)"
     case "$host_system" in
         MINGW*|MSYS*)
-            deadline=$(($(date +%s) + 30))
+            empty_deadline=0
             while ! mkdir "$ADMISSION_LOCK_DIR" 2>/dev/null; do
                 [ ! -L "$ADMISSION_LOCK_DIR" ] ||
                     fail 'epoch admission lock directory is a symlink'
-                pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
-                start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
-                actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
-                if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
-                    rm -f -- "$ADMISSION_LOCK_OWNER"
-                    rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null || true
+                pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+                start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
+                # mkdir publishes before the winner can write its identity.
+                # An empty owner is therefore transitional, not proof of a
+                # stale lock. Wait boundedly; only the deadline may recover
+                # a creator that died in this narrow interval.
+                if [ -z "$pid" ] || [ -z "$start" ]; then
+                    now="$(date +%s)"
+                    if [ "$empty_deadline" -eq 0 ]; then
+                        empty_deadline=$((now + 30))
+                    elif [ "$now" -ge "$empty_deadline" ]; then
+                        fail 'epoch admission lock owner was not published; rerun for serialized recovery'
+                    else
+                        sleep 0.05
+                    fi
                     continue
                 fi
-                [ "$(date +%s)" -lt "$deadline" ] ||
-                    fail 'timed out waiting for epoch admission lock'
+                empty_deadline=0
+                actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
+                if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
+                    fail 'epoch admission lock owner is stale; rerun for serialized recovery'
+                fi
                 sleep 0.05
             done
             [ -d "$ADMISSION_LOCK_DIR" ] && [ ! -L "$ADMISSION_LOCK_DIR" ] ||
                 fail 'epoch admission lock directory is not regular'
-            printf 'pid=%s\nstart=%s\n' "$$" \
-                "$("$SELF_DIR/process-start-token.sh" "$$")" \
+            owner_start="$("$SELF_DIR/process-start-token.sh" "$$")" ||
+                fail 'could not identify epoch admission lock owner'
+            [ -n "$owner_start" ] ||
+                fail 'epoch admission lock owner start token is empty'
+            printf 'pid=%s\nstart=%s\n' "$$" "$owner_start" \
                 > "$ADMISSION_LOCK_OWNER"
             ADMISSION_LOCK_HELD=1
             ;;
@@ -296,13 +326,13 @@ compile_one()
             [ ! -L "$ADMISSION_LOCK_FILE" ] ||
                 fail 'epoch admission lock is a symlink'
             exec 6> "$ADMISSION_LOCK_FILE"
-            [ -f /dev/fd/6 ] &&
-                [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/6 ] ||
+            [ -f "$ADMISSION_LOCK_FILE" ] &&
+                opened_regular_file_matches "$ADMISSION_LOCK_FILE" 6 ||
                 fail 'epoch admission lock is not the opened regular file'
             flock -x 6
             [ -f "$ADMISSION_LOCK_FILE" ] &&
                 [ ! -L "$ADMISSION_LOCK_FILE" ] &&
-                [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/6 ] ||
+                opened_regular_file_matches "$ADMISSION_LOCK_FILE" 6 ||
                 fail 'epoch admission lock changed while waiting'
             ;;
     esac

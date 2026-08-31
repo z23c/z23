@@ -77,9 +77,10 @@ void zcl_snapshot_publish_end(struct zcl_snapshot_env *env, int64_t last_height)
 bool zcl_snapshot_read_try(const struct zcl_snapshot_env *env,
                            uint64_t *seq_out);
 
-/* Validate a completed read: returns true iff no writer intervened since the
- * matching read_try (seq unchanged and even). A false result means the payload
- * just read may be torn — retry, or fall back to last-known labeled stale. */
+/* Validate a completed read: applies the bracket's trailing acquire fence and
+ * returns true iff no writer intervened since the matching read_try (seq
+ * unchanged and even). A false result means the payload just read may be torn
+ * — retry, or fall back to last-known labeled stale. */
 bool zcl_snapshot_read_ok(const struct zcl_snapshot_env *env,
                           uint64_t seq_before);
 

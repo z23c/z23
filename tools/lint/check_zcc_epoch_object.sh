@@ -12,6 +12,10 @@ else
     ZCC="$("$ROOT/tools/dev/zcc_bootstrap.sh")"
 fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-zcc-epoch.XXXXXX")"
+# Darwin exposes /var as a symlink to /private/var; use the physical path so
+# this gate tests the epoch compiler rather than tripping path containment on
+# the host's compatibility alias.
+WORK="$(cd "$WORK" && pwd -P)"
 LOCK_HOLDER_PID=""
 LOCKED_COMPILE_PID=""
 cleanup()
@@ -98,6 +102,33 @@ wait_for_file()
     return 1
 }
 
+make_test_directory_link()
+{
+    local link="$1" target="$2" host_system native_link native_target
+    host_system="$(uname -s 2>/dev/null || printf unknown)"
+    case "$host_system" in
+        MSYS*|MINGW*|CYGWIN*)
+            native_link="$(cygpath -w "$link")" || return 1
+            native_target="$(cygpath -w "$target")" || return 1
+            MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c mklink /J \
+                "$native_link" "$native_target" >/dev/null || return 1
+            ;;
+        *) ln -s -- "$target" "$link" || return 1 ;;
+    esac
+    [ -L "$link" ]
+}
+
+remove_test_directory_link()
+{
+    local link="$1" host_system
+    host_system="$(uname -s 2>/dev/null || printf unknown)"
+    case "$host_system" in
+        MSYS*|MINGW*|CYGWIN*) rmdir -- "$link" ;;
+        *)                    rm -- "$link" ;;
+    esac
+}
+export -f make_test_directory_link
+
 compile()
 {
     local mode="$1" output="$2"
@@ -177,6 +208,7 @@ grep -Fq "compiler exited rc=2 source=$SOURCE" \
 LOCK_HOLDER_SOURCE="$WORK/lock-holder.c"
 LOCK_HOLDER="$WORK/lock-holder"
 cat > "$LOCK_HOLDER_SOURCE" <<'LOCK_HOLDER'
+#define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
@@ -202,7 +234,11 @@ int main(int argc, char **argv)
     return close(fd) == 0 ? 0 : 2;
 }
 LOCK_HOLDER
-cc -std=c23 -Wall -Wextra -Werror -pedantic -o "$LOCK_HOLDER" \
+POSIX_CC=cc
+case "$(uname -s 2>/dev/null || printf unknown)" in
+    MSYS*|MINGW*|CYGWIN*) POSIX_CC="${ZCC_POSIX_CC:-/usr/bin/cc}" ;;
+esac
+"$POSIX_CC" -std=c23 -Wall -Wextra -Werror -pedantic -o "$LOCK_HOLDER" \
     "$LOCK_HOLDER_SOURCE"
 LOCK_READY="$WORK/admission-lock-ready"
 LOCK_RELEASE="$WORK/admission-lock-release"
@@ -261,8 +297,9 @@ for backend in native legacy; do
 done
 cp -- "$WORK/unverified.expected" "$UNVERIFIED"
 rm -- "$UNVERIFIED"
-printf 'redirect-target\n' > "$WORK/unverified-redirect"
-ln -s "$WORK/unverified-redirect" "$UNVERIFIED"
+mkdir "$WORK/unverified-redirect"
+make_test_directory_link "$UNVERIFIED" "$WORK/unverified-redirect" ||
+    fail 'could not create a real unverified-marker link fixture'
 for backend in native legacy; do
     SYMLINK_MARKER_OBJECT="$OBJECT_ROOT/symlink-marker-$backend.o"
     if backend_compile "$backend" dep "$SYMLINK_MARKER_OBJECT" cc \
@@ -274,7 +311,7 @@ for backend in native legacy; do
     [ ! -e "${SYMLINK_MARKER_OBJECT%.o}.d" ] ||
         fail "$backend symlink marker allowed stable artifact publication"
 done
-rm -- "$UNVERIFIED"
+remove_test_directory_link "$UNVERIFIED"
 cp -- "$WORK/unverified.expected" "$UNVERIFIED"
 UNVERIFIED_STAMP="$(file_stamp "$UNVERIFIED")" ||
     fail 'could not capture unverified marker identity'
@@ -494,7 +531,9 @@ done
 write_session
 
 mkdir "$OBJECT_ROOT/real-directory"
-ln -s real-directory "$OBJECT_ROOT/symlink-directory"
+make_test_directory_link "$OBJECT_ROOT/symlink-directory" \
+    "$OBJECT_ROOT/real-directory" ||
+    fail 'could not create a real object-path link fixture'
 for backend in native legacy; do
     if backend_compile "$backend" dep \
             "$OBJECT_ROOT/symlink-directory/$backend.o" \
@@ -518,7 +557,7 @@ cat > "$SWAP_COMPILER" <<'SWAP'
 #!/usr/bin/env bash
 set -euo pipefail
 mv -- "$SWAP_PARENT" "$SWAP_SAVED"
-ln -s -- "$SWAP_ESCAPE" "$SWAP_PARENT"
+make_test_directory_link "$SWAP_PARENT" "$SWAP_ESCAPE"
 cc "$@"
 : > "$SWAP_DONE"
 SWAP
@@ -538,7 +577,7 @@ fi
     fail 'native refusal retained artifacts in the renamed output parent'
 [ ! -e "$SWAP_OBJECT" ] && [ ! -e "${SWAP_OBJECT%.o}.d" ] ||
     fail 'native parent-swap refusal published final artifacts'
-rm -- "$SWAP_PARENT"
+remove_test_directory_link "$SWAP_PARENT"
 mv -- "$SWAP_SAVED" "$SWAP_PARENT"
 
 # Mutating the session after compiler start is an ABA boundary: compilation

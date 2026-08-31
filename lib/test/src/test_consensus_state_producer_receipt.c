@@ -611,6 +611,7 @@ int test_consensus_state_producer_receipt(void)
     bool exported = pr_run_export(db, output_dir_fd, "accepted.bundle.db",
                                   hash[1], &accepted);
     struct stat st;
+#if defined(__linux__)
     PR_CHECK("producer-earned receipt is admitted end-to-end",
              exported && accepted.status == CONSENSUS_EXPORT_EXPORTED &&
              accepted.history_complete && accepted.height == 1 &&
@@ -619,6 +620,20 @@ int test_consensus_state_producer_receipt(void)
              accepted.utxo_count == 1 && accepted.anchor_count == 2 &&
              accepted.nullifier_count == 1 &&
              lstat(accepted_output, &st) == 0 && S_ISREG(st.st_mode));
+#else
+    /* The producer receipt is valid, but this platform has no qualified
+     * O_TMPFILE + exact-descriptor no-replace publication mechanism.  That
+     * capability boundary is intentional: prove the exporter names it and
+     * leaves no file behind instead of treating an unavailable guarantee as
+     * an end-to-end export success. */
+    errno = 0;
+    PR_CHECK("producer-earned receipt refuses without anonymous staging",
+             !exported &&
+             accepted.status == CONSENSUS_EXPORT_OUTPUT_ERROR &&
+             strstr(accepted.reason, "anonymous no-replace output staging") !=
+                 NULL &&
+             lstat(accepted_output, &st) != 0 && errno == ENOENT);
+#endif
 
     /* Standing export cadence: the same receipt-owning producer may advance
      * the singleton to a strictly higher, newly linked corpus.  This was

@@ -52,7 +52,14 @@ if [ "$fresh" = 1 ]; then
 fi
 
 # Build with a bare compiler: the cache cannot be used to build itself.
-BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-cc}"
+HOST_SYSTEM="$(uname -s 2>/dev/null || printf unknown)"
+case "$HOST_SYSTEM" in
+    MSYS*|MINGW*|CYGWIN*)
+        BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-/usr/bin/cc}"
+        [ -x "$BOOTSTRAP_CC" ] || exit 0
+        ;;
+    *)                    BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-cc}" ;;
+esac
 BOOTSTRAP_FLAGS=(-std=c23 -O2 -D_POSIX_C_SOURCE=200809L)
 if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     BOOTSTRAP_FLAGS+=(-D_DARWIN_C_SOURCE -Dst_mtim=st_mtimespec)
@@ -61,6 +68,7 @@ mkdir -p "$(dirname "$BIN")" 2>/dev/null || exit 0
 tmp="$BIN.build.$$"
 if "$BOOTSTRAP_CC" "${BOOTSTRAP_FLAGS[@]}" \
         -I"$REPO_ROOT/lib/sha3/include" -I"$REPO_ROOT/lib/base/include" \
+        -I"$REPO_ROOT/lib/platform/include" \
         -o "$tmp" "$SRC" "$SHA3" "$ALLOC" >/dev/null 2>&1; then
     mv -f "$tmp" "$BIN" 2>/dev/null && printf '%s\n' "$BIN"
 else
