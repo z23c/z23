@@ -576,6 +576,17 @@ static int test_zd_write_scope(void)
         ASSERT(vcs_zcode_write_scope_contains(&scope, "include"));
         ASSERT(!vcs_zcode_write_scope_contains(&scope, "src-old/widget.c"));
         ASSERT(!vcs_zcode_write_scope_contains(&scope, "wallet/key.c"));
+        struct vcs_zcode_write_scope_v1 child, disjoint;
+        vcs_zcode_write_scope_init(&child);
+        vcs_zcode_write_scope_init(&disjoint);
+        ASSERT_EQ(vcs_zcode_write_scope_add(&child, "src/widget.c"),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT_EQ(vcs_zcode_write_scope_add(&disjoint, "src-old"),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT(vcs_zcode_write_scope_overlaps(&scope, &child));
+        ASSERT(vcs_zcode_write_scope_overlaps(&child, &scope));
+        ASSERT(!vcs_zcode_write_scope_overlaps(&scope, &disjoint));
+        ASSERT(!vcs_zcode_write_scope_overlaps(&disjoint, &scope));
         uint8_t root[32]; char root_hex[65];
         ASSERT_EQ(vcs_zcode_write_scope_root(&scope, root),
                   VCS_ZCODE_WRITE_SCOPE_OK);
@@ -5706,6 +5717,24 @@ static bool zd_index_store_task(const char *workspace,
         vcs_object_put_addressed(workspace, out_root, wire, sizeof(wire));
 }
 
+static bool zd_index_store_scope(
+    const char *workspace, const char *path, uint8_t out_root[32])
+{
+    struct vcs_zcode_write_scope_v1 scope;
+    vcs_zcode_write_scope_init(&scope);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = vcs_zcode_write_scope_add(&scope, path) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_serialize(&scope, &wire, &wire_len) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_root(&scope, out_root) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_object_put_addressed(workspace, out_root, wire, wire_len);
+    free(wire);
+    return ok;
+}
+
 static bool zd_index_store_candidate(const char *workspace,
                                      struct vcs_zcode_candidate_v1 *candidate,
                                      uint8_t out_root[32])
@@ -5757,15 +5786,24 @@ static int test_zd_task_index(void)
         ASSERT_EQ(vcs_zcode_proof_policy_root(&policy, policy_root),
                   VCS_ZCODE_DEV_OK);
 
-        /* Two live tasks and one expired task, each a distinct CAS wire. */
+        uint8_t scope_src[32], scope_docs[32], scope_child[32], scope_old[32];
+        ASSERT(zd_index_store_scope(workspace, "src", scope_src));
+        ASSERT(zd_index_store_scope(workspace, "docs", scope_docs));
+        ASSERT(zd_index_store_scope(workspace, "src/widget.c", scope_child));
+        ASSERT(zd_index_store_scope(workspace, "src-old", scope_old));
+
+        /* Two live tasks with the same exact source/goal and one expired
+         * overlapping task, each a distinct canonical CAS wire. */
         struct vcs_zcode_task_v1 task_a, task_b, task_expired;
         zd_task(&task_a, policy_root);
+        memcpy(task_a.write_scope_root, scope_src, 32);
         zd_task(&task_b, policy_root);
         zd_root(task_b.model_policy_root, 0x17);
-        zd_root(task_b.goal_root, 0x18);
+        memcpy(task_b.write_scope_root, scope_docs, 32);
         zd_task(&task_expired, policy_root);
         zd_root(task_expired.model_policy_root, 0x27);
         zd_root(task_expired.goal_root, 0x28);
+        memcpy(task_expired.write_scope_root, scope_child, 32);
         task_expired.expires_unix = 1000;
         uint8_t root_a[32], root_b[32], root_expired[32];
         ASSERT(zd_index_store_task(workspace, &task_a, root_a));
@@ -5812,6 +5850,66 @@ static int test_zd_task_index(void)
         ASSERT(entry_expired != NULL);
         ASSERT(entry_expired->expired);
         ASSERT_STR_EQ(entry_expired->state, "EXPIRED");
+
+        /* Coordination is a deterministic observation over exact task and
+         * scope roots. It neither assigns an owner nor claims execution. */
+        struct vcs_zcode_task_conflict conflict;
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      index, workspace, &task_a, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_DUPLICATE_ACTIVE_WORK);
+        ASSERT_STR_EQ(conflict.task_root_hex, root_b_hex);
+        struct vcs_zcode_task_v1 duplicate = task_a;
+        zd_root(duplicate.model_policy_root, 0x31);
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      index, workspace, &duplicate, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_DUPLICATE_ACTIVE_WORK);
+        const char *smallest_duplicate = strcmp(root_a_hex, root_b_hex) < 0
+            ? root_a_hex : root_b_hex;
+        ASSERT_STR_EQ(conflict.task_root_hex, smallest_duplicate);
+        ASSERT_STR_EQ(vcs_zcode_task_conflict_kind_string(conflict.kind),
+                      "DUPLICATE_ACTIVE_WORK");
+
+        struct vcs_zcode_task_v1 overlap = task_a;
+        zd_root(overlap.model_policy_root, 0x32);
+        zd_root(overlap.goal_root, 0x33);
+        memcpy(overlap.write_scope_root, scope_child, 32);
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      index, workspace, &overlap, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_WRITE_SCOPE_OVERLAP);
+        ASSERT_STR_EQ(conflict.task_root_hex, root_a_hex);
+
+        struct vcs_zcode_task_v1 clear = overlap;
+        zd_root(clear.model_policy_root, 0x34);
+        zd_root(clear.goal_root, 0x35);
+        memcpy(clear.write_scope_root, scope_old, 32);
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      index, workspace, &clear, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_CLEAR);
+
+        struct vcs_zcode_task_v1 other_source = duplicate;
+        zd_root(other_source.source_root, 0x36);
+        zd_root(other_source.model_policy_root, 0x37);
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      index, workspace, &other_source, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_CLEAR);
+
+        struct vcs_zcode_task_v1 missing_scope = overlap;
+        zd_root(missing_scope.model_policy_root, 0x38);
+        zd_root(missing_scope.goal_root, 0x39);
+        zd_root(missing_scope.write_scope_root, 0x3a);
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      index, workspace, &missing_scope, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_INCOMPLETE);
+        ASSERT_STR_EQ(vcs_zcode_task_conflict_kind_string(conflict.kind),
+                      "INCOMPLETE");
+
+        struct vcs_zcode_task_index *timeless =
+            vcs_zcode_task_index_build(workspace, 0);
+        ASSERT(timeless != NULL);
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      timeless, workspace, &clear, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_INCOMPLETE);
+        vcs_zcode_task_index_free(timeless);
 
         /* A fresh build is the restart proof: nothing is cached, so the
          * projection agrees field-for-field with the previous one. */

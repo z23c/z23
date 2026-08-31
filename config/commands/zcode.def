@@ -2134,7 +2134,11 @@ ZCL_COMMAND_READY_COMMAND(
     "scope roots without launching work. mode=admit re-derives the candidate "
     "tree/patch, enforces scope and limits, and queues the selected fixed "
     "compile, package, test, or fuzz action. The task binds every input and "
-    "expiry; no adapter gains acceptance authority. Admission appends one "
+    "expiry. Before task/context persistence, both modes rebuild the CAS task "
+    "projection and refuse an exact same-source/same-goal open task or a "
+    "component-bounded declared-scope overlap; incomplete scans refuse. This "
+    "is collision evidence only: ownership, assignment, and execution remain "
+    "unobserved, and no adapter gains acceptance authority. Admission appends one "
     "root-bound async proof request and returns before discovery, packaging, "
     "transfer, or remote execution. remote_peer is an optional local hint; "
     "zero permits later discovery of any eligible full-node peer.", 0,
