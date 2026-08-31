@@ -12,6 +12,7 @@
 #include <sqlite3.h>
 #if !defined(_WIN32)
 #include <arpa/inet.h>
+#include <errno.h>
 #include <poll.h>
 #include <sys/socket.h>
 #endif
@@ -431,6 +432,57 @@ static int64_t file_service_lifetime_wall_unix(void *opaque)
     return clock->wall_unix;
 }
 
+#if !defined(_WIN32)
+/* Wait for the worker's actual EOF, bounded by a hang guard rather than a
+ * scheduler-speed assertion. This test deliberately installs a fake platform
+ * monotonic source to expire the production connection; its own wait must use
+ * the host clock or the injected fixed timestamp can never advance. */
+static int64_t file_service_test_host_monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)  // platform-ok:test-deadline-bounds-a-wait-never-an-assertion
+        return 0;
+    return (int64_t)now.tv_sec * 1000 + (int64_t)now.tv_nsec / 1000000;
+}
+
+static bool file_service_wait_for_peer_close(int fd, int timeout_ms)
+{
+    int64_t start_ms = file_service_test_host_monotonic_ms();
+    if (fd < 0 || timeout_ms <= 0 || start_ms <= 0 ||
+        start_ms > INT64_MAX - timeout_ms)
+        return false;
+    int64_t deadline_ms = start_ms + timeout_ms;
+
+    for (;;) {
+        int64_t now_ms = file_service_test_host_monotonic_ms();
+        if (now_ms <= 0 || now_ms >= deadline_ms)
+            return false;
+        int remain_ms = (int)(deadline_ms - now_ms);
+        struct pollfd pfd = {
+            .fd = fd,
+            .events = POLLIN | POLLHUP,
+        };
+        int ready = poll(&pfd, 1, remain_ms);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready <= 0)
+            return false;
+        if (!(pfd.revents & (POLLIN | POLLHUP | POLLERR)))
+            return false;
+
+        uint8_t probe = 0;
+        ssize_t n = recv(fd, &probe, 1, MSG_DONTWAIT);
+        if (n == 0)
+            return true;
+        if (n < 0 && (errno == EINTR || errno == EAGAIN ||
+                      errno == EWOULDBLOCK))
+            continue;
+        /* Any byte is a protocol response, not the required lifetime EOF. */
+        return false;
+    }
+}
+#endif
+
 static int test_file_service_start_stop_and_lifetime(void)
 {
     int failures = 0;
@@ -496,12 +548,11 @@ static int test_file_service_start_stop_and_lifetime(void)
             ok = fs_send_frame(&client, FS_PADDING, NULL, 0);
         }
 
-        struct pollfd pfd = {.fd = fd, .events = POLLIN | POLLHUP};
-        int ready = ok ? poll(&pfd, 1, 250) : -1;
-        uint8_t closed_probe = 0;
-        ssize_t closed_read = ready > 0
-            ? recv(fd, &closed_probe, 1, MSG_DONTWAIT) : -1;
-        ok = ok && ready > 0 && closed_read == 0;
+        /* A loaded full-suite worker may not run inside one 250 ms quantum.
+         * Keep the correctness assertion (the peer must observe EOF), but
+         * bound it with the same 30 s hostile-peer hang guard as file-service
+         * frame I/O instead of requiring a particular scheduler latency. */
+        ok = ok && file_service_wait_for_peer_close(fd, 30000);
 
         if (clock_installed)
             platform_clock_clear_source();
