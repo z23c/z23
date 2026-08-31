@@ -6605,7 +6605,8 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
-    retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check
+    retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check \
+    retrieval-gold-current-receipt-check
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
@@ -6637,6 +6638,12 @@ retrieval-gold-benchmark-publishable-capture:
 retrieval-gold-receipt-check: jsonq agent-sha3 retrieval-eval
 	@./tools/dev/retrieval-gold-receipt-check.sh --selftest
 	@./tools/dev/retrieval-gold-receipt-check.sh --check
+
+# Independent checkpoint for the later ten-task v2 cohort. Keep this separate
+# from the immutable b663 seven-task checker and its reviewed whole-file KAT.
+retrieval-gold-current-receipt-check: jsonq agent-sha3 retrieval-eval
+	@./tools/dev/retrieval-gold-current-receipt-check.sh --selftest
+	@./tools/dev/retrieval-gold-current-receipt-check.sh --check
 
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under
