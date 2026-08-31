@@ -1866,23 +1866,6 @@ static bool proof_worker(const struct proof_paths *paths,
                     generation_checkpoint.source_id, sealed_source_id);
                 return false;
             }
-            struct dev_source_record root_checkpoint = {0};
-            checkpoint_why[0] = 0;
-            if (!zcl_dev_source_identity_capture(
-                    paths->root, &root_checkpoint, checkpoint_why,
-                    sizeof(checkpoint_why))) {
-                proof_whyf(why, why_len, "proof_root_source_checkpoint_%s",
-                           checkpoint_why[0] ? checkpoint_why : "failed");
-                return false;
-            }
-            if (strcmp(root_checkpoint.source_id, sealed_source_id) != 0 ||
-                strcmp(root_checkpoint.mutation_id, sealed_mutation_id) != 0) {
-                proof_whyf(
-                    why, why_len,
-                    "proof_root_source_identity_changed_actual_%.16s_sealed_%.16s",
-                    root_checkpoint.source_id, sealed_source_id);
-                return false;
-            }
             if (setenv("ZCL_TESTCACHE_STORE_ROOT", paths->root, 1) != 0) {
                 proof_why(why, why_len, "test_cache_store_root_unavailable");
                 return false;
@@ -1903,14 +1886,14 @@ static bool proof_worker(const struct proof_paths *paths,
                 const char *bundle_argv[] = {
                     "make", "--no-print-directory", make_jobs,
                     "dev-proof-bundle", NULL};
-                if (run_logged(paths->root, paths->bundle_log, bundle_argv,
+                if (run_logged(generation, paths->bundle_log, bundle_argv,
                                PROOF_TIMEOUT_MS) != 0) {
                     proof_why(why, why_len, "proof_bundle_build_failed");
                     return false;
                 }
-                runner_ready = test_binary_path(paths, binary) &&
+                runner_ready = test_binary_path(&execution, binary) &&
                     test_helpers_prepare(
-                        paths, generation, binary, &source_before,
+                        &execution, generation, binary, &source_before,
                         make_jobs, generation_binary, helper_root,
                         why, why_len);
                 if (!runner_ready) {
