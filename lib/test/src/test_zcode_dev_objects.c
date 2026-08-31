@@ -39,6 +39,7 @@
 #include "vcs/zcode_commons.h"
 #include "vcs/zcode_dht_record.h"
 #include "vcs/zcode_agent_context.h"
+#include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_lane.h"
 #include "vcs/zcode_work_context.h"
 #include "vcs/zcode_work_node.h"
@@ -5714,6 +5715,23 @@ static bool zd_index_store_candidate(const char *workspace,
         vcs_object_put_addressed(workspace, out_root, wire, sizeof(wire));
 }
 
+static bool zd_index_store_receipt(
+    const char *workspace, struct vcs_zcode_work_receipt_v1 *receipt,
+    uint8_t seed_value, uint8_t out_root[32])
+{
+    uint8_t seed[32], secret[32], pubkey[32];
+    zd_root(seed, seed_value);
+    ed25519_keypair(pubkey, secret, seed);
+    bool ok = vcs_zcode_work_receipt_seal(receipt, secret, pubkey) ==
+            VCS_ZCODE_DEV_OK;
+    memset(secret, 0, sizeof(secret));
+    uint8_t wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    return ok && vcs_zcode_work_receipt_serialize(receipt, wire) ==
+                     VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(receipt, out_root) == VCS_ZCODE_DEV_OK &&
+        vcs_object_put_addressed(workspace, out_root, wire, sizeof(wire));
+}
+
 static bool zd_index_drop_object(const char *workspace, const uint8_t root[32])
 {
     char hex[65], path[4608];
@@ -5833,6 +5851,110 @@ static int test_zd_task_index(void)
         char author_hex[65];
         zcl_hex_encode(author, 32, author_hex);
         ASSERT_STR_EQ(candidate_entry->author_pubkey_hex, author_hex);
+
+        /* app_runs is evidence over the same CAS, not task state. A signed
+         * APP_RUN receipt whose nested observation is absent is visible but
+         * incomplete. Once the exact observation arrives, it is accepted as
+         * display evidence only when it joins an earlier passing BUILD under
+         * the same task/candidate/policy/toolchain. */
+        struct vcs_zcode_work_receipt_v1 build_receipt = {
+            .schema_version = VCS_ZCODE_DEV_VERSION,
+            .work_kind = VCS_ZCODE_WORK_BUILD,
+            .status = VCS_ZCODE_WORK_PASS,
+            .exit_status = 0,
+            .started_unix = 1200,
+            .finished_unix = 1210,
+        };
+        memcpy(build_receipt.task_root, root_a, 32);
+        memcpy(build_receipt.candidate_root, candidate_root, 32);
+        memcpy(build_receipt.proof_policy_root, policy_root, 32);
+        memcpy(build_receipt.toolchain_capsule_root,
+               task_a.toolchain_capsule_root, 32);
+        zd_root(build_receipt.action_root, 0x90);
+        zd_root(build_receipt.input_root, 0x91);
+        zd_root(build_receipt.output_root, 0x92);
+        zd_root(build_receipt.lease_id, 0x93);
+        zd_root(build_receipt.evidence_root, 0x94);
+        zd_root(build_receipt.confinement_root, 0x95);
+        uint8_t build_receipt_root[32];
+        ASSERT(zd_index_store_receipt(workspace, &build_receipt, 0xa0,
+                                      build_receipt_root));
+
+        struct vcs_zcode_app_run_observation_v1 app_observation = {
+            .schema_version = VCS_ZCODE_APP_RUN_OBSERVATION_VERSION,
+            .flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS,
+            .exit_status = 0,
+            .started_unix = 1220,
+            .finished_unix = 1230,
+        };
+        memcpy(app_observation.task_root, root_a, 32);
+        memcpy(app_observation.candidate_root, candidate_root, 32);
+        memcpy(app_observation.build_receipt_root,
+               build_receipt_root, 32);
+        zd_root(app_observation.artifact_root, 0x96);
+        zd_root(app_observation.invocation_root, 0x97);
+        zd_root(app_observation.stdout_root, 0x98);
+        zd_root(app_observation.stderr_root, 0x99);
+        zd_root(app_observation.confinement_root, 0x9a);
+        uint8_t app_wire[VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES];
+        uint8_t app_observation_root[32];
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_serialize(
+                      &app_observation, app_wire), VCS_ZCODE_APP_RUN_OK);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_root(
+                      &app_observation, app_observation_root),
+                  VCS_ZCODE_APP_RUN_OK);
+        struct vcs_zcode_work_receipt_v1 app_receipt = {
+            .schema_version = VCS_ZCODE_DEV_VERSION,
+            .work_kind = VCS_ZCODE_WORK_APP_RUN,
+            .status = VCS_ZCODE_WORK_PASS,
+            .exit_status = 0,
+            .started_unix = 1220,
+            .finished_unix = 1230,
+        };
+        memcpy(app_receipt.task_root, root_a, 32);
+        memcpy(app_receipt.candidate_root, candidate_root, 32);
+        memcpy(app_receipt.proof_policy_root, policy_root, 32);
+        memcpy(app_receipt.toolchain_capsule_root,
+               task_a.toolchain_capsule_root, 32);
+        memcpy(app_receipt.input_root, app_observation.invocation_root, 32);
+        memcpy(app_receipt.output_root, app_observation_root, 32);
+        memcpy(app_receipt.evidence_root, app_observation_root, 32);
+        memcpy(app_receipt.confinement_root,
+               app_observation.confinement_root, 32);
+        zd_root(app_receipt.action_root, 0x9b);
+        zd_root(app_receipt.lease_id, 0x9c);
+        uint8_t app_receipt_root[32];
+        ASSERT(zd_index_store_receipt(workspace, &app_receipt, 0xa1,
+                                      app_receipt_root));
+        vcs_zcode_task_index_free(index);
+        index = vcs_zcode_task_index_build(workspace, now);
+        ASSERT(index != NULL);
+        entry_a = vcs_zcode_task_index_find(index, root_a);
+        ASSERT(entry_a != NULL);
+        ASSERT_EQ(entry_a->app_run_receipt_count, 1u);
+        ASSERT_EQ(entry_a->valid_app_run_receipt_count, 0u);
+        ASSERT_STR_EQ(entry_a->state, "EVIDENCE_READY");
+        ASSERT(vcs_object_put_addressed(
+            workspace, app_observation_root, app_wire, sizeof(app_wire)));
+        vcs_zcode_task_index_free(index);
+        index = vcs_zcode_task_index_build(workspace, now);
+        ASSERT(index != NULL);
+        entry_a = vcs_zcode_task_index_find(index, root_a);
+        ASSERT(entry_a != NULL);
+        ASSERT_EQ(entry_a->app_run_receipt_count, 1u);
+        ASSERT_EQ(entry_a->valid_app_run_receipt_count, 1u);
+        char app_receipt_hex[65], app_observation_hex[65];
+        zcl_hex_encode(app_receipt_root, 32, app_receipt_hex);
+        zcl_hex_encode(app_observation_root, 32, app_observation_hex);
+        ASSERT_STR_EQ(entry_a->latest_app_run_receipt_hex,
+                      app_receipt_hex);
+        ASSERT_STR_EQ(entry_a->latest_app_run_observation_hex,
+                      app_observation_hex);
+        ASSERT_EQ(entry_a->latest_app_run_flags,
+                  VCS_ZCODE_APP_RUN_PROVED_FLAGS);
+        ASSERT_EQ(entry_a->latest_app_run_status, VCS_ZCODE_WORK_PASS);
+        ASSERT_EQ(entry_a->latest_app_run_exit_status, 0);
+        ASSERT_STR_EQ(entry_a->state, "EVIDENCE_READY");
 
         /* Search filters compose and report totals. */
         struct vcs_zcode_task_search search = {0};

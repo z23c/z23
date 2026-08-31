@@ -60,6 +60,13 @@ AI workers are replaceable.
 
 # ✨ Try the magic
 
+Public start here: [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) is the
+generic fresh-machine setup and first-run guide.
+
+For a fast local development binary, run `make dev-bin`. When impact analysis
+maps a change to tests, run the returned registered parallel group through the
+canonical Make targets; do not invoke a test binary directly.
+
 Build Z23:
 
 ```bash
@@ -746,6 +753,12 @@ Ask about sync:
 
 ```bash
 build/bin/z23 core sync diagnose
+```
+
+Inspect bounded logs through the native command registry:
+
+```bash
+build/bin/z23 ops logs --pattern='<regex>'
 ```
 
 Inspect a block:

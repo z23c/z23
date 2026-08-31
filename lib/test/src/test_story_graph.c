@@ -1,9 +1,13 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Born-red contracts for bounded rooted development stories. */
 #include "test/test_core.h"
+#include "base/hex.h"
 #include "ontology/story_graph.h"
 #include "command/native_story_command.h"
+#include "vcs/zcode_app_run_observation.h"
+#include "vcs/zcode_dev.h"
 
+#include <limits.h>
 #include <string.h>
 
 static void sg_root(uint8_t out[32], uint8_t value)
@@ -260,6 +264,119 @@ static int sg_canonical_work_projection(void)
     return failures;
 }
 
+static int sg_app_run_observation_codec(void)
+{
+    int failures = 0;
+    TEST("story graph: app-run observation is exact evidence, not authority") {
+        struct vcs_zcode_app_run_observation_v1 observation = {
+            .schema_version = VCS_ZCODE_APP_RUN_OBSERVATION_VERSION,
+            .flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS,
+            .exit_status = 0,
+            .started_unix = 1000,
+            .finished_unix = 1001,
+        };
+        sg_root(observation.task_root, 1);
+        sg_root(observation.candidate_root, 2);
+        sg_root(observation.build_receipt_root, 3);
+        sg_root(observation.artifact_root, 4);
+        sg_root(observation.invocation_root, 5);
+        sg_root(observation.stdout_root, 6);
+        sg_root(observation.stderr_root, 7);
+        sg_root(observation.confinement_root, 8);
+        uint8_t wire[VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES];
+        uint8_t root_a[32], root_b[32];
+        struct vcs_zcode_app_run_observation_v1 parsed;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_serialize(
+                      &observation, wire), VCS_ZCODE_APP_RUN_OK);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_parse(
+                      wire, sizeof(wire), &parsed), VCS_ZCODE_APP_RUN_OK);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_root(
+                      &observation, root_a), VCS_ZCODE_APP_RUN_OK);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_root(
+                      &parsed, root_b), VCS_ZCODE_APP_RUN_OK);
+        ASSERT(memcmp(root_a, root_b, 32) == 0);
+        ASSERT(vcs_zcode_app_run_observation_v1_proves_success(&parsed));
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_parse(
+                      wire, sizeof(wire) - 1u, &parsed),
+                  VCS_ZCODE_APP_RUN_ERR_WIRE_SIZE);
+        struct vcs_zcode_app_run_observation_v1 partial = observation;
+        partial.flags = VCS_ZCODE_APP_RUN_ATTEMPTED;
+        partial.exit_status = INT32_MIN;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&partial),
+                  VCS_ZCODE_APP_RUN_OK);
+        ASSERT(!vcs_zcode_app_run_observation_v1_proves_success(&partial));
+        partial.flags |= UINT16_C(0x8000);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&partial),
+                  VCS_ZCODE_APP_RUN_ERR_FLAGS);
+        observation.artifact_root[0] = 0;
+        memset(observation.artifact_root, 0,
+               sizeof(observation.artifact_root));
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&observation),
+                  VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_app_run_projection(void)
+{
+    int failures = 0;
+    TEST("story graph: only a complete validated app-run receipt proves run") {
+        struct zcl_story_work_facts_v1 facts = {
+            .state = "PROVEN",
+            .build_result = "passed",
+            .test_result = "passed_declared_tests",
+            .task_root = sg_hex(1), .source_root = sg_hex(2),
+            .goal_root = sg_hex(3), .agent_context_root = sg_hex(4),
+            .candidate_root = sg_hex(5),
+            .candidate_source_root = sg_hex(6), .patch_root = sg_hex(7),
+            .action_root = sg_hex(8), .work_receipt_root = sg_hex(9),
+            .output_root = sg_hex(10), .lane_receipt_root = sg_hex(11),
+            .proof_set_root = sg_hex(12),
+        };
+        struct zcl_story_event_v1 events[7];
+        struct zcl_story_graph_v1 graph;
+        ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));
+        ASSERT_EQ(events[5].status, ZCL_ONTOLOGY_UNKNOWN);
+
+        facts.app_run_receipt_count = 1;
+        facts.app_run_receipt_root = sg_hex(13);
+        ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));
+        ASSERT_EQ(events[5].status, ZCL_ONTOLOGY_INCOMPLETE);
+
+        facts.valid_app_run_receipt_count = 1;
+        facts.app_run_observation_root = sg_hex(14);
+        facts.app_run_artifact_root = sg_hex(15);
+        facts.app_run_invocation_root = sg_hex(1);
+        facts.app_run_action_root = sg_hex(2);
+        facts.app_run_flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS;
+        facts.app_run_status = VCS_ZCODE_WORK_PASS;
+        facts.app_run_exit_status = 0;
+        ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));
+        ASSERT_EQ(events[5].status, ZCL_ONTOLOGY_PROVED);
+        uint8_t expected[32];
+        ASSERT(zcl_hex_decode_lower(facts.app_run_artifact_root,
+                                    expected, sizeof(expected)));
+        ASSERT(memcmp(events[5].scene_root, expected, 32) == 0);
+        ASSERT(zcl_hex_decode_lower(facts.app_run_invocation_root,
+                                    expected, sizeof(expected)));
+        ASSERT(memcmp(events[5].action_root, expected, 32) == 0);
+        ASSERT(zcl_hex_decode_lower(facts.app_run_observation_root,
+                                    expected, sizeof(expected)));
+        ASSERT(memcmp(events[5].evidence_root, expected, 32) == 0);
+
+        facts.app_run_status = VCS_ZCODE_WORK_FAIL;
+        facts.app_run_exit_status = 1;
+        ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));
+        ASSERT_EQ(events[5].status, ZCL_ONTOLOGY_DISPROVED);
+        facts.valid_app_run_receipt_count = 2;
+        ASSERT(zcl_story_graph_from_work_facts(&facts, events, &graph));
+        ASSERT_EQ(events[5].status, ZCL_ONTOLOGY_INCOMPLETE);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_story_graph(void)
 {
     int failures = 0;
@@ -269,5 +386,7 @@ int test_story_graph(void)
     failures += sg_diff();
     failures += sg_refusals();
     failures += sg_canonical_work_projection();
+    failures += sg_app_run_observation_codec();
+    failures += sg_app_run_projection();
     return failures;
 }

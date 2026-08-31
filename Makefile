@@ -6584,7 +6584,8 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 	    lib/sha3/src/sha3.c
 
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
-    retrieval-gold-benchmark retrieval-gold-benchmark-publishable
+    retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
+    retrieval-gold-benchmark-publishable-capture
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
@@ -6601,6 +6602,13 @@ retrieval-gold-benchmark: z23 dev-bin jsonq agent-sha3 retrieval-eval \
 
 retrieval-gold-benchmark-publishable: z23 dev-bin jsonq agent-sha3 retrieval-eval \
     retrieval-eval-selftest retrieval-gold-corpus-check
+	@./tools/dev/retrieval-gold-benchmark.sh --run
+
+# Capture-only rail: recursive prerequisite output goes to stderr, leaving
+# stdout as exactly the runner's nine JSON records for safe redirection.
+retrieval-gold-benchmark-publishable-capture:
+	@$(MAKE) --no-print-directory z23 dev-bin jsonq agent-sha3 retrieval-eval \
+	    retrieval-eval-selftest retrieval-gold-corpus-check 1>&2
 	@./tools/dev/retrieval-gold-benchmark.sh --run
 
 # ── determinism scan ────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_accepted_work.h"
 #include "vcs/zcode_agent_context.h"
+#include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_lane.h"
 
@@ -200,11 +201,17 @@ static void index_consider_object(const char *repo_root, const char *hex64,
             zcl_hex_encode(address, 32, e->receipt_root_hex);
             zcl_hex_encode(receipt.output_root, 32, e->output_root_hex);
             zcl_hex_encode(receipt.action_root, 32, e->action_root_hex);
+            zcl_hex_encode(receipt.input_root, 32, e->input_root_hex);
+            zcl_hex_encode(receipt.evidence_root, 32,
+                           e->evidence_root_hex);
+            zcl_hex_encode(receipt.confinement_root, 32,
+                           e->confinement_root_hex);
             zcl_hex_encode(receipt.signer_pubkey, 32,
                            e->signer_pubkey_hex);
             e->work_kind = receipt.work_kind;
             e->status = receipt.status;
             e->exit_status = receipt.exit_status;
+            e->started_unix = receipt.started_unix;
             e->finished_unix = receipt.finished_unix;
         }
     } else if (len == VCS_ZCODE_LANE_WIRE_BYTES &&
@@ -351,6 +358,82 @@ static bool index_review_valid(
     return ok;
 }
 
+static const struct vcs_zcode_task_receipt_entry *index_receipt_find(
+    const struct vcs_zcode_task_index *index, const uint8_t root[32])
+{
+    char root_hex[65];
+    zcl_hex_encode(root, 32, root_hex);
+    for (size_t i = 0; i < index->receipt_count; i++)
+        if (strcmp(index->receipts[i].receipt_root_hex, root_hex) == 0)
+            return &index->receipts[i];
+    return NULL;
+}
+
+/* A signed app-run receipt is display evidence only. Re-derive its nested
+ * observation and require an earlier passing build receipt under the same
+ * task/candidate/policy/toolchain. This establishes the exact statement the
+ * observer signed; it does not promote that statement into acceptance or
+ * prove general code safety. */
+static bool index_app_run_valid(
+    const struct vcs_zcode_task_index *index, const char *repo_root,
+    const struct vcs_zcode_task_index_entry *task,
+    const struct vcs_zcode_task_candidate_entry *candidate,
+    const struct vcs_zcode_task_receipt_entry *receipt,
+    struct vcs_zcode_app_run_observation_v1 *out)
+{
+    if (!index || !repo_root || !task || !candidate || !receipt || !out ||
+        receipt->work_kind != VCS_ZCODE_WORK_APP_RUN ||
+        strcmp(receipt->task_root_hex, task->task_root_hex) != 0 ||
+        strcmp(receipt->candidate_root_hex,
+               candidate->candidate_root_hex) != 0 ||
+        strcmp(receipt->proof_policy_root_hex,
+               task->proof_policy_root_hex) != 0 ||
+        strcmp(receipt->toolchain_capsule_root_hex,
+               task->toolchain_capsule_root_hex) != 0 ||
+        strcmp(receipt->output_root_hex, receipt->evidence_root_hex) != 0)
+        return false;
+    uint8_t root[32], checked[32], *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = zcl_hex_decode_lower(receipt->evidence_root_hex, root, 32) &&
+        vcs_object_load_raw_bounded(
+            repo_root, root, VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES,
+            &wire, &wire_len) == 0 &&
+        vcs_zcode_app_run_observation_v1_parse(wire, wire_len, out) ==
+            VCS_ZCODE_APP_RUN_OK &&
+        vcs_zcode_app_run_observation_v1_root(out, checked) ==
+            VCS_ZCODE_APP_RUN_OK &&
+        memcmp(root, checked, 32) == 0;
+    free(wire);
+    if (!ok) return false;
+    char bound[65];
+    zcl_hex_encode(out->task_root, 32, bound);
+    ok = strcmp(bound, task->task_root_hex) == 0;
+    zcl_hex_encode(out->candidate_root, 32, bound);
+    ok = ok && strcmp(bound, candidate->candidate_root_hex) == 0;
+    zcl_hex_encode(out->invocation_root, 32, bound);
+    ok = ok && strcmp(bound, receipt->input_root_hex) == 0;
+    zcl_hex_encode(out->confinement_root, 32, bound);
+    ok = ok && strcmp(bound, receipt->confinement_root_hex) == 0 &&
+        out->started_unix == receipt->started_unix &&
+        out->finished_unix == receipt->finished_unix &&
+        out->exit_status == receipt->exit_status;
+    const struct vcs_zcode_task_receipt_entry *build =
+        index_receipt_find(index, out->build_receipt_root);
+    ok = ok && build && build->work_kind == VCS_ZCODE_WORK_BUILD &&
+        build->status == VCS_ZCODE_WORK_PASS && build->exit_status == 0 &&
+        strcmp(build->task_root_hex, task->task_root_hex) == 0 &&
+        strcmp(build->candidate_root_hex,
+               candidate->candidate_root_hex) == 0 &&
+        strcmp(build->proof_policy_root_hex,
+               task->proof_policy_root_hex) == 0 &&
+        strcmp(build->toolchain_capsule_root_hex,
+               task->toolchain_capsule_root_hex) == 0 &&
+        build->finished_unix <= out->started_unix;
+    bool success = vcs_zcode_app_run_observation_v1_proves_success(out);
+    return ok && ((success && receipt->status == VCS_ZCODE_WORK_PASS) ||
+                  (!success && receipt->status != VCS_ZCODE_WORK_PASS));
+}
+
 static bool index_lane_chain_valid(
     const struct vcs_zcode_task_index *index, const char *repo_root,
     const struct vcs_zcode_task_lane_entry *lane, unsigned depth)
@@ -409,6 +492,7 @@ static void index_derive_states(struct vcs_zcode_task_index *index,
                            latest_candidate->patch_root_hex);
         }
         int64_t latest_finished = 0, latest_review_finished = 0;
+        int64_t latest_app_run_finished = 0;
         for (size_t r = 0; r < index->receipt_count; r++) {
             const struct vcs_zcode_task_receipt_entry *receipt =
                 &index->receipts[r];
@@ -426,8 +510,51 @@ static void index_derive_states(struct vcs_zcode_task_index *index,
                            receipt->candidate_root_hex) == 0) {
                     candidate_bound = true;
                     break;
-                }
+            }
             if (!candidate_bound) continue;
+            if (receipt->work_kind == VCS_ZCODE_WORK_APP_RUN) {
+                if (latest_candidate &&
+                    strcmp(receipt->candidate_root_hex,
+                           latest_candidate->candidate_root_hex) == 0) {
+                    e->app_run_receipt_count++;
+                    struct vcs_zcode_app_run_observation_v1 observation;
+                    if (index_app_run_valid(index, repo_root, e,
+                                            latest_candidate, receipt,
+                                            &observation)) {
+                        e->valid_app_run_receipt_count++;
+                        if (receipt->finished_unix > latest_app_run_finished ||
+                            (receipt->finished_unix ==
+                                 latest_app_run_finished &&
+                             strcmp(receipt->receipt_root_hex,
+                                    e->latest_app_run_receipt_hex) > 0)) {
+                            latest_app_run_finished = receipt->finished_unix;
+                            (void)snprintf(
+                                e->latest_app_run_receipt_hex,
+                                sizeof(e->latest_app_run_receipt_hex), "%s",
+                                receipt->receipt_root_hex);
+                            (void)snprintf(
+                                e->latest_app_run_observation_hex,
+                                sizeof(e->latest_app_run_observation_hex),
+                                "%s", receipt->evidence_root_hex);
+                            (void)snprintf(
+                                e->latest_app_run_action_root_hex,
+                                sizeof(e->latest_app_run_action_root_hex),
+                                "%s", receipt->action_root_hex);
+                            zcl_hex_encode(
+                                observation.artifact_root, 32,
+                                e->latest_app_run_artifact_root_hex);
+                            zcl_hex_encode(
+                                observation.invocation_root, 32,
+                                e->latest_app_run_invocation_root_hex);
+                            e->latest_app_run_flags = observation.flags;
+                            e->latest_app_run_status = receipt->status;
+                            e->latest_app_run_exit_status =
+                                receipt->exit_status;
+                        }
+                    }
+                }
+                continue;
+            }
             e->receipt_count++;
             if (receipt->status == VCS_ZCODE_WORK_PASS &&
                 receipt->exit_status == 0)

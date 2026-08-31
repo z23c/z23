@@ -15,7 +15,7 @@ fail() { printf 'retrieval-eval-selftest: FAIL — %s\n' "$*" >&2; exit 1; }
 
 fixture="$tmp/valid.batch"
 printf '%s\n' \
-    'zcl.retrieval_eval_batch.v2 tasks=1' \
+    'zcl.retrieval_eval_batch.v3 tasks=1 eligible_relevance_judgments=1' \
     'task task_a 1' \
     'query find a' \
     'relevant a.c' \
@@ -26,7 +26,11 @@ printf '%s\n' \
     'rank 5 0 0 a.c' \
     'end' >"$fixture"
 output=$("$evaluator" <"$fixture") || fail "valid fixture was refused"
-[[ $(printf '%s\n' "$output" | "$jsonq" get tasks_evaluated) = 1 &&
+[[ $(printf '%s\n' "$output" | "$jsonq" get schema) = zcl.retrieval_eval_batch_result.v3 &&
+   $(printf '%s\n' "$output" | "$jsonq" get tasks_evaluated) = 1 &&
+   $(printf '%s\n' "$output" | "$jsonq" get aggregation_kind) = macro_equal_task_weight &&
+   $(printf '%s\n' "$output" | "$jsonq" get tasks_denominator) = 1 &&
+   $(printf '%s\n' "$output" | "$jsonq" get eligible_relevance_judgments) = 1 &&
    $(printf '%s\n' "$output" | "$jsonq" get literal.recall_at_5.basis_points) = 10000 &&
    $(printf '%s\n' "$output" | "$jsonq" get literal.mrr.basis_points) = 5000 &&
    $(printf '%s\n' "$output" | "$jsonq" get literal.wrong_scope_at_5.available) = true &&
@@ -59,6 +63,23 @@ sed 's/tasks=1/tasks=2/' "$fixture" >"$bad"
 if "$evaluator" <"$bad" >/dev/null 2>&1; then
     fail "false task count was accepted"
 fi
+bad="$tmp/relevance-count.batch"
+sed 's/eligible_relevance_judgments=1/eligible_relevance_judgments=2/' \
+    "$fixture" >"$bad"
+if "$evaluator" <"$bad" >/dev/null 2>&1; then
+    fail "false eligible relevance-judgment count was accepted"
+fi
+bad="$tmp/task-count-overflow.batch"
+sed 's/tasks=1/tasks=18446744073709551616/' "$fixture" >"$bad"
+if "$evaluator" <"$bad" >/dev/null 2>&1; then
+    fail "overflowing task count was accepted"
+fi
+bad="$tmp/relevance-count-overflow.batch"
+sed 's/eligible_relevance_judgments=1/eligible_relevance_judgments=18446744073709551616/' \
+    "$fixture" >"$bad"
+if "$evaluator" <"$bad" >/dev/null 2>&1; then
+    fail "overflowing eligible relevance-judgment count was accepted"
+fi
 
 bad="$tmp/noncanonical-number.batch"
 sed 's/rank 10 1 0 x.c/rank 010 1 0 x.c/' "$fixture" >"$bad"
@@ -87,4 +108,4 @@ if printf '1 10 x.c\n' | "$evaluator" --rank-root 1 >/dev/null 2>&1; then
     fail "non-tab rank-root row was accepted"
 fi
 
-printf 'retrieval-eval-selftest: PASS mutations=10\n'
+printf 'retrieval-eval-selftest: PASS mutations=13\n'

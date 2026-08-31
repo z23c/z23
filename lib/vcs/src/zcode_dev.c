@@ -180,7 +180,7 @@ static enum vcs_zcode_dev_error receipt_fields(
     if (!zcl_bytes_any_set(receipt->signer_pubkey, 32))
         return VCS_ZCODE_DEV_ERR_PUBKEY_ZERO;
     if (receipt->work_kind < VCS_ZCODE_WORK_PROPOSE ||
-        receipt->work_kind > VCS_ZCODE_WORK_DIAGNOSE)
+        receipt->work_kind > VCS_ZCODE_WORK_APP_RUN)
         return VCS_ZCODE_DEV_ERR_WORK_KIND;
     if (receipt->status < VCS_ZCODE_WORK_PASS ||
         receipt->status > VCS_ZCODE_WORK_REFUSED ||

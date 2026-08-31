@@ -91,6 +91,11 @@ enum vcs_zcode_work_kind {
     VCS_ZCODE_WORK_REVIEW = 5,
     VCS_ZCODE_WORK_REPRODUCE = 6,
     VCS_ZCODE_WORK_DIAGNOSE = 7,
+    /* Evidence-only today: the public worker/action registry deliberately
+     * has no application launcher. A signed receipt of this kind may bind a
+     * canonical app_run_observation emitted by an independently authorized
+     * bounded executor; it is not a proof-policy kind. */
+    VCS_ZCODE_WORK_APP_RUN = 8,
 };
 
 enum vcs_zcode_work_status {
