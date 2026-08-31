@@ -160,11 +160,24 @@ bool zcl_dev_source_identity_capture(const char *repo_root,
         return false;
     }
     if (parse_source_record(&result, out, why, why_len)) {
+        char authoritative_source[sizeof(out->source_id)];
+        char authoritative_mutation[sizeof(out->mutation_id)];
+        memcpy(authoritative_source, out->source_id,
+               sizeof(authoritative_source));
+        memcpy(authoritative_mutation, out->mutation_id,
+               sizeof(authoritative_mutation));
         /* Shadow rollout: the shell SHA-256 record remains the exact build and
          * publication oracle. The native persistent SHA3 tree is attached as
          * independently observable CAS identity and may be compared/audited
-         * without being allowed to green-light an artifact. */
+         * without being allowed to green-light an artifact. Restore the
+         * already-validated portable record after the shadow refresh so an
+         * implementation defect or future CAS-only derivation can never
+         * substitute the shadow identity for publication authority. */
         (void)zcl_dev_source_cas_capture(repo_root, out);
+        memcpy(out->source_id, authoritative_source,
+               sizeof(out->source_id));
+        memcpy(out->mutation_id, authoritative_mutation,
+               sizeof(out->mutation_id));
         return true;
     }
     if (result.output_len > 0 && why && why_len > 0) {
