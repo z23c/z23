@@ -11,6 +11,7 @@
 #   .\tools\dev\windows-setup.ps1
 #   .\tools\dev\windows-setup.ps1 -SkipBuild       # prepare only, do not compile
 #   .\tools\dev\windows-setup.ps1 -Msys2Root D:\msys64
+#   .\tools\dev\windows-setup.ps1 -Msys2Root D:\msys64 -DryRun
 #
 # The script refuses rather than guess when it cannot find or install MSYS2.
 
@@ -19,11 +20,14 @@ param(
     [string]$CheckoutRoot = "",
     [string]$Msys2Root = "C:\msys64",
     [switch]$SkipBuild,
+    [switch]$DryRun,
     [int]$BuildJobs = 4
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-path.ps1')
+Assert-Z23MsysPathContract
 
 function Write-Refusal {
     param([string]$Message)
@@ -99,6 +103,27 @@ $RequiredPackages = @(
 # without launching an interactive shell.
 $env:MSYSTEM = 'UCRT64'
 $env:CHERE_INVOKING = '1'
+$repoRoot = ConvertTo-Z23MsysPath -Path $CheckoutRoot
+$msys2RootMsys = ConvertTo-Z23MsysPath -Path $Msys2Root
+$env:Z23_CHECKOUT_ROOT_MSYS = $repoRoot
+$env:Z23_MSYS2_ROOT_MSYS = $msys2RootMsys
+
+$pathPrefix = 'cd "$Z23_CHECKOUT_ROOT_MSYS" && export PATH="$Z23_MSYS2_ROOT_MSYS/ucrt64/bin:$Z23_MSYS2_ROOT_MSYS/usr/bin:$PATH"'
+$pkgList = $RequiredPackages -join ' '
+$setupCommand = "$pathPrefix && make setup"
+$buildCommand = "$pathPrefix && make -j$BuildJobs z23"
+
+if ($DryRun) {
+    Write-Output "Z23_CHECKOUT_ROOT_MSYS=$repoRoot"
+    Write-Output "Z23_MSYS2_ROOT_MSYS=$msys2RootMsys"
+    Write-Output "pacman -Syy --noconfirm"
+    Write-Output "pacman -S --needed --noconfirm $pkgList"
+    Write-Output $setupCommand
+    if (-not $SkipBuild) {
+        Write-Output $buildCommand
+    }
+    exit 0
+}
 
 Write-Note "updating MSYS2 package database..."
 & $Bash '-lc' "pacman -Syy --noconfirm"
@@ -108,22 +133,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Note "installing required packages..."
-$pkgList = $RequiredPackages -join ' '
 & $Bash '-lc' "pacman -S --needed --noconfirm $pkgList"
 if ($LASTEXITCODE -ne 0) {
     Write-Refusal "pacman install failed (exit $LASTEXITCODE)"
     exit 1
 }
 
-# ---------------------------------------------------------------------------
-# Build phase inside the UCRT64 environment.
-# The PATH order is critical: UCRT64 toolchain first, then MSYS2 utilities.
-# ---------------------------------------------------------------------------
-$repoRoot = $CheckoutRoot -replace '\\', '/'
-$repoRoot = $repoRoot -replace '^([A-Za-z]):', '/$1'
-
 Write-Note "running make setup..."
-& $Bash '-lc' "cd '$repoRoot' && export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin:`$PATH' && make setup"
+& $Bash '-lc' $setupCommand
 if ($LASTEXITCODE -ne 0) {
     Write-Refusal "make setup failed (exit $LASTEXITCODE)"
     exit 1
@@ -136,7 +153,7 @@ if ($SkipBuild) {
 }
 
 Write-Note "building z23 with -j$BuildJobs..."
-& $Bash '-lc' "cd '$repoRoot' && export PATH='/c/msys64/ucrt64/bin:/c/msys64/usr/bin:`$PATH' && make -j$BuildJobs z23"
+& $Bash '-lc' $buildCommand
 if ($LASTEXITCODE -ne 0) {
     Write-Refusal "make z23 failed (exit $LASTEXITCODE)"
     exit 1
