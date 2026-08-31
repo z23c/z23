@@ -1299,7 +1299,7 @@ CHECKOUT_LOCK = $(BUILD_DIR)/.checkout.lock
 CHECKOUT_LOCK_MODE = $(if $(filter 1,$(ZCL_DEV_WATCH_LANE)),watcher,foreground)
 CHECKOUT_LOCKED_TEST_GOALS := test-parallel-active-locked \
 	test-parallel-fast-active-locked test-parallel-locked t-locked \
-	t-fast-locked t-fast-exact-locked test-locked \
+	t-fast-locked t-fast-exact-locked test-locked test-full-locked \
 	secure-release-regressions-locked
 ifneq ($(filter $(CHECKOUT_LOCKED_TEST_GOALS),$(MAKECMDGOALS)),)
 ifneq ($(ZCL_CHECKOUT_LOCK_HELD),1)
@@ -6195,7 +6195,13 @@ test:
 test-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
-test-full: test_zcl
+.PHONY: test-full test-full-locked
+test-full:
+	@mkdir -p "$(BUILD_DIR)"
+	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
+	  $(MAKE) --no-print-directory test-full-locked
+
+test-full-locked: test_zcl
 	$(ZCL_TEST_STACK_SETUP) && $(TEST_ZCL_BIN)
 
 # zclassic23-chaos links the FULL node source tree ($(ALL_SRCS), same
@@ -12165,14 +12171,20 @@ LINT_GATES := \
 # The umbrella also runs capability-closure and cookbook checks over the DEV
 # object graph, and several gates inspect the confined dev package verifier.
 # Name those artifacts here so a parallel cold lint never depends on ambient
-# output from an earlier development build.
-lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN)
+# output from an earlier development build. Keep one set for all three
+# umbrellas: run_lint.sh dispatches the same gate set in cold, cached, and
+# cold-audit modes, so their build prerequisites must not drift apart.
+LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
+	$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) \
+	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL)
+lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) \
+	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS)
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint: tools/core_seal tools/check_observability_pairing $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL)
+lint:
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
@@ -12197,11 +12209,11 @@ endif
 # read build output, git config, /proc, or untracked worktree state. Each
 # carries its reason in tools/lint/lint_cache.sh, and each always runs.
 .PHONY: lint-cached lint-cold-audit
-lint-cached: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
+lint-cached:
 	@tools/lint/run_lint.sh --cache --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed (cached where inputs were unchanged) ══"
 
-lint-cold-audit: tools/core_seal tools/check_observability_pairing $(JSONQ_BIN) $(FILE_SIZE_POLICY_BIN)
+lint-cold-audit:
 	@tools/lint/run_lint.sh --cold-audit --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed, every cache hit verified against a fresh run ══"
 
