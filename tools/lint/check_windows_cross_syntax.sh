@@ -2,8 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # check_windows_cross_syntax.sh — syntax-only mingw sweep of every .c file
-# under lib/, app/, config/, core/, domain/, and ports/ whose text contains
-# _WIN32.
+# under every production/dev source root whose text contains _WIN32.
 #
 # WHY THIS EXISTS
 # gcc and clang on this box never take the _WIN32 branch, so a Windows-only
@@ -14,9 +13,12 @@
 # not link, does not produce objects, and is not a substitute for the native
 # UCRT64 build.
 #
-# File set is SELF-MAINTAINING: a file that gains Windows code joins the
-# gate the day the token _WIN32 appears. Do not narrow the set to the files
-# that already pass.
+# File set is SELF-MAINTAINING: a file that gains Windows code joins the gate
+# the day the token _WIN32 appears. This includes the public node entry points
+# under src/ and release-visible command adapters under tools/command/;
+# omitting those roots previously left current release TUs outside every
+# Windows compile gate. Standalone and dev-only tools keep their own build
+# targets rather than being misgraded as node translation units here.
 #
 # SKIP contract: when mingw is absent, print SKIP and exit 0. An outside
 # contributor is never blocked by a cross-compiler they do not have. SKIP is
@@ -40,6 +42,7 @@
 # Env:
 #   ZCL_MINGW_CC   compiler (default: x86_64-w64-mingw32-gcc)
 #   ZCL_CC_JOBS    parallel workers (default: nproc, capped at 32)
+#   ZCL_REQUIRE_MINGW=1  missing compiler is a hard acceptance failure
 #
 # Exit: 0 clean or SKIP; 1 on a new (non-baselined, non-skippable) failure
 # or a stale baseline row; 2 on a hollow/misconfigured scan.
@@ -57,13 +60,18 @@ CC_BIN="${ZCL_MINGW_CC:-x86_64-w64-mingw32-gcc}"
 BASELINE="tools/lint/windows_cross_syntax_baseline.txt"
 SRC_FLOOR=150
 INC_FLOOR=50
-SCAN_ROOTS=(lib app config core domain ports)
+SCAN_ROOTS=(adapters app application config core domain lib ports src tools/command)
 TEST_COMPAT_HEADER="test/windows_compat.h"
 
 echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
 
 # ── SKIP contract ──────────────────────────────────────────────────────────
 if [ "${1:-}" != "--self-test" ] && ! command -v "$CC_BIN" >/dev/null 2>&1; then
+    if [ "${ZCL_REQUIRE_MINGW:-0}" = 1 ]; then
+        echo "  $GATE: FAIL — required compiler '$CC_BIN' is unavailable;" >&2
+        echo "  acceptance cannot succeed after compiling zero files." >&2
+        exit 2
+    fi
     echo "  $GATE: SKIP — '$CC_BIN' is not installed on this box."
     echo "  0 files were compiled. This is not a pass: it is an unobserved"
     echo "  leg. Install mingw-w64 (apt install gcc-mingw-w64-x86-64) or set"
@@ -253,6 +261,11 @@ printf '%s\0' "${COMPILE_FLAGS[@]}" "${INC_FLAGS[@]}" > "$WORK/flags.nul"
 # ── Self-test: prove the flag set actually rejects a Windows-only error ──
 if [ "${1:-}" = "--self-test" ]; then
     if ! command -v "$CC_BIN" >/dev/null 2>&1; then
+        if [ "${ZCL_REQUIRE_MINGW:-0}" = 1 ]; then
+            echo "  $GATE --self-test: FAIL — required compiler '$CC_BIN'" \
+                 "is unavailable." >&2
+            exit 2
+        fi
         echo "  $GATE --self-test: SKIP — '$CC_BIN' is not installed;" \
              "cannot prove the gate trips without the compiler it gates."
         exit 0

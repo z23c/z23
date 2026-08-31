@@ -75,6 +75,22 @@ CATALOG="tools/dev/test_group_catalog.def"
 # plus eight required platform-baseline groups.  A floor would miss deletions.
 EXPECTED_GROUPS=37
 
+macos_make_target_reachable() {
+    local makefile="${1:-Makefile}"
+    awk '
+        /^macos-acceptance:[[:space:]]+z23[[:space:]]*$/ {
+            in_target = 1
+            next
+        }
+        in_target && /^\t@?\.\/tools\/scripts\/macos_acceptance\.sh --run[[:space:]]*$/ {
+            found = 1
+            next
+        }
+        in_target && /^[^[:space:]#][^:]*:/ { in_target = 0 }
+        END { exit(found ? 0 : 1) }
+    ' "$makefile"
+}
+
 check_root() {
     local out rc groups group_n
 
@@ -121,10 +137,12 @@ check_root() {
     # The whole reason this gate exists is that the script had exactly one
     # reference in the tree. If the recipe stops naming it, the native leg is
     # unreachable again and only this line would notice.
-    if ! grep -q 'macos_acceptance\.sh' Makefile; then
-        echo "  $GATE: FAIL — no Makefile recipe invokes $ACCEPT." >&2
+    if ! macos_make_target_reachable Makefile; then
+        echo "  $GATE: FAIL — macos-acceptance is not a z23-dependent target" >&2
+        echo "  whose recipe invokes $ACCEPT --run." >&2
         echo "  The native (Darwin) leg is then unreachable from any command a" >&2
-        echo "  person would type. Restore the 'macos-acceptance:' target." >&2
+        echo "  person would type. Restore the exact 'macos-acceptance: z23'" >&2
+        echo "  target and its tabbed acceptance recipe." >&2
         return 1
     fi
     if ! grep -Fq 'ONLY="$groups" EXACT_ONLY_MATCHED="$groups"' "$ACCEPT"; then
@@ -184,6 +202,16 @@ expect_accept() {
     if [ "$rc" -ne 0 ]; then
         echo "SELFTEST FAIL: $label — expected a PASS, got rejection."
         printf '%s\n' "$out" | sed 's/^/    /'
+        return 1
+    fi
+    echo "  selftest ok: $label"
+    return 0
+}
+
+expect_make_reject() {
+    local label="$1" fixture="$2"
+    if macos_make_target_reachable "$fixture"; then
+        echo "SELFTEST FAIL: $label — malformed Make target was accepted."
         return 1
     fi
     echo "  selftest ok: $label"
@@ -270,8 +298,28 @@ run_selftest() {
     expect_reject "I: a same-size registered mutation violates the exact set" \
                   "required test set drift" "$FIXTURE_ROOT/required_exact_set.def" || rc=1
 
+    # J. The capability-evidence half of the union is exact too. Replacing Tor
+    #    evidence with an unrelated but registered group preserves the count;
+    #    only a full-set comparison catches the weakened claim.
+    sed 's/test_tor)/test_json)/' \
+        "$MATRIX" > "$FIXTURE_ROOT/capability_exact_set.def"
+    expect_reject "J: same-size registered capability evidence drift is caught" \
+                  "exact evidence set drift" "$FIXTURE_ROOT/capability_exact_set.def" || rc=1
+
+    # K/L. A comment mentioning the script must not keep the reachability
+    # check green after either the real recipe or its public-binary dependency
+    # disappears.
+    sed '\#^[[:space:]]*@\./tools/scripts/macos_acceptance\.sh --run[[:space:]]*$#d' \
+        Makefile > "$FIXTURE_ROOT/make_no_recipe"
+    expect_make_reject "K: deleting the native recipe is caught" \
+                       "$FIXTURE_ROOT/make_no_recipe" || rc=1
+    sed 's/^macos-acceptance: z23$/macos-acceptance:/' \
+        Makefile > "$FIXTURE_ROOT/make_no_z23"
+    expect_make_reject "L: deleting the z23 prerequisite is caught" \
+                       "$FIXTURE_ROOT/make_no_z23" || rc=1
+
     if [ "$rc" -eq 0 ]; then
-        echo "══ selftest: PASS (11/11) ══"
+        echo "══ selftest: PASS (14/14) ══"
     else
         echo "══ selftest: FAIL ══"
     fi

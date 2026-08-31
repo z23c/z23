@@ -350,6 +350,10 @@ jobs:
       - name: make lint
         env:
           ZCL_LINT_VERBOSE: "1"
+          # The lint scripts retain explicit UNOBSERVED output for an optional
+          # contributor environment. Hosted acceptance has installed MinGW
+          # above and must fail, never skip, if that compiler disappears.
+          ZCL_REQUIRE_MINGW: "1"
           # check-systemd-memory-budget sums the deploy/*.service MemoryMax
           # caps and fails if they reach/exceed a percentage of REAL host
           # memory — a fact about the actual deploy target (the maintainer

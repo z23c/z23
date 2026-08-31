@@ -1917,6 +1917,7 @@ ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
 	$(ADAPTERS_INCLUDES) -Ivendor/include
 ZCL_WINDOWS_ACCEPTANCE_BINS := $(addprefix \
 	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
+ZCL_WINDOWS_ACCEPTANCE_COUNT := $(words $(ZCL_WINDOWS_ACCEPTANCE_TESTS))
 
 define ZCL_WINDOWS_ACCEPTANCE_RULE
 $$(ZCL_WINDOWS_ACCEPTANCE_DIR)/$(1).exe: \
@@ -1932,7 +1933,22 @@ $(foreach test,$(ZCL_WINDOWS_ACCEPTANCE_TESTS), \
 
 .PHONY: windows-acceptance-compile windows-acceptance windows-acceptance-wine
 windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
-	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS'
+	@if test '$(ZCL_WINDOWS_ACCEPTANCE_COUNT)' -lt 1; then \
+		printf '%s\n' 'windows-acceptance: FAIL: catalog selected zero programs' >&2; \
+		exit 2; \
+	fi
+	@if test '$(ZCL_WINDOWS_ACCEPTANCE_COUNT)' -ne \
+		'$(words $(sort $(ZCL_WINDOWS_ACCEPTANCE_TESTS)))'; then \
+		printf '%s\n' 'windows-acceptance: FAIL: duplicate catalog program id' >&2; \
+		exit 2; \
+	fi
+	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		test -s "$$executable" || { \
+			printf '%s\n' "windows-acceptance: FAIL: missing/empty $$executable" >&2; \
+			exit 2; \
+		}; \
+	done
+	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS ($(ZCL_WINDOWS_ACCEPTANCE_COUNT) programs)'
 
 windows-acceptance: windows-acceptance-compile
 
@@ -1969,6 +1985,19 @@ windows-acceptance-wine: windows-acceptance-compile
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
 	printf '%s\n' 'windows-acceptance-wine: Wine compatibility execution PASS (not native Windows evidence)'
+
+.PHONY: windows-portability-acceptance
+# Mandatory Linux-hosted acceptance aggregate. Individual lint gates retain an
+# explicit UNOBSERVED mode for contributors without MinGW; this acceptance,
+# pre-push and hosted-CI path does not.
+windows-portability-acceptance:
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh --self-test
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_cross_syntax.sh --self-test
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_cross_syntax.sh
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh --self-test
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh
+	@printf '%s\n' 'windows-portability-acceptance: PASS (cross-compiled on host=$(ZCL_HOST_OS); native Windows runtime UNOBSERVED)'
 
 .PHONY: macos-acceptance
 # Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived
@@ -9859,7 +9888,7 @@ coverage-clean:
 # Mapped focused tests for the files being pushed. Unmapped code fails
 # closed (add an impact rule) instead of expanding to the 941-group suite.
 # Full-suite/fuzz/coverage remain on make install-quality-linger.
-pre-push-ci:
+pre-push-ci: windows-portability-acceptance
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) $(CHECKOUT_LOCK_MODE) "$(CHECKOUT_LOCK)" -- \
 	  env ZCL_FAST_LIVE=0 ZCL_FAST_COMPILE=strict \
@@ -10905,10 +10934,11 @@ check-windows-platform-seam:
 # UNOBSERVED. Optional Wine compatibility execution is a separately labelled
 # target and can never close the native observation.
 #
-# UNOBSERVED contract: with no mingw toolchain the compile step prints
-# UNOBSERVED, in that word, and exits 0 -- an outside contributor is never
-# blocked by a cross-compiler they do not have -- but UNOBSERVED is not a pass
-# and is not cached. The reconcile step has already run by then either way.
+# UNOBSERVED contract: an optional contributor invocation with no mingw
+# toolchain prints UNOBSERVED, in that word, and exits 0 -- but UNOBSERVED is
+# not a pass and is not cached. windows-portability-acceptance, pre-push and
+# hosted CI set ZCL_REQUIRE_MINGW=1 and fail if the compiler is unavailable.
+# The reconcile step has already run by then either way.
 #
 # --self-test runs first on every invocation because a gate not proven able to
 # go red is not evidence: it plants an undeclared program in a throwaway
@@ -10926,10 +10956,11 @@ check-windows-acceptance:
 # END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
-# Syntax-only mingw sweep of every .c under lib/ app/ config/ core/ domain/
-# ports/ whose text contains _WIN32. windows-acceptance-compile cross-links
-# the catalogued acceptance programs; gcc/clang on this box never take the
-# _WIN32 branch of the rest, so a Windows-only syntax error sat undetected.
+# Syntax-only mingw sweep of every .c under the node source roots, including
+# adapters/ application/ src/ and tools/command/, whose text contains _WIN32.
+# windows-acceptance-compile cross-links the catalogued acceptance programs;
+# gcc/clang on this box never take the _WIN32 branch of the rest, so a
+# Windows-only syntax error sat undetected.
 # -fsyntax-only, no objects, no archives. SKIP (exit 0, not a pass) when
 # mingw is absent.
 check-windows-cross-syntax:
