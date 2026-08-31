@@ -802,7 +802,8 @@ int test_simnet_sapling_shielded_send(void)
             printf("  ~/.zcash-params absent — SKIPPING params-gated shielded "
                    "legs (tree plumbing above ran)\n");
         else
-            printf("  SKIP (params-gated shielded legs) — %s (status=%s). "
+            printf("  UNOBSERVED (params-gated shielded legs) — %s "
+                   "(status=%s). "
                    "Tree plumbing above ran.\n",
                    zclassic_sapling_prover_backend(),
                    zclassic_sapling_prover_status());

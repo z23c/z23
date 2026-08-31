@@ -29,9 +29,12 @@ full-node build and service lane.
 - A C++ compiler (`c++`/`g++`), `autoconf`, `curl` or `wget`, `unzip`,
   `sha256sum`, and (optional — a fallback build path exists without it)
   `cmake`, for the one-time vendored-library build.
+- MinGW (`gcc-mingw-w64-x86-64` on Debian/Ubuntu) is not needed for `make z23`,
+  but is required by the Windows portability leg in `make pre-push-ci`.
 - No Rust toolchain or library. Shielded proving and verification are native
   C23 code in this repository.
-- **Nothing else.** In particular you do *not* need the Zcash parameter files
+- No extra node runtime dependency. In particular you do *not* need the Zcash
+  parameter files
   to run a node: the verifying keys are compiled in, so a fresh build syncs
   and validates shielded proofs out of the box. You need them only to *send*
   shielded — see ["The proving parameters"](#the-proving-parameters-optional--a-node-syncs-and-validates-without-them)
@@ -47,7 +50,7 @@ Linux compatibility layer is involved.
 
 ```bash
 xcode-select --install
-brew install autoconf automake bash cmake coreutils findutils flock libtool make pkgconf
+brew install autoconf automake bash cmake coreutils findutils flock libtool make mingw-w64 pkgconf
 export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix findutils)/libexec/gnubin:$PATH"
 ```
 
@@ -56,6 +59,8 @@ lease primitive absent from the macOS base system. `bash` (4+) and `findutils`
 (GNU find with `-printf`) are required by the source-identity capture that
 selects every compile epoch and by `make lint`; Apple's stock bash 3.2 and BSD
 find are not sufficient for either.
+`mingw-w64` supplies the mandatory Windows compile/link evidence run by
+`make pre-push-ci`; it does not turn that result into native Windows evidence.
 
 **Get the source and build:**
 
@@ -155,7 +160,12 @@ The directory watcher now uses kqueue on macOS. `make macos-acceptance`
 validates the closed matrix in `config/platform/macos_capabilities.def`, unions
 its capability evidence with the eight declarative required baseline groups,
 and executes the resulting 37 exact registered groups. It refuses any
-self-skip or unobserved eligible environment. The `self_backtrace` group in
+self-skip or unobserved eligible environment. After that verdict it uses the
+canonical release cutter to create a temporary four-member `darwin-arm64`
+runtime, verifies the macOS 14 floor, Mach-O dependency boundary and closed
+checksums, then executes the packaged node's node-free code guide. This proves
+local packaging and execution, not installation, notarization, publication or
+chain sync. The `self_backtrace` group in
 that union proves the fail-closed macOS capability boundary; it does not claim
 Linux signal-context backtraces on Darwin. Intel macOS has not yet been
 measured.
@@ -460,6 +470,23 @@ make install                              # default PREFIX=/usr/local; use ~/.lo
 make service-install                      # loads ~/Library/LaunchAgents/org.z23.zclassic.plist
 launchctl list | grep org.z23.zclassic    # confirm it is loaded
 ```
+
+Those Make targets are the checkout/development path. A verified
+`darwin-arm64` release directory instead goes through the transactional native
+installer:
+
+```bash
+tools/scripts/install_z23.sh --source=build/release/z23-darwin-arm64
+```
+
+That path verifies the closed manifest, installs immutable generations under
+`~/.local/lib/z23/generations`, switches `current` atomically, validates its
+plist with `plutil`, uses `launchctl bootstrap`/`bootout`/`kickstart`, waits for
+typed node readiness, qualifies the running image, and automatically restores
+`last-good` if the candidate fails. It operates on `~/.zclassic-c23`; use only
+with an operator-approved release and datadir. The public download front door
+remains disabled until the signed platform index and fresh-host acceptance in
+[`docs/work/BOOTSTRAP_PLAN.md`](work/BOOTSTRAP_PLAN.md) are complete.
 
 `make service-install` fails closed if `$(PREFIX)/bin/z23` is missing, so
 run `make install` first or use `make dev-service-install` to run the node

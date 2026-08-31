@@ -714,9 +714,22 @@ static int test_last_peer_ban_secs_config(void)
 static void register_nodes(struct net_manager *nm, struct p2p_node **nodes,
                            size_t count)
 {
+    /* Production always constructs this recursive mutex in
+     * net_manager_init(). A zero-filled pthread mutex happens to tolerate
+     * trylock on some libc implementations, but Darwin correctly gives no
+     * such portable guarantee. Exercise the production lock contract. */
+    zcl_mutex_init(&nm->cs_nodes);
     nm->nodes = nodes;
     nm->num_nodes = count;
     nm->nodes_cap = count;
+}
+
+static void unregister_nodes(struct net_manager *nm)
+{
+    nm->nodes = NULL;
+    nm->num_nodes = 0;
+    nm->nodes_cap = 0;
+    zcl_mutex_destroy(&nm->cs_nodes);
 }
 
 static int test_last_peer_ban_is_bounded(void)
@@ -750,6 +763,7 @@ static int test_last_peer_ban_is_bounded(void)
         ASSERT(blocker_exists("net.last_peer_ban"));
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;
@@ -783,6 +797,7 @@ static int test_second_peer_keeps_full_ban(void)
         ASSERT(!(blocker_exists("net.last_peer_ban")));
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;

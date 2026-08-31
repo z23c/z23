@@ -1755,6 +1755,11 @@ int main(int argc, char **argv)
     { extern int test_zcode_science(void); failures += test_zcode_science(); }
     { extern int test_zcode_science_store(void);
       failures += test_zcode_science_store(); }
+    { extern int test_ontology(void); failures += test_ontology(); }
+    { extern int test_ontology_manifest_rules(void);
+      failures += test_ontology_manifest_rules(); }
+    { extern int test_ontology_vocabulary(void);
+      failures += test_ontology_vocabulary(); }
     { extern int test_zcode_benchmark_exec(void);
       failures += test_zcode_benchmark_exec(); }
     { extern int test_zcode_discovery_projection(void);
@@ -1934,6 +1939,8 @@ int main(int argc, char **argv)
     { extern int test_sync_trust_policy(void); failures += test_sync_trust_policy(); }
     { extern int test_code_capsule(void); failures += test_code_capsule(); }
     { extern int test_code_impact(void); failures += test_code_impact(); }
+    { extern int test_code_ontology(void); failures += test_code_ontology(); }
+    { extern int test_code_vector_hint(void); failures += test_code_vector_hint(); }
     { extern int test_code_merkle(void); failures += test_code_merkle(); }
     { extern int test_code_merkle_proof(void);
       failures += test_code_merkle_proof(); }

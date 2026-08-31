@@ -4,6 +4,7 @@
  * Output remains byte-identical to GNU sha256sum --zero and stat -c %f.
  */
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "zsha256/zsha256.h"
 
@@ -134,14 +135,10 @@ static int digest_fd(int fd, const char *path,
 static int emit_hash(const char *path,
                      const uint8_t digest[ZSHA256_DIGEST_LEN])
 {
-    static const char digits[] = "0123456789abcdef";
-    char hex[2 * ZSHA256_DIGEST_LEN];
-    for (size_t i = 0; i < ZSHA256_DIGEST_LEN; ++i) {
-        hex[2 * i] = digits[digest[i] >> 4];
-        hex[2 * i + 1] = digits[digest[i] & 0x0f];
-    }
+    char hex[2 * ZSHA256_DIGEST_LEN + 1u];
+    zcl_hex_encode(digest, ZSHA256_DIGEST_LEN, hex);
     size_t path_length = strlen(path);
-    if (fwrite(hex, 1, sizeof hex, stdout) != sizeof hex ||
+    if (fwrite(hex, 1, sizeof hex - 1u, stdout) != sizeof hex - 1u ||
         fwrite("  ", 1, 2, stdout) != 2 ||
         fwrite(path, 1, path_length, stdout) != path_length ||
         fputc(0, stdout) == EOF) {

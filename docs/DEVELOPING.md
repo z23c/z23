@@ -44,9 +44,12 @@ make doctor-env
 ```
 
 It reports the compiler (`-std=c23` capability, not a version parse), git,
-`vendor/tor` submodule state, make, optional mingw/ccache/zcc, the stack
-soft limit, CPU count, and free disk. Each failing required check prints the
-exact fix command for this platform. `make doctor` remains the separate
+`vendor/tor` submodule state, make, mingw/ccache/zcc, the stack soft limit,
+CPU count, and free disk. MinGW is optional for an ordinary host `make z23`,
+which is why doctor labels its absence optional, but it is required before
+`make pre-push-ci`: that gate performs non-vacuous Windows compile/link
+acceptance on Linux and macOS. Each failing required check prints the exact
+fix command for this platform. `make doctor` remains the separate
 package-prerequisite doctor (`tools/scripts/vendor_prereqs.tsv`).
 
 Then identify the checkout and preserve existing work:

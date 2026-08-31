@@ -32,8 +32,10 @@
 #             THAT is the gate, and it is a real one.
 #
 #   --run     Builds and executes the exact test groups the matrix derives,
-#             natively, and refuses unless `uname -s` is Darwin and `uname -m`
-#             is arm64. It cannot run here and this gate does not pretend to.
+#             then cuts, audits, checksums, and executes the node-free guide
+#             from the real temporary darwin-arm64 runtime package. It refuses
+#             unless `uname -s` is Darwin and `uname -m` is arm64. It cannot
+#             run here and this gate does not pretend to.
 #
 # So this gate runs --check for real and reports --run as UNOBSERVED. It never
 # prints a pass for the native leg. A gate that always passes is worse than no
@@ -71,6 +73,7 @@ GATE="check-macos-acceptance"
 ACCEPT="tools/scripts/macos_acceptance.sh"
 MATRIX="config/platform/macos_capabilities.def"
 CATALOG="tools/dev/test_group_catalog.def"
+RELEASE_CUTTER="packaging/release/build_release.sh"
 # The union is a closed acceptance contract: 29 capability-evidence groups
 # plus eight required platform-baseline groups.  A floor would miss deletions.
 EXPECTED_GROUPS=37
@@ -78,7 +81,7 @@ EXPECTED_GROUPS=37
 macos_make_target_reachable() {
     local makefile="${1:-Makefile}"
     awk '
-        /^macos-acceptance:[[:space:]]+z23[[:space:]]*$/ {
+        /^macos-acceptance:[[:space:]]+z23[[:space:]]+zclassic23-package-verify[[:space:]]+zclassic23-acme[[:space:]]*$/ {
             in_target = 1
             next
         }
@@ -91,14 +94,20 @@ macos_make_target_reachable() {
     ' "$makefile"
 }
 
+macos_runtime_package_reachable() {
+    local accept="${1:-$ACCEPT}"
+    grep -Fq '"$REPO_ROOT/packaging/release/build_release.sh" --bin "$REPO_ROOT/build/bin" --out "$package_root/runtime" --platform darwin-arm64' "$accept" &&
+        grep -Fq '"$package_root/runtime/z23" code guide >"$package_root/code-guide.json"' "$accept"
+}
+
 check_root() {
     local out rc groups group_n
 
-    for f in "$ACCEPT" "$MATRIX" "$CATALOG"; do
+    for f in "$ACCEPT" "$MATRIX" "$CATALOG" "$RELEASE_CUTTER"; do
         if [ ! -f "$f" ]; then
             echo "$GATE: FATAL — missing $f." >&2
             echo "  This gate is a thin driver over $ACCEPT;" >&2
-            echo "  with any of its three inputs gone there is nothing to check and" >&2
+            echo "  with any of its four inputs gone there is nothing to check and" >&2
             echo "  a silent pass would be a lie." >&2
             return 2
         fi
@@ -138,17 +147,27 @@ check_root() {
     # reference in the tree. If the recipe stops naming it, the native leg is
     # unreachable again and only this line would notice.
     if ! macos_make_target_reachable Makefile; then
-        echo "  $GATE: FAIL — macos-acceptance is not a z23-dependent target" >&2
+        echo "  $GATE: FAIL — macos-acceptance does not depend on the complete" >&2
+        echo "  darwin-arm64 runtime member set" >&2
         echo "  whose recipe invokes $ACCEPT --run." >&2
         echo "  The native (Darwin) leg is then unreachable from any command a" >&2
-        echo "  person would type. Restore the exact 'macos-acceptance: z23'" >&2
-        echo "  target and its tabbed acceptance recipe." >&2
+        echo "  person would type. Restore the exact 'macos-acceptance: z23" >&2
+        echo "  zclassic23-package-verify zclassic23-acme' target and its tabbed" >&2
+        echo "  acceptance recipe." >&2
         return 1
     fi
     if ! grep -Fq 'ONLY="$groups" EXACT_ONLY_MATCHED="$groups"' "$ACCEPT"; then
         echo "  $GATE: FAIL — $ACCEPT does not bind its derived union equally" >&2
         echo "  to t-fast-exact's parse guard and exact selector; the native" >&2
         echo "  target could validate 37 groups while executing an empty set." >&2
+        return 1
+    fi
+    if ! macos_runtime_package_reachable "$ACCEPT"; then
+        echo "  $GATE: FAIL — $ACCEPT does not cut and execute the real" >&2
+        echo "  temporary darwin-arm64 runtime after its exact test verdict." >&2
+        echo "  Restore the canonical build_release.sh invocation and packaged" >&2
+        echo "  'z23 code guide' execution; source-test binaries alone do not" >&2
+        echo "  prove that the bytes a Mac user receives are acceptable." >&2
         return 1
     fi
 
@@ -159,7 +178,8 @@ check_root() {
     local host_os host_arch
     host_os="$(uname -s 2>/dev/null || echo unknown)"
     host_arch="$(uname -m 2>/dev/null || echo unknown)"
-    echo "  $GATE: UNOBSERVED — the native leg (${group_n} exact groups executed on"
+    echo "  $GATE: UNOBSERVED — the native leg (${group_n} exact groups plus an"
+    echo "  audited/checksummed temporary runtime cut and packaged-node execution on"
     echo "  darwin-arm64) did NOT run here; this host is ${host_os}/${host_arch}."
     if [ "$host_os" = "Darwin" ] && [ "$host_arch" = "arm64" ]; then
         echo "  This host CAN run it, and lint deliberately does not: it builds and"
@@ -212,6 +232,16 @@ expect_make_reject() {
     local label="$1" fixture="$2"
     if macos_make_target_reachable "$fixture"; then
         echo "SELFTEST FAIL: $label — malformed Make target was accepted."
+        return 1
+    fi
+    echo "  selftest ok: $label"
+    return 0
+}
+
+expect_package_reject() {
+    local label="$1" fixture="$2"
+    if macos_runtime_package_reachable "$fixture"; then
+        echo "SELFTEST FAIL: $label — incomplete package acceptance was accepted."
         return 1
     fi
     echo "  selftest ok: $label"
@@ -313,13 +343,22 @@ run_selftest() {
         Makefile > "$FIXTURE_ROOT/make_no_recipe"
     expect_make_reject "K: deleting the native recipe is caught" \
                        "$FIXTURE_ROOT/make_no_recipe" || rc=1
-    sed 's/^macos-acceptance: z23$/macos-acceptance:/' \
+    sed 's/^macos-acceptance: z23 zclassic23-package-verify zclassic23-acme$/macos-acceptance: z23/' \
         Makefile > "$FIXTURE_ROOT/make_no_z23"
-    expect_make_reject "L: deleting the z23 prerequisite is caught" \
+    expect_make_reject "L: deleting release-member prerequisites is caught" \
                        "$FIXTURE_ROOT/make_no_z23" || rc=1
 
+    # M/N. Passing source tests is insufficient when either the canonical
+    # runtime cut or execution of its stripped node can silently disappear.
+    grep -Fv 'build_release.sh" --bin' "$ACCEPT" > "$FIXTURE_ROOT/no_package_cut.sh"
+    expect_package_reject "M: deleting the canonical runtime cut is caught" \
+                          "$FIXTURE_ROOT/no_package_cut.sh" || rc=1
+    grep -Fv 'runtime/z23" code guide' "$ACCEPT" > "$FIXTURE_ROOT/no_package_exec.sh"
+    expect_package_reject "N: deleting packaged-node execution is caught" \
+                          "$FIXTURE_ROOT/no_package_exec.sh" || rc=1
+
     if [ "$rc" -eq 0 ]; then
-        echo "══ selftest: PASS (14/14) ══"
+        echo "══ selftest: PASS (16/16) ══"
     else
         echo "══ selftest: FAIL ══"
     fi

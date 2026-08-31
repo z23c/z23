@@ -159,31 +159,6 @@ static bool bf_canonicalize(struct db_build_job *job,
     return true;
 }
 
-/* Test-only projection corruption: application writes must use the model
- * lifecycle, so only an explicit fault fixture may bypass immutable columns. */
-static bool bf_fault_action_authority(
-    struct node_db *ndb, const struct db_build_action *action)
-{
-    sqlite3_stmt *statement = NULL;
-    static const char sql[] =
-        "UPDATE build_actions SET task_root_sha3=?,candidate_root_sha3=?,"
-        "proof_policy_root_sha3=? WHERE action_id=?";
-    bool ok = ndb && ndb->db && action &&
-        sqlite3_prepare_v2(ndb->db, sql, -1, &statement, NULL) == SQLITE_OK &&
-        sqlite3_bind_text(statement, 1, action->task_root_sha3, -1,
-                          SQLITE_TRANSIENT) == SQLITE_OK &&
-        sqlite3_bind_text(statement, 2, action->candidate_root_sha3, -1,
-                          SQLITE_TRANSIENT) == SQLITE_OK &&
-        sqlite3_bind_text(statement, 3, action->proof_policy_root_sha3, -1,
-                          SQLITE_TRANSIENT) == SQLITE_OK &&
-        sqlite3_bind_text(statement, 4, action->action_id, -1,
-                          SQLITE_TRANSIENT) == SQLITE_OK &&
-        sqlite3_step(statement) == SQLITE_DONE &&
-        sqlite3_changes(ndb->db) == 1;
-    if (statement) ok = sqlite3_finalize(statement) == SQLITE_OK && ok;
-    return ok;
-}
-
 static uint8_t *bf_read_fixture(const char *path, size_t *len_out)
 {
     *len_out = 0;
@@ -1863,47 +1838,44 @@ static int test_bf_proof_materialization(void)
         ASSERT(vcs_object_put_addressed(
             dir, misaddressed_authority[2], policy_wire,
             sizeof(policy_wire)));
-        char canonical_task_root[65], canonical_candidate_root[65];
-        char canonical_policy_root[65];
-        (void)snprintf(canonical_task_root, sizeof(canonical_task_root),
-                       "%s", action.task_root_sha3);
-        (void)snprintf(canonical_candidate_root,
-                       sizeof(canonical_candidate_root), "%s",
-                       action.candidate_root_sha3);
-        (void)snprintf(canonical_policy_root,
-                       sizeof(canonical_policy_root), "%s",
-                       action.proof_policy_root_sha3);
         struct build_fabric_proof_evaluation rejected = {0};
+        struct db_build_action rejected_action = action;
+        char rejected_action_id[BUILD_FABRIC_ID_HEX + 1];
+        rejected_action.sequence = 100;
         zcl_hex_encode(misaddressed_authority[0], 32,
-                       action.task_root_sha3);
-        ASSERT(bf_fault_action_authority(&ndb, &action));
-        struct db_build_action corrupted_action;
-        ASSERT(db_build_action_find(
-            &ndb, action.action_id, &corrupted_action));
-        ASSERT_STR_EQ(corrupted_action.task_root_sha3,
-                      action.task_root_sha3);
+                       rejected_action.task_root_sha3);
+        ASSERT(build_fabric_action_id(
+            &job, &rejected_action, rejected_action_id).ok);
+        (void)snprintf(rejected_action.action_id,
+                       sizeof(rejected_action.action_id), "%s",
+                       rejected_action_id);
+        ASSERT(db_build_action_save(&ndb, &rejected_action));
         ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, action.action_id, now, &rejected).ok);
-        (void)snprintf(action.task_root_sha3,
-                       sizeof(action.task_root_sha3), "%s",
-                       canonical_task_root);
+            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
+        rejected_action = action;
+        rejected_action.sequence = 101;
         zcl_hex_encode(misaddressed_authority[1], 32,
-                       action.candidate_root_sha3);
-        ASSERT(bf_fault_action_authority(&ndb, &action));
+                       rejected_action.candidate_root_sha3);
+        ASSERT(build_fabric_action_id(
+            &job, &rejected_action, rejected_action_id).ok);
+        (void)snprintf(rejected_action.action_id,
+                       sizeof(rejected_action.action_id), "%s",
+                       rejected_action_id);
+        ASSERT(db_build_action_save(&ndb, &rejected_action));
         ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, action.action_id, now, &rejected).ok);
-        (void)snprintf(action.candidate_root_sha3,
-                       sizeof(action.candidate_root_sha3), "%s",
-                       canonical_candidate_root);
+            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
+        rejected_action = action;
+        rejected_action.sequence = 102;
         zcl_hex_encode(misaddressed_authority[2], 32,
-                       action.proof_policy_root_sha3);
-        ASSERT(bf_fault_action_authority(&ndb, &action));
+                       rejected_action.proof_policy_root_sha3);
+        ASSERT(build_fabric_action_id(
+            &job, &rejected_action, rejected_action_id).ok);
+        (void)snprintf(rejected_action.action_id,
+                       sizeof(rejected_action.action_id), "%s",
+                       rejected_action_id);
+        ASSERT(db_build_action_save(&ndb, &rejected_action));
         ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, action.action_id, now, &rejected).ok);
-        (void)snprintf(action.proof_policy_root_sha3,
-                       sizeof(action.proof_policy_root_sha3), "%s",
-                       canonical_policy_root);
-        ASSERT(bf_fault_action_authority(&ndb, &action));
+            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
 
         struct db_build_worker worker;
         bf_worker(&worker);

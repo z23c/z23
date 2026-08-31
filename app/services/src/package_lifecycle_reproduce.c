@@ -152,8 +152,10 @@ static void pkgl_fast_stats_consume(
 static struct zcl_result pkgl_run_reproduce_worker(
     const struct pkgl_ctx *ctx, const struct pkgl_reproduce_paths *p,
     const char *name, const struct vcs_package_build_receipt *reference,
-    const char *fast_cache, struct package_lifecycle_reproduce_report *rep)
+    const char *fast_cache, struct package_lifecycle_reproduce_report *rep,
+    bool *full_isolation_unavailable)
 {
+    *full_isolation_unavailable = false;
     char root_hex[65];
     zcl_hex_encode(reference->package_root, 32, root_hex);
     char lock_hex[65];
@@ -249,6 +251,18 @@ static struct zcl_result pkgl_run_reproduce_worker(
             pkgl_fast_stats_consume(rep, out);
     }
     if (rc != 0) {
+        /* Exit 4 is the fixed verifier's documented fail-closed response to
+         * --require-full-isolation on a host with no qualified backend. Name
+         * that platform boundary instead of reducing it to an opaque worker
+         * number; no output or receipt is admitted either way. */
+        if (rc == 4) {
+            *full_isolation_unavailable = true;
+            return ZCL_ERR(
+                -1,
+                "full package-build isolation is unavailable on this host; "
+                "the rebuild did not run and no reproduction receipt was "
+                "filed");
+        }
         /* Trim the captured stdout to one line for the operator's detail. */
         char *nl = strchr(out, '\n');
         if (nl)
@@ -341,14 +355,20 @@ static struct zcl_result pkgl_reproduce_run(
     if (!r.ok)
         return pkgl_reproduce_refused(out, "worker-missing", r);
     ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work), "stale reproduce work is replaced");
+    bool full_isolation_unavailable = false;
     r = pkgl_materialize_package(ctx, root, p.src);
     if (r.ok)
         r = pkgl_run_reproduce_worker(ctx, &p, release->name, &reference,
-                                      fast_cache, out);
+                                      fast_cache, out,
+                                      &full_isolation_unavailable);
     if (!r.ok) {
         ZCL_IGNORE_RESULT(pkgl_rm_rf(p.work),
                           "failed reproduce work removed");
-        return pkgl_reproduce_refused(out, "build-failed", r);
+        return pkgl_reproduce_refused(
+            out,
+            full_isolation_unavailable ? "full-isolation-unavailable"
+                                       : "build-failed",
+            r);
     }
 
     /* The rebuild's own account of what it produced. */

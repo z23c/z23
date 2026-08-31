@@ -63,10 +63,6 @@ static void setup_remote_node(struct p2p_node *node, const char *name,
 static void setup_manager(struct net_manager *nm)
 {
     memset(nm, 0, sizeof(*nm));
-    /* Zeroed pthread mutexes behave like PTHREAD_MUTEX_INITIALIZER on
-     * glibc — a NORMAL (non-recursive) mutex. Production initialises
-     * cs_nodes via zcl_mutex_init() instead; the difference is itself
-     * asserted in test_cs_nodes_is_recursive() below. */
 }
 
 /* Publish borrowed node pointers into the manager's node table, which is
@@ -74,9 +70,21 @@ static void setup_manager(struct net_manager *nm)
 static void register_nodes(struct net_manager *nm, struct p2p_node **nodes,
                            size_t count)
 {
+    /* Match net_manager_init(): zero-filled pthread mutexes are not a
+     * portable substitute (Darwin rejects the trylock used by the strand
+     * predicate), and production requires recursion. */
+    zcl_mutex_init(&nm->cs_nodes);
     nm->nodes = nodes;
     nm->num_nodes = count;
     nm->nodes_cap = count;
+}
+
+static void unregister_nodes(struct net_manager *nm)
+{
+    nm->nodes = NULL;
+    nm->num_nodes = 0;
+    nm->nodes_cap = 0;
+    zcl_mutex_destroy(&nm->cs_nodes);
 }
 
 static int64_t ordinary_ban_secs(void)
@@ -128,6 +136,7 @@ static int test_penalty_is_not_softened(void)
         ASSERT(is_banned(&nm, &node.addr.svc.addr));
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;
@@ -167,6 +176,7 @@ static int test_ban_window_is_bounded(void)
         ASSERT(window <= RECOVERY_WINDOW_CEILING_SECS);
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;
@@ -203,6 +213,7 @@ static int test_window_actually_releases(void)
         ASSERT_EQ((int)nm.num_banned, 0);
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;
@@ -254,6 +265,7 @@ static int test_condition_is_named(void)
         ASSERT(!blocker_exists(LAST_PEER_BAN_ID));
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;
@@ -292,6 +304,7 @@ static int test_dying_second_peer_still_counts_as_stranded(void)
         ASSERT(blocker_exists(LAST_PEER_BAN_ID));
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;
@@ -326,6 +339,7 @@ static int test_live_second_peer_keeps_ordinary_ban(void)
         ASSERT(!blocker_exists(LAST_PEER_BAN_ID));
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;
@@ -397,6 +411,7 @@ static int test_cs_nodes_contention_falls_back_to_full_ban(void)
         ASSERT(!blocker_exists(LAST_PEER_BAN_ID));
 
         free(nm.banned);
+        unregister_nodes(&nm);
         blocker_reset_for_testing();
         PASS();
     } _test_next:;

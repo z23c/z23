@@ -6,6 +6,7 @@
 #   .\tools\dev\windows-make.ps1 z23
 #   .\tools\dev\windows-make.ps1 -j4 t-fast ONLY=mesh_route
 #   .\tools\dev\windows-make.ps1 windows-acceptance
+#   .\tools\dev\windows-make.ps1 -Msys2Root D:\msys64 -DryRun z23
 #
 # This is a thin courier: it ensures the UCRT64 toolchain is on PATH, then
 # invokes the real make with the same arguments. It is the normal way for a
@@ -19,15 +20,22 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-path.ps1')
+Assert-Z23MsysPathContract
 
 $CheckoutRoot = ""
 $Msys2Root = "C:\msys64"
+$DryRun = $false
 $MakeArgs = [System.Collections.Generic.List[string]]::new()
 # Parse wrapper options exactly. PowerShell's normal prefix matching would
 # otherwise consume make's -C as -CheckoutRoot and -m as -Msys2Root.
 $rawArguments = @($Arguments)
 for ($index = 0; $index -lt $rawArguments.Count; $index++) {
     $argument = $rawArguments[$index]
+    if ($argument -ieq '-DryRun') {
+        $DryRun = $true
+        continue
+    }
     if (($argument -ieq '-CheckoutRoot') -or ($argument -ieq '-Msys2Root')) {
         if (($index + 1) -ge $rawArguments.Count) {
             Write-Error -Message "z23-make: REFUSE: $argument requires a path value" -ErrorAction Continue
@@ -59,19 +67,29 @@ if (-not (Test-Path -LiteralPath $Bash)) {
     exit 1
 }
 
-$repoRoot = $CheckoutRoot -replace '\\', '/'
-$repoRoot = $repoRoot -replace '^([A-Za-z]):', '/$1'
-$msysRoot = $Msys2Root -replace '\\', '/'
-$msysRoot = $msysRoot -replace '^([A-Za-z]):', '/$1'
+$repoRoot = ConvertTo-Z23MsysPath -Path $CheckoutRoot
+$msysRoot = ConvertTo-Z23MsysPath -Path $Msys2Root
 
 $env:MSYSTEM = 'UCRT64'
 $env:CHERE_INVOKING = '1'
+$env:Z23_CHECKOUT_ROOT_MSYS = $repoRoot
+$env:Z23_MSYS2_ROOT_MSYS = $msysRoot
 
 # Keep make's arguments as argv entries. Joining them into shell source loses
 # spaces and lets shell metacharacters in a variable assignment or path run as
 # commands. The fixed Bash program consumes only the two wrapper-owned values.
 $bashCommand = 'repo_root=$1; msys_root=$2; shift 2; cd -- "$repo_root" && export PATH="$msys_root/ucrt64/bin:$msys_root/usr/bin:$PATH" && exec make "$@"'
 $bashArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot, $msysRoot) + $MakeArgs.ToArray()
+
+if ($DryRun) {
+    Write-Output "Z23_CHECKOUT_ROOT_MSYS=$repoRoot"
+    Write-Output "Z23_MSYS2_ROOT_MSYS=$msysRoot"
+    Write-Output 'BASH_ARGV:'
+    foreach ($BashArgument in $bashArgs) {
+        Write-Output "  $BashArgument"
+    }
+    exit 0
+}
 
 # Keep every ordinary build/test process in the native kill-on-close Job
 # Object and error-dialog suppression boundary. A fresh checkout bootstraps

@@ -96,6 +96,8 @@ SQLITE_YEAR="2025"
 SQLITE_AMALG="sqlite-amalgamation-3490000"   # SQLite 3.49.0
 SQLITE_URL="https://www.sqlite.org/${SQLITE_YEAR}/${SQLITE_AMALG}.zip"
 SQLITE_SHA="cb6851ebad74913672014c20f642bbd7883552c4747780583a54ee1cd493f13b"
+SQLITE_C_SHA="032f545fd56206903bf25309714acb924504ab599f80b51002b89d08579b0485"
+SQLITE_H_SHA="003d87c193f4a0e363543905deabd377924f03437e068823ec6b674a0fe31eba"
 
 OPENSSL_VER="3.0.16"                          # >= project min-safe floor (3.0.16)
 OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz"
@@ -513,6 +515,18 @@ install_archive() {
     mv -f "$tmp" "$LIB/$archive"
 }
 
+install_vendor_companion() {
+    local source="$1" destination="$2" expected_sha="$3" tmp
+    [[ "$(vp_sha256_file "$source")" == "$expected_sha" ]] ||
+        die "pinned companion hash mismatch: ${source#"$VENDOR"/}"
+    tmp="${destination}.tmp.$$"
+    cp -f "$source" "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$destination"
+    [[ "$(vp_sha256_file "$destination")" == "$expected_sha" ]] ||
+        die "installed companion hash mismatch: ${destination#"$VENDOR"/}"
+}
+
 verify_committed_secp() {
     vp_verify_locked_manifest "$LIB/libsecp256k1.a" "$SECP_MANIFEST" \
         libsecp256k1.a
@@ -537,12 +551,33 @@ build_tor_stub() {     # IN-TREE: vendor/tor_stub.c
 }
 
 build_sqlite() {       # FETCHED: SQLite amalgamation
-    have libsqlite3.a && { say "skip    libsqlite3.a (provenance current)"; return; }
-    say "build   libsqlite3.a  (SQLite ${SQLITE_AMALG#sqlite-amalgamation-})"
-    invalidate_stamps libsqlite3.a
+    local archive_ready=0
+    if have libsqlite3.a; then
+        if [[ -f "$VENDOR/sqlite3.c" && -f "$INC/sqlite3.h" &&
+              "$(vp_sha256_file "$VENDOR/sqlite3.c")" == "$SQLITE_C_SHA" &&
+              "$(vp_sha256_file "$INC/sqlite3.h")" == "$SQLITE_H_SHA" ]]; then
+            say "skip    libsqlite3.a (provenance current)"
+            return
+        fi
+        archive_ready=1
+        say "repair  SQLite amalgamation source beside current archive"
+    fi
     local zip; zip="$(fetch "$SQLITE_URL" "$SQLITE_SHA" "${SQLITE_AMALG}.zip")"
     local d="$WORK/$SQLITE_AMALG"
     rm -rf "$d"; need unzip; unzip -q -o "$zip" -d "$WORK"
+    # The cross-platform acceptance programs compile the pinned amalgamation
+    # directly. A restored archive without these companion sources is not a
+    # complete vendor cache hit, even though native links can consume it.
+    install_vendor_companion "$d/sqlite3.c" "$VENDOR/sqlite3.c" \
+        "$SQLITE_C_SHA"
+    install_vendor_companion "$d/sqlite3.h" "$INC/sqlite3.h" \
+        "$SQLITE_H_SHA"
+    if [[ "$archive_ready" == "1" ]]; then
+        ok "restored SQLite amalgamation source (archive provenance current)"
+        return
+    fi
+    say "build   libsqlite3.a  (SQLite ${SQLITE_AMALG#sqlite-amalgamation-})"
+    invalidate_stamps libsqlite3.a
     # Build flags mirror a typical Bitcoin/Zcash sqlite vendor build.
     local FLAGS="-DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE \
         -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_OMIT_DEPRECATED \
@@ -555,8 +590,6 @@ build_sqlite() {       # FETCHED: SQLite amalgamation
     install_archive "$built" libsqlite3.a
     # Keep the amalgamation source in vendor/ (gitignored) so the rest of the
     # build (tools/sqlq.c etc.) and the header stay in sync.
-    cp -f "$d/sqlite3.c" "$VENDOR/sqlite3.c"
-    cp -f "$d/sqlite3.h" "$INC/sqlite3.h"
     stamp_archives libsqlite3.a
     ok "built   libsqlite3.a"
 }

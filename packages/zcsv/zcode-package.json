@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "name": "zclassic23-commons/zcsv",
+  "name": "zcsv/zcsv",
   "semver": "0.1.0",
   "language": "c23",
   "license": "Apache-2.0",

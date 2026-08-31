@@ -2,8 +2,9 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # install_z23.sh — fetch a packaged Z23 runtime set, verify SHA256SUMS
-# fail-closed, install to ~/.local/bin, write a systemd --user unit, and print
-# ONE next command.
+# fail-closed, install to ~/.local, install the native user service, and print
+# ONE next command. Linux uses systemd --user. macOS uses launchd with
+# immutable release generations and automatic rollback on failed readiness.
 #
 # Artifact source is taken from the first argument or Z23_RELEASE_SOURCE
 # (a node URL or a local directory). Never hardcoded: any node that serves
@@ -34,7 +35,9 @@
 #                        for http(s); obtain independently of the mirror)
 #   Z23_INSTALL_PREFIX   default $HOME/.local
 #   Z23_UNIT_DIR         default $HOME/.config/systemd/user
-#   Z23_SKIP_SYSTEMD=1   skip unit install (tests)
+#   Z23_LAUNCHD_DIR      default $HOME/Library/LaunchAgents
+#   Z23_DATADIR          default $HOME/.zclassic-c23
+#   Z23_SKIP_SYSTEMD=1   skip all service installation (tests/archives)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +46,30 @@ die() { printf 'install_z23: REFUSE: %s\n' "$*" >&2; exit 1; }
 say() { printf 'install_z23: %s\n' "$*" >&2; }
 
 NEXT_COMMAND="z23 status"
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "no SHA-256 tool (sha256sum or shasum) is available"
+    fi
+}
+
+sha256_check_manifest() {
+    local manifest="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "$(dirname "$manifest")" && sha256sum -c --strict "$(basename "$manifest")")
+    elif command -v shasum >/dev/null 2>&1; then
+        # validate_manifest_contract already proves the exact strict grammar
+        # and closed member set before this is reached. Stock macOS shasum
+        # has no GNU --strict switch, so it only has to check the bytes here.
+        (cd "$(dirname "$manifest")" && shasum -a 256 -c "$(basename "$manifest")")
+    else
+        die "no SHA-256 tool (sha256sum or shasum) is available"
+    fi
+}
 
 # Public fetch ceilings. The manifest has exactly five short checksum rows;
 # 1 KiB leaves ample format headroom. Node aliases are currently below 32 MiB,
@@ -203,6 +230,19 @@ INSTALL_STAGE=""
 INSTALL_STAGE_PARENT=""
 
 cleanup_install_stage() {
+    if [ -n "${MACOS_INCOMING:-}" ]; then
+        case "$MACOS_INCOMING" in
+            "${MACOS_GENERATIONS:-/invalid}"/.incoming.??????)
+                chmod u+w "$MACOS_INCOMING" 2>/dev/null || true
+                find "$MACOS_INCOMING" -xdev -depth -delete
+                ;;
+            *)
+                printf 'install_z23: REFUSE: internal macOS generation cleanup path escaped its parent\n' >&2
+                return 1
+                ;;
+        esac
+        MACOS_INCOMING=""
+    fi
     [ -n "$INSTALL_STAGE" ] || return 0
     case "$INSTALL_STAGE" in
         "$INSTALL_STAGE_PARENT"/zcl-install-z23.??????) ;;
@@ -339,7 +379,7 @@ fetch_into() {
                 || die "could not fetch $src/SHA256SUMS"
             [ -s "$dest/SHA256SUMS" ] || die "empty SHA256SUMS from $src"
             local got_manifest_sha256 name
-            got_manifest_sha256="$(sha256sum "$dest/SHA256SUMS" | awk '{print $1}')"
+            got_manifest_sha256="$(sha256_file "$dest/SHA256SUMS")"
             [ "$got_manifest_sha256" = "$expected_manifest_sha256" ] \
                 || die "remote SHA256SUMS digest mismatch — refusing to fetch payloads"
             validate_manifest_contract "$dest/SHA256SUMS"
@@ -367,7 +407,7 @@ fetch_into() {
             # produced) is unaffected.
             if [ -n "$expected_manifest_sha256" ]; then
                 local got_local_sha256
-                got_local_sha256="$(sha256sum "$dest/SHA256SUMS" | awk '{print $1}')"
+                got_local_sha256="$(sha256_file "$dest/SHA256SUMS")"
                 [ "$got_local_sha256" = "$expected_manifest_sha256" ] \
                     || die "SHA256SUMS digest mismatch in $src — refusing to install"
             fi
@@ -387,8 +427,87 @@ fetch_into() {
 verify_strict() {
     local dir="$1"
     validate_payload_sizes "$dir"
-    (cd "$dir" && sha256sum -c --strict SHA256SUMS >/dev/null) \
+    sha256_check_manifest "$dir/SHA256SUMS" >/dev/null \
         || die "SHA256SUMS mismatch — refusing to install"
+}
+
+atomic_relative_link() {
+    local target="$1" link="$2" tmp="$2.new.$$"
+    rm -f -- "$tmp"
+    ln -s "$target" "$tmp" || return 1
+    # GNU mv follows a destination symlink to a directory unless -T is used;
+    # BSD/macOS mv spells the same no-follow contract -h. Try both native
+    # dialects so `current` is replaced, never treated as a destination dir.
+    if mv -fT -- "$tmp" "$link" 2>/dev/null; then
+        return 0
+    fi
+    mv -fh -- "$tmp" "$link"
+}
+
+macos_generation_matches() {
+    local stage="$1" generation="$2" name
+    for name in z23 zclassic23-package-verify zclassic23-acme AGENT_CARD.md; do
+        cmp -s "$stage/$name" "$generation/$name" || return 1
+    done
+    [ -L "$generation/zclassic23" ] \
+        && [ "$(readlink "$generation/zclassic23")" = z23 ]
+}
+
+MACOS_GENERATION=""
+MACOS_GENERATION_ID=""
+MACOS_GENERATIONS=""
+MACOS_INCOMING=""
+MACOS_PREVIOUS_TARGET=""
+MACOS_PLIST=""
+MACOS_ACTIVE_PREFIX=""
+MACOS_ACTIVATION_PENDING=0
+
+install_payload_macos_generation() {
+    local stage="$1" prefix="$2" root generations name
+    root="$prefix/lib/z23"
+    generations="$root/generations"
+    MACOS_GENERATIONS="$generations"
+    MACOS_GENERATION_ID="$(sha256_file "$stage/SHA256SUMS")"
+    MACOS_GENERATION="$generations/$MACOS_GENERATION_ID"
+    mkdir -p "$generations" "$prefix/bin" "$prefix/share/z23"
+
+    if [ -e "$MACOS_GENERATION" ]; then
+        [ -d "$MACOS_GENERATION" ] \
+            || die "macOS generation path is not a directory: $MACOS_GENERATION"
+        macos_generation_matches "$stage" "$MACOS_GENERATION" \
+            || die "macOS generation $MACOS_GENERATION_ID does not match its verified manifest"
+    else
+        MACOS_INCOMING="$(mktemp -d "$generations/.incoming.XXXXXX")" \
+            || die "could not stage macOS release generation"
+        for name in z23 zclassic23-package-verify zclassic23-acme; do
+            install -m 555 "$stage/$name" "$MACOS_INCOMING/$name"
+        done
+        install -m 444 "$stage/AGENT_CARD.md" "$MACOS_INCOMING/AGENT_CARD.md"
+        ln -s z23 "$MACOS_INCOMING/zclassic23" \
+            || die "could not create the macOS generation node alias"
+        # APFS refuses to rename the generation after its owner-write bit is
+        # removed. Commit its final name first, then make the directory inert.
+        mv -- "$MACOS_INCOMING" "$MACOS_GENERATION" \
+            || die "could not commit macOS release generation"
+        MACOS_INCOMING=""
+        chmod 555 "$MACOS_GENERATION"
+    fi
+
+    # These stable public names never contain release bytes. Each resolves
+    # through the one atomically replaced `current` link below.
+    atomic_relative_link ../lib/z23/current/z23 "$prefix/bin/z23" \
+        || die "could not link the current macOS z23 generation"
+    atomic_relative_link z23 "$prefix/bin/zclassic23" \
+        || die "could not link the current macOS node alias"
+    atomic_relative_link ../lib/z23/current/zclassic23-package-verify \
+        "$prefix/bin/zclassic23-package-verify" \
+        || die "could not link the current macOS package verifier"
+    atomic_relative_link ../lib/z23/current/zclassic23-acme \
+        "$prefix/bin/zclassic23-acme" \
+        || die "could not link the current macOS certificate worker"
+    atomic_relative_link ../../lib/z23/current/AGENT_CARD.md \
+        "$prefix/share/z23/AGENT_CARD.md" \
+        || die "could not link the current verified agent card"
 }
 
 install_payload() {
@@ -416,6 +535,180 @@ install_payload() {
     # The agent card is verified payload, so it is installed like payload:
     # an assistant reading it is reading bytes SHA256SUMS covered.
     install -m 644 "$stage/AGENT_CARD.md" "$carddir/AGENT_CARD.md"
+}
+
+xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+write_launchd_plist() {
+    local prefix="$1" datadir="$2" launchd_dir="$3"
+    local plist_tmp bin_xml datadir_xml
+    command -v plutil >/dev/null 2>&1 \
+        || die "plutil is required for the native macOS service install"
+    mkdir -p "$launchd_dir" "$datadir"
+    MACOS_PLIST="$launchd_dir/org.z23.zclassic.plist"
+    plist_tmp="$(mktemp "$launchd_dir/.org.z23.zclassic.XXXXXX")" \
+        || die "could not stage the launchd plist"
+    bin_xml="$(xml_escape "$prefix/bin/z23")"
+    datadir_xml="$(xml_escape "$datadir")"
+    cat >"$plist_tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+         "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>org.z23.zclassic</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$bin_xml</string>
+        <string>-datadir=$datadir_xml</string>
+        <string>-operator-lane=canonical</string>
+        <string>-listen</string>
+        <string>-tor</string>
+        <string>-onion-persist</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ProcessType</key><string>Background</string>
+    <key>ThrottleInterval</key><integer>5</integer>
+    <key>StandardOutPath</key><string>$datadir_xml/z23.stdout.log</string>
+    <key>StandardErrorPath</key><string>$datadir_xml/z23.stderr.log</string>
+    <key>WorkingDirectory</key><string>$datadir_xml</string>
+    <key>Nice</key><integer>0</integer>
+    <key>LowPriorityIO</key><false/>
+</dict>
+</plist>
+EOF
+    if ! plutil -lint "$plist_tmp" >/dev/null; then
+        rm -f -- "$plist_tmp"
+        die "plutil rejected the generated launchd service"
+    fi
+    mv -f -- "$plist_tmp" "$MACOS_PLIST" \
+        || die "could not commit the launchd plist"
+}
+
+macos_switch_current() {
+    local prefix="$1" target="$2" root="$prefix/lib/z23"
+    atomic_relative_link "$target" "$root/current"
+}
+
+macos_launchd_start_and_qualify() {
+    local prefix="$1" datadir="$2" domain service pid running_path
+    local expected_digest running_digest timeout_ms heartbeat_ms
+    domain="gui/$(id -u)"
+    service="$domain/org.z23.zclassic"
+    timeout_ms="${Z23_LAUNCHD_READY_TIMEOUT_MS:-120000}"
+    heartbeat_ms="${Z23_LAUNCHD_READY_HEARTBEAT_MS:-250}"
+    command -v launchctl >/dev/null 2>&1 || return 1
+    command -v lsof >/dev/null 2>&1 || return 1
+
+    if launchctl print "$service" >/dev/null 2>&1; then
+        launchctl bootout "$service" >/dev/null || return 1
+    fi
+    launchctl bootstrap "$domain" "$MACOS_PLIST" >/dev/null || return 1
+    launchctl kickstart -k "$service" >/dev/null || return 1
+    "$prefix/bin/z23" core node bootwait -datadir="$datadir" \
+        --timeout_ms="$timeout_ms" --heartbeat_ms="$heartbeat_ms" \
+        >/dev/null || return 1
+    pid="$(launchctl print "$service" 2>/dev/null |
+        awk '$1 == "pid" && $2 == "=" {print $3; exit}')"
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    running_path="$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null |
+        sed -n 's/^n//p' | head -1)"
+    [ -n "$running_path" ] && [ -f "$running_path" ] || return 1
+    expected_digest="$(sha256_file "$MACOS_GENERATION/z23")"
+    running_digest="$(sha256_file "$running_path")"
+    [ "$running_digest" = "$expected_digest" ] || return 1
+}
+
+macos_restore_previous() {
+    local prefix="$1" domain service root="$prefix/lib/z23"
+    domain="gui/$(id -u)"
+    service="$domain/org.z23.zclassic"
+    launchctl bootout "$service" >/dev/null 2>&1 || true
+    if [ -n "$MACOS_PREVIOUS_TARGET" ]; then
+        macos_switch_current "$prefix" "$MACOS_PREVIOUS_TARGET" || return 1
+        launchctl bootstrap "$domain" "$MACOS_PLIST" >/dev/null || return 1
+        launchctl kickstart -k "$service" >/dev/null || return 1
+    else
+        rm -f -- "$root/current" "$MACOS_PLIST"
+    fi
+}
+
+macos_abort_pending_activation() {
+    [ "$MACOS_ACTIVATION_PENDING" -eq 1 ] || return 0
+    MACOS_ACTIVATION_PENDING=0
+    macos_restore_previous "$MACOS_ACTIVE_PREFIX"
+}
+
+macos_activation_signal() {
+    local status="$1"
+    macos_abort_pending_activation || true
+    exit "$status"
+}
+
+activate_macos_generation() {
+    local prefix="$1" datadir="$2" root="$prefix/lib/z23"
+    MACOS_PREVIOUS_TARGET=""
+    if [ -L "$root/current" ]; then
+        MACOS_PREVIOUS_TARGET="$(readlink "$root/current")"
+    elif [ -e "$root/current" ]; then
+        die "macOS current generation is not a symbolic link"
+    fi
+
+    write_launchd_plist "$prefix" "$datadir" \
+        "${Z23_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}"
+    if [ -n "$MACOS_PREVIOUS_TARGET" ]; then
+        atomic_relative_link "$MACOS_PREVIOUS_TARGET" "$root/last-good" \
+            || die "could not preserve the last-good macOS generation"
+    fi
+    macos_switch_current "$prefix" "generations/$MACOS_GENERATION_ID" \
+        || die "could not activate the candidate macOS generation"
+    MACOS_ACTIVE_PREFIX="$prefix"
+    MACOS_ACTIVATION_PENDING=1
+    trap 'macos_abort_pending_activation' EXIT
+    trap 'macos_activation_signal 129' HUP
+    trap 'macos_activation_signal 130' INT
+    trap 'macos_activation_signal 143' TERM
+
+    if macos_launchd_start_and_qualify "$prefix" "$datadir"; then
+        if [ -z "$MACOS_PREVIOUS_TARGET" ]; then
+            atomic_relative_link "generations/$MACOS_GENERATION_ID" \
+                "$root/last-good" \
+                || die "could not record the first last-good macOS generation"
+        fi
+        MACOS_ACTIVATION_PENDING=0
+        trap - EXIT HUP INT TERM
+        return 0
+    fi
+
+    say "candidate macOS generation failed launchd readiness or running-image qualification; rolling back"
+    MACOS_ACTIVATION_PENDING=0
+    macos_restore_previous "$prefix" \
+        || die "candidate failed and the previous macOS generation could not be restored"
+    trap - EXIT HUP INT TERM
+    die "candidate macOS generation was rolled back"
+}
+
+activate_macos_generation_without_service() {
+    local prefix="$1" root="$prefix/lib/z23" previous=""
+    if [ -L "$root/current" ]; then
+        previous="$(readlink "$root/current")"
+    elif [ -e "$root/current" ]; then
+        die "macOS current generation is not a symbolic link"
+    fi
+    if [ -n "$previous" ]; then
+        atomic_relative_link "$previous" "$root/last-good" \
+            || die "could not preserve the last-good macOS generation"
+    fi
+    macos_switch_current "$prefix" "generations/$MACOS_GENERATION_ID" \
+        || die "could not select the installed macOS generation"
+    if [ -z "$previous" ]; then
+        atomic_relative_link "generations/$MACOS_GENERATION_ID" \
+            "$root/last-good" \
+            || die "could not record the first last-good macOS generation"
+    fi
 }
 
 write_unit() {
@@ -467,11 +760,24 @@ install_from_source() {
     trap 'exit 143' TERM
     fetch_into "$src" "$INSTALL_STAGE" "$expected_manifest_sha256"
     verify_strict "$INSTALL_STAGE"
-    install_payload "$INSTALL_STAGE" "$prefix"
+    local install_platform
+    install_platform="${Z23_INSTALL_TEST_PLATFORM:-$(uname -s)}"
+    if [ "$install_platform" = Darwin ]; then
+        install_payload_macos_generation "$INSTALL_STAGE" "$prefix"
+    else
+        install_payload "$INSTALL_STAGE" "$prefix"
+    fi
     cleanup_install_stage
     trap - EXIT HUP INT TERM
-    if [ "${Z23_SKIP_SYSTEMD:-0}" != "1" ]; then
-        write_unit "$prefix" "$unit_dir"
+    if [ "$install_platform" = Darwin ]; then
+        if [ "${Z23_SKIP_SYSTEMD:-0}" != "1" ]; then
+            activate_macos_generation "$prefix" \
+                "${Z23_DATADIR:-$HOME/.zclassic-c23}"
+        else
+            activate_macos_generation_without_service "$prefix"
+        fi
+    elif [ "${Z23_SKIP_SYSTEMD:-0}" != "1" ]; then
+            write_unit "$prefix" "$unit_dir"
     fi
     say "installed $prefix/bin/z23"
     printf '%s\n' "$NEXT_COMMAND"
@@ -490,11 +796,14 @@ selftest_prepare() {
     local tmp
     tmp="$(mktemp -d /tmp/zcl-install-z23-selftest.XXXXXX)" || die "mktemp failed"
     SELFTEST_TMP="$tmp"
-    trap 'rm -rf "$SELFTEST_TMP"' EXIT
+    trap 'chmod -R u+w "$SELFTEST_TMP" 2>/dev/null || true; rm -rf "$SELFTEST_TMP"' EXIT
 
     mkdir -p "$tmp/good" "$tmp/bad" "$tmp/prefix" "$tmp/units" \
         "$tmp/stages"
     export TMPDIR="$tmp/stages"
+    # The generic installer contract below remains the Linux/systemd shape.
+    # A separate lifecycle proof exercises Darwin generations and launchd.
+    export Z23_INSTALL_TEST_PLATFORM=Linux
 
     # A release is five names, and z23/zclassic23 are the same bytes.
     printf 'payload-a\n' >"$tmp/good/z23"
@@ -1149,6 +1458,166 @@ selftest_local_manifest_refusals() {
         || die "selftest: a negative install path leaked its staging directory"
 }
 
+selftest_macos_transaction() {
+    local tmp="$SELFTEST_TMP" mac="$SELFTEST_TMP/macos"
+    local prefix="$mac/prefix & native" launchd="$mac/LaunchAgents"
+    local datadir="$mac/data & chain" mock="$mac/mockbin" rc out
+    local v1_id v2_id current_target last_good_target
+    mkdir -p "$mac/v1" "$mac/v2" "$mock" "$launchd" "$datadir"
+
+    # This host normally has Homebrew sha256sum, which would otherwise hide
+    # the stock-mac path forever. Constrain PATH to shasum + its parser and
+    # prove both the one-file digest and manifest checker without GNU tools.
+    mkdir -p "$mac/hashbin"
+
+    cat >"$mac/v1/z23" <<'EOF'
+#!/usr/bin/env bash
+[ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ]
+EOF
+    cat >"$mac/v2/z23" <<'EOF'
+#!/usr/bin/env bash
+# Distinct candidate bytes: readiness stays the same, identity does not.
+[ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ]
+EOF
+    chmod 755 "$mac/v1/z23" "$mac/v2/z23"
+    local version
+    for version in v1 v2; do
+        ln -f -- "$mac/$version/z23" "$mac/$version/zclassic23"
+        printf '%s verifier\n' "$version" >"$mac/$version/zclassic23-package-verify"
+        printf '%s acme\n' "$version" >"$mac/$version/zclassic23-acme"
+        printf '# %s agent card\n' "$version" >"$mac/$version/AGENT_CARD.md"
+        chmod 755 "$mac/$version/zclassic23-package-verify" \
+            "$mac/$version/zclassic23-acme"
+        (cd "$mac/$version" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    done
+    v1_id="$(sha256_file "$mac/v1/SHA256SUMS")"
+    v2_id="$(sha256_file "$mac/v2/SHA256SUMS")"
+    if command -v shasum >/dev/null 2>&1; then
+        ln -s "$(command -v shasum)" "$mac/hashbin/shasum"
+        ln -s "$(command -v awk)" "$mac/hashbin/awk"
+        ln -s "$(command -v dirname)" "$mac/hashbin/dirname"
+        ln -s "$(command -v basename)" "$mac/hashbin/basename"
+        [ "$(PATH="$mac/hashbin" sha256_file "$mac/v1/SHA256SUMS")" = "$v1_id" ] \
+            || die "selftest: stock macOS shasum digest path drifted"
+        PATH="$mac/hashbin" sha256_check_manifest "$mac/v1/SHA256SUMS" >/dev/null \
+            || die "selftest: stock macOS shasum manifest check failed"
+    elif [ "$(uname -s)" = Darwin ]; then
+        die "selftest: stock macOS shasum is unavailable"
+    else
+        say "selftest: shasum fallback UNOBSERVED on this non-Darwin host"
+    fi
+
+    cat >"$mock/plutil" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = -lint ] && [ -s "$2" ]
+EOF
+    cat >"$mock/launchctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$Z23_INSTALL_TEST_LAUNCHCTL_LOG"
+case "$1" in
+    print)
+        [ -e "$Z23_INSTALL_TEST_LAUNCHD_STATE" ] || exit 3
+        printf '    pid = 4242\n'
+        ;;
+    bootout) rm -f -- "$Z23_INSTALL_TEST_LAUNCHD_STATE" ;;
+    bootstrap) : >"$Z23_INSTALL_TEST_LAUNCHD_STATE" ;;
+    kickstart) [ -e "$Z23_INSTALL_TEST_LAUNCHD_STATE" ] ;;
+    *) exit 2 ;;
+esac
+EOF
+    cat >"$mock/lsof" <<'EOF'
+#!/usr/bin/env bash
+root="$Z23_INSTALL_PREFIX/lib/z23"
+if [ "${Z23_INSTALL_TEST_WRONG_IMAGE:-0}" = 1 ]; then
+    target="$(readlink "$root/last-good")"
+else
+    target="$(readlink "$root/current")"
+fi
+printf 'p4242\nn%s/%s/z23\n' "$root" "$target"
+EOF
+    chmod 755 "$mock/plutil" "$mock/launchctl" "$mock/lsof"
+    : >"$mac/launchctl.log"
+
+    out="$(PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
+        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
+        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
+        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v1" \
+        2>"$mac/v1.err")" || die "selftest: first macOS generation failed"
+    [ "$out" = "$NEXT_COMMAND" ] \
+        || die "selftest: macOS install did not print one next command"
+    current_target="$(readlink "$prefix/lib/z23/current")"
+    last_good_target="$(readlink "$prefix/lib/z23/last-good")"
+    [ "$current_target" = "generations/$v1_id" ] \
+        || die "selftest: first macOS generation is not current"
+    [ "$last_good_target" = "$current_target" ] \
+        || die "selftest: first macOS generation is not last-good"
+    [ -L "$prefix/bin/z23" ] && [ -x "$prefix/bin/z23" ] \
+        || die "selftest: stable macOS z23 name does not resolve to its generation"
+    [ -f "$launchd/org.z23.zclassic.plist" ] \
+        || die "selftest: macOS install did not commit a launchd plist"
+    grep -q '&amp; native/bin/z23' "$launchd/org.z23.zclassic.plist" \
+        || die "selftest: launchd binary path was not XML escaped"
+    grep -q -- '-tor' "$launchd/org.z23.zclassic.plist" \
+        || die "selftest: launchd node does not enable embedded Tor"
+    if [ "$(uname -s)" = Darwin ]; then
+        /usr/bin/plutil -lint "$launchd/org.z23.zclassic.plist" >/dev/null \
+            || die "selftest: Apple's plutil rejected the launchd plist"
+    fi
+
+    # Readiness can succeed while launchd is still running other bytes. The
+    # exact txt-vnode digest must catch that and restore v1 automatically.
+    rc=0
+    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
+        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
+        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+        Z23_INSTALL_TEST_WRONG_IMAGE=1 \
+        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
+        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+        >/dev/null 2>"$mac/wrong-image.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: wrong running Mac image must refuse"
+    grep -q 'was rolled back' "$mac/wrong-image.err" \
+        || die "selftest: wrong running Mac image did not name rollback: $(tr '\n' ';' <"$mac/wrong-image.err")"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
+        || die "selftest: wrong running Mac image did not restore v1"
+
+    # A typed bootwait failure is the other rollback edge.
+    rc=0
+    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
+        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
+        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+        Z23_INSTALL_TEST_READY_FAIL=1 \
+        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
+        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+        >/dev/null 2>"$mac/not-ready.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: unready Mac generation must refuse"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
+        || die "selftest: unready Mac generation did not restore v1"
+
+    out="$(PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
+        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
+        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
+        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+        2>"$mac/v2.err")" || die "selftest: ready macOS upgrade failed"
+    [ "$out" = "$NEXT_COMMAND" ] \
+        || die "selftest: macOS upgrade did not print one next command"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v2_id" ] \
+        || die "selftest: ready Mac upgrade did not activate v2"
+    [ "$(readlink "$prefix/lib/z23/last-good")" = "generations/$v1_id" ] \
+        || die "selftest: ready Mac upgrade did not retain v1 as last-good"
+    grep -q '^bootstrap gui/' "$mac/launchctl.log" \
+        || die "selftest: macOS lifecycle did not use launchctl bootstrap"
+    grep -q '^bootout gui/' "$mac/launchctl.log" \
+        || die "selftest: macOS lifecycle did not use launchctl bootout"
+    grep -q '^kickstart -k gui/' "$mac/launchctl.log" \
+        || die "selftest: macOS lifecycle did not use launchctl kickstart"
+}
+
 selftest() {
     selftest_prepare
     selftest_prepare_curl_mock
@@ -1161,10 +1630,12 @@ selftest() {
     selftest_local_success
     selftest_local_manifest_refusals
     selftest_release_pin
+    selftest_macos_transaction
     selftest_front_door
 
     say "selftest PASS"
     trap - EXIT
+    chmod -R u+w "$SELFTEST_TMP" 2>/dev/null || true
     rm -rf "$SELFTEST_TMP"
     SELFTEST_TMP=""
 }

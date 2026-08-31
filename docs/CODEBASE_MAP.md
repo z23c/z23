@@ -172,7 +172,7 @@ never varied).
 
 ### Reusable C23 packages — `packages/`
 
-The 76 Commons packages (`zhex`, `zbuf`, `zjson`, …), one directory per
+The Commons packages (`zhex`, `zbuf`, `zjson`, …), one directory per
 component: `zcode-package.json` manifest, `LICENSE`, `README.md`, one
 namespaced public header `include/<pkg>/<pkg>.h`, primary TU `src/<pkg>.c`,
 `tests/`. They are NOT compiled into the node by the Makefile (only the
@@ -206,7 +206,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1050
+test_groups: 1055
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52

@@ -7,11 +7,12 @@
 # bytes and consume no GitHub-hosted compute minutes.
 #
 # Format:
-# item|self_hosted|job_key|display_name|attested_by
+# item|hosted|job_key|display_name|attested_by
 #
-# `self_hosted=yes` requires a real job in .github/workflows/build.yml and `-`
-# as attested_by. Every workflow job must be represented here. Environment-
-# dependent skips remain explicit gaps in each suite receipt.
+# `hosted=yes` means the named job exists in .github/workflows/build.yml and
+# executes on a repository-managed self-hosted runner. Every workflow job is
+# represented here. Environment-dependent gaps remain explicit in the suite
+# receipt; a green workflow proves only its named observation.
 
 gcc|yes|compile-check|compile-check (gcc)|-
 clang|yes|compile-check|compile-check (clang)|-

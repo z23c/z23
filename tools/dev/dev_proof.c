@@ -104,6 +104,119 @@ const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
     return "invalid";
 }
 
+static size_t cycle_key_count(const struct json_value *cycle, const char *key,
+                              const struct json_value **value)
+{
+    size_t count = 0;
+    if (value) *value = NULL;
+    if (!cycle || cycle->type != JSON_OBJ || !key) return 0;
+    for (size_t i = 0; i < cycle->num_children; i++) {
+        if (!cycle->keys[i] || strcmp(cycle->keys[i], key) != 0) continue;
+        if (count == 0 && value) *value = &cycle->children[i];
+        count++;
+    }
+    return count;
+}
+
+static bool cycle_field_text_once(const struct json_value *cycle,
+                                  const char *key, const char *expected)
+{
+    const struct json_value *value = NULL;
+    return expected && cycle_key_count(cycle, key, &value) == 1 &&
+           value->type == JSON_STR &&
+           strcmp(json_get_str(value), expected) == 0;
+}
+
+static bool cycle_field_true_once(const struct json_value *cycle,
+                                  const char *key)
+{
+    const struct json_value *value = NULL;
+    return cycle_key_count(cycle, key, &value) == 1 &&
+           value->type == JSON_BOOL && json_get_bool(value);
+}
+
+static bool cycle_root_nonzero(const uint8_t root[ZCL_DEV_PROOF_ROOT_BYTES])
+{
+    uint8_t any = 0;
+    if (!root) return false;
+    for (size_t i = 0; i < ZCL_DEV_PROOF_ROOT_BYTES; i++) any |= root[i];
+    return any != 0;
+}
+
+static const char *cycle_dimension_root_key(size_t id)
+{
+    static const char *const keys[ZCL_DEV_PROOF_DIMENSIONS] = {
+        "proof_generated_root_sha3",
+        "proof_compile_root_sha3",
+        "proof_lint_root_sha3",
+        "proof_test_root_sha3",
+    };
+    return id < ZCL_DEV_PROOF_DIMENSIONS ? keys[id] : NULL;
+}
+
+static bool cycle_dimension_roots_exact(
+    const struct json_value *cycle,
+    const struct zcl_dev_proof_dimension
+        dimensions[ZCL_DEV_PROOF_DIMENSIONS])
+{
+    if (!dimensions) return false;
+    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
+        const char *key = cycle_dimension_root_key(i);
+        size_t count = cycle_key_count(cycle, key, NULL);
+        if (dimensions[i].selected == 0) {
+            if (count != 0 || cycle_root_nonzero(dimensions[i].receipt_root))
+                return false;
+            continue;
+        }
+        if (count != 1 ||
+            !cycle_root_nonzero(dimensions[i].receipt_root))
+            return false;
+        char expected[ZCL_DEV_PROOF_ROOT_BYTES * 2u + 1u];
+        zcl_hex_encode(dimensions[i].receipt_root,
+                       ZCL_DEV_PROOF_ROOT_BYTES, expected);
+        if (!cycle_field_text_once(cycle, key, expected)) return false;
+        for (size_t prior = 0; prior < i; prior++) {
+            if (dimensions[prior].selected != 0 &&
+                memcmp(dimensions[prior].receipt_root,
+                       dimensions[i].receipt_root,
+                       ZCL_DEV_PROOF_ROOT_BYTES) == 0)
+                return false;
+        }
+    }
+    return true;
+}
+
+bool zcl_dev_proof_cycle_reuse_admissible(
+    const char *body, size_t body_len, const char *source_cas,
+    const char *proof_inputs_sha3,
+    const struct zcl_dev_proof_dimension
+        dimensions[ZCL_DEV_PROOF_DIMENSIONS])
+{
+    uint8_t root[32];
+    struct json_value cycle = {0};
+    if (!body || body_len == 0 || !source_cas || !proof_inputs_sha3 ||
+        !dimensions ||
+        !zcl_hex_decode_lower(source_cas, root, sizeof(root)) ||
+        !zcl_hex_decode_lower(proof_inputs_sha3, root, sizeof(root)) ||
+        !json_read(&cycle, body, body_len) || cycle.type != JSON_OBJ) {
+        json_free(&cycle);
+        return false;
+    }
+    bool admitted =
+        cycle_field_true_once(&cycle, "proof_complete") &&
+        cycle_field_text_once(&cycle, "schema", "zcl.dev_cycle.v1") &&
+        cycle_field_text_once(&cycle, "status", "passed") &&
+        cycle_field_text_once(&cycle, "phase", "verify") &&
+        cycle_field_text_once(&cycle, "proof_scope",
+                              "source_wide_compile_tests_lint_fast") &&
+        cycle_field_text_once(&cycle, "source_cas_sha3", source_cas) &&
+        cycle_field_text_once(&cycle, "proof_inputs_sha3",
+                              proof_inputs_sha3) &&
+        cycle_dimension_roots_exact(&cycle, dimensions);
+    json_free(&cycle);
+    return admitted;
+}
+
 #if defined(_WIN32)
 
 /* The proof worker currently depends on fork/setsid, descriptor inheritance,
@@ -1266,14 +1379,6 @@ static void unused_dimension(enum zcl_dev_proof_dimension_id id,
               dim->receipt_root);
 }
 
-static bool cycle_field_text(const struct json_value *cycle, const char *key,
-                             const char *expected)
-{
-    const struct json_value *value = json_get(cycle, key);
-    return value && value->type == JSON_STR && expected &&
-           strcmp(json_get_str(value), expected) == 0;
-}
-
 static bool cycle_proof_reuse(
     const struct proof_paths *paths, const char *source_cas,
     struct zcl_dev_proof_dimension dimensions[ZCL_DEV_PROOF_DIMENSIONS])
@@ -1283,25 +1388,15 @@ static bool cycle_proof_reuse(
     enum zcl_devloop_state_lookup lookup = zcl_devloop_cycle_state_read(
         paths->root, body, sizeof(body), &body_len, NULL, why, sizeof(why));
     if (lookup != ZCL_DEVLOOP_STATE_FOUND) return false;
-    struct json_value cycle = {0};
-    if (!json_read(&cycle, body, body_len) || cycle.type != JSON_OBJ) {
-        json_free(&cycle);
+    /* Legacy cycle records bind source bytes but not the full proof action
+     * inputs or dimension-specific child roots. Until the producer and
+     * consumer independently derive all of them, a cycle is a safe cache miss
+     * rather than authority for child receipts. */
+    if (!zcl_dev_proof_cycle_reuse_admissible(
+            body, body_len, source_cas, NULL, dimensions))
         return false;
-    }
-    const struct json_value *complete = json_get(&cycle, "proof_complete");
-    bool admitted = complete && complete->type == JSON_BOOL &&
-        json_get_bool(complete) && cycle_field_text(&cycle, "status", "passed") &&
-        cycle_field_text(&cycle, "phase", "verify") &&
-        cycle_field_text(&cycle, "proof_scope",
-                         "source_wide_compile_tests_lint_fast") &&
-        cycle_field_text(&cycle, "source_cas_sha3", source_cas);
-    json_free(&cycle);
-    if (!admitted) return false;
-    uint8_t root[ZCL_DEV_PROOF_ROOT_BYTES];
-    hash_text("zcl.dev_proof_cycle_child.v1", body, body_len, root);
     for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
         if (dimensions[i].selected) {
-            memcpy(dimensions[i].receipt_root, root, sizeof(root));
             dimensions[i].reused = dimensions[i].selected;
         } else {
             unused_dimension((enum zcl_dev_proof_dimension_id)i,

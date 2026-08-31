@@ -7,8 +7,8 @@
  * objects: a reader should be able to hold the whole program in mind.
  */
 
-#ifndef BALL_BALL_H
-#define BALL_BALL_H
+#ifndef BALL_H
+#define BALL_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,4 +61,4 @@ uint64_t ball_canvas_digest(const struct ball_canvas *canvas);
 }
 #endif
 
-#endif /* BALL_BALL_H */
+#endif /* BALL_H */

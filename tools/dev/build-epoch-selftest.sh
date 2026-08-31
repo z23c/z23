@@ -16,6 +16,9 @@ OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"
 SESSION_TOOL="$SELF_DIR/build-epoch-session.sh"
 CC_COMMAND="${CC:-cc}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch-selftest.XXXXXX")"
+# Darwin exposes /var as a compatibility symlink to /private/var.  Exercise
+# the production no-symlink path contract through the physical temp path.
+WORK="$(cd "$WORK" && pwd -P)"
 CHILD_PIDS=()
 
 cleanup()

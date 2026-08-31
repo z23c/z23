@@ -718,6 +718,18 @@ int test_testcache(void)
     TC_CHECK("the onion bootstrap window prints UNOBSERVED, never SKIP",
              file_contains("lib/test/src/test_onion_bootstrap.c",
                            "UNOBSERVED (tor bootstrap did not complete"));
+    TC_CHECK("params-gated simnet legs report UNOBSERVED, never SKIP",
+             file_contains(
+                 "lib/test/src/test_simnet_sapling_shielded_send.c",
+                 "UNOBSERVED (params-gated shielded legs)") &&
+             file_contains(
+                 "lib/test/src/test_simnet_shielded_wallet_e2e.c",
+                 "UNOBSERVED (~/.zcash-params absent") &&
+             file_contains("lib/test/src/test_simnet_zmsg_onchain.c",
+                           "UNOBSERVED (real-prover leg)") &&
+             file_contains("lib/test/src/test_shielded_payment_gate.c",
+                           "UNOBSERVED (ZCL_STRESS_TESTS=1 but Sapling "
+                           "params absent"));
     TC_CHECK("pre-push accepts an unobserved leg but still refuses a skip",
              file_contains("tools/agent_fast_ci.sh",
                            "rejected an environment-unobserved leg") &&

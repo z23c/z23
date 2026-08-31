@@ -192,6 +192,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "lib/zdir") == 0) return "ZCL Directory (ZDIR) on-chain node directory overlay — .onion peer discovery folded from block history";
     if (strcmp(group, "lib/zid") == 0) return "sovereign identity Phase 1: signed identity documents + blinded record keys (ed25519/SHA3, pure codec)";
     if (strcmp(group, "lib/codeindex") == 0) return "the in-binary source-code navigator index: scan, store, query, the `code` CLI";
+    if (strcmp(group, "lib/ontology") == 0) return "canonical source-universe, contextual predicate-calculus objects, and bounded paraconsistent inference";
     if (strcmp(group, "lib/retrieval") == 0) return "BM25 ranked retrieval over an in-memory corpus: an inverted index that answers \"which records are about this?\" in rank order rather than in match order";
     if (strcmp(group, "lib/chainlog") == 0) return "a durable append-only log whose every frame is SHA3-linked to the one before it, so an edit anywhere shows up as a named first bad sequence number";
     if (strcmp(group, "lib/science") == 0) return "the claim register for what makes a model write good C23: a claim is refused unless it names the metric, direction, effect floor and sample floor that could show it wrong, and status is derived from recorded trials rather than set";

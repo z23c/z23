@@ -119,7 +119,8 @@ esac
 # the depfile race this contract exists to prevent.
 assert_build_and_run_locked()
 {
-    local public="$1" inner="$2" header block inner_header
+    local public="$1" inner="$2" required="${3:-dev-package-verifier-ensure}"
+    local header block inner_header
     header="$(awk -v target="$public" '$0 == target ":" { print; exit }' \
         "$MAKEFILE")"
     [ "$header" = "$public:" ] ||
@@ -134,8 +135,8 @@ assert_build_and_run_locked()
     inner_header="$(awk -v target="$inner" \
         'index($0, target ":") == 1 { print; exit }' "$MAKEFILE")"
     case "$inner_header" in
-        "$inner:"*'dev-package-verifier-ensure'*) ;;
-        *) fail "$inner does not own the test binary prerequisites" ;;
+        "$inner:"*"$required"*) ;;
+        *) fail "$inner does not own required prerequisite $required" ;;
     esac
 }
 
@@ -146,6 +147,7 @@ assert_build_and_run_locked t t-locked
 assert_build_and_run_locked t-fast t-fast-locked
 assert_build_and_run_locked t-fast-exact t-fast-exact-locked
 assert_build_and_run_locked test test-locked
+assert_build_and_run_locked test-full test-full-locked test_zcl
 assert_build_and_run_locked secure-release-regressions \
     secure-release-regressions-locked
 

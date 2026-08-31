@@ -199,6 +199,16 @@ bool os_proc_io_bytes(uint64_t *out)
         return false;
     *out = counters.ReadTransferCount + counters.WriteTransferCount;
     return true;
+#elif defined(__APPLE__)
+    struct rusage_info_v2 usage;
+    memset(&usage, 0, sizeof(usage));
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V2,
+                        (rusage_info_t *)&usage) != 0 ||
+        UINT64_MAX - usage.ri_diskio_bytesread <
+            usage.ri_diskio_byteswritten)
+        return false;
+    *out = usage.ri_diskio_bytesread + usage.ri_diskio_byteswritten;
+    return true;
 #else
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage) != 0) return false;

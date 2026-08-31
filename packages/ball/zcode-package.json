@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "name": "ball/ball",
+  "semver": "0.1.0",
+  "language": "c23",
+  "license": "Apache-2.0",
+  "include_dir": "include",
+  "source_dir": "src",
+  "dependencies": [],
+  "files": [
+    "LICENSE",
+    "README.md",
+    "app/main.c",
+    "include/ball/ball.h",
+    "src/ball.c",
+    "tests/test_ball.c",
+    "zcode-package.json"
+  ]
+}

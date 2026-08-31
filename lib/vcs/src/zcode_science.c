@@ -119,6 +119,16 @@ const char *vcs_zcode_science_error_string(enum vcs_zcode_science_error error)
     case VCS_ZCODE_SCIENCE_ERR_METHOD_MISMATCH: return "method-root-mismatch";
     case VCS_ZCODE_SCIENCE_ERR_HARDWARE_MISMATCH:
         return "hardware-profile-root-mismatch";
+    case VCS_ZCODE_SCIENCE_ERR_PROFILE: return "science-profile-invalid";
+    case VCS_ZCODE_SCIENCE_ERR_RIGHTS: return "rights-vocabulary-invalid";
+    case VCS_ZCODE_SCIENCE_ERR_AUTHORSHIP: return "authorship-invalid";
+    case VCS_ZCODE_SCIENCE_ERR_EMBARGO: return "embargo-time-invalid";
+    case VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE:
+        return "science-relation-type-invalid";
+    case VCS_ZCODE_SCIENCE_ERR_RELATION_ORDER:
+        return "science-relation-order-invalid";
+    case VCS_ZCODE_SCIENCE_ERR_RELATION_MISMATCH:
+        return "science-relation-root-mismatch";
     }
     return "unknown";
 }

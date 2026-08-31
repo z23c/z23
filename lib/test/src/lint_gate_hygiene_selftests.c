@@ -1064,6 +1064,86 @@ int t_lint_gate_wiring_gate(void)
     return failures;
 }
 
+/* All three lint umbrellas execute the same run_lint.sh gate catalog. Their
+ * built tools therefore belong to one shared prerequisite set: otherwise a
+ * cold cached/audit invocation can reach a gate before its helper exists.
+ * Grade the real Makefile and two in-memory mutations so this check proves
+ * both the helper-membership and exact-target-set directions. */
+static const char *make_logical_line_end(const char *start)
+{
+    const char *line = start;
+    for (;;) {
+        const char *newline = strchr(line, '\n');
+        if (!newline || newline == line || newline[-1] != '\\') return newline;
+        line = newline + 1;
+    }
+}
+
+static bool range_contains(const char *start, const char *end,
+                           const char *needle)
+{
+    const char *found = strstr(start, needle);
+    return found != NULL && (end == NULL || found < end);
+}
+
+static bool lint_built_prereqs_contract(const char *makefile)
+{
+    if (!makefile) return false;
+    const char *assignment = strstr(makefile, "\nLINT_BUILT_PREREQS =");
+    if (!assignment) return false;
+    assignment++;
+    const char *assignment_end = make_logical_line_end(assignment);
+    if (!range_contains(assignment, assignment_end, "$(EQUIHASH_FACT_TOOL)"))
+        return false;
+
+    const char *targets =
+        strstr(makefile, "\nlint lint-cached lint-cold-audit:");
+    if (!targets) return false;
+    targets++;
+    const char *targets_end = make_logical_line_end(targets);
+    return range_contains(targets, targets_end, "$(LINT_BUILT_PREREQS)");
+}
+
+int t_lint_umbrellas_share_built_prereqs(void)
+{
+    int failures = 0;
+    char path[PATH_MAX];
+    char *makefile = NULL;
+    int read_ok = repo_path(path, sizeof(path), "Makefile") == 0 &&
+                  read_entire_file(path, &makefile) == 0;
+    int baseline_ok = read_ok && lint_built_prereqs_contract(makefile);
+
+    char *missing_helper = read_ok ? strdup(makefile) : NULL;
+    char *assignment = missing_helper
+        ? strstr(missing_helper, "\nLINT_BUILT_PREREQS =") : NULL;
+    char *helper = assignment
+        ? strstr(assignment, "$(EQUIHASH_FACT_TOOL)") : NULL;
+    if (helper) helper[0] = '!';
+    int helper_mutation_trips = helper != NULL &&
+        !lint_built_prereqs_contract(missing_helper);
+
+    char *missing_target = read_ok ? strdup(makefile) : NULL;
+    char *targets = missing_target
+        ? strstr(missing_target, "\nlint lint-cached lint-cold-audit:") : NULL;
+    char *cold = targets ? strstr(targets, "lint-cold-audit") : NULL;
+    if (cold) cold[0] = 'L';
+    int target_mutation_trips = cold != NULL &&
+        !lint_built_prereqs_contract(missing_target);
+
+    TEST("[lint-gate] lint umbrellas share every built prerequisite; helper "
+         "and target-removal mutations trip") {
+        ASSERT(read_ok);
+        ASSERT(baseline_ok);
+        ASSERT(helper_mutation_trips);
+        ASSERT(target_mutation_trips);
+        PASS();
+    } _test_next:;
+    free(makefile);
+    free(missing_helper);
+    free(missing_target);
+    return failures;
+}
+
 #else  /* !ZCL_TESTING */
 
 /* Without ZCL_TESTING the lint-gate self-tests compile to nothing; this
