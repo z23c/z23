@@ -6,6 +6,7 @@
 #include "ontology/story_graph.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Borrowed strings from one already-reverified zcode.work.status result.
  * This struct is an input boundary, not storage and not a second authority. */
@@ -24,6 +25,16 @@ struct zcl_story_work_facts_v1 {
     const char *action_root;
     const char *work_receipt_root;
     const char *output_root;
+    uint32_t app_run_receipt_count;
+    uint32_t valid_app_run_receipt_count;
+    const char *app_run_receipt_root;
+    const char *app_run_observation_root;
+    const char *app_run_artifact_root;
+    const char *app_run_invocation_root;
+    const char *app_run_action_root;
+    uint16_t app_run_flags;
+    uint8_t app_run_status;
+    int32_t app_run_exit_status;
     const char *lane_receipt_root;
     const char *proof_set_root;
 };

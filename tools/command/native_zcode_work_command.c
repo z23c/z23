@@ -1873,6 +1873,26 @@ void zcl_native_handle_zcode_work_status(
                          entry->latest_work_receipt_hex) &&
         json_push_kv_str(&expert, "output_root",
                          entry->latest_receipt_output_root_hex) &&
+        json_push_kv_int(&expert, "app_run_receipt_count",
+                         (int64_t)entry->app_run_receipt_count) &&
+        json_push_kv_int(&expert, "valid_app_run_receipt_count",
+                         (int64_t)entry->valid_app_run_receipt_count) &&
+        json_push_kv_str(&expert, "app_run_receipt_root",
+                         entry->latest_app_run_receipt_hex) &&
+        json_push_kv_str(&expert, "app_run_observation_root",
+                         entry->latest_app_run_observation_hex) &&
+        json_push_kv_str(&expert, "app_run_artifact_root",
+                         entry->latest_app_run_artifact_root_hex) &&
+        json_push_kv_str(&expert, "app_run_invocation_root",
+                         entry->latest_app_run_invocation_root_hex) &&
+        json_push_kv_str(&expert, "app_run_action_root",
+                         entry->latest_app_run_action_root_hex) &&
+        json_push_kv_int(&expert, "app_run_flags",
+                         (int64_t)entry->latest_app_run_flags) &&
+        json_push_kv_int(&expert, "app_run_status",
+                         (int64_t)entry->latest_app_run_status) &&
+        json_push_kv_int(&expert, "app_run_exit_status",
+                         (int64_t)entry->latest_app_run_exit_status) &&
         json_push_kv_str(&expert, "lane_receipt_root",
                          entry->latest_lane_receipt_hex) &&
         json_push_kv_str(&expert, "proof_set_root",

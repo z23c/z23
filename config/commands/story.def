@@ -9,9 +9,11 @@ ZCL_COMMAND_READY_READ(
     "story.show", "story", "",
     "Show one development work item as an exact-root causal story",
     "A bounded read-only projection of the canonical ZCODE task, context, "
-    "candidate, work receipt, proof set, and acceptance lane. Every relation "
-    "carries exact roots and ontology status; absent application-run evidence "
-    "is UNKNOWN, never inferred from a build or test.", ZCL_COMMAND_LIST_BUDGET,
+    "candidate, work receipt, proof set, and acceptance lane. A nested "
+    "app-run observation must join an earlier passing build receipt under "
+    "the same task and candidate before app_runs can be PROVED. Missing or "
+    "broken evidence stays UNKNOWN or INCOMPLETE and is never inferred from "
+    "a build or test.", ZCL_COMMAND_LIST_BUDGET,
     "story,graph,development,evidence,causal,ontology,zcode",
     "zcl.story_show.input.v1", "zcl.story_show.v1",
     "workspace,work,datadir", "work",

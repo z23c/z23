@@ -6,6 +6,8 @@
 #include "command/native_command.h"
 #include "json/json.h"
 #include "sha3/sha3.h"
+#include "vcs/zcode_app_run_observation.h"
+#include "vcs/zcode_dev.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -93,6 +95,8 @@ bool zcl_story_graph_from_work_facts(
     uint8_t task[32], source[32], goal[32], agent_context[32];
     uint8_t candidate[32], candidate_source[32], patch[32], action[32];
     uint8_t receipt[32], output[32], lane[32], proof_set[32];
+    uint8_t app_receipt[32], app_observation[32], app_artifact[32];
+    uint8_t app_invocation[32], app_action[32];
     if (!story_decode(facts->task_root, task) ||
         !story_decode(facts->source_root, source) ||
         !story_decode(facts->goal_root, goal))
@@ -105,6 +109,16 @@ bool zcl_story_graph_from_work_facts(
     bool have_action = story_decode(facts->action_root, action);
     bool have_receipt = story_decode(facts->work_receipt_root, receipt);
     bool have_output = story_decode(facts->output_root, output);
+    bool have_app_receipt = story_decode(
+        facts->app_run_receipt_root, app_receipt);
+    bool have_app_observation = story_decode(
+        facts->app_run_observation_root, app_observation);
+    bool have_app_artifact = story_decode(
+        facts->app_run_artifact_root, app_artifact);
+    bool have_app_invocation = story_decode(
+        facts->app_run_invocation_root, app_invocation);
+    bool have_app_action = story_decode(
+        facts->app_run_action_root, app_action);
     bool have_lane = story_decode(facts->lane_receipt_root, lane);
     bool have_proof_set = story_decode(facts->proof_set_root, proof_set);
     uint8_t scene[32], relation[32], evidence[32];
@@ -164,16 +178,39 @@ bool zcl_story_graph_from_work_facts(
                      source, task, scene, task, relation, evidence,
                      events[3].event_root);
 
-    story_pick_root(output, candidate_source, scene);
+    story_pick_root(app_artifact, output, scene);
+    story_pick_root(scene, candidate_source, scene);
     story_pick_root(scene, source, scene);
-    story_pick_root(output, action, relation);
+    story_pick_root(app_invocation, app_action, relation);
+    story_pick_root(relation, output, relation);
+    story_pick_root(relation, action, relation);
     story_pick_root(relation, task, relation);
-    /* No canonical ZCODE object currently states that the built application
-     * was executed. Build/test evidence is deliberately not promoted into
-     * that stronger relation. */
+    story_pick_root(app_observation, app_receipt, evidence);
+    story_pick_root(evidence, task, evidence);
+    enum zcl_ontology_status app_status = ZCL_ONTOLOGY_UNKNOWN;
+    bool app_roots_complete = have_app_receipt && have_app_observation &&
+        have_app_artifact && have_app_invocation && have_app_action;
+    bool app_flags_complete =
+        (facts->app_run_flags & VCS_ZCODE_APP_RUN_PROVED_FLAGS) ==
+        VCS_ZCODE_APP_RUN_PROVED_FLAGS;
+    if (facts->app_run_receipt_count > 0) {
+        if (facts->valid_app_run_receipt_count == 0 ||
+            facts->valid_app_run_receipt_count >
+                facts->app_run_receipt_count ||
+            !app_roots_complete)
+            app_status = ZCL_ONTOLOGY_INCOMPLETE;
+        else if (facts->app_run_status == VCS_ZCODE_WORK_PASS &&
+                 facts->app_run_exit_status == 0 && app_flags_complete)
+            app_status = ZCL_ONTOLOGY_PROVED;
+        else if (facts->app_run_status == VCS_ZCODE_WORK_FAIL &&
+                 (facts->app_run_flags & VCS_ZCODE_APP_RUN_LAUNCHED) != 0)
+            app_status = ZCL_ONTOLOGY_DISPROVED;
+        else
+            app_status = ZCL_ONTOLOGY_INCOMPLETE;
+    }
     story_fill_event(&events[5], ZCL_STORY_EVENT_APP_RUNS,
-                     ZCL_ONTOLOGY_UNKNOWN, source, task, scene, task,
-                     relation, task, events[4].event_root);
+                     app_status, source, task, scene, task,
+                     relation, evidence, events[4].event_root);
 
     story_pick_root(lane, proof_set, scene);
     story_pick_root(scene, task, scene);
@@ -215,6 +252,13 @@ static bool story_object_bool(const struct json_value *object,
 {
     const struct json_value *value = object ? json_get(object, key) : NULL;
     return value && value->type == JSON_BOOL && json_get_bool(value);
+}
+
+static int64_t story_object_int(const struct json_value *object,
+                                const char *key)
+{
+    const struct json_value *value = object ? json_get(object, key) : NULL;
+    return value && value->type == JSON_INT ? json_get_int(value) : 0;
 }
 
 static const char *story_status_name(enum zcl_ontology_status status)
@@ -310,6 +354,26 @@ static bool story_load_work(const struct zcl_command_request *request,
         .work_receipt_root = story_object_string(expert,
                                                   "work_receipt_root"),
         .output_root = story_object_string(expert, "output_root"),
+        .app_run_receipt_count = (uint32_t)story_object_int(
+            expert, "app_run_receipt_count"),
+        .valid_app_run_receipt_count = (uint32_t)story_object_int(
+            expert, "valid_app_run_receipt_count"),
+        .app_run_receipt_root = story_object_string(
+            expert, "app_run_receipt_root"),
+        .app_run_observation_root = story_object_string(
+            expert, "app_run_observation_root"),
+        .app_run_artifact_root = story_object_string(
+            expert, "app_run_artifact_root"),
+        .app_run_invocation_root = story_object_string(
+            expert, "app_run_invocation_root"),
+        .app_run_action_root = story_object_string(
+            expert, "app_run_action_root"),
+        .app_run_flags = (uint16_t)story_object_int(
+            expert, "app_run_flags"),
+        .app_run_status = (uint8_t)story_object_int(
+            expert, "app_run_status"),
+        .app_run_exit_status = (int32_t)story_object_int(
+            expert, "app_run_exit_status"),
         .lane_receipt_root = story_object_string(expert,
                                                   "lane_receipt_root"),
         .proof_set_root = story_object_string(expert, "proof_set_root"),
@@ -389,6 +453,13 @@ static bool story_render_show(struct zcl_command_reply *reply,
     bool ok = true;
     for (size_t i = 0; ok && i < loaded->graph.event_count; i++)
         ok = story_push_event(&events, &loaded->events[i], full);
+    bool app_missing = loaded->events[5].status != ZCL_ONTOLOGY_PROVED;
+    const char *app_next = loaded->events[5].status ==
+            ZCL_ONTOLOGY_INCOMPLETE
+        ? "restore or repair the nested app-run observation and its exact build-receipt binding"
+        : loaded->events[5].status == ZCL_ONTOLOGY_DISPROVED
+        ? "inspect the exact app-run observation and repair the application before recording another run"
+        : "capture one canonical receipt that binds the exact built application to its observed execution";
     ok = ok &&
         json_push_kv_str(&reply->data, "status",
                          story_status_name(loaded->show.status)) &&
@@ -416,12 +487,10 @@ static bool story_render_show(struct zcl_command_reply *reply,
         json_push_kv_str(&reply->data, "truth_system",
                          "zcl.ontology.status") &&
         json_push_kv_str(&reply->data, "largest_missing_relation",
-                         (loaded->show.unknown_mask & ZCL_STORY_STEP_APP_RUNS)
-                             ? "app_runs" : "none") &&
+                         app_missing ? "app_runs" : "none") &&
         json_push_kv_str(&reply->data, "next_action",
-                         (loaded->show.unknown_mask & ZCL_STORY_STEP_APP_RUNS)
-                             ? "capture one canonical receipt that binds the exact built application to its observed execution"
-                             : "inspect story why for any non-PROVED relation");
+                         app_missing ? app_next
+                                     : "inspect story why for any non-PROVED relation");
     json_free(&events);
     return ok;
 }

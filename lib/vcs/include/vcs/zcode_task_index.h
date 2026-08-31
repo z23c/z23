@@ -72,6 +72,16 @@ struct vcs_zcode_task_index_entry {
     char latest_receipt_output_root_hex[65];
     uint8_t latest_receipt_status;
     int32_t latest_receipt_exit_status;
+    uint32_t app_run_receipt_count;
+    uint32_t valid_app_run_receipt_count;
+    char latest_app_run_receipt_hex[65];
+    char latest_app_run_observation_hex[65];
+    char latest_app_run_artifact_root_hex[65];
+    char latest_app_run_invocation_root_hex[65];
+    char latest_app_run_action_root_hex[65];
+    uint16_t latest_app_run_flags;
+    uint8_t latest_app_run_status;
+    int32_t latest_app_run_exit_status;
     uint8_t latest_lane;
     char latest_lane_receipt_hex[65];
     char latest_proof_set_root_hex[65];
@@ -105,10 +115,14 @@ struct vcs_zcode_task_receipt_entry {
     char receipt_root_hex[65];
     char output_root_hex[65];
     char action_root_hex[65];
+    char input_root_hex[65];
+    char evidence_root_hex[65];
+    char confinement_root_hex[65];
     char signer_pubkey_hex[65];
     uint8_t work_kind;
     uint8_t status;
     int32_t exit_status;
+    int64_t started_unix;
     int64_t finished_unix;
 };
 
