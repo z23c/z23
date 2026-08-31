@@ -28,7 +28,7 @@ is_sha256()
 }
 
 [ "$#" -ge 17 ] && [ "$#" -le 18 ] ||
-    fail 'usage: build-epoch-session.sh MODE SESSION LEASE OBJECT_ROOT CANDIDATE_ROOT KEEP SOURCE COMPLETE MUTATION COMPILER EPOCH PROFILE COMPILE_FLAGS LINK_FLAGS CC CXX OWNER_PID [VERIFY_TOOL]'
+    fail 'usage: build-epoch-session.sh MODE(acquire|recover|check|verify) SESSION LEASE OBJECT_ROOT CANDIDATE_ROOT KEEP SOURCE COMPLETE MUTATION COMPILER EPOCH PROFILE COMPILE_FLAGS LINK_FLAGS CC CXX OWNER_PID [VERIFY_TOOL]'
 
 MODE="$1"
 SESSION="$2"
@@ -55,7 +55,7 @@ HOST_SYSTEM="$(uname -s 2>/dev/null || printf 'unknown')"
 HOST_IS_MSYS=0
 case "$HOST_SYSTEM" in MINGW*|MSYS*) HOST_IS_MSYS=1 ;; esac
 
-case "$MODE" in acquire|check|verify) ;; *) fail "unknown mode: $MODE" ;; esac
+case "$MODE" in acquire|recover|check|verify) ;; *) fail "unknown mode: $MODE" ;; esac
 
 find_make_owner()
 {
@@ -144,7 +144,7 @@ elif [ "$HOST_IS_MSYS" = 1 ] &&
      [[ "${MAKELEVEL:-}" =~ ^[1-9][0-9]*$ ]] &&
      "$SELF_DIR/process-start-token.sh" "$$" >/dev/null 2>&1; then
     OWNER_PID="$$"
-elif [ "$MODE" != acquire ]; then
+elif [ "$MODE" != acquire ] && [ "$MODE" != recover ]; then
     OWNER_PID="$$"
 else
     fail "could not identify live Make owner process; ancestry=$(process_ancestry)"
@@ -294,7 +294,7 @@ acquire_admission_lock()
             if [ "$empty_deadline" -eq 0 ]; then
                 empty_deadline=$((now + 30))
             elif [ "$now" -ge "$empty_deadline" ]; then
-                [ "$MODE" = acquire ] &&
+                { [ "$MODE" = acquire ] || [ "$MODE" = recover ]; } &&
                 [ "${EPOCH_GC_LOCK_HELD:-0}" = 1 ] ||
                     fail 'epoch admission lock owner was not published'
                 rm -f -- "$ADMISSION_LOCK_OWNER"
@@ -321,7 +321,7 @@ acquire_admission_lock()
                 sleep 0.05
                 continue
             }
-            [ "$MODE" = acquire ] &&
+            { [ "$MODE" = acquire ] || [ "$MODE" = recover ]; } &&
             [ "${EPOCH_GC_LOCK_HELD:-0}" = 1 ] ||
                 fail 'epoch admission lock owner remained stale'
             verify_pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
@@ -494,6 +494,8 @@ acquire_admission_lock
 if [ -e "$UNVERIFIED" ] || [ -L "$UNVERIFIED" ]; then
     [ -f "$UNVERIFIED" ] && [ ! -L "$UNVERIFIED" ] ||
         fail 'unverified epoch marker is not a regular file'
+    [ "$MODE" = recover ] ||
+        fail 'unverified compile epoch appeared after recovery admission; rerun make'
     live_current_lease=0
     if [ -d "$EPOCH_DIR/.leases" ]; then
         while IFS= read -r -d '' current_lease; do

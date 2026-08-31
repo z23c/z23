@@ -237,9 +237,12 @@ historical fixture passes, then deploy/restart intentionally.
   acquisition.** The selected profile's included recovery witness acquires and
   quarantines that generation, then forces exactly one Make restart before
   object prerequisites are classified. Marker-free builds do not restart or
-  rewrite artifacts. The marker probe is parse-time; a future resident
-  coordinator must serialize epoch acquisition so a new marker cannot appear
-  between parsing and the ordinary lease recipe.
+  rewrite artifacts. A marker that appears after the parse-time probe is too
+  late for safe same-invocation quarantine: ordinary acquisition preserves the
+  generation and refuses with the named retry reason, and the next invocation's
+  recovery witness performs the quarantine before classifying objects. Never
+  change that refusal into an ordinary acquire-side cleanup; doing so restores
+  the missing-object response-file link race.
 - **Onion gates self-SKIPing is SKIP-not-FAIL honesty, not a broken suite.** `test_onion_bootstrap` prints `SKIP (set ZCL_STRESS_TESTS=1 to run — ~30s + Tor network)` (`lib/test/src/test_onion_bootstrap.c:112`), and `mvp-onion-local` exits 0 with a named SKIP when the binary links the offline Tor stub or the host has no Tor-network egress (Makefile, the `mvp-onion-local` block). Both are deliberate: a timed real-network bootstrap on a sandboxed host would false-FAIL forever, and a stub-built binary answering the claim would be a lie. The Tor stack itself is hosted IN-PROCESS (vendored dynhost fork; `tor_run_main()` runs on our own thread — no external daemon is ever spawned), so the hermetic onion groups (`test_onion_stream`, `test_onion_persistence`, `test_onion_directory`, …) pass offline and there is nothing to "fix" about that either; wide-area rendezvous claims belong only to `make mvp-onion-local` on an egress-capable host. **Breaks if "fixed" by making them fail unconditionally:** every no-egress box (CI sandboxes included) turns permanently red for an environmental reason, which trains everyone to ignore red. → `docs/OVERLAY.md` "The onion lives inside this binary".
 
 ---

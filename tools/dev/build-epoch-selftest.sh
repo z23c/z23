@@ -524,7 +524,7 @@ printf 'schema=zcl.build_epoch_unverified.v1\nsource_id=%s\nmutation=%s\ncompile
     "$SOURCE_A" "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
     > "$QUARANTINE_EPOCH_DIR/.unverified"
 set_state "$SOURCE_A" "$MUTATION_A2"
-STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
+STATE_FILE="$STATE" "$SESSION_TOOL" recover \
     "$QUARANTINE_SESSION" "$QUARANTINE_LEASE" \
     "$QUARANTINE_ROOT" "$QUARANTINE_CANDIDATES" 2 \
     "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
@@ -566,6 +566,8 @@ MAKE_RECOVERY_BINARY="$MAKE_RECOVERY/probe"
 MAKE_RECOVERY_ACTIONS="$MAKE_RECOVERY/actions.log"
 MAKE_RECOVERY_MK="$MAKE_RECOVERY/probe.mk"
 MAKE_RECOVERY_VIEW_READY="$MAKE_RECOVERY/view-ready.mk"
+MAKE_RECOVERY_RACE_ARM="$MAKE_RECOVERY/race-armed"
+MAKE_RECOVERY_RACE_LOG="$MAKE_RECOVERY/race.log"
 MAKE_RECOVERY_FIRST_LOG="$MAKE_RECOVERY/first.log"
 MAKE_RECOVERY_WARM_LOG="$MAKE_RECOVERY/warm.log"
 MAKE_SOURCE_RECORD="$("$ROOT/tools/dev/source-identity.sh" capture-record)" ||
@@ -580,10 +582,6 @@ mkdir -p "$MAKE_RECOVERY_EPOCH_DIR/.leases" \
 printf 'int main(void) { return 0; }\n' > "$MAKE_RECOVERY_SOURCE"
 printf 'stale object that must never reach the linker\n' > "$MAKE_RECOVERY_OBJECT"
 printf '%s\n' "$MAKE_RECOVERY_OBJECT" > "$MAKE_RECOVERY_RSP"
-printf 'pid=99999996\nstart=1\n' > "$MAKE_RECOVERY_LEASE"
-printf 'schema=zcl.build_epoch_unverified.v1\nsource_id=%s\nmutation=%s\ncompiler_id=%s\nepoch=%s\n' \
-    "$MAKE_SOURCE_ID" "$MAKE_SOURCE_MUTATION" "$COMPILER_ID" "$EPOCH_MAIN" \
-    > "$MAKE_RECOVERY_EPOCH_DIR/.unverified"
 printf '%s\n' '# fixture view inputs are already ready' \
     > "$MAKE_RECOVERY_VIEW_READY"
 
@@ -593,6 +591,15 @@ include $ROOT/Makefile
 .PHONY: epoch-recovery-probe
 epoch-recovery-probe: $MAKE_RECOVERY_BINARY
 	@printf 'epoch-recovery-probe: restarts=%s\n' '\$(if \$(strip \$(MAKE_RESTARTS)),\$(MAKE_RESTARTS),0)'
+
+\$(TEST_FAST_LEASE): | $MAKE_RECOVERY_RACE_ARM
+
+$MAKE_RECOVERY_RACE_ARM:
+	@printf 'pid=99999996\nstart=1\n' > '$MAKE_RECOVERY_LEASE'
+	@printf 'schema=zcl.build_epoch_unverified.v1\nsource_id=%s\nmutation=%s\ncompiler_id=%s\nepoch=%s\n' \
+	  '$MAKE_SOURCE_ID' '$MAKE_SOURCE_MUTATION' '$COMPILER_ID' '$EPOCH_MAIN' \
+	  > '$MAKE_RECOVERY_EPOCH_DIR/.unverified'
+	@: > '$MAKE_RECOVERY_RACE_ARM'
 
 $MAKE_RECOVERY_OBJECT: $MAKE_RECOVERY_SOURCE | \$(TEST_FAST_LEASE)
 	@printf '%s\n' compile >> '$MAKE_RECOVERY_ACTIONS'
@@ -638,13 +645,30 @@ run_make_recovery()
             TEST_FAST_LEASE="$MAKE_RECOVERY_LEASE" \
             BUILD_EPOCH_RECOVERY_READY="$MAKE_RECOVERY_READY" \
             CC="$CC_COMMAND" CXX="$CC_COMMAND" epoch-recovery-probe
-    ) > "$log" 2>&1 || {
-        sed 's/^/build-epoch-selftest: make recovery: /' "$log" >&2
-        fail 'Make recovery fixture failed'
-    }
+    ) > "$log" 2>&1
 }
 
-run_make_recovery "$MAKE_RECOVERY_FIRST_LOG"
+if run_make_recovery "$MAKE_RECOVERY_RACE_LOG"; then
+    fail 'post-parse unverified marker unexpectedly reached the linker'
+fi
+grep -Fq 'unverified compile epoch appeared after recovery admission; rerun make' \
+    "$MAKE_RECOVERY_RACE_LOG" ||
+    fail 'post-parse unverified marker did not produce the named retry refusal'
+grep -Fq 'stale object that must never reach the linker' \
+    "$MAKE_RECOVERY_OBJECT" ||
+    fail 'ordinary acquire changed a generation after Make classified it'
+[ -f "$MAKE_RECOVERY_EPOCH_DIR/.unverified" ] &&
+[ -f "$MAKE_RECOVERY_LEASE" ] ||
+    fail 'ordinary acquire discarded the late recovery evidence'
+[ ! -e "$MAKE_RECOVERY_READY" ] &&
+[ ! -s "$MAKE_RECOVERY_ACTIONS" ] ||
+    fail 'late-marker refusal performed compile or link work'
+
+run_make_recovery "$MAKE_RECOVERY_FIRST_LOG" || {
+    sed 's/^/build-epoch-selftest: make recovery: /' \
+        "$MAKE_RECOVERY_FIRST_LOG" >&2
+    fail 'Make recovery fixture failed after the named retry'
+}
 grep -Fqx 'epoch-recovery-probe: restarts=1' "$MAKE_RECOVERY_FIRST_LOG" ||
     fail 'stale epoch did not cause exactly one Make parse restart'
 [ "$(grep -Fc 'build-epoch-session: acquired' "$MAKE_RECOVERY_FIRST_LOG")" -eq 1 ] ||
@@ -672,7 +696,11 @@ for artifact in "${MAKE_RECOVERY_ARTIFACTS[@]}"; do
     MAKE_RECOVERY_BEFORE+=("$(artifact_stamp "$artifact")")
 done
 
-run_make_recovery "$MAKE_RECOVERY_WARM_LOG"
+run_make_recovery "$MAKE_RECOVERY_WARM_LOG" || {
+    sed 's/^/build-epoch-selftest: warm recovery: /' \
+        "$MAKE_RECOVERY_WARM_LOG" >&2
+    fail 'marker-free warm Make recovery fixture failed'
+}
 grep -Fqx 'epoch-recovery-probe: restarts=0' "$MAKE_RECOVERY_WARM_LOG" ||
     fail 'marker-free warm Make unexpectedly restarted'
 [ "$(grep -Fc 'build-epoch-session: acquired' "$MAKE_RECOVERY_WARM_LOG")" -eq 1 ] ||
@@ -834,5 +862,5 @@ set -e
 [ "$CURRENT_RC" -eq 0 ] || fail 'current B publisher failed behind stale A'
 [ "$($STABLE)" = B ] || fail 'stale A overwrote the current B alias'
 
-printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true make_recovery=true warm_no_rewrite=true compiler_id=%s\n' \
+printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true late_marker_refusal=true make_recovery=true warm_no_rewrite=true compiler_id=%s\n' \
     "$COMPILER_ID"
