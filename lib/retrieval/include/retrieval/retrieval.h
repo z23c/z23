@@ -69,6 +69,14 @@
 
 struct zcl_retrieval;
 
+/* Apply the retrieval engine's locale-independent ASCII tokenization to
+ * arbitrary text. Tokens are lowercased and long runs are chunked exactly as
+ * they are for indexing and querying. Returns false when the callback refuses
+ * or when text or callback is NULL. The opaque context may be NULL. */
+typedef bool (*zcl_retrieval_token_fn)(const char *token, void *context);
+bool zcl_retrieval_tokenize(const char *text, zcl_retrieval_token_fn emit,
+                            void *context);
+
 /* One ranked answer. `doc` is the id returned by zcl_retrieval_add. */
 struct zcl_retrieval_hit {
     uint32_t doc;

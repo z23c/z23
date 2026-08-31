@@ -32,7 +32,8 @@ mode=${1:---run-local}
 publishable=false
 scope_selftest=false
 readonly eval_arm_keys='recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points'
-readonly eval_result_keys="schema,tasks_evaluated,aggregation_kind,tasks_denominator,eligible_relevance_judgments,binding_kind,context_cost_kind,token_basis,literal,$eval_arm_keys,bm25,$eval_arm_keys"
+readonly eval_base_result_keys="schema,tasks_evaluated,aggregation_kind,tasks_denominator,eligible_relevance_judgments,binding_kind,context_cost_kind,token_basis,literal,$eval_arm_keys,bm25,$eval_arm_keys"
+readonly eval_result_keys="$eval_base_result_keys,identifier_graph,$eval_arm_keys"
 
 . "$repo_root/tools/dev/dev_lib.sh" # json_escape
 
@@ -178,11 +179,11 @@ validate_envelope() {
 validate_stream_page() {
     local document=$1 expected_budget=$2
     local elapsed_us elapsed_ms budget_ms exceeded should_exceed
-    [[ $(field "$document" schema) = zcl.dev_retrieval_benchmark_stream_page.v2 &&
+    [[ $(field "$document" schema) = zcl.dev_retrieval_benchmark_stream_page.v3 &&
        $(field "$document" command) = dev.retrieval.benchmark &&
        $(bool_field "$document" shared_computation) = true &&
        $(uint_field "$document" ranking_computations 1) -eq 1 &&
-       $(field "$document" data_schema) = zcl.dev_retrieval_benchmark.v1 &&
+       $(field "$document" data_schema) = zcl.dev_retrieval_benchmark.v2 &&
        $(field_type "$document" data) = object ]] ||
         fail "invalid retrieval benchmark stream page"
     elapsed_us=$(uint_field "$document" ranking_elapsed_us 9223372036854775807)
@@ -239,6 +240,20 @@ validate_eval_arm() {
         r20=$(uint_field "$document" "$arm.recall_at_20.basis_points" 10000)
         ((r20 >= r5)) || fail "$arm Recall@20 is below Recall@5"
     fi
+}
+
+validate_eval_result_envelope() {
+    local document=$1 expected_tasks=$2 expected_judgments=$3 label=$4
+    [[ $(field "$document" schema) = zcl.retrieval_eval_batch_result.v3 &&
+       $(field "$document" aggregation_kind) = macro_equal_task_weight &&
+       $(uint_field "$document" tasks_evaluated 32) -eq $expected_tasks &&
+       $(uint_field "$document" tasks_denominator 32) -eq $expected_tasks &&
+       $(uint_field "$document" eligible_relevance_judgments 4096) -eq \
+           $expected_judgments &&
+       $(field "$document" binding_kind) = metrics_only_runner_seals_provenance &&
+       $(field "$document" context_cost_kind) = projected_not_read &&
+       $(field "$document" token_basis) = 'ceil(context_bytes/4)' ]] ||
+        fail "$label evaluator task/envelope contract differs from runner"
 }
 
 canonical_path() {
@@ -401,6 +416,43 @@ check_rank_file() {
         fail "$arm ranking root does not independently rederive"
 }
 
+validate_identifier_graph_contract() {
+    local bm25_file=$1 graph_file=$2 bm25_count=$3 graph_count=$4
+    local bm25_complete=$5 graph_complete=$6 bm25_context=$7 graph_context=$8
+    local seed_count=$9 reverse_ref_files=${10} saturated=${11} reason=${12}
+    local evidence_available=${13}
+    [[ $graph_count -eq $bm25_count &&
+       $graph_complete = "$bm25_complete" &&
+       $graph_context -le $bm25_context &&
+       $seed_count -le 512 && $reverse_ref_files -le $bm25_count ]] ||
+        fail "identifier-graph bounds differ from the declared basis"
+    cmp -s \
+        <(awk -F '\t' '{ print $3 "\t" $2 }' "$bm25_file" | sort) \
+        <(awk -F '\t' '{ print $3 "\t" $2 }' "$graph_file" | sort) ||
+        fail "identifier-graph changed a BM25 path/context binding"
+    cmp -s \
+        <(awk -F '\t' '$1 <= 20 { print $3 }' "$bm25_file" | sort) \
+        <(awk -F '\t' '$1 <= 20 { print $3 }' "$graph_file" | sort) ||
+        fail "identifier-graph changed the BM25 top-20 candidate set"
+    case "$reason:$saturated" in
+        none:false)
+            [[ $evidence_available = true ]] && ((seed_count > 0)) ||
+                fail "applied identifier-graph ranking has no seed symbol" ;;
+        query_atom_cap:true|symbol_cap:true|identifier_seed_cap:true|caller_cap:true)
+            [[ $evidence_available = false ]] &&
+                ((seed_count == 0 && reverse_ref_files == 0)) ||
+                fail "saturated identifier-graph fallback retained partial evidence"
+            cmp -s "$bm25_file" "$graph_file" ||
+                fail "saturated identifier-graph fallback changed BM25 order" ;;
+        no_window_evidence:false|context_guard_fallback:false)
+            [[ $evidence_available = false ]] ||
+                fail "identifier-graph fallback claimed row evidence"
+            cmp -s "$bm25_file" "$graph_file" ||
+                fail "identifier-graph fallback changed BM25 order" ;;
+        *) fail "invalid identifier-graph fallback/saturation state: $reason/$saturated" ;;
+    esac
+}
+
 membership_check() {
     local row=$1 eligibility=$2 groups_file=${3:-}
     local count i path input room merkle room_found merkle_found kind tree_root group
@@ -483,8 +535,10 @@ run_scope_selftest() {
     local literal_file="$run_root/scope-selftest.literal.tsv"
     local bm25_file="$run_root/scope-selftest.bm25.tsv"
     local body="$run_root/scope-selftest.body"
+    local graph_body="$run_root/scope-selftest.graph-body"
     local fixture="$run_root/scope-selftest.batch"
-    local row room group output bad arm
+    local graph_fixture="$run_root/scope-selftest.graph-batch"
+    local row room group output graph_output bad arm
     workspace=$repo_root
     row=$(printf '{"query":"exact directory group union","relevant_paths":["%s","%s"]}' \
         "$net_path" "$test_path")
@@ -499,20 +553,32 @@ run_scope_selftest() {
     [[ $group = config ]] || fail "scope selftest outside directory group changed"
     printf '1\t1\t%s\n2\t1\t%s\n' "$test_path" "$outside_path" >"$literal_file"
     cp -- "$literal_file" "$bm25_file"
-    batch=$body; : >"$batch"
+    batch=$body; graph_batch=$graph_body; : >"$batch"; : >"$graph_batch"
     emit_batch_task "$row" scope_union "$literal_file" 2 true \
-        "$bm25_file" 2 true "$groups_file"
+        "$bm25_file" 2 true "$bm25_file" 2 true "$groups_file"
     {
         printf '%s\n' 'zcl.retrieval_eval_batch.v3 tasks=1 eligible_relevance_judgments=2'
         cat "$body"
         printf '%s\n' end
     } >"$fixture"
+    {
+        printf '%s\n' 'zcl.retrieval_eval_batch.v3 tasks=1 eligible_relevance_judgments=2'
+        cat "$graph_body"
+        printf '%s\n' end
+    } >"$graph_fixture"
     output=$("$evaluator" <"$fixture") || fail "scope selftest evaluator refused fixture"
+    graph_output=$("$evaluator" <"$graph_fixture") ||
+        fail "scope selftest evaluator refused identifier-graph fixture"
+    validate_eval_result_envelope "$output" 1 2 scope-baseline
+    validate_eval_result_envelope "$graph_output" 1 2 scope-identifier-graph
     for arm in literal bm25; do
         [[ $(bool_field "$output" "$arm.wrong_scope_at_5.available") = true &&
            $(uint_field "$output" "$arm.wrong_scope_at_5.basis_points" 10000) -eq 5000 ]] ||
             fail "$arm scope selftest metric did not rederive"
     done
+    [[ $(bool_field "$graph_output" bm25.wrong_scope_at_5.available) = true &&
+       $(uint_field "$graph_output" bm25.wrong_scope_at_5.basis_points 10000) -eq 5000 ]] ||
+        fail "identifier-graph scope selftest metric did not rederive"
     room=$(code_room_document "$test_path")
     bad=${room/\"path\":\"$test_path\"/\"path\":\"wrong.c\"}
     if (validated_room_group "$bad" "$test_path" >/dev/null 2>&1); then
@@ -532,20 +598,24 @@ run_scope_selftest() {
 
 emit_batch_task() {
     local row=$1 id=$2 literal_file=$3 literal_count=$4 literal_complete=$5
-    local bm25_file=$6 bm25_count=$7 bm25_complete=$8 groups_file=$9
-    local n i path rank bytes query in_scope
+    local bm25_file=$6 bm25_count=$7 bm25_complete=$8
+    local graph_file=$9 graph_count=${10} graph_complete=${11} groups_file=${12}
+    local n i path rank bytes query in_scope destination
     n=$(array_count "$row" relevant_paths)
-    printf 'task %s %s\n' "$id" "$n" >>"$batch"
     query=$(field "$row" query)
     [[ -n $query && ${#query} -le 768 && $query =~ ^[[:print:]]+$ ]] ||
         fail "task query is not one canonical line: $id"
-    printf 'query %s\n' "$query" >>"$batch"
-    for ((i = 0; i < n; i++)); do
-        path=$(field "$row" "relevant_paths[$i]")
-        printf 'relevant %s\n' "$path" >>"$batch"
+    for destination in "$batch" "$graph_batch"; do
+        printf 'task %s %s\n' "$id" "$n" >>"$destination"
+        printf 'query %s\n' "$query" >>"$destination"
+        for ((i = 0; i < n; i++)); do
+            path=$(field "$row" "relevant_paths[$i]")
+            printf 'relevant %s\n' "$path" >>"$destination"
+        done
     done
     [[ $literal_complete = true ]] && literal_complete=1 || literal_complete=0
     [[ $bm25_complete = true ]] && bm25_complete=1 || bm25_complete=0
+    [[ $graph_complete = true ]] && graph_complete=1 || graph_complete=0
     printf 'literal observed %s %s\n' "$literal_complete" "$literal_count" >>"$batch"
     while IFS=$'\t' read -r rank bytes path; do
         if ((rank <= 5)); then
@@ -564,6 +634,25 @@ emit_batch_task() {
             printf 'rank %s 0 0 %s\n' "$bytes" "$path" >>"$batch"
         fi
     done <"$bm25_file"
+
+    printf 'literal observed %s %s\n' "$literal_complete" "$literal_count" >>"$graph_batch"
+    while IFS=$'\t' read -r rank bytes path; do
+        if ((rank <= 5)); then
+            in_scope=$(ranked_file_in_scope "$path" "$groups_file")
+            printf 'rank %s 1 %s %s\n' "$bytes" "$in_scope" "$path" >>"$graph_batch"
+        else
+            printf 'rank %s 0 0 %s\n' "$bytes" "$path" >>"$graph_batch"
+        fi
+    done <"$literal_file"
+    printf 'bm25 observed %s %s\n' "$graph_complete" "$graph_count" >>"$graph_batch"
+    while IFS=$'\t' read -r rank bytes path; do
+        if ((rank <= 5)); then
+            in_scope=$(ranked_file_in_scope "$path" "$groups_file")
+            printf 'rank %s 1 %s %s\n' "$bytes" "$in_scope" "$path" >>"$graph_batch"
+        else
+            printf 'rank %s 0 0 %s\n' "$bytes" "$path" >>"$graph_batch"
+        fi
+    done <"$graph_file"
 }
 
 if [[ $scope_selftest = true ]]; then
@@ -574,20 +663,27 @@ fi
 run_eligible_task() {
     local row=$1 id=$2 query=$3 expected_root=$4 task_dir=$5
     local literal_file="$task_dir/literal.tsv" bm25_file="$task_dir/bm25.tsv"
+    local graph_file="$task_dir/identifier-graph.tsv"
     local scope_groups="$task_dir/relevant.groups"
     local offset=0 pages=0 output input started ended process_wall_us span next has_more
-    local literal_display bm25_display max_display elapsed_us budget_ms exceeded
-    local page_limit max_count remaining expected_span expected_more page_file literal_take bm25_take stream_file
+    local literal_display bm25_display graph_display max_display elapsed_us budget_ms exceeded
+    local page_limit max_count remaining expected_span expected_more page_file literal_take bm25_take graph_take stream_file
     local total_elapsed=0 total_wall=0 any_budget_exceeded=false terminal=false
     local arm
-    : >"$literal_file"; : >"$bm25_file"; : >"$scope_groups"
+    : >"$literal_file"; : >"$bm25_file"; : >"$graph_file"; : >"$scope_groups"
     unset invariant_task_id invariant_query invariant_expected_root \
         invariant_pre_root invariant_post_root invariant_codeindex_root \
         invariant_corpus_files invariant_document_profile \
         invariant_literal_count invariant_literal_complete invariant_literal_root \
         invariant_literal_context invariant_literal_tokens invariant_bm25_count \
         invariant_bm25_complete invariant_bm25_root invariant_bm25_context \
-        invariant_bm25_tokens invariant_membership_tree_root \
+        invariant_bm25_tokens invariant_identifier_graph_count \
+        invariant_identifier_graph_complete invariant_identifier_graph_root \
+        invariant_identifier_graph_context invariant_identifier_graph_tokens \
+        invariant_identifier_seed_symbols invariant_reverse_ref_files \
+        invariant_query_lookup_saturated invariant_graph_fallback_reason \
+        invariant_graph_evidence_available \
+        invariant_membership_tree_root \
         invariant_stream_elapsed_us invariant_stream_budget_ms \
         invariant_stream_budget_exceeded
     input=$(printf '{"workspace":"%s","expected_vcs_root":"%s","task_id":"%s","query":"%s"}' \
@@ -611,7 +707,7 @@ run_eligible_task() {
         validate_stream_page "$output" 900
         [[ $(uint_field "$output" page_index 127) -eq $((pages - 1)) ]] ||
             fail "stream page index is not contiguous for $id"
-        [[ $(field "$output" data.schema) = zcl.dev_retrieval_benchmark.v1 &&
+        [[ $(field "$output" data.schema) = zcl.dev_retrieval_benchmark.v2 &&
            $(bool_field "$output" data.observational) = true &&
            $(bool_field "$output" data.production_ordering_changed) = true &&
            $(bool_field "$output" data.promotion_authorized) = false &&
@@ -623,7 +719,11 @@ run_eligible_task() {
            $(field "$output" data.context_cost_kind) = projected_not_read &&
            $(field "$output" data.token_basis) = 'ceil(context_bytes/4)' &&
            $(field "$output" data.literal_selector_basis) = frozen_pre_story_token_order_v1 &&
-           $(field "$output" data.production_selector_basis) = hybrid_literal_bm25_story_v1 ]] ||
+           $(field "$output" data.production_selector_basis) = hybrid_literal_bm25_story_v1 &&
+           $(field "$output" data.identifier_graph_basis) = bm25_top20_rare_identifier_atom_df16_observed_reverse_refs_context_guard_v1 &&
+           $(field "$output" data.index_scan_completeness) = unobserved &&
+           $(field "$output" data.graph_evidence_kind) = observed_reverse_refs_not_resolved_calls &&
+           $(field "$output" data.vector_evidence) = not_used ]] ||
             fail "ranking authority/evidence boundary failed for $id"
         [[ $(uint_field "$output" data.rank_offset 127) -eq $offset ]] ||
             fail "top-level rank offset mismatch for $id"
@@ -637,7 +737,13 @@ run_eligible_task() {
         record_invariant "$output" codeindex_root data.shared_codeindex_source_root_sha3 root
         record_invariant "$output" corpus_files data.corpus_files uint
         record_invariant "$output" document_profile data.document_profile string
-        for arm in literal bm25; do
+        record_invariant "$output" identifier_seed_symbols data.identifier_seed_symbols uint
+        record_invariant "$output" reverse_ref_files data.observed_reverse_ref_files uint
+        record_invariant "$output" query_lookup_saturated data.query_lookup_saturated bool
+        record_invariant "$output" graph_fallback_reason data.graph_fallback_reason string
+        record_invariant "$output" graph_evidence_available \
+            data.identifier_graph.evidence_available bool
+        for arm in literal bm25 identifier_graph; do
             record_invariant "$output" "${arm}_count" "data.$arm.ranked_files" uint
             record_invariant "$output" "${arm}_complete" "data.$arm.ranking_complete" bool
             record_invariant "$output" "${arm}_root" "data.$arm.ranking_root_sha3" root
@@ -645,6 +751,7 @@ run_eligible_task() {
             record_invariant "$output" "${arm}_tokens" "data.$arm.approximate_tokens_at_5" uint
         done
         ((invariant_literal_count <= 128 && invariant_bm25_count <= 128 &&
+          invariant_identifier_graph_count <= 128 &&
           invariant_corpus_files > 0)) || fail "ranking count is outside its bound"
         [[ $invariant_task_id = "$id" && $invariant_query = "$query" &&
            $invariant_expected_root = "$expected_root" &&
@@ -654,12 +761,17 @@ run_eligible_task() {
             fail "ranking is not bound to the reviewed task/source root"
         append_arm_page "$output" literal "$offset" "$page_limit" "$literal_file"
         append_arm_page "$output" bm25 "$offset" "$page_limit" "$bm25_file"
+        append_arm_page "$output" identifier_graph "$offset" "$page_limit" "$graph_file"
         literal_display=$(uint_field "$output" data.literal.displayed_files 20)
         bm25_display=$(uint_field "$output" data.bm25.displayed_files 20)
+        graph_display=$(uint_field "$output" data.identifier_graph.displayed_files 20)
         ((literal_display > bm25_display)) && max_display=$literal_display || max_display=$bm25_display
+        ((graph_display > max_display)) && max_display=$graph_display
         span=$(uint_field "$output" data.page_span 20)
         ((invariant_literal_count > invariant_bm25_count)) &&
             max_count=$invariant_literal_count || max_count=$invariant_bm25_count
+        ((invariant_identifier_graph_count > max_count)) &&
+            max_count=$invariant_identifier_graph_count
         remaining=0; ((max_count > offset)) && remaining=$((max_count - offset))
         expected_span=$remaining; ((expected_span > page_limit)) && expected_span=$page_limit
         [[ $span -eq $max_display && $span -eq $expected_span ]] ||
@@ -698,24 +810,40 @@ run_eligible_task() {
     check_rank_file bm25 "$bm25_file" "$invariant_bm25_count" \
         "$invariant_bm25_context" "$invariant_bm25_complete" \
         "$invariant_bm25_root"
+    check_rank_file identifier_graph "$graph_file" \
+        "$invariant_identifier_graph_count" "$invariant_identifier_graph_context" \
+        "$invariant_identifier_graph_complete" "$invariant_identifier_graph_root"
+    validate_identifier_graph_contract \
+        "$bm25_file" "$graph_file" "$invariant_bm25_count" \
+        "$invariant_identifier_graph_count" "$invariant_bm25_complete" \
+        "$invariant_identifier_graph_complete" "$invariant_bm25_context" \
+        "$invariant_identifier_graph_context" "$invariant_identifier_seed_symbols" \
+        "$invariant_reverse_ref_files" "$invariant_query_lookup_saturated" \
+        "$invariant_graph_fallback_reason" "$invariant_graph_evidence_available"
     [[ $invariant_literal_tokens -eq $(((invariant_literal_context + 3) / 4)) &&
-       $invariant_bm25_tokens -eq $(((invariant_bm25_context + 3) / 4)) ]] ||
+       $invariant_bm25_tokens -eq $(((invariant_bm25_context + 3) / 4)) &&
+       $invariant_identifier_graph_tokens -eq $(((invariant_identifier_graph_context + 3) / 4)) ]] ||
         fail "token approximation does not rederive for $id"
     literal_take=$invariant_literal_count; ((literal_take > 5)) && literal_take=5
     bm25_take=$invariant_bm25_count; ((bm25_take > 5)) && bm25_take=5
+    graph_take=$invariant_identifier_graph_count; ((graph_take > 5)) && graph_take=5
     literal_eval_files=$((literal_eval_files + literal_take))
     bm25_eval_files=$((bm25_eval_files + bm25_take))
+    graph_eval_files=$((graph_eval_files + graph_take))
     literal_eval_context=$((literal_eval_context + invariant_literal_context))
     bm25_eval_context=$((bm25_eval_context + invariant_bm25_context))
+    graph_eval_context=$((graph_eval_context + invariant_identifier_graph_context))
     membership_check "$row" c23_codeindex "$scope_groups"
     sort -u -o "$scope_groups" "$scope_groups"
     [[ -s $scope_groups ]] || fail "eligible task has no reviewed code.room groups: $id"
     emit_batch_task "$row" "$id" "$literal_file" "$invariant_literal_count" \
         "$invariant_literal_complete" "$bm25_file" "$invariant_bm25_count" \
-        "$invariant_bm25_complete" "$scope_groups"
+        "$invariant_bm25_complete" "$graph_file" \
+        "$invariant_identifier_graph_count" "$invariant_identifier_graph_complete" \
+        "$scope_groups"
     verify_checkout "$(field "$row" parent_commit)"
     [[ $(capture_root) = "$expected_root" ]] || fail "post-task source root changed for $id"
-    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v3","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"ranking_compute":{"elapsed_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"wall_us":%s,"single_process":true,"buffered_before_write":true},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"scope_available":true,"scope_basis":"reviewed_relevant_codeindex_group_membership_v1","scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","scope_classifier_epoch":"current_driver_over_exact_parent_source","files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
+    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v4","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"ranking_compute":{"elapsed_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"wall_us":%s,"single_process":true,"buffered_before_write":true},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"identifier_graph":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s,"basis":"bm25_top20_rare_identifier_atom_df16_observed_reverse_refs_context_guard_v1","identifier_seed_symbols":%s,"observed_reverse_ref_files":%s,"query_lookup_saturated":%s,"index_scan_completeness":"unobserved","graph_evidence_kind":"observed_reverse_refs_not_resolved_calls","evidence_available":%s,"fallback_reason":"%s","vector_evidence":"not_used","candidate_set":"strict_bm25_retained_permutation"},"scope_available":true,"scope_basis":"reviewed_relevant_codeindex_group_membership_v1","scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","scope_classifier_epoch":"current_driver_over_exact_parent_source","files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
         "$(json_escape "$id")" "$expected_root" "$invariant_codeindex_root" \
         "$invariant_membership_tree_root" "$pages" "$total_elapsed" \
         "$invariant_stream_budget_ms" "$any_budget_exceeded" "$total_wall" \
@@ -723,7 +851,13 @@ run_eligible_task() {
         "$invariant_literal_root" "$invariant_literal_context" \
         "$invariant_literal_tokens" "$invariant_bm25_count" \
         "$invariant_bm25_complete" "$invariant_bm25_root" \
-        "$invariant_bm25_context" "$invariant_bm25_tokens" >>"$task_rows"
+        "$invariant_bm25_context" "$invariant_bm25_tokens" \
+        "$invariant_identifier_graph_count" "$invariant_identifier_graph_complete" \
+        "$invariant_identifier_graph_root" "$invariant_identifier_graph_context" \
+        "$invariant_identifier_graph_tokens" "$invariant_identifier_seed_symbols" \
+        "$invariant_reverse_ref_files" "$invariant_query_lookup_saturated" \
+        "$invariant_graph_evidence_available" \
+        "$(json_escape "$invariant_graph_fallback_reason")" >>"$task_rows"
 }
 
 "$corpus_check" --selftest >/dev/null
@@ -754,12 +888,13 @@ runner_sha3=$(hash_file "$runner_path")
 driver_status_sha3=$(hash_text "$driver_status")
 task_rows="$run_root/tasks.jsonl"; : >"$task_rows"
 batch="$run_root/eval.body"; : >"$batch"
+graph_batch="$run_root/eval-graph.body"; : >"$graph_batch"
 declared_tasks=$(sed -n '1p' "$corpus" | "$jsonq" get task_count) ||
     fail "corpus task count is unavailable"
 [[ $declared_tasks =~ ^[1-9][0-9]*$ ]] || fail "corpus task count is invalid"
 tasks=0; eligible=0; unsupported=0
-literal_eval_files=0; bm25_eval_files=0
-literal_eval_context=0; bm25_eval_context=0
+literal_eval_files=0; bm25_eval_files=0; graph_eval_files=0
+literal_eval_context=0; bm25_eval_context=0; graph_eval_context=0
 corpus_commit_subject=0; corpus_same_commit=0
 evaluated_commit_subject=0; evaluated_same_commit=0
 eligible_relevance_judgments=0
@@ -790,7 +925,7 @@ while IFS= read -r row || [[ -n $row ]]; do
         [[ $(capture_root) = "$expected_root" ]] ||
             fail "post-membership source root changed for $id"
         unsupported=$((unsupported + 1))
-        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v3","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null}\n' \
+        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v4","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null,"identifier_graph":null}\n' \
             "$(json_escape "$id")" "$expected_root" \
             "$invariant_membership_tree_root" >>"$task_rows"
     else
@@ -823,6 +958,12 @@ printf 'zcl.retrieval_eval_batch.v3 tasks=%s eligible_relevance_judgments=%s\n' 
     "$eligible" "$eligible_relevance_judgments" >"$batch"
 cat "$batch_body" >>"$batch"
 printf 'end\n' >>"$batch"
+graph_batch_body=$graph_batch
+graph_batch="$run_root/eval-graph.batch"
+printf 'zcl.retrieval_eval_batch.v3 tasks=%s eligible_relevance_judgments=%s\n' \
+    "$eligible" "$eligible_relevance_judgments" >"$graph_batch"
+cat "$graph_batch_body" >>"$graph_batch"
+printf 'end\n' >>"$graph_batch"
 batch_sha3=$(hash_file "$batch")
 batch_bytes=$(wc -c <"$batch"); batch_bytes=${batch_bytes//[[:space:]]/}
 [[ $batch_bytes =~ ^[1-9][0-9]*$ ]] || fail "evaluator batch byte count is invalid"
@@ -831,19 +972,35 @@ expected_base64_chars=$((4 * ((batch_bytes + 2) / 3)))
 [[ ${#batch_base64} -eq $expected_base64_chars &&
    $batch_base64 =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
     fail "evaluator batch base64 encoding is malformed"
+graph_batch_sha3=$(hash_file "$graph_batch")
+graph_batch_bytes=$(wc -c <"$graph_batch"); graph_batch_bytes=${graph_batch_bytes//[[:space:]]/}
+[[ $graph_batch_bytes =~ ^[1-9][0-9]*$ ]] ||
+    fail "identifier-graph evaluator batch byte count is invalid"
+graph_batch_base64=$(encode_base64_file "$graph_batch") ||
+    fail "could not encode identifier-graph evaluator batch"
+expected_graph_base64_chars=$((4 * ((graph_batch_bytes + 2) / 3)))
+[[ ${#graph_batch_base64} -eq $expected_graph_base64_chars &&
+   $graph_batch_base64 =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
+    fail "identifier-graph evaluator batch base64 encoding is malformed"
 metrics=$("$evaluator" <"$batch") || fail "maintained evaluator adapter failed"
-keys_exact "$metrics" . "$eval_result_keys"
-[[ $(uint_field "$metrics" tasks_evaluated 32) -eq $eligible &&
-   $(field "$metrics" schema) = zcl.retrieval_eval_batch_result.v3 &&
-   $(field "$metrics" aggregation_kind) = macro_equal_task_weight &&
-   $(uint_field "$metrics" tasks_denominator 32) -eq $eligible &&
-   $(uint_field "$metrics" eligible_relevance_judgments 4096) -eq $eligible_relevance_judgments &&
-   $(field "$metrics" binding_kind) = metrics_only_runner_seals_provenance &&
-   $(field "$metrics" context_cost_kind) = projected_not_read &&
-   $(field "$metrics" token_basis) = 'ceil(context_bytes/4)' ]] ||
-    fail "evaluator task set differs from runner task set"
+graph_metrics=$("$evaluator" <"$graph_batch") ||
+    fail "maintained evaluator adapter refused identifier-graph batch"
+keys_exact "$metrics" . "$eval_base_result_keys"
+keys_exact "$graph_metrics" . "$eval_base_result_keys"
+validate_eval_result_envelope "$metrics" "$eligible" \
+    "$eligible_relevance_judgments" baseline
 validate_eval_arm "$metrics" literal "$literal_eval_files" "$literal_eval_context"
 validate_eval_arm "$metrics" bm25 "$bm25_eval_files" "$bm25_eval_context"
+validate_eval_result_envelope "$graph_metrics" "$eligible" \
+    "$eligible_relevance_judgments" identifier-graph
+validate_eval_arm "$graph_metrics" bm25 "$graph_eval_files" "$graph_eval_context"
+[[ $(raw_field "$metrics" bm25.recall_at_20) = \
+   $(raw_field "$graph_metrics" bm25.recall_at_20) ]] ||
+    fail "identifier-graph Recall@20 differs despite the sealed top-20 set"
+graph_arm=$(raw_field "$graph_metrics" bm25)
+metrics=${metrics/"zcl.retrieval_eval_batch_result.v3"/"zcl.retrieval_eval_batch_result.v4"}
+metrics="${metrics%?},\"identifier_graph\":$graph_arm}"
+keys_exact "$metrics" . "$eval_result_keys"
 [[ $(hash_file "$rank_bin") = "$rank_sha3" &&
    $(hash_file "$capture_bin") = "$capture_sha3" &&
    $(hash_file "$evaluator") = "$evaluator_sha3" &&
@@ -853,15 +1010,18 @@ validate_eval_arm "$metrics" bm25 "$bm25_eval_files" "$bm25_eval_context"
    $(hash_file "$corpus") = "$corpus_sha3" &&
    $(hash_file "$runner_path") = "$runner_sha3" &&
    $(hash_file "$batch") = "$batch_sha3" &&
+   $(hash_file "$graph_batch") = "$graph_batch_sha3" &&
    $(wc -c <"$batch" | tr -d '[:space:]') = "$batch_bytes" &&
-   $(encode_base64_file "$batch") = "$batch_base64" ]] ||
+   $(wc -c <"$graph_batch" | tr -d '[:space:]') = "$graph_batch_bytes" &&
+   $(encode_base64_file "$batch") = "$batch_base64" &&
+   $(encode_base64_file "$graph_batch") = "$graph_batch_base64" ]] ||
     fail "benchmark input, executable, or batch changed during the run"
 [[ $(git -C "$repo_root" rev-parse HEAD) = "$driver_commit" &&
    $(git -C "$repo_root" rev-parse origin/main) = "$remote_commit" &&
    $(hash_text "$(git -C "$repo_root" status --porcelain --untracked-files=all)") = "$driver_status_sha3" ]] ||
     fail "benchmark implementation identity changed during the run"
 
-printf -v benchmark_record '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v1","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":%s,"tasks_evaluated":%s,"tasks_unsupported":%s,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"evaluated_query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","jsonq_binary_sha3":"%s","sha3_helper_binary_sha3":"%s","corpus_checker_script_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_bytes":%s,"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"%s","evaluator_batch_root_sha3":"%s"}' \
+printf -v benchmark_record '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v2","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":%s,"tasks_evaluated":%s,"tasks_unsupported":%s,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"evaluated_query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","jsonq_binary_sha3":"%s","sha3_helper_binary_sha3":"%s","corpus_checker_script_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_bytes":%s,"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"%s","evaluator_batch_root_sha3":"%s","identifier_graph_evaluator_batch_bytes":%s,"identifier_graph_evaluator_batch_encoding":"base64_rfc4648","identifier_graph_evaluator_batch_base64":"%s","identifier_graph_evaluator_batch_root_sha3":"%s"}' \
     "${mode#--}" "$publishable" "$publication_admission" "$driver_commit" \
     "$remote_commit" "$driver_clean" "$driver_status_sha3" "$declared_tasks" \
     "$eligible" "$unsupported" \
@@ -869,12 +1029,13 @@ printf -v benchmark_record '{"record":"benchmark","schema":"zcl.retrieval_gold_b
     "$evaluated_commit_subject" "$evaluated_same_commit" "$rank_sha3" \
     "$capture_sha3" "$evaluator_sha3" "$jsonq_sha3" "$sha3_sha3" \
     "$checker_sha3" "$corpus_sha3" "$runner_sha3" \
-    "$batch_bytes" "$batch_base64" "$batch_sha3"
+    "$batch_bytes" "$batch_base64" "$batch_sha3" \
+    "$graph_batch_bytes" "$graph_batch_base64" "$graph_batch_sha3"
 [[ $(root_field "$benchmark_record" jsonq_binary_sha3) = "$jsonq_sha3" &&
    $(root_field "$benchmark_record" sha3_helper_binary_sha3) = "$sha3_sha3" &&
    $(root_field "$benchmark_record" corpus_checker_script_sha3) = "$checker_sha3" ]] ||
     fail "benchmark tool identity fields do not match their observed inputs"
 printf '%s\n' "$benchmark_record"
 cat "$task_rows"
-printf '{"record":"aggregate","schema":"zcl.retrieval_gold_benchmark_aggregate.v2","metrics":%s,"files_read_observed":false,"observed_token_count_available":false,"wrong_scope_basis":"reviewed_relevant_codeindex_group_membership_v1","wrong_scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","wrong_scope_classifier_epoch":"current_driver_over_exact_parent_source","wrong_scope_aggregation_kind":"micro_task_file_selections_at_5","wrong_scope_denominator_kind":"sum_of_task_unique_file_selections_at_5","reuse_success_available":false,"duplicate_avoidance_available":false,"new_unique_loc_avoided_available":false}\n' \
+printf '{"record":"aggregate","schema":"zcl.retrieval_gold_benchmark_aggregate.v3","metrics":%s,"files_read_observed":false,"observed_token_count_available":false,"wrong_scope_basis":"reviewed_relevant_codeindex_group_membership_v1","wrong_scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","wrong_scope_classifier_epoch":"current_driver_over_exact_parent_source","wrong_scope_aggregation_kind":"micro_task_file_selections_at_5","wrong_scope_denominator_kind":"sum_of_task_unique_file_selections_at_5","reuse_success_available":false,"duplicate_avoidance_available":false,"new_unique_loc_avoided_available":false}\n' \
     "$(raw_field "$metrics" .)"

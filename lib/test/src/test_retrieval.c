@@ -71,6 +71,23 @@ static const char *const k_texts[] = {
 };
 #define CORPUS_N (sizeof k_texts / sizeof k_texts[0])
 
+struct token_capture {
+    char values[4][ZCL_RETRIEVAL_TOKEN_MAX + 1u];
+    size_t count;
+    size_t accept;
+};
+
+static bool token_capture_emit(const char *token, void *opaque)
+{
+    struct token_capture *capture = opaque;
+    if (capture->count >= capture->accept || capture->count >= 4u)
+        return false;
+    (void)snprintf(capture->values[capture->count],
+                   sizeof(capture->values[0]), "%s", token);
+    capture->count++;
+    return true;
+}
+
 static struct zcl_retrieval *corpus_build(void)
 {
     struct zcl_retrieval *r = zcl_retrieval_create();
@@ -278,6 +295,21 @@ static int case_reproducible(void)
 static int case_tokenizer(void)
 {
     int failures = 0;
+    struct token_capture capture = {.accept = 4};
+    RT_CHECK("the public tokenizer exposes the engine's exact ASCII atoms",
+             zcl_retrieval_tokenize("Alpha_beta99 GAMMA", token_capture_emit,
+                                    &capture) &&
+             capture.count == 3 &&
+             strcmp(capture.values[0], "alpha") == 0 &&
+             strcmp(capture.values[1], "beta99") == 0 &&
+             strcmp(capture.values[2], "gamma") == 0);
+    capture = (struct token_capture){.accept = 1};
+    RT_CHECK("the public tokenizer propagates callback refusal",
+             !zcl_retrieval_tokenize("one two", token_capture_emit,
+                                     &capture) && capture.count == 1);
+    RT_CHECK("the public tokenizer refuses NULL inputs",
+             !zcl_retrieval_tokenize(NULL, token_capture_emit, &capture) &&
+             !zcl_retrieval_tokenize("one", NULL, &capture));
     struct zcl_retrieval *r = zcl_retrieval_create();
     RT_CHECK("an index is created", r != NULL);
     if (!r)

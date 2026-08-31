@@ -75,17 +75,19 @@ ZCL_COMMAND_BRANCH("dev.retrieval", "dev",
 
 ZCL_COMMAND_DEV_READ(
     "dev.retrieval.benchmark", "dev.retrieval", "",
-    "Compare literal and BM25 file retrieval on one reviewed task",
+    "Compare literal, BM25, and identifier-graph file retrieval",
     "An observational, native-only comparison over one exact ZVCS manifest "
     "root. The unchanged production goal selector is projected to unique "
-    "files beside a BM25 index built from indexed source metadata. It emits "
+    "files beside a BM25 index and a bounded rare identifier-atom/observed "
+    "reverse-reference "
+    "rerank of that same retained file set. It emits "
     "rankings and exact full-file context byte costs only; a separate "
     "evaluator may join reviewed gold after both rankings are sealed. No "
     "result changes production ordering or authorizes promotion.",
     ZCL_COMMAND_LIST_BUDGET,
     "dev,retrieval,benchmark,bm25,recall,mrr,context",
     "zcl.dev_retrieval_benchmark_input.v1",
-    "zcl.dev_retrieval_benchmark.v1",
+    "zcl.dev_retrieval_benchmark.v2",
     "workspace,expected_vcs_root,task_id,query,cursor", "",
     "z23-dev dev retrieval benchmark --input='"
     "{\"workspace\":\"<canonical-absolute-checkout>\","

@@ -214,9 +214,10 @@ static bool posting_push(struct posting_list *pl, uint32_t doc, uint32_t tf)
 /* Calls `emit` once per lowercased token. Stops early, returning false, the
  * first time `emit` refuses. A run of alphanumerics longer than
  * ZCL_RETRIEVAL_TOKEN_MAX is emitted as consecutive full-length chunks. */
-static bool tokenize(const char *text, bool (*emit)(const char *, void *),
-                     void *ctx)
+bool zcl_retrieval_tokenize(const char *text, zcl_retrieval_token_fn emit,
+                            void *ctx)
 {
+    if (!text || !emit) return false;
     char buf[ZCL_RETRIEVAL_TOKEN_MAX + 1];
     for (const char *p = text; *p;) {
         while (*p && !ascii_alnum(*p))
@@ -310,7 +311,8 @@ uint32_t zcl_retrieval_add(struct zcl_retrieval *r, const char *name,
     char *dup_name = zcl_strdup(name, "retrieval_doc_name");
     char *dup_text = zcl_strdup(text, "retrieval_doc_text");
     struct add_ctx ctx = { .r = r, .doc = id, .len = 0 };
-    if (!dup_name || !dup_text || !tokenize(text, add_emit, &ctx)) {
+    if (!dup_name || !dup_text ||
+        !zcl_retrieval_tokenize(text, add_emit, &ctx)) {
         free(dup_name);
         free(dup_text);
         r->poisoned = true;
@@ -401,7 +403,8 @@ bool zcl_retrieval_query_checked(const struct zcl_retrieval *r,
         acc[i].doc = (uint32_t)i;
 
     struct query_ctx ctx = { .r = r, .acc = acc };
-    (void)tokenize(query, query_emit, &ctx); /* query_emit never refuses */
+    (void)zcl_retrieval_tokenize(query, query_emit, &ctx);
+    /* query_emit never refuses */
 
     qsort(acc, r->count, sizeof *acc, cmp_hit);
 
@@ -483,7 +486,7 @@ size_t zcl_retrieval_df(const struct zcl_retrieval *r, const char *token)
     if (!r || !token)
         return 0;
     struct df_ctx c = { .r = r, .df = 0, .seen = 0 };
-    (void)tokenize(token, df_emit, &c);
+    (void)zcl_retrieval_tokenize(token, df_emit, &c);
     return c.seen == 1 ? c.df : 0;
 }
 
