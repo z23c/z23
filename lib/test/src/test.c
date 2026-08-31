@@ -1935,6 +1935,7 @@ int main(int argc, char **argv)
     { extern int test_sync_trust_policy(void); failures += test_sync_trust_policy(); }
     { extern int test_code_capsule(void); failures += test_code_capsule(); }
     { extern int test_code_impact(void); failures += test_code_impact(); }
+    { extern int test_code_ontology(void); failures += test_code_ontology(); }
     { extern int test_code_merkle(void); failures += test_code_merkle(); }
     { extern int test_code_merkle_proof(void);
       failures += test_code_merkle_proof(); }
