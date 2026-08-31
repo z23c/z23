@@ -1038,9 +1038,13 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf,
                       "Do not add Python, shell, or helper-binary")
                != NULL);
-        ASSERT(strstr(buf, "origin/main..HEAD") != NULL);
-        ASSERT(strstr(buf, "cached focused fast-ci") != NULL);
-        ASSERT(strstr(buf, "live node condition remains") != NULL);
+        ASSERT(strstr(buf, "only checks ancestry") != NULL);
+        ASSERT(strstr(buf,
+                      "exact fixed-width aggregate and child receipts")
+               != NULL);
+        ASSERT(strstr(buf, "fast result cache hit") != NULL);
+        ASSERT(strstr(buf, "still refreshes the live service probe")
+               != NULL);
         ASSERT(strstr(buf, "zclassic23-fuzz.timer") != NULL);
         ASSERT(strstr(buf, "zclassic23-coverage.timer") != NULL);
         ASSERT(strstr(buf, "zclassic23-test-suite.timer") != NULL);
@@ -1053,7 +1057,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "docs/GETTING_STARTED.md") != NULL);
         ASSERT(strstr(buf, "Public start here") != NULL);
         ASSERT(strstr(buf, "make dev-bin") != NULL);
-        ASSERT(strstr(buf, "registered parallel groups") != NULL);
+        ASSERT(strstr(buf, "returned registered parallel group") != NULL);
         ASSERT(strstr(buf, "build/bin/z23 core sync diagnose")
                != NULL);
         ASSERT(strstr(buf, "| jq") == NULL);
@@ -1114,8 +1118,21 @@ int t_agent_fast_ci_contract(void)
          * gate said PASS while executing zero test groups. */
         ASSERT(run_gate_script_arg("tools/agent_fast_ci.sh", NULL,
                                    "changed-set-selftest") == 0);
-        ASSERT(run_gate_script("tools/dev/build-epoch-selftest.sh", NULL)
-               == 0);
+        int epoch_selftest_rc = run_gate_script(
+            "tools/dev/build-epoch-selftest.sh", NULL);
+        if (epoch_selftest_rc != 0) {
+            char epoch_output_path[PATH_MAX];
+            char *epoch_output = NULL;
+            if (lint_gate_out_path(epoch_output_path,
+                                   sizeof(epoch_output_path)) == 0 &&
+                read_entire_file(epoch_output_path, &epoch_output) == 0) {
+                fprintf(stderr,
+                        "build-epoch-selftest rc=%d output:\n%s\n",
+                        epoch_selftest_rc, epoch_output);
+            }
+            free(epoch_output);
+        }
+        ASSERT(epoch_selftest_rc == 0);
         PASS();
     } _test_next:;
     free(buf);
