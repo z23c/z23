@@ -25,6 +25,18 @@ SOURCES=(
     lib/base/src/log_level.c
     lib/sha3/src/sha3.c
 )
+GEN="$TMP/gen_capability_inventory"
+LIBS=()
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*)
+        SOURCES+=(
+            lib/platform/src/directory_compat.c
+            lib/platform/src/positioned_file.c
+        )
+        LIBS+=( -ladvapi32 )
+        GEN="$GEN.exe"
+        ;;
+esac
 
 if [ ! -f "$DOC" ]; then
     echo "check_capability_inventory_generated: FATAL — missing $DOC" >&2
@@ -38,14 +50,14 @@ if ! "$CC_BIN" -std=c23 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
         -Werror -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
         -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
         -Ilib/crypto/include -Ilib/platform/include \
-        -o "$TMP/gen_capability_inventory" "${SOURCES[@]}" \
+        -o "$GEN" "${SOURCES[@]}" "${LIBS[@]}" \
         2>"$TMP/cc.log"; then
     echo "check_capability_inventory_generated: FATAL — generator compile failed" >&2
     sed 's/^/    /' "$TMP/cc.log" >&2
     exit 2
 fi
 
-if ! "$TMP/gen_capability_inventory" "$TMP/expected.jsonl" . \
+if ! "$GEN" "$TMP/expected.jsonl" . \
         2>"$TMP/gen.log"; then
     echo "check_capability_inventory_generated: FATAL — derivation failed" >&2
     sed 's/^/    /' "$TMP/gen.log" >&2

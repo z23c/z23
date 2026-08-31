@@ -146,7 +146,7 @@ bool platform_positioned_file_open_beneath(
                                    current, NULL);
         IO_STATUS_BLOCK status = {0};
         result = create_file(&handle,
-            FILE_READ_ATTRIBUTES | SYNCHRONIZE |
+            FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE |
                 (leaf ? FILE_READ_DATA : FILE_TRAVERSE),
             &attributes, &status, NULL, FILE_ATTRIBUTE_NORMAL,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,

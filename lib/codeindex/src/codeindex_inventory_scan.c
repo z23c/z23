@@ -20,6 +20,9 @@
 #if !defined(_WIN32)
 #include <dirent.h>
 #include <unistd.h>
+#else
+#include "platform/directory_compat.h"
+#include "platform/positioned_file.h"
 #endif
 
 enum { INV_PATH_MAX = 4096 };
@@ -121,9 +124,6 @@ void inv_group_for_path(const char *path, char out[64])
     (void)snprintf(out, 64, "%.*s", (int)n, path);
 }
 
-#if !defined(_WIN32)
-/* Only inv_collect_dir (POSIX arm below) uses these helpers; on Windows the
- * traversal refuses in inv_collect_paths and these would be dead code. */
 static bool inv_source_name(const char *name)
 {
     size_t n = strlen(name);
@@ -140,6 +140,7 @@ static bool inv_prune_dir(const char *name)
            strncmp(name, "test-tmp", 8) == 0;
 }
 
+#if !defined(_WIN32)
 static bool inv_path_push(struct inv_scan *s, const char *path,
                           const struct stat *st)
 {
@@ -161,6 +162,33 @@ static bool inv_path_push(struct inv_scan *s, const char *path,
                     (int64_t)INV_CTIME_NSEC((*st));
     row->device = (uint64_t)st->st_dev;
     row->inode = (uint64_t)st->st_ino;
+    return true;
+}
+#endif
+
+#if defined(_WIN32)
+static bool inv_snapshot_push(
+    struct inv_scan *s, const char *path,
+    const struct platform_positioned_file_snapshot *snapshot)
+{
+    if (s->path_count == s->path_cap) {
+        int cap = s->path_cap ? s->path_cap * 2 : 1024;
+        void *p = zcl_realloc(s->paths, (size_t)cap * sizeof(*s->paths),
+                              "ci_inventory_paths");
+        if (!p) return false;
+        s->paths = p;
+        s->path_cap = cap;
+    }
+    struct inv_path *row = &s->paths[s->path_count++];
+    memset(row, 0, sizeof(*row));
+    inv_cpy(row->path, sizeof(row->path), path);
+    row->size = (int64_t)snapshot->size;
+    row->mtime_ns = snapshot->modified_seconds * INT64_C(1000000000) +
+                    snapshot->modified_nanoseconds;
+    row->ctime_ns = snapshot->changed_seconds * INT64_C(1000000000) +
+                    snapshot->changed_nanoseconds;
+    row->device = snapshot->volume;
+    row->inode = snapshot->file_low;
     return true;
 }
 #endif
@@ -198,21 +226,65 @@ static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 }
 #endif
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+static bool inv_collect_dir(struct inv_scan *s, const char *rel)
+{
+    char full[INV_PATH_MAX];
+    int n = snprintf(full, sizeof(full), "%s/%s", s->root, rel);
+    if (n <= 0 || (size_t)n >= sizeof(full)) return false;
+    enum platform_directory_probe_result probe =
+        platform_directory_probe_real(full);
+    if (probe == PLATFORM_DIRECTORY_PROBE_MISSING) return true;
+    if (probe != PLATFORM_DIRECTORY_PROBE_OK) return false;
+
+    struct platform_directory_list directories = {0}, files = {0};
+    if (!platform_directory_list_real_sorted(full, &directories) ||
+        !platform_directory_list_regular_sorted(full, &files)) {
+        platform_directory_list_free(&directories);
+        platform_directory_list_free(&files);
+        return false;
+    }
+    bool ok = true;
+    for (size_t i = 0; ok && i < directories.count; i++) {
+        const char *name = directories.entries[i].name;
+        if (inv_prune_dir(name)) continue;
+        char child[INV_PATH_MAX];
+        n = snprintf(child, sizeof(child), "%s/%s", rel, name);
+        ok = n > 0 && (size_t)n < sizeof(child) &&
+             inv_collect_dir(s, child);
+    }
+    for (size_t i = 0; ok && i < files.count; i++) {
+        const char *name = files.entries[i].name;
+        if (!inv_source_name(name)) continue;
+        char child[INV_PATH_MAX];
+        n = snprintf(child, sizeof(child), "%s/%s", rel, name);
+        struct platform_positioned_file file;
+        struct platform_positioned_file_snapshot before, after;
+        platform_positioned_file_init(&file);
+        ok = n > 0 && (size_t)n < sizeof(child) &&
+             platform_positioned_file_open_beneath(&file, s->root, child) &&
+             platform_positioned_file_snapshot(&file, &before) &&
+             platform_positioned_file_snapshot(&file, &after) &&
+             platform_positioned_file_snapshot_equal(&before, &after) &&
+             before.size <= INT64_MAX &&
+             inv_snapshot_push(s, child, &after);
+        platform_positioned_file_close(&file);
+    }
+    platform_directory_list_free(&directories);
+    platform_directory_list_free(&files);
+    return ok;
+}
+#endif
+
 static int inv_path_cmp(const void *a, const void *b)
 {
     return strcmp(((const struct inv_path *)a)->path,
                   ((const struct inv_path *)b)->path);
 }
-#endif
 
 bool inv_collect_paths(struct inv_scan *s)
 {
     if (!s || !s->root || !s->root[0]) return false;
-#if defined(_WIN32)
-    LOG_FAIL("codeindex.inventory",
-             "source inventory traversal is unavailable on Windows");
-#else
     static const char *const roots[] = {
         "lib", "app", "core", "config", "tools", "domain", "adapters",
         "ports", "src", "packages", "examples", NULL
@@ -232,7 +304,6 @@ bool inv_collect_paths(struct inv_scan *s)
     }
     s->path_count = write;
     return s->path_count > 0;
-#endif
 }
 
 bool inv_read_stable(const struct inv_scan *s, int file_index,
@@ -242,6 +313,38 @@ bool inv_read_stable(const struct inv_scan *s, int file_index,
     if (out_len) *out_len = 0;
     if (!s || file_index < 0 || file_index >= s->path_count || !out || !out_len)
         return false;
+#if defined(_WIN32)
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open_beneath(
+            &file, s->root, s->paths[file_index].path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size > SIZE_MAX) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    size_t len = (size_t)before.size;
+    char *buf = zcl_malloc(len ? len : 1, "ci_inventory_source");
+    if (!buf) { platform_positioned_file_close(&file); return false; }
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < len) {
+        size_t wanted = len - offset < 64 * 1024 ? len - offset : 64 * 1024;
+        int64_t got = platform_positioned_file_read(
+            &file, buf + offset, wanted, (uint64_t)offset);
+        if (got <= 0) { ok = false; break; }
+        offset += (size_t)got;
+    }
+    ok = ok && offset == len &&
+         platform_positioned_file_snapshot(&file, &after) &&
+         platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!ok) { free(buf); return false; }
+    *out = buf;
+    *out_len = len;
+    return true;
+#else
     char full[INV_PATH_MAX];
     int n = snprintf(full, sizeof(full), "%s/%s", s->root,
                      s->paths[file_index].path);
@@ -270,6 +373,7 @@ bool inv_read_stable(const struct inv_scan *s, int file_index,
     *out = buf;
     *out_len = len;
     return true;
+#endif
 }
 
 static bool inv_file_push(struct inv_scan *s, int index, const char *purpose)

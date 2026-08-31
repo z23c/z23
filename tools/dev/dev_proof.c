@@ -66,7 +66,7 @@ struct proof_paths {
     char helper_log[PATH_MAX];
     char attempt[PATH_MAX];
     char attempt_token[192];
-    pid_t attempt_worker;
+    int64_t attempt_worker;
 };
 
 static void proof_why(char *why, size_t why_len, const char *message)
@@ -846,7 +846,7 @@ static bool proof_attempt_paths_prepare(const struct proof_paths *pair,
         return false;
     (void)snprintf(attempt->attempt_token, sizeof(attempt->attempt_token),
                    "%s", leaf + 1);
-    attempt->attempt_worker = getpid();
+    attempt->attempt_worker = (int64_t)getpid();
     if (snprintf(attempt->logs, sizeof(attempt->logs), "%s/logs",
                  attempt->attempt) >= (int)sizeof(attempt->logs) ||
         snprintf(attempt->changed, sizeof(attempt->changed),

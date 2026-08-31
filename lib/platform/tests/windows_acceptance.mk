@@ -12,7 +12,6 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	build_fabric_worker_refusal \
 	bundle_exporter_refusal \
 	cli_render_env \
-	codeindex_build_refusal \
 	consensus_bundle_marker \
 	consensus_export_fd_io_refusal \
 	consensus_export_output_seal_refusal \
@@ -96,10 +95,6 @@ ZCL_WINDOWS_ACCEPTANCE_cli_render_env_SOURCES := \
 	lib/json/src/json.c \
 	lib/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_cli_render_env_FLAGS := -Itools
-ZCL_WINDOWS_ACCEPTANCE_codeindex_build_refusal_SOURCES := \
-	lib/test/src/codeindex_build_refusal_acceptance.c \
-	lib/codeindex/src/codeindex_build_windows.c
-ZCL_WINDOWS_ACCEPTANCE_codeindex_build_refusal_FLAGS := -Ilib/codeindex/src
 ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_SOURCES := \
 	lib/test/src/consensus_bundle_marker_windows_acceptance.c \
 	config/src/boot_consensus_bundle_marker.c \

@@ -58,14 +58,11 @@ enum {
     MERKLE_SNAPSHOT_MAX = 64u * 1024u * 1024u,
 };
 
-#if !defined(_WIN32)
 static const char merkle_snapshot_format[] =
     "zcl.codeindex.source_tree.merkle.v2";
 static const char merkle_snapshot_name[] = "source_tree.merkle";
 static const char merkle_snapshot_seal_domain[] =
     "zcl.codeindex.source_tree.merkle.seal.v1";
-#endif
-
 /* ── records ─────────────────────────────────────────────────────────── */
 
 /* The cache key that decides whether a leaf's bytes must be re-read. Same
@@ -285,7 +282,6 @@ struct merkle_snapshot {
     struct merkle_node_rec *nodes;
     uint32_t                nnodes;
 };
-
 static void merkle_snapshot_free(struct merkle_snapshot *s)
 {
     if (!s) return;
@@ -295,14 +291,11 @@ static void merkle_snapshot_free(struct merkle_snapshot *s)
     s->nodes = NULL;
     s->nleaves = s->nnodes = 0;
 }
-
 struct merkle_cursor {
     const unsigned char *p;
     size_t               left;
     bool                 bad;
 };
-
-#if !defined(_WIN32)
 static void merkle_snapshot_seal(const unsigned char *image, size_t len,
                                  unsigned char out[32])
 {
@@ -314,7 +307,6 @@ static void merkle_snapshot_seal(const unsigned char *image, size_t len,
     sha3_256_write(&sha, image, len);
     sha3_256_finalize(&sha, out);
 }
-#endif
 
 static bool merkle_take(struct merkle_cursor *c, void *dst, size_t n)
 {
@@ -333,7 +325,6 @@ static uint32_t merkle_take_u32(struct merkle_cursor *c)
            ((uint32_t)b[3] << 24);
 }
 
-#if !defined(_WIN32)
 static uint64_t merkle_take_u64(struct merkle_cursor *c)
 {
     unsigned char b[8] = {0};
@@ -380,8 +371,133 @@ static void merkle_put_path(unsigned char **w, const char *p)
     *w += 2;
     merkle_put(w, p, len);
 }
-#endif
 
+static bool merkle_snapshot_decode(unsigned char *img, size_t len,
+                                   struct merkle_snapshot *out, bool *found)
+{
+    if (len <= 32) { free(img); return true; }
+    size_t payload_len = len - 32;
+    unsigned char expected_seal[32];
+    merkle_snapshot_seal(img, payload_len, expected_seal);
+    if (memcmp(expected_seal, img + payload_len, 32) != 0) {
+        free(img);
+        return true;
+    }
+    struct merkle_cursor c = {.p = img, .left = payload_len, .bad = false};
+    char format[256];
+    if (!merkle_take_path(&c, format) ||
+        strcmp(format, merkle_snapshot_format) != 0) {
+        free(img);
+        return true;
+    }
+    uint32_t nleaves = merkle_take_u32(&c);
+    uint32_t nnodes = merkle_take_u32(&c);
+    unsigned char root_digest[32];
+    (void)merkle_take(&c, root_digest, 32);
+    if (c.bad || nnodes == 0 || nleaves > (MERKLE_SNAPSHOT_MAX / 64) ||
+        nnodes > (MERKLE_SNAPSHOT_MAX / 64)) {
+        free(img);
+        return true;
+    }
+    struct merkle_leaf_rec *leaves = nleaves
+        ? zcl_malloc((size_t)nleaves * sizeof(*leaves),
+                     "ci_merkle_snap_leaves") : NULL;
+    struct merkle_node_rec *nodes =
+        zcl_malloc((size_t)nnodes * sizeof(*nodes), "ci_merkle_snap_nodes");
+    if ((nleaves && !leaves) || !nodes) {
+        free(leaves);
+        free(nodes);
+        free(img);
+        LOG_FAIL("codeindex", "allocate merkle snapshot records");
+    }
+    if (leaves) memset(leaves, 0, (size_t)nleaves * sizeof(*leaves));
+    memset(nodes, 0, (size_t)nnodes * sizeof(*nodes));
+    for (uint32_t i = 0; i < nleaves && !c.bad; i++) {
+        struct merkle_leaf_rec *l = &leaves[i];
+        if (!merkle_take_path(&c, l->path)) break;
+        (void)merkle_take(&c, l->digest.bytes, 32);
+        l->size = merkle_take_u64(&c);
+        l->key.dev = merkle_take_u64(&c);
+        l->key.ino = merkle_take_u64(&c);
+        l->key.size = merkle_take_u64(&c);
+        l->key.mtime_sec = merkle_take_u64(&c);
+        l->key.mtime_nsec = merkle_take_u64(&c);
+        l->key.ctime_sec = merkle_take_u64(&c);
+        l->key.ctime_nsec = merkle_take_u64(&c);
+        if (i > 0 && strcmp(leaves[i - 1].path, l->path) >= 0) c.bad = true;
+    }
+    for (uint32_t i = 0; i < nnodes && !c.bad; i++) {
+        struct merkle_node_rec *nd = &nodes[i];
+        if (!merkle_take_path(&c, nd->path)) break;
+        (void)merkle_take(&c, nd->digest.bytes, 32);
+        nd->direct_children = merkle_take_u32(&c);
+        nd->file_count = merkle_take_u32(&c);
+        nd->dir_count = merkle_take_u32(&c);
+        nd->total_bytes = merkle_take_u64(&c);
+        if (i > 0 && strcmp(nodes[i - 1].path, nd->path) >= 0) c.bad = true;
+    }
+    free(img);
+    if (c.bad || c.left != 0 || nodes[0].path[0] != '\0' ||
+        memcmp(nodes[0].digest.bytes, root_digest, 32) != 0) {
+        free(leaves);
+        free(nodes);
+        return true;
+    }
+    out->leaves = leaves;
+    out->nleaves = nleaves;
+    out->nodes = nodes;
+    out->nnodes = nnodes;
+    *found = true;
+    return true;
+}
+
+static unsigned char *merkle_snapshot_encode(const struct ci_merkle *m,
+                                             size_t *total_out)
+{
+    size_t need = sizeof(merkle_snapshot_format) + 2 + 4 + 4 + 32 + 32;
+    for (uint32_t i = 0; i < m->nleaves; i++)
+        need += 2 + strlen(m->leaves[i].path) + 32 + 8 * 8;
+    for (uint32_t i = 0; i < m->nnodes; i++)
+        need += 2 + strlen(m->nodes[i].path) + 32 + 4 + 4 + 4 + 8;
+    unsigned char *img = zcl_malloc(need, "ci_merkle_snapshot_out");
+    if (!img) LOG_NULL("codeindex", "allocate merkle snapshot output");
+    unsigned char *w = img;
+    merkle_put_path(&w, merkle_snapshot_format);
+    merkle_put_u32(&w, m->nleaves);
+    merkle_put_u32(&w, m->nnodes);
+    merkle_put(&w, m->root.bytes, 32);
+    for (uint32_t i = 0; i < m->nleaves; i++) {
+        const struct merkle_leaf_rec *l = &m->leaves[i];
+        merkle_put_path(&w, l->path);
+        merkle_put(&w, l->digest.bytes, 32);
+        merkle_put_u64(&w, l->size);
+        merkle_put_u64(&w, l->key.dev);
+        merkle_put_u64(&w, l->key.ino);
+        merkle_put_u64(&w, l->key.size);
+        merkle_put_u64(&w, l->key.mtime_sec);
+        merkle_put_u64(&w, l->key.mtime_nsec);
+        merkle_put_u64(&w, l->key.ctime_sec);
+        merkle_put_u64(&w, l->key.ctime_nsec);
+    }
+    for (uint32_t i = 0; i < m->nnodes; i++) {
+        const struct merkle_node_rec *nd = &m->nodes[i];
+        merkle_put_path(&w, nd->path);
+        merkle_put(&w, nd->digest.bytes, 32);
+        merkle_put_u32(&w, nd->direct_children);
+        merkle_put_u32(&w, nd->file_count);
+        merkle_put_u32(&w, nd->dir_count);
+        merkle_put_u64(&w, nd->total_bytes);
+    }
+    size_t payload_len = (size_t)(w - img);
+    merkle_snapshot_seal(img, payload_len, w);
+    w += 32;
+    *total_out = (size_t)(w - img);
+    return img;
+}
+
+#if !defined(_WIN32)
+static _Atomic uint64_t g_merkle_tmp_seq = 1;
+#endif
 /* Open <root>/.codeindex as a directory capability. `create` mkdirs it. Same
  * owner-controlled posture codeindex_build.c requires of the same directory: a
  * cache another user can write is a cache that can answer for us. */
@@ -389,23 +505,33 @@ static void merkle_put_path(unsigned char **w, const char *p)
 static bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
                                  bool *found)
 {
-    (void)root;
     *found = false;
     memset(out, 0, sizeof(*out));
-    return true;
+    unsigned char *image = NULL;
+    size_t length = 0;
+    bool image_found = false;
+    if (!ci_merkle_snapshot_image_load_windows(
+            root, merkle_snapshot_name, MERKLE_SNAPSHOT_MAX, &image, &length,
+            &image_found))
+        return false;
+    if (!image_found) return true;
+    return merkle_snapshot_decode(image, length, out, found);
 }
-
 static bool merkle_snapshot_save(const char *root, const struct ci_merkle *m)
 {
-    (void)root;
-    (void)m;
-    return false;
+    size_t total = 0;
+    unsigned char *img = merkle_snapshot_encode(m, &total);
+    if (!img) return false;
+    bool ok = ci_merkle_snapshot_image_save_windows(
+        root, merkle_snapshot_name, img, total);
+    free(img);
+    return ok;
 }
-
 bool ci_merkle_forget(const char *root)
 {
-    (void)root;
-    return false;
+    if (!root) LOG_FAIL("codeindex", "null root to merkle_forget");
+    return ci_merkle_snapshot_image_forget_windows(root,
+                                                   merkle_snapshot_name);
 }
 #else
 static int merkle_open_dir(const char *root, bool create)
@@ -471,137 +597,17 @@ static bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
         return true; /* unreadable cache == no cache */
     }
 
-    if (len <= 32) {
-        free(img);
-        return true;
-    }
-    size_t payload_len = len - 32;
-    unsigned char expected_seal[32];
-    merkle_snapshot_seal(img, payload_len, expected_seal);
-    if (memcmp(expected_seal, img + payload_len, 32) != 0) {
-        free(img);
-        return true;
-    }
-
-    struct merkle_cursor c = {
-        .p = img, .left = payload_len, .bad = false
-    };
-    char format[256];
-    if (!merkle_take_path(&c, format) ||
-        strcmp(format, merkle_snapshot_format) != 0) {
-        free(img);
-        return true;
-    }
-    uint32_t nleaves = merkle_take_u32(&c);
-    uint32_t nnodes = merkle_take_u32(&c);
-    unsigned char root_digest[32];
-    (void)merkle_take(&c, root_digest, 32);
-    if (c.bad || nnodes == 0 || nleaves > (MERKLE_SNAPSHOT_MAX / 64) ||
-        nnodes > (MERKLE_SNAPSHOT_MAX / 64)) {
-        free(img);
-        return true;
-    }
-
-    struct merkle_leaf_rec *leaves =
-        nleaves ? zcl_malloc((size_t)nleaves * sizeof(*leaves),
-                             "ci_merkle_snap_leaves")
-                : NULL;
-    struct merkle_node_rec *nodes =
-        zcl_malloc((size_t)nnodes * sizeof(*nodes), "ci_merkle_snap_nodes");
-    if ((nleaves && !leaves) || !nodes) {
-        free(leaves);
-        free(nodes);
-        free(img);
-        LOG_FAIL("codeindex", "allocate merkle snapshot records");
-    }
-    if (leaves) memset(leaves, 0, (size_t)nleaves * sizeof(*leaves));
-    memset(nodes, 0, (size_t)nnodes * sizeof(*nodes));
-
-    for (uint32_t i = 0; i < nleaves && !c.bad; i++) {
-        struct merkle_leaf_rec *l = &leaves[i];
-        if (!merkle_take_path(&c, l->path)) break;
-        (void)merkle_take(&c, l->digest.bytes, 32);
-        l->size = merkle_take_u64(&c);
-        l->key.dev = merkle_take_u64(&c);
-        l->key.ino = merkle_take_u64(&c);
-        l->key.size = merkle_take_u64(&c);
-        l->key.mtime_sec = merkle_take_u64(&c);
-        l->key.mtime_nsec = merkle_take_u64(&c);
-        l->key.ctime_sec = merkle_take_u64(&c);
-        l->key.ctime_nsec = merkle_take_u64(&c);
-        if (i > 0 && strcmp(leaves[i - 1].path, l->path) >= 0) c.bad = true;
-    }
-    for (uint32_t i = 0; i < nnodes && !c.bad; i++) {
-        struct merkle_node_rec *nd = &nodes[i];
-        if (!merkle_take_path(&c, nd->path)) break;
-        (void)merkle_take(&c, nd->digest.bytes, 32);
-        nd->direct_children = merkle_take_u32(&c);
-        nd->file_count = merkle_take_u32(&c);
-        nd->dir_count = merkle_take_u32(&c);
-        nd->total_bytes = merkle_take_u64(&c);
-        if (i > 0 && strcmp(nodes[i - 1].path, nd->path) >= 0) c.bad = true;
-    }
-    free(img);
-    if (c.bad || c.left != 0 || nodes[0].path[0] != '\0' ||
-        memcmp(nodes[0].digest.bytes, root_digest, 32) != 0) {
-        free(leaves);
-        free(nodes);
-        return true;
-    }
-    out->leaves = leaves;
-    out->nleaves = nleaves;
-    out->nodes = nodes;
-    out->nnodes = nnodes;
-    *found = true;
-    return true;
+    return merkle_snapshot_decode(img, len, out, found);
 }
-
-static _Atomic uint64_t g_merkle_tmp_seq = 1;
 
 /* Publish a snapshot: private O_EXCL temp beside the target, fsync, atomic
  * rename. A crash mid-write leaves the previous snapshot (or none), and either
  * way the next refresh is correct — only slower. */
 static bool merkle_snapshot_save(const char *root, const struct ci_merkle *m)
 {
-    size_t need = sizeof(merkle_snapshot_format) + 2 + 4 + 4 + 32 + 32;
-    for (uint32_t i = 0; i < m->nleaves; i++)
-        need += 2 + strlen(m->leaves[i].path) + 32 + 8 * 8;
-    for (uint32_t i = 0; i < m->nnodes; i++)
-        need += 2 + strlen(m->nodes[i].path) + 32 + 4 + 4 + 4 + 8;
-
-    unsigned char *img = zcl_malloc(need, "ci_merkle_snapshot_out");
-    if (!img) LOG_FAIL("codeindex", "allocate merkle snapshot output");
-    unsigned char *w = img;
-    merkle_put_path(&w, merkle_snapshot_format);
-    merkle_put_u32(&w, m->nleaves);
-    merkle_put_u32(&w, m->nnodes);
-    merkle_put(&w, m->root.bytes, 32);
-    for (uint32_t i = 0; i < m->nleaves; i++) {
-        const struct merkle_leaf_rec *l = &m->leaves[i];
-        merkle_put_path(&w, l->path);
-        merkle_put(&w, l->digest.bytes, 32);
-        merkle_put_u64(&w, l->size);
-        merkle_put_u64(&w, l->key.dev);
-        merkle_put_u64(&w, l->key.ino);
-        merkle_put_u64(&w, l->key.size);
-        merkle_put_u64(&w, l->key.mtime_sec);
-        merkle_put_u64(&w, l->key.mtime_nsec);
-        merkle_put_u64(&w, l->key.ctime_sec);
-        merkle_put_u64(&w, l->key.ctime_nsec);
-    }
-    for (uint32_t i = 0; i < m->nnodes; i++) {
-        const struct merkle_node_rec *nd = &m->nodes[i];
-        merkle_put_path(&w, nd->path);
-        merkle_put(&w, nd->digest.bytes, 32);
-        merkle_put_u32(&w, nd->direct_children);
-        merkle_put_u32(&w, nd->file_count);
-        merkle_put_u32(&w, nd->dir_count);
-        merkle_put_u64(&w, nd->total_bytes);
-    }
-    size_t payload_len = (size_t)(w - img);
-    merkle_snapshot_seal(img, payload_len, w);
-    w += 32;
-    size_t total = (size_t)(w - img);
+    size_t total = 0;
+    unsigned char *img = merkle_snapshot_encode(m, &total);
+    if (!img) return false;
 
     int dirfd = merkle_open_dir(root, true);
     if (dirfd < 0) {

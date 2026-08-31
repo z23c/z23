@@ -1996,6 +1996,7 @@ windows-acceptance: windows-acceptance-compile
 ifeq ($(ZCL_HOST_WINDOWS),1)
 windows-acceptance: windows-headless-run-selftest
 
+	@$(MAKE) --no-print-directory z23
 	@root="$$(cygpath -aw .)"; \
 	runner="$$(cygpath -aw $(WINDOWS_HEADLESS_RUN_BIN))"; \
 	log_dir="build/tests/windows/logs"; mkdir -p "$$log_dir"; \
@@ -2012,6 +2013,25 @@ windows-acceptance: windows-headless-run-selftest
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
+	codeindex_log="$$log_dir/codeindex_native.log"; \
+	codeindex_log_win="$$(cygpath -aw "$$codeindex_log")"; \
+	z23_win="$$(cygpath -aw build/bin/z23.exe)"; \
+	"$$runner" --cwd "$$root" --log "$$codeindex_log_win" -- \
+		"$$z23_win" code have '--input={"text":"windows native codeindex acceptance"}'; rc=$$?; \
+	test ! -f "$$codeindex_log" || cat "$$codeindex_log"; \
+	if test $$rc -ne 0; then \
+		printf '%s\n' 'windows-acceptance: FAIL: native codeindex command failed' >&2; \
+		exit $$rc; \
+	fi; \
+	grep -q '"ok":true' "$$codeindex_log" || { \
+		printf '%s\n' 'windows-acceptance: FAIL: native codeindex did not pass' >&2; \
+		exit 2; \
+	}; \
+	grep -q '"data_schema":"zcl.code_have.v1"' "$$codeindex_log" || { \
+		printf '%s\n' 'windows-acceptance: FAIL: native codeindex response schema missing' >&2; \
+		exit 2; \
+	}; \
+	printf '%s\n' 'windows-acceptance: native codeindex rebuild/open/query PASS'; \
 	printf '%s\n' 'windows-acceptance: native execution PASS (explicit runtime refusals reported above)'
 else
 	@printf '%s\n' \
@@ -11696,7 +11716,10 @@ docs-api-reference: $(API_REFERENCE_TOOL)
 # capability census.  JSON Lines keeps 1,000+ headers and their full symbol
 # tables grep-friendly without requiring jq or loading one giant document.
 # The checked-in artifact is never edited: regenerate it with this target.
-CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory
+CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory$(ZCL_HOST_EXEEXT)
+CAPABILITY_INVENTORY_PLATFORM_SRCS = $(if $(ZCL_HOST_WINDOWS), \
+	lib/platform/src/directory_compat.c lib/platform/src/positioned_file.c,)
+CAPABILITY_INVENTORY_PLATFORM_LIBS = $(if $(ZCL_HOST_WINDOWS),-ladvapi32,)
 CAPABILITY_INVENTORY_SRCS = tools/gen_capability_inventory.c \
 	lib/codeindex/src/codeindex_inventory.c \
 	lib/codeindex/src/codeindex_inventory_scan.c \
@@ -11704,7 +11727,8 @@ CAPABILITY_INVENTORY_SRCS = tools/gen_capability_inventory.c \
 	lib/codeindex/src/codeindex_inventory_evidence.c \
 	lib/codeindex/src/codeindex_scan.c \
 	lib/codeindex/src/codeindex_scan_doc.c \
-	lib/base/src/safe_alloc.c lib/base/src/log_level.c lib/sha3/src/sha3.c
+	lib/base/src/safe_alloc.c lib/base/src/log_level.c lib/sha3/src/sha3.c \
+	$(CAPABILITY_INVENTORY_PLATFORM_SRCS)
 
 $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
 	lib/codeindex/include/codeindex/codeindex_inventory.h \
@@ -11715,7 +11739,7 @@ $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
 	    -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
 	    -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
 	    -Ilib/crypto/include -Ilib/platform/include \
-	    -o $@ $(CAPABILITY_INVENTORY_SRCS)
+	    -o $@ $(CAPABILITY_INVENTORY_SRCS) $(CAPABILITY_INVENTORY_PLATFORM_LIBS)
 
 .PHONY: tools/gen_capability_inventory docs-capability-inventory
 tools/gen_capability_inventory: $(CAPABILITY_INVENTORY_TOOL)

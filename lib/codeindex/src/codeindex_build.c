@@ -221,34 +221,12 @@ collect_failed:
 
 /* ── staleness stamp: exact content-bound source-tree digest ────────── */
 
-static const char ci_store_format[] = "zcl.codeindex.store.v4";
-
 struct stamp_ctx {
     const char *root;
     struct sha3_256_ctx sha;
     struct sha3_256_ctx stat_sha;
     bool include_stat;
 };
-
-static void source_root_init(struct sha3_256_ctx *sha)
-{
-    /* v3: bumped alongside CI_SCHEMA_VERSION="cg1" (refs.enclosing) so the
-     * content stamp of any pre-call-graph generation misses — the second half
-     * of the dual recompute-never-repair trigger.
-     * v4: bumped alongside CI_SCHEMA_VERSION="rev1". The enumerated set now
-     * includes `*.def` registries, so the stamp finally moves when one is
-     * edited; a v3 stamp was computed over a strictly smaller file set. */
-    static const char domain[] = "zcl.codeindex.source_root.v4";
-    sha3_256_init(sha);
-    sha3_256_write(sha, (const unsigned char *)domain, sizeof(domain));
-}
-
-static void source_root_add(struct sha3_256_ctx *sha, const char *relpath,
-                            const uint8_t content_sha3[32])
-{
-    sha3_256_write(sha, (const unsigned char *)relpath, strlen(relpath) + 1);
-    sha3_256_write(sha, content_sha3, 32);
-}
 
 static void sha_write_u64le(struct sha3_256_ctx *sha, uint64_t value)
 {
@@ -340,7 +318,7 @@ static bool stamp_cb(const char *relpath, const struct stat *st, void *user)
     struct stat opened_st;
     if (!source_file_sha3(c->root, relpath, content_sha3, &opened_st))
         return false;
-    source_root_add(&c->sha, relpath, content_sha3);
+    ci_source_root_add(&c->sha, relpath, content_sha3);
     if (c->include_stat)
         source_stat_root_add(&c->stat_sha, relpath, &opened_st);
     (void)st;
@@ -364,7 +342,7 @@ bool ci_source_roots_sha3(const char *root, uint8_t exact_out[32],
     memset(&c, 0, sizeof(c));
     c.root = root;
     c.include_stat = true;
-    source_root_init(&c.sha);
+    ci_source_root_init(&c.sha);
     source_stat_root_init(&c.stat_sha);
     if (!ci_enumerate_sources(root, stamp_cb, &c))
         LOG_FAIL("codeindex", "enumerate for source roots failed");
@@ -385,135 +363,7 @@ bool ci_source_stat_root_sha3(const char *root, uint8_t out[32])
     return true;
 }
 
-/* ── rebuild ────────────────────────────────────────────────────────── */
-
-/* path → file_id map (sorted, bsearch) */
-struct idmap_ent { char path[256]; int64_t id; };
-struct build_ctx {
-    struct ci_store   *store;
-    bool               err;
-    struct idmap_ent  *ids;
-    size_t             nids, cap_ids;
-    struct sha3_256_ctx source_root;
-};
-
-static void on_sym_cb(const struct ci_symbol *sym, void *user)
-{
-    struct build_ctx *b = user;
-    if (b->err) return;
-    if (!ci_store_put_symbol(b->store, sym)) b->err = true;
-}
-
-/* Discarding sinks for a registry file: ci_scan_file requires both callbacks,
- * and a registry must contribute neither a symbol nor a call edge. */
-static void ci_ignore_sym_cb(const struct ci_symbol *sym, void *user)
-{
-    (void)sym;
-    (void)user;
-}
-
-static void ci_ignore_ref_cb(const char *callee, const char *ref_file,
-                             int ref_line, const char *enclosing, void *user)
-{
-    (void)callee;
-    (void)ref_file;
-    (void)ref_line;
-    (void)enclosing;
-    (void)user;
-}
-
-static void on_ref_cb(const char *callee, const char *ref_file, int ref_line,
-                      const char *enclosing, void *user)
-{
-    struct build_ctx *b = user;
-    if (b->err) return;
-    if (!ci_store_put_ref(b->store, callee, ref_file, ref_line, enclosing))
-        b->err = true;
-}
-
-static bool idmap_push(struct build_ctx *b, const char *path, int64_t id)
-{
-    if (b->nids == b->cap_ids) {
-        size_t ncap = b->cap_ids ? b->cap_ids * 2 : 512;
-        void *nb = zcl_realloc(b->ids, ncap * sizeof(*b->ids), "ci_idmap");
-        if (!nb) return false;
-        b->ids = nb; b->cap_ids = ncap;
-    }
-    snprintf(b->ids[b->nids].path, sizeof(b->ids[b->nids].path), "%s", path);
-    b->ids[b->nids].id = id;
-    b->nids++;
-    return true;
-}
-
-static int idmap_cmp(const void *a, const void *b)
-{
-    return strcmp(((const struct idmap_ent *)a)->path,
-                  ((const struct idmap_ent *)b)->path);
-}
-
-static int64_t idmap_find(const struct build_ctx *b, const char *path)
-{
-    size_t lo = 0, hi = b->nids;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        int c = strcmp(b->ids[mid].path, path);
-        if (c == 0) return b->ids[mid].id;
-        if (c < 0) lo = mid + 1; else hi = mid;
-    }
-    return -1;
-}
-
-/* the per-file enumeration callback needs root; carry it alongside build_ctx. */
-struct build_file_env { struct build_ctx *b; const char *root; };
-
-static bool build_file_cb2(const char *relpath, const struct stat *file_st,
-                           void *user)
-{
-    struct build_file_env *env = user;
-    struct build_ctx *b = env->b;
-    if (b->err) return false;
-
-    uint8_t sha[32];
-    char purpose[CI_FILE_PURPOSE_MAX] = "";
-    /* A registry is hashed and filed, never scanned: its `FOO(a, b)` rows are
-     * macro data, and letting the C scanner read them would mint symbols and
-     * call edges that do not exist. Include-graph node only (see
-     * ci_is_registry_name). */
-    bool registry = ci_path_is_registry(relpath);
-    if (!ci_scan_file(env->root, relpath,
-                      registry ? ci_ignore_sym_cb : on_sym_cb,
-                      registry ? ci_ignore_ref_cb : on_ref_cb, b, sha,
-                      purpose)) {
-        b->err = true;
-        return false;
-    }
-    source_root_add(&b->source_root, relpath, sha);
-    struct ci_file f;
-    memset(&f, 0, sizeof(f));
-    snprintf(f.path, sizeof(f.path), "%s", relpath);
-    ci_group_for_path(relpath, f.group);
-    /* self-description derived from the file's leading comment (§1.1). */
-    snprintf(f.purpose, sizeof(f.purpose), "%s", purpose);
-    int64_t id = -1;
-    int64_t mtime_ns = (int64_t)file_st->st_mtim.tv_sec * INT64_C(1000000000) +
-                       (int64_t)file_st->st_mtim.tv_nsec;
-    if (!ci_store_put_file(b->store, &f, sha, mtime_ns, &id)) {
-        b->err = true;
-        return false;
-    }
-    if (!idmap_push(b, relpath, id)) { b->err = true; return false; }
-    return true;
-}
-
-static void on_dep_cb(const char *src_relpath, const char *dep_relpath,
-                      void *user)
-{
-    struct build_ctx *b = user;
-    if (b->err) return;
-    int64_t id = idmap_find(b, src_relpath);
-    if (id < 0) return;  /* source not in our indexed set — skip */
-    if (!ci_store_put_include(b->store, id, dep_relpath)) b->err = true;
-}
+/* ── rebuild publication ────────────────────────────────────────────── */
 
 static _Atomic uint64_t g_stage_sequence = 1;
 
@@ -781,13 +631,10 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
 
     const char *failure = "unknown rebuild failure";
     bool success = false;
-    bool tx_open = false;
     char stage_name[128] = "";
     struct stage_identity stage_identity = {0};
     int stagefd = -1;
     struct ci_store *st = NULL;
-    struct build_ctx b;
-    memset(&b, 0, sizeof(b));
 
     if (!cleanup_orphan_stages(dirfd)) {
         failure = "orphan staging cleanup failed";
@@ -828,87 +675,13 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         goto out;
     }
 
-    /* Build in memory, then serialize through the still-open O_EXCL file
-     * descriptor. SQLite never receives a staging pathname, so a directory
-     * entry swap cannot redirect DDL/DELETE writes outside this capability. */
-    st = ci_store_open_path(":memory:");
-    if (!st) {
-        failure = "open staging store failed";
-        goto out;
-    }
-    b.store = st;
-    source_root_init(&b.source_root);
-
-    if (!ci_store_begin(st)) {
-        failure = "begin staging transaction failed";
-        goto out;
-    }
-    tx_open = true;
-    bool build_ok = ci_store_clear(st) && ci_group_emit_all(st);
-
-    struct build_file_env env = { &b, ci->root };
-    if (build_ok && !ci_enumerate_sources(ci->root, build_file_cb2, &env))
-        build_ok = false;
-    if (b.err) build_ok = false;
-
-    if (build_ok)
-        qsort(b.ids, b.nids, sizeof(b.ids[0]), idmap_cmp);
-
-    uint8_t built_source_root[32];
-    uint8_t built_dep_root[32];
     uint8_t built_source_stat_root[32];
     uint8_t built_dep_stat_root[32];
-    if (build_ok) {
-        sha3_256_finalize(&b.source_root, built_source_root);
-        if (!ci_store_meta_set(st, "source_root_sha3", built_source_root, 32))
-            build_ok = false;
-    }
-    if (build_ok &&
-        (!ci_deps_scan(ci->root, on_dep_cb, &b, built_dep_root) || b.err))
-        build_ok = false;
-    if (build_ok &&
-        !ci_store_meta_set(st, "dep_root_sha3", built_dep_root, 32))
-        build_ok = false;
-
-    /* Refuse a mixed source epoch and derive the metadata cache keys from the
-     * same opened inodes as the exact validation pass. */
-    uint8_t current_source_root[32], current_dep_root[32];
-    if (build_ok &&
-        (!ci_source_roots_sha3(ci->root, current_source_root,
-                               built_source_stat_root) ||
-         memcmp(built_source_root, current_source_root, 32) != 0 ||
-         !ci_deps_scan_roots(ci->root, NULL, NULL, current_dep_root,
-                             built_dep_stat_root) ||
-         memcmp(built_dep_root, current_dep_root, 32) != 0))
-        build_ok = false;
-    if (build_ok &&
-        !ci_store_meta_set(st, "source_stat_root_sha3",
-                           built_source_stat_root, 32))
-        build_ok = false;
-    if (build_ok &&
-        !ci_store_meta_set(st, "dep_stat_root_sha3",
-                           built_dep_stat_root, 32))
-        build_ok = false;
-    if (build_ok &&
-        !ci_store_meta_set(st, "store_format", ci_store_format,
-                           sizeof(ci_store_format) - 1))
-        build_ok = false;
-    if (build_ok &&
-        !ci_store_meta_set(st, "ci_schema_version", CI_SCHEMA_VERSION,
-                           sizeof(CI_SCHEMA_VERSION) - 1))
-        build_ok = false;
-    if (!build_ok) {
-        (void)ci_store_rollback(st);
-        tx_open = false;
+    if (!ci_build_store_memory(ci->root, &st, built_source_stat_root,
+                               built_dep_stat_root)) {
         failure = "source scan or staging write failed";
         goto out;
     }
-    if (!ci_store_commit(st)) {
-        tx_open = false;
-        failure = "commit staging store failed";
-        goto out;
-    }
-    tx_open = false;
 
     if (!ci_store_write_image_fd(st, stagefd)) {
         failure = "serialize staging store failed";
@@ -1002,12 +775,8 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     success = true;
 
 out:
-    if (st) {
-        if (tx_open) (void)ci_store_rollback(st);
-        ci_store_close(st);
-    }
+    if (st) ci_store_close(st);
     if (stagefd >= 0) close(stagefd);
-    free(b.ids);
     if (stage_name[0]) {
         (void)unlinkat(dirfd, stage_name, 0);
     }

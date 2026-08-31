@@ -21,6 +21,8 @@
 #define ZCL_CODEINDEX_STORE_INTERNAL_H
 
 #include "codeindex_priv.h"
+#include "platform/positioned_file.h"
+#include "platform/read_mapping.h"
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -29,6 +31,9 @@ struct ci_store {
     sqlite3        *db;
     pthread_mutex_t lock;   /* recursive: held begin..commit; reads take briefly */
     int             bound_fd; /* immutable canonical inode, -1 for :memory: */
+    struct platform_positioned_file bound_file;
+    struct platform_read_mapping mapping;
+    bool            has_bound_file;
     bool            readonly;
 };
 

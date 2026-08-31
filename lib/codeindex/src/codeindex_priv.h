@@ -16,6 +16,7 @@
 #include "codeindex/codeindex.h"
 
 #include "crypto/sha3.h"
+#include "platform/directory_transaction.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -99,6 +100,21 @@ bool ci_store_meta_set(struct ci_store *s, const char *k, const void *v,
 /* Serialize a committed in-memory store directly into an already-open private
  * regular-file capability. No pathname is opened or followed. */
 bool ci_store_write_image_fd(struct ci_store *s, int fd);
+/* Serialize a committed in-memory store through one retained child file.
+ * Used by the native Windows publisher, where an integer CRT descriptor is
+ * not the directory-relative authority. */
+bool ci_store_write_image_child(struct ci_store *s,
+                                struct platform_directory_child *child);
+#if defined(_WIN32)
+bool ci_merkle_snapshot_image_load_windows(
+    const char *root, const char *leaf, size_t maximum,
+    unsigned char **image_out, size_t *length_out, bool *found);
+bool ci_merkle_snapshot_image_save_windows(
+    const char *root, const char *leaf, const unsigned char *image,
+    size_t length);
+bool ci_merkle_snapshot_image_forget_windows(const char *root,
+                                             const char *leaf);
+#endif
 
 /* reads (self-locking; no open txn required) */
 bool ci_store_meta_get(struct ci_store *s, const char *k, void *buf,
@@ -167,6 +183,16 @@ bool ci_source_stat_root_sha3(const char *root, uint8_t out[32]);
 /* Exact bytes and their metadata cache key from the same opened inodes. */
 bool ci_source_roots_sha3(const char *root, uint8_t exact_out[32],
                           uint8_t stat_out[32]);
+
+/* Shared deterministic store assembly. Platform publishers supply only the
+ * retained staging/lock/replace transaction; scanning, metadata binding and
+ * the in-memory SQLite generation stay identical on every host. */
+void ci_source_root_init(struct sha3_256_ctx *sha);
+void ci_source_root_add(struct sha3_256_ctx *sha, const char *relpath,
+                        const uint8_t content_sha3[32]);
+bool ci_build_store_memory(const char *root, struct ci_store **out_store,
+                           uint8_t source_stat_out[32],
+                           uint8_t dep_stat_out[32]);
 
 /* ── the C scanner (codeindex_scan.c) ─────────────────────────────────
  * Scan one in-tree file's text. Emits symbols and refs through callbacks.

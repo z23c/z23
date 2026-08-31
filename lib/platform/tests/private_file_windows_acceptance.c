@@ -100,6 +100,10 @@ int main(void) {
       !platform_positioned_file_is_private(&reader))
     return fail("private ACL validation");
   platform_positioned_file_close(&reader);
+  if (!platform_positioned_file_open_beneath(&reader, dir, "stage.part") ||
+      !platform_positioned_file_is_private(&reader))
+    return fail("private ACL validation through retained parent");
+  platform_positioned_file_close(&reader);
   if (platform_private_file_create(stage, &file))
     return fail("create clobbered existing file");
   if (!platform_private_file_open_locked(stage, &file))

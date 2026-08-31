@@ -19,6 +19,19 @@ qualified. The agent adapter is deliberately unavailable because Windows
 confinement is not yet implemented. Never weaken those refusals to obtain a
 green build.
 
+The native code navigator can build and refresh `.codeindex/index.kv` on
+Windows. Publication stays beneath a retained private directory handle, writes
+through a retained private staging-file handle, verifies the final source
+stat-root and empty SQLite journal, flushes the staged bytes, and atomically
+moves the retained child into place. `make windows-acceptance` executes
+`z23.exe code have` through the headless runner and requires a successful typed
+response; a Windows rebuild refusal is no longer accepted as a passing result.
+The source-tree Merkle cache and territory roll-up memo use the same retained
+private child transaction on Windows, so warm provenance and dispatch queries
+can reuse sealed derived state after the source generation is unchanged. The
+read-only SQLite generation is mapped from its retained positioned-file handle
+instead of copied into a second roughly 100 MiB heap image on every command.
+
 Native execution still requires Windows, but producing a Windows artifact no
 longer does. A Linux host can build the pinned third-party archives into the
 target-qualified `vendor/cross/x86_64-w64-mingw32` tree, then use Clang 20+

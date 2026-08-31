@@ -37,9 +37,13 @@
 #include "base/serialize_le.h"
 #include "codeindex/codeindex.h"
 #include "platform/clock.h"
+#if defined(_WIN32)
+#include "platform/directory_transaction.h"
+#endif
 #include "sha3/sha3.h"
 
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -553,6 +557,16 @@ static int tu_cache_path(char *buf, size_t cap, const char *root)
     return snprintf(buf, cap, "%s/.codeindex/territory_rollup.v1", root);
 }
 
+#if defined(_WIN32)
+static _Atomic uint64_t g_tu_cache_sequence = 1;
+
+static bool tu_cache_directory(char *buf, size_t cap, const char *root)
+{
+    int n = snprintf(buf, cap, "%s/.codeindex", root);
+    return n > 0 && (size_t)n < cap;
+}
+#endif
+
 /* The bytes that get digested: everything but the two cache-provenance flags,
  * which describe THIS call and must never be baked into the payload. */
 static size_t tu_payload(const struct territory_rollup *r, const uint8_t **p)
@@ -564,13 +578,43 @@ static size_t tu_payload(const struct territory_rollup *r, const uint8_t **p)
 static bool tu_cache_load(const char *root, const uint8_t gen[32],
                           struct territory_rollup *out)
 {
+#if defined(_WIN32)
+    char directory_path[TERRITORY_PATH_MAX + 32];
+    struct platform_directory_transaction directory;
+    struct platform_directory_child child;
+    struct platform_directory_child_info info;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&child);
+    if (!tu_cache_directory(directory_path, sizeof(directory_path), root) ||
+        !platform_directory_transaction_open(&directory, directory_path) ||
+        !platform_directory_child_open(&directory, "territory_rollup.v1",
+                                       &child) ||
+        !platform_directory_child_info(&child, &info) ||
+        info.link_count != 1 || !info.current_user_only) {
+        platform_directory_child_close(&child);
+        platform_directory_transaction_close(&directory);
+        return false;
+    }
+#else
     char path[TERRITORY_PATH_MAX + 64];
     int n = tu_cache_path(path, sizeof(path), root);
     if (n < 0 || (size_t)n >= sizeof(path)) return false;
     FILE *f = fopen(path, "rb");
     if (!f) return false;
+#endif
     uint8_t hdr[TU_HDR_SIZE];
-    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) { fclose(f); return false; }
+#if defined(_WIN32)
+    if (!platform_directory_child_read_exact(&child, hdr, sizeof(hdr), 0)) {
+        platform_directory_child_close(&child);
+        platform_directory_transaction_close(&directory);
+        return false;
+    }
+#else
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
+        fclose(f);
+        return false;
+    }
+#endif
     const uint8_t *unused = NULL;
     size_t head = tu_payload(out, &unused);
     size_t tail = sizeof(*out) - offsetof(struct territory_rollup, ranks);
@@ -579,13 +623,31 @@ static bool tu_cache_load(const char *root, const uint8_t gen[32],
         zcl_read_u32_le(hdr + TU_HDR_VERSION) != TU_VERSION ||
         stored != (uint32_t)(head + tail) ||
         memcmp(hdr + TU_HDR_ROOT, gen, 32) != 0) {
+#if defined(_WIN32)
+        platform_directory_child_close(&child);
+        platform_directory_transaction_close(&directory);
+#else
         fclose(f);
+#endif
         return false;
     }
     uint8_t *body = zcl_malloc(head + tail, "tu_cache_body");
+#if defined(_WIN32)
+    if (!body) {
+        platform_directory_child_close(&child);
+        platform_directory_transaction_close(&directory);
+        LOG_RETURN(false, "territory", "rollup memo buffer");
+    }
+    bool ok = info.size == TU_HDR_SIZE + head + tail &&
+        platform_directory_child_read_exact(&child, body, head + tail,
+                                            TU_HDR_SIZE);
+    platform_directory_child_close(&child);
+    platform_directory_transaction_close(&directory);
+#else
     if (!body) { fclose(f); LOG_RETURN(false, "territory", "rollup memo buffer"); }
     bool ok = fread(body, 1, head + tail, f) == head + tail;
     fclose(f);
+#endif
     if (!ok) { free(body); return false; }
 
     uint8_t got[32];
@@ -616,11 +678,13 @@ static void tu_cache_store(const char *root, const uint8_t gen[32],
 {
     *wrote = false;
     char path[TERRITORY_PATH_MAX + 64];
-    char tmp[TERRITORY_PATH_MAX + 96];
     int n = tu_cache_path(path, sizeof(path), root);
     if (n < 0 || (size_t)n >= sizeof(path)) return;
+#if !defined(_WIN32)
+    char tmp[TERRITORY_PATH_MAX + 96];
     n = snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
     if (n < 0 || (size_t)n >= sizeof(tmp)) return;
+#endif
 
     const uint8_t *base = NULL;
     size_t head = tu_payload(r, &base);
@@ -640,6 +704,53 @@ static void tu_cache_store(const char *root, const uint8_t gen[32],
     sha3_256_write(&c, (const unsigned char *)ranks, tail);
     sha3_256_finalize(&c, hdr + TU_HDR_DIGEST);
 
+#if defined(_WIN32)
+    char directory_path[TERRITORY_PATH_MAX + 32];
+    struct platform_directory_transaction directory;
+    struct platform_directory_child stage;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&stage);
+    if (!tu_cache_directory(directory_path, sizeof(directory_path), root) ||
+        !platform_directory_transaction_open(&directory, directory_path))
+        return;
+    char stage_name[96] = "";
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 32 && !created; attempt++) {
+        uint64_t seq = atomic_fetch_add_explicit(&g_tu_cache_sequence, 1,
+                                                 memory_order_relaxed);
+        n = snprintf(stage_name, sizeof(stage_name),
+                     "territory_rollup.v1.tmp.%llu",
+                     (unsigned long long)seq);
+        if (n <= 0 || (size_t)n >= sizeof(stage_name)) break;
+        created = platform_directory_child_create(&directory, stage_name,
+                                                  &stage);
+    }
+    bool stage_named = created;
+    bool ok = created &&
+        platform_directory_child_write_exact(&stage, hdr, sizeof(hdr), 0) &&
+        platform_directory_child_write_exact(&stage, base, head,
+                                             sizeof(hdr)) &&
+        platform_directory_child_write_exact(&stage, ranks, tail,
+                                             sizeof(hdr) + head) &&
+        platform_directory_child_truncate(&stage, sizeof(hdr) + head + tail) &&
+        platform_directory_child_flush(&stage);
+    struct platform_directory_child_info info;
+    ok = ok && platform_directory_child_info(&stage, &info) &&
+         info.size == sizeof(hdr) + head + tail && info.link_count == 1 &&
+         info.current_user_only;
+    enum platform_directory_result published = PLATFORM_DIRECTORY_IO;
+    if (ok)
+        published = platform_directory_child_move_between(
+            &directory, &stage, &directory, "territory_rollup.v1", false);
+    if (published == PLATFORM_DIRECTORY_OK ||
+        published == PLATFORM_DIRECTORY_OUTCOME_UNKNOWN)
+        stage_named = false;
+    platform_directory_child_close(&stage);
+    if (stage_named)
+        (void)platform_directory_child_unlink(&directory, stage_name, true);
+    platform_directory_transaction_close(&directory);
+    *wrote = published == PLATFORM_DIRECTORY_OK;
+#else
     FILE *f = fopen(tmp, "wb");
     if (!f) return;  /* a read-only checkout is a normal state */
     bool ok = fwrite(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
@@ -648,6 +759,7 @@ static void tu_cache_store(const char *root, const uint8_t gen[32],
     if (fclose(f) != 0) ok = false;
     if (!ok || rename(tmp, path) != 0) { (void)unlink(tmp); return; }
     *wrote = true;
+#endif
 }
 
 void territory_rollup_free(struct territory_rollup *r) { free(r); }

@@ -18,6 +18,7 @@
 
 #include "platform/fd_path.h"
 #include "platform/positioned_file.h"
+#include "platform/read_mapping.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -62,6 +63,8 @@ struct ci_store *ci_store_open_path(const char *dbpath)
         LOG_NULL("codeindex", "calloc ci_store");
 
     s->bound_fd = -1;
+    platform_positioned_file_init(&s->bound_file);
+    platform_read_mapping_init(&s->mapping);
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
@@ -102,36 +105,33 @@ struct ci_store *ci_store_open(const char *root)
         !platform_positioned_file_size(&file, &image_size) || image_size == 0 ||
         image_size > INT64_MAX || image_size > (uint64_t)SIZE_MAX) {
         platform_positioned_file_close(&file);
-        return NULL;
+        LOG_NULL("codeindex", "published Windows index is not a private bounded file");
     }
-    unsigned char *image = sqlite3_malloc64((sqlite3_uint64)image_size);
-    if (!image) {
+    struct platform_read_mapping mapping;
+    platform_read_mapping_init(&mapping);
+    if (!platform_read_mapping_open_positioned(
+            &mapping, &file, (size_t)image_size)) {
         platform_positioned_file_close(&file);
-        return NULL;
+        LOG_NULL("codeindex", "map published Windows index image size=%llu",
+                 (unsigned long long)image_size);
     }
-    size_t done = 0;
-    while (done < (size_t)image_size) {
-        int64_t read = platform_positioned_file_read(
-            &file, image + done, (size_t)image_size - done, done);
-        if (read <= 0) break;
-        done += (size_t)read;
-    }
-    bool stable = done == (size_t)image_size &&
-        platform_positioned_file_snapshot(&file, &after) &&
-        before.size == after.size && before.volume == after.volume &&
-        before.file_low == after.file_low && before.file_high == after.file_high &&
-        before.modified_seconds == after.modified_seconds &&
-        before.modified_nanoseconds == after.modified_nanoseconds &&
-        before.changed_seconds == after.changed_seconds &&
-        before.changed_nanoseconds == after.changed_nanoseconds;
-    platform_positioned_file_close(&file);
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+        platform_positioned_file_snapshot_equal(&before, &after);
     if (!stable) {
-        sqlite3_free(image);
-        return NULL;
+        platform_read_mapping_close(&mapping);
+        platform_positioned_file_close(&file);
+        LOG_NULL("codeindex", "published Windows index changed while reading");
     }
     struct ci_store *s = zcl_calloc(1, sizeof(*s), "ci_store_readonly");
-    if (!s) { sqlite3_free(image); return NULL; }
+    if (!s) {
+        platform_read_mapping_close(&mapping);
+        platform_positioned_file_close(&file);
+        LOG_NULL("codeindex", "allocate readonly Windows store");
+    }
     s->bound_fd = -1;
+    s->bound_file = file;
+    s->mapping = mapping;
+    s->has_bound_file = true;
     s->readonly = true;
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -142,15 +142,20 @@ struct ci_store *ci_store_open(const char *root)
                 SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_MEMORY;
     int opened = sqlite3_open_v2(":memory:", &s->db, flags, NULL);
     int loaded = opened == SQLITE_OK
-        ? sqlite3_deserialize(s->db, "main", image,
+        ? sqlite3_deserialize(s->db, "main", (unsigned char *)mapping.data,
                               (sqlite3_int64)image_size,
                               (sqlite3_int64)image_size,
-                              SQLITE_DESERIALIZE_FREEONCLOSE |
-                                  SQLITE_DESERIALIZE_READONLY)
+                              SQLITE_DESERIALIZE_READONLY)
         : SQLITE_ERROR;
     if (opened != SQLITE_OK || loaded != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:codeindex-open-failure
+                "[codeindex] Windows deserialize failed open_rc=%d "
+                "load_rc=%d image_size=%llu error=%s\n", opened, loaded,
+                (unsigned long long)image_size,
+                s->db ? sqlite3_errmsg(s->db) : "(no handle)");
         if (s->db) sqlite3_close(s->db);
-        sqlite3_free(image);
+        platform_read_mapping_close(&s->mapping);
+        platform_positioned_file_close(&s->bound_file);
         pthread_mutex_destroy(&s->lock);
         free(s);
         return NULL;
@@ -203,6 +208,8 @@ struct ci_store *ci_store_open(const char *root)
         LOG_NULL("codeindex", "calloc readonly ci_store");
     }
     s->bound_fd = fd;
+    platform_positioned_file_init(&s->bound_file);
+    platform_read_mapping_init(&s->mapping);
     s->readonly = true;
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -292,10 +299,44 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd)
 #endif
 }
 
+bool ci_store_write_image_child(struct ci_store *s,
+                                struct platform_directory_child *child)
+{
+    if (!s || !child)
+        LOG_FAIL("codeindex", "invalid store/image child");
+
+    pthread_mutex_lock(&s->lock);
+    sqlite3_int64 image_size = 0;
+    unsigned char *image = sqlite3_serialize(s->db, "main", &image_size, 0);
+    bool ok = image && image_size > 0 &&
+              (uint64_t)image_size <= (uint64_t)SIZE_MAX &&
+              platform_directory_child_truncate(child, 0);
+    uint64_t offset = 0;
+    while (ok && offset < (uint64_t)image_size) {
+        uint64_t left = (uint64_t)image_size - offset;
+        size_t chunk = left > UINT64_C(1048576)
+            ? (size_t)UINT64_C(1048576) : (size_t)left;
+        ok = platform_directory_child_write_exact(child, image + offset,
+                                                  chunk, offset);
+        offset += ok ? chunk : 0;
+    }
+    if (ok)
+        ok = platform_directory_child_truncate(child,
+                                                (uint64_t)image_size);
+    if (image) sqlite3_free(image);
+    pthread_mutex_unlock(&s->lock);
+    if (!ok)
+        LOG_FAIL("codeindex", "serialize staging image to retained child failed");
+    return true;
+}
+
 void ci_store_close(struct ci_store *s)
 {
     if (!s) return;
     if (s->db) sqlite3_close(s->db);
+    platform_read_mapping_close(&s->mapping);
+    if (s->has_bound_file)
+        platform_positioned_file_close(&s->bound_file);
     if (s->bound_fd >= 0) {
 #if defined(_WIN32)
         _close(s->bound_fd);
