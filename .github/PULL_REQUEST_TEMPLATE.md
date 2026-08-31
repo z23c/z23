@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Pull request
 
 ## What & why
@@ -10,7 +12,7 @@
 <!-- Paste the result lines, not adjectives: -->
 
 - [ ] `make lint` — clean (no new gate violations)
-- [ ] `make test` (or `make t ONLY=<groups touched>`) — green
+- [ ] `make test` (or `make t-fast ONLY=service_state_driver`) — green
 - [ ] New behavior is covered by a test (boundary/adversarial cases, not
       just the happy path)
 

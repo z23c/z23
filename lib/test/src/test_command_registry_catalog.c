@@ -316,7 +316,10 @@ static int test_code_guide_leaf(void)
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "lint_command")),
                       "make lint-fast") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "push_command")),
-                      "make pre-push-ci") == 0);
+                      "git push origin HEAD:main") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data,
+                                             "receipt_status_command")),
+                      "build/bin/z23-dev dev proof status") == 0);
         ASSERT(strstr(json_get_str(json_get(&reply.data, "never")),
                       "test_zcl") != NULL);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "docs")),

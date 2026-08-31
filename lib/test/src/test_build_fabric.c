@@ -159,6 +159,31 @@ static bool bf_canonicalize(struct db_build_job *job,
     return true;
 }
 
+/* Test-only projection corruption: application writes must use the model
+ * lifecycle, so only an explicit fault fixture may bypass immutable columns. */
+static bool bf_fault_action_authority(
+    struct node_db *ndb, const struct db_build_action *action)
+{
+    sqlite3_stmt *statement = NULL;
+    static const char sql[] =
+        "UPDATE build_actions SET task_root_sha3=?,candidate_root_sha3=?,"
+        "proof_policy_root_sha3=? WHERE action_id=?";
+    bool ok = ndb && ndb->db && action &&
+        sqlite3_prepare_v2(ndb->db, sql, -1, &statement, NULL) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 1, action->task_root_sha3, -1,
+                          SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 2, action->candidate_root_sha3, -1,
+                          SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 3, action->proof_policy_root_sha3, -1,
+                          SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 4, action->action_id, -1,
+                          SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_DONE &&
+        sqlite3_changes(ndb->db) == 1;
+    if (statement) ok = sqlite3_finalize(statement) == SQLITE_OK && ok;
+    return ok;
+}
+
 static uint8_t *bf_read_fixture(const char *path, size_t *len_out)
 {
     *len_out = 0;
@@ -1790,6 +1815,7 @@ static int test_bf_proof_materialization(void)
         char dir[256], path[320];
         ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path),
                        "proof_materialize"));
+        ASSERT(vcs_object_store_init(dir));
         int64_t now = 2000;
         static const uint8_t source[] = "proof-materialization-source";
         uint8_t source_root[32];
@@ -1850,7 +1876,12 @@ static int test_bf_proof_materialization(void)
         struct build_fabric_proof_evaluation rejected = {0};
         zcl_hex_encode(misaddressed_authority[0], 32,
                        action.task_root_sha3);
-        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT(bf_fault_action_authority(&ndb, &action));
+        struct db_build_action corrupted_action;
+        ASSERT(db_build_action_find(
+            &ndb, action.action_id, &corrupted_action));
+        ASSERT_STR_EQ(corrupted_action.task_root_sha3,
+                      action.task_root_sha3);
         ASSERT(!build_fabric_proof_evaluate_readonly(
             &ndb, dir, action.action_id, now, &rejected).ok);
         (void)snprintf(action.task_root_sha3,
@@ -1858,7 +1889,7 @@ static int test_bf_proof_materialization(void)
                        canonical_task_root);
         zcl_hex_encode(misaddressed_authority[1], 32,
                        action.candidate_root_sha3);
-        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT(bf_fault_action_authority(&ndb, &action));
         ASSERT(!build_fabric_proof_evaluate_readonly(
             &ndb, dir, action.action_id, now, &rejected).ok);
         (void)snprintf(action.candidate_root_sha3,
@@ -1866,13 +1897,13 @@ static int test_bf_proof_materialization(void)
                        canonical_candidate_root);
         zcl_hex_encode(misaddressed_authority[2], 32,
                        action.proof_policy_root_sha3);
-        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT(bf_fault_action_authority(&ndb, &action));
         ASSERT(!build_fabric_proof_evaluate_readonly(
             &ndb, dir, action.action_id, now, &rejected).ok);
         (void)snprintf(action.proof_policy_root_sha3,
                        sizeof(action.proof_policy_root_sha3), "%s",
                        canonical_policy_root);
-        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT(bf_fault_action_authority(&ndb, &action));
 
         struct db_build_worker worker;
         bf_worker(&worker);
@@ -2047,6 +2078,25 @@ static int test_bf_proof_materialization(void)
         ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
         ASSERT_STR_EQ(observed.trust_state, "REMOTE_OBSERVED");
 
+        struct db_build_worker alias_worker = worker;
+        uint8_t alias_pubkey[32];
+        memset(alias_pubkey, 0xa7, sizeof(alias_pubkey));
+        bf_worker_id_from_pubkey(alias_pubkey, alias_worker.worker_id);
+        zcl_hex_encode(alias_pubkey, sizeof(alias_pubkey),
+                       alias_worker.signer_pubkey);
+        ASSERT(db_build_worker_save(&ndb, &alias_worker));
+        (void)snprintf(row.worker_id, sizeof(row.worker_id), "%s",
+                       alias_worker.worker_id);
+        ASSERT(db_build_receipt_save(&ndb, &row));
+        struct build_fabric_proof_evaluation corrupted_projection = {0};
+        ASSERT(build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &corrupted_projection).ok);
+        ASSERT_EQ(corrupted_projection.valid_receipts, 0);
+        (void)snprintf(row.worker_id, sizeof(row.worker_id), "%s",
+                       worker.worker_id);
+        ASSERT(db_build_receipt_save(&ndb, &row));
+        db_changes = sqlite3_total_changes(ndb.db);
+
         struct build_fabric_proof_evaluation materialized = {0};
         ASSERT(build_fabric_proof_materialize(
             &ndb, dir, action.action_id, now, &materialized).ok);
@@ -2094,6 +2144,27 @@ static int test_bf_proof_materialization(void)
                       materialized.proof_set_root_sha3);
         ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
         ASSERT_STR_EQ(observed.trust_state, "QUORUM_MATCHED");
+
+        struct db_build_receipt filler = row;
+        filler.work_receipt_sha3[0] = '\0';
+        filler.created_at = now + 1;
+        for (size_t i = 0; i < VCS_ZCODE_PROOF_SET_MAX_RECEIPTS; i++) {
+            uint8_t filler_root[32];
+            sha3_256((const uint8_t *)&i, sizeof(i), filler_root);
+            zcl_hex_encode(filler_root, sizeof(filler_root), filler.receipt_id);
+            if (strcmp(filler.receipt_id, row.receipt_id) == 0)
+                continue;
+            ASSERT(db_build_receipt_save(&ndb, &filler));
+            if (i + 2u == VCS_ZCODE_PROOF_SET_MAX_RECEIPTS) {
+                struct build_fabric_proof_evaluation bounded = {0};
+                ASSERT(build_fabric_proof_evaluate_readonly(
+                    &ndb, dir, action.action_id, now, &bounded).ok);
+                ASSERT_EQ(bounded.valid_receipts, 1);
+            }
+        }
+        struct build_fabric_proof_evaluation truncated = {0};
+        ASSERT(!build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &truncated).ok);
         node_db_close(&ndb);
         test_rm_rf(dir);
         PASS();

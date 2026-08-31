@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Security and Integrity Model
 
 Z23's security model is built around operator ownership: one local
@@ -126,11 +128,10 @@ item, not a claimed property.
   detailed contract is [`DEFENSIVE_CODING.md`](./DEFENSIVE_CODING.md).
 - **Local integration gate:** `make ci` runs lint before tests, then the test
   harness, benchmark regression, hermetic MVP slice gates, crash tests, and
-  fuzz smoke tests where the toolchain is available. This checkout contains two
-  GitHub Actions workflows under `.github/workflows/` (`pr-security-review.yml`,
-  `pr-security-comment.yml`) that run an automated, fork-safe security
-  review/comment on pull requests; there is no hosted build/test CI workflow
-  (CI runs locally via `make ci`).
+  fuzz smoke tests where the toolchain is available. Workflow automation uses
+  only explicitly managed self-hosted runners. Mainline build/test observations
+  and the trusted-base pull-request security scan are supplementary; exact
+  local receipts remain admission authority.
 - **Operator-private HTTP routes:** `/api/wallet`, `/api/messages`, and
   `/api/swaps` are classified operator-private (`api_route_is_operator_private`,
   `lib/net/src/https_server.c`) and 403'd before dispatch on the 0.0.0.0 TLS

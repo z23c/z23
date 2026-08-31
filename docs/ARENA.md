@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # ZCODE Arena
 
 The Arena is the smallest complete example of what Z23 is for: someone
@@ -266,14 +268,10 @@ These are named because they are real, not because they are about to be fixed.
   acceptance script pins its own separate roots.
 - **The cross-node proof runs two nodes on one host.** It proves independent
   fetch, install, build and replay across two disjoint datadirs and stores; it
-  does not prove it across two CPU microarchitectures. It is no longer the only
-  cross-machine evidence: the `arena (make arena-demo)` job in
-  [`.github/workflows/build.yml`](../.github/workflows/build.yml) re-derives
-  these exact roots on a hosted runner — a different machine, a fresh userland,
-  every push — from a clean checkout with no cache. That covers the *match*
-  reproducing elsewhere. It does not cover the *package swarm* reproducing
-  elsewhere, which is what the two-node script is for and what still runs on one
-  host.
+  does not prove reproduction across two CPU microarchitectures. The
+  self-hosted `arena` workflow is an additional clean-checkout observation, not
+  independent platform qualification. The package-swarm proof therefore
+  remains same-host evidence.
 - **Match definitions are carried out of band.** The acceptance script writes
   the seed, plane count and package roots to a file both nodes read. There is
   no signed on-network challenge/accept wire for a match yet; the transport

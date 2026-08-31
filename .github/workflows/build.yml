@@ -1,35 +1,25 @@
-# Does this patch compile?
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Self-hosted mainline verification.
 #
-# Until this workflow existed, the repo's only automation SCANNED the text of
-# a diff and explicitly never executed anything, so an outside contributor
-# could open a pull request and neither they nor the maintainers learned
-# whether the code even built. That is the credibility gap this file closes.
+# This workflow runs only accepted mainline bytes or an operator-selected
+# revision. Pull requests are verified locally before acceptance; untrusted
+# contributor code is never executed automatically on a persistent
+# self-hosted runner.
 #
-# ── Security posture (copied from pr-security-review.yml, then extended) ──
-#   * trigger is `pull_request`, NOT `pull_request_target`. Fork PRs run in
-#     the UNTRUSTED context: read-only GITHUB_TOKEN, no repo secrets, no
-#     write access to anything. That is the only context in which it is safe
-#     to COMPILE a stranger's code, and compiling is the entire point here —
-#     unlike the two security workflows, which deliberately never execute PR
-#     code because they hold (or feed) a privileged step.
+# Security posture:
+#   * every job requires an explicitly managed self-hosted runner;
+#   * no GitHub-hosted minutes are consumed;
 #   * `persist-credentials: false` on every checkout — the job never holds a
 #     git credential.
 #   * no `secrets` are referenced anywhere in this file. Adding one later
-#     would break the posture above; don't.
-#   * dependency CACHE is restore-only on pull requests and written only from
-#     a push to the default branch, so a hostile PR cannot poison the cache
-#     that later runs consume.
+#     would break the posture above.
+#   * dependency cache publication is restricted to a push of `main`.
 #   * nothing here comments on, labels, or otherwise writes to the PR. The
-#     pass/fail check IS the signal.
-#
-# Leave pr-security-review.yml and pr-security-comment.yml alone; they run
-# independently and this workflow neither replaces nor feeds them.
+#     pass/fail check is the signal.
 
 name: Build
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   workflow_dispatch:
@@ -38,20 +28,19 @@ permissions:
   contents: read          # minimal; intentionally NO write, NO secrets
 
 concurrency:
-  group: build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   # ── JOB 1 — THE CREDIBILITY JOB ────────────────────────────────────────
-  # Answers "does this patch compile" for every pull request, under BOTH
+  # Answers "does this accepted revision compile" under both
   # compilers, with no dependency build at all: a whole-tree -fsyntax-only
   # pass needs only the C sources, the in-tree headers, and the two system
   # dev packages the sources include directly. Measured 3 s wall over 1174
-  # translation units at 32 workers on the dev reference host, so even a
-  # 4-vCPU hosted runner finishes it in well under a minute.
+  # translation units at 32 workers on the measured development host.
   compile-check:
     name: compile-check (${{ matrix.cc }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, z23-build]
     timeout-minutes: 15
     strategy:
       fail-fast: false      # a clang failure must not hide a gcc failure
@@ -60,9 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history: the syntax pass scopes its verdict to the files this
-          # pull request actually changed (see below), which needs the base
-          # commit present.
+          # Full history keeps source-identity and change-scope tools usable.
           fetch-depth: 0
           persist-credentials: false
 
@@ -78,7 +65,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             zlib1g-dev libssl-dev
 
-          # ubuntu-latest's default `clang` (18) rejects the "vaes"/"sha"
+          # Clang 18 rejects the "vaes"/"sha"
           # __builtin_cpu_supports() feature strings that lib/util/src/hw_profile.c
           # uses and that GCC — and clang 20 — both accept (this is the exact
           # skew tools/lint/check_clang_portability.sh's own header comment
@@ -91,7 +78,7 @@ jobs:
           sudo update-alternatives --set clang /usr/bin/clang-20
 
           if [ "${{ matrix.cc }}" = "gcc" ]; then
-            # ubuntu-latest's default `gcc` (13) rejects -std=c23 outright
+            # GCC 13 rejects -std=c23 outright
             # ("did you mean '-std=c2x'?") — GCC only accepted the `c23`
             # spelling itself starting with GCC 14. This project is C23-only
             # by policy, so the runner's compiler is what moves: gcc-14 is
@@ -108,29 +95,12 @@ jobs:
 
           ${{ matrix.cc }} --version
 
-      - name: Compute the changed-file scope (pull requests only)
+      - name: Compute the compile scope
         id: scope
         run: |
           set -eu
-          # On a pull request the verdict is scoped to the files the patch
-          # touches: those must be diagnostic-FREE. Pre-existing diagnostics
-          # elsewhere stay advisory, because this runner's compiler is a
-          # different VERSION from the one the ratchet baseline was recorded
-          # with and version skew must never fail a contributor's patch.
-          #
-          # On push/dispatch there is no diff, so the gate runs its full-tree
-          # ratchet — the strict mode `make lint` uses on the dev host.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff --name-only --diff-filter=d \
-              '${{ github.event.pull_request.base.sha }}' HEAD \
-              -- '*.c' '*.h' > changed.txt
-            echo "scope=$PWD/changed.txt" >> "$GITHUB_OUTPUT"
-            echo "Changed C files in this pull request:"
-            cat changed.txt
-          else
-            echo "scope=" >> "$GITHUB_OUTPUT"
-            echo "not a pull request — running the full-tree ratchet"
-          fi
+          echo "scope=" >> "$GITHUB_OUTPUT"
+          echo "running the full-tree ratchet"
 
       - name: Whole-tree syntax pass (${{ matrix.cc }})
         env:
@@ -152,7 +122,7 @@ jobs:
   #             so it genuinely parallelizes and gives real "it builds"
   #             evidence for the cost of a compile.
   #   EXCLUDED  `make ci` as a whole. It pulls in `bench-regress`, which is a
-  #             timing measurement — on a shared hosted runner with noisy
+  #             timing measurement — on a shared runner with noisy
   #             neighbours that is a coin flip, not a gate. Coverage is
   #             likewise excluded: it is a second instrumented rebuild for a
   #             number nobody reads on a PR.
@@ -168,7 +138,7 @@ jobs:
   #             -flto=auto on purpose so each TU is compiled and cached
   #             independently; the monolith survives only as the separate
   #             `test_parallel_wpo` target. What is still a real open question
-  #             is hosted runner capacity and how much of the corpus assumes a
+  #             is runner capacity and how much of the corpus assumes a
   #             maintainer-host environment. Measure those; do not inherit this
   #             comment's stale answer.
   #
@@ -176,18 +146,14 @@ jobs:
   # paragraph is .github/verification-coverage.txt, held to the job list below
   # by the lint gate check-verification-coverage. Read that file rather than
   # counting jobs here: unheld prose in a comment is exactly what rotted above.
-  #   HOSTED CI (this file) runs five jobs and nothing else — compile-check
+  #   SELF-HOSTED AUTOMATION runs the jobs declared below — compile-check
   #             under GCC and under clang, `build` (a full per-TU compile of
   #             every node translation unit), `lint` (`make lint`), and
   #             `fuzz-replay` over the saved findings. THE TEST SUITE IS NOT
-  #             AMONG THEM: five green checks on a commit do NOT mean that
-  #             commit's tests passed.
-  #   LOCALLY   the two excluded steps are gated by the pre-push hook
-  #             (`tools/githooks/pre-push`) and by hand at merge. Do not read
-  #             the hook as a full-suite gate: it defaults to
-  #             `make pre-push-ci` -> `make fast-ci`, which compiles the
-  #             changed files and runs the FOCUSED tests for them, and it is
-  #             overridable with `ZCL_PREPUSH_CMD`. The whole suite
+  #             AMONG THEM: green checks prove only their named observations.
+  #   LOCALLY   the native pre-push hook checks ancestry and the exact sealed
+  #             receipt; it never compiles, lints, tests, waits, or invokes a
+  #             shell. The whole suite
   #             (`make test-parallel`) and the LTO link are run deliberately,
   #             by a person, before a merge — `tools/ship.sh` also runs both
   #             before it will deploy anything.
@@ -200,7 +166,7 @@ jobs:
   #             follows the LTO link out of this job.
   build:
     name: build (cached dependencies)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, z23-build]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -212,7 +178,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential perl
-          # Same fix as the compile-check job: ubuntu-latest's default gcc
+          # Same compatibility floor as the compile-check job: GCC 13
           # (13) does not accept -std=c23, which every recipe in this
           # Makefile passes. gcc-14 does. Repoint the plain `cc`/`gcc` names
           # so `make vendor-ready` / `make build-only` need no CC= override.
@@ -247,8 +213,7 @@ jobs:
           # build.
           make vendor-ready
 
-      # Cache WRITE only from the default branch. A fork pull request must
-      # never be able to place bytes that a later run consumes.
+      # Cache writes are restricted to accepted mainline executions.
       - name: Save vendored dependencies
         if: >-
           github.event_name == 'push' &&
@@ -285,7 +250,7 @@ jobs:
   # is the entire point of the check — so it cannot be made fast the way every
   # other gate in LINT_GATES is fast, and folding it into JOB 1's tight budget
   # meant one compile-heavy gate was dragging every free text scan behind it
-  # and, on a cold hosted runner with no vendored dependency and no ccache, blew
+  # and, on a cold runner with no vendored dependency and no ccache, blew
   # straight through a 15-minute job timeout without printing a verdict at
   # all (confirmed on this branch: cancelled at the timeout, only this one
   # gate of 116 still in flight).
@@ -295,7 +260,7 @@ jobs:
   # sized off the measurement above, not a guess.
   lint:
     name: lint (make lint)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, z23-build]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -395,7 +360,7 @@ jobs:
   # restore-only — JOB 2 is the sole writer.
   fuzz-replay:
     name: fuzz-replay (saved findings)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, z23-build]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -438,20 +403,20 @@ jobs:
   # that had gone stale (it called the suite a whole-program LTO link, which it
   # stopped being when test_parallel moved to a per-TU, depfile-tracked,
   # non-LTO object tree). That comment also named the one thing still genuinely
-  # unknown — hosted runner capacity, and how much of the corpus assumes the
+  # unknown — runner capacity, and how much of the corpus assumes the
   # maintainer host — and told the next person to MEASURE it rather than
   # inherit an answer. This job is that measurement, run in the open where its
   # result is a check attached to a commit.
   #
   # Two things to expect, and to read honestly rather than paper over:
   #   * TIME. The dev reference host runs the suite in ~15 min at 32 workers.
-  #     A 4-vCPU runner compiles ~1400 translation units first, so the budget
+  #     A smaller runner compiles ~1400 translation units first, so the budget
   #     here is sized generously; if it times out, the honest fix is a smaller
-  #     hosted scope declared in verification-coverage.txt, NOT a quietly
+  #     reduced scope declared in verification-coverage.txt, NOT a quietly
   #     reduced corpus.
   #   * ENVIRONMENT. Parts of this corpus were written on a host that has a
   #     live node, a legacy zclassicd datadir, and a populated ~/.zclassic-c23.
-  #     A hosted runner has none of those. Groups that self-skip here are
+  #     A clean runner may have none of those. Groups that self-skip here are
   #     reporting a real coverage difference between the two environments —
   #     that difference belongs in verification-coverage.txt, not hidden.
   #
@@ -461,7 +426,7 @@ jobs:
   # false green in this project before.
   tests:
     name: tests (make test-parallel)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, z23-build]
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -473,8 +438,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential perl gcc-14
-          # Same -std=c23 reason as every other job here: ubuntu-latest's
-          # default gcc (13) rejects the `c23` spelling outright.
+          # GCC 13 rejects the `c23` spelling outright.
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
           sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100
           sudo update-alternatives --set gcc /usr/bin/gcc-14
@@ -549,7 +513,7 @@ jobs:
   # not, without either weakening an assertion or pinning us to a kernel.
   arena:
     name: arena (make arena-demo)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, z23-build]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -560,8 +524,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends build-essential gcc-14
-          # Same -std=c23 reason as every other job here: ubuntu-latest's
-          # default gcc (13) rejects the `c23` spelling outright.
+          # GCC 13 rejects the `c23` spelling outright.
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
           sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100
           sudo update-alternatives --set gcc /usr/bin/gcc-14

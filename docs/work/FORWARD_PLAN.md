@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Z23 current forward plan
 
 This file is the current ordered development mission. Durable product direction
@@ -145,6 +147,24 @@ Distributed workers share immutable CAS objects where practical and minimize
 shared mutable SQLite state. A subsystem may not close, replace, rename,
 checkpoint, or remove database files it does not own or explicitly lease.
 
+The current development reactor has two transitional orchestration paths: the
+per-checkout native proof queue and the separate `tools/land` batching
+chainlog. Both are duplicate transitional lifecycle models and neither is
+product authority. Consolidation is complete only when a
+signed Git intent freezes into the existing source/task/candidate/action/work
+context, the build fabric owns its request and lease, canonical work receipts
+materialize one proof-set root, a PROVEN lane yields one accepted-work root,
+and a versioned Git publication job records immutable progress and outcome. The
+existing package-publication job does not yet provide those Git phases.
+Git identities remain provenance; no landing verdict may replace a source,
+action, proof-set, or accepted-work root.
+
+The action-fabric local Git adapter, shared resident coordinator, Git-target
+publication phases, and native epoch-batch executor remain unfinished. Native
+`zcc --epoch-object` currently covers the build-only and fast-test object
+paths; a batch manifest codec is not a worker pool or object-set publisher.
+Keep those distinctions explicit in code, commands, and documentation.
+
 ## 4. Developer tooling freeze
 
 Do not expand HOT_FORK, hot-swap, reflex, agent fleet, or benchmark machinery
@@ -163,6 +183,14 @@ immutable candidate/action becomes available
 There is no direct agent-to-agent coordination and no dependency from local
 editing back into remote proof.
 
+Today an integrator still fetches, merges normally, waits for the exact local
+receipt, pushes, and verifies the remote SHA. The target workflow replaces that
+waiting with a durable signed-commit handoff to one resident coordinator. That
+coordinator alone reconciles current `origin/main`, reuses canonical child
+proofs, admits the exact aggregate, performs a normal main-only publication,
+and records the remotely observed outcome. Until that path exists and is
+qualified, documentation must not describe enqueue as publish.
+
 ## 5. Simulation and reference work
 
 Metaverse, marketplace expansion, live-token design, speculative services, and
@@ -176,7 +204,8 @@ For each coherent slice:
 
 1. Run its focused acceptance.
 2. Fetch current `origin/main` and integrate safely.
-3. Rerun affected gates, then `make lint` and the required uncached suite.
+3. Rerun the exact affected gates. Run full lint or an uncached broad suite
+   only when the changed closure or acceptance policy requires it.
 4. Commit only owned files, push normally, and verify the remote SHA.
 5. Continue to the next unfinished item.
 

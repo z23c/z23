@@ -418,7 +418,7 @@ else ifneq ($(filter zclassic23 z23 zclassic23-package-verify,$(ZCL_EPOCH_SINGLE
 ZCL_EPOCH_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter dev-bin z23-dev zclassic23-dev dev-proof-bundle,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -1479,8 +1479,14 @@ BUILD_ONLY_SESSION = $(OBJ_DIR)/.build-session
 DEV_SESSION = $(DEV_OBJ_DIR)/.build-session
 BUILD_ONLY_LEASE = $(OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 DEV_LEASE = $(DEV_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
+# An included-makefile recovery barrier can restart this same Make process after
+# it acquires the lease.  The invocation-specific lease already exists on that
+# second parse, so FORCE must apply only before the first restart; otherwise the
+# recovery acquire would run again after Make has classified the replacement
+# generation and recreate the ordering defect the restart closes.
+BUILD_EPOCH_LEASE_FORCE = $(if $(strip $(MAKE_RESTARTS)),,FORCE)
 
-$(BUILD_ONLY_LEASE): FORCE
+$(BUILD_ONLY_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(BUILD_ONLY_SESSION)" "$@" \
 	  "$(OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
 	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
@@ -1488,7 +1494,7 @@ $(BUILD_ONLY_LEASE): FORCE
 	  "$(BUILD_ONLY_EPOCH_COMPILE_FLAGS)" "$(BUILD_ONLY_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-$(NODE_C23_LEASE): FORCE
+$(NODE_C23_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(NODE_C23_SESSION)" "$@" \
 	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
 	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
@@ -1496,7 +1502,7 @@ $(NODE_C23_LEASE): FORCE
 	  "$(NODE_C23_EPOCH_COMPILE_FLAGS)" "$(NODE_C23_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-$(DEV_LEASE): FORCE
+$(DEV_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(DEV_SESSION)" "$@" \
 	  "$(DEV_OBJ_ROOT)" "$(BIN_DIR)/dev" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -1504,7 +1510,7 @@ $(DEV_LEASE): FORCE
 	  "$(DEV_EPOCH_COMPILE_FLAGS)" "$(DEV_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-$(DEV_ASAN_LEASE): FORCE
+$(DEV_ASAN_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(DEV_ASAN_SESSION)" "$@" \
 	  "$(DEV_ASAN_OBJ_ROOT)" "$(BIN_DIR)/dev-asan" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -1512,7 +1518,7 @@ $(DEV_ASAN_LEASE): FORCE
 	  "$(DEV_ASAN_EPOCH_COMPILE_FLAGS)" "$(DEV_ASAN_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-$(DEV_TSAN_LEASE): FORCE
+$(DEV_TSAN_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(DEV_TSAN_SESSION)" "$@" \
 	  "$(DEV_TSAN_OBJ_ROOT)" "$(BIN_DIR)/dev-tsan" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -2470,7 +2476,7 @@ TEST_REL_SESSION = $(TEST_REL_OBJ_DIR)/.build-session
 TEST_FAST_LEASE = $(TEST_FAST_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 TEST_REL_LEASE = $(TEST_REL_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 
-$(TEST_FAST_LEASE): FORCE
+$(TEST_FAST_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(TEST_FAST_SESSION)" "$@" \
 	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -2478,7 +2484,7 @@ $(TEST_FAST_LEASE): FORCE
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
 
-$(TEST_REL_LEASE): FORCE
+$(TEST_REL_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(TEST_REL_SESSION)" "$@" \
 	  "$(TEST_REL_OBJ_ROOT)" "$(BIN_DIR)/test-strict" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -2532,7 +2538,7 @@ TEST_ASAN_PROFILE = test-asan-v2
 TEST_ASAN_SESSION = $(TEST_ASAN_OBJ_DIR)/.build-session
 TEST_ASAN_LEASE = $(TEST_ASAN_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 
-$(TEST_ASAN_LEASE): FORCE
+$(TEST_ASAN_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(TEST_ASAN_SESSION)" "$@" \
 	  "$(TEST_ASAN_OBJ_ROOT)" "$(BIN_DIR)/test-asan-epochs" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -2584,7 +2590,7 @@ TEST_TSAN_PROFILE = test-tsan-v2
 TEST_TSAN_SESSION = $(TEST_TSAN_OBJ_DIR)/.build-session
 TEST_TSAN_LEASE = $(TEST_TSAN_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 
-$(TEST_TSAN_LEASE): FORCE
+$(TEST_TSAN_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(TEST_TSAN_SESSION)" "$@" \
 	  "$(TEST_TSAN_OBJ_ROOT)" "$(BIN_DIR)/test-tsan-epochs" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -9748,13 +9754,51 @@ COV_LEASE = $(COV_BUILD_DIR)/.leases/$(BUILD_INVOCATION_ID)
 COV_INFO = $(BUILD_DIR)/coverage.info
 COV_HTML = $(BUILD_DIR)/coverage_html
 
-$(COV_LEASE): FORCE
+$(COV_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 	@$(BUILD_EPOCH_SESSION_TOOL) acquire "$(COV_SESSION)" "$@" \
 	  "$(COV_BUILD_ROOT)" "$(BIN_DIR)/coverage" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(BUILD_COMPILER_ID)" "$(COV_COMPILE_EPOCH)" "$(COV_PROFILE)" \
 	  "$(COV_EPOCH_COMPILE_FLAGS)" "$(COV_EPOCH_LINK_FLAGS)" \
 	  "$(CC)" "$(CXX)" "$$PPID"
+
+# GNU Make records whether an object exists before it runs that object's
+# order-only lease prerequisite.  If a dead writer left `.unverified`, acquire
+# quarantines the complete generation; without a parse restart, Make retains
+# the now-invalid "present" result and the linker receives missing paths.
+#
+# Remake this included witness through exactly the selected, marker-bearing
+# leases before Make updates any ordinary goal.  Remaking an included makefile
+# restarts parsing, so the replacement generation is classified from scratch.
+# Marker-free builds keep the ordinary single acquire and pay no restart.  The
+# non-executing modes remain read-only.
+BUILD_EPOCH_RECOVERY_READY = $(BUILD_DIR)/identity/epoch-recovery-ready.mk
+BUILD_EPOCH_RECOVERY_LEASES = \
+	$(if $(and $(filter build-only,$(ZCL_EPOCH_PROFILES)),$(wildcard $(OBJ_DIR)/.unverified)),$(BUILD_ONLY_LEASE)) \
+	$(if $(and $(filter dev,$(ZCL_EPOCH_PROFILES)),$(wildcard $(DEV_OBJ_DIR)/.unverified)),$(DEV_LEASE)) \
+	$(if $(and $(filter dev-asan,$(ZCL_EPOCH_PROFILES)),$(wildcard $(DEV_ASAN_OBJ_DIR)/.unverified)),$(DEV_ASAN_LEASE)) \
+	$(if $(and $(filter dev-tsan,$(ZCL_EPOCH_PROFILES)),$(wildcard $(DEV_TSAN_OBJ_DIR)/.unverified)),$(DEV_TSAN_LEASE)) \
+	$(if $(and $(filter test-fast,$(ZCL_EPOCH_PROFILES)),$(wildcard $(TEST_FAST_OBJ_DIR)/.unverified)),$(TEST_FAST_LEASE)) \
+	$(if $(and $(filter test-strict,$(ZCL_EPOCH_PROFILES)),$(wildcard $(TEST_REL_OBJ_DIR)/.unverified)),$(TEST_REL_LEASE)) \
+	$(if $(and $(filter test-asan,$(ZCL_EPOCH_PROFILES)),$(wildcard $(TEST_ASAN_OBJ_DIR)/.unverified)),$(TEST_ASAN_LEASE)) \
+	$(if $(and $(filter test-tsan,$(ZCL_EPOCH_PROFILES)),$(wildcard $(TEST_TSAN_OBJ_DIR)/.unverified)),$(TEST_TSAN_LEASE)) \
+	$(if $(and $(filter coverage,$(ZCL_EPOCH_PROFILES)),$(wildcard $(COV_BUILD_DIR)/.unverified)),$(COV_LEASE)) \
+	$(if $(and $(filter node-c23,$(ZCL_EPOCH_PROFILES)),$(wildcard $(NODE_C23_OBJ_DIR)/.unverified)),$(NODE_C23_LEASE))
+ifeq ($(strip $(MAKE_RESTARTS)),)
+ifeq ($(strip $(ZCL_MAKE_NO_EXEC)),)
+ifneq ($(strip $(BUILD_EPOCH_RECOVERY_LEASES)),)
+-include $(BUILD_EPOCH_RECOVERY_READY)
+$(BUILD_EPOCH_RECOVERY_READY): $(BUILD_EPOCH_RECOVERY_LEASES)
+	@set -eu; \
+	mkdir -p "$(dir $@)"; \
+	tmp="$$(mktemp "$@.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	printf '%s\n' '# zcl.build_epoch_recovery_ready.v1' > "$$tmp"; \
+	mv -f -- "$$tmp" "$@"; \
+	trap - EXIT HUP INT TERM
+endif
+endif
+endif
 
 COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))

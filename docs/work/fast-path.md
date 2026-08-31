@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # The Fast Path — our information algorithm for getting to correct C
 
 Mantra: **code fearlessly; immutable history is the oracle.** ZClassic's
@@ -70,16 +72,16 @@ symptom as a body gap, and shipping a chain-reset fix that deletes
 | `make agent-doctor` | no-build combined build/dev-lane/recent-test-failure status with one next safe command |
 | `make agent-dev-status` / `z23 agentdevstatus` | no-build read-only dev-lane status: service, RPC/pre-RPC recovery, staged binary, saved deploy state, auto-reindex marker, deploy blocker/reason, stale-marker candidate, next action |
 | `make agent-clear-stale-dev-reindex` | archive a proven-stale dev-lane `auto_reindex_request` after RPC height is at/above the marker anchor; no restart, no canonical/soak mutation |
-| `make agent-stage-dev` | build and atomically stage `~/.local/bin/zclassic23-dev` for the next dev-lane restart without stopping the running service |
+| `make agent-stage-dev` | contained compatibility entry point; refuses before build or staging mutation |
 | `make syntax-check` | full no-link syntax check across every TU |
 | `make lint-fast` | measured ~15 high-signal lint gates via the timed parallel driver (per-gate ms in `.cache/lint-timing/`; full `make lint` before commit) |
 | `make agent-plan` | no-build JSON decision packet: changed-path/test classification hints, source-wide compile plan, fast-cache hit/miss, dev-lane stage/deploy commands, and native command shortcuts |
-| `make agent-loop` | one-command agent loop: fast-ci checks by default; `ZCL_AGENT_LOOP_BIN=1` also links the dev binary; `ZCL_AGENT_LOOP_DEPLOY=dev` hot-swaps the dev lane |
+| `make agent-loop` | one-command verification loop: fast-ci checks by default; `ZCL_AGENT_LOOP_BIN=1` also links the dev binary; deployment selectors refuse |
 | `make fast-ci` | cache-aware agent loop: `lint-fast` + exact source-wide compile/test proofs + native linger-service probe; identical green inputs skip repeated proven scope |
 | `make immutable-history-canaries` | fast real-chain consensus KATs: h=478544 oversized canonical transaction plus consensus parity pins |
 | `z23 status` / `z23 dumpstate <subsystem>` | native node reads (the native command registry is the sole agent interface) |
 | `z23-dev status` | dev-lane native read against the installed dev binary |
-| `make pre-push-ci` | bounded push gate: strict compile/lint plus mapped tests, reusing only exact skip-free content-addressed PASS receipts |
+| `make pre-push-ci` | explicit legacy parity oracle: strict compile/lint plus mapped tests; not called by the installed native hook |
 | `make install-quality-linger` | install background full-test, fuzz, and coverage user timers |
 | `make quality-linger-status` | show latest background tests/fuzz/coverage JSON verdicts |
 | `make test` | the fast fork-based parallel suite (~1 min), now built from the cached per-TU `test_parallel` (incremental after the first build); `make test-full` is the slow single-process binary |
@@ -99,10 +101,9 @@ changes; the heavier real-chain replay gates remain `make replay-canary-anchor`
 and `make replay-canary-genesis`.
 
 `make agent-loop` is the default edit-loop command for agents and operators. It
-delegates to `make fast-ci` for the safe checks, then optionally links the
-runnable dev binary with `ZCL_AGENT_LOOP_BIN=1`, stages the dev-lane binary
-without restarting with `ZCL_AGENT_LOOP_DEPLOY=stage`, or hot-swaps the dev lane
-with `ZCL_AGENT_LOOP_DEPLOY=dev`. `make fast-ci` remains the underlying cache-aware
+delegates to `make fast-ci` for the safe checks and optionally links the
+runnable dev binary with `ZCL_AGENT_LOOP_BIN=1`. Stage and deploy selectors are
+recognized only to return a containment refusal. `make fast-ci` remains the underlying cache-aware
 gate and auto-selects `sccache cc` or `ccache cc` when present; override with
 `ZCL_FAST_CC='ccache cc'`. Its automated proof runs the exact source-wide fast
 test candidate under `build/bin/test-fast/epochs/<compile-epoch>/`; path-to-test
@@ -120,7 +121,8 @@ the automated proof remains source-wide. Use `ZCL_FAST_STRICT_TESTS=1` to pay
 the strict exact-candidate proof. Set parallelism with `ZCL_FAST_JOBS=N`
 (default caps at 16). Set
 `ZCL_FAST_CHANGED_FILES_ONLY=1` when `ZCL_FAST_CHANGED_FILES[_FILE]` is already
-the exact semantic input, as the pre-push hook does. Successful runs write a content
+the exact semantic input. The native pre-push hook does not run this gate.
+Successful runs write a content
 fingerprint under `.cache/zcl-agent-fast-ci/` covering changed-file contents,
 selected test groups, compiler/cache choice, strict/live knobs, core scripts,
 the Makefile, and the native probe binary mtime. A repeat with the same
@@ -158,14 +160,12 @@ the right binary for
 local `agentbuild`, `agentimpact`, parser, API, and diagnostics iteration; it is
 not a deploy or release artifact.
 
-For an asynchronous edit-to-push path, start the existing resident verifier
-with `z23-dev dev begin` and inspect its durable cycle with `z23 dev status`.
-The watcher mints the same per-group content-addressed PASS receipts consumed by
-`make pre-push-ci`. Pre-push still performs strict source-wide compilation and
-lint, runs external-input or stale-graph groups fresh, rejects runtime SKIPs,
-and requires `groups_ran + groups_cached` to equal the exact mapped set. A
-documentation-only rebase therefore preserves unrelated C test receipts while
-its documentation/lint authority continues to run fresh.
+For asynchronous exact proof, use `build/bin/z23-dev dev proof
+ensure/status/wait`. The installed native pre-push hook only checks ancestry and
+the exact fixed-width aggregate and child receipts. It never compiles, lints,
+tests, fetches, waits, invokes a shell, or calls `make pre-push-ci`. Current
+notification is best-effort and proof state remains per-checkout under
+`.cache/zcl-dev-proof`; a durable shared signed-commit promoter is unfinished.
 
 The native build contract is discoverable with `build/bin/z23 agentbuild`;
 it advertises
@@ -187,14 +187,12 @@ Canonical operator APIs, in priority order:
    client to the running linger service.
 2. REST (`/api/v1/agent`, `/api/v1/openapi`) — public web/API surface.
 
-`make agent-loop` is the normal AI/operator edit gate. Before pushing `main`, the
-tracked pre-push hook computes the exact `origin/main..HEAD` changed-file set,
-passes it to `make pre-push-ci`, and rejects remote refs other than
-`refs/heads/main`. `make pre-push-ci` runs cached focused fast-ci for that file
-set (`build-only` plus mapped `t-fast` groups); it does not rerun the full suite
-on every push, and it forces `ZCL_FAST_LIVE=0` so a live node condition remains
-telemetry rather than a push blocker. Set `ZCL_FAST_STRICT_TESTS=1` for a
-deliberate strict focused run. Full `make ci` still exists for release-grade manual runs, but the
+`make agent-loop` is the normal AI/operator edit gate. Before pushing `main`,
+obtain the exact commit/base receipt and push normally; the native hook rejects
+other remote refs, missing ancestry, or invalid evidence without running a
+gate. `make pre-push-ci` remains available for deliberate legacy parity, and
+`ZCL_FAST_STRICT_TESTS=1` selects its strict focused mode. Full `make ci` still
+exists for release-grade manual runs, but the
 expensive proof lanes are kept fresh by `zclassic23-test-suite.timer`,
 `zclassic23-fuzz.timer`, and `zclassic23-coverage.timer`. Install them with
 `make install-quality-linger`; inspect their latest

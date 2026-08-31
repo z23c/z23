@@ -9,6 +9,7 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
 PUBLISH_TOOL="$SELF_DIR/publish-build-alias.sh"
 OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"
@@ -513,6 +514,144 @@ cmp -s "$QUARANTINE_SESSION" "$SESSION_MAIN" ||
 [ -z "$(find "$QUARANTINE_ROOT/.failed-epochs" -mindepth 1 -print -quit)" ] ||
     fail 'dead unverified epoch quarantine was not removed after recovery'
 
+# Exercise the Make integration, not only the session helper.  The stale object
+# is newer than its source, so Make initially classifies it as current.  The
+# included recovery witness must acquire and quarantine before ordinary target
+# update, restart parsing exactly once, and let the restarted graph rebuild the
+# replacement object before the response-file link consumes it.
+MAKE_RECOVERY="$WORK/make-recovery"
+MAKE_RECOVERY_OBJ_ROOT="$MAKE_RECOVERY/objects"
+MAKE_RECOVERY_EPOCH_DIR="$MAKE_RECOVERY_OBJ_ROOT/epochs/$EPOCH_MAIN"
+MAKE_RECOVERY_OBJECT="$MAKE_RECOVERY_EPOCH_DIR/probe.o"
+MAKE_RECOVERY_DEPFILE="${MAKE_RECOVERY_OBJECT%.o}.d"
+MAKE_RECOVERY_SESSION="$MAKE_RECOVERY_EPOCH_DIR/.build-session"
+MAKE_RECOVERY_LEASE="$MAKE_RECOVERY_EPOCH_DIR/.leases/make-recovery"
+MAKE_RECOVERY_READY="$MAKE_RECOVERY/epoch-recovery-ready.mk"
+MAKE_RECOVERY_SOURCE="$MAKE_RECOVERY/probe.c"
+MAKE_RECOVERY_RSP="$MAKE_RECOVERY/link.rsp"
+MAKE_RECOVERY_BINARY="$MAKE_RECOVERY/probe"
+MAKE_RECOVERY_ACTIONS="$MAKE_RECOVERY/actions.log"
+MAKE_RECOVERY_MK="$MAKE_RECOVERY/probe.mk"
+MAKE_RECOVERY_VIEW_READY="$MAKE_RECOVERY/view-ready.mk"
+MAKE_RECOVERY_FIRST_LOG="$MAKE_RECOVERY/first.log"
+MAKE_RECOVERY_WARM_LOG="$MAKE_RECOVERY/warm.log"
+MAKE_SOURCE_RECORD="$("$ROOT/tools/dev/source-identity.sh" capture-record)" ||
+    fail 'Make recovery fixture could not capture repository source identity'
+read -r MAKE_SOURCE_ID MAKE_SOURCE_COMPLETE MAKE_SOURCE_MUTATION \
+    <<< "$MAKE_SOURCE_RECORD"
+[ "$MAKE_SOURCE_COMPLETE" = 1 ] ||
+    fail 'Make recovery fixture source identity is incomplete'
+
+mkdir -p "$MAKE_RECOVERY_EPOCH_DIR/.leases" \
+    "$MAKE_RECOVERY/bin/test-fast/epochs/$EPOCH_MAIN"
+printf 'int main(void) { return 0; }\n' > "$MAKE_RECOVERY_SOURCE"
+printf 'stale object that must never reach the linker\n' > "$MAKE_RECOVERY_OBJECT"
+printf '%s\n' "$MAKE_RECOVERY_OBJECT" > "$MAKE_RECOVERY_RSP"
+printf 'pid=99999996\nstart=1\n' > "$MAKE_RECOVERY_LEASE"
+printf 'schema=zcl.build_epoch_unverified.v1\nsource_id=%s\nmutation=%s\ncompiler_id=%s\nepoch=%s\n' \
+    "$MAKE_SOURCE_ID" "$MAKE_SOURCE_MUTATION" "$COMPILER_ID" "$EPOCH_MAIN" \
+    > "$MAKE_RECOVERY_EPOCH_DIR/.unverified"
+printf '%s\n' '# fixture view inputs are already ready' \
+    > "$MAKE_RECOVERY_VIEW_READY"
+
+cat > "$MAKE_RECOVERY_MK" <<MAKE_RECOVERY_EOF
+include $ROOT/Makefile
+
+.PHONY: epoch-recovery-probe
+epoch-recovery-probe: $MAKE_RECOVERY_BINARY
+	@printf 'epoch-recovery-probe: restarts=%s\n' '\$(if \$(strip \$(MAKE_RESTARTS)),\$(MAKE_RESTARTS),0)'
+
+$MAKE_RECOVERY_OBJECT: $MAKE_RECOVERY_SOURCE | \$(TEST_FAST_LEASE)
+	@printf '%s\n' compile >> '$MAKE_RECOVERY_ACTIONS'
+	@\$(BUILD_EPOCH_OBJECT_TOOL) dep '\$@' '\$<' \
+	  '\$(BUILD_SOURCE_ID)' '\$(BUILD_CLEAN)' '\$(BUILD_MUTATION)' \
+	  '\$(TEST_FAST_COMPILE_EPOCH)' '\$(BUILD_COMPILER_ID)' \
+	  '\$(TEST_FAST_SESSION)' -- \
+	  \$(CC) -std=c23 -O0 -Wall -Wextra -Werror
+
+$MAKE_RECOVERY_BINARY: $MAKE_RECOVERY_OBJECT $MAKE_RECOVERY_RSP
+	@printf '%s\n' link >> '$MAKE_RECOVERY_ACTIONS'
+	@\$(CC) -o '\$@' '@$MAKE_RECOVERY_RSP'
+	@\$(BUILD_EPOCH_SESSION_TOOL) verify \
+	  '\$(TEST_FAST_SESSION)' '\$(TEST_FAST_LEASE)' \
+	  '\$(TEST_FAST_OBJ_ROOT)' '\$(BIN_DIR)/test-fast' \
+	  '\$(BUILD_EPOCH_KEEP)' '\$(BUILD_SOURCE_ID)' \
+	  '\$(BUILD_CLEAN)' '\$(BUILD_MUTATION)' '\$(BUILD_COMPILER_ID)' \
+	  '\$(TEST_FAST_COMPILE_EPOCH)' '\$(TEST_FAST_PROFILE)' \
+	  '\$(TEST_FAST_EPOCH_COMPILE_FLAGS)' \
+	  '\$(TEST_FAST_EPOCH_LINK_FLAGS)' '\$(CC)' '\$(CXX)' "\$\$PPID" \
+	  >/dev/null
+MAKE_RECOVERY_EOF
+
+run_make_recovery()
+{
+    local log="$1"
+    (
+        cd "$ROOT"
+        make -f "$MAKE_RECOVERY_MK" --no-print-directory \
+            ZCL_EPOCH_PROFILES=test-fast ZCL_DEPFILE_PROFILES= \
+            BUILD_DIR="$MAKE_RECOVERY" BIN_DIR="$MAKE_RECOVERY/bin" \
+            VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= \
+            VIEW_BOOTSTRAP_MK="$MAKE_RECOVERY_VIEW_READY" \
+            BUILD_SOURCE_RECORD="$MAKE_SOURCE_RECORD" \
+            BUILD_COMPILER_ID="$COMPILER_ID" BUILD_SYSTEM_ID="$BSYS_REAL" \
+            TEST_FAST_OBJ_ROOT="$MAKE_RECOVERY_OBJ_ROOT" \
+            TEST_FAST_OBJ_DIR="$MAKE_RECOVERY_EPOCH_DIR" \
+            TEST_FAST_COMPILE_EPOCH="$EPOCH_MAIN" \
+            TEST_FAST_PROFILE="$PROFILE" \
+            TEST_FAST_EPOCH_COMPILE_FLAGS="$COMPILE_FLAGS" \
+            TEST_FAST_EPOCH_LINK_FLAGS="$LINK_FLAGS" \
+            TEST_FAST_SESSION="$MAKE_RECOVERY_SESSION" \
+            TEST_FAST_LEASE="$MAKE_RECOVERY_LEASE" \
+            BUILD_EPOCH_RECOVERY_READY="$MAKE_RECOVERY_READY" \
+            CC="$CC_COMMAND" CXX="$CC_COMMAND" epoch-recovery-probe
+    ) > "$log" 2>&1 || {
+        sed 's/^/build-epoch-selftest: make recovery: /' "$log" >&2
+        fail 'Make recovery fixture failed'
+    }
+}
+
+run_make_recovery "$MAKE_RECOVERY_FIRST_LOG"
+grep -Fqx 'epoch-recovery-probe: restarts=1' "$MAKE_RECOVERY_FIRST_LOG" ||
+    fail 'stale epoch did not cause exactly one Make parse restart'
+[ "$(grep -Fc 'build-epoch-session: acquired' "$MAKE_RECOVERY_FIRST_LOG")" -eq 1 ] ||
+    fail 'restarted Make acquired the recovery lease more than once'
+[ -s "$MAKE_RECOVERY_OBJECT" ] && [ -s "$MAKE_RECOVERY_DEPFILE" ] &&
+[ -x "$MAKE_RECOVERY_BINARY" ] ||
+    fail 'restarted Make did not publish the replacement object and consumer'
+"$MAKE_RECOVERY_BINARY" || fail 'response-file consumer did not link the replacement object'
+[ ! -e "$MAKE_RECOVERY_EPOCH_DIR/.unverified" ] ||
+    fail 'Make recovery did not admit the completed replacement generation'
+[ "$(wc -l < "$MAKE_RECOVERY_ACTIONS")" -eq 2 ] ||
+    fail 'Make recovery did not compile and link exactly once'
+
+artifact_stamp()
+{
+    stat -Lc '%d:%i:%s:%Y:%Z:%y:%z' "$1" 2>/dev/null ||
+        stat -f '%d:%i:%z:%m:%c' "$1"
+}
+MAKE_RECOVERY_ARTIFACTS=(
+    "$MAKE_RECOVERY_OBJECT" "$MAKE_RECOVERY_DEPFILE"
+    "$MAKE_RECOVERY_RSP" "$MAKE_RECOVERY_BINARY" "$MAKE_RECOVERY_READY"
+)
+MAKE_RECOVERY_BEFORE=()
+for artifact in "${MAKE_RECOVERY_ARTIFACTS[@]}"; do
+    MAKE_RECOVERY_BEFORE+=("$(artifact_stamp "$artifact")")
+done
+
+run_make_recovery "$MAKE_RECOVERY_WARM_LOG"
+grep -Fqx 'epoch-recovery-probe: restarts=0' "$MAKE_RECOVERY_WARM_LOG" ||
+    fail 'marker-free warm Make unexpectedly restarted'
+[ "$(grep -Fc 'build-epoch-session: acquired' "$MAKE_RECOVERY_WARM_LOG")" -eq 1 ] ||
+    fail 'marker-free warm Make did not acquire exactly one ordinary lease'
+[ "$(wc -l < "$MAKE_RECOVERY_ACTIONS")" -eq 2 ] ||
+    fail 'marker-free warm Make recompiled or relinked'
+for index in "${!MAKE_RECOVERY_ARTIFACTS[@]}"; do
+    [ "$(artifact_stamp "${MAKE_RECOVERY_ARTIFACTS[$index]}")" = \
+      "${MAKE_RECOVERY_BEFORE[$index]}" ] ||
+        fail "marker-free warm Make rewrote ${MAKE_RECOVERY_ARTIFACTS[$index]}"
+done
+
 expect_generation_symlink_refused()
 {
     local surface="$1" base object_root candidate_root outside session lease log
@@ -662,5 +801,5 @@ set -e
 [ "$CURRENT_RC" -eq 0 ] || fail 'current B publisher failed behind stale A'
 [ "$($STABLE)" = B ] || fail 'stale A overwrote the current B alias'
 
-printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true compiler_id=%s\n' \
+printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true make_recovery=true warm_no_rewrite=true compiler_id=%s\n' \
     "$COMPILER_ID"

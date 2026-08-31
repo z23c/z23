@@ -646,7 +646,7 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(agent_ctrl_buf, "ZCL_AGENT_LOOP_BIN=1 make agent-loop")
                != NULL);
         ASSERT(strstr(agent_ctrl_buf,
-                      "ZCL_AGENT_LOOP_DEPLOY=dev make agent-loop") != NULL);
+                      "ZCL_AGENT_LOOP_DEPLOY=dev make agent-loop refuses") != NULL);
         ASSERT(strstr(agent_ctrl_buf, "make agent-deploy-fast") != NULL);
         /* The self-documentation names native dev-lane workflows. */
         ASSERT(strstr(agent_ctrl_buf, "make agent-dev-status") != NULL);
@@ -990,7 +990,7 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(agent_ctrl_buf, "zclassic23-fuzz.timer") != NULL);
         ASSERT(strstr(agent_ctrl_buf, "zclassic23-coverage.timer") != NULL);
         ASSERT(strstr(agent_ctrl_buf, "zclassic23-test-suite.timer") != NULL);
-        ASSERT(strstr(agent_ctrl_buf, "pre-push-ci skips live service probe")
+        ASSERT(strstr(agent_ctrl_buf, "native pre-push checks ancestry")
                != NULL);
         ASSERT(strstr(agent_ctrl_buf, "app/controllers/src/agent_controller.c")
                != NULL);

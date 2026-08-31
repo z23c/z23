@@ -2141,6 +2141,44 @@ static int t_store_exact_cache_restore(void)
              stable_after.st_dev == stable_before.st_dev &&
              stable_after.st_ino == stable_before.st_ino &&
              stable_after.st_mtime == stable_before.st_mtime);
+
+    uint8_t source_root[32], *source_wire = NULL, *source_blob = NULL;
+    size_t source_wire_len = 0, source_blob_len = 0;
+    struct vcs_manifest source_manifest = {0};
+    char source_blob_path[1400] = {0};
+    bool source_fixture_ok =
+        zcl_hex_decode_lower(job.source_cas_sha3, source_root, 32) &&
+        vcs_object_load_raw(dd, source_root, &source_wire,
+                            &source_wire_len) == 0 &&
+        vcs_manifest_parse(source_wire, source_wire_len,
+                           &source_manifest) &&
+        source_manifest.count > 0 &&
+        vcs_object_get(dd, source_manifest.entries[0].blob,
+                       VCS_TAG_BLOB, &source_blob,
+                       &source_blob_len) == 0 &&
+        zs_addressed_path(dd, source_manifest.entries[0].blob,
+                          source_blob_path, sizeof(source_blob_path));
+    ZS_CHECK("exact cache: source closure blob resolves", source_fixture_ok);
+    if (source_fixture_ok) {
+        ZS_CHECK("exact cache: source closure missing-blob fixture removes",
+                 unlink(source_blob_path) == 0);
+        restored = build_fabric_cache_restore(
+            &ndb, dd, store, &job, &action, output, &report);
+        ZS_CHECK("exact cache: missing source closure blob refuses restore",
+                 !restored.ok &&
+                 report.disposition == BUILD_FABRIC_CACHE_CORRUPT);
+        uint8_t restored_blob_root[32];
+        ZS_CHECK("exact cache: source closure blob restores exactly",
+                 vcs_object_put(dd, source_blob, source_blob_len,
+                                VCS_TAG_BLOB, restored_blob_root) &&
+                 memcmp(restored_blob_root,
+                        source_manifest.entries[0].blob,
+                        sizeof(restored_blob_root)) == 0);
+    }
+    free(source_blob);
+    free(source_wire);
+    vcs_manifest_free(&source_manifest);
+
     struct db_build_receipt receipts[1];
     struct db_build_action unchanged;
     ZS_CHECK("exact cache: hit mints no receipt or lifecycle transition",
