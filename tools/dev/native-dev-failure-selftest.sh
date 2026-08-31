@@ -228,6 +228,21 @@ case "${1:-}" in
 esac
 SCRIPT
 chmod 0700 "$REPO/build/bin/test_parallel_fast"
+printf '0\n' >"$REPO/runner.count"
+
+if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+    set +e
+    DARWIN_ADMIT="$(native dev test run api 2>&1)"
+    DARWIN_RC=$?
+    set -e
+    [[ "$DARWIN_RC" -ne 0 &&
+       "$DARWIN_ADMIT" == *'"code":"SOURCE_IDENTITY_UNAVAILABLE"'* &&
+       "$(cat "$REPO/runner.count")" == 0 ]] ||
+        fail "Darwin focused runner executed an unattested script fixture"
+    echo "native-dev-failure-selftest: PASS"
+    exit 0
+fi
+
 printf '0\n' >"$REPO/capture.count"
 printf '0\n' >"$REPO/verify.count"
 printf '0\n' >"$REPO/runner.count"

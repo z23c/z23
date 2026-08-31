@@ -203,6 +203,26 @@ ZCL_CAPABILITY_SYMBOL("fork", CAP_PROCESS, "")
 ZCL_CAPABILITY_SYMBOL("kill", CAP_PROCESS,
     "Reaches a process this one did not create. Contrast pthread_kill, "
     "which cannot leave this process.")
+ZCL_CAPABILITY_SYMBOL("posix_spawn", CAP_PROCESS,
+    "Creates the child image. Kept with fork and exec even when the "
+    "Darwin caller requests an initially suspended process.")
+ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_addchdir_np", CAP_PROCESS,
+    "Chooses the working directory inherited by a posix_spawn child.")
+ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_addclose", CAP_PROCESS,
+    "Builds the descriptor inheritance policy for a posix_spawn child.")
+ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_adddup2", CAP_PROCESS,
+    "Builds the descriptor inheritance policy for a posix_spawn child.")
+ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_destroy", CAP_PROCESS,
+    "Kept with the complete posix_spawn configuration family.")
+ZCL_CAPABILITY_SYMBOL("posix_spawn_file_actions_init", CAP_PROCESS,
+    "Kept with the complete posix_spawn configuration family.")
+ZCL_CAPABILITY_SYMBOL("posix_spawnattr_destroy", CAP_PROCESS,
+    "Kept with the complete posix_spawn configuration family.")
+ZCL_CAPABILITY_SYMBOL("posix_spawnattr_init", CAP_PROCESS,
+    "Kept with the complete posix_spawn configuration family.")
+ZCL_CAPABILITY_SYMBOL("posix_spawnattr_setflags", CAP_PROCESS,
+    "Selects process-level spawn semantics, including suspended start "
+    "and creation of a new session on Darwin.")
 ZCL_CAPABILITY_SYMBOL("setenv", CAP_PROCESS,
     "Mutates the block a later exec inherits, which is how PATH and the "
     "loader variables get chosen.")
@@ -574,6 +594,9 @@ ZCL_CAPABILITY_SYMBOL("X509_gmtime_adj", CAP_CLOCK,
     "Sets a certificate validity bound relative to the current time.")
 
 /* ---- CAP_PRIVILEGE ---- */
+ZCL_CAPABILITY_SYMBOL("csops", CAP_PRIVILEGE,
+    "The operation number is invisible to nm and spans code-signing "
+    "inspection and process policy mutation; the restrictive class wins.")
 ZCL_CAPABILITY_SYMBOL("grantpt", CAP_PRIVILEGE,
     "Grants the current process access to a pseudo-terminal slave by "
     "changing kernel-managed ownership and permissions.")

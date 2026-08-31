@@ -3328,8 +3328,8 @@ void zcl_native_handle_dev_test_run(
                            ZCL_COMMAND_EXIT_BLOCKED,
                            "TEST_RUNNER_EXECUTION_UNAVAILABLE", "precondition",
                            true, false,
-                           "native handle-bound focused runner execution is unavailable",
-                           "use the POSIX reference lane until native execution is ported");
+                           "Windows descriptor-bound focused runner execution is unavailable",
+                           "use the Linux or macOS native lane until Windows execution is ported");
     return;
 #else
     int runner_fd = open(bin, O_RDONLY);

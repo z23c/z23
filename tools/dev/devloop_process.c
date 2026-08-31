@@ -121,6 +121,10 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#if defined(__APPLE__)
+#include <mach-o/loader.h>
+#include <spawn.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -284,6 +288,264 @@ static void drain_output(int fd, struct zcl_devloop_process_result *out)
 }
 #endif
 
+#if defined(__APPLE__) && \
+    (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+/* macOS has no fexecve(2), but its kernel can bind both sides of an
+ * equivalent pre-execution identity check. F_ADDFILESIGS_INFO returns the
+ * CodeDirectory hash for the already-open vnode. POSIX_SPAWN_START_SUSPENDED
+ * maps the selected image without running its first instruction, and csops
+ * returns the CodeDirectory hash of that exact mapped process. The pathname
+ * obtained with F_GETPATH is therefore only a locator: replacement before
+ * spawn yields a hash mismatch and the suspended child is killed before it
+ * can execute.
+ *
+ * csops is stable Darwin kernel ABI (syscall 169) and exported by libSystem,
+ * but the public macOS SDK omits its user declaration. Keep the declaration
+ * and use confined to the non-shipping dev/test executor. */
+extern int csops(pid_t pid, unsigned int ops, void *useraddr,
+                 size_t usersize);
+
+enum { ZCL_DARWIN_CS_OPS_CDHASH = 5 };
+
+static bool darwin_pread_exact(int fd, void *body, size_t body_len,
+                               off_t offset)
+{
+    size_t done = 0;
+    while (done < body_len) {
+        ssize_t got = pread(fd, (unsigned char *)body + done,
+                            body_len - done, offset + (off_t)done);
+        if (got > 0) {
+            done += (size_t)got;
+            continue;
+        }
+        if (got < 0 && errno == EINTR)
+            continue;
+        fprintf(stderr,
+                "[devloop] process: Mach-O signature read failed at %lld: %s\n",
+                (long long)(offset + (off_t)done),
+                got == 0 ? "unexpected end of file" : strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+static bool darwin_code_signature_region(int fd, const struct stat *st,
+                                         off_t *blob_offset,
+                                         size_t *blob_size)
+{
+    struct mach_header_64 header;
+    if (!darwin_pread_exact(fd, &header, sizeof(header), 0))
+        return false;
+#if defined(__aarch64__)
+    const cpu_type_t native_cpu = CPU_TYPE_ARM64;
+#elif defined(__x86_64__)
+    const cpu_type_t native_cpu = CPU_TYPE_X86_64;
+#else
+    fprintf(stderr,
+            "[devloop] process: no native Mach-O identity arm for this CPU\n");
+    errno = ENOTSUP;
+    return false;
+#endif
+    uint64_t commands_end = sizeof(header) + (uint64_t)header.sizeofcmds;
+    if (header.magic != MH_MAGIC_64 || header.cputype != native_cpu ||
+        header.filetype != MH_EXECUTE || commands_end > (uint64_t)st->st_size) {
+        fprintf(stderr,
+                "[devloop] process: descriptor is not a native thin Mach-O executable\n");
+        errno = ENOEXEC;
+        return false;
+    }
+    if (header.ncmds > header.sizeofcmds / sizeof(struct load_command)) {
+        fprintf(stderr,
+                "[devloop] process: Mach-O load-command count exceeds its bounds\n");
+        errno = ENOEXEC;
+        return false;
+    }
+
+    uint64_t cursor = sizeof(header);
+    bool found = false;
+    for (uint32_t i = 0; i < header.ncmds; i++) {
+        struct load_command command;
+        if (cursor + sizeof(command) > commands_end ||
+            !darwin_pread_exact(fd, &command, sizeof(command),
+                                (off_t)cursor))
+            return false;
+        if (command.cmdsize < sizeof(command) ||
+            cursor + command.cmdsize > commands_end) {
+            fprintf(stderr,
+                    "[devloop] process: malformed Mach-O load-command bounds\n");
+            errno = ENOEXEC;
+            return false;
+        }
+        if (command.cmd == LC_CODE_SIGNATURE) {
+            struct linkedit_data_command signature_command;
+            if (found || command.cmdsize < sizeof(signature_command) ||
+                !darwin_pread_exact(fd, &signature_command,
+                                    sizeof(signature_command),
+                                    (off_t)cursor)) {
+                fprintf(stderr,
+                        "[devloop] process: ambiguous Mach-O code signature command\n");
+                errno = ENOEXEC;
+                return false;
+            }
+            uint64_t signature_end =
+                (uint64_t)signature_command.dataoff +
+                (uint64_t)signature_command.datasize;
+            if (signature_command.datasize == 0 ||
+                signature_end > (uint64_t)st->st_size) {
+                fprintf(stderr,
+                        "[devloop] process: Mach-O code signature exceeds file bounds\n");
+                errno = ENOEXEC;
+                return false;
+            }
+            *blob_offset = (off_t)signature_command.dataoff;
+            *blob_size = (size_t)signature_command.datasize;
+            found = true;
+        }
+        cursor += command.cmdsize;
+    }
+    if (!found || cursor != commands_end) {
+        fprintf(stderr,
+                "[devloop] process: Mach-O has no exact embedded code signature\n");
+        errno = ENOEXEC;
+        return false;
+    }
+    return true;
+}
+
+static void darwin_reap_suspended(pid_t pid)
+{
+    (void)kill(pid, SIGKILL);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+}
+
+static bool darwin_spawn_fd_attested(const char *cwd, int exec_fd,
+                                     const char *const argv[], int output_fd,
+                                     int output_read_fd, int ready_read_fd,
+                                     int ready_write_fd, pid_t *pid_out)
+{
+    struct stat executable_stat;
+    if (fstat(exec_fd, &executable_stat) != 0) {
+        fprintf(stderr, "[devloop] process: executable fstat failed: %s\n",
+                strerror(errno));
+        return false;
+    }
+    if (!S_ISREG(executable_stat.st_mode) ||
+        !(executable_stat.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+        fprintf(stderr,
+                "[devloop] process: executable fd is not an executable regular file\n");
+        errno = EACCES;
+        return false;
+    }
+
+    off_t signature_offset = 0;
+    size_t signature_size = 0;
+    if (!darwin_code_signature_region(exec_fd, &executable_stat,
+                                      &signature_offset, &signature_size))
+        return false;
+    fsignatures_t signature = {0};
+    signature.fs_file_start = 0;
+    signature.fs_blob_start = (void *)(uintptr_t)signature_offset;
+    signature.fs_blob_size = signature_size;
+    signature.fs_fsignatures_size = sizeof(signature);
+    if (fcntl(exec_fd, F_ADDFILESIGS_INFO, &signature) != 0) {
+        fprintf(stderr,
+                "[devloop] process: descriptor CodeDirectory query failed: %s\n",
+                strerror(errno));
+        return false;
+    }
+    char path[PATH_MAX];
+    if (fcntl(exec_fd, F_GETPATH, path) != 0) {
+        fprintf(stderr,
+                "[devloop] process: executable locator query failed: %s\n",
+                strerror(errno));
+        return false;
+    }
+
+    posix_spawn_file_actions_t actions;
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc != 0) {
+        fprintf(stderr,
+                "[devloop] process: spawn file-actions init failed: %s\n",
+                strerror(rc));
+        return false;
+    }
+    rc = posix_spawn_file_actions_addchdir_np(&actions, cwd);
+    if (rc == 0)
+        rc = posix_spawn_file_actions_adddup2(&actions, output_fd,
+                                               STDOUT_FILENO);
+    if (rc == 0)
+        rc = posix_spawn_file_actions_adddup2(&actions, output_fd,
+                                               STDERR_FILENO);
+    if (rc == 0)
+        rc = posix_spawn_file_actions_addclose(&actions, output_read_fd);
+    if (rc == 0)
+        rc = posix_spawn_file_actions_addclose(&actions, output_fd);
+    if (rc == 0)
+        rc = posix_spawn_file_actions_addclose(&actions, ready_read_fd);
+    if (rc == 0)
+        rc = posix_spawn_file_actions_addclose(&actions, ready_write_fd);
+    if (rc != 0) {
+        fprintf(stderr,
+                "[devloop] process: spawn file-actions setup failed: %s\n",
+                strerror(rc));
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+
+    posix_spawnattr_t attributes;
+    rc = posix_spawnattr_init(&attributes);
+    if (rc != 0) {
+        fprintf(stderr, "[devloop] process: spawn attributes init failed: %s\n",
+                strerror(rc));
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+    short flags = POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_SETSID |
+                  POSIX_SPAWN_CLOEXEC_DEFAULT;
+    rc = posix_spawnattr_setflags(&attributes, flags);
+    if (rc != 0) {
+        fprintf(stderr,
+                "[devloop] process: suspended spawn setup failed: %s\n",
+                strerror(rc));
+        (void)posix_spawnattr_destroy(&attributes);
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return false;
+    }
+
+    extern char **environ;
+    pid_t pid = -1;
+    rc = posix_spawn(&pid, path, &actions, &attributes,
+                     (char *const *)argv, environ);
+    (void)posix_spawnattr_destroy(&attributes);
+    (void)posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) {
+        fprintf(stderr, "[devloop] process: suspended spawn failed: %s\n",
+                strerror(rc));
+        return false;
+    }
+
+    unsigned char actual[USER_FSIGNATURES_CDHASH_LEN] = {0};
+    if (csops(pid, ZCL_DARWIN_CS_OPS_CDHASH, actual, sizeof(actual)) != 0) {
+        int saved = errno;
+        darwin_reap_suspended(pid);
+        fprintf(stderr,
+                "[devloop] process: mapped CodeDirectory query failed: %s\n",
+                strerror(saved));
+        errno = saved;
+        return false;
+    }
+    if (memcmp(actual, signature.fs_cdhash, sizeof(actual)) != 0) {
+        darwin_reap_suspended(pid);
+        fprintf(stderr,
+                "[devloop] process: descriptor/mapped CodeDirectory mismatch; child refused before execution\n");
+        errno = ESTALE;
+        return false;
+    }
+    *pid_out = pid;
+    return true;
+}
+#endif
+
 static bool process_run_impl(const char *cwd, int exec_fd,
                              const char *const argv[], int timeout_ms,
                              bool raise_stack,
@@ -328,7 +590,23 @@ static bool process_run_impl(const char *cwd, int exec_fd,
     (void)fcntl(ready_fds[1], F_SETFD, FD_CLOEXEC);
 
     int64_t started_us = platform_time_monotonic_us();
-    pid_t pid = fork();
+    pid_t pid = -1;
+    bool darwin_attested_spawn = false;
+#if defined(__APPLE__)
+    if (exec_fd >= 0) {
+        if (!darwin_spawn_fd_attested(cwd, exec_fd, argv, fds[1], fds[0],
+                                      ready_fds[0], ready_fds[1], &pid)) {
+            close(fds[0]);
+            close(fds[1]);
+            close(ready_fds[0]);
+            close(ready_fds[1]);
+            return false;
+        }
+        darwin_attested_spawn = true;
+    }
+#endif
+    if (!darwin_attested_spawn)
+        pid = fork();
     if (pid < 0) {
         fprintf(stderr, "[devloop] process: fork failed: %s\n",
                 strerror(errno));
@@ -338,7 +616,7 @@ static bool process_run_impl(const char *cwd, int exec_fd,
         close(ready_fds[1]);
         return false;
     }
-    if (pid == 0) {
+    if (!darwin_attested_spawn && pid == 0) {
         close(ready_fds[0]);
         if (setsid() < 0)
             _exit(126);
@@ -377,34 +655,54 @@ static bool process_run_impl(const char *cwd, int exec_fd,
 
     close(fds[1]);
     close(ready_fds[1]);
+#if defined(__APPLE__)
+    if (darwin_attested_spawn) {
+        close(ready_fds[0]);
+        out->startup_us = platform_time_monotonic_us() - started_us;
+        if (kill(pid, SIGCONT) != 0) {
+            int saved = errno;
+            darwin_reap_suspended(pid);
+            close(fds[0]);
+            if (g_process_active_leader == (sig_atomic_t)pid)
+                g_process_active_leader = 0;
+            fprintf(stderr,
+                    "[devloop] process: attested child resume failed: %s\n",
+                    strerror(saved));
+            errno = saved;
+            return false;
+        }
+    }
+#endif
     char ready = 0;
     ssize_t ready_got;
-    do {
-        ready_got = read(ready_fds[0], &ready, 1);
-    } while (ready_got < 0 && errno == EINTR);
-    if (ready_got != 1 || ready != '1') {
+    if (!darwin_attested_spawn) {
+        do {
+            ready_got = read(ready_fds[0], &ready, 1);
+        } while (ready_got < 0 && errno == EINTR);
+        if (ready_got != 1 || ready != '1') {
+            close(ready_fds[0]);
+            (void)kill(pid, SIGKILL);
+            (void)waitpid(pid, NULL, 0);
+            close(fds[0]);
+            if (g_process_active_leader == (sig_atomic_t)pid)
+                g_process_active_leader = 0;
+            fprintf(stderr, "[devloop] process: child session setup failed\n");
+            return false;
+        }
+        do {
+            ready_got = read(ready_fds[0], &ready, 1);
+        } while (ready_got < 0 && errno == EINTR);
+        out->startup_us = platform_time_monotonic_us() - started_us;
         close(ready_fds[0]);
-        (void)kill(pid, SIGKILL);
-        (void)waitpid(pid, NULL, 0);
-        close(fds[0]);
-        if (g_process_active_leader == (sig_atomic_t)pid)
-            g_process_active_leader = 0;
-        fprintf(stderr, "[devloop] process: child session setup failed\n");
-        return false;
-    }
-    do {
-        ready_got = read(ready_fds[0], &ready, 1);
-    } while (ready_got < 0 && errno == EINTR);
-    out->startup_us = platform_time_monotonic_us() - started_us;
-    close(ready_fds[0]);
-    if (ready_got != 0) {
-        (void)kill(pid, SIGKILL);
-        (void)waitpid(pid, NULL, 0);
-        close(fds[0]);
-        if (g_process_active_leader == (sig_atomic_t)pid)
-            g_process_active_leader = 0;
-        fprintf(stderr, "[devloop] process: exec boundary failed\n");
-        return false;
+        if (ready_got != 0) {
+            (void)kill(pid, SIGKILL);
+            (void)waitpid(pid, NULL, 0);
+            close(fds[0]);
+            if (g_process_active_leader == (sig_atomic_t)pid)
+                g_process_active_leader = 0;
+            fprintf(stderr, "[devloop] process: exec boundary failed\n");
+            return false;
+        }
     }
     int flags = fcntl(fds[0], F_GETFL, 0);
     if (flags >= 0)

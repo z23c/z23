@@ -176,6 +176,11 @@ passed their platform contracts. A fresh isolated test-lane datadir reached
 graceful shutdown. This is startup evidence, not chain-sync acceptance.
 Descriptor-bound A/B execution is unavailable on macOS and fails closed;
 pathname reconstruction is not accepted as a substitute for `fexecve`.
+The dev/test proof executor has a narrower native rail: it obtains the
+CodeDirectory hash from the already-open thin Mach-O, spawns the locator path
+suspended, asks the kernel for the mapped child's CodeDirectory hash, and
+resumes only on an exact match. This does not promote production A/B or hot
+activation.
 The optimized ROM-seed background-scan regression also passed after bounding
 its worker-stack use; the artifact snapshot uses checked allocation instead of
 a roughly 1 MiB automatic array.

@@ -32,6 +32,9 @@
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 #if !defined(_WIN32)
@@ -3007,6 +3010,65 @@ static int test_resident_restart_builder(void)
     return failures;
 }
 
+#if defined(__APPLE__)
+static bool run_darwin_attested_descriptor_fixture(void)
+{
+    const char *saved = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    if (saved && !saved_copy)
+        return false;
+
+    char unresolved[PATH_MAX], executable[PATH_MAX];
+    uint32_t unresolved_len = sizeof(unresolved);
+    bool ok = _NSGetExecutablePath(unresolved, &unresolved_len) == 0 &&
+              realpath(unresolved, executable) != NULL;
+    int fd = ok ? open(executable, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0)
+        ok = false;
+    if (ok && platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1)
+                  != 0)
+        ok = false;
+
+    struct zcl_devloop_process_result result = {0};
+    const char *argv[] = { executable, "--source-record", NULL };
+    if (ok) {
+        ok = zcl_devloop_process_run_fd(".", fd, argv, 30000, &result) &&
+             result.exit_code == 0 && result.term_signal == 0 &&
+             !result.timed_out && !result.cancelled &&
+             result.output_len >= 131 && result.startup_us > 0;
+        char source_id[65] = {0}, mutation_id[65] = {0}, extra = 0;
+        int complete = 0;
+        if (ok)
+            ok = sscanf(result.output, "%64[0-9a-f] %d %64[0-9a-f] %c",
+                        source_id, &complete, mutation_id, &extra) == 3 &&
+                 strlen(source_id) == 64 && strlen(mutation_id) == 64 &&
+                 complete == 1;
+    }
+
+    if (fd >= 0)
+        close(fd);
+    if (saved_copy) {
+        if (platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_copy,
+                                     1) != 0)
+            ok = false;
+        free(saved_copy);
+    } else if (dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS") != 0) {
+        ok = false;
+    }
+    return ok;
+}
+
+static int test_darwin_attested_descriptor_process(void)
+{
+    int failures = 0;
+    TEST("dev platform: Darwin executes the open Mach-O only after kernel CodeDirectory attestation") {
+        ASSERT(run_darwin_attested_descriptor_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 static int test_resident_process_cancellation(void)
 {
     int failures = 0;
@@ -3501,6 +3563,9 @@ static int test_dev_platform_platform_arm(void)
     failures += test_distill_first_error();
     failures += test_hotswap_artifact_cache();
     failures += test_resident_restart_builder();
+#if defined(__APPLE__)
+    failures += test_darwin_attested_descriptor_process();
+#endif
     failures += test_resident_process_cancellation();
     failures += test_resident_process_supersession();
     failures += test_native_source_cas_shadow();
