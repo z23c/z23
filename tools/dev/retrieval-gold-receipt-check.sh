@@ -20,7 +20,8 @@ evaluator=${ZCL_RETRIEVAL_EVAL:-$repo_root/build/bin/retrieval-eval}
 tmp=''
 
 readonly benchmark_keys='record,schema,corpus_id,mode,publishable,publication_admission,promotion_authorized,driver_commit,driver_commit_semantics,observed_origin_main,driver_clean,driver_status_sha3,tasks_declared,tasks_evaluated,tasks_unsupported,source_epoch_kind,source_root_basis,relevance_judgment,query_strata,commit_subject_only,same_commit_unordered,evaluated_query_strata,commit_subject_only,same_commit_unordered,original_prompts_available,canonical_task_roots_available,ranking_may_read_relevance,rank_binary_sha3,capture_binary_sha3,evaluator_binary_sha3,jsonq_binary_sha3,sha3_helper_binary_sha3,corpus_checker_script_sha3,corpus_sha3,runner_sha3,evaluator_batch_bytes,evaluator_batch_encoding,evaluator_batch_base64,evaluator_batch_root_sha3'
-readonly observed_task_keys='record,schema,id,status,expected_vcs_root,shared_codeindex_source_root_sha3,membership_tree_root_sha3,membership_join_basis,pages,page0,elapsed_us,wall_us,budget_ms,budget_exceeded,all_pages,elapsed_us,wall_us,any_budget_exceeded,literal,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,bm25,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,scope_available,files_read_observed,reuse_success_available,unique_loc_avoided_available'
+readonly observed_task_v1_keys='record,schema,id,status,expected_vcs_root,shared_codeindex_source_root_sha3,membership_tree_root_sha3,membership_join_basis,pages,page0,elapsed_us,wall_us,budget_ms,budget_exceeded,all_pages,elapsed_us,wall_us,any_budget_exceeded,literal,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,bm25,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,scope_available,files_read_observed,reuse_success_available,unique_loc_avoided_available'
+readonly observed_task_v2_keys='record,schema,id,status,expected_vcs_root,shared_codeindex_source_root_sha3,membership_tree_root_sha3,membership_join_basis,pages,ranking_compute,elapsed_us,budget_ms,budget_exceeded,all_pages,wall_us,single_process,buffered_before_write,literal,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,bm25,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,scope_available,files_read_observed,reuse_success_available,unique_loc_avoided_available'
 readonly unsupported_task_keys='record,schema,id,status,reason,expected_vcs_root,membership_tree_root_sha3,membership_absence_observed,literal,bm25'
 readonly arm_keys='retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5'
 readonly metric_keys='available,basis_points'
@@ -146,7 +147,7 @@ decode_base64() {
 }
 
 validate_semantics() {
-    local candidate=$1 benchmark aggregate encoded batch replay metrics
+    local candidate=$1 benchmark aggregate encoded batch replay metrics task_schema row_schema
     local bytes corpus runner checker i row corpus_row id eligibility relevant_count
     local corpus_subject=0 corpus_same=0 eval_subject=0 eval_same=0
     local observed=0 unsupported=0 relevance_total=0
@@ -218,11 +219,18 @@ validate_semantics() {
 
     mapfile -t corpus_rows <"$corpus_file"
     [[ ${#corpus_rows[@]} -eq 8 ]] || fail "driver corpus is not eight records"
+    task_schema=$(field "${rows[1]}" schema)
+    case "$task_schema" in
+        zcl.retrieval_gold_benchmark_task.v1|zcl.retrieval_gold_benchmark_task.v2) ;;
+        *) fail "unsupported task receipt schema: $task_schema" ;;
+    esac
     : >"$projection"
     for ((i = 0; i < 7; i++)); do
         row=${rows[i + 1]}; corpus_row=${corpus_rows[i + 1]}
-        [[ $(field "$row" record) = task &&
-           $(field "$row" schema) = zcl.retrieval_gold_benchmark_task.v1 ]] ||
+        row_schema=$(field "$row" schema)
+        [[ $row_schema = "$task_schema" ]] ||
+            fail "mixed task receipt schemas at record $((i + 2))"
+        [[ $(field "$row" record) = task ]] ||
             fail "record $((i + 2)) is not a task receipt"
         id=$(field "$corpus_row" id)
         [[ $(field "$row" id) = "$id" &&
@@ -248,7 +256,11 @@ validate_semantics() {
             continue
         fi
         [[ $eligibility = c23_codeindex ]] || fail "unknown corpus eligibility: $id"
-        keys_exact "$row" . "$observed_task_keys"
+        if [[ $task_schema = zcl.retrieval_gold_benchmark_task.v1 ]]; then
+            keys_exact "$row" . "$observed_task_v1_keys"
+        else
+            keys_exact "$row" . "$observed_task_v2_keys"
+        fi
         [[ $(field "$row" status) = observed &&
            $(field "$row" membership_join_basis) = source_stability_backed_separate_indexes &&
            $(bool_field "$row" scope_available) = false &&
@@ -259,19 +271,37 @@ validate_semantics() {
         root_field "$row" shared_codeindex_source_root_sha3 >/dev/null
         root_field "$row" membership_tree_root_sha3 >/dev/null
         (( $(uint_field "$row" pages 128) >= 1 )) || fail "task has zero pages: $id"
-        keys_exact "$row" page0 elapsed_us,wall_us,budget_ms,budget_exceeded
-        keys_exact "$row" all_pages elapsed_us,wall_us,any_budget_exceeded
-        elapsed=$(uint_field "$row" page0.elapsed_us 9223372036854775807)
-        wall=$(uint_field "$row" page0.wall_us 9223372036854775807)
-        budget=$(uint_field "$row" page0.budget_ms 9223372036854)
-        exceeded=$(bool_field "$row" page0.budget_exceeded); expected_exceeded=false
-        ((elapsed > budget * 1000)) && expected_exceeded=true
-        [[ $exceeded = "$expected_exceeded" ]] || fail "page0 budget formula differs: $id"
-        all_elapsed=$(uint_field "$row" all_pages.elapsed_us 9223372036854775807)
-        all_wall=$(uint_field "$row" all_pages.wall_us 9223372036854775807)
-        any_exceeded=$(bool_field "$row" all_pages.any_budget_exceeded)
-        ((all_elapsed >= elapsed && all_wall >= wall)) || fail "all-page totals are below page0: $id"
-        [[ $exceeded = false || $any_exceeded = true ]] || fail "all-page exceed flag loses page0: $id"
+        if [[ $task_schema = zcl.retrieval_gold_benchmark_task.v1 ]]; then
+            keys_exact "$row" page0 elapsed_us,wall_us,budget_ms,budget_exceeded
+            keys_exact "$row" all_pages elapsed_us,wall_us,any_budget_exceeded
+            elapsed=$(uint_field "$row" page0.elapsed_us 9223372036854775807)
+            wall=$(uint_field "$row" page0.wall_us 9223372036854775807)
+            budget=$(uint_field "$row" page0.budget_ms 9223372036854)
+            exceeded=$(bool_field "$row" page0.budget_exceeded); expected_exceeded=false
+            ((elapsed > budget * 1000)) && expected_exceeded=true
+            [[ $exceeded = "$expected_exceeded" ]] || fail "page0 budget formula differs: $id"
+            all_elapsed=$(uint_field "$row" all_pages.elapsed_us 9223372036854775807)
+            all_wall=$(uint_field "$row" all_pages.wall_us 9223372036854775807)
+            any_exceeded=$(bool_field "$row" all_pages.any_budget_exceeded)
+            ((all_elapsed >= elapsed && all_wall >= wall)) || fail "all-page totals are below page0: $id"
+            [[ $exceeded = false || $any_exceeded = true ]] || fail "all-page exceed flag loses page0: $id"
+        else
+            keys_exact "$row" ranking_compute elapsed_us,budget_ms,budget_exceeded
+            keys_exact "$row" all_pages wall_us,single_process,buffered_before_write
+            elapsed=$(uint_field "$row" ranking_compute.elapsed_us 9223372036854775807)
+            budget=$(uint_field "$row" ranking_compute.budget_ms 9223372036854)
+            exceeded=$(bool_field "$row" ranking_compute.budget_exceeded)
+            expected_exceeded=false
+            ((elapsed > budget * 1000)) && expected_exceeded=true
+            [[ $exceeded = "$expected_exceeded" ]] ||
+                fail "ranking-compute budget formula differs: $id"
+            all_wall=$(uint_field "$row" all_pages.wall_us 9223372036854775807)
+            ((all_wall >= elapsed)) ||
+                fail "all-page wall time is below ranking compute: $id"
+            [[ $(bool_field "$row" all_pages.single_process) = true &&
+               $(bool_field "$row" all_pages.buffered_before_write) = true ]] ||
+                fail "v2 all-page transport boundary differs: $id"
+        fi
         for arm in literal bm25; do
             keys_exact "$row" "$arm" "$arm_keys"
             retained=$(uint_field "$row" "$arm.retained_files" 128)
@@ -510,6 +540,10 @@ selftest() {
     awk 'NR == 2 { saved = $0; next } NR == 3 { print; print saved; next } { print }' \
         "$receipt" >"$bad"
     expect_semantic_refusal task-order "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/mixed-task-schema.jsonl"
+    sed '0,/zcl.retrieval_gold_benchmark_task.v1/s//zcl.retrieval_gold_benchmark_task.v2/' \
+        "$receipt" >"$bad"
+    expect_semantic_refusal mixed-task-schema "$bad"; mutations=$((mutations + 1))
     printf 'retrieval-gold-receipt-check: SELFTEST PASS mutations=%s\n' "$mutations"
 }
 
