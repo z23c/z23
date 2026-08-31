@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Verify the frozen publishable retrieval benchmark without rerunning ranking.
+
+set -euo pipefail
+export LC_ALL=C
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+readonly driver=b663f019ed20d6ece26aa94b5dfe92f41bd4c0be
+readonly receipt_name="retrieval-gold-benchmark-$driver.jsonl"
+readonly receipt="$repo_root/docs/work/retrieval-gold-evidence/$receipt_name"
+readonly receipt_sha3=e21887c74915cee1ab8895a258220008012ebb67c64c1a09a9f5d0ea22db99b5
+readonly empty_sha3=a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
+readonly corpus_path=docs/work/RETRIEVAL_GOLD_CORPUS.jsonl
+readonly runner_path=tools/dev/retrieval-gold-benchmark.sh
+readonly corpus_checker_path=tools/dev/retrieval-gold-corpus-check.sh
+jsonq=${ZCL_JSONQ:-$repo_root/build/bin/jsonq}
+sha3=${ZCL_AGENT_SHA3:-$repo_root/build/bin/agent_sha3}
+evaluator=${ZCL_RETRIEVAL_EVAL:-$repo_root/build/bin/retrieval-eval}
+rank_bin=${ZCL_RETRIEVAL_BENCH_Z23:-$repo_root/build/bin/z23-dev}
+capture_bin=${ZCL_RETRIEVAL_CAPTURE_Z23:-$repo_root/build/bin/z23}
+tmp=''
+
+readonly benchmark_keys='record,schema,corpus_id,mode,publishable,publication_admission,promotion_authorized,driver_commit,driver_commit_semantics,observed_origin_main,driver_clean,driver_status_sha3,tasks_declared,tasks_evaluated,tasks_unsupported,source_epoch_kind,source_root_basis,relevance_judgment,query_strata,commit_subject_only,same_commit_unordered,evaluated_query_strata,commit_subject_only,same_commit_unordered,original_prompts_available,canonical_task_roots_available,ranking_may_read_relevance,rank_binary_sha3,capture_binary_sha3,evaluator_binary_sha3,jsonq_binary_sha3,sha3_helper_binary_sha3,corpus_checker_script_sha3,corpus_sha3,runner_sha3,evaluator_batch_bytes,evaluator_batch_encoding,evaluator_batch_base64,evaluator_batch_root_sha3'
+readonly observed_task_keys='record,schema,id,status,expected_vcs_root,shared_codeindex_source_root_sha3,membership_tree_root_sha3,membership_join_basis,pages,page0,elapsed_us,wall_us,budget_ms,budget_exceeded,all_pages,elapsed_us,wall_us,any_budget_exceeded,literal,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,bm25,retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5,scope_available,files_read_observed,reuse_success_available,unique_loc_avoided_available'
+readonly unsupported_task_keys='record,schema,id,status,reason,expected_vcs_root,membership_tree_root_sha3,membership_absence_observed,literal,bm25'
+readonly arm_keys='retained_files,ranking_complete,ranking_root_sha3,projected_context_bytes_at_5,approximate_tokens_at_5'
+readonly metric_keys='available,basis_points'
+readonly eval_arm_keys='recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points'
+readonly eval_keys='schema,tasks_evaluated,aggregation_kind,tasks_denominator,eligible_relevance_judgments,binding_kind,context_cost_kind,token_basis,literal,recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points,bm25,recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points'
+readonly aggregate_keys="record,schema,metrics,$eval_keys,files_read_observed,observed_token_count_available,wrong_scope_basis,reuse_success_available,duplicate_avoidance_available,new_unique_loc_avoided_available"
+
+fail() { printf 'retrieval-gold-receipt-check: FAIL — %s\n' "$*" >&2; return 1; }
+
+field() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" get "$2") ||
+        fail "missing or malformed field: $2"
+    printf '%s' "$value"
+}
+
+raw_field() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" raw "$2") ||
+        fail "missing or malformed value: $2"
+    printf '%s' "$value"
+}
+
+field_type() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" type "$2") ||
+        fail "missing type: $2"
+    printf '%s' "$value"
+}
+
+array_count() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" count "$2") ||
+        fail "missing array: $2"
+    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || fail "invalid array count: $2"
+    printf '%s' "$value"
+}
+
+keys_exact() {
+    local observed
+    observed=$(printf '%s\n' "$1" | "$jsonq" keys "$2" | paste -sd, -) ||
+        fail "cannot enumerate keys: $2"
+    [[ $observed = "$3" ]] || fail "unexpected object shape: $2"
+}
+
+uint_field() {
+    local value
+    [[ $(field_type "$1" "$2") = number ]] || fail "not a number: $2"
+    value=$(field "$1" "$2")
+    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || fail "not a canonical integer: $2"
+    ((${#value} < ${#3} || (${#value} == ${#3} && 10#$value <= 10#$3))) ||
+        fail "integer exceeds bound: $2"
+    printf '%s' "$value"
+}
+
+bool_field() {
+    local value
+    [[ $(field_type "$1" "$2") = bool ]] || fail "not a boolean: $2"
+    value=$(field "$1" "$2")
+    [[ $value = true || $value = false ]] || fail "invalid boolean: $2"
+    printf '%s' "$value"
+}
+
+root_field() {
+    local value
+    [[ $(field_type "$1" "$2") = string ]] || fail "not a root string: $2"
+    value=$(field "$1" "$2")
+    [[ $value =~ ^[0-9a-f]{64}$ ]] || fail "invalid SHA3 root: $2"
+    printf '%s' "$value"
+}
+
+hash_file() {
+    local output root
+    output=$("$sha3" "$1") || fail "cannot hash file: $1"
+    root=${output%% *}
+    [[ $root =~ ^[0-9a-f]{64}$ ]] || fail "malformed file hash: $1"
+    printf '%s' "$root"
+}
+
+check_hash() {
+    [[ $(hash_file "$1") = "$2" ]] || fail "SHA3 differs: $1"
+}
+
+validate_metric() {
+    local available
+    keys_exact "$1" "$2" "$metric_keys"
+    available=$(bool_field "$1" "$2.available")
+    if [[ $available = true ]]; then
+        uint_field "$1" "$2.basis_points" 10000 >/dev/null
+    else
+        [[ $(field_type "$1" "$2.basis_points") = null ]] ||
+            fail "unavailable metric carries a value: $2"
+    fi
+}
+
+validate_eval_arm() {
+    local document=$1 arm=$2 expected_files=$3 expected_context=$4
+    local actual_files actual_context actual_tokens
+    keys_exact "$document" "$arm" "$eval_arm_keys"
+    validate_metric "$document" "$arm.recall_at_5"
+    validate_metric "$document" "$arm.recall_at_20"
+    validate_metric "$document" "$arm.mrr"
+    validate_metric "$document" "$arm.wrong_scope_at_5"
+    [[ $(bool_field "$document" "$arm.wrong_scope_at_5.available") = false &&
+       $(field_type "$document" "$arm.wrong_scope_at_5.basis_points") = null ]] ||
+        fail "$arm wrong-scope overclaims unavailable evidence"
+    actual_files=$(uint_field "$document" "$arm.task_unique_file_selections_at_5" 3840)
+    actual_context=$(uint_field "$document" "$arm.projected_context_bytes_at_5" 9223372036854775807)
+    actual_tokens=$(uint_field "$document" "$arm.approximate_tokens_at_5" 9223372036854775807)
+    [[ $actual_files -eq $expected_files && $actual_context -eq $expected_context &&
+       $actual_tokens -eq $(((expected_context + 3) / 4)) ]] ||
+        fail "$arm aggregate cost formula differs"
+}
+
+decode_base64() {
+    if base64 --help 2>&1 | grep -q -- '--decode'; then
+        base64 --decode
+    else
+        base64 -D
+    fi
+}
+
+validate_semantics() {
+    local candidate=$1 benchmark aggregate encoded batch replay metrics
+    local bytes corpus runner checker i row corpus_row id eligibility relevant_count
+    local corpus_subject=0 corpus_same=0 eval_subject=0 eval_same=0
+    local observed=0 unsupported=0 relevance_total=0
+    local literal_files=0 bm25_files=0 literal_context=0 bm25_context=0
+    local retained context tokens take elapsed wall budget exceeded expected_exceeded
+    local all_elapsed all_wall any_exceeded
+    local corpus_file="$tmp/corpus.jsonl" runner_file="$tmp/runner.sh"
+    local checker_file="$tmp/corpus-checker.sh" projection="$tmp/expected.projection"
+    local observed_projection="$tmp/observed.projection"
+
+    [[ -f $candidate ]] || fail "receipt is absent: $candidate"
+    [[ $(tail -c 1 "$candidate" | od -An -tuC | tr -d '[:space:]') = 10 ]] ||
+        fail "receipt lacks one canonical final newline"
+    mapfile -t rows <"$candidate"
+    [[ ${#rows[@]} -eq 9 ]] || fail "receipt must contain exactly nine records"
+    for row in "${rows[@]}"; do [[ -n $row ]] || fail "receipt contains a blank record"; done
+    benchmark=${rows[0]}; aggregate=${rows[8]}
+    keys_exact "$benchmark" . "$benchmark_keys"
+    [[ $(field "$benchmark" record) = benchmark &&
+       $(field "$benchmark" schema) = zcl.retrieval_gold_benchmark.v1 &&
+       $(field "$benchmark" corpus_id) = z23-historical-agent-tasks-v1 &&
+       $(field "$benchmark" mode) = run &&
+       $(bool_field "$benchmark" publishable) = true &&
+       $(field "$benchmark" publication_admission) = exact_observed_origin_main &&
+       $(bool_field "$benchmark" promotion_authorized) = false &&
+       $(field "$benchmark" driver_commit) = "$driver" &&
+       $(field "$benchmark" observed_origin_main) = "$driver" &&
+       $(field "$benchmark" driver_commit_semantics) = display_only_github_trace_metadata &&
+       $(bool_field "$benchmark" driver_clean) = true &&
+       $(root_field "$benchmark" driver_status_sha3) = "$empty_sha3" &&
+       $(uint_field "$benchmark" tasks_declared 32) -eq 7 &&
+       $(uint_field "$benchmark" tasks_evaluated 32) -eq 6 &&
+       $(uint_field "$benchmark" tasks_unsupported 32) -eq 1 &&
+       $(field "$benchmark" source_epoch_kind) = git_parent_commit &&
+       $(field "$benchmark" source_root_basis) = vcs_manifest_v1_nonignored_filesystem &&
+       $(field "$benchmark" relevance_judgment) = landed_changed_path_present_in_parent &&
+       $(bool_field "$benchmark" original_prompts_available) = false &&
+       $(bool_field "$benchmark" canonical_task_roots_available) = false &&
+       $(bool_field "$benchmark" ranking_may_read_relevance) = false ]] ||
+        fail "benchmark publication boundary differs"
+    keys_exact "$benchmark" query_strata commit_subject_only,same_commit_unordered
+    keys_exact "$benchmark" evaluated_query_strata commit_subject_only,same_commit_unordered
+    [[ $(uint_field "$benchmark" query_strata.commit_subject_only 7) -eq 1 &&
+       $(uint_field "$benchmark" query_strata.same_commit_unordered 7) -eq 6 &&
+       $(uint_field "$benchmark" evaluated_query_strata.commit_subject_only 6) -eq 1 &&
+       $(uint_field "$benchmark" evaluated_query_strata.same_commit_unordered 6) -eq 5 ]] ||
+        fail "query strata differ"
+
+    git -C "$repo_root" cat-file -e "$driver^{commit}" || fail "driver commit is unavailable"
+    git -C "$repo_root" show "$driver:$corpus_path" >"$corpus_file"
+    git -C "$repo_root" show "$driver:$runner_path" >"$runner_file"
+    git -C "$repo_root" show "$driver:$corpus_checker_path" >"$checker_file"
+    check_hash "$corpus_file" "$(root_field "$benchmark" corpus_sha3)"
+    check_hash "$runner_file" "$(root_field "$benchmark" runner_sha3)"
+    check_hash "$checker_file" "$(root_field "$benchmark" corpus_checker_script_sha3)"
+    check_hash "$rank_bin" "$(root_field "$benchmark" rank_binary_sha3)"
+    check_hash "$capture_bin" "$(root_field "$benchmark" capture_binary_sha3)"
+    check_hash "$evaluator" "$(root_field "$benchmark" evaluator_binary_sha3)"
+    check_hash "$jsonq" "$(root_field "$benchmark" jsonq_binary_sha3)"
+    check_hash "$sha3" "$(root_field "$benchmark" sha3_helper_binary_sha3)"
+
+    mapfile -t corpus_rows <"$corpus_file"
+    [[ ${#corpus_rows[@]} -eq 8 ]] || fail "driver corpus is not eight records"
+    : >"$projection"
+    for ((i = 0; i < 7; i++)); do
+        row=${rows[i + 1]}; corpus_row=${corpus_rows[i + 1]}
+        [[ $(field "$row" record) = task &&
+           $(field "$row" schema) = zcl.retrieval_gold_benchmark_task.v1 ]] ||
+            fail "record $((i + 2)) is not a task receipt"
+        id=$(field "$corpus_row" id)
+        [[ $(field "$row" id) = "$id" &&
+           $(root_field "$row" expected_vcs_root) = $(root_field "$corpus_row" expected_vcs_root) ]] ||
+            fail "task row is not bound to corpus order/root: $id"
+        eligibility=$(field "$corpus_row" index_eligibility)
+        relevant_count=$(array_count "$corpus_row" relevant_paths)
+        case $(field "$corpus_row" query_provenance) in
+            commit_subject_only) corpus_subject=$((corpus_subject + 1)) ;;
+            same_commit_unordered_*) corpus_same=$((corpus_same + 1)) ;;
+            *) fail "unknown corpus query stratum: $id" ;;
+        esac
+        if [[ $eligibility = outside_c23_codeindex ]]; then
+            keys_exact "$row" . "$unsupported_task_keys"
+            [[ $(field "$row" status) = unsupported &&
+               $(field "$row" reason) = outside_c23_codeindex &&
+               $(bool_field "$row" membership_absence_observed) = true &&
+               $(field_type "$row" literal) = null &&
+               $(field_type "$row" bm25) = null ]] ||
+                fail "unsupported task weakens its null/refusal boundary: $id"
+            root_field "$row" membership_tree_root_sha3 >/dev/null
+            unsupported=$((unsupported + 1))
+            continue
+        fi
+        [[ $eligibility = c23_codeindex ]] || fail "unknown corpus eligibility: $id"
+        keys_exact "$row" . "$observed_task_keys"
+        [[ $(field "$row" status) = observed &&
+           $(field "$row" membership_join_basis) = source_stability_backed_separate_indexes &&
+           $(bool_field "$row" scope_available) = false &&
+           $(bool_field "$row" files_read_observed) = false &&
+           $(bool_field "$row" reuse_success_available) = false &&
+           $(bool_field "$row" unique_loc_avoided_available) = false ]] ||
+            fail "observed task overclaims unavailable evidence: $id"
+        root_field "$row" shared_codeindex_source_root_sha3 >/dev/null
+        root_field "$row" membership_tree_root_sha3 >/dev/null
+        (( $(uint_field "$row" pages 128) >= 1 )) || fail "task has zero pages: $id"
+        keys_exact "$row" page0 elapsed_us,wall_us,budget_ms,budget_exceeded
+        keys_exact "$row" all_pages elapsed_us,wall_us,any_budget_exceeded
+        elapsed=$(uint_field "$row" page0.elapsed_us 9223372036854775807)
+        wall=$(uint_field "$row" page0.wall_us 9223372036854775807)
+        budget=$(uint_field "$row" page0.budget_ms 9223372036854)
+        exceeded=$(bool_field "$row" page0.budget_exceeded); expected_exceeded=false
+        ((elapsed > budget * 1000)) && expected_exceeded=true
+        [[ $exceeded = "$expected_exceeded" ]] || fail "page0 budget formula differs: $id"
+        all_elapsed=$(uint_field "$row" all_pages.elapsed_us 9223372036854775807)
+        all_wall=$(uint_field "$row" all_pages.wall_us 9223372036854775807)
+        any_exceeded=$(bool_field "$row" all_pages.any_budget_exceeded)
+        ((all_elapsed >= elapsed && all_wall >= wall)) || fail "all-page totals are below page0: $id"
+        [[ $exceeded = false || $any_exceeded = true ]] || fail "all-page exceed flag loses page0: $id"
+        for arm in literal bm25; do
+            keys_exact "$row" "$arm" "$arm_keys"
+            retained=$(uint_field "$row" "$arm.retained_files" 128)
+            bool_field "$row" "$arm.ranking_complete" >/dev/null
+            root_field "$row" "$arm.ranking_root_sha3" >/dev/null
+            context=$(uint_field "$row" "$arm.projected_context_bytes_at_5" 9223372036854775807)
+            tokens=$(uint_field "$row" "$arm.approximate_tokens_at_5" 9223372036854775807)
+            [[ $tokens -eq $(((context + 3) / 4)) ]] || fail "$arm task token formula differs: $id"
+            take=$retained; ((take > 5)) && take=5
+            if [[ $arm = literal ]]; then
+                literal_files=$((literal_files + take)); literal_context=$((literal_context + context))
+            else
+                bm25_files=$((bm25_files + take)); bm25_context=$((bm25_context + context))
+            fi
+        done
+        printf 'task %s %s\nquery %s\n' "$id" "$relevant_count" "$(field "$corpus_row" query)" >>"$projection"
+        for ((retained = 0; retained < relevant_count; retained++)); do
+            printf 'relevant %s\n' "$(field "$corpus_row" "relevant_paths[$retained]")" >>"$projection"
+        done
+        relevance_total=$((relevance_total + relevant_count)); observed=$((observed + 1))
+        case $(field "$corpus_row" query_provenance) in
+            commit_subject_only) eval_subject=$((eval_subject + 1)) ;;
+            same_commit_unordered_*) eval_same=$((eval_same + 1)) ;;
+        esac
+    done
+    [[ $observed -eq 6 && $unsupported -eq 1 && $relevance_total -eq 28 &&
+       $corpus_subject -eq 1 && $corpus_same -eq 6 &&
+       $eval_subject -eq 1 && $eval_same -eq 5 ]] || fail "task/strata/relevance denominator differs"
+
+    [[ $(field "$benchmark" evaluator_batch_encoding) = base64_rfc4648 ]] ||
+        fail "unknown evaluator batch encoding"
+    bytes=$(uint_field "$benchmark" evaluator_batch_bytes 1048576)
+    [[ $bytes -eq 48030 ]] || fail "sealed evaluator batch byte count differs"
+    encoded=$(field "$benchmark" evaluator_batch_base64)
+    [[ $encoded =~ ^[A-Za-z0-9+/]*={0,2}$ && $((${#encoded} % 4)) -eq 0 ]] ||
+        fail "evaluator batch base64 is noncanonical"
+    batch="$tmp/evaluator.batch"
+    printf '%s' "$encoded" | decode_base64 >"$batch" || fail "cannot decode evaluator batch"
+    [[ $(wc -c <"$batch" | tr -d '[:space:]') -eq $bytes ]] || fail "decoded batch byte count differs"
+    [[ $(base64 <"$batch" | tr -d '\n') = "$encoded" ]] || fail "batch base64 does not round-trip canonically"
+    check_hash "$batch" "$(root_field "$benchmark" evaluator_batch_root_sha3)"
+    [[ $(root_field "$benchmark" evaluator_batch_root_sha3) = abefa3f2cd30efb1bca229d99e90414ec786c59645badb239148f87a6f2f620c ]] ||
+        fail "batch root differs from reviewed KAT"
+    [[ $(head -n 1 "$batch") = 'zcl.retrieval_eval_batch.v3 tasks=6 eligible_relevance_judgments=28' ]] ||
+        fail "evaluator batch header differs"
+    awk '
+        $1 == "task" { remaining=$3; print; want_query=1; next }
+        want_query { print; want_query=0; next }
+        remaining > 0 { print; remaining--; next }
+    ' "$batch" >"$observed_projection"
+    cmp -s "$projection" "$observed_projection" || fail "batch tasks/query/relevance differ from corpus"
+    replay=$("$evaluator" <"$batch") || fail "maintained evaluator refused sealed batch"
+
+    keys_exact "$aggregate" . "$aggregate_keys"
+    [[ $(field "$aggregate" record) = aggregate &&
+       $(field "$aggregate" schema) = zcl.retrieval_gold_benchmark_aggregate.v1 &&
+       $(bool_field "$aggregate" files_read_observed) = false &&
+       $(bool_field "$aggregate" observed_token_count_available) = false &&
+       $(field "$aggregate" wrong_scope_basis) = unavailable &&
+       $(bool_field "$aggregate" reuse_success_available) = false &&
+       $(bool_field "$aggregate" duplicate_avoidance_available) = false &&
+       $(bool_field "$aggregate" new_unique_loc_avoided_available) = false ]] ||
+        fail "aggregate overclaims unavailable evidence"
+    metrics=$(raw_field "$aggregate" metrics)
+    [[ $metrics = "$replay" ]] || fail "aggregate metrics differ from evaluator replay"
+    keys_exact "$metrics" . "$eval_keys"
+    [[ $(field "$metrics" schema) = zcl.retrieval_eval_batch_result.v3 &&
+       $(uint_field "$metrics" tasks_evaluated 32) -eq 6 &&
+       $(field "$metrics" aggregation_kind) = macro_equal_task_weight &&
+       $(uint_field "$metrics" tasks_denominator 32) -eq 6 &&
+       $(uint_field "$metrics" eligible_relevance_judgments 4096) -eq 28 &&
+       $(field "$metrics" binding_kind) = metrics_only_runner_seals_provenance &&
+       $(field "$metrics" context_cost_kind) = projected_not_read &&
+       $(field "$metrics" token_basis) = 'ceil(context_bytes/4)' ]] ||
+        fail "evaluator aggregation contract differs"
+    validate_eval_arm "$metrics" literal "$literal_files" "$literal_context"
+    validate_eval_arm "$metrics" bm25 "$bm25_files" "$bm25_context"
+}
+
+validate_canonical() {
+    [[ $receipt = "$repo_root/docs/work/retrieval-gold-evidence/$receipt_name" ]] ||
+        fail "internal canonical receipt path differs"
+    [[ ${receipt##*/} = *"$driver"* ]] || fail "receipt filename omits full driver SHA"
+    check_hash "$receipt" "$receipt_sha3"
+    validate_semantics "$receipt"
+}
+
+expect_semantic_refusal() {
+    local name=$1 candidate=$2
+    if "$0" --semantic-fixture "$candidate" >/dev/null 2>&1; then
+        fail "mutation was accepted: $name"
+    fi
+}
+
+selftest() {
+    local bad mutations=0
+    "$0" --semantic-fixture "$receipt" >/dev/null
+    bad="$tmp/wrong-path.jsonl"; sed 's/"publishable":true/"publishable":false/' "$receipt" >"$bad"
+    [[ $(hash_file "$bad") != "$receipt_sha3" ]] || fail "whole-file KAT mutation did not change hash"
+    expect_semantic_refusal publishable "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/driver.jsonl"; sed 's/b663f019ed20d6ece26aa94b5dfe92f41bd4c0be/b663f019ed20d6ece26aa94b5dfe92f41bd4c0bf/' "$receipt" >"$bad"
+    expect_semantic_refusal driver "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/count.jsonl"; sed 's/"tasks_evaluated":6/"tasks_evaluated":5/' "$receipt" >"$bad"
+    expect_semantic_refusal count "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/stratum.jsonl"; sed 's/"same_commit_unordered":5/"same_commit_unordered":4/' "$receipt" >"$bad"
+    expect_semantic_refusal stratum "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/bytes.jsonl"; sed 's/"evaluator_batch_bytes":48030/"evaluator_batch_bytes":48031/' "$receipt" >"$bad"
+    expect_semantic_refusal batch-bytes "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/base64.jsonl"; sed 's/"evaluator_batch_base64":"e/"evaluator_batch_base64":"!/' "$receipt" >"$bad"
+    expect_semantic_refusal base64 "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/batch-root.jsonl"; sed 's/abefa3f2cd30efb1bca229d99e90414ec786c59645badb239148f87a6f2f620c/0befa3f2cd30efb1bca229d99e90414ec786c59645badb239148f87a6f2f620c/' "$receipt" >"$bad"
+    expect_semantic_refusal batch-root "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/denominator.jsonl"; sed 's/"tasks_denominator":6/"tasks_denominator":5/' "$receipt" >"$bad"
+    expect_semantic_refusal denominator "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/relevance.jsonl"; sed 's/"eligible_relevance_judgments":28/"eligible_relevance_judgments":27/' "$receipt" >"$bad"
+    expect_semantic_refusal relevance "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/unsupported.jsonl"; sed '0,/"literal":null/s//"literal":{}/' "$receipt" >"$bad"
+    expect_semantic_refusal unsupported-null "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/unavailable.jsonl"; sed 's/"observed_token_count_available":false/"observed_token_count_available":true/' "$receipt" >"$bad"
+    expect_semantic_refusal unavailable "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/token.jsonl"; sed '0,/"approximate_tokens_at_5":[0-9][0-9]*/s//"approximate_tokens_at_5":0/' "$receipt" >"$bad"
+    expect_semantic_refusal token-formula "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/order.jsonl"
+    awk 'NR == 2 { saved = $0; next } NR == 3 { print; print saved; next } { print }' \
+        "$receipt" >"$bad"
+    expect_semantic_refusal task-order "$bad"; mutations=$((mutations + 1))
+    printf 'retrieval-gold-receipt-check: SELFTEST PASS mutations=%s\n' "$mutations"
+}
+
+cleanup() { [[ -z ${tmp:-} ]] || rm -r -- "$tmp"; }
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/z23-retrieval-receipt-check.XXXXXX")
+trap cleanup EXIT HUP INT TERM
+for executable in "$jsonq" "$sha3" "$evaluator" "$rank_bin" "$capture_bin"; do
+    [[ -x $executable ]] || fail "required executable is unavailable: $executable"
+done
+command -v base64 >/dev/null 2>&1 || fail "base64 is unavailable"
+
+case ${1:---check} in
+    --check)
+        [[ $# -eq 1 ]] || fail "--check takes no receipt override"
+        validate_canonical
+        printf 'retrieval-gold-receipt-check: PASS records=9 tasks=7 evaluated=6 unsupported=1 relevance=28 receipt_sha3=%s\n' "$receipt_sha3" ;;
+    --selftest)
+        [[ $# -eq 1 ]] || fail "--selftest takes no arguments"
+        selftest ;;
+    --semantic-fixture)
+        [[ $# -eq 2 ]] || fail "--semantic-fixture requires one path"
+        validate_semantics "$2" ;;
+    *)
+        printf 'usage: %s [--check|--selftest]\n' "$0" >&2
+        exit 64 ;;
+esac

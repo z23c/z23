@@ -6605,7 +6605,7 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
-    retrieval-gold-benchmark-publishable-capture
+    retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
@@ -6630,6 +6630,13 @@ retrieval-gold-benchmark-publishable-capture:
 	@$(MAKE) --no-print-directory z23 dev-bin jsonq agent-sha3 retrieval-eval \
 	    retrieval-eval-selftest retrieval-gold-corpus-check 1>&2
 	@./tools/dev/retrieval-gold-benchmark.sh --run
+
+# Fast independent check of the frozen publishable receipt. This replays only
+# the maintained evaluator over the sealed batch; it does not rerun ranking or
+# turn the receipt's explicitly unavailable observations into evidence.
+retrieval-gold-receipt-check: z23 dev-bin jsonq agent-sha3 retrieval-eval
+	@./tools/dev/retrieval-gold-receipt-check.sh --selftest
+	@./tools/dev/retrieval-gold-receipt-check.sh --check
 
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under
