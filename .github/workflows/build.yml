@@ -236,6 +236,7 @@ jobs:
             vendor/lib
             vendor/include
             vendor/provenance
+            vendor/sqlite3.c
           key: vendor-${{ runner.os }}-${{ hashFiles('tools/scripts/build_vendor.sh', 'vendor/patches/**') }}
 
       - name: Build/repair + audit vendored dependencies
@@ -260,6 +261,7 @@ jobs:
             vendor/lib
             vendor/include
             vendor/provenance
+            vendor/sqlite3.c
           key: ${{ steps.vendor-cache.outputs.cache-primary-key }}
 
       - name: Compile every node translation unit
@@ -342,6 +344,7 @@ jobs:
             vendor/lib
             vendor/include
             vendor/provenance
+            vendor/sqlite3.c
           key: vendor-${{ runner.os }}-${{ hashFiles('tools/scripts/build_vendor.sh', 'vendor/patches/**') }}
 
       - name: Arm the fresh checkout
@@ -422,6 +425,7 @@ jobs:
             vendor/lib
             vendor/include
             vendor/provenance
+            vendor/sqlite3.c
           key: vendor-${{ runner.os }}-${{ hashFiles('tools/scripts/build_vendor.sh', 'vendor/patches/**') }}
 
       - name: Build the fuzz targets and replay every saved artifact
@@ -491,6 +495,7 @@ jobs:
             vendor/lib
             vendor/include
             vendor/provenance
+            vendor/sqlite3.c
           key: vendor-${{ runner.os }}-${{ hashFiles('tools/scripts/build_vendor.sh', 'vendor/patches/**') }}
 
       - name: Arm the fresh checkout

@@ -92,6 +92,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
+#include "platform/fd_path.h"
 #include "sha3/sha3.h"
 
 #include <ctype.h>
@@ -2459,12 +2460,7 @@ static bool epoch_names(const char *base, struct epoch_artifacts *artifacts)
 
 static bool epoch_fd_path(int fd, const char *name, char path[PATH_MAX])
 {
-#if defined(__APPLE__)
-    return snprintf(path, PATH_MAX, "/dev/fd/%d/%s", fd, name) < PATH_MAX;
-#else
-    return snprintf(path, PATH_MAX, "/proc/self/fd/%d/%s", fd, name) <
-           PATH_MAX;
-#endif
+    return platform_dirfd_child_path(path, PATH_MAX, fd, name);
 }
 
 static bool epoch_make_staging(struct epoch_artifacts *artifacts)
