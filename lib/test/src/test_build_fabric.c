@@ -1838,44 +1838,25 @@ static int test_bf_proof_materialization(void)
         ASSERT(vcs_object_put_addressed(
             dir, misaddressed_authority[2], policy_wire,
             sizeof(policy_wire)));
-        struct build_fabric_proof_evaluation rejected = {0};
-        struct db_build_action rejected_action = action;
-        char rejected_action_id[BUILD_FABRIC_ID_HEX + 1];
-        rejected_action.sequence = 100;
-        zcl_hex_encode(misaddressed_authority[0], 32,
-                       rejected_action.task_root_sha3);
-        ASSERT(build_fabric_action_id(
-            &job, &rejected_action, rejected_action_id).ok);
-        (void)snprintf(rejected_action.action_id,
-                       sizeof(rejected_action.action_id), "%s",
-                       rejected_action_id);
-        ASSERT(db_build_action_save(&ndb, &rejected_action));
-        ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
-        rejected_action = action;
-        rejected_action.sequence = 101;
-        zcl_hex_encode(misaddressed_authority[1], 32,
-                       rejected_action.candidate_root_sha3);
-        ASSERT(build_fabric_action_id(
-            &job, &rejected_action, rejected_action_id).ok);
-        (void)snprintf(rejected_action.action_id,
-                       sizeof(rejected_action.action_id), "%s",
-                       rejected_action_id);
-        ASSERT(db_build_action_save(&ndb, &rejected_action));
-        ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
-        rejected_action = action;
-        rejected_action.sequence = 102;
-        zcl_hex_encode(misaddressed_authority[2], 32,
-                       rejected_action.proof_policy_root_sha3);
-        ASSERT(build_fabric_action_id(
-            &job, &rejected_action, rejected_action_id).ok);
-        (void)snprintf(rejected_action.action_id,
-                       sizeof(rejected_action.action_id), "%s",
-                       rejected_action_id);
-        ASSERT(db_build_action_save(&ndb, &rejected_action));
-        ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
+        for (size_t i = 0; i < 3; i++) {
+            struct db_build_job bad_job = job;
+            struct db_build_action bad_action = action;
+            bad_action.sequence = (int64_t)i + 1;
+            if (i == 0)
+                zcl_hex_encode(misaddressed_authority[i], 32,
+                               bad_action.task_root_sha3);
+            else if (i == 1)
+                zcl_hex_encode(misaddressed_authority[i], 32,
+                               bad_action.candidate_root_sha3);
+            else
+                zcl_hex_encode(misaddressed_authority[i], 32,
+                               bad_action.proof_policy_root_sha3);
+            ASSERT(bf_canonicalize(&bad_job, &bad_action));
+            ASSERT(build_fabric_plan(&ndb, &bad_job, &bad_action).ok);
+            struct build_fabric_proof_evaluation rejected = {0};
+            ASSERT(!build_fabric_proof_evaluate_readonly(
+                &ndb, dir, bad_action.action_id, now, &rejected).ok);
+        }
 
         struct db_build_worker worker;
         bf_worker(&worker);
