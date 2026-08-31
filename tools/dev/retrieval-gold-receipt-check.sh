@@ -28,7 +28,7 @@ readonly eval_arm_keys='recall_at_5,available,basis_points,recall_at_20,availabl
 readonly eval_keys='schema,tasks_evaluated,aggregation_kind,tasks_denominator,eligible_relevance_judgments,binding_kind,context_cost_kind,token_basis,literal,recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points,bm25,recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points'
 readonly aggregate_keys="record,schema,metrics,$eval_keys,files_read_observed,observed_token_count_available,wrong_scope_basis,reuse_success_available,duplicate_avoidance_available,new_unique_loc_avoided_available"
 
-fail() { printf 'retrieval-gold-receipt-check: FAIL — %s\n' "$*" >&2; return 1; }
+fail() { printf 'retrieval-gold-receipt-check: FAIL — %s\n' "$*" >&2; exit 1; }
 
 field() {
     local value
@@ -153,9 +153,14 @@ validate_semantics() {
     local literal_files=0 bm25_files=0 literal_context=0 bm25_context=0
     local retained context tokens take elapsed wall budget exceeded expected_exceeded
     local all_elapsed all_wall any_exceeded
+    local complete ranking_root rank_index arm_index meta_complete meta_count
+    local batch_task_id observed_root
     local corpus_file="$tmp/corpus.jsonl" runner_file="$tmp/runner.sh"
     local checker_file="$tmp/corpus-checker.sh" projection="$tmp/expected.projection"
     local observed_projection="$tmp/observed.projection"
+    local rank_task_map="$tmp/rank-tasks.tsv"
+    local -a rank_task_ids literal_roots literal_complete literal_counts
+    local -a bm25_roots bm25_complete bm25_counts
 
     [[ -f $candidate ]] || fail "receipt is absent: $candidate"
     [[ $(tail -c 1 "$candidate" | od -An -tuC | tr -d '[:space:]') = 10 ]] ||
@@ -270,18 +275,25 @@ validate_semantics() {
         for arm in literal bm25; do
             keys_exact "$row" "$arm" "$arm_keys"
             retained=$(uint_field "$row" "$arm.retained_files" 128)
-            bool_field "$row" "$arm.ranking_complete" >/dev/null
-            root_field "$row" "$arm.ranking_root_sha3" >/dev/null
+            complete=$(bool_field "$row" "$arm.ranking_complete")
+            ranking_root=$(root_field "$row" "$arm.ranking_root_sha3")
             context=$(uint_field "$row" "$arm.projected_context_bytes_at_5" 9223372036854775807)
             tokens=$(uint_field "$row" "$arm.approximate_tokens_at_5" 9223372036854775807)
             [[ $tokens -eq $(((context + 3) / 4)) ]] || fail "$arm task token formula differs: $id"
             take=$retained; ((take > 5)) && take=5
             if [[ $arm = literal ]]; then
+                literal_roots[$observed]=$ranking_root
+                literal_complete[$observed]=$complete
+                literal_counts[$observed]=$retained
                 literal_files=$((literal_files + take)); literal_context=$((literal_context + context))
             else
+                bm25_roots[$observed]=$ranking_root
+                bm25_complete[$observed]=$complete
+                bm25_counts[$observed]=$retained
                 bm25_files=$((bm25_files + take)); bm25_context=$((bm25_context + context))
             fi
         done
+        rank_task_ids[$observed]=$id
         printf 'task %s %s\nquery %s\n' "$id" "$relevant_count" "$(field "$corpus_row" query)" >>"$projection"
         for ((retained = 0; retained < relevant_count; retained++)); do
             printf 'relevant %s\n' "$(field "$corpus_row" "relevant_paths[$retained]")" >>"$projection"
@@ -319,6 +331,93 @@ validate_semantics() {
     ' "$batch" >"$observed_projection"
     cmp -s "$projection" "$observed_projection" || fail "batch tasks/query/relevance differ from corpus"
     replay=$("$evaluator" <"$batch") || fail "maintained evaluator refused sealed batch"
+
+    # The batch carries the complete retained rank lists. Reconstruct the same
+    # strict TSV consumed by retrieval-eval --rank-root so each task receipt's
+    # ranking identity is independently bound to those bytes, not merely
+    # preserved by the outer whole-file KAT.
+    awk -v out="$tmp" -v task_map="$rank_task_map" '
+        function refuse(message) {
+            print "retrieval-gold-receipt-check: batch rank extraction: " message > "/dev/stderr"
+            bad = 1
+            exit 1
+        }
+        function finish_arm() {
+            if (arm != "" && ranks != declared)
+                refuse("rank count differs from declaration")
+        }
+        $1 == "task" {
+            finish_arm()
+            if (arm != "" && arm != "bm25") refuse("task ended before bm25")
+            task++
+            if (NF != 3) refuse("malformed task declaration")
+            print task "\t" $2 >> task_map
+            arm = ""
+            next
+        }
+        ($1 == "literal" || $1 == "bm25") && $2 == "observed" {
+            finish_arm()
+            if (task == 0 || NF != 4) refuse("malformed arm declaration")
+            if ($1 == "literal" && arm != "") refuse("duplicate literal arm")
+            if ($1 == "bm25" && arm != "literal") refuse("bm25 before literal")
+            arm = $1
+            complete = $3
+            declared = $4
+            ranks = 0
+            meta = out "/rank-" task "-" arm ".meta"
+            file = out "/rank-" task "-" arm ".tsv"
+            print complete "\t" declared > meta
+            close(meta)
+            printf "%s", "" > file
+            close(file)
+            next
+        }
+        $1 == "rank" {
+            if (arm == "" || NF != 5) refuse("rank outside an arm")
+            ranks++
+            file = out "/rank-" task "-" arm ".tsv"
+            print ranks "\t" $2 "\t" $5 >> file
+            close(file)
+            next
+        }
+        END {
+            if (!bad) {
+                finish_arm()
+                if (task != 6 || arm != "bm25") refuse("incomplete task/arm sequence")
+            }
+        }
+    ' "$batch" || fail "could not extract exact task rankings from sealed batch"
+    [[ $(wc -l <"$rank_task_map" | tr -d '[:space:]') -eq $observed ]] ||
+        fail "sealed batch task count differs from observed receipts"
+    for ((rank_index = 0; rank_index < observed; rank_index++)); do
+        arm_index=$((rank_index + 1))
+        batch_task_id=$(awk -F '\t' -v wanted="$arm_index" \
+            '$1 == wanted { print $2 }' "$rank_task_map")
+        [[ $batch_task_id = "${rank_task_ids[$rank_index]}" ]] ||
+            fail "sealed batch task order differs at rank task $arm_index"
+        for arm in literal bm25; do
+            IFS=$'\t' read -r meta_complete meta_count \
+                <"$tmp/rank-$arm_index-$arm.meta" ||
+                fail "missing sealed $arm rank metadata: $batch_task_id"
+            if [[ $arm = literal ]]; then
+                complete=${literal_complete[$rank_index]}
+                retained=${literal_counts[$rank_index]}
+                ranking_root=${literal_roots[$rank_index]}
+            else
+                complete=${bm25_complete[$rank_index]}
+                retained=${bm25_counts[$rank_index]}
+                ranking_root=${bm25_roots[$rank_index]}
+            fi
+            [[ $complete = true ]] && complete=1 || complete=0
+            [[ $meta_complete = "$complete" && $meta_count = "$retained" ]] ||
+                fail "$arm batch declaration differs from task receipt: $batch_task_id"
+            observed_root=$("$evaluator" --rank-root "$complete" \
+                <"$tmp/rank-$arm_index-$arm.tsv") ||
+                fail "$arm batch ranking-root replay failed: $batch_task_id"
+            [[ $observed_root = "$ranking_root" ]] ||
+                fail "$arm batch ranking root differs from task receipt: $batch_task_id"
+        done
+    done
 
     keys_exact "$aggregate" . "$aggregate_keys"
     [[ $(field "$aggregate" record) = aggregate &&
@@ -367,6 +466,16 @@ selftest() {
     bad="$tmp/wrong-path.jsonl"; sed 's/"publishable":true/"publishable":false/' "$receipt" >"$bad"
     [[ $(hash_file "$bad") != "$receipt_sha3" ]] || fail "whole-file KAT mutation did not change hash"
     expect_semantic_refusal publishable "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/boolean-type.jsonl"; sed 's/"publishable":true/"publishable":"true"/' "$receipt" >"$bad"
+    expect_semantic_refusal boolean-type "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/integer-type.jsonl"; sed 's/"tasks_declared":7/"tasks_declared":"7"/' "$receipt" >"$bad"
+    expect_semantic_refusal integer-type "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/string-type.jsonl"; sed 's/"mode":"run"/"mode":true/' "$receipt" >"$bad"
+    expect_semantic_refusal string-type "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/root-type.jsonl"; sed 's/"driver_status_sha3":"[0-9a-f]*"/"driver_status_sha3":false/' "$receipt" >"$bad"
+    expect_semantic_refusal root-type "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/null-type.jsonl"; sed '0,/"basis_points":null/s//"basis_points":"null"/' "$receipt" >"$bad"
+    expect_semantic_refusal null-type "$bad"; mutations=$((mutations + 1))
     bad="$tmp/driver.jsonl"; sed 's/b663f019ed20d6ece26aa94b5dfe92f41bd4c0be/b663f019ed20d6ece26aa94b5dfe92f41bd4c0bf/' "$receipt" >"$bad"
     expect_semantic_refusal driver "$bad"; mutations=$((mutations + 1))
     bad="$tmp/count.jsonl"; sed 's/"tasks_evaluated":6/"tasks_evaluated":5/' "$receipt" >"$bad"
@@ -393,6 +502,10 @@ selftest() {
     expect_semantic_refusal unavailable "$bad"; mutations=$((mutations + 1))
     bad="$tmp/token.jsonl"; sed '0,/"approximate_tokens_at_5":[0-9][0-9]*/s//"approximate_tokens_at_5":0/' "$receipt" >"$bad"
     expect_semantic_refusal token-formula "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/ranking-root.jsonl"
+    sed '0,/038b674ae2ade35f3ff02d6e89271501c6ad0ca4dec30ee318250b33dd69b196/s//138b674ae2ade35f3ff02d6e89271501c6ad0ca4dec30ee318250b33dd69b196/' \
+        "$receipt" >"$bad"
+    expect_semantic_refusal ranking-root "$bad"; mutations=$((mutations + 1))
     bad="$tmp/order.jsonl"
     awk 'NR == 2 { saved = $0; next } NR == 3 { print; print saved; next } { print }' \
         "$receipt" >"$bad"
