@@ -187,10 +187,12 @@ Canonical operator APIs, in priority order:
    client to the running linger service.
 2. REST (`/api/v1/agent`, `/api/v1/openapi`) — public web/API surface.
 
-`make agent-loop` is the normal AI/operator edit gate. Before pushing `main`,
-obtain the exact commit/base receipt and push normally; the native hook rejects
-other remote refs, missing ancestry, or invalid evidence without running a
-gate. `make pre-push-ci` remains available for deliberate legacy parity, and
+`make agent-loop` is the normal AI/operator edit gate. On Linux and macOS,
+obtain the exact commit/base receipt and push normally; the installed native
+hook rejects other remote refs, missing ancestry, or invalid evidence without
+running a gate. Windows uses the synchronous fixed-catalog
+`make windows-acceptance` shell hook and does not claim exact-receipt admission.
+`make pre-push-ci` remains available for deliberate legacy parity, and
 `ZCL_FAST_STRICT_TESTS=1` selects its strict focused mode. Full `make ci` still
 exists for release-grade manual runs, but the
 expensive proof lanes are kept fresh by `zclassic23-test-suite.timer`,

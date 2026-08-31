@@ -537,13 +537,16 @@ Before committing:
    unrelated local work.
 5. Rerun the minimum gates affected by that integration.
 6. Commit one coherent change with an evidence-backed message.
-7. Wait for `dev proof status` to report `passed`, then push normally. The
-   native pre-push hook reads only the exact sealed receipt.
+7. On Linux and macOS, wait for `dev proof status` to report `passed`, then
+   push normally; the native pre-push hook reads only the exact sealed receipt.
+   Windows currently uses the synchronous `make windows-acceptance` shell hook
+   documented in [`WINDOWS.md`](WINDOWS.md), not receipt admission.
 8. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 Every changed C path must map to focused proof through the repository's impact
-rules. Unmapped or incomplete closure refuses receipt publication. The hook
-never builds, tests, lints, waits, invokes a shell, or fetches; a missing or
+rules. Unmapped or incomplete closure refuses receipt publication. On POSIX,
+the native receipt hook never builds, tests, lints, waits, invokes a shell, or
+fetches; a missing or
 running receipt refuses within the bounded read path and prints the exact
 `z23-dev dev proof wait` command for that commit/base pair. A normal
 non-fast-forward race also refuses without deleting reusable child evidence.
