@@ -26,7 +26,7 @@ enum { RUN_TIMEOUT = 124, RUN_INFRA = 125 };
 static bool monotonic_ms(uint64_t *out)
 {
     struct timespec now;
-    if (!out || clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0)
+    if (!out || clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0) // platform-ok:standalone proof runner links no platform clock
         return false;
     uint64_t seconds = (uint64_t)now.tv_sec;
     if (seconds > UINT64_MAX / 1000u) return false;

@@ -9,14 +9,97 @@
 #include "support/log_throttle.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#define ZCL_CHACHA20_VECTOR4 1
+#define ZCL_CHACHA20_VECTOR4_NAME "NEON four-block"
+typedef uint32x4_t chacha_vec4;
+static inline chacha_vec4 cv_broadcast(uint32_t v) { return vdupq_n_u32(v); }
+static inline chacha_vec4 cv_add(chacha_vec4 a, chacha_vec4 b) { return vaddq_u32(a, b); }
+static inline chacha_vec4 cv_xor(chacha_vec4 a, chacha_vec4 b) { return veorq_u32(a, b); }
+static inline chacha_vec4 cv_rotl16(chacha_vec4 v) { return vorrq_u32(vshlq_n_u32(v, 16), vshrq_n_u32(v, 16)); }
+static inline chacha_vec4 cv_rotl12(chacha_vec4 v) { return vorrq_u32(vshlq_n_u32(v, 12), vshrq_n_u32(v, 20)); }
+static inline chacha_vec4 cv_rotl8(chacha_vec4 v) { return vorrq_u32(vshlq_n_u32(v, 8), vshrq_n_u32(v, 24)); }
+static inline chacha_vec4 cv_rotl7(chacha_vec4 v) { return vorrq_u32(vshlq_n_u32(v, 7), vshrq_n_u32(v, 25)); }
+static inline chacha_vec4 cv_counters(uint32_t counter)
+{
+    const uint32_t v[4] = {counter, counter + 1u, counter + 2u, counter + 3u};
+    return vld1q_u32(v);
+}
+static inline void cv_store_transposed(uint8_t *out, chacha_vec4 a,
+                                       chacha_vec4 b, chacha_vec4 c,
+                                       chacha_vec4 d)
+{
+    uint32x4x2_t ab = vtrnq_u32(a, b), cd = vtrnq_u32(c, d);
+    uint32x4_t o0 = vcombine_u32(vget_low_u32(ab.val[0]),
+                                 vget_low_u32(cd.val[0]));
+    uint32x4_t o1 = vcombine_u32(vget_low_u32(ab.val[1]),
+                                 vget_low_u32(cd.val[1]));
+    uint32x4_t o2 = vcombine_u32(vget_high_u32(ab.val[0]),
+                                 vget_high_u32(cd.val[0]));
+    uint32x4_t o3 = vcombine_u32(vget_high_u32(ab.val[1]),
+                                 vget_high_u32(cd.val[1]));
+    vst1q_u8(out + 0u, vreinterpretq_u8_u32(o0));
+    vst1q_u8(out + 64u, vreinterpretq_u8_u32(o1));
+    vst1q_u8(out + 128u, vreinterpretq_u8_u32(o2));
+    vst1q_u8(out + 192u, vreinterpretq_u8_u32(o3));
+}
+#elif defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#define ZCL_CHACHA20_VECTOR4 1
+#define ZCL_CHACHA20_VECTOR4_NAME "SSE2 four-block"
+typedef __m128i chacha_vec4;
+static inline chacha_vec4 cv_broadcast(uint32_t v) { return _mm_set1_epi32((int32_t)v); }
+static inline chacha_vec4 cv_add(chacha_vec4 a, chacha_vec4 b) { return _mm_add_epi32(a, b); }
+static inline chacha_vec4 cv_xor(chacha_vec4 a, chacha_vec4 b) { return _mm_xor_si128(a, b); }
+static inline chacha_vec4 cv_rotl16(chacha_vec4 v) { return _mm_or_si128(_mm_slli_epi32(v, 16), _mm_srli_epi32(v, 16)); }
+static inline chacha_vec4 cv_rotl12(chacha_vec4 v) { return _mm_or_si128(_mm_slli_epi32(v, 12), _mm_srli_epi32(v, 20)); }
+static inline chacha_vec4 cv_rotl8(chacha_vec4 v) { return _mm_or_si128(_mm_slli_epi32(v, 8), _mm_srli_epi32(v, 24)); }
+static inline chacha_vec4 cv_rotl7(chacha_vec4 v) { return _mm_or_si128(_mm_slli_epi32(v, 7), _mm_srli_epi32(v, 25)); }
+static inline chacha_vec4 cv_counters(uint32_t counter)
+{
+    return _mm_set_epi32((int32_t)(counter + 3u), (int32_t)(counter + 2u),
+                         (int32_t)(counter + 1u), (int32_t)counter);
+}
+static inline void cv_store_transposed(uint8_t *out, chacha_vec4 a,
+                                       chacha_vec4 b, chacha_vec4 c,
+                                       chacha_vec4 d)
+{
+    __m128i ab_lo = _mm_unpacklo_epi32(a, b);
+    __m128i ab_hi = _mm_unpackhi_epi32(a, b);
+    __m128i cd_lo = _mm_unpacklo_epi32(c, d);
+    __m128i cd_hi = _mm_unpackhi_epi32(c, d);
+    _mm_storeu_si128((__m128i *)(void *)(out + 0u),
+                     _mm_unpacklo_epi64(ab_lo, cd_lo));
+    _mm_storeu_si128((__m128i *)(void *)(out + 64u),
+                     _mm_unpackhi_epi64(ab_lo, cd_lo));
+    _mm_storeu_si128((__m128i *)(void *)(out + 128u),
+                     _mm_unpacklo_epi64(ab_hi, cd_hi));
+    _mm_storeu_si128((__m128i *)(void *)(out + 192u),
+                     _mm_unpackhi_epi64(ab_hi, cd_hi));
+}
+#else
+#define ZCL_CHACHA20_VECTOR4 0
+#define ZCL_CHACHA20_VECTOR4_NAME "portable C"
+#endif
+
+/* Forced VECTOR4 exists for parity and physical measurement. AUTO remains
+ * portable until caller-shaped p95 and worst-case receipts promote it on each
+ * architecture; a passing correctness KAT is necessary, never sufficient. */
+#define ZCL_CHACHA20_AUTO_VECTOR4 0
 
 /* Authentication failures are attacker-controlled input on encrypted public
  * transports.  Preserve the first occurrence and a five-minute keepalive with
  * its cumulative suppressed count; never let a remote sender turn the crypto
  * primitive into an unbounded disk-log writer. */
 static struct log_throttle g_auth_failure_log = LOG_THROTTLE_INIT;
+
+static _Atomic int g_chacha20_vector_state = -1;
+static _Atomic int g_chacha20_requested_impl = CHACHA20_IMPL_AUTO;
 
 static uint32_t rotl32(uint32_t v, int n)
 {
@@ -82,13 +165,159 @@ void chacha20_block(const uint8_t key[32], uint32_t counter,
         store32_le(out + 4 * i, working[i] + state[i]);
 }
 
-void chacha20_encrypt(const uint8_t key[32], uint32_t counter,
+#if ZCL_CHACHA20_VECTOR4
+#define VQR(a, b, c, d)                    \
+    a = cv_add(a, b); d = cv_xor(d, a); d = cv_rotl16(d); \
+    c = cv_add(c, d); b = cv_xor(b, c); b = cv_rotl12(b); \
+    a = cv_add(a, b); d = cv_xor(d, a); d = cv_rotl8(d);  \
+    c = cv_add(c, d); b = cv_xor(b, c); b = cv_rotl7(b)
+
+static void chacha20_blocks4(const uint8_t key[32], uint32_t counter,
+                             const uint8_t nonce[12], uint8_t out[256])
+{
+    uint32_t scalar[16];
+    scalar[0] = 0x61707865u; scalar[1] = 0x3320646eu;
+    scalar[2] = 0x79622d32u; scalar[3] = 0x6b206574u;
+    for (int i = 0; i < 8; i++) scalar[4 + i] = load32_le(key + 4 * i);
+    scalar[12] = counter;
+    scalar[13] = load32_le(nonce + 0);
+    scalar[14] = load32_le(nonce + 4);
+    scalar[15] = load32_le(nonce + 8);
+
+    chacha_vec4 base[16], work[16];
+    for (int i = 0; i < 16; i++) base[i] = cv_broadcast(scalar[i]);
+    base[12] = cv_counters(counter);
+    memcpy(work, base, sizeof work);
+    for (int i = 0; i < 10; i++) {
+        VQR(work[0], work[4], work[ 8], work[12]);
+        VQR(work[1], work[5], work[ 9], work[13]);
+        VQR(work[2], work[6], work[10], work[14]);
+        VQR(work[3], work[7], work[11], work[15]);
+        VQR(work[0], work[5], work[10], work[15]);
+        VQR(work[1], work[6], work[11], work[12]);
+        VQR(work[2], work[7], work[ 8], work[13]);
+        VQR(work[3], work[4], work[ 9], work[14]);
+    }
+    for (int word = 0; word < 16; word++)
+        work[word] = cv_add(work[word], base[word]);
+    for (int word = 0; word < 16; word += 4)
+        cv_store_transposed(out + (size_t)word * 4u, work[word],
+                            work[word + 1], work[word + 2], work[word + 3]);
+    memory_cleanse(work, sizeof work);
+    memory_cleanse(base, sizeof base);
+    memory_cleanse(scalar, sizeof scalar);
+}
+
+static bool chacha20_vector4_kat(void)
+{
+    uint8_t key[32], nonce[12], got[256], want[256];
+    for (size_t i = 0; i < sizeof key; i++) key[i] = (uint8_t)i;
+    for (size_t i = 0; i < sizeof nonce; i++) nonce[i] = (uint8_t)(0xa0u + i);
+    chacha20_blocks4(key, 7u, nonce, got);
+    for (uint32_t lane = 0; lane < 4; lane++)
+        chacha20_block(key, 7u + lane, nonce, want + (size_t)lane * 64u);
+    bool ok = memcmp(got, want, sizeof got) == 0;
+    memory_cleanse(got, sizeof got);
+    memory_cleanse(want, sizeof want);
+    return ok;
+}
+#undef VQR
+#endif
+
+static bool chacha20_vector4_state(void)
+{
+#if ZCL_CHACHA20_VECTOR4
+    int state = atomic_load_explicit(&g_chacha20_vector_state,
+                                     memory_order_acquire);
+    if (state >= 0) return state == 1;
+    if (state == -2) return false;
+    int expected = -1;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_chacha20_vector_state, &expected, -2,
+            memory_order_acq_rel, memory_order_acquire))
+        return expected == 1;
+    bool ok = chacha20_vector4_kat();
+    atomic_store_explicit(&g_chacha20_vector_state, ok ? 1 : 0,
+                          memory_order_release);
+    state = ok ? 1 : 0;
+    if (state == 0)
+        LOG_ERROR("chacha20", "four-block portable-oracle KAT failed; vector tier disabled");
+    return state == 1;
+#else
+    return false;
+#endif
+}
+
+bool chacha20_vector4_available(void)
+{
+    return chacha20_vector4_state();
+}
+
+bool chacha20_vector4_compiled(void)
+{
+    return ZCL_CHACHA20_VECTOR4 != 0;
+}
+
+int chacha20_select_impl(enum chacha20_impl which)
+{
+    if (which == CHACHA20_IMPL_PORTABLE) {
+        atomic_store_explicit(&g_chacha20_requested_impl,
+                              CHACHA20_IMPL_PORTABLE, memory_order_release);
+        return CHACHA20_IMPL_PORTABLE;
+    }
+    if (which == CHACHA20_IMPL_AUTO) {
+        atomic_store_explicit(&g_chacha20_requested_impl,
+                              CHACHA20_IMPL_AUTO, memory_order_release);
+        return ZCL_CHACHA20_AUTO_VECTOR4 && chacha20_vector4_state()
+            ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
+    }
+    int selected = chacha20_vector4_state()
+        ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
+    atomic_store_explicit(&g_chacha20_requested_impl, selected,
+                          memory_order_release);
+    return selected;
+}
+
+const char *chacha20_implementation(void)
+{
+    int requested = atomic_load_explicit(&g_chacha20_requested_impl,
+                                         memory_order_acquire);
+    if ((requested == CHACHA20_IMPL_VECTOR4 ||
+         (requested == CHACHA20_IMPL_AUTO && ZCL_CHACHA20_AUTO_VECTOR4)) &&
+        chacha20_vector4_state())
+        return ZCL_CHACHA20_VECTOR4_NAME;
+    return "portable C";
+}
+
+bool chacha20_encrypt(const uint8_t key[32], uint32_t counter,
                        const uint8_t nonce[12],
                        const uint8_t *plaintext, size_t len,
                        uint8_t *ciphertext)
 {
-    uint8_t block[64];
+    uint64_t blocks_needed = (uint64_t)(len / 64u) + (len % 64u != 0u);
+    uint64_t counters_left = (uint64_t)UINT32_MAX - counter + 1u;
+    if (blocks_needed > counters_left)
+        LOG_FAIL("chacha20", "encrypt length %zu exhausts counter space from %u",
+                 len, counter);
     size_t pos = 0;
+#if ZCL_CHACHA20_VECTOR4
+    int requested = atomic_load_explicit(&g_chacha20_requested_impl,
+                                         memory_order_acquire);
+    if ((requested == CHACHA20_IMPL_VECTOR4 ||
+         (requested == CHACHA20_IMPL_AUTO && ZCL_CHACHA20_AUTO_VECTOR4)) &&
+        chacha20_vector4_state()) {
+        uint8_t blocks[256];
+        while (len - pos >= sizeof blocks && counter <= UINT32_MAX - 3u) {
+            chacha20_blocks4(key, counter, nonce, blocks);
+            for (size_t i = 0; i < sizeof blocks; i++)
+                ciphertext[pos + i] = plaintext[pos + i] ^ blocks[i];
+            pos += sizeof blocks;
+            counter += 4u;
+        }
+        memory_cleanse(blocks, sizeof blocks);
+    }
+#endif
+    uint8_t block[64];
     while (pos < len) {
         chacha20_block(key, counter, nonce, block);
         counter++;
@@ -101,6 +330,7 @@ void chacha20_encrypt(const uint8_t key[32], uint32_t counter,
     /* Wipe the keystream block: its last read was the XOR above, and it is
      * key/nonce-derived secret material. Output already written. */
     memory_cleanse(block, sizeof(block));
+    return true;
 }
 
 /* Poly1305 — RFC 7539 Section 2.5 */
@@ -265,7 +495,10 @@ bool chacha20poly1305_encrypt(const uint8_t *plaintext, size_t plen,
     chacha20_block(key, 0, nonce, poly_key);
 
     /* Encrypt plaintext with ChaCha20 starting at counter 1 */
-    chacha20_encrypt(key, 1, nonce, plaintext, plen, ciphertext);
+    if (!chacha20_encrypt(key, 1, nonce, plaintext, plen, ciphertext)) {
+        memory_cleanse(poly_key, sizeof poly_key);
+        LOG_FAIL("chacha20poly1305", "encrypt plaintext exhausts counter space");
+    }
 
     /* Construct Poly1305 MAC input:
      * aad || pad(aad) || ciphertext || pad(ciphertext) || le64(aad_len) || le64(plen) */
@@ -384,6 +617,7 @@ bool chacha20poly1305_decrypt(const uint8_t *ciphertext, size_t clen,
     }
 
     /* Decrypt */
-    chacha20_encrypt(key, 1, nonce, ciphertext, plen, plaintext);
+    if (!chacha20_encrypt(key, 1, nonce, ciphertext, plen, plaintext))
+        LOG_FAIL("chacha20poly1305", "decrypt ciphertext exhausts counter space");
     return true;
 }

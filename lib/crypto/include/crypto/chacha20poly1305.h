@@ -17,10 +17,27 @@
 void chacha20_block(const uint8_t key[32], uint32_t counter,
                      const uint8_t nonce[12], uint8_t out[64]);
 
-void chacha20_encrypt(const uint8_t key[32], uint32_t counter,
+/* Encrypt disjoint buffers or exactly in place. Returns false without writing
+ * when len would exhaust the 32-bit IETF ChaCha20 counter space. */
+bool chacha20_encrypt(const uint8_t key[32], uint32_t counter,
                        const uint8_t nonce[12],
                        const uint8_t *plaintext, size_t len,
                        uint8_t *ciphertext);
+
+/* Select the four-stream bulk implementation used by chacha20_encrypt().
+ * VECTOR4 is arm64 NEON or x86-64 SSE2 and is installed only after a one-time
+ * portable-oracle KAT. A request can narrow to PORTABLE but cannot override a
+ * failed KAT. AUTO is the production default. The scalar chacha20_block()
+ * remains the frozen oracle on every platform. */
+enum chacha20_impl {
+    CHACHA20_IMPL_AUTO = -1,
+    CHACHA20_IMPL_PORTABLE = 0,
+    CHACHA20_IMPL_VECTOR4 = 1,
+};
+int chacha20_select_impl(enum chacha20_impl which);
+bool chacha20_vector4_compiled(void);
+bool chacha20_vector4_available(void);
+const char *chacha20_implementation(void);
 
 void poly1305_mac(const uint8_t *message, size_t len,
                    const uint8_t key[32], uint8_t tag[16]);

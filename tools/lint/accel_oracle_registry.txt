@@ -31,6 +31,7 @@
 # fails on a stale row too.
 
 lib/crypto/src/sha256.c          lib/test/src/test_sha256_isa_parity.c      sha256_isa_parity
+lib/crypto/src/chacha20poly1305.c lib/test/src/test_chacha20_isa_parity.c   chacha20_isa_parity
 lib/crypto/src/blake2b_avx2.c    lib/test/src/test_blake2b_batch_parity.c   blake2b_batch_parity
 lib/crypto/src/sha3_256_x4.c     lib/test/src/test_sha3_256_x4.c            sha3_256_x4
 lib/crypto/src/sha3_avx512.c     lib/test/src/test_sha3_512_x4.c            sha3_512_x4

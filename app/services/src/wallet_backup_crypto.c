@@ -52,7 +52,10 @@ static bool wbs_aead_encrypt(const uint8_t *plain, size_t plain_len,
     chacha20_block(key, 0, nonce, poly_block);
 
     /* Encrypt with ChaCha20 starting at counter 1. */
-    chacha20_encrypt(key, 1, nonce, plain, plain_len, ciphertext_out);
+    if (!chacha20_encrypt(key, 1, nonce, plain, plain_len, ciphertext_out)) {
+        memory_cleanse(poly_block, sizeof(poly_block));
+        LOG_FAIL("wallet_backup", "aead_encrypt: ChaCha20 counter space exhausted");
+    }
 
     /* Build the Poly1305 message:
      *   aad || pad16(aad) || ciphertext || pad16(ciphertext) ||
@@ -125,7 +128,8 @@ static bool wbs_aead_decrypt(const uint8_t *ciphertext, size_t plain_len,
     if (diff != 0) LOG_FAIL("wallet_backup", "aead_decrypt: tag verification failed");
 
     /* Tag verified - now decrypt. */
-    chacha20_encrypt(key, 1, nonce, ciphertext, plain_len, plain_out);
+    if (!chacha20_encrypt(key, 1, nonce, ciphertext, plain_len, plain_out))
+        LOG_FAIL("wallet_backup", "aead_decrypt: ChaCha20 counter space exhausted");
     return true;
 }
 
