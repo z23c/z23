@@ -109,6 +109,7 @@ build/bin/z23 code map
 build/bin/z23 code group lib/ontology
 build/bin/z23 code file lib/ontology/include/ontology/ontology.h
 build/bin/z23 code capsule zcl_ontology_evaluate_formula_v1
+build/bin/z23 code provenance relations zcl_ontology_evaluate_formula_v1
 build/bin/z23 code impact lib/ontology/src/ontology_formula.c
 build/bin/z23 code tests lib/ontology/src/ontology_formula.c
 build/bin/z23 discover schema code.have --side=input
@@ -147,8 +148,14 @@ independent in the evaluator, while the current executable fixture proves
 their independent observation; imported facts are visible only through exact
 context roots. Executable negative-rule and equality-constraint fixtures are
 still required before those admitted Horn forms are claimed end to end.
-The separate general-formula evaluator still accepts exact-tier predicates,
-and native command/service exposure of Horn queries remains unfinished.
+The separate general-formula evaluator still accepts exact-tier predicates.
+`code provenance relations <symbol>` now exposes a bounded, typed relation
+projection over the current source and command-registry roots: `isa`, exact
+definition/declaration occurrences, source group, registered command execution
+contract, and required focused-test routes. It stays `INCOMPLETE` because a
+static execution contract is not a runtime observation and a required test is
+not an accepted receipt. Native execution of arbitrary Horn questions and the
+receipt join remain unfinished rather than being simulated by this projection.
 
 Optional signed-int8 concept-card vectors are strictly `MODEL_HINT` evidence.
 They may propose or order fuzzy candidates, but cannot prove identity, truth,

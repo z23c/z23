@@ -483,6 +483,28 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_facts)
 
 ZCL_COMMAND_READY_READ(
+    "code.provenance.relations", "code.provenance", "",
+    "Expose typed source, command-locus, and proof-requirement relations",
+    "A bounded predicate-shaped projection for one exact C23 declaration. "
+    "It binds isa, definition/declaration occurrence, source group, native "
+    "command scope/lane/authority/effect/transport, and required focused-test "
+    "relations to the current source and command-registry roots. Runtime "
+    "observations and accepted receipts are named gaps, never inferred from "
+    "reachability or a test route.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,ontology,relations,predicate,isa,locus,proof,context",
+    "zcl.code_name_input.v1",
+    "zcl.code_relations.v1", "name", "name",
+    "z23 code provenance relations zcl_native_handle_code_sym",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_relations)
+
+ZCL_COMMAND_READY_READ(
     "code.provenance.emitter", "code.provenance", "",
     "Resolve emitted text to its emitting code",
     "The source site that formatted a string the node emitted, joined across "

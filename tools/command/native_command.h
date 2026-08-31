@@ -406,6 +406,13 @@ void zcl_native_handle_code_facts(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* code.provenance.relations — bounded typed facts about one declaration's
+ * identity, source context, registered command execution contract and proof
+ * requirements. Runtime observations and receipts remain explicit gaps. */
+void zcl_native_handle_code_relations(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* code.provenance.emitter — the reverse direction of every other code leaf:
  * given text the node EMITTED (a blocker id, a dumper subsystem name, a
  * reason/log fragment), return the source site that formatted it, its enclosing

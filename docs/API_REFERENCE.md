@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 765 |
+| Registry entries (branches + leaves) | 766 |
 | Top-level roots | 12 |
 | Branches | 176 |
-| Leaves (dispatchable command paths) | 589 |
-| … `ready` (live handler in this build) | 530 |
+| Leaves (dispatchable command paths) | 590 |
+| … `ready` (live handler in this build) | 531 |
 | … `compat` (metadata only, names a fallback) | 28 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 27 |
@@ -97,7 +97,7 @@ Per source file:
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
 | `config/commands/dev.def` | 63 | 15 | 48 |
-| `config/commands/code.def` | 22 | 2 | 20 |
+| `config/commands/code.def` | 23 | 2 | 21 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
 | `config/commands/zcode.def` | 245 | 58 | 187 |
@@ -986,6 +986,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `code provenance merkle` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_merkle.v1` | `z23 code provenance merkle lib/net` | Give the SHA3 Merkle root of the tree or a subtree |
 | `code provenance facts` | ready | read / read / public · background/moderate | **`key`**, `store` | `zcl.code_facts.v1` | `z23 code provenance facts coins_applied_height` | Census the durable named slots and name the ones with several writers |
+| `code provenance relations` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_relations.v1` | `z23 code provenance relations zcl_native_handle_code_sym` | Expose typed source, command-locus, and proof-requirement relations |
 | `code provenance emitter` | ready | read / read / public · foreground/moderate | **`text`** | `zcl.code_emitter.v1` | `z23 code provenance emitter 'address_index.below_snapshot_seed'` | Resolve emitted text to its emitting code |
 
 ### `vault` — What this node owns, and what may act on it

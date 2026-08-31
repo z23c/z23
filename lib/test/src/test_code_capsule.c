@@ -398,6 +398,194 @@ static int test_code_capsule_budget_shrink(void)
     return failures;
 }
 
+static bool relation_present(const struct json_value *relations,
+                             const char *predicate, const char *object)
+{
+    if (!relations || relations->type != JSON_ARR) return false;
+    for (size_t i = 0; i < relations->num_children; i++) {
+        const struct json_value *item = &relations->children[i];
+        const char *got_predicate = json_get_str(json_get(item, "predicate"));
+        const char *got_object = json_get_str(json_get(item, "object"));
+        if (got_predicate && got_object &&
+            strcmp(got_predicate, predicate) == 0 &&
+            strcmp(got_object, object) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool string_present(const struct json_value *array, const char *value)
+{
+    if (!array || array->type != JSON_ARR) return false;
+    for (size_t i = 0; i < array->num_children; i++) {
+        const char *item = json_get_str(&array->children[i]);
+        if (item && strcmp(item, value) == 0) return true;
+    }
+    return false;
+}
+
+static bool relation_subject_present(const struct json_value *relations,
+                                     const char *predicate,
+                                     const char *subject_type,
+                                     const char *subject)
+{
+    if (!relations || relations->type != JSON_ARR) return false;
+    for (size_t i = 0; i < relations->num_children; i++) {
+        const struct json_value *item = &relations->children[i];
+        const char *p = json_get_str(json_get(item, "predicate"));
+        const char *t = json_get_str(json_get(item, "subject_type"));
+        const char *s = json_get_str(json_get(item, "subject"));
+        if (p && t && s && strcmp(p, predicate) == 0 &&
+            strcmp(t, subject_type) == 0 && strcmp(s, subject) == 0)
+            return true;
+    }
+    return false;
+}
+
+static int test_code_relations_command_locus(void)
+{
+    int failures = 0;
+    TEST("code_relations: handler has typed isa, exact command locus, and "
+         "honest unobserved proof gaps") {
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        (void)json_push_kv_str(&input, "name",
+                               "zcl_native_handle_code_sym");
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal",
+            .invoked_name = "code.provenance.relations",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_relations.v1");
+        zcl_native_handle_code_relations(&request, &reply);
+
+        ASSERT(json_get_bool(json_get(&reply.data, "found")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "INCOMPLETE");
+        ASSERT(!json_get_bool(json_get(&reply.data, "complete")));
+        const struct json_value *relations =
+            json_get(&reply.data, "relations");
+        ASSERT(relation_present(relations, "isa", "c23.function"));
+        ASSERT(relation_present(relations, "declared_handler_for_command",
+                                "code.sym"));
+        ASSERT(relation_present(relations, "declares_scope", "local"));
+        ASSERT(relation_subject_present(relations, "declares_scope",
+                                        "command", "code.sym"));
+        ASSERT(relation_present(relations, "declares_authority", "public"));
+        ASSERT(relation_present(relations, "declares_transport", "native"));
+        ASSERT(relation_present(relations,
+                                "routes_path_change_to_test_group",
+                                "code_capsule"));
+        const char *source_root = json_get_str(json_get(
+            &reply.data, "codeindex_source_root_sha3"));
+        const char *registry_digest = json_get_str(json_get(
+            &reply.data, "registry_digest"));
+        const char *relation_root = json_get_str(json_get(
+            &reply.data, "relation_set_root"));
+        ASSERT(source_root && strlen(source_root) == 64);
+        ASSERT(registry_digest && strncmp(registry_digest, "sha256:", 7) == 0);
+        ASSERT(relation_root && strlen(relation_root) == 64);
+        const struct json_value *contexts = json_get(&reply.data, "contexts");
+        ASSERT(contexts && contexts->type == JSON_OBJ);
+        ASSERT(json_get(contexts, "source") != NULL);
+        ASSERT(json_get(contexts, "registry") != NULL);
+        ASSERT(json_get(contexts, "impact") != NULL);
+        const struct json_value *missing =
+            json_get(&reply.data, "missing_dimensions");
+        ASSERT(missing && missing->type == JSON_ARR &&
+               missing->num_children >= 2);
+        ASSERT_STR_EQ(json_get_str(&missing->children[0]),
+                      "runtime_process_observation");
+        ASSERT_STR_EQ(json_get_str(&missing->children[1]),
+                      "accepted_receipt_join");
+        ASSERT(string_present(missing, "source_registry_generation_join"));
+        ASSERT(string_present(missing, "active_handler_override_join"));
+
+        char encoded[ZCL_COMMAND_LIST_BUDGET + 1];
+        size_t encoded_size = json_write(&reply.data, encoded, sizeof(encoded));
+        ASSERT(encoded_size > 0 && encoded_size <= 7168);
+
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_relations_refuses_false_absence(void)
+{
+    int failures = 0;
+    TEST("code_relations: a scanner miss is UNKNOWN and INCOMPLETE") {
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        (void)json_push_kv_str(&input, "name",
+                               "definitely_not_a_z23_symbol_6f7834");
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal",
+            .invoked_name = "code.provenance.relations",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_relations.v1");
+        zcl_native_handle_code_relations(&request, &reply);
+        ASSERT(!json_get_bool(json_get(&reply.data, "found")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")),
+                      "UNKNOWN");
+        ASSERT(!json_get_bool(json_get(&reply.data, "complete")));
+        ASSERT(string_present(json_get(&reply.data, "missing_dimensions"),
+                              "closed_world_declaration_coverage"));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_relations_static_not_command_handler(void)
+{
+    int failures = 0;
+    TEST("code_relations: same-named static identity cannot inherit a command") {
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        (void)json_push_kv_str(&input, "name",
+            "fn:static:lib/storage/src/wallet_projection.c:ensure_schema");
+        struct zcl_command_request request = {
+            .input = &input, .view = "normal",
+            .invoked_name = "code.provenance.relations",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_relations.v1");
+        zcl_native_handle_code_relations(&request, &reply);
+        ASSERT(json_get_bool(json_get(&reply.data, "found")));
+        ASSERT(json_get_int(json_get(&reply.data, "command_total")) == 0);
+        ASSERT(!relation_present(json_get(&reply.data, "relations"),
+                                 "declared_handler_for_command", "code.sym"));
+        const char *static_root = json_get_str(json_get(
+            &reply.data, "relation_set_root"));
+        ASSERT(static_root && strlen(static_root) == 64);
+
+        struct json_value command_input;
+        json_init(&command_input); json_set_object(&command_input);
+        (void)json_push_kv_str(&command_input, "name",
+                               "zcl_native_handle_code_sym");
+        struct zcl_command_request command_request = {
+            .input = &command_input, .view = "normal",
+            .invoked_name = "code.provenance.relations",
+        };
+        struct zcl_command_reply command_reply;
+        zcl_command_reply_init(&command_reply, "zcl.code_relations.v1");
+        zcl_native_handle_code_relations(&command_request, &command_reply);
+        const char *command_root = json_get_str(json_get(
+            &command_reply.data, "relation_set_root"));
+        ASSERT(command_root && strcmp(static_root, command_root) != 0);
+        zcl_command_reply_free(&command_reply);
+        json_free(&command_input);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_capsule(void)
 {
     int failures = 0;
@@ -407,5 +595,8 @@ int test_code_capsule(void)
     failures += test_code_change_plan_symbol();
     failures += test_code_change_plan_patch();
     failures += test_code_capsule_budget_shrink();
+    failures += test_code_relations_command_locus();
+    failures += test_code_relations_refuses_false_absence();
+    failures += test_code_relations_static_not_command_handler();
     return failures;
 }
