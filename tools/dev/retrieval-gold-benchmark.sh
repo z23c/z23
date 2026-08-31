@@ -158,17 +158,17 @@ validate_envelope() {
 validate_stream_page() {
     local document=$1 expected_budget=$2
     local elapsed_us elapsed_ms budget_ms exceeded should_exceed
-    [[ $(field "$document" schema) = zcl.dev_retrieval_benchmark_stream_page.v1 &&
+    [[ $(field "$document" schema) = zcl.dev_retrieval_benchmark_stream_page.v2 &&
        $(field "$document" command) = dev.retrieval.benchmark &&
        $(bool_field "$document" shared_computation) = true &&
        $(uint_field "$document" ranking_computations 1) -eq 1 &&
        $(field "$document" data_schema) = zcl.dev_retrieval_benchmark.v1 &&
        $(field_type "$document" data) = object ]] ||
         fail "invalid retrieval benchmark stream page"
-    elapsed_us=$(uint_field "$document" elapsed_us 9223372036854775807)
-    elapsed_ms=$(uint_field "$document" elapsed_ms 9223372036854775807)
-    budget_ms=$(uint_field "$document" budget_ms 9223372036854775807)
-    exceeded=$(bool_field "$document" budget_exceeded)
+    elapsed_us=$(uint_field "$document" ranking_elapsed_us 9223372036854775807)
+    elapsed_ms=$(uint_field "$document" ranking_elapsed_ms 9223372036854775807)
+    budget_ms=$(uint_field "$document" ranking_budget_ms 9223372036854775807)
+    exceeded=$(bool_field "$document" ranking_budget_exceeded)
     [[ $budget_ms -eq $expected_budget && $elapsed_ms -eq $((elapsed_us / 1000)) ]] ||
         fail "invalid retrieval benchmark stream timing"
     should_exceed=false
@@ -445,7 +445,7 @@ run_eligible_task() {
     local literal_display bm25_display max_display elapsed_us budget_ms exceeded
     local page_limit max_count remaining expected_span expected_more page_file literal_take bm25_take stream_file
     local total_elapsed=0 total_wall=0 any_budget_exceeded=false terminal=false
-    local page0_elapsed_us page0_wall_us page0_budget_ms page0_budget_exceeded arm
+    local arm
     : >"$literal_file"; : >"$bm25_file"
     unset invariant_task_id invariant_query invariant_expected_root \
         invariant_pre_root invariant_post_root invariant_codeindex_root \
@@ -530,17 +530,15 @@ run_eligible_task() {
         expected_span=$remaining; ((expected_span > page_limit)) && expected_span=$page_limit
         [[ $span -eq $max_display && $span -eq $expected_span ]] ||
             fail "page span mismatch for $id"
-        elapsed_us=$(uint_field "$output" elapsed_us 9223372036854775807)
-        budget_ms=$(uint_field "$output" budget_ms 9223372036854775807)
-        exceeded=$(bool_field "$output" budget_exceeded)
+        elapsed_us=$(uint_field "$output" ranking_elapsed_us 9223372036854775807)
+        budget_ms=$(uint_field "$output" ranking_budget_ms 9223372036854775807)
+        exceeded=$(bool_field "$output" ranking_budget_exceeded)
         set_invariant stream_elapsed_us "$elapsed_us"
         set_invariant stream_budget_ms "$budget_ms"
         set_invariant stream_budget_exceeded "$exceeded"
         [[ $exceeded = true ]] && any_budget_exceeded=true
         if ((pages == 1)); then
             total_elapsed=$elapsed_us; total_wall=$process_wall_us
-            page0_elapsed_us=$elapsed_us; page0_wall_us=$process_wall_us
-            page0_budget_ms=$budget_ms; page0_budget_exceeded=$exceeded
         fi
         has_more=$(bool_field "$output" data.has_more)
         next=$(uint_field "$output" data.next_offset 127)
@@ -581,11 +579,10 @@ run_eligible_task() {
     emit_batch_task "$row" "$id" "$literal_file" "$invariant_literal_count" \
         "$invariant_literal_complete" "$bm25_file" "$invariant_bm25_count" \
         "$invariant_bm25_complete"
-    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v1","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"page0":{"elapsed_us":%s,"wall_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"elapsed_us":%s,"wall_us":%s,"any_budget_exceeded":%s},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"scope_available":false,"files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
+    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v2","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"ranking_compute":{"elapsed_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"wall_us":%s,"single_process":true,"buffered_before_write":true},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"scope_available":false,"files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
         "$(json_escape "$id")" "$expected_root" "$invariant_codeindex_root" \
-        "$invariant_membership_tree_root" "$pages" "$page0_elapsed_us" \
-        "$page0_wall_us" "$page0_budget_ms" "$page0_budget_exceeded" \
-        "$total_elapsed" "$total_wall" "$any_budget_exceeded" \
+        "$invariant_membership_tree_root" "$pages" "$total_elapsed" \
+        "$invariant_stream_budget_ms" "$any_budget_exceeded" "$total_wall" \
         "$invariant_literal_count" "$invariant_literal_complete" \
         "$invariant_literal_root" "$invariant_literal_context" \
         "$invariant_literal_tokens" "$invariant_bm25_count" \

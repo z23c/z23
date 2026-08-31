@@ -600,15 +600,16 @@ int zcl_native_dev_retrieval_stream_jsonl(
         ok = page_index <= INT64_MAX &&
             json_push_kv_str(
                 &line, "schema",
-                "zcl.dev_retrieval_benchmark_stream_page.v1") &&
+                "zcl.dev_retrieval_benchmark_stream_page.v2") &&
             json_push_kv_str(&line, "command", "dev.retrieval.benchmark") &&
             json_push_kv_int(&line, "page_index", (int64_t)page_index) &&
             json_push_kv_bool(&line, "shared_computation", true) &&
             json_push_kv_int(&line, "ranking_computations", 1) &&
-            json_push_kv_int(&line, "elapsed_us", elapsed_us) &&
-            json_push_kv_int(&line, "elapsed_ms", elapsed_us / 1000) &&
-            json_push_kv_int(&line, "budget_ms", budget_ms) &&
-            json_push_kv_bool(&line, "budget_exceeded", budget_exceeded) &&
+            json_push_kv_int(&line, "ranking_elapsed_us", elapsed_us) &&
+            json_push_kv_int(&line, "ranking_elapsed_ms", elapsed_us / 1000) &&
+            json_push_kv_int(&line, "ranking_budget_ms", budget_ms) &&
+            json_push_kv_bool(&line, "ranking_budget_exceeded",
+                              budget_exceeded) &&
             json_push_kv_str(&line, "data_schema",
                              "zcl.dev_retrieval_benchmark.v1") &&
             json_push_kv(&line, "data", &reply.data);
