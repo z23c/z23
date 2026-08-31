@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 768 |
-| Top-level roots | 12 |
-| Branches | 177 |
-| Leaves (dispatchable command paths) | 591 |
-| … `ready` (live handler in this build) | 531 |
+| Registry entries (branches + leaves) | 772 |
+| Top-level roots | 13 |
+| Branches | 178 |
+| Leaves (dispatchable command paths) | 594 |
+| … `ready` (live handler in this build) | 534 |
 | … `compat` (metadata only, names a fallback) | 29 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 28 |
@@ -105,6 +105,7 @@ Per source file:
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
 | `config/commands/zses.def` | 4 | 2 | 2 |
+| `config/commands/story.def` | 4 | 1 | 3 |
 | `config/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `config/commands/telemetry/watch.def` | 1 | 0 | 1 |
 | `config/commands/telemetry/runtime.def` | 4 | 1 | 3 |
@@ -171,6 +172,7 @@ The root order below is a wire contract, not a presentation choice.
 | `metaverse` | `metaverse` | branch | ready | Sovereign digital property: catalog, rights, receipts |
 | `yardsale` | `yardsale` | branch | ready | For-sale-by-owner signed ads, settled bilaterally |
 | `zses` | `zses` | branch | ready | Session invites |
+| `story` | `story` | branch | ready | Rooted causal views of development work |
 
 
 ## The tree, leaf by leaf
@@ -1638,6 +1640,14 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `zses invite create` | ready | read / read / public · fast/low | `endpoint`, `expires`, `capability_tag`, `capability-tag`, `posture`, `port` | `zcl.zses_invite.v1` | `z23 zses invite create` | Create a signed zses:v1 session invite |
 | `zses invite accept` | ready | read / read / public · fast/low | **`invite`**, `now` | `zcl.zses_invite_accept.v1` | `z23 zses invite accept --invite=<json>` | Verify and accept a signed zses:v1 invite |
+
+### `story` — Rooted causal views of development work
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `story show` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir` | `zcl.story_show.v1` | `z23 story show work-<task-prefix>` | Show one development work item as an exact-root causal story |
+| `story why` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir`, **`event`** | `zcl.story_why.v1` | `z23 story why work-<task-prefix> user_accepts` | Explain the exact causal chain for one development event |
+| `story diff` | ready | read / read / public · foreground/low | `workspace`, **`before`**, **`after`**, `datadir` | `zcl.story_diff.v1` | `z23 story diff work-<before-prefix> work-<after-prefix>` | Diff two exact-root development stories |
 
 
 ## Aliases

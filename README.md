@@ -8,82 +8,1035 @@
   <a href="LICENSE"><img src="docs/assets/badges/license.svg" alt="license: Apache-2.0"></a>
   <img src="docs/assets/badges/language.svg" alt="language: C23">
   <a href="docs/MVP.md"><img src="docs/assets/badges/status.svg" alt="status: pre-v1"></a>
-  <a href="#start-here"><img src="docs/assets/badges/start.svg" alt="start here"></a>
+  <a href="#try-the-magic"><img src="docs/assets/badges/start.svg" alt="start here"></a>
 </p>
 
 # Z23
 
-**Describe software. See it run. Keep the exact version.**
+**Software made for you, not imposed on you.**
 
-Z23 is a C23-first **sovereign software computer**. Its trusted core is two
-things at once:
+Tell Z23 what you want software to do.
 
-- a real full node for the 100% proof-of-work ZClassic chain; and
-- a peer-to-peer commons where people and AI workers can find, build, verify,
-  reproduce, preserve, and improve native C23 software.
-
-The AI is replaceable. The exact source, build history, evidence, wallet keys,
-local policy, and software you accepted remain under your control.
+It can inspect the C23 that already exists, show an AI the small part that
+matters, build and test an exact change, let you see the result, preserve the
+version you chose, and let another machine reproduce it.
 
 ```text
 YOU
  │
- │  "Make me a private photo diary.
- │   Add tags and a slideshow."
+ │  "I want the plane to turn faster."
  ▼
-Z23 understands the goal
+Z23 finds the flight code
  │
- ├─ finds reusable C23
- ├─ checks exact source, platform, license, capabilities, and tests
- ├─ creates only the missing behavior
- ├─ builds and shows the native application
- └─ records what actually happened
+ ├── what already exists?
+ ├── what calls it?
+ ├── what depends on it?
+ ├── what should change?
+ └── what tests prove the change?
          │
          ▼
-YOU accept one exact version
+AI changes a small amount of C23
          │
          ▼
-another machine reproduces it
+you see the plane turn faster
          │
          ▼
-the original AI, author, host, or registry may disappear
+you accept one exact version
+         │
+         ▼
+another node reproduces it
 ```
 
-> [!IMPORTANT]
-> Z23 is **pre-v1**. It is usable for native C23 development and real node
-> operation, but do not rely on it as your only mainnet node yet. The acceptance
-> target is explicit: someone the project does not know can run Z23 and use it
-> for a week without intervention. See [`docs/MVP.md`](docs/MVP.md), or run
-> `make mvp`.
+And Z23 is also a real ZClassic proof-of-work full node.
+
+The same project owns your software commons, exact source history, wallet,
+peer-to-peer distribution, explorer, API, and optional Tor onion service.
+
+AI workers are replaceable.
+
+**Your software is not.**
 
 ---
 
-## 🚀 Start here
+# ✨ Try the magic
 
-### See native C23 behavior without building the full node
-
-The lean GUI build compiles a two-translation-unit application without paying
-for the full-node build graph.
+Build Z23:
 
 ```bash
 git clone https://github.com/z23c/z23.git
 cd z23
 
-make -f Makefile.gui zhello-selftest   # headless, deterministic frame proof
-make -f Makefile.gui zhello            # open the native window
+make doctor
+make setup
+make -j4 z23
 ```
 
-`zhello` uses the same small C23 application shape on macOS, Windows, and Linux:
-a platform-independent painter plus a thin native window driver.
+Now ask the binary to explain itself:
 
-- **macOS:** install Apple's command-line tools with `xcode-select --install`.
-  See [`docs/MACOS_GUI_QUICKSTART.md`](docs/MACOS_GUI_QUICKSTART.md).
-- **Windows:** use the supported MSYS2 UCRT64 bootstrap. See
-  [`docs/WINDOWS.md`](docs/WINDOWS.md).
-- **Linux:** the headless self-test needs no display; the windowed run needs a
-  graphical desktop.
+```bash
+build/bin/z23 discover help
+```
 
-### Create your own native app
+This is not a hand-written CLI help page.
+
+Z23 has a native command registry that describes the operations the running
+software actually exposes.
+
+Search it:
+
+```bash
+build/bin/z23 discover search "find C23 that already does something"
+```
+
+Inspect a command:
+
+```bash
+build/bin/z23 discover describe code.have
+```
+
+Ask for its exact machine-readable input schema:
+
+```bash
+build/bin/z23 discover schema code.have --side=input
+```
+
+An AI does not need a giant prompt containing hundreds of guessed tools.
+
+It can ask Z23:
+
+```text
+What can you do?
+        ↓
+What command handles this?
+        ↓
+What exact input does it accept?
+        ↓
+What does it return?
+        ↓
+What should I do next?
+```
+
+That is the API.
+
+---
+
+# 🧠 Now ask Z23 about its own code
+
+Before an AI writes another implementation, ask:
+
+```bash
+build/bin/z23 code have \
+  --input='{"text":"bounded parser"}'
+```
+
+`code have` searches for the **concept**, not merely the spelling of a symbol.
+
+Its job is to answer:
+
+```text
+DO WE ALREADY HAVE THIS?
+```
+
+with evidence from the checkout.
+
+Then explore:
+
+```bash
+build/bin/z23 code map
+```
+
+```bash
+build/bin/z23 code group lib/ontology
+```
+
+```bash
+build/bin/z23 code room app/jobs/src/utxo_apply_stage.c
+```
+
+```bash
+build/bin/z23 code sym codeindex_open
+```
+
+And this is where it gets interesting:
+
+```bash
+build/bin/z23 code capsule codeindex_open
+```
+
+A capsule can bring together the symbol's identity, declaration and
+definition, callers, callees, include dependencies, command bindings,
+evidence labels, likely change files, and explicit unknown sections.
+
+Instead of:
+
+```text
+AI
+ ↓
+grep
+ ↓
+open file
+ ↓
+open another file
+ ↓
+grep again
+ ↓
+read 8,000 tokens
+ ↓
+guess
+```
+
+the goal is:
+
+```text
+AI
+ ↓
+z23 code capsule <thing>
+ ↓
+small bounded context
+ ↓
+understand
+```
+
+---
+
+# 🔬 Ask what a change would affect
+
+Suppose the AI wants to change:
+
+```text
+lib/util/include/util/safe_alloc.h
+```
+
+Ask Z23 for the blast radius:
+
+```bash
+build/bin/z23 code impact \
+  lib/util/include/util/safe_alloc.h
+```
+
+Ask which focused tests own the change:
+
+```bash
+build/bin/z23 code tests \
+  lib/util/include/util/safe_alloc.h
+```
+
+Or ask for a change plan around a symbol:
+
+```bash
+build/bin/z23 code change-plan codeindex_open
+```
+
+The desired loop is:
+
+```text
+WHAT DO I WANT?
+       │
+       ▼
+DOES IT ALREADY EXIST?
+       │
+       ▼
+WHAT EXACTLY SHOULD I READ?
+       │
+       ▼
+WHAT SHOULD CHANGE?
+       │
+       ▼
+WHAT DOES THAT AFFECT?
+       │
+       ▼
+WHAT MUST BE PROVED?
+```
+
+Then run the exact focused proof:
+
+```bash
+make -j"$(getconf _NPROCESSORS_ONLN)" \
+  t-fast-exact ONLY=<returned-group>
+
+make lint-fast
+```
+
+This is what Z23 is trying to do for AI coding:
+
+> **replace repository archaeology with a native, bounded, evidence-aware
+> development API.**
+
+---
+
+# 📊 Ask Z23 whether the codebase is actually getting better
+
+Z23 can inspect more than individual symbols.
+
+For example:
+
+```bash
+build/bin/z23 code territory lib/net
+```
+
+asks questions like:
+
+```text
+What does this module own?
+
+What tests reach its public API?
+
+What dependencies enter it?
+
+What depends on it?
+
+What is weak or unproven?
+```
+
+And:
+
+```bash
+build/bin/z23 code corpus
+```
+
+is deliberately not just a line counter.
+
+The long-term goal is a huge C23 corpus, but more lines are not automatically
+better.
+
+Z23 separates:
+
+```text
+HOW MUCH CODE EXISTS?
+          ≠
+HOW MUCH IS ACTUALLY PROVEN?
+```
+
+It can also record development metrics:
+
+```bash
+build/bin/z23 code kpi
+```
+
+The point is not to congratulate ourselves for producing code.
+
+The point is to make useful software accumulate **without hiding duplicated,
+unproven, or poorly understood complexity.**
+
+---
+
+# 🚀 Now make software
+
+Ask Z23 for the current software-creation journey:
+
+```bash
+build/bin/z23 zcode guide
+```
+
+The product loop is:
+
+```text
+DESCRIBE
+   ↓
+REUSE
+   ↓
+CREATE
+   ↓
+SEE
+   ↓
+KEEP
+   ↓
+SHARE
+```
+
+### DESCRIBE
+
+Say what behavior you want.
+
+### REUSE
+
+Find C23 that already provides part of it.
+
+### CREATE
+
+Write only what is missing.
+
+### SEE
+
+Run the real software and experience the consequence.
+
+### KEEP
+
+Accept one exact version.
+
+### SHARE
+
+Let another independent machine fetch and reproduce it.
+
+![Describe, reuse, create, see, keep, share](docs/assets/z23-journey.svg)
+
+**SEE is the center of the product.**
+
+The user should not care that a manifest root is beautiful.
+
+The user should care that:
+
+> “I asked for the plane to turn faster, and now the plane turns faster.”
+
+Everything else exists to make that result fast, reusable, explainable, and
+durable.
+
+---
+
+# 🪄 See the whole Commons proof
+
+Run:
+
+```bash
+make commons-demo
+```
+
+Z23 creates isolated nodes and proves the journey end to end.
+
+```text
+          NODE A
+            │
+            │ publishes useful C23
+            ▼
+          NODE B
+            │
+            │ discovers it
+            │ fetches it
+            │ verifies the source
+            │ rebuilds it
+            │ gets identical result
+            ▼
+      accepted software
+            │
+            │
+       KILL NODE A
+            │
+            ▼
+          NODE C
+            │
+            │ finds the surviving copy
+            │ fetches it
+            │ reproduces it
+            ▼
+       SOFTWARE LIVES
+```
+
+![make commons-demo — the whole loop, end to end](docs/assets/z23-term-commons-demo.svg)
+
+The original publisher can disappear.
+
+The original AI can disappear.
+
+GitHub can disappear from the workflow.
+
+The software remains identified by what it **is**, not by where it happened to
+be hosted.
+
+There is also a physical-host acceptance journey:
+
+```bash
+make commons-multihost-acceptance
+```
+
+![what the multihost proof measured](docs/assets/z23-term-commons-proof.svg)
+
+That is the beginning of the C23 Commons.
+
+---
+
+# 🌐 Source without a central registry
+
+Z23 can capture source into its own content-addressed source system:
+
+```bash
+z23 zcode workspace source capture \
+  --input='{"workspace":"/src/project"}'
+```
+
+That produces an exact source identity.
+
+A source bundle can be created:
+
+```bash
+z23 zcode workspace source bundle create \
+  --input='{
+    "workspace":"/src/project",
+    "source_root":"<64hex>",
+    "output":"/tmp/source.zvsb"
+  }'
+```
+
+Verified:
+
+```bash
+z23 zcode workspace source bundle verify \
+  --input='{
+    "bundle":"/tmp/source.zvsb",
+    "source_root":"<64hex>"
+  }'
+```
+
+Reconstructed without Git:
+
+```bash
+z23 zcode workspace source bundle checkout \
+  --input='{
+    "bundle":"/tmp/source.zvsb",
+    "source_root":"<64hex>",
+    "workspace":"/tmp/zvcs",
+    "destination":"/tmp/source"
+  }'
+```
+
+Or fetched from peers by the root itself:
+
+```bash
+z23 zcode workspace source bundle fetch \
+  --input='{
+    "source_root":"<64hex>",
+    "output":"/tmp/source.zvsb",
+    "peers":"peer-a:18034,peer-b:18034"
+  }'
+```
+
+The important part is what fetching **does not** mean.
+
+```text
+FETCHED
+   ≠
+ACCEPTED
+
+SIGNED
+   ≠
+CORRECT
+
+BUILT
+   ≠
+SAFE
+
+AVAILABLE
+   ≠
+AUTHORIZED TO EXECUTE
+```
+
+Bytes arrive inert.
+
+Every receiver verifies and decides locally.
+
+---
+
+# ⚡ Repeated work should become cheap
+
+Two agents should not perform the same expensive action just because they are
+different agents.
+
+Z23 binds build and proof work to exact inputs such as:
+
+```text
+source
++ toolchain
++ flags
++ environment
++ build graph
++ requested proof
+```
+
+Conceptually:
+
+```text
+Machine A
+   │
+   │ executes exact Action X
+   ▼
+Receipt + output
+   │
+   │
+Machine B asks for Action X
+   │
+   ▼
+reconstruct exact identity
+   │
+   ├── DIFFERENT → do the work
+   │
+   └── IDENTICAL → verify and reuse
+```
+
+As the commons grows, the desired economics are:
+
+```text
+TOTAL WORK
+   ≈
+NEW WORK
+```
+
+not:
+
+```text
+TOTAL WORK
+   ≈
+EVERYTHING × EVERY AGENT
+```
+
+---
+
+# 🤖 One API for humans and AI
+
+The native API has a shallow command tree.
+
+Examples include:
+
+```text
+z23
+│
+├── status
+│
+├── core
+│   ├── chain
+│   ├── sync
+│   ├── consensus
+│   ├── network
+│   ├── wallet
+│   └── storage
+│
+├── app
+│
+├── dev
+│
+├── ops
+│
+├── discover
+│   ├── help
+│   ├── search
+│   ├── describe
+│   └── schema
+│
+├── code
+│   ├── guide
+│   ├── have
+│   ├── map
+│   ├── room
+│   ├── sym
+│   ├── capsule
+│   ├── change-plan
+│   ├── impact
+│   ├── tests
+│   ├── territory
+│   ├── corpus
+│   └── ...
+│
+└── zcode
+    ├── work
+    ├── task
+    ├── workspace
+    ├── package
+    └── ...
+```
+
+Do not memorize this tree.
+
+Ask the binary:
+
+```bash
+z23 discover help
+```
+
+That is the point.
+
+The same registry owns typed metadata such as:
+
+```text
+command identity
+input schema
+output schema
+authority
+side effects
+risk
+latency
+cost
+capabilities
+availability
+example invocation
+```
+
+An AI can load only the tiny branch needed for the current task.
+
+That is radically different from handing a model hundreds of tool
+descriptions on every turn.
+
+---
+
+# 🔌 The HTTP API describes itself too
+
+Z23 is its own web server.
+
+When the HTTPS surface is enabled, the same binary can serve the explorer and
+REST API directly—no application server is required.
+
+The API index is available at:
+
+```text
+GET /api/v1
+```
+
+Machine-readable OpenAPI:
+
+```text
+GET /api/v1/openapi
+```
+
+Public node/agent status:
+
+```text
+GET /api/v1/agent
+```
+
+Service catalog:
+
+```text
+GET /api/v1/service-catalog
+```
+
+Operations:
+
+```text
+GET /api/v1/service-operations
+```
+
+So a client or AI can discover:
+
+```text
+What services exist?
+        ↓
+What operations do they expose?
+        ↓
+Which are public reads?
+        ↓
+Which require operator authority?
+        ↓
+What schema does the operation accept?
+        ↓
+What native command corresponds to it?
+```
+
+The native command system and web API are not intended to become two
+independent descriptions of reality.
+
+They project the same C-owned contracts.
+
+---
+
+# ⛓️ And it is a real ZClassic full node
+
+This is not only a developer tool.
+
+Build and run:
+
+```bash
+make -j4 z23
+build/bin/z23
+```
+
+Inspect it:
+
+```bash
+build/bin/z23 status
+```
+
+Ask about sync:
+
+```bash
+build/bin/z23 core sync diagnose
+```
+
+Inspect a block:
+
+```bash
+build/bin/z23 core chain block get --height=478544
+```
+
+Inspect networking:
+
+```bash
+build/bin/z23 core network status
+```
+
+Inspect the wallet:
+
+```bash
+build/bin/z23 core wallet status
+```
+
+The node validates the ZClassic proof-of-work chain, owns wallet custody behind
+local keys, speaks the P2P protocol, exposes native and web APIs, and can serve
+its explorer through its own HTTPS/onion surface.
+
+No other node gets to tell your node what the valid chain is.
+
+It verifies for itself.
+
+---
+
+# ⛏️ Why proof of work belongs here
+
+The blockchain and the software commons solve different problems.
+
+```text
+C23 COMMONS
+├── source
+├── packages
+├── builds
+├── tests
+├── evidence
+└── reproduction
+
+ZCLASSIC PoW
+├── public ordering
+├── durable history
+├── payments
+├── names
+└── optional anchors
+```
+
+The blockchain is a terrible place to store a source tree.
+
+It is useful when independent people need to agree:
+
+```text
+"This existed by here."
+
+"This payment happened."
+
+"This name changed hands."
+
+"This root was anchored before that root."
+```
+
+But:
+
+```text
+ON CHAIN
+   ≠
+CORRECT SOFTWARE
+```
+
+A block cannot grant code permission to execute.
+
+A miner cannot decide what software your computer accepts.
+
+The node always keeps those authorities separate.
+
+---
+
+# 👤 Your machine is the sovereign self
+
+Z23 is designed around a simple boundary:
+
+```text
+                 👤 YOU
+        goals + final acceptance
+                   │
+                   ▼
+              🖥️ YOUR NODE
+        keys + policy + software
+                   │
+          ┌────────┴────────┐
+          ▼                 ▼
+     🌐 COMMONS         ⛓️ CHAIN
+   shared knowledge     shared history
+   shared evidence      ordering/payment
+```
+
+The commons can become extremely intelligent.
+
+It does not become your ruler.
+
+The chain can become extremely durable.
+
+It does not become your software judge.
+
+The AI can become extremely capable.
+
+It does not own the result.
+
+> **Shared intelligence without shared sovereignty.**
+
+---
+
+# 🎮 The game on the cover
+
+Every good software box should show what the machine can do.
+
+`zdogace` is a real-time 3D C23 dogfight over a neon grid city.
+
+![the red ace turns, fires, and takes the match — a verified replay, 30 fps](docs/assets/z23-flyover-hero.gif)
+
+Now imagine telling an AI:
+
+> “Make the aircraft turn faster.”
+
+The interesting problem is not whether an LLM can generate some C.
+
+The interesting problem is whether the whole system can do this:
+
+```text
+understand request
+       ↓
+find flight behavior
+       ↓
+retrieve tiny relevant context
+       ↓
+reuse existing components
+       ↓
+change the smallest thing
+       ↓
+compile quickly
+       ↓
+show the consequence
+       ↓
+run affected proof
+       ↓
+keep exact version
+       ↓
+make improvement reusable
+```
+
+Then:
+
+> “Add a blue engine trail.”
+
+Then:
+
+> “Make the enemies cooperate.”
+
+Then:
+
+> “Put a building there that I can enter.”
+
+The shared software should get richer.
+
+The amount of reinvention required for the next request should get smaller.
+
+---
+
+# 📈 The big bet
+
+AI makes code cheap to create.
+
+That creates a new problem:
+
+```text
+MORE AI
+   ↓
+MORE CODE
+   ↓
+MORE DUPLICATION
+   ↓
+MORE TECH DEBT
+```
+
+unless we build a better substrate.
+
+Z23 is aiming for:
+
+```text
+MORE AI
+   +
+MORE C23
+   +
+MORE EVIDENCE
+      ↓
+BETTER SEARCH
+      ↓
+MORE REUSE
+      ↓
+LESS NEW CODE PER FEATURE
+      ↓
+LESS DUPLICATE BUILD/TEST WORK
+      ↓
+FASTER SOFTWARE CREATION
+      ↓
+BETTER COMMONS
+```
+
+Eventually a very large software commons should be easier for an AI to work
+with than a normal medium-sized repository.
+
+Because the agent should not read the commons.
+
+It should ask the commons.
+
+---
+
+# 🧠 Where the intelligence is going
+
+Today Z23 already has native source navigation, exact identities, contexts,
+ontology objects, dependency relationships, evidence, retrieval benchmarking,
+build actions, and receipts.
+
+The next step is to make these pieces work together.
+
+```text
+LLM
+ │
+ │ proposes
+ ▼
+semantic retrieval
+ │
+ │ narrows
+ ▼
+code + dependency graph
+ │
+ │ structures
+ ▼
+ontology + contexts
+ │
+ │ explains
+ ▼
+exact C23
+ │
+ │ executes
+ ▼
+tests + observations
+ │
+ │ establish evidence
+ ▼
+reusable commons
+```
+
+The rule remains:
+
+```text
+VECTOR SIMILARITY
+      =
+LOOK HERE
+
+not
+
+THIS IS TRUE
+```
+
+and:
+
+```text
+LLM CONFIDENCE
+      ≠
+EVIDENCE
+```
+
+---
+
+# 🖥️ Native C23 applications
+
+You can also start with the smallest visible part of the project.
+
+Build the reference GUI application:
+
+```bash
+make -f Makefile.gui zhello-selftest
+make -f Makefile.gui zhello
+```
+
+Create your own:
 
 ```bash
 make new-app NAME=myapp
@@ -91,581 +1044,162 @@ make -f Makefile.gui myapp-selftest
 make -f Makefile.gui myapp
 ```
 
-Your application lives under `packages/myapp/` as ordinary C23: one public
-header, one painter, one driver, one deterministic test, one package manifest.
-On macOS, package it as a reproducible `.app`:
+On macOS:
 
 ```bash
 make -f Makefile.gui myapp-app
 ```
 
-### Build the full Z23 system and run the commons proof
+The goal is deliberately simple:
+
+```text
+EDIT C23
+   ↓
+SEE NATIVE RESULT
+```
+
+For macOS:
+
+[`docs/MACOS_GUI_QUICKSTART.md`](docs/MACOS_GUI_QUICKSTART.md)
+
+For Windows:
+
+[`docs/WINDOWS.md`](docs/WINDOWS.md)
+
+---
+
+# 🛡️ Pre-v1 means what it says
+
+Z23 is under active development.
+
+Do not infer completion from a large feature list.
+
+The actual full-node product bar is:
+
+> **someone we do not know can run Z23 and use it for a week without
+> intervention.**
+
+Ask the project:
 
 ```bash
-make doctor
-make setup
-make -j4 z23
-make commons-demo
+make mvp
 ```
 
-`make commons-demo` starts three fresh isolated nodes on empty temporary
-datadirs. It contacts nothing outside your machine. Exit `0` means the complete
-declared journey held:
-
-1. ask for useful behavior and reuse C23 already published by another node;
-2. build, test, observe, and accept one exact result;
-3. fetch and rebuild the exact source on another node; and
-4. remove the original publisher and prove a third node can still reproduce and
-   run the accepted software.
-
-![make commons-demo — the whole loop, end to end](docs/assets/z23-term-commons-demo.svg)
-
-The physical-host version is:
+Run the local acceptance aggregate:
 
 ```bash
-make commons-multihost-acceptance
+make mvp-verify
 ```
 
-![what the multihost proof measures](docs/assets/z23-term-commons-proof.svg)
+Anything unavailable should be named as unavailable or blocked—not silently
+turned into green.
 
-For the full-node build, installation, proving parameters, Tor, and production
-operation, continue with [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md).
+See:
+
+[`docs/MVP.md`](docs/MVP.md)
+
+Current live operator state belongs in:
+
+[`docs/HANDOFF.md`](docs/HANDOFF.md)
 
 ---
 
-## 🧭 The product
+# Principles
 
-**DESCRIBE → REUSE → CREATE → SEE → KEEP → SHARE**
+### Verify, don't trust.
 
-![Describe, reuse, create, see, keep, share](docs/assets/z23-journey.svg)
+Every receiver checks what it accepts.
 
-- **DESCRIBE** — say what you want the software to do.
-- **REUSE** — find the best existing C23 before generating another copy.
-- **CREATE** — write only the behavior that is genuinely missing.
-- **SEE** — experience the consequence in the real native application.
-- **KEEP** — accept one exact version under your own policy.
-- **SHARE** — let peers independently fetch, verify, reproduce, and preserve it.
+### Reuse before create.
 
-**SEE is the product.** Roots, manifests, ontologies, queues, proofs, and the
-blockchain are supporting machinery. The decisive moment is the software doing
-what you requested on your screen before anything is published.
+Do not generate another implementation until you know you need one.
 
----
+### See the real consequence.
 
-## 📖 Software is behavior over time
+The user cares about behavior, not internal machinery.
 
-A useful software request is naturally story-shaped:
+### Exact identity beats names.
 
-```text
-🌌 Universe  = what entities, rules, code, and assets exist
-🧠 Context   = which assumptions, policy, platform, and observer apply
-🎬 Scene     = the current bounded state
-🎭 Entity    = something with stable identity whose state can change
-➡️ Action    = a proposed state transition
-📍 Event     = a transition that was actually observed
-📖 Story     = a causal graph of events
-📷 View      = what a human, agent, test, or camera sees
-```
+Names are labels. Content roots identify exact things.
 
-Z23's north star is to compile that meaningful description into small, fast,
-testable native C23:
+### Missing evidence is not a pass.
 
-```text
-human description
-       ↓
-bounded story / goal model
-       ↓
-exact code and evidence navigation
-       ↓
-reuse plan
-       ↓
-generated or edited C23
-       ↓
-native behavior
-       ↓
-observation + receipt
-       ↓
-local human acceptance
-```
+`UNKNOWN` and `INCOMPLETE` are useful answers.
 
-This is a **direction, not an inflated completion claim**. Today the repository
-already has rooted source universes and contexts, typed ontology objects,
-immutable signed events, code navigation, exact build actions, native app
-templates, and proof receipts. A unified StoryGraph-to-C23 compiler is still
-being built.
+### Signatures prove authorship, not correctness.
+
+### Proof of work proves accumulated public work, not software correctness.
+
+### Fetching code never grants permission to execute it.
+
+### No privileged coordinator.
+
+Peers, AI workers, schedulers, registries, and signers are replaceable.
+
+### Consensus and wallet custody always win resource conflicts.
+
+Software indexing and AI work must not impair the full node.
+
+### C23 source first.
+
+Keep useful software small, native, inspectable, portable, and reusable.
+
+### Free reuse first.
+
+Copyable source should remain cheap to copy. Scarce compute, storage,
+verification, hosting, and human work can be paid for separately.
 
 ---
 
-## ⚙️ How Z23 works
+# Where to go next
 
-```text
-                         HUMAN GOAL
-                              │
-                              ▼
-                 ┌────────────────────────┐
-                 │  Z23 CODE NAVIGATOR    │
-                 │                        │
-                 │ exact symbols          │
-                 │ ontology + contexts    │
-                 │ lexical / BM25 ranking │
-                 │ graph/model hints      │
-                 └───────────┬────────────┘
-                             │ candidates
-                             ▼
-                 ┌────────────────────────┐
-                 │  REUSE PLAN            │
-                 │                        │
-                 │ packages + APIs        │
-                 │ platform + license     │
-                 │ capabilities + tests   │
-                 │ missing behavior only  │
-                 └───────────┬────────────┘
-                             │
-                             ▼
-                 ┌────────────────────────┐
-                 │  C23 BUILD + PROOF     │
-                 │                        │
-                 │ incremental objects    │
-                 │ bounded execution      │
-                 │ behavior probes        │
-                 │ exact child receipts   │
-                 └───────────┬────────────┘
-                             │
-                             ▼
-                       NATIVE APP
-                             │
-                     human sees result
-                             │
-                             ▼
-                    EXACT LOCAL ACCEPTANCE
-                             │
-              ┌──────────────┴──────────────┐
-              ▼                             ▼
-      content-addressed peers        optional ZCL anchor
-      fetch missing objects          ordering / payment
-```
-
-The system deliberately separates five different things:
-
-```text
-AI proposal
-    ≠
-search relevance
-    ≠
-logical claim
-    ≠
-observed behavior
-    ≠
-local authority
-```
-
-An LLM may propose a change. A ranker may say where to look. An ontology may
-state what follows under an explicit context. A compiler or test may observe one
-exact action. Only the local node and human decide what to accept.
+| I want to...                             | Start here                                                             |
+| ---------------------------------------- | ---------------------------------------------------------------------- |
+| **See what Z23 can do**                  | `z23 discover help`                                                    |
+| **Ask whether code already exists**      | `z23 code have <concept>`                                              |
+| **Understand one symbol**                | `z23 code capsule <symbol>`                                            |
+| **Plan a change**                        | `z23 code change-plan <symbol>`                                        |
+| **See blast radius**                     | `z23 code impact <path>`                                               |
+| **Find the required tests**              | `z23 code tests <path>`                                                |
+| **Inspect corpus health**                | `z23 code corpus`                                                      |
+| **Start the software Commons journey**   | `z23 zcode guide`                                                      |
+| **Prove the whole local Commons loop**   | `make commons-demo`                                                    |
+| **Build the full node**                  | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md)                   |
+| **Develop on macOS**                     | [`docs/MACOS_GUI_QUICKSTART.md`](docs/MACOS_GUI_QUICKSTART.md)         |
+| **Develop on Windows**                   | [`docs/WINDOWS.md`](docs/WINDOWS.md)                                   |
+| **Use the package commons**              | [`docs/C23_COMMONS_QUICKSTART.md`](docs/C23_COMMONS_QUICKSTART.md)     |
+| **Give an AI agent work**                | [`AGENTS.md`](AGENTS.md)                                               |
+| **Understand the API**                   | [`docs/NATIVE_COMMAND_INTERFACE.md`](docs/NATIVE_COMMAND_INTERFACE.md) |
+| **See every generated command contract** | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md)                       |
+| **See current development priority**     | [`docs/work/FORWARD_PLAN.md`](docs/work/FORWARD_PLAN.md)               |
+| **See the pre-v1 acceptance bar**        | [`docs/MVP.md`](docs/MVP.md)                                           |
 
 ---
 
-## 🧠 Intelligence without surrendering authority
-
-Z23 combines several kinds of intelligence, each with a limited job:
-
-| Layer | What it does | What it cannot do |
-| --- | --- | --- |
-| **LLM worker** | Interprets goals, proposes code, explains results | Grant itself authority or establish truth |
-| **Exact navigation** | Finds symbols, definitions, packages, capabilities, and required tests | Prove runtime behavior |
-| **Ontology and logic** | Binds typed claims to explicit universes, contexts, coverage, and evidence | Turn missing evidence into certainty |
-| **Lexical/BM25 ranking** | Orders likely relevant files for a human goal | Override exact identity or policy |
-| **Vector hints** | Suggest semantically similar concepts | Prove identity, safety, completeness, or permission |
-| **Compiler and tests** | Observe one exact build or behavior | Decide whether the human wants the result |
-| **Local node** | Applies local policy, protects keys, accepts or refuses | Force another node to agree |
-| **ZClassic chain** | Supplies public ordering, payments, names, and optional anchors | Prove software correctness or authorize execution |
-
-The ontology evaluator can preserve five honest outcomes:
+# Z23
 
 ```text
-PROVED
-DISPROVED
-BOTH
-UNKNOWN
-INCOMPLETE
-```
-
-A contradiction does not become arbitrary truth. Missing coverage does not
-become a pass. Model hints never replace mandatory evidence.
-
----
-
-## 📈 Why the architecture can scale
-
-A billion-line corpus is useful only if an ordinary task does **not** require an
-agent to read a billion lines.
-
-```text
-normal repository model:
-
-task cost ≈ total repository size
-           × repeated scans
-           × repeated builds
-           × repeated tests
-
-Z23 target:
-
-task cost ≈ relevant closure
-           + genuinely missing objects
-           + genuinely new proof
-```
-
-| Technique | Scaling advantage |
-| --- | --- |
-| **Content-addressed source and artifacts** | Identical bytes have one identity; peers request only missing objects |
-| **Rooted source universes** | Every answer names the exact corpus and generation it describes |
-| **Contexts and provenance** | A fact can be invalidated when its support changes without relearning everything |
-| **Code and dependency graphs** | Agents follow the affected subgraph instead of scanning the entire corpus |
-| **Hybrid retrieval** | Exact filters narrow the space; lexical, graph, and model hints rank what remains |
-| **Impact-selected proofs** | A small edit runs its mandatory closure instead of every unrelated test |
-| **Compile epochs and object reuse** | Unchanged translation units and toolchain-identical outputs are reused |
-| **Exact action roots and receipts** | Two agents asking for the same action can share one verified result |
-| **Independent reproduction** | A result survives the original machine, AI vendor, author, and registry |
-| **Duplicate detection and evidence** | The corpus can grow in useful behavior faster than it grows in unique complexity |
-
-The desired compounding law is:
-
-```text
-MORE AGENTS
-    +
-MORE SOFTWARE
-    +
-MORE EVIDENCE
-
-should produce
-
-LESS NEW CODE PER FEATURE
-LESS CONTEXT PER TASK
-LESS DUPLICATE BUILD/TEST WORK
-FASTER VISIBLE RESULTS
-BETTER FUTURE SOFTWARE
-```
-
----
-
-## 👤 Who is the “self”?
-
-Z23 does not create one central super-user. It separates sovereignty from shared
-intelligence:
-
-```text
-👤 HUMAN
-goals, values, final acceptance
-       │
-       ▼
-🖥️ FULL-NODE SELF
-keys, policy, memory, accepted software
-       │
-       ▼
-🌐 SWARM
-shared discovery, source, experiments, and evidence
-       │
-       ▼
-⛓️ ZCLASSIC
-shared public ordering and settlement
-```
-
-AI workers move through these layers temporarily.
-
-- The **human** supplies purpose.
-- The **full node** is the sovereign self: it holds keys, policy, local memory,
-  and the exact lineage of accepted software.
-- The **swarm** is a collective knowledge system, not a collective ruler.
-- The **chain** is shared public history, not a mind and not a software judge.
-
-The principle is:
-
-> **Shared intelligence without shared sovereignty.**
-
----
-
-## ✅ What exists today
-
-| Area | Current state |
-| --- | --- |
-| **Native C23 apps** | `zhello` and `ball` use the lean GUI path, native windows, deterministic headless frame tests, and small readable package shapes. macOS can produce reproducible `.app` bundles. |
-| **Full node** | A real ZClassic node with consensus validation, wallet custody, P2P, RPC, databases, explorer/API surfaces, and optional embedded Tor. The default build uses the Tor stub; `make tor-full` builds the real embedded onion service. |
-| **C23 Commons** | The complete local describe/reuse/build/accept/fetch/reproduce/serve journey runs through `make commons-demo`; multihost acceptance takes the original publisher offline. Open peer transport remains under hardening. |
-| **Code intelligence** | Native commands expose the current code map, groups, files, symbols, capabilities, provenance, impact, and focused tests. Rooted ontology and bounded logical evaluation exist. Literal and BM25 retrieval are measured in the development benchmark; graph/vector expansion is active work. |
-| **Build and proof fabric** | Source-bound compile epochs, incremental object reuse, a resident content-addressed proof queue, exact proof-child action identities, structured refusals, receipts, and accepted-output cache foundations exist. |
-| **Story-to-software layer** | The underlying identity, context, event, action, and evidence pieces exist; the unified story model and compiler are not yet a shipped user surface. |
-| **Acceptance** | The project is pre-v1. `make mvp` names full PASS, partial proxy evidence, and BLOCKED prerequisites without silently collapsing them. |
-
-### Platform lanes
-
-| Platform | Current supported shape |
-| --- | --- |
-| **Linux x86-64** | Primary full-node, development, proof, and service lane |
-| **macOS arm64** | Native node, native GUI apps, focused acceptance, packaged runtime, and reproducible `.app`; some Linux-only confinement, hot-activation, and snapshot capabilities remain unavailable |
-| **Windows x86-64** | Native GCC/Clang C23 and Win32 build/acceptance under MSYS2 UCRT64; WSL2 is the complete full-node lane today; native agent confinement and some operations remain unavailable |
-| **Other targets** | Portability work is evidence-driven; do not infer runtime support from a cross-compile |
-
-Run the platform's own acceptance before making a support claim:
-
-```bash
-make macos-acceptance
-make windows-acceptance
-```
-
-A MinGW cross-link or Wine run is not native Windows runtime evidence. A Linux
-build is not macOS evidence. Z23 names those distinctions instead of hiding
-them.
-
----
-
-## 🔎 Build C23 without guessing
-
-Ask the checkout what already exists before writing another copy:
-
-```bash
-build/bin/z23 code guide
-build/bin/z23 code have --input='{"text":"bounded parser"}'
-build/bin/z23 code map
-build/bin/z23 code group lib/ontology
-build/bin/z23 code file lib/ontology/include/ontology/ontology.h
-build/bin/z23 code capsule zcl_ontology_evaluate_formula_v1
-build/bin/z23 code provenance relations zcl_ontology_evaluate_formula_v1
-build/bin/z23 code impact lib/ontology/src/ontology_formula.c
-build/bin/z23 code tests lib/ontology/src/ontology_formula.c
-build/bin/z23 discover schema code.have --side=input
-```
-
-The intended development loop is:
-
-```text
-goal
+ASK
  ↓
-find existing behavior
+UNDERSTAND
  ↓
-inspect exact provenance and capability boundaries
+REUSE
  ↓
-edit the smallest relevant files
+CREATE
  ↓
-ask Z23 for the mandatory proof groups
+SEE
  ↓
-run the exact proof
+VERIFY
  ↓
-see the result
+KEEP
+ ↓
+SHARE
+ ↓
+MAKE THE NEXT THING EASIER
 ```
 
-Run the returned focused group, then the fast defensive checks:
+**Software made for you, not imposed on you.**
 
-```bash
-make -j"$(getconf _NPROCESSORS_ONLN)" t-fast-exact ONLY=<exact-group>
-make lint-fast
-```
+Z23 is Apache-2.0.
 
-For model-neutral development rules, worktree ownership, exact receipts, and
-push admission, read [`docs/DEVELOPING.md`](docs/DEVELOPING.md) and
-[`AGENTS.md`](AGENTS.md).
-
----
-
-## 🌐 The C23 Commons
-
-A package name and semantic version are labels. Exact identity is a content
-root.
-
-```text
-author creates exact source
-        ↓
-local node derives package and recipe roots
-        ↓
-bounded build/test produces receipts
-        ↓
-human accepts one exact release
-        ↓
-peers announce availability
-        ↓
-another node fetches inert bytes
-        ↓
-that node rebuilds and verifies independently
-```
-
-The rules are intentionally strict:
-
-```text
-FETCH
-  ≠ BUILD
-
-BUILD
-  ≠ INSTALL
-
-SIGNATURE
-  ≠ CORRECTNESS
-
-RECEIPT
-  ≠ UNIVERSAL SAFETY
-
-CHAIN ANCHOR
-  ≠ EXECUTION AUTHORITY
-```
-
-Every receiver applies its own policy. No central registry, package judge, AI
-vendor, scheduler, or signer has a permanent privileged role.
-
-Start with:
-
-```bash
-build/bin/z23 zcode guide
-build/bin/z23 zcode package guide
-```
-
-Then follow [`docs/C23_COMMONS_QUICKSTART.md`](docs/C23_COMMONS_QUICKSTART.md).
-
----
-
-## ⛓️ Why ZClassic is part of the same product
-
-Z23 keeps source, builds, tests, and large artifacts off-chain, where they
-belong. The ZClassic proof-of-work chain is useful for the things a public chain
-is good at:
-
-```text
-ON CHAIN
-├─ durable ordering
-├─ optional payments and bounties
-├─ names and ownership events
-└─ compact release or evidence anchors
-
-OFF CHAIN
-├─ source trees
-├─ build inputs and outputs
-├─ tests and observations
-├─ ontology/index shards
-└─ native applications
-```
-
-Proof of work answers which public history has accumulated the accepted work.
-It does not answer whether a program is correct.
-
-A chain record therefore never grants package acceptance, wallet authority,
-installation, publication, or execution. The full node validates the chain; the
-local software system validates software; the human decides what to keep.
-
----
-
-## 🎮 The game on the cover
-
-Every good software box should show the toy.
-
-`zdogace` is a real-time 3D dogfight: two teams of AI pilots over a neon grid
-city. The replay and state roots shown by the HUD are re-derived from the same
-deterministic simulation discipline used elsewhere in Z23.
-
-![the red ace turns, fires, and takes the match — a verified replay, 30 fps](docs/assets/z23-flyover-hero.gif)
-
-The game is an ordinary C23 application assembled from reusable pieces: arena,
-flight model, rendering, and pilots.
-
-> *“Make the aircraft turn faster.”*
-> *“Add a blue engine trail.”*
-> *“Make these enemies cooperate.”*
-> *“Add a building I can enter.”*
-
-The destination is that requests like these become small changes to a shared,
-understood, reproducible software world—not another disposable codebase.
-
----
-
-## Principles that do not bend
-
-1. **The human remains the authority.** AI proposes; the human accepts.
-2. **Reuse before create.** Search the commons before generating another copy.
-3. **See the consequence.** A visible behavior matters more than a pile of
-   manifests.
-4. **Exact identity beats names.** Source, actions, artifacts, and evidence are
-   content-addressed.
-5. **Model hints are not proof.** Similarity may rank candidates; it cannot
-   establish truth or skip mandatory tests.
-6. **Fetch is inert.** Receiving bytes never grants permission to build, run,
-   install, sign, spend, or deploy.
-7. **Verify locally.** Every node re-derives what it accepts under its own
-   policy.
-8. **No privileged coordinator.** Shared intelligence must not require shared
-   sovereignty.
-9. **C23 source first.** Prefer small, fast, portable native software with
-   explicit dependencies.
-10. **Free reuse first.** Copyable source remains free; optional payment belongs
-    where real scarcity remains—compute, verification, storage, hosting, or
-    human work.
-11. **The blockchain yields no software authority.** It can order and settle;
-    it cannot certify correctness.
-12. **Consensus and wallet safety preempt background work.** Indexing, agents,
-    builds, and proofs may not impair the full node.
-
----
-
-## 🧭 Near-term roadmap
-
-The current ordered mission is in
-[`docs/work/FORWARD_PLAN.md`](docs/work/FORWARD_PLAN.md). The next product
-proofs are:
-
-1. **Finish the full-node V1 acceptance gates.** Real cold sync, live store
-   delivery, sovereign soak, and exact parity remain first-class work.
-2. **Measure the agent loop.** Record files read, context bytes/tokens, tool
-   calls, retries, compiler invocations, cache hits, proof latency, and
-   prompt-to-visible behavior on a frozen real-task corpus.
-3. **Make reuse-before-create automatic.** Combine exact ontology, platform,
-   license, capability, and evidence filters with measured lexical, graph, and
-   model-hint ranking.
-4. **Build the story-to-C23 layer.** Represent entities, scenes, actions,
-   events, causal relationships, views, and invariants without creating a
-   second truth or authority system.
-5. **Complete the Windows and macOS golden journeys.** From a fresh user account:
-   setup, create, develop, see, ship, and reproduce a native C23 application
-   with very few visible steps.
-6. **Prove cross-machine reuse.** An independently verified action should reuse
-   exact source, output, and proof without repeating identical work; the
-   original publisher should be allowed to disappear.
-7. **Scale only after local value is measured.** Prove 1M, 10M, 100M, and
-   eventually 1B-line indexed fixtures while task context stays small and node
-   responsiveness remains intact.
-
-Token economics remain simulation-only and do not displace these proofs.
-
----
-
-## Documentation
-
-| Start here | Document |
-| --- | --- |
-| **Build and run Z23** | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) |
-| **Create a native macOS app** | [`docs/MACOS_GUI_QUICKSTART.md`](docs/MACOS_GUI_QUICKSTART.md) |
-| **Develop on Windows** | [`docs/WINDOWS.md`](docs/WINDOWS.md) |
-| **Use the C23 Commons** | [`docs/C23_COMMONS_QUICKSTART.md`](docs/C23_COMMONS_QUICKSTART.md) |
-| **Agent and contributor entry point** | [`AGENTS.md`](AGENTS.md) |
-| **Development and proof workflow** | [`docs/DEVELOPING.md`](docs/DEVELOPING.md) |
-| **Security and integrity model** | [`docs/SECURITY_AND_INTEGRITY.md`](docs/SECURITY_AND_INTEGRITY.md) |
-| **Full-node architecture north star** | [`docs/ARCHITECTURE_NORTH_STAR.md`](docs/ARCHITECTURE_NORTH_STAR.md) |
-| **Codebase map** | [`docs/CODEBASE_MAP.md`](docs/CODEBASE_MAP.md) |
-| **Generated native API reference** | [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) |
-| **Exact capability inventory** | [`docs/CAPABILITY_INVENTORY.jsonl`](docs/CAPABILITY_INVENTORY.jsonl) |
-| **Current ordered mission** | [`docs/work/FORWARD_PLAN.md`](docs/work/FORWARD_PLAN.md) |
-| **LLM-first app platform checklist** | [`docs/work/LLM-C23-APP-PLATFORM-CHECKLIST.md`](docs/work/LLM-C23-APP-PLATFORM-CHECKLIST.md) |
-| **Pre-v1 acceptance criteria** | [`docs/MVP.md`](docs/MVP.md) |
-| **Maintainer-host live state** | [`docs/HANDOFF.md`](docs/HANDOFF.md) |
-
-The live native command surface is self-describing:
-
-```bash
-build/bin/z23 discover help
-build/bin/z23 discover describe <command>
-build/bin/z23 status
-```
-
-![the live command surface](docs/assets/z23-term-command-surface.svg)
-
----
-
-## License
-
-Z23 is licensed under the [Apache License 2.0](LICENSE).
-
-The name is the chain and the language: **ZClassic + C23**.
+**ZClassic + C23.**

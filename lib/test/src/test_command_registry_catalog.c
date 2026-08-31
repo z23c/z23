@@ -117,18 +117,18 @@ static int test_domain_leaf_counts(void)
     return failures;
 }
 
-static int test_six_roots(void)
+static int test_thirteen_roots(void)
 {
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
-    TEST("root exposes exactly twelve choices") {
+    TEST("root exposes exactly thirteen choices") {
         size_t roots = 0;
         for (size_t i = 0; i < reg->count; i++) {
             const char *p = reg->commands[i].parent;
             if (!p || !p[0])
                 roots++;
         }
-        ASSERT_EQ(roots, (size_t)12);
+        ASSERT_EQ(roots, (size_t)13);
         ASSERT(find_spec(reg, "status") != NULL);
         ASSERT(find_spec(reg, "core") != NULL);
         ASSERT(find_spec(reg, "app") != NULL);
@@ -141,6 +141,7 @@ static int test_six_roots(void)
         ASSERT(find_spec(reg, "metaverse") != NULL);
         ASSERT(find_spec(reg, "yardsale") != NULL);
         ASSERT(find_spec(reg, "zses") != NULL);
+        ASSERT(find_spec(reg, "story") != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -3031,7 +3032,7 @@ static int test_ops_state_requires_subsystem(void)
 static int test_is_root_ownership(void)
 {
     int failures = 0;
-    TEST("is_root owns terse status plus core/app/dev/ops/discover/code/vault") {
+    TEST("is_root owns every canonical native root including story") {
         ASSERT(zcl_native_command_is_root("core"));
         ASSERT(zcl_native_command_is_root("app"));
         ASSERT(zcl_native_command_is_root("ops"));
@@ -3043,6 +3044,7 @@ static int test_is_root_ownership(void)
         ASSERT(zcl_native_command_is_root("dev"));
         ASSERT(zcl_native_command_is_root("vault"));
         ASSERT(zcl_native_command_is_root("zses"));
+        ASSERT(zcl_native_command_is_root("story"));
         ASSERT(!zcl_native_command_is_root("getblockcount"));
         /* Dotted first-token form: `<root>.<rest>` is owned too (the
          * canonical documented invocation), split into segments by
@@ -4200,7 +4202,7 @@ int test_command_registry_catalog(void)
     failures += test_describe_emits_observed_p99();
     failures += test_next_actions_fail_closed();
     failures += test_domain_leaf_counts();
-    failures += test_six_roots();
+    failures += test_thirteen_roots();
     failures += test_yardsale_guide();
     failures += test_code_guide_leaf();
     failures += test_root_menu_budget();

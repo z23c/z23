@@ -202,6 +202,12 @@ static const struct rlw_leaf g_rlw_leaves[] = {
      * leaves alone. */
     { "zcode.work.show", zcl_native_handle_zcode_work_status,
       "workspace", RLW_DATADIR_VALUE, "work", RLW_ZID_PUBKEY, NULL },
+    { "story.show", zcl_native_handle_story_show,
+      "work", RLW_ZID_PUBKEY, NULL, NULL, NULL },
+    { "story.why", zcl_native_handle_story_why,
+      "work", RLW_ZID_PUBKEY, "event", "user_accepts", NULL },
+    { "story.diff", zcl_native_handle_story_diff,
+      "before", RLW_ZID_PUBKEY, "after", RLW_ZID_PUBKEY, NULL },
     /* Task-carrier board: declared READ with a `datadir` input only, so
      * the harness injects the fixture datadir and the seen-set projection
      * answers from the local record store without writing to it. The
