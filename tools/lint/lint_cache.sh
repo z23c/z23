@@ -129,6 +129,7 @@ check-command-input-keys
 check-telemetry-ontology check-privileged-transition-receipt
 check-c23-only
 check-no-python
+check-shell-host-assumptions
 check-no-trust-state-ordering check-no-gnu-va-args check-no-warning-suppression
 check-result-discard
 check-published-platforms

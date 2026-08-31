@@ -141,27 +141,31 @@ them — acceptance scripts, lint gates, operator probes — is where the silent
 Linux assumptions still live, and it is exactly the layer an agent runs
 first, so a wrong answer here costs a cycle before any C compiles.
 
-Measured on this tree with `git grep` over tracked `*.sh`:
+Measured by `tools/lint/check_shell_host_assumptions.sh` over 449 intended
+tracked `*.sh` files (the gate excludes its own implementation). The gate owns
+these counts; a hand grep is not equivalent to its conservative raw lexical
+scan, which includes comments, quoted programs, and heredoc bodies rather than
+pretending to be a complete shell parser.
 
 | Assumption | Sites | Files | Non-Linux fallback |
 |---|---|---|---|
-| `ss(8)` for port probing | 23 | 19 | 1 |
-| `nproc` for job count | 38 | 27 | Apple ships no `nproc`; a stripped PATH silently yields 8 workers |
-| `stat -c` (GNU spelling) | 96 | 45 | BSD/macOS `stat` needs `-f` |
-| `sed -i` (GNU spelling) | 28 | 10 | BSD/macOS `sed -i` requires an argument |
+| `ss(8)` for port probing | 63 | 19 | shared helper tries `lsof`, then `netstat`, and names `UNOBSERVED` |
+| `nproc` for job count | 36 | 27 | Apple ships no `nproc`; a stripped PATH silently yields 8 workers |
+| `stat -c` (GNU spelling) | 108 | 53 | BSD/macOS `stat` needs `-f` |
+| `sed -i` (GNU spelling) | 22 | 5 | BSD/macOS `sed -i` requires an argument |
 
-`tools/scripts/two_node_peer_tip.sh` already carries the shape the rest
-should follow: try `ss`, fall back to `lsof`, then `netstat`, and **refuse by
-name** when no probe exists rather than treating "cannot tell" as "port is
-free". That last clause is the point — every one of these, read carelessly,
-fails *open*.
+`tools/scripts/port_probe.sh` now owns the tri-state port contract: LISTENING,
+proven free, or named `UNOBSERVED`. `tools/scripts/two_node_peer_tip.sh` is the
+first migrated caller and refuses the third state rather than treating
+"cannot tell" as "port is free". The helper selftest injects success, empty,
+and backend-error responses for `ss`, `lsof`, and `netstat` with no live-port
+dependency.
 
-Extract the fallback into one sourced helper rather than copying it 19 times,
-then add a gate that refuses a *new* bare `ss`/`nproc`/`stat -c`/`sed -i` in a
-tracked script, ratcheted against a baseline of the existing sites the way
-`check_pipefail_status_pipe.sh` ratchets its own class. Prefer
-`getconf _NPROCESSORS_ONLN` over `nproc`, which is what
-`docs/GETTING_STARTED.md` already tells a reader to type.
+The shrink-only gate refuses a new site, a larger count, or a stale row after a
+site is removed; deliberate burn-down must regenerate the exact baseline. It
+has no inline exemption. Remaining work is to migrate the baseline rows to
+portable helpers, preferring `getconf _NPROCESSORS_ONLN` over `nproc`, which is
+what `docs/GETTING_STARTED.md` already tells a reader to type.
 
 ## 5. The pipefail inversion class — CLOSED, and now ratcheted
 

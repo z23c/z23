@@ -62,7 +62,6 @@ tools/scripts/promotion_receipt.sh 8
 tools/scripts/slo_hold_judge.sh 13
 tools/scripts/soak_evidence.sh 4
 tools/scripts/stopwatch_skip_class.sh 1
-tools/scripts/two_node_peer_tip.sh 3
 tools/scripts/worktree_gc.sh 3
 tools/scripts/zcl-portfwd-setup.sh 1
 tools/scripts/zcl_intervene.sh 2

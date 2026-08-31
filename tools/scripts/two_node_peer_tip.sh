@@ -27,7 +27,7 @@
 # SAFETY (mirrors isolated_node_env.sh + crash_recovery_test.c):
 #   - /tmp-only datadirs (mktemp -d under /tmp/zcl23-2node-*).
 #   - 39xxx isolation ports ONLY; every chosen port is checked against the
-#     live refuse-set AND ss(8)-LISTEN-probed before spawn.
+#     live refuse-set AND fail-closed LISTEN-probed before spawn.
 #   - Each node spawned through the in-tree C23 process-group launcher → its
 #     OWN process group; cleanup
 #     kill -KILL's the whole GROUP (no orphan survives a harness crash).
@@ -44,6 +44,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
+. "$REPO_ROOT/tools/scripts/port_probe.sh"
 
 # ── Live-port refuse-set (verbatim from isolated_node_env.sh) ──────
 TN_LIVE_PORTS="8023 8033 8034 8035 8043 8044 8045 8046 8232 8443 \
@@ -79,25 +80,14 @@ tn_assert_not_live_port() {
     return 0
 }
 tn_assert_port_free() {
-    local p="$1"
-    # Linux iproute2 ss(8) is the preferred probe; macOS/BSD fall back to
-    # lsof(8) or netstat(8) so the harness runs on the first Mac dev host.
-    if command -v ss >/dev/null 2>&1; then
-        if ss -tlnH "sport = :$p" 2>/dev/null | grep -q .; then
-            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
-        fi
-    elif command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | grep -q .; then
-            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
-        fi
-    elif command -v netstat >/dev/null 2>&1; then
-        if netstat -anv 2>/dev/null | grep -E "[.:]$p[[:space:]].*LISTEN" | grep -q .; then
-            tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
-        fi
+    local p="$1" rc
+    if z23_tcp_port_listening "$p"; then
+        tn_die "port $p is already LISTENING — refusing (operator port math is wrong)"
     else
-        tn_die "no port probe available (need ss, lsof, or netstat)"
+        rc=$?
     fi
-    return 0
+    [ "$rc" -eq 1 ] && return 0
+    tn_die "port $p availability is UNOBSERVED — refusing"
 }
 
 # ── Cleanup: kill BOTH groups + rm BOTH /tmp datadirs ──────────────
@@ -206,9 +196,6 @@ tn_wait_height() {
 }
 
 # ── Preflight + setup ──────────────────────────────────────────────
-if ! command -v ss >/dev/null 2>&1 && ! command -v lsof >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
-    tn_die "ss(8), lsof(8), or netstat(8) not found (need one to probe listening ports)"
-fi
 command -v mktemp >/dev/null 2>&1 || tn_die "mktemp not found"
 [ -x "$NODE_BIN" ] || tn_die "$NODE_BIN not built — run make first"
 [ -x "$RPC_BIN" ]  || tn_die "$RPC_BIN not built — run make zcl-rpc"
@@ -232,7 +219,7 @@ fi
 trap tn_cleanup EXIT INT TERM
 
 for p in "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" \
-         "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS"; do
+         "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "$DEAD_SINK"; do
     tn_assert_port_free "$p"
 done
 

@@ -11503,6 +11503,15 @@ check-pipefail-status-pipe:
 	@./tools/lint/check_pipefail_status_pipe.sh --selftest
 	@./tools/lint/check_pipefail_status_pipe.sh
 
+# Cross-host shell debt must only shrink.  The shared port helper is exercised
+# here too, so a fallback or fail-closed regression cannot hide behind an
+# unchanged spelling baseline.
+check-shell-host-assumptions:
+	@echo "══ LINT: Linux/GNU shell assumptions only shrink ══"
+	@./tools/lint/check_shell_host_assumptions.sh --selftest
+	@./tools/scripts/port_probe.sh --selftest
+	@./tools/lint/check_shell_host_assumptions.sh
+
 # Sibling of the gate above, for two more shapes where the shell throws a
 # decision away. (A) A bare `! cmd` statement under `set -e`: bash does not
 # exit for a command whose value is being inverted, and the ERR trap is exempt
@@ -12138,6 +12147,7 @@ LINT_GATES := \
     check-source-identity-authority \
     check-status-reason-single \
     check-pipefail-status-pipe \
+    check-shell-host-assumptions \
     check-discarded-status \
     check-no-wallclock-assertion \
     check-framework-shape \
