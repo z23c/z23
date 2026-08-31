@@ -32,7 +32,12 @@ enum platform_directory_result {
     PLATFORM_DIRECTORY_EXISTS,
     PLATFORM_DIRECTORY_REFUSED,
     PLATFORM_DIRECTORY_IO,
-    PLATFORM_DIRECTORY_INVALID
+    PLATFORM_DIRECTORY_INVALID,
+    /* The namespace move completed, but the post-move identity or directory
+     * durability proof failed. The caller must treat both the source and
+     * destination names as observational only and must not clean either one
+     * up by name until it re-establishes retained identity authority. */
+    PLATFORM_DIRECTORY_OUTCOME_UNKNOWN
 };
 enum platform_directory_lock_mode {
     PLATFORM_DIRECTORY_LOCK_SHARED = 0,
@@ -79,6 +84,22 @@ bool platform_directory_child_write_exact(struct platform_directory_child *f,
 bool platform_directory_child_replace(struct platform_directory_transaction *d,
                                       struct platform_directory_child *staged,
                                       const char *destination, bool no_clobber);
+/* Move `source` from its retained source directory into a retained destination
+ * directory on the same volume. Both leaf names are validated, the source
+ * name is re-opened relative to source_dir and required to identify the exact
+ * retained child, the destination is re-opened and identity-checked after the
+ * atomic move, and both directory capabilities are flushed. No pathname is
+ * reconstructed or re-resolved.
+ *
+ * OUTCOME_UNKNOWN means the namespace operation succeeded but the subsequent
+ * identity/durability proof did not. In that case source->leaf names the
+ * requested destination, but callers must not infer which directory entry is
+ * durable or unlink either spelling by name. */
+enum platform_directory_result platform_directory_child_move_between(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_child *source,
+    struct platform_directory_transaction *destination_dir,
+    const char *destination_leaf, bool no_clobber);
 bool platform_directory_child_unlink(struct platform_directory_transaction *d,
                                      const char *leaf, bool missing_ok);
 enum platform_directory_result platform_directory_child_unlink_result(
@@ -92,5 +113,11 @@ enum platform_directory_result platform_directory_lock_acquire(
     struct platform_directory_transaction *d, const char *leaf, bool create,
     enum platform_directory_lock_mode mode, struct platform_directory_lock *lock);
 void platform_directory_lock_release(struct platform_directory_lock *lock);
+
+#ifdef ZCL_TESTING
+/* One-shot seam proving that a successful rename followed by an unprovable
+ * directory flush reports OUTCOME_UNKNOWN rather than ordinary failure. */
+void platform_directory_child_move_test_fail_durability_once(void);
+#endif
 
 #endif

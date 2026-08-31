@@ -1977,9 +1977,18 @@ windows-acceptance: windows-acceptance-compile
 ifeq ($(ZCL_HOST_WINDOWS),1)
 windows-acceptance: windows-headless-run-selftest
 
-	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+	@root="$$(cygpath -aw .)"; \
+	runner="$$(cygpath -aw $(WINDOWS_HEADLESS_RUN_BIN))"; \
+	log_dir="build/tests/windows/logs"; mkdir -p "$$log_dir"; \
+	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
 		case "$$executable" in */headless_run.exe) continue ;; esac; \
-		"$$executable"; rc=$$?; \
+		name="$$(basename "$$executable" .exe)"; \
+		log="$$log_dir/$$name.log"; \
+		executable_win="$$(cygpath -aw "$$executable")"; \
+		log_win="$$(cygpath -aw "$$log")"; \
+		"$$runner" --cwd "$$root" --log "$$log_win" -- \
+			"$$executable_win"; rc=$$?; \
+		test ! -f "$$log" || cat "$$log"; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \
@@ -2019,7 +2028,11 @@ windows-portability-acceptance:
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_cross_syntax.sh
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh --self-test
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh
+ifeq ($(ZCL_HOST_WINDOWS),1)
+	@printf '%s\n' 'windows-portability-acceptance: PASS (cross-compiled and contained native Windows acceptance executed)'
+else
 	@printf '%s\n' 'windows-portability-acceptance: PASS (cross-compiled on host=$(ZCL_HOST_OS); native Windows runtime UNOBSERVED)'
+endif
 
 .PHONY: macos-acceptance
 # Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived

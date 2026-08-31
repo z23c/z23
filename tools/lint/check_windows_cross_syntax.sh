@@ -104,6 +104,7 @@ END_AWK
 #   SKIP_GENERATED   every error is a missing command/native_*.h
 #   SKIP_OPENSSL     every error is a missing openssl/*.h
 #   SKIP_HEADERS     mix of those two missing-header classes, nothing else
+#   COMPILER_FAILURE driver/backend failure, not a source-located diagnostic
 #   ERROR            any other diagnostic
 cat > "$WORK/classify.awk" <<'END_AWK'
 BEGIN {
@@ -111,15 +112,43 @@ BEGIN {
     gen = 0
     ossl = 0
     other = 0
+    driver = 0
 }
 {
     line = $0
+    lower = tolower(line)
+    if (index(lower, "internal compiler error") > 0 ||
+        index(lower, "cannot execute") > 0 ||
+        index(lower, "createprocess") > 0 ||
+        index(lower, "unable to execute command") > 0 ||
+        index(lower, "frontend command failed") > 0 ||
+        index(lower, "please submit a bug report") > 0 ||
+        index(lower, "segmentation fault") > 0 ||
+        index(lower, "stack dump") > 0 ||
+        index(lower, "out of memory") > 0 ||
+        index(lower, "killed signal") > 0 ||
+        index(lower, "error in backend") > 0 ||
+        index(lower, "llvm error") > 0 ||
+        index(lower, "access violation") > 0 ||
+        index(lower, "cc1.exe:") > 0)
+        driver++
     is_fatal = 0
     is_error = 0
     if (index(line, ": fatal error: ") > 0) is_fatal = 1
     if (is_fatal == 0 && index(line, ": error: ") > 0) is_error = 1
     if (is_fatal == 0 && is_error == 0) next
     errors++
+    # A source rejection is located as path:line[:column]: diagnostic. GCC
+    # driver failures use the same words (`gcc: fatal error:`), but have no
+    # source location and must never be absorbable by a per-source baseline.
+    marker = is_fatal ? ": fatal error: " : ": error: "
+    marker_at = index(line, marker)
+    prefix = substr(line, 1, marker_at - 1)
+    if (prefix !~ /:[0-9]+(:[0-9]+)?$/ ||
+        driver > 0) {
+        driver++
+        next
+    }
     if (is_fatal) {
         rest = line
         p = index(rest, "fatal error: ")
@@ -135,6 +164,7 @@ BEGIN {
     other++
 }
 END {
+    if (driver > 0) { print "COMPILER_FAILURE"; exit 0 }
     if (errors == 0) { print "CLEAN"; exit 0 }
     if (other > 0) { print "ERROR"; exit 0 }
     if (gen == errors) { print "SKIP_GENERATED"; exit 0 }
@@ -173,12 +203,37 @@ if [ "${#PLATFORM_DEFINES[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# -DZCL_TESTING exposes test-only declarations. Without it, several _WIN32
-# acceptance files fail with "invalid initializer" on an implicit int return
-# of a function that actually returns struct zcl_result — a missing prototype,
-# not a Windows syntax bug.
-COMPILE_FLAGS=(-std=c2x -fsyntax-only -DZCL_TESTING
+# Production files must be graded under the production preprocessor profile.
+# Test-only declarations and the native Windows compatibility header are added
+# per test translation unit in the worker below; applying ZCL_TESTING globally
+# can hide a broken #ifndef ZCL_TESTING production arm.
+COMPILE_FLAGS=(-std=c2x -fsyntax-only
                "${API_FLOOR_DEFINES[@]}" "${PLATFORM_DEFINES[@]}")
+
+compile_result_kind() {
+    local log=$1 rc=$2 raw
+    raw="$(awk -f "$WORK/classify.awk" "$log")"
+    case "$rc" in
+        0)
+            if [ "$raw" = CLEAN ]; then
+                printf '%s' CLEAN
+            else
+                printf '%s' INCONSISTENT_SUCCESS
+            fi
+            ;;
+        ''|*[!0-9]*) printf '%s' MISSING_RESULT ;;
+        *)
+            if [ "$raw" = CLEAN ]; then
+                # Backend crashes, loader/DLL failures, OOM, and process-spawn
+                # failures often have no GCC-style `: error:` diagnostic.
+                # A nonzero compiler status is never a clean translation unit.
+                printf '%s' COMPILER_FAILURE
+            else
+                printf '%s' "$raw"
+            fi
+            ;;
+    esac
+}
 
 # The native Windows test profile force-includes one test-only compatibility
 # header. Grade lib/test translation units under that same contract; applying
@@ -298,8 +353,54 @@ PROBE
         echo "  The gate would false-fail every contributor."
         exit 1
     fi
+    compat="$WORK/test_compat.c"
+    cat > "$compat" <<'PROBE'
+#include <fcntl.h>
+#include <sys/stat.h>
+int zcl_gate_wincross_test_compat(void)
+{
+    zcl_win_suppress_abort_dialog();
+    return mkdir("fixture", 0700) + O_CLOEXEC;
+}
+PROBE
+    if ! "$CC_BIN" "${flags[@]}" -include test/windows_compat.h \
+            "$compat" >/dev/null 2>&1; then
+        echo "FAIL: --self-test — the native test-profile compatibility" \
+             "header did not compile a representative POSIX-style test TU."
+        exit 1
+    fi
+    fake_compiler="$WORK/fake-compiler"
+    cat > "$fake_compiler" <<'PROBE'
+#!/usr/bin/env bash
+echo "gcc: fatal error: cannot execute 'cc1': CreateProcess: No such file or directory" >&2
+exit 86
+PROBE
+    chmod +x "$fake_compiler"
+    fake_log="$WORK/fake-compiler.log"
+    set +e
+    "$fake_compiler" "$clean" >"$fake_log" 2>&1
+    fake_rc=$?
+    set -e
+    fake_kind="$(compile_result_kind "$fake_log" "$fake_rc")"
+    if [ "$fake_kind" != COMPILER_FAILURE ]; then
+        echo "FAIL: --self-test — a nonzero compiler with no conventional" \
+             "source diagnostic was classified '$fake_kind', not an" \
+             "infrastructure failure."
+        exit 1
+    fi
+    mixed_log="$WORK/mixed-compiler.log"
+    printf '%s\n' \
+        'fixture.c:1:2: error: ordinary source rejection' \
+        'cc1.exe: out of memory allocating 4096 bytes' > "$mixed_log"
+    mixed_kind="$(compile_result_kind "$mixed_log" 1)"
+    if [ "$mixed_kind" != COMPILER_FAILURE ]; then
+        echo "FAIL: --self-test — a source diagnostic followed by a backend" \
+             "crash was classified '$mixed_kind', not infrastructure failure."
+        exit 1
+    fi
     echo "  OK: --self-test — flag set trips on a Windows-only undeclared" \
-         "identifier, passes clean code"
+         "identifier, passes clean and test-compat code, rejects a crashed" \
+         "compiler backend"
     exit 0
 fi
 
@@ -348,14 +449,19 @@ if [ ${#flags[@]} -gt 0 ]; then
         unset "flags[$last]"
     fi
 fi
+# Match the native test profiles without polluting production translation
+# units. The test-fast corpus receives both test declarations and the
+# force-included compatibility header; standalone platform acceptance sources
+# receive test declarations only.
 case "$src" in
-    lib/test/*) flags+=( -include "$ZCL_GATE_TEST_COMPAT_HEADER" ) ;;
+    lib/test/*) flags+=(-DZCL_TESTING -include "$ZCL_GATE_TEST_COMPAT_HEADER") ;;
+    */tests/*.c) flags+=(-DZCL_TESTING) ;;
 esac
-if "$ZCL_GATE_CC" "${flags[@]}" "$src" >"$log" 2>&1; then
-    echo 0 > "$rcf"
-else
-    echo 1 > "$rcf"
-fi
+set +e
+"$ZCL_GATE_CC" "${flags[@]}" "$src" >"$log" 2>&1
+rc=$?
+set -e
+printf '%s\n' "$rc" > "$rcf"
 exit 0
 END_WORKER
 chmod +x "$WORK/compile_one.sh"
@@ -392,18 +498,20 @@ STILL="$WORK/still.txt"
 SKIP_GEN_LIST="$WORK/skip_gen.txt"
 SKIP_OSSL_LIST="$WORK/skip_ossl.txt"
 CLEAN_LIST="$WORK/clean.txt"
+INFRA_LIST="$WORK/infra.txt"
 : > "$NEW_FAIL"
 : > "$STILL"
 : > "$SKIP_GEN_LIST"
 : > "$SKIP_OSSL_LIST"
 : > "$CLEAN_LIST"
+: > "$INFRA_LIST"
 
 while IFS= read -r src; do
     [ -n "$src" ] || continue
     log="$OUT_DIR/${src}.log"
     rcf="$OUT_DIR/${src}.rc"
     rc="$(cat "$rcf" 2>/dev/null || echo missing)"
-    kind="$(awk -f "$WORK/classify.awk" "$log")"
+    kind="$(compile_result_kind "$log" "$rc")"
     case "$kind" in
         CLEAN)
             echo "$src" >> "$CLEAN_LIST"
@@ -419,17 +527,16 @@ while IFS= read -r src; do
                 continue
             fi
             ;;
+        COMPILER_FAILURE|MISSING_RESULT|INCONSISTENT_SUCCESS)
+            printf '%s|%s|%s\n' "$src" "$rc" "$kind" >> "$INFRA_LIST"
+            continue
+            ;;
     esac
     # Compiler error that is not a skippable missing header.
     if [ -n "${BASE[$src]:-}" ]; then
         echo "$src" >> "$STILL"
     else
         echo "$src" >> "$NEW_FAIL"
-    fi
-    # Keep rc for the summary; a CLEAN rc with ERROR kind is a classifier bug.
-    if [ "$rc" = 0 ]; then
-        echo "$GATE: FATAL — $src classified $kind but compiler exited 0." >&2
-        exit 2
     fi
 done < "$SRC_LIST"
 
@@ -440,6 +547,12 @@ while IFS= read -r row; do
     [ -n "$row" ] || continue
     STILL_SET["$row"]=1
 done < "$STILL"
+# An infrastructure failure proves nothing about whether a baseline row is
+# stale. Keep that row out of the shrink decision until a compiler completes.
+while IFS='|' read -r row _; do
+    [ -n "$row" ] || continue
+    STILL_SET["$row"]=1
+done < "$INFRA_LIST"
 STALE="$WORK/stale.txt"
 : > "$STALE"
 for k in "${!BASE[@]}"; do
@@ -460,11 +573,31 @@ still_count="$(count_lines "$STILL")"
 skip_gen_count="$(count_lines "$SKIP_GEN_LIST")"
 skip_ossl_count="$(count_lines "$SKIP_OSSL_LIST")"
 clean_count="$(count_lines "$CLEAN_LIST")"
+infra_count="$(count_lines "$INFRA_LIST")"
 
 rc=0
 
+if [ "$infra_count" -gt 0 ]; then
+    rc=2
+    echo "$GATE: UNPROVEN — $infra_count compiler infrastructure failure(s);" \
+         "no affected translation unit is counted clean:" >&2
+    while IFS='|' read -r src compiler_rc kind; do
+        [ -n "$src" ] || continue
+        echo "  $src (compiler rc=$compiler_rc, result=$kind)" >&2
+        if [ -s "$OUT_DIR/${src}.log" ]; then
+            sed -n '1,80p' "$OUT_DIR/${src}.log" | sed 's/^/    /' >&2
+        else
+            echo "    (compiler produced no diagnostic output)" >&2
+        fi
+    done < "$INFRA_LIST"
+    echo "" >&2
+    echo "  Check compiler installation/DLL integrity, memory and process" \
+         "limits, then rerun. A baseline cannot excuse infrastructure" \
+         "failure." >&2
+fi
+
 if [ "$new_count" -gt 0 ]; then
-    rc=1
+    [ "$rc" -eq 0 ] && rc=1
     echo "$GATE: FAIL — $new_count file(s) failed mingw -fsyntax-only" \
          "(not baselined, not a skippable missing header):" >&2
     while IFS= read -r src; do
@@ -481,7 +614,7 @@ if [ "$new_count" -gt 0 ]; then
 fi
 
 if [ "$stale_count" -gt 0 ]; then
-    rc=1
+    [ "$rc" -eq 0 ] && rc=1
     echo "$GATE: FAIL — $stale_count baseline entr(y|ies) now compile clean" \
          "or are only a skippable missing header." >&2
     echo "  This baseline is shrink-only. Delete these lines from $BASELINE:" >&2
@@ -491,8 +624,9 @@ fi
 if [ "$rc" -ne 0 ]; then
     echo "$GATE: compiled $SRC_COUNT file(s), $clean_count clean," \
          "$skip_gen_count generated-header skip, $skip_ossl_count openssl-header skip," \
-         "$still_count baselined, $new_count new failure(s)."
-    exit 1
+         "$still_count baselined, $new_count new failure(s)," \
+         "$infra_count infrastructure failure(s)."
+    exit "$rc"
 fi
 
 echo "$GATE: PASS ($SRC_COUNT files compiled, $clean_count clean," \

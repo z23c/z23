@@ -935,7 +935,13 @@ static void write_test_timing_json(const struct group_result *results,
 
     time_t now = platform_time_wall_time_t();
     struct tm tm_utc;
-    gmtime_r(&now, &tm_utc);
+    if (!platform_time_utc_tm(now, &tm_utc)) {
+        fprintf(stderr, "test_parallel: UTC timestamp conversion failed\n");
+        fclose(fp);
+        (void)remove(tmp_path);
+        free(order);
+        return;
+    }
     char ts[32];
     strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
 

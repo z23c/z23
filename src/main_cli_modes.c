@@ -65,6 +65,7 @@
 #include "sapling/params_init.h"
 #include "platform/clock.h"               /* clock_now_monotonic_ns (banned: gettimeofday) */
 #include "platform/os_proc.h"             /* os_proc_exe_path (banned: raw /proc/self/exe) */
+#include "base/utc_tm.h"                  /* zcl_utc_tm: gmtime_s/gmtime_r */
 #include "test/verify_bench_fixture.h"    /* baked real (200,9) witness */
 #include "controllers/explorer_internal.h"
 #include "services/wallet_backup_service.h"
@@ -148,10 +149,17 @@ static bool bench_env_true(const char *name)
 }
 static void bench_iso8601(char *out, size_t out_len)
 {
+    if (!out || out_len == 0)
+        return;
+    out[0] = '\0';
     time_t now = time(NULL);
     struct tm tmv;
-    gmtime_r(&now, &tmv);
-    strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+    if (!zcl_utc_tm(now, &tmv)) {
+        fprintf(stderr, "bench: UTC timestamp conversion failed\n");
+        return;
+    }
+    if (strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &tmv) == 0)
+        fprintf(stderr, "bench: UTC timestamp formatting failed\n");
 }
 static double bench_system_uptime_seconds(void)
 {

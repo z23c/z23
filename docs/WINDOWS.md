@@ -202,19 +202,27 @@ build.
 
 | Gate | What a compiler actually reads | What it does not do |
 | --- | --- | --- |
-| `make windows-acceptance-compile` | Every active program in `lib/platform/tests/windows_acceptance.mk`; the reconcile gate requires the active IDs and `_SOURCES` IDs to match exactly | Does not read the rest of the `_WIN32` set or execute a native Windows program |
-| `check-windows-cross-syntax` (`make lint`) | Every `.c` containing `_WIN32` under `adapters/`, `app/`, `application/`, `config/`, `core/`, `domain/`, `lib/`, `ports/`, `src/`, and release-visible `tools/command/` | Syntax-only: no objects, archives, link, Wine run, or native observation |
+| `make windows-acceptance-compile` | Every active program in the source-derived catalog at `lib/platform/tests/windows_acceptance.mk`; reconciliation requires the active IDs and `_SOURCES` IDs to match exactly | Does not read the rest of the `_WIN32` set or execute a native Windows program |
+| `check-windows-cross-syntax` (`make lint`) | Every `.c` whose text contains `_WIN32` under the maintained scan roots: `adapters/`, `app/`, `application/`, `config/`, `core/`, `domain/`, `lib/`, `ports/`, `src/`, and release-visible `tools/command/` | Syntax-only: no objects, archives, link, Wine run, or native observation |
 
 The syntax sweep uses `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only` and
 every directory named `include` (plus `-I.` and `-Itools`, so
 `command/native_command.h` is findable). The file set is self-maintaining: a
 file that gains Windows code joins the gate. When mingw is not installed the
 gate prints `SKIP` and exits 0; that is not a pass. The mandatory
-`windows-portability-acceptance`, Linux/macOS pre-push, and hosted-CI paths
+`windows-portability-acceptance`, pre-push, and hosted-CI paths
 set `ZCL_REQUIRE_MINGW=1`, so a missing compiler is a hard failure there. The
-current ratchet baseline is empty: every selected translation unit must
-compile, and any documented generated-header skip is counted explicitly in
-the verdict rather than hidden behind a remembered file total.
+gate prints its current source, clean, dependency-skip, baseline, and
+compiler-infrastructure counts on every run; do not copy those changing counts
+into prose. Missing OpenSSL
+headers are skipped by header name (`openssl/…`), not by source filename, and
+are graded automatically once the vendored headers exist. The adjacent
+shrink-only baseline is currently empty: every selected translation unit must
+compile, while each documented generated-header skip is counted explicitly in
+the verdict. Compiler/backend failure is never baseline-eligible: every worker
+publishes an exit-status sidecar, and a crash, missing `cc1`, loader failure, or
+nonzero exit without a source-located diagnostic makes the whole sweep
+unproven.
 
 ## Native-port completion criteria
 

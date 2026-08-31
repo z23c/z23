@@ -912,10 +912,22 @@ ZCL_CAPABILITY_SYMBOL("sqlite3_get_autocommit", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_get_clientdata", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_last_insert_rowid", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_limit", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("sqlite3_log", CAP_HARMLESS,
+    "Records a diagnostic through SQLite's already-configured logger.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_malloc", CAP_HARMLESS, "Allocates process memory.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_mprintf", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("sqlite3_mutex_alloc", CAP_HARMLESS,
+    "Allocates a process-local SQLite synchronization object.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_mutex_enter", CAP_HARMLESS, "Local synchronization.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_mutex_free", CAP_HARMLESS,
+    "Releases a process-local SQLite synchronization object.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_mutex_leave", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_mutex_try", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_next_stmt", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("sqlite3_randomness", CAP_RANDOM,
+    "Requests random bytes from SQLite's configured randomness source.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_realloc64", CAP_HARMLESS,
+    "Resizes process memory allocated by SQLite.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_progress_handler", CAP_HARMLESS,
     "Installs a callback invoked between virtual machine steps.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_reset", CAP_HARMLESS, "")
@@ -935,6 +947,8 @@ ZCL_CAPABILITY_SYMBOL("sqlite3_txn_state", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_update_hook", CAP_HARMLESS,
     "Installs a callback that observes changes this process itself "
     "made.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_uri_boolean", CAP_HARMLESS,
+    "Parses a boolean parameter from a caller-supplied SQLite URI.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_value_blob", CAP_HARMLESS,
     "Reads an argument already handed to a callback.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_value_bytes", CAP_HARMLESS, "")
@@ -1228,13 +1242,22 @@ ZCL_CAPABILITY_SYMBOL("CreateDirectoryW", CAP_FS_WRITE, "Creates a directory.")
 ZCL_CAPABILITY_SYMBOL("CreateHardLinkA", CAP_FS_WRITE, "Creates a filesystem link.")
 ZCL_CAPABILITY_SYMBOL("CreateHardLinkW", CAP_FS_WRITE, "Creates a filesystem link.")
 ZCL_CAPABILITY_SYMBOL("DeleteFileW", CAP_FS_WRITE, "Deletes a file.")
+ZCL_CAPABILITY_SYMBOL("DuplicateHandle", CAP_FS_WRITE,
+    "The source process, target process, access mask, and close-source flag "
+    "are invisible to nm; treat handle duplication like dup/dup2.")
 ZCL_CAPABILITY_SYMBOL("FlushFileBuffers", CAP_FS_WRITE,
     "Forces pending writes through a file handle.")
 ZCL_CAPABILITY_SYMBOL("LockFileEx", CAP_FS_WRITE,
     "Can exclude another writer from an operator file.")
 ZCL_CAPABILITY_SYMBOL("MoveFileExW", CAP_FS_WRITE,
     "Renames, replaces, or deletes according to runtime flags.")
+ZCL_CAPABILITY_SYMBOL("OpenFileById", CAP_FS_WRITE,
+    "The desired-access mask is invisible to nm; a retained volume/file "
+    "identity can be reopened for write authority.")
 ZCL_CAPABILITY_SYMBOL("RemoveDirectoryW", CAP_FS_WRITE, "Deletes a directory.")
+ZCL_CAPABILITY_SYMBOL("ReOpenFile", CAP_FS_WRITE,
+    "The desired-access mask is invisible to nm and can acquire write or "
+    "delete authority from an already-retained file object.")
 ZCL_CAPABILITY_SYMBOL("SetEndOfFile", CAP_FS_WRITE, "Truncates or extends a file.")
 ZCL_CAPABILITY_SYMBOL("SetFileAttributesW", CAP_FS_WRITE, "Writes file metadata.")
 ZCL_CAPABILITY_SYMBOL("SetFileInformationByHandle", CAP_FS_WRITE,
@@ -1272,12 +1295,12 @@ ZCL_CAPABILITY_SYMBOL("GetModuleFileNameW", CAP_FS_READ,
     "Discloses the path of an executable image.")
 ZCL_CAPABILITY_SYMBOL("GetTempPathW", CAP_FS_READ,
     "Reads the operator-selected temporary directory path.")
+ZCL_CAPABILITY_SYMBOL("GetVolumeInformationByHandleW", CAP_FS_READ,
+    "Reads filesystem and volume properties through an acquired handle.")
 ZCL_CAPABILITY_SYMBOL("MapViewOfFile", CAP_FS_READ, "Windows mmap family.")
 ZCL_CAPABILITY_SYMBOL("ReadDirectoryChangesW", CAP_FS_READ,
     "Observes changes below a directory handle.")
 ZCL_CAPABILITY_SYMBOL("ReadFile", CAP_FS_READ, "Reads an arbitrary handle.")
-ZCL_CAPABILITY_SYMBOL("ReOpenFile", CAP_FS_READ,
-    "The desired-access flags are invisible to nm.")
 ZCL_CAPABILITY_SYMBOL("SetFilePointerEx", CAP_FS_READ,
     "Windows lseek family; writing remains carried by WriteFile.")
 ZCL_CAPABILITY_SYMBOL("SHGetFolderPathA", CAP_FS_READ,
