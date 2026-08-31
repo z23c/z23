@@ -20,12 +20,16 @@
  *      1 MiB SHA3 chunks, deterministic roots, and fail-closed parsing.
  *  13. content.v2 swarm codec: bounded announce/want/data/cancel frames and
  *      manifest/chunk verification tied to the exact package root.
+ *  14. cached and uncached manifests have identical bytes and tree roots,
+ *      including a same-size, restored-mtime edit invalidated by changed
+ *      ctime.
  *
  * All work happens under ./test-tmp/ (project no-/tmp convention). */
 
 #include "test/test_core.h"
 #include "test/public_shape_fixture.h"
 
+#include "platform/private_directory.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_commit.h"
 #include "vcs/vcs_index.h"
@@ -1144,6 +1148,99 @@ static bool manifest_has_path(const struct vcs_manifest *manifest,
     return false;
 }
 
+static bool vc_manifest_bytes_and_root_equal(
+    const struct vcs_manifest *left, const struct vcs_manifest *right)
+{
+    uint8_t *left_bytes = NULL, *right_bytes = NULL;
+    size_t left_len = 0, right_len = 0;
+    uint8_t left_root[32], right_root[32];
+    bool ok = vcs_manifest_serialize(left, &left_bytes, &left_len) &&
+        vcs_manifest_serialize(right, &right_bytes, &right_len) &&
+        vcs_manifest_tree_hash(left, left_root) &&
+        vcs_manifest_tree_hash(right, right_root) &&
+        left_len == right_len &&
+        memcmp(left_bytes, right_bytes, left_len) == 0 &&
+        memcmp(left_root, right_root, sizeof(left_root)) == 0;
+    free(right_bytes);
+    free(left_bytes);
+    return ok;
+}
+
+static int t_manifest_stat_cache_identity(const char *dir)
+{
+    int failures = 0;
+    vc_write(dir, "src/cache.c", "cache-one\n");
+    vc_write(dir, "docs/cache.md", "cache-doc\n");
+
+    char index_dir[4096];
+    int index_dir_len = snprintf(index_dir, sizeof(index_dir), "%s/.zvcs", dir);
+    bool index_dir_ok = index_dir_len > 0 &&
+        (size_t)index_dir_len < sizeof(index_dir) &&
+        platform_private_directory_ensure(index_dir);
+    VC_CHECK("cache identity: private index directory is established",
+             index_dir_ok);
+
+    struct vcs_index *index = index_dir_ok ? vcs_index_open(dir) : NULL;
+    VC_CHECK("cache identity: index opens", index != NULL);
+    if (!index) return failures + 1;
+
+    struct vcs_manifest uncached = {0}, cached = {0}, warm = {0};
+    bool uncached_ok = vcs_manifest_build(dir, NULL, &uncached);
+    bool cached_ok = vcs_manifest_build(dir, index, &cached);
+    bool warm_ok = vcs_manifest_build(dir, index, &warm);
+    VC_CHECK("cache identity: cached and uncached builds succeed",
+             uncached_ok && cached_ok && warm_ok);
+    VC_CHECK("cache identity: canonical manifests and roots match",
+             uncached_ok && cached_ok && warm_ok &&
+             vc_manifest_bytes_and_root_equal(&uncached, &cached) &&
+             vc_manifest_bytes_and_root_equal(&uncached, &warm));
+
+#if !defined(_WIN32)
+    char path[4096];
+    int path_len = snprintf(path, sizeof(path), "%s/src/cache.c", dir);
+    struct stat before = {0}, after = {0};
+    bool captured = path_len > 0 && (size_t)path_len < sizeof(path) &&
+        stat(path, &before) == 0;
+    bool rewrote = captured && vc_write(dir, "src/cache.c", "cache-two\n");
+    const struct timespec restore_times[2] = {
+        before.st_atim, before.st_mtim,
+    };
+    bool restored = rewrote &&
+        utimensat(AT_FDCWD, path, restore_times, 0) == 0 &&
+        stat(path, &after) == 0;
+    bool cache_key_changed = restored && before.st_size == after.st_size &&
+        before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+        before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+        (before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+         before.st_ctim.tv_nsec != after.st_ctim.tv_nsec);
+    VC_CHECK("cache identity: same-size edit restores mtime but changes ctime",
+             cache_key_changed);
+
+    struct vcs_manifest edited_cached = {0}, edited_uncached = {0};
+    bool edited_cached_ok = cache_key_changed &&
+        vcs_manifest_build(dir, index, &edited_cached);
+    bool edited_uncached_ok = cache_key_changed &&
+        vcs_manifest_build(dir, NULL, &edited_uncached);
+    uint8_t old_root[32], edited_root[32];
+    bool old_root_ok = warm_ok && vcs_manifest_tree_hash(&warm, old_root);
+    bool edited_root_ok = vcs_manifest_tree_hash(&edited_cached, edited_root);
+    VC_CHECK("cache identity: ctime invalidates restored-mtime cache entry",
+             edited_cached_ok && edited_uncached_ok && old_root_ok &&
+             edited_root_ok &&
+             memcmp(old_root, edited_root, sizeof(old_root)) != 0 &&
+             vc_manifest_bytes_and_root_equal(&edited_cached,
+                                              &edited_uncached));
+    vcs_manifest_free(&edited_uncached);
+    vcs_manifest_free(&edited_cached);
+#endif /* !defined(_WIN32) */
+
+    vcs_manifest_free(&warm);
+    vcs_manifest_free(&cached);
+    vcs_manifest_free(&uncached);
+    vcs_index_close(index);
+    return failures;
+}
+
 static int t_generated_paths_ignored(const char *dir)
 {
     int failures = 0;
@@ -2065,6 +2162,10 @@ int test_vcs_core(void)
     failures += t_commit_record();
 
     char dir[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "manifest_cache");
+    failures += t_manifest_stat_cache_identity(dir);
+    test_rm_rf_recursive(dir);
 
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "objstore");
     failures += t_object_store(dir);

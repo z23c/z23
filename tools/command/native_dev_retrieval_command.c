@@ -10,10 +10,12 @@
 #include "codeindex/codeindex.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "retrieval/retrieval.h"
 #include "services/zcode_goal_context_service.h"
 #include "sha3/sha3.h"
+#include "vcs/vcs_index.h"
 #include "vcs/vcs_manifest.h"
 
 #include <limits.h>
@@ -253,11 +255,11 @@ static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank,
     return ok;
 }
 
-static bool rb_manifest_capture(const char *workspace,
+static bool rb_manifest_capture(const char *workspace, struct vcs_index *index,
                                 struct vcs_manifest *manifest,
                                 uint8_t root[32])
 {
-    if (!vcs_manifest_build(workspace, NULL, manifest)) {
+    if (!vcs_manifest_build(workspace, index, manifest)) {
         LOG_ERROR(RB_TAG, "manifest build failed for %s", workspace);
         return false;
     }
@@ -267,6 +269,22 @@ static bool rb_manifest_capture(const char *workspace,
         return false;
     }
     return true;
+}
+
+static struct vcs_index *rb_index_open(const char *workspace)
+{
+    char cache_dir[PATH_MAX];
+    int n = snprintf(cache_dir, sizeof(cache_dir), "%s/.zvcs", workspace);
+    if (n <= 0 || (size_t)n >= sizeof(cache_dir)) {
+        LOG_ERROR(RB_TAG, "ZVCS cache path is too long for %s", workspace);
+        return NULL;
+    }
+    if (!platform_private_directory_ensure(cache_dir)) {
+        LOG_ERROR(RB_TAG, "could not establish private ZVCS cache at %s",
+                  cache_dir);
+        return NULL;
+    }
+    return vcs_index_open(workspace);
 }
 
 static bool rb_workspace(const struct json_value *input, char out[PATH_MAX])
@@ -395,7 +413,14 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
 
     struct vcs_manifest pre = {0};
     uint8_t pre_root[32];
-    if (!rb_manifest_capture(workspace, &pre, pre_root)) {
+    struct vcs_index *index = rb_index_open(workspace);
+    if (!index) {
+        rb_fail(reply, "SOURCE_CAPTURE_FAILED", "capture",
+                "could not open the ZVCS stat cache", workspace);
+        return false;
+    }
+    if (!rb_manifest_capture(workspace, index, &pre, pre_root)) {
+        vcs_index_close(index);
         rb_fail(reply, "SOURCE_CAPTURE_FAILED", "capture",
                 "could not build the pre-run ZVCS manifest", workspace);
         return false;
@@ -403,6 +428,7 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
     zcl_hex_encode(pre_root, sizeof(pre_root), computed->pre_hex);
     if (memcmp(expected, pre_root, sizeof(expected)) != 0) {
         vcs_manifest_free(&pre);
+        vcs_index_close(index);
         rb_fail(reply, "SOURCE_ROOT_MISMATCH", "bind",
                 "expected source root does not match the pre-run manifest",
                 computed->pre_hex);
@@ -418,6 +444,7 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
     codeindex_close(ci);
     if (!ranked) {
         vcs_manifest_free(&pre);
+        vcs_index_close(index);
         rb_fail(reply, "RANKING_FAILED", "rank",
                 "literal or BM25 ranking could not be sealed", workspace);
         return false;
@@ -425,10 +452,11 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
 
     struct vcs_manifest post = {0};
     uint8_t post_root[32];
-    if (!rb_manifest_capture(workspace, &post, post_root) ||
+    if (!rb_manifest_capture(workspace, index, &post, post_root) ||
         memcmp(pre_root, post_root, sizeof(pre_root)) != 0) {
         vcs_manifest_free(&pre);
         vcs_manifest_free(&post);
+        vcs_index_close(index);
         rb_fail(reply, "SOURCE_CHANGED_DURING_BENCHMARK", "bind",
                 "the ZVCS manifest changed while rankings were computed",
                 workspace);
@@ -436,6 +464,7 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
     }
     vcs_manifest_free(&post);
     vcs_manifest_free(&pre);
+    vcs_index_close(index);
     zcl_hex_encode(post_root, sizeof(post_root), computed->post_hex);
     zcl_hex_encode(codeindex_root, sizeof(codeindex_root),
                    computed->codeindex_hex);

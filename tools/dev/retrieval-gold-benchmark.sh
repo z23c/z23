@@ -5,6 +5,19 @@
 set -euo pipefail
 export LC_ALL=C
 
+# vcs_manifest_v1 binds raw st_mode permission bits.  Git applies the caller's
+# umask when it materializes a linked worktree, so an ambient 0002 checkout
+# (0664/0775) has a different exact root from the reviewed 0022 checkout
+# (0644/0755).  Fix the materialization environment before creating any
+# historical epoch; the pinned task roots then prove this rail stayed active.
+readonly historical_checkout_umask=0022
+umask "$historical_checkout_umask"
+[[ $(umask) = "$historical_checkout_umask" ]] || {
+    printf 'retrieval-gold-benchmark: FAIL — cannot establish historical checkout umask %s\n' \
+        "$historical_checkout_umask" >&2
+    exit 1
+}
+
 repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
 corpus=${ZCL_RETRIEVAL_GOLD_CORPUS:-$repo_root/docs/work/RETRIEVAL_GOLD_CORPUS.jsonl}
 corpus_check=${ZCL_RETRIEVAL_GOLD_CHECK:-$repo_root/tools/dev/retrieval-gold-corpus-check.sh}
