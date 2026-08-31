@@ -240,6 +240,7 @@ static int sg_canonical_work_projection(void)
         ASSERT(zcl_hex_decode_lower(facts.build_output_root,
                                     expected, sizeof(expected)));
         ASSERT(memcmp(events[3].scene_root, expected, 32) == 0);
+        ASSERT(memcmp(events[4].scene_root, expected, 32) == 0);
         ASSERT(zcl_hex_decode_lower(facts.proof_action_root,
                                     expected, sizeof(expected)));
         ASSERT(memcmp(events[3].action_root, expected, 32) == 0);
@@ -268,6 +269,16 @@ static int sg_canonical_work_projection(void)
         ASSERT(zcl_story_graph_from_work_facts(
             &facts, changed_events, &changed_graph));
         ASSERT(changed_events[3].status == ZCL_ONTOLOGY_INCOMPLETE);
+
+        facts.build_result = "passed";
+        facts.build_output_root = "";
+        ASSERT(zcl_story_graph_from_work_facts(
+            &facts, changed_events, &changed_graph));
+        ASSERT(changed_events[3].status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(changed_events[4].status == ZCL_ONTOLOGY_PROVED);
+        ASSERT(zcl_hex_decode_lower(facts.candidate_source_root,
+                                    expected, sizeof(expected)));
+        ASSERT(memcmp(changed_events[4].scene_root, expected, 32) == 0);
 
         facts.agent_context_root = "";
         facts.agent_context_ambiguous = true;

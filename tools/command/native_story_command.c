@@ -154,8 +154,7 @@ bool zcl_story_graph_from_work_facts(
                      source, task, scene, task, relation, evidence,
                      events[1].event_root);
 
-    story_pick_root(build_output, output, scene);
-    story_pick_root(scene, candidate_source, scene);
+    story_pick_root(build_output, candidate_source, scene);
     story_pick_root(scene, source, scene);
     story_pick_root(proof_action, action, relation);
     story_pick_root(relation, task, relation);
@@ -170,8 +169,8 @@ bool zcl_story_graph_from_work_facts(
                      build_status, source, task, scene, task, relation,
                      evidence, events[2].event_root);
 
-    story_pick_root(proof_set, output, scene);
-    story_pick_root(scene, task, scene);
+    story_pick_root(build_output, candidate_source, scene);
+    story_pick_root(scene, source, scene);
     story_pick_root(proof_action, action, relation);
     story_pick_root(relation, task, relation);
     story_pick_root(proof_set, receipt, evidence);
