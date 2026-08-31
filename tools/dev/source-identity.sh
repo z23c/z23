@@ -37,6 +37,17 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$ROOT"
 
+# The native helper replaces hundreds of stat/sha256sum children without
+# becoming an availability dependency. A missing or stale helper is rebuilt
+# atomically when a C23 compiler is present; otherwise capture retains the
+# byte-identical coreutils/portable implementation below.
+SOURCE_IDENTITY_BATCH=""
+if [ "${ZCL_SOURCE_IDENTITY_BATCH_DISABLE:-0}" != 1 ]; then
+    SOURCE_IDENTITY_BATCH="$($SELF_DIR/source-identity-batch-bootstrap.sh \
+        2>/dev/null || true)"
+    [ -x "$SOURCE_IDENTITY_BATCH" ] || SOURCE_IDENTITY_BATCH=""
+fi
+
 # Optional host-local, per-Make-invocation memoization for capture-record and
 # verify-record (see capture_record_cached() below). One plain `make
 # build-only` or `make t-fast` calls one of those two modes 4-5 times even
@@ -566,12 +577,33 @@ capture_batched()
 
     if [ "${#existing_paths[@]}" -gt 0 ]; then
         : > "$WORK/modes"
-        for ((batch_start = 0; batch_start < ${#existing_paths[@]};
-              batch_start += batch_size)); do
-            batch=("${existing_paths[@]:batch_start:batch_size}")
-            stat -c '%f' -- "${batch[@]}" >> "$WORK/modes" 2>/dev/null ||
+        if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+            printf '%s\0' "${existing_paths[@]}" > "$WORK/mode-paths"
+            "$SOURCE_IDENTITY_BATCH" mode < "$WORK/mode-paths" \
+                > "$WORK/modes" ||
                 fail "dirty source changed while collecting file modes"
-        done
+            if [ "${ZCL_SOURCE_IDENTITY_BATCH_SHADOW:-0}" = 1 ]; then
+                : > "$WORK/modes.legacy"
+                for ((batch_start = 0;
+                      batch_start < ${#existing_paths[@]};
+                      batch_start += batch_size)); do
+                    batch=("${existing_paths[@]:batch_start:batch_size}")
+                    stat -c '%f' -- "${batch[@]}" \
+                        >> "$WORK/modes.legacy" 2>/dev/null ||
+                        fail "legacy file-mode shadow failed"
+                done
+                cmp -s "$WORK/modes" "$WORK/modes.legacy" ||
+                    fail "native and legacy file-mode batches differ"
+            fi
+        else
+            for ((batch_start = 0; batch_start < ${#existing_paths[@]};
+                  batch_start += batch_size)); do
+                batch=("${existing_paths[@]:batch_start:batch_size}")
+                stat -c '%f' -- "${batch[@]}" >> "$WORK/modes" \
+                    2>/dev/null ||
+                    fail "dirty source changed while collecting file modes"
+            done
+        fi
         mapfile -t existing_modes < "$WORK/modes"
         [ "${#existing_modes[@]}" -eq "${#existing_paths[@]}" ] ||
             fail "file-mode batch was incomplete"
@@ -579,12 +611,32 @@ capture_batched()
 
     if [ "${#regular_paths[@]}" -gt 0 ]; then
         : > "$WORK/hashes"
-        for ((batch_start = 0; batch_start < ${#regular_paths[@]};
-              batch_start += batch_size)); do
-            batch=("${regular_paths[@]:batch_start:batch_size}")
-            sha256sum --zero -- "${batch[@]}" >> "$WORK/hashes" ||
+        if [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+            printf '%s\0' "${regular_paths[@]}" > "$WORK/hash-paths"
+            "$SOURCE_IDENTITY_BATCH" hash < "$WORK/hash-paths" \
+                > "$WORK/hashes" ||
                 fail "dirty source changed while hashing regular files"
-        done
+            if [ "${ZCL_SOURCE_IDENTITY_BATCH_SHADOW:-0}" = 1 ]; then
+                : > "$WORK/hashes.legacy"
+                for ((batch_start = 0;
+                      batch_start < ${#regular_paths[@]};
+                      batch_start += batch_size)); do
+                    batch=("${regular_paths[@]:batch_start:batch_size}")
+                    sha256sum --zero -- "${batch[@]}" \
+                        >> "$WORK/hashes.legacy" ||
+                        fail "legacy regular-file hash shadow failed"
+                done
+                cmp -s "$WORK/hashes" "$WORK/hashes.legacy" ||
+                    fail "native and legacy regular-file hash batches differ"
+            fi
+        else
+            for ((batch_start = 0; batch_start < ${#regular_paths[@]};
+                  batch_start += batch_size)); do
+                batch=("${regular_paths[@]:batch_start:batch_size}")
+                sha256sum --zero -- "${batch[@]}" >> "$WORK/hashes" ||
+                    fail "dirty source changed while hashing regular files"
+            done
+        fi
         while IFS= read -r -d '' record; do
             [ "$hash_i" -lt "${#regular_paths[@]}" ] ||
                 fail "regular-file hash batch returned extra rows"
@@ -649,6 +701,11 @@ capture_batched()
 capture()
 {
     local help
+    if [ "${ZCL_SOURCE_IDENTITY_FORCE_PORTABLE:-0}" != 1 ] &&
+       [ -n "$SOURCE_IDENTITY_BATCH" ]; then
+        capture_batched
+        return
+    fi
     if [ "${ZCL_SOURCE_IDENTITY_FORCE_PORTABLE:-0}" != 1 ] &&
        command -v sha256sum >/dev/null 2>&1; then
         help="$(sha256sum --help 2>/dev/null || true)"

@@ -18,6 +18,8 @@
  * USAGE — transparent wrapper, exec-compatible with the compiler:
  *     zcc cc -O2 -c foo.c -o foo.o
  *     zcc cc -O2 a.c b.c -o build/bin/tool -lm
+ *     zcc --epoch-object dep OUTPUT SOURCE SOURCE_ID COMPLETE MUTATION \
+ *         EPOCH COMPILER_ID SESSION -- cc [args...]
  *     zcc --zcc-stats | --zcc-clear | --zcc-trim [MB]
  *
  * THE KEY. Two levels, both SHA3-256.
@@ -540,6 +542,17 @@ static void plan_build(struct plan *pl, int argc, char **argv)
             pl->dep_path = pl->dep_buf;
         }
     }
+}
+
+static void plan_free(struct plan *pl)
+{
+    for (int i = 0; i < pl->rsp_n; i++)
+        free(pl->rsp[i]);
+    free(pl->rsp);
+    free(pl->libdir);
+    free(pl->blob);
+    free(pl->src);
+    memset(pl, 0, sizeof *pl);
 }
 
 /* ── keying ──────────────────────────────────────────────────────────── */
@@ -1993,6 +2006,880 @@ static void logline(const char *disposition, const char *detail,
     close(fd);
 }
 
+/* ── native compile-epoch object publication ────────────────────────── */
+
+struct epoch_authority {
+    struct stat stamp;
+    struct stat epoch_stamp;
+    struct stat object_root_stamp;
+    struct stat admission_dir_stamp;
+    int epoch_fd;
+    int object_root_fd;
+    int admission_dir_fd;
+    int session_parent_fd;
+    int session_fd;
+    char epoch_path[PATH_MAX];
+    char object_root_path[PATH_MAX];
+    char admission_lock_name[NAME_MAX + 1u];
+    char session_leaf[NAME_MAX + 1u];
+    char unverified[512];
+    size_t unverified_len;
+};
+
+struct epoch_artifacts {
+    struct stat parent_stamp;
+    struct stat staging_stamp;
+    int parent_fd;
+    int staging_fd;
+    char parent_relative[PATH_MAX];
+    char parent_path[PATH_MAX];
+    char staging_name[NAME_MAX + 1u];
+    char object_name[NAME_MAX + 1u];
+    char dep_name[NAME_MAX + 1u];
+    char note_name[NAME_MAX + 1u];
+    char record_name[NAME_MAX + 1u];
+    char lock_name[NAME_MAX + 1u];
+    char depfile[PATH_MAX];
+    char object[PATH_MAX];
+    char note[PATH_MAX];
+};
+
+static int epoch_fail(const char *message)
+{
+    fprintf(stderr, "zcc --epoch-object: %s\n", message);
+    return 2;
+}
+
+static bool epoch_is_sha256(const char *value)
+{
+    if (!value || strlen(value) != 64u)
+        return false;
+    for (size_t i = 0; i < 64u; i++) {
+        if (!((value[i] >= '0' && value[i] <= '9') ||
+              (value[i] >= 'a' && value[i] <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+static bool epoch_same_stamp(const struct stat *a, const struct stat *b)
+{
+    bool same = a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+                a->st_size == b->st_size;
+#if defined(__APPLE__)
+    return same && a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
+           a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+           a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
+           a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#else
+    return same && a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+           a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
+           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+}
+
+static bool epoch_same_identity(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
+}
+
+static bool epoch_session_bytes(const struct buf *text, const char *source_id,
+                                const char *complete, const char *mutation,
+                                const char *compiler_id, const char *epoch)
+{
+    char fixed[512];
+    int n = snprintf(fixed, sizeof fixed,
+                     "schema=zcl.build_epoch_session.v1\n"
+                     "source_id=%s\ncomplete=%s\nmutation=%s\n"
+                     "compiler_id=%s\nepoch=%s\nprofile=",
+                     source_id, complete, mutation, compiler_id, epoch);
+    if (n <= 0 || n >= (int)sizeof fixed || text->len <= (size_t)n ||
+        memcmp(text->p, fixed, (size_t)n) != 0)
+        return false;
+    const unsigned char *profile = text->p + (size_t)n;
+    const unsigned char *newline = memchr(profile, '\n',
+                                           text->len - (size_t)n);
+    if (!newline || newline == profile)
+        return false;
+    static const char flags[] = "flags_sha256=";
+    const unsigned char *value = newline + 1u;
+    size_t remaining = text->len - (size_t)(value - text->p);
+    if (remaining != sizeof flags - 1u + 64u + 1u ||
+        memcmp(value, flags, sizeof flags - 1u) != 0 ||
+        value[remaining - 1u] != '\n')
+        return false;
+    char digest[65];
+    memcpy(digest, value + sizeof flags - 1u, 64u);
+    digest[64] = '\0';
+    return epoch_is_sha256(digest);
+}
+
+static bool epoch_read_fd(int fd, struct buf *text, struct stat *stamp)
+{
+    struct stat before;
+    bool ok = lseek(fd, 0, SEEK_SET) == 0 && fstat(fd, &before) == 0 &&
+              S_ISREG(before.st_mode);
+    unsigned char chunk[4096];
+    while (ok) {
+        ssize_t n = read(fd, chunk, sizeof chunk);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0) {
+            ok = false;
+            break;
+        }
+        if (n == 0)
+            break;
+        ok = text->len + (size_t)n <= 65536u &&
+             buf_add(text, chunk, (size_t)n);
+    }
+    struct stat after;
+    ok = ok && fstat(fd, &after) == 0 && epoch_same_stamp(&before, &after);
+    if (ok) {
+        *stamp = after;
+        return true;
+    }
+    return false;
+}
+
+static bool epoch_component(const char *part, size_t length,
+                            char name[NAME_MAX + 1u])
+{
+    if (length == 0u || length > NAME_MAX ||
+        (length == 1u && part[0] == '.') ||
+        (length == 2u && part[0] == '.' && part[1] == '.'))
+        return false;
+    memcpy(name, part, length);
+    name[length] = '\0';
+    return true;
+}
+
+static int epoch_dup_cloexec(int fd)
+{
+    int copy = dup(fd);
+    if (copy >= 0 && fcntl(copy, F_SETFD, FD_CLOEXEC) != 0) {
+        close(copy);
+        return -1;
+    }
+    return copy;
+}
+
+static int epoch_open_relative_dir(int root_fd, const char *relative,
+                                   bool create)
+{
+    int current = epoch_dup_cloexec(root_fd);
+    if (current < 0)
+        return -1;
+    const char *part = relative;
+    while (*part) {
+        const char *slash = strchr(part, '/');
+        size_t length = slash ? (size_t)(slash - part) : strlen(part);
+        char name[NAME_MAX + 1u];
+        if (!epoch_component(part, length, name)) {
+            close(current);
+            errno = EINVAL;
+            return -1;
+        }
+        int next = openat(current, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+                                          O_CLOEXEC);
+        if (next < 0 && create && errno == ENOENT) {
+            if (mkdirat(current, name, 0700) != 0 && errno != EEXIST) {
+                close(current);
+                return -1;
+            }
+            next = openat(current, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+                                          O_CLOEXEC);
+        }
+        close(current);
+        if (next < 0)
+            return -1;
+        current = next;
+        if (!slash)
+            break;
+        part = slash + 1u;
+        if (!*part) {
+            close(current);
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    return current;
+}
+
+static int epoch_open_path_dir(const char *path)
+{
+    int root = open(path[0] == '/' ? "/" : ".",
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root < 0)
+        return -1;
+    const char *relative = path + (path[0] == '/');
+    int result = epoch_open_relative_dir(root, relative, false);
+    close(root);
+    return result;
+}
+
+static bool epoch_path_root(const char *path, const char *epoch,
+                            size_t *root_len)
+{
+    char needle[80];
+    if (snprintf(needle, sizeof needle, "epochs/%s/", epoch) >=
+        (int)sizeof needle)
+        return false;
+    const char *match = strstr(path, needle);
+    while (match && match != path && match[-1] != '/')
+        match = strstr(match + 1, needle);
+    if (!match)
+        return false;
+    *root_len = (size_t)(match - path) + strlen(needle) - 1u;
+    return path[*root_len] == '/';
+}
+
+static bool epoch_path_parts(const char *path)
+{
+    const char *part = path + (path[0] == '/');
+    while (*part) {
+        const char *slash = strchr(part, '/');
+        size_t length = slash ? (size_t)(slash - part) : strlen(part);
+        char name[NAME_MAX + 1u];
+        if (!epoch_component(part, length, name))
+            return false;
+        if (!slash)
+            return true;
+        part = slash + 1u;
+    }
+    return false;
+}
+
+static bool epoch_paths_contained(const char *output, const char *session,
+                                  const char *epoch)
+{
+    size_t output_root = 0, session_root = 0;
+    return epoch_path_root(output, epoch, &output_root) &&
+           epoch_path_root(session, epoch, &session_root) &&
+           output_root == session_root &&
+           memcmp(output, session, output_root) == 0 &&
+           epoch_path_parts(output) && epoch_path_parts(session);
+}
+
+static bool epoch_split_output(const char *output, char dir[PATH_MAX],
+                               const char **base)
+{
+    if (snprintf(dir, PATH_MAX, "%s", output) >= PATH_MAX)
+        return false;
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        *base = output;
+        snprintf(dir, PATH_MAX, ".");
+        return output[0] != '\0';
+    }
+    *base = strrchr(output, '/') + 1;
+    if (!(*base)[0])
+        return false;
+    if (slash == dir)
+        slash[1] = '\0';
+    else
+        *slash = '\0';
+    return true;
+}
+
+static bool epoch_split_relative(const char *path, char parent[PATH_MAX],
+                                 char leaf[NAME_MAX + 1u])
+{
+    if (snprintf(parent, PATH_MAX, "%s", path) >= PATH_MAX)
+        return false;
+    char *slash = strrchr(parent, '/');
+    const char *base = slash ? slash + 1u : parent;
+    if (!epoch_component(base, strlen(base), leaf))
+        return false;
+    if (slash)
+        *slash = '\0';
+    else
+        parent[0] = '\0';
+    return true;
+}
+
+static void epoch_authority_close(struct epoch_authority *authority)
+{
+    if (authority->session_fd >= 0)
+        close(authority->session_fd);
+    if (authority->session_parent_fd >= 0)
+        close(authority->session_parent_fd);
+    if (authority->epoch_fd >= 0)
+        close(authority->epoch_fd);
+    if (authority->admission_dir_fd >= 0)
+        close(authority->admission_dir_fd);
+    if (authority->object_root_fd >= 0)
+        close(authority->object_root_fd);
+    authority->session_fd = -1;
+    authority->session_parent_fd = authority->epoch_fd = -1;
+    authority->admission_dir_fd = authority->object_root_fd = -1;
+}
+
+static bool epoch_authority_open(const char *output, const char *session,
+                                 const char *source_id, const char *complete,
+                                 const char *mutation, const char *compiler_id,
+                                 const char *epoch,
+                                 struct epoch_authority *authority)
+{
+    size_t root_len = 0;
+    memset(authority, 0, sizeof *authority);
+    authority->epoch_fd = authority->session_parent_fd = -1;
+    authority->session_fd = authority->object_root_fd = -1;
+    authority->admission_dir_fd = -1;
+    int marker_len = snprintf(
+        authority->unverified, sizeof authority->unverified,
+        "schema=zcl.build_epoch_unverified.v1\n"
+        "source_id=%s\nmutation=%s\ncompiler_id=%s\nepoch=%s\n",
+        source_id, mutation, compiler_id, epoch);
+    if (marker_len <= 0 || marker_len >= (int)sizeof authority->unverified)
+        return false;
+    authority->unverified_len = (size_t)marker_len;
+    if (!epoch_path_root(output, epoch, &root_len) || root_len >= PATH_MAX)
+        return false;
+    memcpy(authority->epoch_path, output, root_len);
+    authority->epoch_path[root_len] = '\0';
+    size_t epoch_suffix_len = strlen(epoch) + strlen("/epochs/");
+    if (root_len < epoch_suffix_len)
+        return false;
+    size_t object_root_len = root_len - epoch_suffix_len;
+    if (object_root_len == 0u) {
+        if (output[0] == '/')
+            memcpy(authority->object_root_path, "/", 2u);
+        else
+            memcpy(authority->object_root_path, ".", 2u);
+    } else {
+        memcpy(authority->object_root_path, output, object_root_len);
+        authority->object_root_path[object_root_len] = '\0';
+    }
+    authority->object_root_fd = epoch_open_path_dir(
+        authority->object_root_path);
+    char epoch_relative[NAME_MAX + 9u];
+    if (snprintf(epoch_relative, sizeof epoch_relative, "epochs/%s", epoch) >=
+        (int)sizeof epoch_relative || authority->object_root_fd < 0)
+        goto fail;
+    authority->epoch_fd = epoch_open_relative_dir(
+        authority->object_root_fd, epoch_relative, false);
+    authority->admission_dir_fd = epoch_open_relative_dir(
+        authority->object_root_fd, ".epoch-admission", true);
+    if (authority->epoch_fd < 0 || authority->admission_dir_fd < 0 ||
+        fstat(authority->object_root_fd, &authority->object_root_stamp) != 0 ||
+        fstat(authority->epoch_fd, &authority->epoch_stamp) != 0 ||
+        fstat(authority->admission_dir_fd,
+              &authority->admission_dir_stamp) != 0)
+        goto fail;
+    if (snprintf(authority->admission_lock_name,
+                 sizeof authority->admission_lock_name, "%s.lock", epoch) >=
+        (int)sizeof authority->admission_lock_name)
+        goto fail;
+    const char *session_relative = session + root_len + 1u;
+    char session_parent[PATH_MAX];
+    if (!epoch_split_relative(session_relative, session_parent,
+                              authority->session_leaf))
+        goto fail;
+    authority->session_parent_fd = epoch_open_relative_dir(
+        authority->epoch_fd, session_parent, false);
+    if (authority->session_parent_fd < 0)
+        goto fail;
+    authority->session_fd = openat(authority->session_parent_fd,
+                                    authority->session_leaf,
+                                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (authority->session_fd < 0)
+        goto fail;
+    struct buf text = { 0 };
+    bool ok = epoch_read_fd(authority->session_fd, &text, &authority->stamp) &&
+              text.len != 0u && memchr(text.p, '\0', text.len) == NULL &&
+              epoch_session_bytes(&text, source_id, complete, mutation,
+                                  compiler_id, epoch);
+    buf_free(&text);
+    if (ok)
+        return true;
+fail:
+    epoch_authority_close(authority);
+    return false;
+}
+
+static bool epoch_lookup_same(int parent_fd, const char *name,
+                              const struct stat *expected)
+{
+    struct stat now;
+    return fstatat(parent_fd, name, &now, AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(now.st_mode) && epoch_same_stamp(expected, &now);
+}
+
+static bool epoch_authority_current(const struct epoch_authority *authority)
+{
+    struct stat session_now, epoch_now, object_root_now, admission_now;
+    int object_root = epoch_open_path_dir(authority->object_root_path);
+    int root = epoch_open_path_dir(authority->epoch_path);
+    int admission = epoch_open_relative_dir(authority->object_root_fd,
+                                            ".epoch-admission", false);
+    bool root_ok = object_root >= 0 &&
+                   fstat(object_root, &object_root_now) == 0 &&
+                   epoch_same_identity(&authority->object_root_stamp,
+                                       &object_root_now) &&
+                   root >= 0 && fstat(root, &epoch_now) == 0 &&
+                   epoch_same_identity(&authority->epoch_stamp, &epoch_now) &&
+                   admission >= 0 && fstat(admission, &admission_now) == 0 &&
+                   epoch_same_identity(&authority->admission_dir_stamp,
+                                       &admission_now);
+    if (object_root >= 0)
+        close(object_root);
+    if (root >= 0)
+        close(root);
+    if (admission >= 0)
+        close(admission);
+    return root_ok && fstat(authority->session_fd, &session_now) == 0 &&
+           S_ISREG(session_now.st_mode) &&
+           epoch_same_stamp(&authority->stamp, &session_now) &&
+           epoch_lookup_same(authority->session_parent_fd,
+                             authority->session_leaf, &authority->stamp);
+}
+
+static bool epoch_names(const char *base, struct epoch_artifacts *artifacts)
+{
+    char stem[NAME_MAX + 1u];
+    if (snprintf(stem, sizeof stem, "%s", base) >= (int)sizeof stem)
+        return false;
+    size_t n = strlen(stem);
+    if (n >= 2u && strcmp(stem + n - 2u, ".o") == 0)
+        stem[n - 2u] = '\0';
+    return snprintf(artifacts->object_name, sizeof artifacts->object_name,
+                    "%s", base) < (int)sizeof artifacts->object_name &&
+           snprintf(artifacts->dep_name, sizeof artifacts->dep_name, "%s.d",
+                    stem) < (int)sizeof artifacts->dep_name &&
+           snprintf(artifacts->note_name, sizeof artifacts->note_name,
+                    "%s.gcno", stem) < (int)sizeof artifacts->note_name &&
+           snprintf(artifacts->record_name, sizeof artifacts->record_name,
+                    "%s.gcno-path", stem) <
+               (int)sizeof artifacts->record_name &&
+           snprintf(artifacts->lock_name, sizeof artifacts->lock_name,
+                    "%s.lock", base) < (int)sizeof artifacts->lock_name;
+}
+
+static bool epoch_fd_path(int fd, const char *name, char path[PATH_MAX])
+{
+#if defined(__APPLE__)
+    return snprintf(path, PATH_MAX, "/dev/fd/%d/%s", fd, name) < PATH_MAX;
+#else
+    return snprintf(path, PATH_MAX, "/proc/self/fd/%d/%s", fd, name) <
+           PATH_MAX;
+#endif
+}
+
+static bool epoch_make_staging(struct epoch_artifacts *artifacts)
+{
+    for (unsigned int attempt = 0; attempt < 128u; attempt++) {
+        if (snprintf(artifacts->staging_name, sizeof artifacts->staging_name,
+                     ".zcc-epoch.%ld.%u", (long)getpid(), attempt) >=
+            (int)sizeof artifacts->staging_name)
+            return false;
+        if (mkdirat(artifacts->parent_fd, artifacts->staging_name, 0700) == 0)
+            break;
+        if (errno != EEXIST || attempt == 127u)
+            return false;
+    }
+    artifacts->staging_fd = openat(artifacts->parent_fd,
+                                    artifacts->staging_name,
+                                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    return artifacts->staging_fd >= 0 &&
+           fstat(artifacts->staging_fd, &artifacts->staging_stamp) == 0;
+}
+
+static bool epoch_stage_prepare(const char *output,
+                                const struct epoch_authority *authority,
+                                struct epoch_artifacts *artifacts)
+{
+    memset(artifacts, 0, sizeof *artifacts);
+    artifacts->parent_fd = artifacts->staging_fd = -1;
+    size_t root_len = strlen(authority->epoch_path);
+    const char *relative = output + root_len + 1u;
+    char base[NAME_MAX + 1u];
+    if (!epoch_split_relative(relative, artifacts->parent_relative, base) ||
+        !epoch_names(base, artifacts))
+        return false;
+    artifacts->parent_fd = epoch_open_relative_dir(
+        authority->epoch_fd, artifacts->parent_relative, true);
+    if (artifacts->parent_fd < 0 || !epoch_make_staging(artifacts) ||
+        fstat(artifacts->parent_fd, &artifacts->parent_stamp) != 0)
+        return false;
+    const char *ignored_base = NULL;
+    if (!epoch_split_output(output, artifacts->parent_path, &ignored_base) ||
+        !epoch_fd_path(artifacts->staging_fd, artifacts->dep_name,
+                       artifacts->depfile) ||
+        !epoch_fd_path(artifacts->staging_fd, artifacts->object_name,
+                       artifacts->object) ||
+        !epoch_fd_path(artifacts->staging_fd, artifacts->note_name,
+                       artifacts->note))
+        return false;
+    return true;
+}
+
+static int epoch_compiler_start(int argc, char **argv)
+{
+    if (argc < 14)
+        return 12;
+    struct stat self, wrapper;
+    if (stat(argv[0], &self) != 0 || !S_ISREG(self.st_mode) ||
+        stat(argv[12], &wrapper) != 0 || !S_ISREG(wrapper.st_mode))
+        return 12;
+    return self.st_dev == wrapper.st_dev && self.st_ino == wrapper.st_ino
+               ? 13 : 12;
+}
+
+static char **epoch_compiler_argv(int argc, char **argv, const char *output,
+                                  const char *source,
+                                  const struct epoch_artifacts *artifacts,
+                                  int *compiler_argc)
+{
+    int input_start = epoch_compiler_start(argc, argv);
+    int input_argc = argc - input_start;
+    char **cc = zcl_calloc((size_t)input_argc + 12u, sizeof *cc,
+                           "zcc epoch compiler argv");
+    if (!cc)
+        return NULL;
+    cc[0] = (char *)"zcc:epoch-compiler";
+    for (int i = 0; i < input_argc; i++)
+        cc[i + 1] = argv[i + input_start];
+    const char *extra[] = { "-MMD", "-MP", "-MF", artifacts->depfile,
+                            "-MT", output, "-c", "-o", artifacts->object,
+                            source };
+    for (size_t i = 0; i < sizeof extra / sizeof extra[0]; i++)
+        cc[input_argc + 1 + (int)i] = (char *)extra[i];
+    *compiler_argc = input_argc + 11;
+    return cc;
+}
+
+static bool epoch_compile_complete(int rc, bool coverage,
+                                   const struct epoch_artifacts *artifacts)
+{
+    struct stat object_st, dep_st, note_st;
+    return rc == 0 &&
+           fstatat(artifacts->staging_fd, artifacts->object_name, &object_st,
+                   AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(object_st.st_mode) && object_st.st_size > 0 &&
+           fstatat(artifacts->staging_fd, artifacts->dep_name, &dep_st,
+                   AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(dep_st.st_mode) && dep_st.st_size > 0 &&
+           (!coverage ||
+            (fstatat(artifacts->staging_fd, artifacts->note_name, &note_st,
+                     AT_SYMLINK_NOFOLLOW) == 0 &&
+             S_ISREG(note_st.st_mode) && note_st.st_size > 0));
+}
+
+static bool epoch_stage_current(const struct epoch_authority *authority,
+                                const struct epoch_artifacts *artifacts)
+{
+    struct stat parent_now, staging_now, named_staging;
+    int parent = epoch_open_relative_dir(authority->epoch_fd,
+                                         artifacts->parent_relative, false);
+    bool ok = fstat(artifacts->parent_fd, &parent_now) == 0 &&
+              epoch_same_identity(&artifacts->parent_stamp, &parent_now) &&
+              parent >= 0 && fstat(parent, &parent_now) == 0 &&
+              epoch_same_identity(&artifacts->parent_stamp, &parent_now) &&
+              fstat(artifacts->staging_fd, &staging_now) == 0 &&
+              epoch_same_identity(&artifacts->staging_stamp, &staging_now) &&
+              fstatat(artifacts->parent_fd, artifacts->staging_name,
+                      &named_staging, AT_SYMLINK_NOFOLLOW) == 0 &&
+              S_ISDIR(named_staging.st_mode) &&
+              epoch_same_identity(&artifacts->staging_stamp, &named_staging);
+    if (parent >= 0)
+        close(parent);
+    return ok && epoch_authority_current(authority);
+}
+
+static int epoch_unverified_state(const struct epoch_authority *authority)
+{
+    struct stat st;
+    if (fstatat(authority->epoch_fd, ".unverified", &st,
+                AT_SYMLINK_NOFOLLOW) != 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISREG(st.st_mode))
+        return -1;
+    int fd = openat(authority->epoch_fd, ".unverified",
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct buf text = { 0 };
+    struct stat stamp;
+    bool ok = fd >= 0 && epoch_read_fd(fd, &text, &stamp) &&
+              text.len == authority->unverified_len &&
+              memcmp(text.p, authority->unverified, text.len) == 0;
+    if (fd >= 0)
+        close(fd);
+    buf_free(&text);
+    return ok ? 1 : -1;
+}
+
+static bool epoch_write_unverified(const struct epoch_authority *authority)
+{
+    char temporary[NAME_MAX + 1u];
+    int fd = -1;
+    for (unsigned int attempt = 0; attempt < 128u; attempt++) {
+        if (snprintf(temporary, sizeof temporary, ".unverified.%ld.%u",
+                     (long)getpid(), attempt) >= (int)sizeof temporary)
+            return false;
+        fd = openat(authority->epoch_fd, temporary,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    0600);
+        if (fd >= 0)
+            break;
+        if (errno != EEXIST)
+            return false;
+    }
+    if (fd < 0)
+        return false;
+    bool ok = fd >= 0 &&
+              write_all(fd, (const unsigned char *)authority->unverified,
+                        authority->unverified_len) &&
+              fsync(fd) == 0;
+    if (fd >= 0 && close(fd) != 0)
+        ok = false;
+    if (ok)
+        ok = renameat(authority->epoch_fd, temporary, authority->epoch_fd,
+                      ".unverified") == 0;
+    if (!ok)
+        (void)unlinkat(authority->epoch_fd, temporary, 0);
+    return ok;
+}
+
+static bool epoch_sync_unverified(const struct epoch_authority *authority)
+{
+    int fd = openat(authority->epoch_fd, ".unverified",
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct buf text = { 0 };
+    struct stat stamp;
+    bool ok = fd >= 0 && epoch_read_fd(fd, &text, &stamp) &&
+              text.len == authority->unverified_len &&
+              memcmp(text.p, authority->unverified, text.len) == 0 &&
+              epoch_lookup_same(authority->epoch_fd, ".unverified", &stamp) &&
+              fsync(fd) == 0;
+    if (fd >= 0 && close(fd) != 0)
+        ok = false;
+    buf_free(&text);
+    return ok;
+}
+
+static bool epoch_ensure_unverified(const struct epoch_authority *authority)
+{
+    int state = epoch_unverified_state(authority);
+    if (state != 0)
+        return state > 0;
+    return epoch_write_unverified(authority) &&
+           epoch_sync_unverified(authority) &&
+           fsync(authority->epoch_fd) == 0;
+}
+
+static bool epoch_admission_lock_current(
+    const struct epoch_authority *authority, int lock_fd)
+{
+    struct stat opened, named;
+    return fstat(lock_fd, &opened) == 0 && S_ISREG(opened.st_mode) &&
+           fstatat(authority->admission_dir_fd,
+                   authority->admission_lock_name, &named,
+                   AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(named.st_mode) && epoch_same_identity(&opened, &named);
+}
+
+static int epoch_admission_acquire(
+    const struct epoch_authority *authority,
+    const struct epoch_artifacts *artifacts)
+{
+    int lock_fd = openat(authority->admission_dir_fd,
+                         authority->admission_lock_name,
+                         O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    struct stat lock_st;
+    if (lock_fd < 0 || fstat(lock_fd, &lock_st) != 0 ||
+        !S_ISREG(lock_st.st_mode) || flock(lock_fd, LOCK_EX) != 0 ||
+        !epoch_admission_lock_current(authority, lock_fd) ||
+        !epoch_stage_current(authority, artifacts) ||
+        !epoch_ensure_unverified(authority) ||
+        !epoch_stage_current(authority, artifacts)) {
+        if (lock_fd >= 0)
+            close(lock_fd);
+        return -1;
+    }
+    return lock_fd;
+}
+
+static void epoch_remove_staging(struct epoch_artifacts *artifacts)
+{
+    if (artifacts->staging_fd >= 0) {
+        (void)unlinkat(artifacts->staging_fd, artifacts->object_name, 0);
+        (void)unlinkat(artifacts->staging_fd, artifacts->dep_name, 0);
+        (void)unlinkat(artifacts->staging_fd, artifacts->note_name, 0);
+        close(artifacts->staging_fd);
+        artifacts->staging_fd = -1;
+    }
+    if (artifacts->parent_fd >= 0 && artifacts->staging_name[0])
+        (void)unlinkat(artifacts->parent_fd, artifacts->staging_name,
+                       AT_REMOVEDIR);
+}
+
+static void epoch_artifacts_close(struct epoch_artifacts *artifacts,
+                                  bool remove_staging)
+{
+    if (remove_staging)
+        epoch_remove_staging(artifacts);
+    else if (artifacts->staging_fd >= 0)
+        close(artifacts->staging_fd);
+    if (artifacts->parent_fd >= 0)
+        close(artifacts->parent_fd);
+    artifacts->staging_fd = artifacts->parent_fd = -1;
+}
+
+static bool epoch_prepare_record(const struct epoch_artifacts *artifacts,
+                                 char temporary[NAME_MAX + 1u])
+{
+    char line[PATH_MAX + NAME_MAX + 3u];
+    if (snprintf(temporary, NAME_MAX + 1u, ".zcc-record.%ld",
+                 (long)getpid()) >= NAME_MAX + 1 ||
+        snprintf(line, sizeof line, "%s/%s/%s\n", artifacts->parent_path,
+                 artifacts->staging_name, artifacts->note_name) >=
+            (int)sizeof line)
+        return false;
+    int fd = openat(artifacts->parent_fd, temporary,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    0600);
+    bool ok = fd >= 0 &&
+              write_all(fd, (const unsigned char *)line, strlen(line));
+    if (fd >= 0 && close(fd) != 0)
+        ok = false;
+    if (!ok)
+        (void)unlinkat(artifacts->parent_fd, temporary, 0);
+    return ok;
+}
+
+static bool epoch_publish(bool coverage,
+                          const struct epoch_artifacts *artifacts)
+{
+    char record_tmp[NAME_MAX + 1u] = { 0 };
+    bool ready = !coverage ||
+                 (epoch_prepare_record(artifacts, record_tmp) &&
+                  (unlinkat(artifacts->parent_fd, artifacts->record_name, 0) ==
+                       0 ||
+                   errno == ENOENT));
+    bool published = ready &&
+                     renameat(artifacts->staging_fd, artifacts->dep_name,
+                              artifacts->parent_fd, artifacts->dep_name) == 0 &&
+                     renameat(artifacts->staging_fd, artifacts->object_name,
+                              artifacts->parent_fd,
+                              artifacts->object_name) == 0 &&
+                     (!coverage ||
+                      renameat(artifacts->parent_fd, record_tmp,
+                               artifacts->parent_fd,
+                               artifacts->record_name) == 0);
+    if (coverage && !published) {
+        (void)unlinkat(artifacts->parent_fd, record_tmp, 0);
+        (void)unlinkat(artifacts->parent_fd, artifacts->record_name, 0);
+    }
+    return published;
+}
+
+static void epoch_retract(bool coverage,
+                          const struct epoch_artifacts *artifacts)
+{
+    (void)unlinkat(artifacts->parent_fd, artifacts->object_name, 0);
+    (void)unlinkat(artifacts->parent_fd, artifacts->dep_name, 0);
+    if (coverage)
+        (void)unlinkat(artifacts->parent_fd, artifacts->record_name, 0);
+}
+
+static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass);
+
+static int epoch_compile_publish(int argc, char **argv, const char *mode,
+                                 const char *output, const char *source,
+                                 const struct epoch_authority *authority)
+{
+    struct epoch_artifacts artifacts = { 0 };
+    int lock_fd = -1;
+    if (!epoch_stage_prepare(output, authority, &artifacts)) {
+        epoch_artifacts_close(&artifacts, true);
+        return epoch_fail("could not create complete object staging paths");
+    }
+    bool coverage = strcmp(mode, "coverage") == 0;
+    if (coverage) {
+        lock_fd = openat(artifacts.parent_fd, artifacts.lock_name,
+                         O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0 ||
+            !epoch_stage_current(authority, &artifacts)) {
+            if (lock_fd >= 0)
+                close(lock_fd);
+            epoch_artifacts_close(&artifacts, true);
+            return epoch_fail("could not lock coverage object");
+        }
+    }
+    int compiler_argc = 0;
+    char **cc = epoch_compiler_argv(argc, argv, output, source, &artifacts,
+                                    &compiler_argc);
+    if (!cc) {
+        epoch_artifacts_close(&artifacts, true);
+        if (lock_fd >= 0)
+            close(lock_fd);
+        return epoch_fail("could not allocate compiler argv");
+    }
+    int rc = zcc_dispatch(compiler_argc, cc, false);
+    free(cc);
+    bool complete = epoch_compile_complete(rc, coverage, &artifacts);
+    if (!complete || !epoch_stage_current(authority, &artifacts)) {
+        epoch_artifacts_close(&artifacts, true);
+        if (lock_fd >= 0)
+            close(lock_fd);
+        if (rc != 0)
+            return rc;
+        return epoch_fail(!complete ? "compiler did not create a complete object"
+                                   : "compile authority changed during compilation");
+    }
+    int admission_fd = epoch_admission_acquire(authority, &artifacts);
+    if (admission_fd < 0) {
+        epoch_artifacts_close(&artifacts, true);
+        if (lock_fd >= 0)
+            close(lock_fd);
+        return epoch_fail("could not acquire stable-publication admission");
+    }
+    bool published = epoch_publish(coverage, &artifacts);
+    if (published &&
+        (!epoch_admission_lock_current(authority, admission_fd) ||
+         !epoch_stage_current(authority, &artifacts))) {
+        epoch_retract(coverage, &artifacts);
+        published = false;
+    }
+    epoch_artifacts_close(&artifacts, !coverage || !published);
+    close(admission_fd);
+    if (lock_fd >= 0)
+        close(lock_fd);
+    return published ? 0 : epoch_fail("atomic object publication failed");
+}
+
+static int cmd_epoch_object(int argc, char **argv)
+{
+    if (argc < 13 || strcmp(argv[11], "--") != 0)
+        return epoch_fail("usage: zcc --epoch-object dep|coverage OUTPUT "
+                          "SOURCE SOURCE_ID COMPLETE MUTATION EPOCH "
+                          "COMPILER_ID SESSION -- COMPILER [ARG...]");
+    const char *mode = argv[2], *output = argv[3], *source = argv[4];
+    const char *source_id = argv[5], *complete = argv[6], *mutation = argv[7];
+    const char *epoch = argv[8], *compiler_id = argv[9], *session = argv[10];
+    if (strcmp(mode, "dep") != 0 && strcmp(mode, "coverage") != 0)
+        return epoch_fail("unknown compile mode");
+    if (!epoch_is_sha256(source_id) || !epoch_is_sha256(mutation) ||
+        !epoch_is_sha256(epoch) || !epoch_is_sha256(compiler_id))
+        return epoch_fail("authority field is not lowercase SHA-256");
+    if (strcmp(complete, "1") != 0)
+        return epoch_fail("source capture is incomplete");
+    struct stat source_st;
+    if (lstat(source, &source_st) != 0 || !S_ISREG(source_st.st_mode))
+        return epoch_fail("source is not a regular file");
+    if (!epoch_paths_contained(output, session, epoch))
+        return epoch_fail("object and session paths do not share compile epoch");
+    struct epoch_authority authority;
+    if (!epoch_authority_open(output, session, source_id, complete, mutation,
+                              compiler_id, epoch, &authority))
+        return epoch_fail("compile-session stamp does not match object authority");
+    int result = epoch_compile_publish(argc, argv, mode, output, source,
+                                       &authority);
+    epoch_authority_close(&authority);
+    return result;
+}
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 static int exec_direct(char **argv)
@@ -2002,14 +2889,18 @@ static int exec_direct(char **argv)
     return 127;
 }
 
-int main(int argc, char **argv)
+static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
 {
     if (argc < 2) {
         fprintf(stderr,
                 "usage: zcc <compiler> [args...]\n"
+                "       zcc --epoch-object dep|coverage OUTPUT SOURCE ...\n"
                 "       zcc --zcc-stats | --zcc-clear | --zcc-trim [MB]\n");
         return 2;
     }
+
+    if (strcmp(argv[1], "--epoch-object") == 0)
+        return cmd_epoch_object(argc, argv);
 
     struct cache c;
     if (strncmp(argv[1], "--zcc-", 6) == 0) {
@@ -2043,7 +2934,9 @@ int main(int argc, char **argv)
             bump(&c, "bypass");
             logline("BYPASS", pl.bypass, &pl);
         }
-        return exec_direct(cc_argv);
+        plan_free(&pl);
+        return replace_on_bypass ? exec_direct(cc_argv)
+                                 : run_argv(cc_argv, NULL, NULL);
     }
 
     const bool strict = getenv("ZCC_STRICT") != NULL;
@@ -2066,6 +2959,7 @@ int main(int argc, char **argv)
     if (have_ckey && !audit && serve(&c, ckey, &pl)) {
         bump(&c, "hit");
         logline("HIT", "level 1 (probe manifest)", &pl);
+        plan_free(&pl);
         return 0;
     }
 
@@ -2078,7 +2972,9 @@ int main(int argc, char **argv)
             deps_free(&deps);
             bump(&c, "unkeyable");
             logline("UNKEY", "the -E probe failed", &pl);
-            return exec_direct(cc_argv);
+            plan_free(&pl);
+            return replace_on_bypass ? exec_direct(cc_argv)
+                                     : run_argv(cc_argv, NULL, NULL);
         }
         have_deps = true;
         if (!audit && serve(&c, ckey, &pl)) {
@@ -2092,6 +2988,7 @@ int main(int argc, char **argv)
              * has to check the bound. */
             if (wrote)
                 maybe_trim(&c, &pl);
+            plan_free(&pl);
             return 0;
         }
     }
@@ -2145,5 +3042,11 @@ int main(int argc, char **argv)
     buf_free(&cached_before);
     deps_free(&deps);
     unlink(errfile);
+    plan_free(&pl);
     return rc;
+}
+
+int main(int argc, char **argv)
+{
+    return zcc_dispatch(argc, argv, true);
 }

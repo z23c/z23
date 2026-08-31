@@ -310,7 +310,7 @@ main()
                     command = command (command == "" ? "" : " ") words[i]
                 dep = object
                 sub(/[.]o$/, ".d", dep)
-                command = command " -MD -MP -MF " dep " -MT " object \
+                command = command " -MMD -MP -MF " dep " -MT " object \
                           " -c -o " object " " source
             }
             if (source ~ /[.]c$/ &&

@@ -4,14 +4,10 @@
 # zcc_bootstrap.sh — make the in-tree compile cache available before the first
 # object is compiled, and print its path.
 #
-# WHY A SCRIPT AND NOT A MAKE RULE. $(CC) is chosen while the Makefile is
-# still being parsed, long before any recipe runs, so a normal rule for
-# build/bin/zcc would come too late to wrap the very build that needs it. This
-# runs from $(shell ...) at parse time instead. It is deliberately the
-# cheapest thing that can be correct: two stat comparisons on the warm path,
-# and a single ~0.4 s compile the first time a clone is built. Nothing is
-# fetched, so a developer who cloned five minutes ago gets the cache with no
-# install step — the same promise the node makes about its own runtime.
+# The Makefile invokes this at parse time when automatic caching is enabled and
+# also through a real file prerequisite when native epoch publication is
+# requested explicitly. The warm path only checks the complete bootstrap input
+# set. Nothing is fetched.
 #
 # It NEVER fails a build: if the compile does not work here, the script prints
 # nothing, $(CC) is left bare, and the build is merely slower.
@@ -25,6 +21,15 @@ SRC="$REPO_ROOT/tools/zcc.c"
 SHA3="$REPO_ROOT/lib/sha3/src/sha3.c"
 ALLOC="$REPO_ROOT/lib/base/src/safe_alloc.c"
 BIN="${ZCL_BIN_DIR:-$REPO_ROOT/build/bin}/zcc"
+INPUT_CATALOG="$SCRIPT_DIR/zcc-bootstrap-inputs.list"
+BOOTSTRAP_INPUTS=()
+while IFS= read -r input || [ -n "$input" ]; do
+    case "$input" in
+        license=*) ;;
+        *) [[ "$input" =~ ^[A-Za-z0-9_./-]+$ ]] || exit 0
+           BOOTSTRAP_INPUTS+=("$REPO_ROOT/$input") ;;
+    esac
+done < "$INPUT_CATALOG"
 
 # The build epoch fingerprints every token of $(CC) and fails CLOSED on a path
 # it cannot parse as a plain argv (tools/dev/build-epoch-key.sh, safe_command).
@@ -34,10 +39,14 @@ BIN="${ZCL_BIN_DIR:-$REPO_ROOT/build/bin}/zcc"
 if [[ ! "$BIN" =~ ^[A-Za-z0-9_./:+,=%-]+$ ]]; then
     exit 0
 fi
-[ -f "$SRC" ] && [ -f "$SHA3" ] && [ -f "$ALLOC" ] || exit 0
-
-if [ -x "$BIN" ] && [ "$BIN" -nt "$SRC" ] && [ "$BIN" -nt "$SHA3" ] &&
-   [ "$BIN" -nt "$ALLOC" ]; then
+fresh=1
+for input in "${BOOTSTRAP_INPUTS[@]}"; do
+    [ -f "$input" ] || exit 0
+    if [ ! -x "$BIN" ] || [ ! "$BIN" -nt "$input" ]; then
+        fresh=0
+    fi
+done
+if [ "$fresh" = 1 ]; then
     printf '%s\n' "$BIN"
     exit 0
 fi

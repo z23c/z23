@@ -1,0 +1,10 @@
+license=Copyright-2026-Rhett-Creighton-Apache-2.0
+tools/dev/zcc-bootstrap-inputs.list
+tools/dev/zcc_bootstrap.sh
+tools/zcc.c
+lib/sha3/src/sha3.c
+lib/base/src/safe_alloc.c
+lib/sha3/include/sha3/sha3.h
+lib/base/include/base/safe_alloc.h
+lib/base/include/base/hex.h
+lib/base/include/base/serialize_le.h

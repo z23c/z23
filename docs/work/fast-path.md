@@ -60,7 +60,7 @@ symptom as a body gap, and shipping a chain-reset fix that deletes
 
 | command | what |
 |---|---|
-| `make t ONLY=<group>` | run ONE test group from the exact strict candidate. Sources resolve under `build/test-rel-obj/epochs/<compile-epoch>/` (`-O3 -Werror -pedantic -DZCL_TESTING`, non-LTO); a mutation selects a fresh tree and compiler-cache hits recover unchanged TU work. `-MD -MP` depfiles close the old header false-green trap |
+| `make t ONLY=<group>` | run ONE test group from the exact strict candidate. Sources resolve under the stable toolchain/flags epoch in `build/test-rel-obj/epochs/<compile-epoch>/` (`-O3 -Werror -pedantic -DZCL_TESTING`, non-LTO); Make rebuilds mutation-affected TUs and compiler-cache hits recover unchanged work. `-MMD -MP` records project headers while the compiler identity binds toolchain roots, closing the old header false-green trap without loading system headers into Make |
 | `make t-fast ONLY=<group>` | hot-path ONE test group from the exact non-LTO, non-`-Werror`, `-O1` candidate under `build/bin/test-fast/epochs/<compile-epoch>/`; loosest/fastest loop |
 | `make test_parallel_wpo` | rebuild the original whole-program LTO test binary at `build/bin/test_parallel_wpo` — only to debug a suspected per-TU-vs-LTO divergence |
 | `make fast-changed-compile` | compatibility name for the source-wide dev compile proof; changed paths are classification hints only |
