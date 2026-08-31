@@ -17,7 +17,8 @@ static bool task_valid(const struct zcl_retrieval_gold_task *task)
 {
     if (!task || !task->task_id || !task->task_id[0] || !task->query ||
         !task->query[0] || !task->relevant_paths || task->relevant_count == 0 ||
-        !task->ranked || task->ranked_count > ZCL_RETRIEVAL_EVAL_RANK_MAX)
+        (!task->ranked && task->ranked_count != 0) ||
+        task->ranked_count > ZCL_RETRIEVAL_EVAL_RANK_MAX)
         return false;
     for (size_t i = 0; i < task->relevant_count; i++) {
         if (!task->relevant_paths[i] || !task->relevant_paths[i][0])

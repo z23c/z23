@@ -500,6 +500,28 @@ static int case_gold_metrics(void)
              !zcl_retrieval_evaluate(tasks, 1, &m) && m.tasks == 0);
     RT_CHECK("an empty corpus refuses instead of reporting perfect zeroes",
              !zcl_retrieval_evaluate(NULL, 0, &m));
+
+    struct zcl_retrieval_gold_task zero = {
+        .task_id = "zero",
+        .query = "a real query with no hits",
+        .relevant_paths = relevant_a,
+        .relevant_count = 1,
+        .ranked = NULL,
+        .ranked_count = 0,
+        .ranking_complete = true,
+    };
+    RT_CHECK("a complete zero-hit ranking is a measured zero",
+             zcl_retrieval_evaluate(&zero, 1, &m) &&
+             m.recall_at_5_available && m.recall_at_5_bp == 0 &&
+             m.recall_at_20_available && m.recall_at_20_bp == 0 &&
+             m.mrr_available && m.mrr_bp == 0 &&
+             m.unique_files_at_5 == 0 && m.context_bytes_at_5 == 0);
+    zero.ranking_complete = false;
+    RT_CHECK("an incomplete zero-hit ranking is valid but unavailable",
+             zcl_retrieval_evaluate(&zero, 1, &m) &&
+             !m.recall_at_5_available && !m.recall_at_20_available &&
+             !m.mrr_available && m.recall_at_5_bp == 0 &&
+             m.recall_at_20_bp == 0 && m.mrr_bp == 0);
     return failures;
 }
 
