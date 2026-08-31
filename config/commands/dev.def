@@ -86,7 +86,7 @@ ZCL_COMMAND_DEV_READ(
     "dev,retrieval,benchmark,bm25,recall,mrr,context",
     "zcl.dev_retrieval_benchmark_input.v1",
     "zcl.dev_retrieval_benchmark.v1",
-    "workspace,expected_vcs_root,task_id,query", "",
+    "workspace,expected_vcs_root,task_id,query,cursor", "",
     "z23-dev dev retrieval benchmark --input='"
     "{\"workspace\":\"<canonical-absolute-checkout>\","
     "\"expected_vcs_root\":\"<64-lowercase-hex>\","

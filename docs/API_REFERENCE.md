@@ -654,7 +654,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `dev retrieval benchmark` | compat 🔧 → `z23-dev dev retrieval benchmark` | read / read / operator · persistent/high | `workspace`, `expected_vcs_root`, `task_id`, `query` | `zcl.dev_retrieval_benchmark.v1` | `z23-dev dev retrieval benchmark --input='{"workspace":"<canonical-absolute-checkout>","expected_vcs_root":"<64-lowercase-hex>","task_id":"task","query":"goal"}'` | Compare literal and BM25 file retrieval on one reviewed task — *retrieval benchmarking requires the dev binary* |
+| `dev retrieval benchmark` | compat 🔧 → `z23-dev dev retrieval benchmark` | read / read / operator · persistent/high | `workspace`, `expected_vcs_root`, `task_id`, `query`, `cursor` | `zcl.dev_retrieval_benchmark.v1` | `z23-dev dev retrieval benchmark --input='{"workspace":"<canonical-absolute-checkout>","expected_vcs_root":"<64-lowercase-hex>","task_id":"task","query":"goal"}'` | Compare literal and BM25 file retrieval on one reviewed task — *retrieval benchmarking requires the dev binary* |
 
 #### `dev.publication` — Inspect asynchronous proven-source publication
 

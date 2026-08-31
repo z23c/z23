@@ -61,6 +61,7 @@ bool zcl_retrieval_evaluate(
     if (!tasks || task_count == 0 || task_count > UINT32_MAX) return false;
     uint64_t recall5_sum = 0, recall20_sum = 0, rr_sum = 0;
     bool r5_available = true, r20_available = true, mrr_available = true;
+    bool wrong_scope_available = true;
     for (size_t t = 0; t < task_count; t++) {
         const struct zcl_retrieval_gold_task *task = &tasks[t];
         if (!task_valid(task)) return false;
@@ -81,7 +82,9 @@ bool zcl_retrieval_evaluate(
                     !add_u64(&out->context_bytes_at_5,
                              task->ranked[i].context_bytes))
                     return false;
-                if (!task->ranked[i].in_scope &&
+                if (!task->ranked[i].in_scope_available)
+                    wrong_scope_available = false;
+                else if (!task->ranked[i].in_scope &&
                     !add_u64(&out->wrong_scope_files_at_5, 1))
                     return false;
             }
@@ -113,9 +116,13 @@ bool zcl_retrieval_evaluate(
     if (mrr_available) out->mrr_bp = (uint32_t)(rr_sum / task_count);
     if (out->context_bytes_at_5 > UINT64_MAX - 3u) return false;
     out->approximate_tokens_at_5 = (out->context_bytes_at_5 + 3u) / 4u;
-    if (out->unique_files_at_5 != 0)
+    out->wrong_scope_at_5_available = wrong_scope_available &&
+        out->unique_files_at_5 != 0;
+    if (out->wrong_scope_at_5_available)
         out->wrong_scope_at_5_bp = (uint32_t)(
             out->wrong_scope_files_at_5 *
             ZCL_RETRIEVAL_EVAL_BASIS_POINTS / out->unique_files_at_5);
+    else
+        out->wrong_scope_files_at_5 = 0;
     return true;
 }

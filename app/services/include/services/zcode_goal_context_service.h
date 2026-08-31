@@ -48,4 +48,11 @@ struct zcl_result zcode_goal_context_select(
     const char *workspace, const char *goal, const char *exact_symbol,
     struct zcode_goal_selection *out);
 
+/* Identical selection over a caller-owned, already-open index generation.
+ * The caller retains ownership and may bind multiple observational rankers to
+ * the exact same generation without a second implicit open or rebuild. */
+struct zcl_result zcode_goal_context_select_indexed(
+    struct codeindex *index, const char *goal, const char *exact_symbol,
+    struct zcode_goal_selection *out);
+
 #endif /* ZCL_SERVICES_ZCODE_GOAL_CONTEXT_SERVICE_H */

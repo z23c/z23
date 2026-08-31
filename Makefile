@@ -6565,6 +6565,29 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
 	    packages/zutf8/src/zutf8.c
 
+# Strict line-protocol adapter over the maintained retrieval evaluator. The
+# historical runner supplies two sealed rank lists per reviewed task; this
+# helper calls zcl_retrieval_evaluate once per ranker so metric math has one
+# implementation rather than a shell-side approximation.
+RETRIEVAL_EVAL_BIN = $(BIN_DIR)/retrieval-eval
+.PHONY: retrieval-eval
+retrieval-eval: $(RETRIEVAL_EVAL_BIN)
+$(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
+    lib/retrieval/src/retrieval_eval.c \
+    lib/retrieval/include/retrieval/retrieval.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -Ilib/retrieval/include -o $@ \
+	    tools/retrieval_eval.c lib/retrieval/src/retrieval_eval.c
+
+.PHONY: retrieval-eval-selftest retrieval-gold-corpus-check
+retrieval-eval-selftest: retrieval-eval jsonq
+	@./tools/dev/retrieval-eval-selftest.sh
+
+retrieval-gold-corpus-check: jsonq agent-sha3
+	@./tools/dev/retrieval-gold-corpus-check.sh --selftest
+	@./tools/dev/retrieval-gold-corpus-check.sh --check
+
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under
 # deliberately perturbed environments. It shells out to build/bin/test_parallel
