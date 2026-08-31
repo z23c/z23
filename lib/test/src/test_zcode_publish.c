@@ -67,6 +67,7 @@
 #include "vcs/package_recipe.h"
 #include "vcs/package_store.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1195,18 +1196,43 @@ static int t_acceptance_replay(void)
 
 /* Commit one small package under the given key/name/license/sequence. The
  * LICENSE text carries content_seed so every package root is distinct. */
-static bool zp_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
-                          const char *name, const char *license,
-                          int content_seed)
+static bool zp_scratch_path(char *out, size_t out_cap, const char *dd,
+                            const char *name)
+{
+    if (!out || out_cap == 0 || !dd || !name)
+        return false;
+    int wrote = snprintf(out, out_cap, "%s/src-", dd);
+    if (wrote < 0 || (size_t)wrote >= out_cap)
+        return false;
+    size_t used = (size_t)wrote;
+    for (const char *p = name; *p; p++) {
+        if (used + 1u >= out_cap)
+            return false;
+        out[used++] = *p == '/' ? '_' : *p;
+    }
+    out[used] = '\0';
+    return true;
+}
+
+static bool zp_commit_one_observed(const char *dd, uint8_t key_seed,
+                                   uint64_t seq, const char *name,
+                                   const char *license, int content_seed,
+                                   char *observed_path,
+                                   size_t observed_path_cap)
 {
     char pkgdir[512];
-    snprintf(pkgdir, sizeof(pkgdir), "%s/src-%s", dd, name);
-    /* The name carries a '/', which mkdir treats as a separator — replace
-     * it for the scratch dir only. */
-    for (char *q = pkgdir; *q; q++)
-        if (*q == '/')
-            *q = '_';
-    mkdir(pkgdir, 0700);
+    if (!zp_scratch_path(pkgdir, sizeof(pkgdir), dd, name))
+        return false;
+    if (observed_path) {
+        size_t path_len = strlen(pkgdir);
+        if (observed_path_cap == 0 || path_len >= observed_path_cap)
+            return false;
+        memcpy(observed_path, pkgdir, path_len + 1u);
+    } else if (observed_path_cap != 0) {
+        return false;
+    }
+    if (mkdir(pkgdir, 0700) != 0)
+        return false;
     struct zp_pkg p;
     memset(&p, 0, sizeof(p));
     vcs_package_manifest_init(&p.manifest);
@@ -1248,6 +1274,14 @@ static bool zp_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
     return ok;
 }
 
+static bool zp_commit_one(const char *dd, uint8_t key_seed, uint64_t seq,
+                          const char *name, const char *license,
+                          int content_seed)
+{
+    return zp_commit_one_observed(dd, key_seed, seq, name, license,
+                                  content_seed, NULL, 0);
+}
+
 static void zp_search_input(struct zp_cmd *c, const char *dd,
                             const char *key, const char *value)
 {
@@ -1265,6 +1299,25 @@ static int t_search(void)
     test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "search");
     struct zp_cmd c;
 
+    char scratch[512] = {0};
+    char prefix_tiny[8];
+    char name_tiny[512];
+    size_t dd_len = strlen(dd);
+    size_t name_tiny_cap = dd_len + strlen("/src-") + 3u;
+    ZP_CHECK("search: truncated scratch prefix fails closed",
+             !zp_scratch_path(prefix_tiny, sizeof(prefix_tiny), dd,
+                              "rhett/ring-buffer"));
+    ZP_CHECK("search: truncated scratch name fails closed",
+             name_tiny_cap <= sizeof(name_tiny) &&
+             !zp_scratch_path(name_tiny, name_tiny_cap, dd,
+                              "rhett/ring-buffer"));
+    char observed_tiny[8];
+    ZP_CHECK("search: truncated observed path fails before mkdir",
+             !zp_commit_one_observed(dd, 0xaa, 1u,
+                                     "rhett/ring-buffer", "MIT", 0,
+                                     observed_tiny,
+                                     sizeof(observed_tiny)));
+
     /* Empty store: a PASSED empty result, not an error. */
     zp_search_input(&c, dd, NULL, NULL);
     zcl_native_handle_zcode_package_search(&c.request, &c.reply);
@@ -1274,11 +1327,22 @@ static int t_search(void)
              json_get_int(json_get(&c.reply.data, "packages_scanned")) == 0);
     zp_cmd_free(&c);
 
+    bool observed_commit = zp_commit_one_observed(
+        dd, 0xaa, 1u, "rhett/ring-buffer", "MIT", 1, scratch,
+        sizeof(scratch));
     ZP_CHECK("search: three packages commit",
-             zp_commit_one(dd, 0xaa, 1u, "rhett/ring-buffer", "MIT", 1) &&
+             observed_commit &&
              zp_commit_one(dd, 0xaa, 2u, "rhett/json-lite", "Apache-2.0",
                            2) &&
              zp_commit_one(dd, 0xbb, 1u, "bob/ring-zlib", "Zlib", 3));
+    struct stat scratch_st;
+    errno = 0;
+    int scratch_stat = observed_commit ? stat(scratch, &scratch_st) : 0;
+    int scratch_errno = errno;
+    ZP_CHECK("search: package scratch stays below root and is removed",
+             observed_commit && strncmp(scratch, dd, dd_len) == 0 &&
+             scratch[dd_len] == '/' &&
+             scratch_stat == -1 && scratch_errno == ENOENT);
 
     zp_search_input(&c, dd, NULL, NULL);
     zcl_native_handle_zcode_package_search(&c.request, &c.reply);
