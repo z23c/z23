@@ -1726,8 +1726,7 @@ static bool proof_worker(const struct proof_paths *paths,
             proof_why(why, why_len, "source_identity_capture_failed");
         return false;
     }
-    if (!zcl_dev_source_cas_capture(generation, &source_before) ||
-        !source_before.cas_present) {
+    if (!source_before.cas_present) {
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
     }
