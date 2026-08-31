@@ -466,6 +466,8 @@ sa_build_fixture() {
         "$REPO_ROOT/lib/crypto/src/ed25519.c" \
         "$REPO_ROOT/lib/crypto/src/sha512.c" \
         "$REPO_ROOT/lib/crypto/src/sha256.c" \
+        "$REPO_ROOT/lib/crypto/src/chacha20poly1305.c" \
+        "$REPO_ROOT/lib/support/src/log_throttle.c" \
         "$REPO_ROOT/lib/base/src/safe_alloc.c" \
         "$REPO_ROOT/lib/base/src/log_level.c" \
         "$REPO_ROOT/lib/base/src/result.c" \

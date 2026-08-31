@@ -8330,37 +8330,41 @@ $(BIN_DIR)/bench_fresh_sync: tools/bench_fresh_sync.c \
 # Per-ISA-tier crypto microbenchmark (tools/simd_bench.c). Drives the SAME
 # input through EVERY ISA tier of each primitive (generic / SHA-NI / AVX2 /
 # AVX-512 / BMI2), asserts every tier is BIT-IDENTICAL to the generic one, and
-# only then reports median + p90 ns/op pinned to one core, with the CCD named.
+# only then reports p50/p90/p95/max ns/op, with pinning and the CCD named where
+# the host exposes an affinity API.
 #
-# Built at the SHIPPED CFLAGS on purpose (-O3 -march=x86-64-v3, no LTO): the
-# whole question it answers is "does the accelerated path beat what the
-# compiler already emits for the generic path at the flags we actually ship",
-# so building it at anything else would answer a question nobody asked.
+# Built at the shipped per-target architecture flags and portable release
+# baseline on purpose (never -march=native): the question it answers is whether
+# an explicit tier beats the generic path emitted for the target we ship.
 # Exits 2 if any tier diverges — a faster path returning different bytes is a
 # chain split, not a win.
 SIMD_BENCH_SRCS = tools/simd_bench.c \
+	lib/crypto/src/chacha20poly1305.c \
 	lib/crypto/src/sha256.c lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c \
 	lib/crypto/src/sha3_avx512.c lib/crypto/src/sha3_256_x4.c \
 	lib/crypto/src/blake2b.c lib/crypto/src/blake2b_avx2.c \
 	lib/sapling/src/bn254_accel.c lib/sapling/src/fr_avx512.c \
-	lib/base/src/cleanse.c lib/base/src/log_level.c
+	lib/base/src/cleanse.c lib/base/src/log_level.c lib/base/src/safe_alloc.c \
+	lib/platform/src/clock.c lib/support/src/log_throttle.c
 
 .PHONY: simd_bench
 simd_bench: $(BIN_DIR)/simd_bench
 $(BIN_DIR)/simd_bench: $(SIMD_BENCH_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
-	    -Wall -Wextra -Werror -pedantic \
+	    -Wall -Wextra -Werror -pedantic -pthread \
 	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/sapling/include -Ilib/base/include \
 	    -Ilib/util/include -Ilib/platform/include -Ilib/support/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ $^
 
-# Run it. REPS= and CPU= override the defaults; CPU picks which CCD you land on
-# (this host class is asymmetric: one CCD has 3D V-Cache, the other clocks
-# higher), so quote the CPU alongside any number you record.
+# Run it. REPS= and CPU= override the defaults. Linux CPU= selects and reports
+# an L3/CCD domain; Darwin reports affinity unavailable and relies on paired
+# within-process tier ordering.
 .PHONY: bench-simd
 bench-simd: $(BIN_DIR)/simd_bench
-	@$(BIN_DIR)/simd_bench $(if $(CPU),--cpu=$(CPU)) $(if $(REPS),--reps=$(REPS))
+	@$(BIN_DIR)/simd_bench $(if $(CPU),--cpu=$(CPU)) $(if $(REPS),--reps=$(REPS)) \
+	    $(if $(CHACHA_ONLY),--chacha-only) \
+	    $(if $(REQUIRE_CHACHA_WINS),--require-chacha-wins)
 
 # Block-body deserialization microbenchmark (tools/serial_bench.c). Drives the
 # SAME real chain bytes through the parser once per allocation variant —

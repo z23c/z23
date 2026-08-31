@@ -47,6 +47,7 @@
 
 #include "util/cpu_topology.h"
 #include "crypto/blake2b.h"
+#include "crypto/chacha20poly1305.h"
 #include "crypto/sha256.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
@@ -639,6 +640,28 @@ bool hw_profile_dump_state_json(struct json_value *out, const char *key)
                      equihash_blake2b_batch_implementation());
     json_push_kv_str(&isa, "crc32c_transform", zcl_crc32c_impl_name());
     json_push_kv_bool(&isa, "keccak_x4_available", keccak_x4_available());
+    struct json_value chacha20;
+    json_init(&chacha20);
+    json_set_object(&chacha20);
+    bool chacha_compiled = chacha20_vector4_compiled();
+    bool chacha_cpu_capable = false;
+#if defined(__aarch64__)
+    chacha_cpu_capable = chacha_compiled && g_state.isa.arm_neon;
+#elif defined(__x86_64__) || defined(_M_X64)
+    /* The current x86 vector arm is SSE2, an x86-64 ABI baseline. Do not
+     * reuse this rule if that arm later changes to an optional extension. */
+    chacha_cpu_capable = chacha_compiled;
+#endif
+    json_push_kv_bool(&chacha20, "compiled", chacha_compiled);
+    json_push_kv_bool(&chacha20, "cpu_capable", chacha_cpu_capable);
+    json_push_kv_bool(&chacha20, "kat_usable",
+                      chacha20_vector4_available());
+    json_push_kv_bool(&chacha20, "auto_selected",
+                      chacha20_auto_uses_vector4());
+    json_push_kv_str(&chacha20, "active_transform",
+                     chacha20_implementation());
+    json_push_kv(&isa, "chacha20_vector4", &chacha20);
+    json_free(&chacha20);
     json_push_kv(out, "isa", &isa);
     json_free(&isa);
 

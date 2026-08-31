@@ -36,7 +36,10 @@ enum chacha20_impl {
 };
 int chacha20_select_impl(enum chacha20_impl which);
 bool chacha20_vector4_compiled(void);
+/* Stable KAT usability query. Concurrent first callers converge through the
+ * one-time KAT; this never reports a transient "unavailable while testing". */
 bool chacha20_vector4_available(void);
+bool chacha20_auto_uses_vector4(void);
 const char *chacha20_implementation(void);
 
 void poly1305_mac(const uint8_t *message, size_t len,

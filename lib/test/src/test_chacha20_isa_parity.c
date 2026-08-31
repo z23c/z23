@@ -14,6 +14,9 @@
 #include "platform/clock.h"
 
 #include <limits.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -39,6 +42,22 @@ static uint64_t chacha_now_ns(void)
     return now > 0 ? (uint64_t)now : 0;
 }
 
+struct chacha_once_probe {
+    _Atomic unsigned *ready;
+    _Atomic bool *start;
+    bool available;
+};
+
+static void *chacha_once_probe_main(void *arg)
+{
+    struct chacha_once_probe *probe = arg;
+    atomic_fetch_add_explicit(probe->ready, 1u, memory_order_release);
+    while (!atomic_load_explicit(probe->start, memory_order_acquire))
+        sched_yield();
+    probe->available = chacha20_vector4_available();
+    return NULL;
+}
+
 static int parity_case(const uint8_t key[32], const uint8_t nonce[12],
                        uint32_t counter, const uint8_t *plain, size_t len)
 {
@@ -62,18 +81,56 @@ int test_chacha20_isa_parity(void)
     chacha_rng_fill(nonce, sizeof nonce);
     chacha_rng_fill(plain, sizeof plain);
 
+    printf("chacha20_isa_parity: concurrent first KAT callers converge... ");
+    {
+        enum { NPROBES = 16 };
+        pthread_t threads[NPROBES];
+        struct chacha_once_probe probes[NPROBES];
+        _Atomic unsigned ready = 0;
+        _Atomic bool start = false;
+        int created = 0;
+        for (int i = 0; i < NPROBES; i++) {
+            probes[i] = (struct chacha_once_probe){
+                .ready = &ready, .start = &start, .available = false };
+            if (pthread_create(&threads[i], NULL, chacha_once_probe_main,
+                               &probes[i]) != 0)
+                break;
+            created++;
+        }
+        while (atomic_load_explicit(&ready, memory_order_acquire) <
+               (unsigned)created)
+            sched_yield();
+        atomic_store_explicit(&start, true, memory_order_release);
+        bool converged = created == NPROBES;
+        for (int i = 0; i < created; i++) {
+            if (pthread_join(threads[i], NULL) != 0)
+                converged = false;
+        }
+        for (int i = 1; i < created; i++)
+            if (probes[i].available != probes[0].available)
+                converged = false;
+#if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
+        if (created == 0 || !probes[0].available)
+            converged = false;
+#endif
+        if (converged) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
     printf("chacha20_isa_parity: compiled=%s KAT-usable=%s AUTO=%s\n",
            chacha20_vector4_compiled() ? "yes" : "no",
            chacha20_vector4_available() ? "yes" : "no",
            chacha20_select_impl(CHACHA20_IMPL_AUTO) == CHACHA20_IMPL_VECTOR4
                ? "vector4" : "portable");
 #if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
-    if (!chacha20_vector4_compiled() || !chacha20_vector4_available()) {
+    if (!chacha20_vector4_compiled() ||
+        !chacha20_vector4_available()) {
         printf("chacha20_isa_parity: mandatory-ABI vector tier unavailable... FAIL\n");
         failures++;
     }
 #endif
     if (chacha20_select_impl(CHACHA20_IMPL_AUTO) != CHACHA20_IMPL_PORTABLE ||
+        chacha20_auto_uses_vector4() ||
         strcmp(chacha20_implementation(), "portable C") != 0) {
         printf("chacha20_isa_parity: AUTO promoted without benchmark receipt... FAIL\n");
         failures++;

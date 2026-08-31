@@ -20,21 +20,25 @@
  *      A mismatch aborts the whole run with exit 2. A faster path that returns
  *      different bytes is a chain split, not an optimization, and this harness
  *      must never be the thing that reports it as a win.
- *   3. Only then TIME them, reporting median and p90 across repetitions rather
- *      than a mean — this box runs other workloads, and a mean is noise.
+ *   3. Only then TIME them, reporting p50, p90, p95, and worst sample across
+ *      repetitions rather than a mean — this box runs other workloads, and a
+ *      mean is noise.
  *
  * METHODOLOGY NOTES (read before trusting a number)
  * -------------------------------------------------
- *  - CPU PINNING is mandatory, not advisory. This host class (7950X3D) is an
+ *  - On Linux/x86 CPU PINNING is mandatory, not advisory. That host class
+ *    (7950X3D) is an
  *    asymmetric dual-CCD part: one CCD carries 3D V-Cache (large L3, lower
  *    clock), the other clocks higher with a third of the L3. A benchmark that
  *    migrates between them silently is worthless. We pin with
  *    sched_setaffinity and REPORT the CCD (derived from sysfs L3
  *    shared_cpu_list, not hardcoded) plus its L3 size in every header line.
+ *    Darwin has no equivalent userspace affinity API; Mac rows say unpinned
+ *    and are comparable only inside their alternating paired process run.
  *  - Each measurement is a full independent repetition of `inner` operations.
- *    We take the median and p90 OF THE REPETITIONS. p90 above median is the
- *    honest signal for interference; the tool prints the spread so a reader can
- *    discount a contended run instead of being handed a clean-looking mean.
+ *    We report p50, p90, p95, and max OF THE REPETITIONS. The tail above p50
+ *    is the honest signal for interference; the tool prints p95/p50 so a reader
+ *    can discount a contended run instead of being handed a clean-looking mean.
  *  - A warmup repetition is discarded (page faults, DVFS ramp, icache).
  *  - Loads are anti-optimized with a volatile sink so the compiler cannot
  *    delete the work being timed.
@@ -48,8 +52,10 @@
 #define _GNU_SOURCE
 
 #include "crypto/blake2b.h"
+#include "crypto/chacha20poly1305.h"
 #include "crypto/sha256.h"
 #include "crypto/sha3.h"
+#include "base/serialize_le.h"
 #include "sapling/bn254_accel.h"
 #include "sapling/fr_accel.h"
 
@@ -71,7 +77,10 @@
 static int      g_reps = BENCH_REPS_DEFAULT;
 static int      g_pin_cpu = -1;
 static bool     g_csv = false;
+static bool     g_chacha_only = false;
+static bool     g_require_chacha_wins = false;
 static unsigned g_failures = 0;
+static unsigned g_promotion_refusals = 0;
 
 /* Anti-optimization sink: every timed body folds its result in here so the
  * compiler cannot prove the work is dead and delete it. */
@@ -200,6 +209,8 @@ struct tier_result {
     bool        verified;       /* output byte-identical to reference tier */
     uint64_t    median_ns;      /* per repetition (inner ops) */
     uint64_t    p90_ns;
+    uint64_t    p95_ns;
+    uint64_t    max_ns;
     uint64_t    min_ns;
     double      ops_per_sec;
     double      bytes_per_sec;  /* 0 when the primitive is not byte-oriented */
@@ -217,6 +228,23 @@ struct bench {
 /* Run `fn` for g_reps repetitions (+1 discarded warmup) and fill `tr`. */
 typedef void (*bench_fn)(long inner, void *ctx);
 
+static void record_tier_samples(struct tier_result *tr, const struct bench *b,
+                                uint64_t samples[BENCH_MAX_REPS])
+{
+    qsort(samples, (size_t)g_reps, sizeof(samples[0]), cmp_u64);
+
+    tr->min_ns    = samples[0];
+    tr->median_ns = pct_sorted(samples, g_reps, 0.50);
+    tr->p90_ns    = pct_sorted(samples, g_reps, 0.90);
+    tr->p95_ns    = pct_sorted(samples, g_reps, 0.95);
+    tr->max_ns    = samples[g_reps - 1];
+
+    double per_op_ns = (double)tr->median_ns / (double)b->inner;
+    tr->ops_per_sec = per_op_ns > 0.0 ? 1e9 / per_op_ns : 0.0;
+    tr->bytes_per_sec = b->bytes_per_op > 0.0
+                      ? tr->ops_per_sec * b->bytes_per_op : 0.0;
+}
+
 static void time_tier(struct tier_result *tr, const struct bench *b,
                       bench_fn fn, void *ctx)
 {
@@ -230,16 +258,7 @@ static void time_tier(struct tier_result *tr, const struct bench *b,
         uint64_t t1 = now_ns();
         samples[r] = t1 - t0;
     }
-    qsort(samples, (size_t)g_reps, sizeof(samples[0]), cmp_u64);
-
-    tr->min_ns    = samples[0];
-    tr->median_ns = pct_sorted(samples, g_reps, 0.50);
-    tr->p90_ns    = pct_sorted(samples, g_reps, 0.90);
-
-    double per_op_ns = (double)tr->median_ns / (double)b->inner;
-    tr->ops_per_sec  = per_op_ns > 0.0 ? 1e9 / per_op_ns : 0.0;
-    tr->bytes_per_sec = b->bytes_per_op > 0.0
-                      ? tr->ops_per_sec * b->bytes_per_op : 0.0;
+    record_tier_samples(tr, b, samples);
 }
 
 static void human_bytes(double bps, char *out, size_t n)
@@ -258,9 +277,9 @@ static void report(const struct bench *b)
     if (!g_csv) {
         printf("\n%s  (%ld %s per repetition, %d repetitions)\n",
                b->primitive, b->inner, b->unit, g_reps);
-        printf("  %-22s %12s %12s %10s %12s %9s  %s\n",
-               "tier", "median ns/op", "p90 ns/op", "p90/med", "ops/s",
-               "throughput", "vs generic");
+        printf("  %-22s %11s %11s %11s %11s %9s %9s  %s\n",
+               "tier", "p50 ns/op", "p90 ns/op", "p95 ns/op", "max ns/op",
+               "p95/p50", "throughput", "vs generic");
         printf("  %.100s\n",
                "--------------------------------------------------------"
                "--------------------------------------------------");
@@ -271,7 +290,7 @@ static void report(const struct bench *b)
 
         if (!t->available) {
             if (g_csv)
-                printf("%s,%s,UNAVAILABLE,,,,,\n", b->primitive, t->name);
+                printf("%s,%s,UNAVAILABLE,,,,,,,\n", b->primitive, t->name);
             else
                 printf("  %-22s %12s   (not available on this host)\n",
                        t->name, "-");
@@ -282,7 +301,7 @@ static void report(const struct bench *b)
          * Saying "0.00x SLOWER" would read as a measurement; it is not one. */
         if (!t->verified) {
             if (g_csv)
-                printf("%s,%s,DIVERGED,,,,,\n", b->primitive, t->name);
+                printf("%s,%s,DIVERGED,,,,,,,\n", b->primitive, t->name);
             else
                 printf("  %-22s %12s   *** DIVERGED from generic — NOT TIMED ***\n",
                        t->name, "-");
@@ -291,13 +310,15 @@ static void report(const struct bench *b)
 
         double med_op = (double)t->median_ns / (double)b->inner;
         double p90_op = (double)t->p90_ns / (double)b->inner;
-        double spread = med_op > 0.0 ? p90_op / med_op : 0.0;
+        double p95_op = (double)t->p95_ns / (double)b->inner;
+        double max_op = (double)t->max_ns / (double)b->inner;
+        double spread = med_op > 0.0 ? p95_op / med_op : 0.0;
         double rel    = (ref->available && t->median_ns > 0)
                       ? (double)ref->median_ns / (double)t->median_ns : 0.0;
 
         if (g_csv) {
-            printf("%s,%s,OK,%.4f,%.4f,%.0f,%.0f,%.4f\n",
-                   b->primitive, t->name, med_op, p90_op,
+            printf("%s,%s,OK,%.4f,%.4f,%.4f,%.4f,%.0f,%.0f,%.4f\n",
+                   b->primitive, t->name, med_op, p90_op, p95_op, max_op,
                    t->ops_per_sec, t->bytes_per_sec, rel);
             continue;
         }
@@ -310,8 +331,8 @@ static void report(const struct bench *b)
         else if (rel >= 1.0)        snprintf(relbuf, sizeof(relbuf), "%.2fx FASTER", rel);
         else                        snprintf(relbuf, sizeof(relbuf), "%.2fx  SLOWER", rel);
 
-        printf("  %-22s %12.2f %12.2f %9.2fx %12.3g %s  %s%s\n",
-               t->name, med_op, p90_op, spread, t->ops_per_sec, thr, relbuf,
+        printf("  %-22s %11.2f %11.2f %11.2f %11.2f %8.2fx %s  %s%s\n",
+               t->name, med_op, p90_op, p95_op, max_op, spread, thr, relbuf,
                t->verified ? "" : "  [UNVERIFIED]");
     }
 }
@@ -642,7 +663,220 @@ static void bench_equihash_blake2b(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * Primitive 6 — BN254 Fq Montgomery multiply (portable vs BMI2/MULX)
+ * Primitive 6 — caller-shaped ChaCha20-Poly1305 seal
+ *
+ * The paired schedule alternates portable→vector and vector→portable for
+ * every measured repetition. This bounds first/second-order thermal and
+ * scheduler drift better than timing every portable repetition before every
+ * vector repetition. The result remains measurement evidence, not AUTO
+ * promotion authority: Darwin cannot bind a thread to one physical core and
+ * a single process run cannot establish a cross-machine policy.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+#define CHACHA_BENCH_MAX_PLAIN 65520u
+#define CHACHA_BENCH_MAX_AAD      85u
+
+static uint8_t g_chacha_plain[CHACHA_BENCH_MAX_PLAIN];
+static uint8_t g_chacha_aad[CHACHA_BENCH_MAX_AAD];
+static uint8_t g_chacha_sealed[2][CHACHA_BENCH_MAX_PLAIN + POLY1305_TAG_SIZE];
+
+struct chacha_aead_ctx {
+    size_t plen;
+    size_t aad_len;
+    uint8_t key[CHACHA20_KEY_SIZE];
+    uint8_t nonce[CHACHA20_NONCE_SIZE];
+    uint8_t *sealed;
+    bool failed;
+};
+
+static void chacha_aead_seal_body(long inner, void *vctx)
+{
+    struct chacha_aead_ctx *c = vctx;
+    uint8_t nonce[CHACHA20_NONCE_SIZE];
+    for (long i = 0; i < inner; i++) {
+        memcpy(nonce, c->nonce, sizeof nonce);
+        zcl_write_u32_le(nonce + 8, (uint32_t)i);
+        if (!chacha20poly1305_encrypt(g_chacha_plain, c->plen,
+                                      g_chacha_aad, c->aad_len,
+                                      nonce, c->key, c->sealed)) {
+            c->failed = true;
+            return;
+        }
+        g_sink += c->sealed[(size_t)i % (c->plen + POLY1305_TAG_SIZE)];
+    }
+}
+
+static uint64_t chacha_time_selected(enum chacha20_impl impl, long inner,
+                                     struct chacha_aead_ctx *ctx)
+{
+    if (chacha20_select_impl(impl) != (int)impl) {
+        ctx->failed = true;
+        return 0;
+    }
+    uint64_t started = now_ns();
+    chacha_aead_seal_body(inner, ctx);
+    return now_ns() - started;
+}
+
+static bool chacha_promotion_sample_passes(const struct tier_result *portable,
+                                           const struct tier_result *vector,
+                                           bool every_pair_won)
+{
+    if (!portable->available || !portable->verified ||
+        !vector->available || !vector->verified ||
+        portable->median_ns == 0 || portable->p95_ns == 0 ||
+        portable->max_ns == 0)
+        return false;
+    return (double)vector->median_ns <= (double)portable->median_ns * 0.95 &&
+           (double)vector->p95_ns <= (double)portable->p95_ns * 0.95 &&
+           vector->max_ns < portable->max_ns && every_pair_won;
+}
+
+static void bench_chacha_aead_row(const char *label, size_t plen,
+                                  size_t aad_len, long inner)
+{
+    bool every_pair_won = false;
+    struct bench b = {
+        .primitive = label,
+        .unit = "seals",
+        .inner = inner,
+        .bytes_per_op = (double)plen,
+        .ntiers = 2,
+    };
+    b.tier[0].name = "generic (portable C)";
+#if defined(__aarch64__)
+    b.tier[1].name = "NEON four-block";
+#elif defined(__x86_64__) || defined(_M_X64)
+    b.tier[1].name = "SSE2 four-block";
+#else
+    b.tier[1].name = "vector4";
+#endif
+
+    struct chacha_aead_ctx ctx[2];
+    memset(ctx, 0, sizeof ctx);
+    for (int tier = 0; tier < 2; tier++) {
+        ctx[tier].plen = plen;
+        ctx[tier].aad_len = aad_len;
+        ctx[tier].sealed = g_chacha_sealed[tier];
+        for (size_t i = 0; i < sizeof ctx[tier].key; i++)
+            ctx[tier].key[i] = (uint8_t)(i * 29u + 7u);
+        for (size_t i = 0; i < sizeof ctx[tier].nonce; i++)
+            ctx[tier].nonce[i] = (uint8_t)(i * 17u + 3u);
+    }
+
+    b.tier[0].available =
+        chacha20_select_impl(CHACHA20_IMPL_PORTABLE) ==
+        CHACHA20_IMPL_PORTABLE;
+    bool portable_ok = b.tier[0].available &&
+        chacha20poly1305_encrypt(g_chacha_plain, plen,
+                                 g_chacha_aad, aad_len,
+                                 ctx[0].nonce, ctx[0].key,
+                                 ctx[0].sealed);
+    b.tier[0].verified = portable_ok;
+
+    b.tier[1].available =
+        chacha20_select_impl(CHACHA20_IMPL_VECTOR4) ==
+        CHACHA20_IMPL_VECTOR4;
+    if (b.tier[1].available) {
+        bool vector_ok = chacha20poly1305_encrypt(
+            g_chacha_plain, plen, g_chacha_aad, aad_len,
+            ctx[1].nonce, ctx[1].key, ctx[1].sealed);
+        if (!portable_ok || !vector_ok ||
+            memcmp(ctx[1].sealed, ctx[0].sealed,
+                   plen + POLY1305_TAG_SIZE) != 0) {
+            parity_fail(b.primitive, b.tier[1].name,
+                        ctx[1].sealed, ctx[0].sealed,
+                        plen + POLY1305_TAG_SIZE);
+        } else {
+            b.tier[1].verified = true;
+        }
+    }
+
+    if (b.tier[0].verified && b.tier[1].verified) {
+        uint64_t samples[2][BENCH_MAX_REPS];
+        every_pair_won = true;
+
+        /* Seven discarded paired warmups let page faults, allocator arenas,
+         * frequency state, and instruction/data caches converge. */
+        for (int warm = 0; warm < 7; warm++) {
+            int first = warm & 1;
+            (void)chacha_time_selected(first ? CHACHA20_IMPL_VECTOR4
+                                             : CHACHA20_IMPL_PORTABLE,
+                                       inner, &ctx[first]);
+            (void)chacha_time_selected(first ? CHACHA20_IMPL_PORTABLE
+                                             : CHACHA20_IMPL_VECTOR4,
+                                       inner, &ctx[1 - first]);
+        }
+
+        for (int rep = 0; rep < g_reps; rep++) {
+            int first = rep & 1;
+            enum chacha20_impl first_impl = first
+                ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
+            enum chacha20_impl second_impl = first
+                ? CHACHA20_IMPL_PORTABLE : CHACHA20_IMPL_VECTOR4;
+            samples[first][rep] = chacha_time_selected(
+                first_impl, inner, &ctx[first]);
+            samples[1 - first][rep] = chacha_time_selected(
+                second_impl, inner, &ctx[1 - first]);
+            if (samples[1][rep] >= samples[0][rep])
+                every_pair_won = false;
+        }
+        if (ctx[0].failed || ctx[1].failed) {
+            fprintf(stderr, "FATAL: %s AEAD seal failed during timing.\n",
+                    b.primitive);
+            g_failures++;
+            b.tier[0].verified = false;
+            b.tier[1].verified = false;
+        } else {
+            record_tier_samples(&b.tier[0], &b, samples[0]);
+            record_tier_samples(&b.tier[1], &b, samples[1]);
+        }
+    } else if (b.tier[0].verified) {
+        chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
+        time_tier(&b.tier[0], &b, chacha_aead_seal_body, &ctx[0]);
+    }
+
+    chacha20_select_impl(CHACHA20_IMPL_AUTO);
+    report(&b);
+    if (g_require_chacha_wins &&
+        !chacha_promotion_sample_passes(&b.tier[0], &b.tier[1],
+                                         every_pair_won)) {
+        fprintf(stderr,
+                "PROMOTION REFUSAL: %s did not achieve >=5%% p50/p95, "
+                "strict max, and every-pair wins.\n", b.primitive);
+        g_promotion_refusals++;
+    }
+    if (!g_csv && b.tier[0].verified && b.tier[1].verified) {
+        bool p95_win = b.tier[1].p95_ns < b.tier[0].p95_ns;
+        bool worst_win = b.tier[1].max_ns < b.tier[0].max_ns;
+        printf("  paired sample    : p95=%s worst=%s AUTO=%s "
+               "(measurement only; 3 physical runs required)\n",
+               p95_win ? "VECTOR-WIN" : "NO-WIN",
+               worst_win ? "VECTOR-WIN" : "NO-WIN",
+               chacha20_auto_uses_vector4() ? "vector4" : "portable");
+    }
+}
+
+static void bench_chacha_aead(void)
+{
+    for (size_t i = 0; i < sizeof g_chacha_plain; i++)
+        g_chacha_plain[i] = (uint8_t)(i * 131u + 17u);
+    for (size_t i = 0; i < sizeof g_chacha_aad; i++)
+        g_chacha_aad[i] = (uint8_t)(i * 47u + 11u);
+
+    bench_chacha_aead_row(
+        "ChaCha20-Poly1305 Sapling note seal (564 B; AAD 0)",
+        564u, 0u, 32768);
+    bench_chacha_aead_row(
+        "ChaCha20-Poly1305 Noise frame seal (1536 B; AAD 7)",
+        1536u, 7u, 12288);
+    bench_chacha_aead_row(
+        "ChaCha20-Poly1305 private-object seal (65520 B; AAD 85)",
+        65520u, 85u, 256);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Primitive 7 — BN254 Fq Montgomery multiply (portable vs BMI2/MULX)
  * Sprout Groth16 JoinSplit verification bottoms out here.
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -855,11 +1089,15 @@ static void bench_fp(int chains)
 
 static void usage(const char *argv0)
 {
-    printf("usage: %s [--cpu=N] [--reps=N] [--csv] [--self-test]\n\n", argv0);
+    printf("usage: %s [--cpu=N] [--reps=N] [--csv] [--chacha-only] "
+           "[--require-chacha-wins] [--self-test]\n\n", argv0);
     printf("  --cpu=N      pin to logical CPU N (default 0)\n");
     printf("  --reps=N     repetitions per tier (default %d, max %d)\n",
            BENCH_REPS_DEFAULT, BENCH_MAX_REPS);
     printf("  --csv        machine-readable output\n");
+    printf("  --chacha-only  run only caller-shaped ChaCha20-Poly1305 rows\n");
+    printf("  --require-chacha-wins  exit 2 unless every ChaCha row meets the\n");
+    printf("                 documented per-run promotion-candidate thresholds\n");
     printf("  --self-test  prove the parity checker can FAIL, then exit\n\n");
     printf("Every tier of every primitive is checked for BIT-IDENTICAL output\n");
     printf("against the generic tier before it is timed. Any mismatch exits 2.\n");
@@ -899,6 +1137,37 @@ static int self_test(void)
         return 1;
     }
     printf("SELF-TEST PASSED: identical output is not falsely flagged.\n");
+
+    uint64_t samples[5] = {50, 10, 40, 20, 30};
+    qsort(samples, 5, sizeof(samples[0]), cmp_u64);
+    if (pct_sorted(samples, 5, 0.50) != 30 ||
+        pct_sorted(samples, 5, 0.95) != 50 || samples[4] != 50) {
+        fprintf(stderr,
+                "SELF-TEST FAILED: p50/p95/max sample accounting drifted.\n");
+        return 1;
+    }
+    printf("SELF-TEST PASSED: p50/p95/max sample accounting is exact.\n");
+
+    struct tier_result portable = {
+        .available = true, .verified = true,
+        .median_ns = 1000, .p95_ns = 1100, .max_ns = 1200,
+    };
+    struct tier_result vector = {
+        .available = true, .verified = true,
+        .median_ns = 900, .p95_ns = 1000, .max_ns = 1100,
+    };
+    if (!chacha_promotion_sample_passes(&portable, &vector, true)) {
+        fprintf(stderr, "SELF-TEST FAILED: clean promotion sample refused.\n");
+        return 1;
+    }
+    vector.p95_ns = 1050;
+    if (chacha_promotion_sample_passes(&portable, &vector, true) ||
+        chacha_promotion_sample_passes(&portable, &portable, true) ||
+        chacha_promotion_sample_passes(&portable, &vector, false)) {
+        fprintf(stderr, "SELF-TEST FAILED: weak promotion sample accepted.\n");
+        return 1;
+    }
+    printf("SELF-TEST PASSED: strict ChaCha promotion judge accepts and refuses.\n");
     return 0;
 }
 
@@ -908,11 +1177,26 @@ int main(int argc, char **argv)
         if (strncmp(argv[i], "--cpu=", 6) == 0)       g_pin_cpu = atoi(argv[i] + 6);
         else if (strncmp(argv[i], "--reps=", 7) == 0) g_reps = atoi(argv[i] + 7);
         else if (strcmp(argv[i], "--csv") == 0)       g_csv = true;
+        else if (strcmp(argv[i], "--chacha-only") == 0) g_chacha_only = true;
+        else if (strcmp(argv[i], "--require-chacha-wins") == 0)
+            g_require_chacha_wins = true;
         else if (strcmp(argv[i], "--self-test") == 0) return self_test();
         else { usage(argv[0]); return 1; }
     }
     if (g_reps < 3) g_reps = 3;
     if (g_reps > BENCH_MAX_REPS) g_reps = BENCH_MAX_REPS;
+    if (g_require_chacha_wins && !g_chacha_only) {
+        fprintf(stderr,
+                "--require-chacha-wins requires --chacha-only so unrelated "
+                "timings cannot obscure the receipt.\n");
+        return 1;
+    }
+    if (g_require_chacha_wins && chacha20_auto_uses_vector4()) {
+        fprintf(stderr,
+                "PROMOTION REFUSAL: AUTO is already vector-selected; this "
+                "pre-promotion measurement must start portable.\n");
+        return 2;
+    }
 
     /* Default pin: CPU 0. Deliberately a fixed, documented choice rather than
      * "wherever we happen to be" — comparability across runs matters more than
@@ -940,7 +1224,8 @@ int main(int argc, char **argv)
                    topo.ccd_index, topo.l3_shared, topo.l3_kb);
         else
             printf("  L3 domain (CCD) : unknown (sysfs cache info unavailable)\n");
-        printf("  repetitions     : %d per tier (median + p90 reported)\n", g_reps);
+        printf("  repetitions     : %d per tier (p50/p90/p95/max reported)\n",
+               g_reps);
 
         double la[3];
         if (getloadavg(la, 3) == 3)
@@ -954,8 +1239,9 @@ int main(int argc, char **argv)
         printf("            bn254=%s\n            bls12-381=%s\n",
                bn254_accel_implementation(), fr_accel_implementation());
     } else {
-        printf("primitive,tier,status,median_ns_per_op,p90_ns_per_op,"
-               "ops_per_sec,bytes_per_sec,speedup_vs_generic\n");
+        printf("primitive,tier,status,p50_ns_per_op,p90_ns_per_op,"
+               "p95_ns_per_op,max_ns_per_op,ops_per_sec,bytes_per_sec,"
+               "speedup_vs_generic\n");
     }
 
     /* Shared random-ish input buffer, identical across every tier. */
@@ -963,16 +1249,21 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < sizeof(buf); i++)
         buf[i] = (unsigned char)(i * 131 + 17);
 
-    bench_sha256(buf);
-    bench_sha3_256_x4(buf);
-    bench_sha3_512_x4(buf);
-    bench_equihash_blake2b();
-    bench_bn254(1);
-    bench_bn254(MONT_MAX_CHAINS);
-    bench_fr(1);
-    bench_fr(MONT_MAX_CHAINS);
-    bench_fp(1);
-    bench_fp(MONT_MAX_CHAINS);
+    if (!g_chacha_only) {
+        bench_sha256(buf);
+        bench_sha3_256_x4(buf);
+        bench_sha3_512_x4(buf);
+        bench_equihash_blake2b();
+    }
+    bench_chacha_aead();
+    if (!g_chacha_only) {
+        bench_bn254(1);
+        bench_bn254(MONT_MAX_CHAINS);
+        bench_fr(1);
+        bench_fr(MONT_MAX_CHAINS);
+        bench_fp(1);
+        bench_fp(MONT_MAX_CHAINS);
+    }
 
     if (!g_csv) {
         double la[3];
@@ -985,6 +1276,12 @@ int main(int argc, char **argv)
                 "\n%u tier(s) produced output that differs from the generic path.\n"
                 "Treat every speed number above as void until that is resolved.\n",
                 g_failures);
+        return 2;
+    }
+    if (g_promotion_refusals) {
+        fprintf(stderr,
+                "\n%u ChaCha20 promotion-candidate row(s) refused. AUTO stays "
+                "portable.\n", g_promotion_refusals);
         return 2;
     }
     if (!g_csv) printf("\nAll timed tiers verified bit-identical to generic.\n");

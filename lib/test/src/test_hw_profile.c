@@ -19,6 +19,7 @@
  *     topology, true on the synthetic asymmetric fixture */
 
 #include "test/test_core.h"
+#include "crypto/chacha20poly1305.h"
 #include "util/hw_profile.h"
 #include "util/cpu_topology.h"
 #include "json/json.h"
@@ -211,6 +212,8 @@ int test_hw_profile(void)
 
     /* ── dump_state_json ──────────────────────────────────────────── */
     {
+        int forced = chacha20_select_impl(CHACHA20_IMPL_VECTOR4);
+        const char *active_before_dump = chacha20_implementation();
         struct json_value v;
         json_init(&v);
         HWP_CHECK("dump_state_json succeeds", hw_profile_dump_state_json(&v, NULL));
@@ -232,6 +235,38 @@ int test_hw_profile(void)
                   json_get(isa_dump, "crc32c_transform") != NULL);
         HWP_CHECK("dump reports four-lane Keccak availability",
                   json_get(isa_dump, "keccak_x4_available") != NULL);
+        const struct json_value *chacha_dump =
+            json_get(isa_dump, "chacha20_vector4");
+        HWP_CHECK("dump has nested ChaCha20 vector status",
+                  chacha_dump != NULL);
+        HWP_CHECK("dump separates compiled ChaCha20 vector tier",
+                  json_get(chacha_dump, "compiled") != NULL);
+        HWP_CHECK("dump separates CPU-capable ChaCha20 vector tier",
+                  json_get(chacha_dump, "cpu_capable") != NULL);
+        HWP_CHECK("dump separates KAT-usable ChaCha20 vector tier",
+                  json_get(chacha_dump, "kat_usable") != NULL);
+        HWP_CHECK("dump separates ChaCha20 AUTO selection",
+                  json_get(chacha_dump, "auto_selected") != NULL);
+        HWP_CHECK("dump names the active ChaCha20 transform",
+                  json_get(chacha_dump, "active_transform") != NULL &&
+                  strcmp(json_get_str(json_get(chacha_dump,
+                                               "active_transform")),
+                         active_before_dump) == 0);
+        HWP_CHECK("dump does not confuse forced selection with AUTO policy",
+                  json_get_bool(json_get(chacha_dump, "auto_selected")) ==
+                      chacha20_auto_uses_vector4());
+        HWP_CHECK("dump does not mutate the active ChaCha20 transform",
+                  strcmp(chacha20_implementation(), active_before_dump) == 0);
+#if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
+        HWP_CHECK("mandatory-ABI ChaCha20 vector facts are internally honest",
+                  json_get_bool(json_get(chacha_dump, "compiled")) &&
+                  json_get_bool(json_get(chacha_dump, "cpu_capable")) &&
+                  json_get_bool(json_get(chacha_dump, "kat_usable")) &&
+                  (!json_get_bool(json_get(chacha_dump, "auto_selected")) ||
+                   (json_get_bool(json_get(chacha_dump, "compiled")) &&
+                    json_get_bool(json_get(chacha_dump, "cpu_capable")) &&
+                    json_get_bool(json_get(chacha_dump, "kat_usable")))));
+#endif
 #if defined(__APPLE__) && defined(__aarch64__)
         HWP_CHECK("dump reports the observed Darwin ARM ISA facts",
                   json_get(isa_dump, "arm_neon") &&
@@ -250,12 +285,16 @@ int test_hw_profile(void)
                   json_get_bool(json_get(isa_dump, "arm_aes")) ==
                       isa->arm_aes);
 #endif
+        HWP_CHECK("forced ChaCha20 vector selection narrows honestly",
+                  forced == CHACHA20_IMPL_VECTOR4 ||
+                  forced == CHACHA20_IMPL_PORTABLE);
         HWP_CHECK("dump has storage object", json_get(&v, "storage") != NULL);
         HWP_CHECK("dump has l3 object", json_get(&v, "l3") != NULL);
         HWP_CHECK("dump has derived object", json_get(&v, "derived") != NULL);
         HWP_CHECK("dump has pin_reducer_available",
                   json_get(&v, "pin_reducer_available") != NULL);
         json_free(&v);
+        (void)chacha20_select_impl(CHACHA20_IMPL_AUTO);
     }
 
     /* ── derived tunables: monotonicity + clamps ─────────────────── */

@@ -74,9 +74,9 @@ ACCEPT="tools/scripts/macos_acceptance.sh"
 MATRIX="config/platform/macos_capabilities.def"
 CATALOG="tools/dev/test_group_catalog.def"
 RELEASE_CUTTER="packaging/release/build_release.sh"
-# The union is a closed acceptance contract: 29 capability-evidence groups
+# The union is a closed acceptance contract: 30 capability-evidence groups
 # plus eight required platform-baseline groups.  A floor would miss deletions.
-EXPECTED_GROUPS=37
+EXPECTED_GROUPS=38
 
 macos_make_target_reachable() {
     local makefile="${1:-Makefile}"
@@ -159,7 +159,7 @@ check_root() {
     if ! grep -Fq 'ONLY="$groups" EXACT_ONLY_MATCHED="$groups"' "$ACCEPT"; then
         echo "  $GATE: FAIL — $ACCEPT does not bind its derived union equally" >&2
         echo "  to t-fast-exact's parse guard and exact selector; the native" >&2
-        echo "  target could validate 37 groups while executing an empty set." >&2
+        echo "  target could validate 38 groups while executing an empty set." >&2
         return 1
     fi
     if ! macos_runtime_package_reachable "$ACCEPT"; then

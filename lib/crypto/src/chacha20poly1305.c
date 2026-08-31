@@ -9,6 +9,7 @@
 #include "support/log_throttle.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,10 +88,18 @@ static inline void cv_store_transposed(uint8_t *out, chacha_vec4 a,
 #define ZCL_CHACHA20_VECTOR4_NAME "portable C"
 #endif
 
-/* Forced VECTOR4 exists for parity and physical measurement. AUTO remains
- * portable until caller-shaped p95 and worst-case receipts promote it on each
- * architecture; a passing correctness KAT is necessary, never sufficient. */
+/* Forced VECTOR4 exists for parity and physical measurement. AUTO promotion
+ * is architecture-specific: an Apple receipt must never promote x86 SSE2 (or
+ * vice versa). A passing correctness KAT is necessary, never sufficient. */
+#define ZCL_CHACHA20_AUTO_VECTOR4_APPLE_ARM64 0
+#define ZCL_CHACHA20_AUTO_VECTOR4_X86_64     0
+#if defined(__APPLE__) && defined(__aarch64__)
+#define ZCL_CHACHA20_AUTO_VECTOR4 ZCL_CHACHA20_AUTO_VECTOR4_APPLE_ARM64
+#elif defined(__x86_64__) || defined(_M_X64)
+#define ZCL_CHACHA20_AUTO_VECTOR4 ZCL_CHACHA20_AUTO_VECTOR4_X86_64
+#else
 #define ZCL_CHACHA20_AUTO_VECTOR4 0
+#endif
 
 /* Authentication failures are attacker-controlled input on encrypted public
  * transports.  Preserve the first occurrence and a five-minute keepalive with
@@ -98,7 +107,8 @@ static inline void cv_store_transposed(uint8_t *out, chacha_vec4 a,
  * primitive into an unbounded disk-log writer. */
 static struct log_throttle g_auth_failure_log = LOG_THROTTLE_INIT;
 
-static _Atomic int g_chacha20_vector_state = -1;
+static pthread_once_t g_chacha20_vector_once = PTHREAD_ONCE_INIT;
+static bool g_chacha20_vector_usable = false;
 static _Atomic int g_chacha20_requested_impl = CHACHA20_IMPL_AUTO;
 
 static uint32_t rotl32(uint32_t v, int n)
@@ -224,38 +234,29 @@ static bool chacha20_vector4_kat(void)
 #undef VQR
 #endif
 
-static bool chacha20_vector4_state(void)
+static void chacha20_vector4_init(void)
 {
 #if ZCL_CHACHA20_VECTOR4
-    int state = atomic_load_explicit(&g_chacha20_vector_state,
-                                     memory_order_acquire);
-    if (state >= 0) return state == 1;
-    if (state == -2) return false;
-    int expected = -1;
-    if (!atomic_compare_exchange_strong_explicit(
-            &g_chacha20_vector_state, &expected, -2,
-            memory_order_acq_rel, memory_order_acquire))
-        return expected == 1;
-    bool ok = chacha20_vector4_kat();
-    atomic_store_explicit(&g_chacha20_vector_state, ok ? 1 : 0,
-                          memory_order_release);
-    state = ok ? 1 : 0;
-    if (state == 0)
+    g_chacha20_vector_usable = chacha20_vector4_kat();
+    if (!g_chacha20_vector_usable)
         LOG_ERROR("chacha20", "four-block portable-oracle KAT failed; vector tier disabled");
-    return state == 1;
-#else
-    return false;
 #endif
 }
 
 bool chacha20_vector4_available(void)
 {
-    return chacha20_vector4_state();
+    pthread_once(&g_chacha20_vector_once, chacha20_vector4_init);
+    return g_chacha20_vector_usable;
 }
 
 bool chacha20_vector4_compiled(void)
 {
     return ZCL_CHACHA20_VECTOR4 != 0;
+}
+
+bool chacha20_auto_uses_vector4(void)
+{
+    return ZCL_CHACHA20_AUTO_VECTOR4 && chacha20_vector4_available();
 }
 
 int chacha20_select_impl(enum chacha20_impl which)
@@ -268,10 +269,10 @@ int chacha20_select_impl(enum chacha20_impl which)
     if (which == CHACHA20_IMPL_AUTO) {
         atomic_store_explicit(&g_chacha20_requested_impl,
                               CHACHA20_IMPL_AUTO, memory_order_release);
-        return ZCL_CHACHA20_AUTO_VECTOR4 && chacha20_vector4_state()
+        return chacha20_auto_uses_vector4()
             ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
     }
-    int selected = chacha20_vector4_state()
+    int selected = chacha20_vector4_available()
         ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
     atomic_store_explicit(&g_chacha20_requested_impl, selected,
                           memory_order_release);
@@ -282,9 +283,9 @@ const char *chacha20_implementation(void)
 {
     int requested = atomic_load_explicit(&g_chacha20_requested_impl,
                                          memory_order_acquire);
-    if ((requested == CHACHA20_IMPL_VECTOR4 ||
-         (requested == CHACHA20_IMPL_AUTO && ZCL_CHACHA20_AUTO_VECTOR4)) &&
-        chacha20_vector4_state())
+    if ((requested == CHACHA20_IMPL_VECTOR4 &&
+         chacha20_vector4_available()) ||
+        (requested == CHACHA20_IMPL_AUTO && chacha20_auto_uses_vector4()))
         return ZCL_CHACHA20_VECTOR4_NAME;
     return "portable C";
 }
@@ -303,9 +304,9 @@ bool chacha20_encrypt(const uint8_t key[32], uint32_t counter,
 #if ZCL_CHACHA20_VECTOR4
     int requested = atomic_load_explicit(&g_chacha20_requested_impl,
                                          memory_order_acquire);
-    if ((requested == CHACHA20_IMPL_VECTOR4 ||
-         (requested == CHACHA20_IMPL_AUTO && ZCL_CHACHA20_AUTO_VECTOR4)) &&
-        chacha20_vector4_state()) {
+    if ((requested == CHACHA20_IMPL_VECTOR4 &&
+         chacha20_vector4_available()) ||
+        (requested == CHACHA20_IMPL_AUTO && chacha20_auto_uses_vector4())) {
         uint8_t blocks[256];
         while (len - pos >= sizeof blocks && counter <= UINT32_MAX - 3u) {
             chacha20_blocks4(key, counter, nonce, blocks);
