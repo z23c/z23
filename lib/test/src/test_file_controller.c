@@ -433,6 +433,10 @@ static int64_t file_service_lifetime_wall_unix(void *opaque)
 }
 
 #if !defined(_WIN32)
+/* Wait for the worker's actual EOF, bounded by a hang guard rather than a
+ * scheduler-speed assertion. This test deliberately installs a fake platform
+ * monotonic source to expire the production connection; its own wait must use
+ * the host clock or the injected fixed timestamp can never advance. */
 static bool file_service_wait_for_eof(int fd, int timeout_ms)
 {
     const int64_t deadline_us = clock_now_monotonic_raw_us() +
@@ -534,7 +538,11 @@ static int test_file_service_start_stop_and_lifetime(void)
             (void)fs_send_frame(&client, FS_PADDING, NULL, 0);
         }
 
-        bool peer_closed = file_service_wait_for_eof(fd, 2000);
+        /* A loaded full-suite worker may not run inside one 250 ms quantum.
+         * Keep the correctness assertion (the peer must observe EOF), but
+         * bound it with the same 30 s hostile-peer hang guard as file-service
+         * frame I/O instead of requiring a particular scheduler latency. */
+        bool peer_closed = file_service_wait_for_eof(fd, 30000);
         ok = ok && peer_closed;
 
         if (clock_installed)

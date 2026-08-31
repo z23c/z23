@@ -29,9 +29,10 @@
  *   2. the artifact your machine builds — tools/scripts/node_reproduce.sh
  *      builds z23 in an isolated build dir and emits a receipt;
  *   3. the toolchain BOTH artifacts record, read the SAME way from each
- *      ELF's `.comment` section by the one implementation below. Measuring
- *      the two sides differently would make every honest build look like a
- *      toolchain mismatch, so there is deliberately only one reader.
+ *      image: ELF `.comment` on ELF and `LC_BUILD_VERSION` on Mach-O.
+ *      Measuring the two sides differently would make every honest build
+ *      look like a toolchain mismatch, so there is deliberately only one
+ *      reader.
  *
  * ── WHY THE ANSWER IS NEVER JUST "DIFFERS" ───────────────────────────────
  * A bare mismatch is useless: the user cannot tell "my gcc is newer" from
@@ -219,9 +220,66 @@ done:
     return got;
 }
 
-/* Fill `hex` (65 bytes) with SHA3-256 over the ELF's `.comment` bytes and
- * `desc` with a printable rendering of them. Both become "" / "" when the
- * section is absent — an honest UNKNOWN, never a fabricated identity. */
+/* Mach-O does not carry ELF's `.comment`, but its LC_BUILD_VERSION command
+ * records the target platform, minimum OS, SDK and linker tool version. Hash
+ * the exact command bytes so copied/reproduced images are measured by the
+ * same portable rule without executing either image. Fat/universal images
+ * stay UNKNOWN until their slice selection is explicit; guessing a slice
+ * would make the identity host-dependent. */
+static size_t nv_macho_build_version(const char *path, unsigned char *out,
+                                     size_t cap)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 32)
+        return 0;
+    uint64_t fsz = (uint64_t)st.st_size;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+
+    size_t got = 0;
+    unsigned char mh[32];
+    if (!nv_read_at(f, 0, mh, sizeof(mh), fsz) ||
+        zcl_read_u32_le(mh) != UINT32_C(0xfeedfacf))
+        goto done;
+    uint32_t ncmds = zcl_read_u32_le(mh + 16);
+    uint32_t sizeofcmds = zcl_read_u32_le(mh + 20);
+    if (ncmds == 0 || ncmds > 4096 || sizeofcmds < 8 ||
+        (uint64_t)sizeofcmds > fsz - sizeof(mh))
+        goto done;
+
+    uint64_t off = sizeof(mh);
+    uint64_t end = off + sizeofcmds;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        unsigned char lc[8];
+        if (off > end || end - off < sizeof(lc) ||
+            !nv_read_at(f, off, lc, sizeof(lc), fsz))
+            break;
+        uint32_t cmd = zcl_read_u32_le(lc);
+        uint32_t cmdsize = zcl_read_u32_le(lc + 4);
+        if (cmdsize < sizeof(lc) || (uint64_t)cmdsize > end - off)
+            break;
+        /* LC_BUILD_VERSION = 0x32; the fixed fields occupy 24 bytes and
+         * each build_tool_version row occupies 8 more. */
+        if (cmd == UINT32_C(0x32)) {
+            if (cmdsize < 24 || cmdsize > cap)
+                break;
+            if (nv_read_at(f, off, out, cmdsize, fsz))
+                got = cmdsize;
+            break;
+        }
+        off += cmdsize;
+    }
+
+done:
+    (void)fclose(f);
+    return got;
+}
+
+/* Fill `hex` (65 bytes) with SHA3-256 over the image's recorded toolchain
+ * bytes and `desc` with a printable rendering. Both become "" / "" when the
+ * image has no supported record — an honest UNKNOWN, never a fabricated
+ * identity. */
 static void nv_toolchain(const char *path, char hex[65], char *desc,
                          size_t desc_cap)
 {
@@ -230,6 +288,11 @@ static void nv_toolchain(const char *path, char hex[65], char *desc,
         desc[0] = '\0';
     unsigned char raw[NV_COMMENT_MAX];
     size_t n = nv_elf_comment(path, raw, sizeof(raw));
+    bool macho = false;
+    if (n == 0) {
+        n = nv_macho_build_version(path, raw, sizeof(raw));
+        macho = n > 0;
+    }
     if (n == 0)
         return;
     uint8_t d[32];
@@ -237,6 +300,19 @@ static void nv_toolchain(const char *path, char hex[65], char *desc,
     zcl_hex_encode(d, 32, hex);
     if (!desc || desc_cap == 0)
         return;
+    if (macho) {
+        uint32_t platform = zcl_read_u32_le(raw + 8);
+        uint32_t minos = zcl_read_u32_le(raw + 12);
+        uint32_t sdk = zcl_read_u32_le(raw + 16);
+        uint32_t ntools = zcl_read_u32_le(raw + 20);
+        (void)snprintf(desc, desc_cap,
+                       "Mach-O build platform=%u minos=%u.%u.%u "
+                       "sdk=%u.%u.%u tools=%u",
+                       platform, minos >> 16, (minos >> 8) & 0xffu,
+                       minos & 0xffu, sdk >> 16, (sdk >> 8) & 0xffu,
+                       sdk & 0xffu, ntools);
+        return;
+    }
     /* `.comment` is a run of NUL-separated strings. Render them separated by
      * "; " so several producers stay visible in one printable line. */
     size_t w = 0;

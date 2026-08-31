@@ -80,19 +80,23 @@ static int test_wallet_rebuild_probe(void)
  * fixture and the cases that drive it are POSIX-only; the Windows arm of
  * the group prints a loud SKIP instead. */
 #if !defined(_WIN32)
-static int bp_bind_abstract_socket(char *name_out, size_t name_cap)
+static int bp_bind_notify_socket(char *name_out, size_t name_cap,
+                                 char *dir_out, size_t dir_cap)
 {
     static unsigned counter;
     int fd = platform_socket_open(AF_UNIX, SOCK_DGRAM, 0, true, true);
     if (fd < 0)
         return -1;
 
+#if defined(__linux__)
     int n = snprintf(name_out, name_cap, "@zcl-bootphase-%d-%u",
                      (int)getpid(), counter++);
     if (n <= 0 || (size_t)n >= name_cap) {
         close(fd);
         return -1;
     }
+    if (dir_cap > 0)
+        dir_out[0] = '\0';
     size_t name_len = strlen(name_out) - 1;   /* bytes after the '@' */
 
     struct sockaddr_un sa;
@@ -102,8 +106,33 @@ static int bp_bind_abstract_socket(char *name_out, size_t name_cap)
     memcpy(sa.sun_path + 1, name_out + 1, name_len);
     socklen_t sa_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
                                     + 1 + name_len);
+#else
+    /* Darwin and the other POSIX targets have pathname AF_UNIX sockets but
+     * no Linux abstract namespace.  Keep the pathname in the suite's private
+     * per-process fixture directory and hand that exact pathname to the same
+     * sd_notify implementation production uses. */
+    test_make_tmpdir(dir_out, dir_cap, "bootphase", "notify");
+    int n = snprintf(name_out, name_cap, "%s/socket-%u", dir_out, counter++);
+    if (n <= 0 || (size_t)n >= name_cap ||
+        (size_t)n >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        close(fd);
+        test_rm_rf(dir_out);
+        dir_out[0] = '\0';
+        return -1;
+    }
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    memcpy(sa.sun_path, name_out, (size_t)n + 1u);
+    socklen_t sa_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
+                                    (size_t)n + 1u);
+#endif
     if (bind(fd, (struct sockaddr *)&sa, sa_len) != 0) {
         close(fd);
+#if !defined(__linux__)
+        test_rm_rf(dir_out);
+        dir_out[0] = '\0';
+#endif
         return -1;
     }
     return fd;
@@ -628,8 +657,10 @@ int test_boot_phase(void)
         boot_stage_reset_for_testing();
 
 #if !defined(_WIN32)
-        char sock_name[64];
-        int  fd = bp_bind_abstract_socket(sock_name, sizeof(sock_name));
+        char sock_name[256];
+        char sock_dir[256];
+        int fd = bp_bind_notify_socket(sock_name, sizeof(sock_name),
+                                       sock_dir, sizeof(sock_dir));
         BP_CHECK("evidence: notify socket bound", fd >= 0);
 
         if (fd >= 0) {
@@ -702,6 +733,8 @@ int test_boot_phase(void)
             close(fd);
             unsetenv("NOTIFY_SOCKET");
             sd_notify_reset_for_testing();
+            if (sock_dir[0])
+                test_rm_rf(sock_dir);
         }
 #else
         printf("boot_phase: SKIP (Windows): sd_notify EXTEND_TIMEOUT_USEC "

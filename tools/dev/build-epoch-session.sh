@@ -232,6 +232,21 @@ ADMISSION_LOCK_FILE="$ADMISSION_LOCK_ROOT/$EPOCH.lock"
 ADMISSION_LOCK_DIR="$ADMISSION_LOCK_ROOT/$EPOCH.lock.d"
 ADMISSION_LOCK_OWNER="$ADMISSION_LOCK_DIR/owner"
 ADMISSION_LOCK_HELD=0
+
+admission_lock_matches_fd()
+{
+    local fd_inode path_inode
+    if [ "$HOST_SYSTEM" = Darwin ]; then
+        [ -x /usr/sbin/lsof ] || return 1
+        fd_inode=$(/usr/sbin/lsof -a -p "$$" -d 8 -Fi 2>/dev/null |
+            sed -n 's/^i//p')
+        path_inode=$(/usr/bin/stat -f '%i' "$ADMISSION_LOCK_FILE" 2>/dev/null)
+        [ -n "$fd_inode" ] && [ "$fd_inode" = "$path_inode" ]
+        return
+    fi
+    [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/8 ]
+}
+
 acquire_admission_lock()
 {
     local deadline pid start actual
@@ -255,13 +270,13 @@ acquire_admission_lock()
             fail 'epoch admission lock is a symbolic link'
         exec 8> "$ADMISSION_LOCK_FILE"
         [ -f "$ADMISSION_LOCK_FILE" ] && [ ! -L "$ADMISSION_LOCK_FILE" ] &&
-            [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/8 ] || {
+            admission_lock_matches_fd || {
             exec 8>&-
             fail 'epoch admission lock is not a regular file'
         }
         flock -x 8
         [ -f "$ADMISSION_LOCK_FILE" ] && [ ! -L "$ADMISSION_LOCK_FILE" ] &&
-            [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/8 ] || {
+            admission_lock_matches_fd || {
             exec 8>&-
             fail 'epoch admission lock changed while waiting'
         }

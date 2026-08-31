@@ -121,6 +121,11 @@ static bool agent_peer_load_cache(int *peer_count,
             &g_agent_peer_cache_best_height_known, memory_order_relaxed);
         *sampled_at = atomic_load_explicit(&g_agent_peer_cache_sampled_at,
                                            memory_order_relaxed);
+        /* The leading acquire keeps these payload loads after the first
+         * sequence sample.  ARM also needs a trailing read barrier so none of
+         * them can move after the validation sample and make a torn record
+         * appear stable. */
+        atomic_thread_fence(memory_order_acquire);
         uint64_t after = atomic_load_explicit(&g_agent_peer_cache_seq,
                                               memory_order_acquire);
         if (valid && before == after && (after & 1U) == 0) {

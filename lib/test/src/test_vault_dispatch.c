@@ -42,6 +42,7 @@
 #include "rpc/server.h"
 #include "services/legacy_balance_observer.h"
 #include "services/vault_read.h"
+#include "util/safe_alloc.h"
 #include "wallet/wallet.h"
 
 #include <stdlib.h>
@@ -364,7 +365,11 @@ int test_vault_dispatch(void)
         struct db_service dbsvc;
         struct app_runtime_context runtime;
         struct db_principal p;
-        struct wallet wallet;
+        /* A wallet owns the fixed 65,536-entry transaction table and is tens
+         * of MiB. Keeping it automatic made the optimized macOS harness
+         * fault in ___chkstk_darwin before the first assertion ran. */
+        struct wallet *wallet =
+            zcl_calloc(1, sizeof(*wallet), "vault_dispatch.wallet");
         struct wallet_identity_row identity;
         test_make_tmpdir(dir, sizeof(dir), "vault_dispatch", "policy");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
@@ -373,9 +378,13 @@ int test_vault_dispatch(void)
         memset(&runtime, 0, sizeof(runtime));
         memset(&p, 0, sizeof(p));
         memset(&identity, 0, sizeof(identity));
-        wallet_init(&wallet);
-        wallet.default_fee = 0;
-        bool db_ok = node_db_open(&ndb, dbpath);
+        bool db_ok = wallet != NULL;
+        if (wallet) {
+            wallet_init(wallet);
+            wallet->default_fee = 0;
+        }
+        if (db_ok)
+            db_ok = node_db_open(&ndb, dbpath);
         const uint8_t genesis[32] = { 0x42 };
         if (db_ok)
             db_ok = wallet_identity_ensure(&ndb, genesis, "canonical",
@@ -433,7 +442,7 @@ int test_vault_dispatch(void)
         VD_CHECK("policy fixture: tmp node_db + runtime wired", db_ok);
         if (db_ok) {
             runtime.db_service = &dbsvc;
-            runtime.wallet = &wallet;
+            runtime.wallet = wallet;
             app_runtime_set_current(&runtime);
             node_rpc_client_set_test_hook(vd_rpc_hook);
 
@@ -563,7 +572,10 @@ int test_vault_dispatch(void)
         }
         if (ndb.open)
             node_db_close(&ndb);
-        wallet_free(&wallet);
+        if (wallet) {
+            wallet_free(wallet);
+            free(wallet);
+        }
         test_rm_rf(dir);
     }
 

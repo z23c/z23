@@ -4,9 +4,9 @@
  * discipline is copied field-for-field from the proven seqlock in
  * app/controllers/src/event_agent_peers.c: the writer marks itself busy with a
  * release-ordered odd seq, publishes payload with relaxed stores, then a
- * release-ordered even seq; the reader takes an acquire-ordered seq before and
- * after reading the payload and accepts the sample only when both are the same
- * even value. */
+ * release-ordered even seq; the reader takes an acquire-ordered seq before the
+ * payload, then an acquire fence before the final seq validation, and accepts
+ * the sample only when both seq values are the same even value. */
 
 #include "util/subsystem_snapshot.h"
 
@@ -65,6 +65,13 @@ bool zcl_snapshot_read_ok(const struct zcl_snapshot_env *env,
 {
     if (!env)
         return false;
+    /* This is the trailing half of the seqlock bracket.  The acquire load in
+     * read_try keeps payload loads after the opening seq observation; this
+     * acquire fence keeps those loads before the closing seq observation.
+     * A second acquire load by itself is not that trailing load-load barrier
+     * on weakly ordered CPUs such as ARM64: payload loads may otherwise be
+     * observed after seq validation and a torn generation can be accepted. */
+    atomic_thread_fence(memory_order_acquire);
     uint64_t seq = atomic_load_explicit(&env->seq, memory_order_acquire);
     return (seq_before & 1U) == 0 && seq == seq_before;
 }

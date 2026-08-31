@@ -251,7 +251,8 @@ uint64_t os_proc_current_pid(void);
 bool os_proc_pid_start_token(uint64_t pid, uint64_t *token);
 
 /* Cumulative process filesystem I/O bytes suitable for progress evidence.
- * Windows uses GetProcessIoCounters transfer bytes; POSIX uses getrusage
+ * Windows uses GetProcessIoCounters transfer bytes; Darwin uses the native
+ * proc_pid_rusage disk-I/O byte counters; other POSIX targets use getrusage
  * block counts converted from their specified 512-byte units. */
 bool os_proc_io_bytes(uint64_t *out);
 

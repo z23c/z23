@@ -4,9 +4,9 @@
  * bytes.
  *
  * These cases do not mock the artifact. The thing being hashed is this test
- * binary itself — a real stripped-or-not ELF with a real `.comment` section
- * — and the "rebuild" is a real copy of it on disk, byte-identical or with
- * one byte deliberately flipped. Only the BUILD is substituted (through the
+ * binary itself — a real platform image with a real toolchain record — and
+ * the "rebuild" is a real copy of it on disk, byte-identical or with one byte
+ * deliberately flipped. Only the BUILD is substituted (through the
  * documented test seam), because paying for a whole-program LTO link per
  * assertion would mean these assertions never ran.
  *
@@ -91,11 +91,10 @@ static bool nv_sha3_file(const char *path, char hex[65], uint64_t *bytes)
     return true;
 }
 
-/* Copy `src` to `dst`. When `tamper` is true, flip one bit in the ELF
- * identification PADDING (e_ident[9]) — a byte no section owns, so the file
- * size, every section's contents, and `.comment` in particular are all
- * unchanged. That isolates the assertion to "the bytes differ", with no
- * chance of accidentally perturbing the toolchain identity as well. */
+/* Copy `src` to `dst`. When `tamper` is true, flip one bit outside either
+ * supported toolchain record (ELF `.comment` or Mach-O LC_BUILD_VERSION).
+ * The file size and recorded toolchain stay unchanged, isolating the
+ * assertion to "the bytes differ". */
 static bool nv_copy(const char *src, const char *dst, bool tamper)
 {
     FILE *in = fopen(src, "rb");
@@ -376,9 +375,9 @@ static int t_tampered_artifact_is_caught(void)
              detail != NULL && strstr(detail, "received sha3") != NULL &&
                  strstr(detail, "built") != NULL);
 
-    /* One byte flipped in ELF padding leaves `.comment` untouched, so the
-     * toolchain identity must still agree — that is what makes this a
-     * DIAGNOSIS and not a shrug. */
+    /* The changed byte leaves the platform toolchain record untouched, so
+     * the identity must still agree — that is what makes this a DIAGNOSIS
+     * and not a shrug. */
     NV_CHECK("the toolchain still agrees (only the padding byte moved)",
              nv_data_bool(&r, "toolchain_agrees"));
     const char *sid = zcl_build_source_id_sha256();

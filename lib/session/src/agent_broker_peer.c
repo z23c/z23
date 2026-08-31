@@ -28,6 +28,9 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <sys/socket.h>
+#if defined(__APPLE__)
+#include <sys/un.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -53,7 +56,16 @@ bool agent_broker_peercred(int fd, struct agent_peer_cred *out)
     if (getpeereid(fd, &uid, &gid) != 0)
         LOG_FAIL(BROKER_TAG, "getpeereid on fd=%d failed: %s", fd,
                  strerror(errno));
-    out->pid = -1;
+    pid_t pid = -1;
+    socklen_t pid_len = sizeof(pid);
+    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &pid_len) != 0)
+        LOG_FAIL(BROKER_TAG, "LOCAL_PEERPID on fd=%d failed: %s", fd,
+                 strerror(errno));
+    if (pid_len != sizeof(pid) || pid <= 0)
+        LOG_FAIL(BROKER_TAG,
+                 "LOCAL_PEERPID on fd=%d returned invalid pid=%d len=%u",
+                 fd, (int)pid, (unsigned)pid_len);
+    out->pid = pid;
     out->uid = uid;
     out->gid = gid;
 #else

@@ -43,7 +43,18 @@
  * written differently so that a fingerprint match is a behavioral claim and
  * not a textual one. */
 
-__attribute__((optimize("O0")))
+#if defined(__clang__)
+#define FX_OPT_O0 __attribute__((optnone))
+#define FX_OPT_O2
+#elif defined(__GNUC__)
+#define FX_OPT_O0 __attribute__((optimize("O0")))
+#define FX_OPT_O2 __attribute__((optimize("O2")))
+#else
+#define FX_OPT_O0
+#define FX_OPT_O2
+#endif
+
+FX_OPT_O0
 static uint32_t fx_rot_o0(uint32_t x, unsigned n)
 {
     unsigned k = n & 31u;
@@ -57,7 +68,7 @@ static uint32_t fx_rot_o0(uint32_t x, unsigned n)
 }
 
 /* Same behavior, different text, and compiled at a different level. */
-__attribute__((optimize("O2")))
+FX_OPT_O2
 static uint32_t fx_rot_o2(uint32_t x, unsigned n)
 {
     uint32_t v = x;
@@ -81,6 +92,9 @@ static uint32_t fx_unrelated(uint32_t x, unsigned n)
 {
     return x ^ (uint32_t)n;
 }
+
+#undef FX_OPT_O0
+#undef FX_OPT_O2
 
 typedef uint32_t (*fx_fn)(uint32_t, unsigned);
 

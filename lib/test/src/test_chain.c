@@ -624,9 +624,12 @@ int test_chain(void)
 
     printf("block_tree_db load preserves exact body position... ");
     {
-        char path[256];
-        snprintf(path, sizeof(path), "/tmp/test_btdb_pos_%d", (int)getpid());
-        test_cleanup_tmpdir(path);
+        /* Do not spell this under /tmp: on Darwin /tmp is a symlink to
+         * /private/tmp, and the LevelDB wrapper correctly refuses a path
+         * whose traversed directory object is a symlink.  The shared helper
+         * gives every platform a real, private, per-process fixture leaf. */
+        char path[512];
+        test_make_tmpdir(path, sizeof(path), "chain", "btdb_pos");
 
         struct block_tree_db btdb;
         bool opened = block_tree_db_open(&btdb, path, 1 << 20, false, true);
@@ -668,7 +671,7 @@ int test_chain(void)
         chainstate_free(&loaded);
         if (opened)
             block_tree_db_close(&btdb);
-        test_cleanup_tmpdir(path);
+        test_rm_rf(path);
     }
 
     printf("block_tree_db guts load pumps boot-liveness marker... ");
@@ -680,9 +683,8 @@ int test_chain(void)
          * the marker. (Sibling of the blocks-table hydrate pump test in
          * test_block_index_loader.c §15b.) */
         const int N = 4096 + 16;
-        char path[256];
-        snprintf(path, sizeof(path), "/tmp/test_btdb_pump_%d", (int)getpid());
-        test_cleanup_tmpdir(path);
+        char path[512];
+        test_make_tmpdir(path, sizeof(path), "chain", "btdb_pump");
 
         struct block_tree_db btdb;
         bool opened = block_tree_db_open(&btdb, path, 1 << 20, false, true);
@@ -712,7 +714,7 @@ int test_chain(void)
         chainstate_free(&loaded2);
         if (opened)
             block_tree_db_close(&btdb);
-        test_cleanup_tmpdir(path);
+        test_rm_rf(path);
     }
 
     printf("block serialize/deserialize roundtrip... ");
