@@ -187,14 +187,17 @@ Canonical operator APIs, in priority order:
    client to the running linger service.
 2. REST (`/api/v1/agent`, `/api/v1/openapi`) — public web/API surface.
 
-`make agent-loop` is the normal AI/operator edit gate. Before pushing `main`, the
-tracked pre-push hook computes the exact `origin/main..HEAD` changed-file set,
+`make agent-loop` is the normal AI/operator edit gate. On Linux and macOS,
+before pushing `main`, the tracked pre-push hook computes the exact
+`origin/main..HEAD` changed-file set,
 passes it to `make pre-push-ci`, and rejects remote refs other than
 `refs/heads/main`. `make pre-push-ci` runs cached focused fast-ci for that file
 set (`build-only` plus mapped `t-fast` groups); it does not rerun the full suite
 on every push, and it forces `ZCL_FAST_LIVE=0` so a live node condition remains
 telemetry rather than a push blocker. Set `ZCL_FAST_STRICT_TESTS=1` for a
-deliberate strict focused run. Full `make ci` still exists for release-grade manual runs, but the
+deliberate strict focused run. Windows uses the synchronous fixed-catalog
+`make windows-acceptance` shell hook and does not claim exact-receipt admission.
+Full `make ci` still exists for release-grade manual runs, but the
 expensive proof lanes are kept fresh by `zclassic23-test-suite.timer`,
 `zclassic23-fuzz.timer`, and `zclassic23-coverage.timer`. Install them with
 `make install-quality-linger`; inspect their latest

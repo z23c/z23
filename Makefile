@@ -9634,6 +9634,15 @@ GIT_HOOK_CFLAGS = -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
 	-Itools/dev -Ilib/base/include -Ilib/sha3/include
 
 .PHONY: git-hook git-hook-selftest install-hooks
+ifeq ($(ZCL_HOST_WINDOWS),1)
+git-hook git-hook-selftest:
+	@echo "native exact-receipt Git hook is unavailable on Windows; make setup installs the synchronous shell pre-push gate" >&2
+	@false
+
+install-hooks:
+	@ZCL_GIT_HOOK_HOST=windows \
+	  tools/scripts/install_git_hooks.sh
+else
 git-hook: $(GIT_HOOK_BIN)
 
 $(GIT_HOOK_BIN): $(GIT_HOOK_SRCS)
@@ -9644,25 +9653,14 @@ git-hook-selftest: $(GIT_HOOK_BIN)
 	@$(GIT_HOOK_BIN) --selftest
 
 install-hooks: $(GIT_HOOK_BIN)
-	@mkdir -p $(GIT_HOOK_DIR)
-	@install -m 0755 tools/githooks/pre-commit $(GIT_HOOK_DIR)/pre-commit
-	@install -m 0755 $(GIT_HOOK_BIN) $(GIT_HOOK_DIR)/z23-git-hook
-	@for hook in pre-push post-commit post-merge post-checkout; do \
-		ln -sfn z23-git-hook $(GIT_HOOK_DIR)/$$hook; \
-	done
-	@git config extensions.worktreeConfig true
-	@git config --unset-all core.hooksPath 2>/dev/null || true
-	@git config --worktree core.hooksPath $(GIT_HOOK_DIR)
-	@echo "Installed native git hooks: core.hooksPath=$(GIT_HOOK_DIR)"
-	@echo "  pre-push -> admits one immutable exact commit/base receipt"
-	@echo "  post-commit/post-merge/post-checkout -> schedule proof and return"
-	@echo "  pre-commit -> refuses non-main-branch commits in the MAIN checkout"
-	@echo "                (lane work goes in a worktree; ZCL_LANE_COMMIT_OK=1 overrides)"
-	@echo "  full-suite/fuzz/coverage -> make install-quality-linger"
+	@ZCL_GIT_HOOK_HOST=posix \
+	  tools/scripts/install_git_hooks.sh
+endif
 
 .PHONY: check-git-hooks-installed
 check-git-hooks-installed:
 	@echo "══ LINT: local pre-push hook installed ══"
+	@./tools/scripts/check_git_hooks_installed.sh --self-test
 	@./tools/scripts/check_git_hooks_installed.sh
 
 # One-shot bootstrap for a freshly created `.claude/worktrees/*` lane: copies
@@ -12491,7 +12489,7 @@ setup:
 	else \
 	    echo "══ setup: arming this clone ══"; \
 	    $(MAKE) --no-print-directory install-hooks; \
-	    echo "  wrote  .git/config          core.hooksPath = tools/githooks"; \
+	    echo "  wrote  .git/config          core.hooksPath = build/githooks"; \
 	fi
 	@$(MAKE) --no-print-directory compdb
 	@echo "  wrote  compile_commands.json  (clangd/LSP; regenerate with make compdb)"

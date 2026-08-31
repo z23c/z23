@@ -1284,14 +1284,16 @@ This is a C23 project, so the edit loop should compile only what changed.
   installed, otherwise `ccache`. Set `ZCL_USE_CCACHE=0` to force a direct
   compiler call.
 
-Before pushing `main`, the tracked pre-push hook computes the exact
-`origin/main..HEAD` changed-file set, rejects non-`main` remote refs, and runs
+On Linux and macOS, before pushing `main`, the tracked pre-push hook computes
+the exact `origin/main..HEAD` changed-file set, rejects non-`main` remote refs, and runs
 `make pre-push-ci`. That command uses cached `make t-fast ONLY=<group>` tests
 selected by `tools/agent_fast_ci.sh`, plus `ZCL_FAST_COMPILE=strict` so the
 compile gate is `make build-only` for compiler and `-Werror` coverage; it does
 not rerun the full suite when the changed files only require narrower coverage.
 It also sets `ZCL_FAST_LIVE=0`, so an already-running
-node condition is visible through telemetry but does not block a code push. Set
+node condition is visible through telemetry but does not block a code push.
+Windows instead runs the fixed native `windows-acceptance` catalog described in
+[`WINDOWS.md`](WINDOWS.md); it does not claim exact-receipt admission. Set
 `ZCL_FAST_STRICT_TESTS=1` when a change needs strict whole-harness focused
 tests. Full-suite, fuzz, and coverage evidence belongs to the background quality lanes: install them with
 `make install-quality-linger` and inspect them with `make quality-linger-status`.
