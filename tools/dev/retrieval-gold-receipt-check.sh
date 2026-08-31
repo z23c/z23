@@ -136,7 +136,9 @@ validate_eval_arm() {
 }
 
 decode_base64() {
-    if base64 --help 2>&1 | grep -q -- '--decode'; then
+    local help
+    help=$(base64 --help 2>&1 || true)
+    if grep -q -- '--decode' <<<"$help"; then
         base64 --decode
     else
         base64 -D
