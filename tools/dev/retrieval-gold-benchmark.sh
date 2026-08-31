@@ -18,7 +18,7 @@ keep=${ZCL_RETRIEVAL_BENCH_KEEP:-0}
 mode=${1:---run-local}
 publishable=false
 readonly eval_arm_keys='recall_at_5,available,basis_points,recall_at_20,available,basis_points,mrr,available,basis_points,task_unique_file_selections_at_5,projected_context_bytes_at_5,approximate_tokens_at_5,wrong_scope_at_5,available,basis_points'
-readonly eval_result_keys="schema,tasks_evaluated,binding_kind,context_cost_kind,token_basis,literal,$eval_arm_keys,bm25,$eval_arm_keys"
+readonly eval_result_keys="schema,tasks_evaluated,aggregation_kind,tasks_denominator,eligible_relevance_judgments,binding_kind,context_cost_kind,token_basis,literal,$eval_arm_keys,bm25,$eval_arm_keys"
 
 . "$repo_root/tools/dev/dev_lib.sh" # json_escape
 
@@ -40,6 +40,7 @@ for executable in "$jsonq" "$rank_bin" "$capture_bin" "$evaluator" "$sha3" \
     "$corpus_check"; do
     [[ -x $executable ]] || fail "required executable is unavailable: $executable"
 done
+command -v base64 >/dev/null 2>&1 || fail "required executable is unavailable: base64"
 [[ $command_timeout =~ ^[1-9][0-9]*$ ]] || fail "timeout must be a positive integer"
 case "$keep" in 0|1) ;; *) fail "ZCL_RETRIEVAL_BENCH_KEEP must be 0 or 1" ;; esac
 
@@ -116,6 +117,19 @@ hash_text() {
     root=$(printf '%s' "$value" | "$sha3") || fail "could not hash text"
     [[ $root =~ ^[0-9a-f]{64}$ ]] || fail "malformed text SHA3"
     printf '%s' "$root"
+}
+
+encode_base64_file() {
+    base64 <"$1" | tr -d '\n'
+}
+
+query_stratum() {
+    case "$1" in
+        commit_subject_only) printf '%s' commit_subject_only ;;
+        same_commit_unordered_question|same_commit_unordered_intent|same_commit_unordered_intention)
+            printf '%s' same_commit_unordered ;;
+        *) fail "unknown query provenance: $1" ;;
+    esac
 }
 
 validate_envelope() {
@@ -572,6 +586,9 @@ batch="$run_root/eval.body"; : >"$batch"
 tasks=0; eligible=0; unsupported=0
 literal_eval_files=0; bm25_eval_files=0
 literal_eval_context=0; bm25_eval_context=0
+corpus_commit_subject=0; corpus_same_commit=0
+evaluated_commit_subject=0; evaluated_same_commit=0
+eligible_relevance_judgments=0
 
 while IFS= read -r row || [[ -n $row ]]; do
     [[ $(field "$row" record) = task ]] || continue
@@ -579,6 +596,13 @@ while IFS= read -r row || [[ -n $row ]]; do
     id=$(field "$row" id); parent=$(field "$row" parent_commit)
     expected_root=$(field "$row" expected_vcs_root)
     eligibility=$(field "$row" index_eligibility)
+    stratum=$(query_stratum "$(field "$row" query_provenance)")
+    relevant_count=$(array_count "$row" relevant_paths)
+    case "$stratum" in
+        commit_subject_only) corpus_commit_subject=$((corpus_commit_subject + 1)) ;;
+        same_commit_unordered) corpus_same_commit=$((corpus_same_commit + 1)) ;;
+        *) fail "internal query-stratum classification error: $id" ;;
+    esac
     printf 'retrieval-gold-benchmark: task=%s parent=%s\n' "$id" "$parent" >&2
     prepare_checkout "$parent"
     [[ $(capture_root) = "$expected_root" ]] ||
@@ -597,6 +621,14 @@ while IFS= read -r row || [[ -n $row ]]; do
             "$invariant_membership_tree_root" >>"$task_rows"
     else
         [[ $eligibility = c23_codeindex ]] || fail "unknown eligibility for $id"
+        case "$stratum" in
+            commit_subject_only)
+                evaluated_commit_subject=$((evaluated_commit_subject + 1)) ;;
+            same_commit_unordered)
+                evaluated_same_commit=$((evaluated_same_commit + 1)) ;;
+            *) fail "internal evaluated query-stratum classification error: $id" ;;
+        esac
+        eligible_relevance_judgments=$((eligible_relevance_judgments + relevant_count))
         query=$(field "$row" query)
         run_eligible_task "$row" "$id" "$query" "$expected_root" "$task_dir"
         eligible=$((eligible + 1))
@@ -606,16 +638,32 @@ done <"$corpus"
 
 [[ $tasks -eq 7 && $eligible -eq 6 && $unsupported -eq 1 ]] ||
     fail "task classification changed"
+[[ $corpus_commit_subject -eq 1 && $corpus_same_commit -eq 6 &&
+   $evaluated_commit_subject -eq 1 && $evaluated_same_commit -eq 5 ]] ||
+    fail "query-stratum classification changed"
+((eligible_relevance_judgments > 0)) ||
+    fail "eligible task set has no relevance judgments"
 batch_body=$batch
 batch="$run_root/eval.batch"
-printf 'zcl.retrieval_eval_batch.v2 tasks=%s\n' "$eligible" >"$batch"
+printf 'zcl.retrieval_eval_batch.v3 tasks=%s eligible_relevance_judgments=%s\n' \
+    "$eligible" "$eligible_relevance_judgments" >"$batch"
 cat "$batch_body" >>"$batch"
 printf 'end\n' >>"$batch"
 batch_sha3=$(hash_file "$batch")
+batch_bytes=$(wc -c <"$batch"); batch_bytes=${batch_bytes//[[:space:]]/}
+[[ $batch_bytes =~ ^[1-9][0-9]*$ ]] || fail "evaluator batch byte count is invalid"
+batch_base64=$(encode_base64_file "$batch") || fail "could not encode evaluator batch"
+expected_base64_chars=$((4 * ((batch_bytes + 2) / 3)))
+[[ ${#batch_base64} -eq $expected_base64_chars &&
+   $batch_base64 =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
+    fail "evaluator batch base64 encoding is malformed"
 metrics=$("$evaluator" <"$batch") || fail "maintained evaluator adapter failed"
 keys_exact "$metrics" . "$eval_result_keys"
-[[ $(uint_field "$metrics" tasks_evaluated 32) -eq 6 &&
-   $(field "$metrics" schema) = zcl.retrieval_eval_batch_result.v2 &&
+[[ $(uint_field "$metrics" tasks_evaluated 32) -eq $eligible &&
+   $(field "$metrics" schema) = zcl.retrieval_eval_batch_result.v3 &&
+   $(field "$metrics" aggregation_kind) = macro_equal_task_weight &&
+   $(uint_field "$metrics" tasks_denominator 32) -eq $eligible &&
+   $(uint_field "$metrics" eligible_relevance_judgments 4096) -eq $eligible_relevance_judgments &&
    $(field "$metrics" binding_kind) = metrics_only_runner_seals_provenance &&
    $(field "$metrics" context_cost_kind) = projected_not_read &&
    $(field "$metrics" token_basis) = 'ceil(context_bytes/4)' ]] ||
@@ -630,17 +678,22 @@ validate_eval_arm "$metrics" bm25 "$bm25_eval_files" "$bm25_eval_context"
    $(hash_file "$corpus_check") = "$checker_sha3" &&
    $(hash_file "$corpus") = "$corpus_sha3" &&
    $(hash_file "$runner_path") = "$runner_sha3" &&
-   $(hash_file "$batch") = "$batch_sha3" ]] ||
+   $(hash_file "$batch") = "$batch_sha3" &&
+   $(wc -c <"$batch" | tr -d '[:space:]') = "$batch_bytes" &&
+   $(encode_base64_file "$batch") = "$batch_base64" ]] ||
     fail "benchmark input, executable, or batch changed during the run"
 [[ $(git -C "$repo_root" rev-parse HEAD) = "$driver_commit" &&
    $(git -C "$repo_root" rev-parse origin/main) = "$remote_commit" &&
    $(hash_text "$(git -C "$repo_root" status --porcelain --untracked-files=all)") = "$driver_status_sha3" ]] ||
     fail "benchmark implementation identity changed during the run"
 
-printf '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v1","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":7,"tasks_evaluated":6,"tasks_unsupported":1,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":1,"same_commit_unordered":6},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_root_sha3":"%s"}\n' \
+printf '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v1","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":7,"tasks_evaluated":6,"tasks_unsupported":1,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"evaluated_query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_bytes":%s,"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"%s","evaluator_batch_root_sha3":"%s"}\n' \
     "${mode#--}" "$publishable" "$publication_admission" "$driver_commit" \
-    "$remote_commit" "$driver_clean" "$driver_status_sha3" "$rank_sha3" \
-    "$capture_sha3" "$evaluator_sha3" "$corpus_sha3" "$runner_sha3" "$batch_sha3"
+    "$remote_commit" "$driver_clean" "$driver_status_sha3" \
+    "$corpus_commit_subject" "$corpus_same_commit" \
+    "$evaluated_commit_subject" "$evaluated_same_commit" "$rank_sha3" \
+    "$capture_sha3" "$evaluator_sha3" "$corpus_sha3" "$runner_sha3" \
+    "$batch_bytes" "$batch_base64" "$batch_sha3"
 cat "$task_rows"
 printf '{"record":"aggregate","schema":"zcl.retrieval_gold_benchmark_aggregate.v1","metrics":%s,"files_read_observed":false,"observed_token_count_available":false,"wrong_scope_basis":"unavailable","reuse_success_available":false,"duplicate_avoidance_available":false,"new_unique_loc_avoided_available":false}\n' \
     "$(raw_field "$metrics" .)"
