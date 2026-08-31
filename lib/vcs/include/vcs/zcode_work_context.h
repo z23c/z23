@@ -46,6 +46,13 @@ struct vcs_zcode_work_context_v1 {
     size_t task_authority_len;
 };
 
+struct vcs_zcode_work_context_roots {
+    uint8_t source_root[32];
+    uint8_t source_manifest_id[32];
+    uint8_t input_root[32];
+    uint8_t action_root[32];
+};
+
 const char *vcs_zcode_work_context_result_string(
     enum vcs_zcode_work_context_result result);
 void vcs_zcode_work_context_init(struct vcs_zcode_work_context_v1 *context);
@@ -96,5 +103,15 @@ vcs_zcode_work_context_put_for_kind_with_candidate(
 enum vcs_zcode_work_context_result vcs_zcode_work_context_get(
     struct vcs_package_store *store, const uint8_t package_root[32],
     int64_t now_unix, struct vcs_zcode_work_context_v1 *out);
+
+/* Restore one remote carrier into an explicit receiver CAS. The receiver
+ * imports the existing task/candidate authorities and complete candidate tree,
+ * then independently binds the exact candidate-manifest bytes to the action's
+ * source-manifest identity before admitting the fixed action objects. */
+enum vcs_zcode_work_context_result
+vcs_zcode_work_context_restore_for_kind(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *receiver_root, const char *kind, int64_t now_unix,
+    struct vcs_zcode_work_context_roots *roots);
 
 #endif /* ZCL_VCS_ZCODE_WORK_CONTEXT_H */
