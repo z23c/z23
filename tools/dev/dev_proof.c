@@ -1719,6 +1719,7 @@ static bool proof_worker(const struct proof_paths *paths,
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
 
     struct dev_source_record source_before = {0}, source_after = {0};
+    char sealed_source_id[65], sealed_mutation_id[65];
     if (!zcl_dev_source_identity_capture(generation, &source_before, why,
                                          why_len)) {
         if (!why || !why[0])
@@ -1730,6 +1731,10 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
     }
+    memcpy(sealed_source_id, source_before.source_id,
+           sizeof(sealed_source_id));
+    memcpy(sealed_mutation_id, source_before.mutation_id,
+           sizeof(sealed_mutation_id));
     struct zcl_dev_acceptance_receipt_v1 receipt = {0};
     if (!zcl_dev_proof_oid_decode(local, receipt.local_commit,
                                   &receipt.local_commit_len) ||
@@ -1835,6 +1840,50 @@ static bool proof_worker(const struct proof_paths *paths,
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_LINT, lint);
         if (test->selected) {
+            if (strcmp(source_before.source_id, sealed_source_id) != 0 ||
+                strcmp(source_before.mutation_id, sealed_mutation_id) != 0) {
+                proof_whyf(
+                    why, why_len,
+                    "proof_saved_source_identity_changed_actual_%.16s_sealed_%.16s",
+                    source_before.source_id, sealed_source_id);
+                return false;
+            }
+            struct dev_source_record generation_checkpoint = {0};
+            char checkpoint_why[160] = {0};
+            if (!zcl_dev_source_identity_capture(
+                    generation, &generation_checkpoint, checkpoint_why,
+                    sizeof(checkpoint_why))) {
+                proof_whyf(why, why_len,
+                           "proof_generation_source_checkpoint_%s",
+                           checkpoint_why[0] ? checkpoint_why : "failed");
+                return false;
+            }
+            if (strcmp(generation_checkpoint.source_id, sealed_source_id) != 0 ||
+                strcmp(generation_checkpoint.mutation_id,
+                       sealed_mutation_id) != 0) {
+                proof_whyf(
+                    why, why_len,
+                    "proof_generation_source_identity_changed_actual_%.16s_sealed_%.16s",
+                    generation_checkpoint.source_id, sealed_source_id);
+                return false;
+            }
+            struct dev_source_record root_checkpoint = {0};
+            checkpoint_why[0] = 0;
+            if (!zcl_dev_source_identity_capture(
+                    paths->root, &root_checkpoint, checkpoint_why,
+                    sizeof(checkpoint_why))) {
+                proof_whyf(why, why_len, "proof_root_source_checkpoint_%s",
+                           checkpoint_why[0] ? checkpoint_why : "failed");
+                return false;
+            }
+            if (strcmp(root_checkpoint.source_id, sealed_source_id) != 0 ||
+                strcmp(root_checkpoint.mutation_id, sealed_mutation_id) != 0) {
+                proof_whyf(
+                    why, why_len,
+                    "proof_root_source_identity_changed_actual_%.16s_sealed_%.16s",
+                    root_checkpoint.source_id, sealed_source_id);
+                return false;
+            }
             if (setenv("ZCL_TESTCACHE_STORE_ROOT", paths->root, 1) != 0) {
                 proof_why(why, why_len, "test_cache_store_root_unavailable");
                 return false;
