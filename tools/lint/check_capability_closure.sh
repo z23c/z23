@@ -12,9 +12,9 @@
 #   config/capability_symbols.def   — every external symbol this tree calls,
 #                                      and which class it belongs to (or
 #                                      CAP_HARMLESS, meaning none).
-#   config/module_capabilities.def  — portable/Linux source declarations.
-#   config/module_capabilities_windows.def — exact overrides for paths whose
-#                                      selected Windows arm differs.
+#   config/module_capabilities.def  — cross-target source declarations.
+#   config/module_capabilities_linux.def / _windows.def — exact overrides for
+#                                      paths whose selected host arm differs.
 #
 # Neither file enforces anything by existing. This script is the enforcement:
 # it reads what the compiler already proved (every undefined symbol in every
@@ -135,56 +135,57 @@ CAP_CLOSURE_MIN_OBJECTS_SCANNED=500
 #   tools/dev/checkout-lock.sh foreground build/.checkout.lock -- \
 #     make -j16 build/bin/z23-dev build/bin/zclassic23-package-verify-dev
 # (2060 objects, epoch 2617150eb95064fbce18c5cd445173e9dc2e80d3787aa96ad604d8c14f9b26f7).
-# Of the complete portable module declaration set, exactly 2 have no compiled object
-# anywhere in that epoch, both genuine standalone binaries neither target
-# links:
+# Of the host-selected module declaration set, exactly 2 have no compiled
+# object anywhere in that epoch, both genuine standalone binaries neither
+# target links:
 #   lib/test/src/test_thread_qos.c   — built only by the test harness
 #   tools/rebuild_recent.c           — its own BUILD_NODE_TOOL binary
 # Neither belongs in z23-dev or the package verifier; this is the honest
-# floor for THIS pair of targets, not padding. A complete Windows epoch has
-# the same two unobserved rows after excluding exactly three targets which
-# cannot belong to that host graph: os_sandbox_linux.c and vcs_devloop.c have
-# selected Windows replacement arms, and package_verify.c is the explicitly
-# refused Linux-confinement helper. These are exact source identities below,
-# not extra baseline headroom. If a dependency shape changes, the baseline
-# may only move DOWN without review — a rise means either a legitimate new
-# standalone exemption (document it above) or the partial-scan regression
-# this floor exists to catch. Darwin has two additional honest platform
-# alternatives: os_sandbox_linux.c and self_backtrace.c are replaced by their
-# fail-closed stubs, so its measured floor is 4.
+# floor for THIS pair of targets, not padding. Host alternatives that Makefile
+# does not select are excluded by exact source identity below: Linux drops the
+# sandbox stub; Darwin drops the Linux sandbox and native self-backtrace arms;
+# Windows drops the Linux sandbox and VCS arms plus the explicitly refused
+# Linux-confinement package verifier. They are not baseline headroom. If a
+# dependency shape changes, the baseline may only move DOWN without review —
+# a rise means either a legitimate new standalone exemption (document it
+# above) or the partial-scan regression this floor exists to catch.
 CAP_CLOSURE_HOST_BASELINE=2
-[ "$(uname -s 2>/dev/null || true)" = "Darwin" ] &&
-    CAP_CLOSURE_HOST_BASELINE=4
 CAP_CLOSURE_COVERAGE_BASELINE="${ZCL_CAP_CLOSURE_COVERAGE_BASELINE:-$CAP_CLOSURE_HOST_BASELINE}"
+
+CAP_CLOSURE_HOST_OS="$(uname -s 2>/dev/null || true)"
+case "$CAP_CLOSURE_HOST_OS" in
+    Linux|Darwin) ;;
+    MINGW*|MSYS*|CYGWIN*) CAP_CLOSURE_HOST_OS=Windows ;;
+    *) CAP_CLOSURE_HOST_OS=Other ;;
+esac
 
 # Linux produced the portable declaration snapshot and remains the
 # shrink-only symmetry authority. Darwin still enforces closure and every
 # undeclared reach, but cannot call Linux-only compiler lowering stale.
 CAP_CLOSURE_HOST_SYMMETRY=1
-[ "$(uname -s 2>/dev/null || true)" = "Darwin" ] &&
+[ "$CAP_CLOSURE_HOST_OS" = "Darwin" ] &&
     CAP_CLOSURE_HOST_SYMMETRY=0
 CAP_CLOSURE_ENFORCE_SYMMETRY="${ZCL_CAP_CLOSURE_ENFORCE_SYMMETRY:-$CAP_CLOSURE_HOST_SYMMETRY}"
 
 CAP_CLOSURE_HOST_WINDOWS=false
-case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*) CAP_CLOSURE_HOST_WINDOWS=true ;;
-esac
+[ "$CAP_CLOSURE_HOST_OS" = "Windows" ] && CAP_CLOSURE_HOST_WINDOWS=true
 
 # Return success when a declared source belongs to the complete epoch shape
-# for this host. The Windows exclusions mirror Makefile's selected platform
-# arms plus its named package-verifier refusal; do not turn this into a broad
+# for this host. These exclusions mirror Makefile's selected platform arms
+# plus Windows' named package-verifier refusal; do not turn this into a broad
 # directory or pattern exemption.
 cap_closure_coverage_applicable() {
     local path="$1"
-    if [ "$CAP_CLOSURE_HOST_WINDOWS" = true ]; then
-        case "$path" in
-            lib/platform/src/os_sandbox_linux.c|\
-            lib/vcs/src/vcs_devloop.c|\
-            tools/package_verify.c)
-                return 1
-                ;;
-        esac
-    fi
+    case "$CAP_CLOSURE_HOST_OS:$path" in
+        Linux:lib/platform/src/os_sandbox_stub.c|\
+        Darwin:lib/platform/src/os_sandbox_linux.c|\
+        Darwin:lib/util/src/self_backtrace.c|\
+        Windows:lib/platform/src/os_sandbox_linux.c|\
+        Windows:lib/vcs/src/vcs_devloop.c|\
+        Windows:tools/package_verify.c)
+            return 1
+            ;;
+    esac
     return 0
 }
 
@@ -378,7 +379,7 @@ cap_closure_load_module_rows() {
         CAP_MOD_RAW["$path"]="$cls"
         CAP_MOD_UNION_RAW["$path"]="$(cap_closure_union_caps "${CAP_MOD_UNION_RAW[$path]:-}" "$cls")"
     done <<< "$out"
-    if [ "$CAP_CLOSURE_HOST_WINDOWS" = true ] && [ -n "$platform_file" ] && [ -f "$platform_file" ]; then
+    if [ -n "$platform_file" ] && [ -f "$platform_file" ]; then
         out="$(cap_closure_module_tsv "$platform_file")" || return 1
         while IFS=$'\t' read -r path cls; do
             [ -n "$path" ] || continue
@@ -413,7 +414,15 @@ check_root() {
     local root="$1"
     local symbols_file="$root/config/capability_symbols.def"
     local module_file="$root/config/module_capabilities.def"
-    local platform_module_file="$root/config/module_capabilities_windows.def"
+    local platform_module_file=""
+    case "$CAP_CLOSURE_HOST_OS" in
+        Linux)
+            platform_module_file="$root/config/module_capabilities_linux.def"
+            ;;
+        Windows)
+            platform_module_file="$root/config/module_capabilities_windows.def"
+            ;;
+    esac
     local violations=0
 
     if ! cap_closure_load_symbols "$symbols_file"; then
@@ -847,6 +856,7 @@ run_selftest() {
     FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cap-closure-selftest.XXXXXX")"
     trap selftest_cleanup EXIT
     local rc=0 d
+    local host_os_saved="$CAP_CLOSURE_HOST_OS"
     local host_windows_saved="$CAP_CLOSURE_HOST_WINDOWS"
 
     # Cases A-E below declare either zero rows or one row that IS compiled,
@@ -1042,6 +1052,7 @@ EOF
     # I. COFF import pointers and MinGW stdio wrappers are ABI spellings of a
     # reviewed base entry, not new unclassified capabilities.
     d="$FIXTURE_ROOT/i"; fixture_symbols "$d"
+    CAP_CLOSURE_HOST_OS=Windows
     CAP_CLOSURE_HOST_WINDOWS=true
     if ! cap_closure_load_symbols "$d/config/capability_symbols.def" ||
        [ "${CAP_SYM[__imp_connect]:-}" != "CAP_NETWORK" ] ||
@@ -1078,10 +1089,69 @@ EOF
 ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NONE, "Windows exact empty arm")
 EOF
     expect_accept "J: Windows exact CAP_NONE override replaces portable reach and skips only the named Linux arm" "$d" || rc=1
+
+    # K. Linux exact overrides have the same replacement semantics as the
+    # Windows supplement. The portable cross-target union remains intact,
+    # while symmetry grades only the selected Linux arm.
+    d="$FIXTURE_ROOT/k"; mkdir -p "$d/fixture_src"
+    make_epoch "$d"
+    fixture_symbols "$d"
+    cat > "$d/fixture_src/platform_user.c" <<'EOF'
+static int local_only(int x) { return x + 1; }
+int platform_export(int x) { return local_only(x); }
+EOF
+    mkdir -p "$d/build/dev-obj/epochs/fx0/fixture_src"
+    cc -std=c23 -c "$d/fixture_src/platform_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/platform_user.o" 2>/dev/null \
+      || cc -c "$d/fixture_src/platform_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/platform_user.o"
+    fixture_module_rows "$d" \
+        'ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NETWORK, "portable arm")'
+    cat > "$d/config/module_capabilities_linux.def" <<'EOF'
+ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NONE, "Linux exact empty arm")
+EOF
+    CAP_CLOSURE_HOST_OS=Linux
+    CAP_CLOSURE_HOST_WINDOWS=false
+    expect_accept "K: Linux exact CAP_NONE override replaces portable cross-target reach" "$d" || rc=1
+
+    # L. Coverage grades the exact host-selected graph, while the two real
+    # standalone rows remain applicable on every host. An unselected platform
+    # arm is not an honest addition to the unobserved-row baseline.
+    CAP_CLOSURE_HOST_OS=Linux
+    if cap_closure_coverage_applicable \
+           "lib/platform/src/os_sandbox_stub.c" ||
+       ! cap_closure_coverage_applicable \
+           "lib/test/src/test_thread_qos.c" ||
+       ! cap_closure_coverage_applicable "tools/rebuild_recent.c"; then
+        echo "SELFTEST FAIL: L: Linux host-source selection or standalone rows drifted"
+        rc=1
+    else
+        CAP_CLOSURE_HOST_OS=Darwin
+        if cap_closure_coverage_applicable \
+               "lib/platform/src/os_sandbox_linux.c" ||
+           cap_closure_coverage_applicable \
+               "lib/util/src/self_backtrace.c"; then
+            echo "SELFTEST FAIL: L: Darwin host-source selection drifted"
+            rc=1
+        else
+            CAP_CLOSURE_HOST_OS=Windows
+            if cap_closure_coverage_applicable \
+                   "lib/platform/src/os_sandbox_linux.c" ||
+               cap_closure_coverage_applicable \
+                   "lib/vcs/src/vcs_devloop.c" ||
+               cap_closure_coverage_applicable "tools/package_verify.c"; then
+                echo "SELFTEST FAIL: L: Windows host-source selection drifted"
+                rc=1
+            else
+                echo "  selftest ok: L: coverage follows exact host-source selection and retains the two standalone rows"
+            fi
+        fi
+    fi
+    CAP_CLOSURE_HOST_OS="$host_os_saved"
     CAP_CLOSURE_HOST_WINDOWS="$host_windows_saved"
 
     if [ "$rc" -eq 0 ]; then
-        echo "== selftest: PASS (10/10) =="
+        echo "== selftest: PASS (12/12) =="
     else
         echo "== selftest: FAIL =="
     fi

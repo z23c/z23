@@ -191,13 +191,21 @@ struct hammer {
     int saw_other;
 };
 
-static _Atomic bool g_hammer_run = false;
+static pthread_mutex_t g_hammer_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_hammer_cond = PTHREAD_COND_INITIALIZER;
+static bool g_hammer_start = false;
+static int g_hammer_completed = 0;
 
 static void *hammer_fn(void *arg)
 {
     struct hammer *h = arg;
-    while (atomic_load(&g_hammer_run) && h->rounds > 0) {
-        h->rounds--;
+
+    pthread_mutex_lock(&g_hammer_lock);
+    while (!g_hammer_start)
+        pthread_cond_wait(&g_hammer_cond, &g_hammer_lock);
+    pthread_mutex_unlock(&g_hammer_lock);
+
+    for (int round = 0; round < h->rounds; round++) {
         struct conn c;
         if (!conn_open(&c)) {
             h->handshakes_failed++;
@@ -211,6 +219,11 @@ static void *hammer_fn(void *arg)
             h->saw_other++;
         conn_close(&c);
     }
+
+    pthread_mutex_lock(&g_hammer_lock);
+    g_hammer_completed++;
+    pthread_cond_broadcast(&g_hammer_cond);
+    pthread_mutex_unlock(&g_hammer_lock);
     return NULL;
 }
 
@@ -344,24 +357,43 @@ int test_acme_cert_reload(void)
     {
         struct hammer workers[4];
         memset(workers, 0, sizeof(workers));
-        atomic_store(&g_hammer_run, true);
+        pthread_mutex_lock(&g_hammer_lock);
+        g_hammer_start = false;
+        g_hammer_completed = 0;
+        pthread_mutex_unlock(&g_hammer_lock);
         bool spawned = true;
+        size_t spawned_count = 0;
         for (size_t i = 0; i < sizeof(workers) / sizeof(workers[0]); i++) {
             workers[i].rounds = 30;
             if (pthread_create(&workers[i].thread, NULL, hammer_fn,
                                &workers[i]) != 0) {
                 workers[i].rounds = 0;
                 spawned = false;
-            }
+            } else
+                spawned_count++;
         }
-        for (int flip = 0; flip < 60; flip++) {
-            if (flip % 2 == 0)
+
+        pthread_mutex_lock(&g_hammer_lock);
+        g_hammer_start = true;
+        pthread_cond_broadcast(&g_hammer_cond);
+        pthread_mutex_unlock(&g_hammer_lock);
+
+        int flips = 0;
+        for (;;) {
+            int completed;
+            if (flips % 2 == 0)
                 https_server_watch_certificate(a_cert, a_key);
             else
                 https_server_watch_certificate(b_cert, b_key);
             (void)https_server_certificate_refresh();
+            flips++;
+
+            pthread_mutex_lock(&g_hammer_lock);
+            completed = g_hammer_completed;
+            pthread_mutex_unlock(&g_hammer_lock);
+            if (flips >= 60 && completed == (int)spawned_count)
+                break;
         }
-        atomic_store(&g_hammer_run, false);
         int failed = 0, alpha = 0, bravo = 0, other = 0;
         for (size_t i = 0; i < sizeof(workers) / sizeof(workers[0]); i++) {
             if (workers[i].rounds == 0 && !spawned)
@@ -374,8 +406,11 @@ int test_acme_cert_reload(void)
         }
         printf("acme_cert_reload: %d handshakes during %d swaps "
                "(alpha=%d bravo=%d other=%d failed=%d)\n",
-               alpha + bravo + other + failed, 60, alpha, bravo, other, failed);
+               alpha + bravo + other + failed, flips,
+               alpha, bravo, other, failed);
         CR_CHECK("every thread was started", spawned);
+        CR_CHECK("four workers each attempted exactly 30 handshakes",
+                 alpha + bravo + other + failed == 4 * 30);
         /* A mismatched certificate and key cannot produce a page: it
          * produces a handshake failure. Zero failures IS the atomicity
          * claim. */

@@ -1,0 +1,32 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * LINUX X86-64 EXACT MODULE CAPABILITY OVERRIDES.
+ *
+ * config/module_capabilities.def remains the cross-target package-claim
+ * union. A source path can select materially different entry points under
+ * __linux__, __APPLE__, and _WIN32, so one union row cannot stay symmetric
+ * against every object graph.
+ *
+ * Each row here REPLACES the portable row while closure grades a native
+ * Linux epoch. CAP_NONE is an explicit empty override, not a capability
+ * class. Ordering is alphabetical by source path and carries no meaning. */
+
+ZCL_MODULE_CAPABILITY("config/src/boot_memory_guard.c", CAP_FS_WRITE|CAP_CLOCK, "")
+ZCL_MODULE_CAPABILITY("config/src/boot_mesh_terminal.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("config/src/boot_mint_anchor_preflight.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
+ZCL_MODULE_CAPABILITY("lib/crypto/src/keccak_x4.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("lib/crypto/src/sha256.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("lib/encoding/src/utilstrencodings.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("lib/hotswap/src/hotswap_macho_probe.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("lib/net/src/nat_route_dump.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("lib/platform/src/dlopen_pin.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("lib/platform/src/os_proc_mem.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("lib/platform/src/positioned_file.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("lib/platform/src/toolchain.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("lib/presentation/src/presentation.c", CAP_CLOCK|CAP_DYNLOAD|CAP_FS_WRITE|CAP_FS_READ, "the Linux presentation arm loads the selected native backend and reads/writes its asset cache")
+ZCL_MODULE_CAPABILITY("lib/storage/src/progress_store_directory.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("lib/util/src/cpu_topology.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("lib/util/src/crc32c.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("lib/util/src/hw_profile.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("lib/util/src/sd_notify.c", CAP_NETWORK, "talks directly to systemd's notification socket over AF_UNIX, no libsystemd dependency")
+ZCL_MODULE_CAPABILITY("tools/dev/dev_workspace.c", CAP_FS_WRITE|CAP_FS_READ, "")

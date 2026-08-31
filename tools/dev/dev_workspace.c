@@ -329,6 +329,25 @@ static int ws_mkdir(const char *path, int mode)
 
 static int ws_getpid(void) { return 1; }
 
+/* The native test profile force-includes its POSIX compatibility surface.
+ * This adapter deliberately replaces those names with retained-capability
+ * operations, so remove any compatibility macros before rebinding them. */
+#undef open
+#undef openat
+#undef close
+#undef fstat
+#undef geteuid
+#undef flock
+#undef pread
+#undef pwrite
+#undef write
+#undef ftruncate
+#undef fsync
+#undef unlinkat
+#undef renameat
+#undef mkdirat
+#undef mkdir
+#undef getpid
 #define open ws_open
 #define openat ws_openat
 #define close ws_close
@@ -507,14 +526,16 @@ static bool private_dir_fd(int fd)
 {
     struct stat st;
     return fd >= 0 && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) &&
-           st.st_uid == geteuid() && (st.st_mode & 0077) == 0;
+           (uint64_t)st.st_uid == (uint64_t)geteuid() &&
+           (st.st_mode & 0077) == 0;
 }
 
 static bool private_regular_fd(int fd, struct stat *st_out)
 {
     struct stat st;
     bool ok = fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-              st.st_uid == geteuid() && st.st_nlink == 1 &&
+              (uint64_t)st.st_uid == (uint64_t)geteuid() &&
+              st.st_nlink == 1 &&
               (st.st_mode & 0077) == 0;
     if (ok && st_out)
         *st_out = st;

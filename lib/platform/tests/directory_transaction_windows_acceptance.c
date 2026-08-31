@@ -27,6 +27,14 @@ static bool names_are(const struct platform_directory_names *names,
            strcmp(names->items[1], second) == 0;
 }
 
+static bool same_identity(const struct platform_directory_child_info *left,
+                          const struct platform_directory_child_info *right)
+{
+    return left && right && left->volume == right->volume &&
+           left->file_low == right->file_low &&
+           left->file_high == right->file_high;
+}
+
 struct io_task {
     struct platform_directory_child *child;
     uint64_t offset;
@@ -88,12 +96,21 @@ int main(int argc, char **argv)
     const char *phase = "open";
     const char *detail = "";
     struct platform_directory_transaction directory;
+    struct platform_directory_transaction move_destination;
     struct platform_directory_child stage, opened, occupied, replacement;
+    struct platform_directory_child moved, move_probe, collision_source;
+    struct platform_directory_child collision_destination, unknown_move;
     platform_directory_transaction_init(&directory);
+    platform_directory_transaction_init(&move_destination);
     platform_directory_child_init(&stage);
     platform_directory_child_init(&opened);
     platform_directory_child_init(&occupied);
     platform_directory_child_init(&replacement);
+    platform_directory_child_init(&moved);
+    platform_directory_child_init(&move_probe);
+    platform_directory_child_init(&collision_source);
+    platform_directory_child_init(&collision_destination);
+    platform_directory_child_init(&unknown_move);
     if (!platform_directory_transaction_open(&directory, root))
         goto cleanup;
 
@@ -278,6 +295,124 @@ int main(int argc, char **argv)
         goto cleanup;
     platform_directory_child_close(&replacement);
 
+    phase = "retained cross-directory move";
+    detail = "create retained destination";
+    if (platform_directory_transaction_open_child(
+            &directory, "move-target", true, &move_destination) !=
+        PLATFORM_DIRECTORY_OK)
+        goto cleanup;
+    platform_directory_transaction_close(&move_destination);
+    char move_target_path[MAX_PATH];
+    if (snprintf(move_target_path, sizeof(move_target_path),
+                 "%s/move-target", root) <= 0)
+        goto cleanup;
+    detail = "reopen top-level retained destination";
+    if (!platform_directory_transaction_open(&move_destination,
+                                             move_target_path))
+        goto cleanup;
+    detail = "create retained source";
+    if (!platform_directory_child_create(&directory, "move.stage", &moved) ||
+        !platform_directory_child_write_exact(&moved, "move-payload", 12, 0) ||
+        !platform_directory_child_flush(&moved))
+        goto cleanup;
+    struct platform_directory_child_info moved_before, moved_after;
+    if (!platform_directory_child_info(&moved, &moved_before))
+        goto cleanup;
+    detail = "invalid destination leaf refusal";
+    if (platform_directory_child_move_between(
+            &directory, &moved, &move_destination, "name:stream", true) !=
+            PLATFORM_DIRECTORY_INVALID ||
+        strcmp(moved.leaf, "move.stage") != 0)
+        goto cleanup;
+    detail = "no-clobber move";
+    if (platform_directory_child_move_between(
+            &directory, &moved, &move_destination, "move.final", true) !=
+            PLATFORM_DIRECTORY_OK ||
+        strcmp(moved.leaf, "move.final") != 0)
+        goto cleanup;
+    if (platform_directory_child_open_result(
+            &directory, "move.stage", false, false, &move_probe, NULL) !=
+            PLATFORM_DIRECTORY_MISSING ||
+        !platform_directory_child_open(&move_destination, "move.final",
+                                       &move_probe) ||
+        !platform_directory_child_info(&move_probe, &moved_after) ||
+        !same_identity(&moved_before, &moved_after))
+        goto cleanup;
+    platform_directory_child_close(&move_probe);
+
+    detail = "cross-directory no-clobber collision";
+    if (!platform_directory_child_create(
+            &move_destination, "collision.final", &collision_destination) ||
+        !platform_directory_child_write_exact(
+            &collision_destination, "old", 3, 0) ||
+        !platform_directory_child_flush(&collision_destination))
+        goto cleanup;
+    platform_directory_child_close(&collision_destination);
+    if (!platform_directory_child_create(
+            &directory, "collision.stage", &collision_source) ||
+        !platform_directory_child_write_exact(&collision_source, "new", 3, 0) ||
+        !platform_directory_child_flush(&collision_source))
+        goto cleanup;
+    struct platform_directory_child_info collision_before, collision_after;
+    if (!platform_directory_child_info(&collision_source, &collision_before) ||
+        platform_directory_child_move_between(
+            &directory, &collision_source, &move_destination,
+            "collision.final", true) != PLATFORM_DIRECTORY_EXISTS ||
+        strcmp(collision_source.leaf, "collision.stage") != 0)
+        goto cleanup;
+    detail = "cross-directory replacement";
+    if (platform_directory_child_move_between(
+            &directory, &collision_source, &move_destination,
+            "collision.final", false) != PLATFORM_DIRECTORY_OK ||
+        !platform_directory_child_open(
+            &move_destination, "collision.final", &collision_destination) ||
+        !platform_directory_child_info(
+            &collision_destination, &collision_after) ||
+        !same_identity(&collision_before, &collision_after))
+        goto cleanup;
+    platform_directory_child_close(&collision_destination);
+
+    detail = "post-rename durability ambiguity";
+    if (!platform_directory_child_create(
+            &directory, "unknown.stage", &unknown_move) ||
+        !platform_directory_child_write_exact(&unknown_move, "unknown", 7, 0) ||
+        !platform_directory_child_flush(&unknown_move))
+        goto cleanup;
+    struct platform_directory_child_info unknown_before, unknown_after;
+    if (!platform_directory_child_info(&unknown_move, &unknown_before))
+        goto cleanup;
+    platform_directory_child_move_test_fail_durability_once();
+    if (platform_directory_child_move_between(
+            &directory, &unknown_move, &move_destination,
+            "unknown.final", true) != PLATFORM_DIRECTORY_OUTCOME_UNKNOWN ||
+        strcmp(unknown_move.leaf, "unknown.final") != 0 ||
+        platform_directory_child_open_result(
+            &directory, "unknown.stage", false, false, &move_probe, NULL) !=
+            PLATFORM_DIRECTORY_MISSING ||
+        !platform_directory_child_open(
+            &move_destination, "unknown.final", &move_probe) ||
+        !platform_directory_child_info(&move_probe, &unknown_after) ||
+        !same_identity(&unknown_before, &unknown_after))
+        goto cleanup;
+    platform_directory_child_close(&move_probe);
+    if (!platform_directory_transaction_flush(&move_destination) ||
+        !platform_directory_transaction_flush(&directory))
+        goto cleanup;
+
+    platform_directory_child_close(&moved);
+    platform_directory_child_close(&collision_source);
+    platform_directory_child_close(&unknown_move);
+    if (!platform_directory_child_unlink(
+            &move_destination, "move.final", false) ||
+        !platform_directory_child_unlink(
+            &move_destination, "collision.final", false) ||
+        !platform_directory_child_unlink(
+            &move_destination, "unknown.final", false))
+        goto cleanup;
+    platform_directory_transaction_close(&move_destination);
+    if (!platform_private_directory_remove_empty(move_target_path))
+        goto cleanup;
+
     phase = "sorted regular listing";
     struct platform_directory_names names;
     if (!platform_directory_transaction_list_regular(&directory, &names))
@@ -371,10 +506,24 @@ int main(int argc, char **argv)
     result = 0;
 
 cleanup:
+    platform_directory_child_close(&unknown_move);
+    platform_directory_child_close(&collision_destination);
+    platform_directory_child_close(&collision_source);
+    platform_directory_child_close(&move_probe);
+    platform_directory_child_close(&moved);
     platform_directory_child_close(&replacement);
     platform_directory_child_close(&occupied);
     platform_directory_child_close(&opened);
     platform_directory_child_close(&stage);
+    if (move_destination.native != UINTPTR_MAX) {
+        (void)platform_directory_child_unlink(
+            &move_destination, "move.final", true);
+        (void)platform_directory_child_unlink(
+            &move_destination, "collision.final", true);
+        (void)platform_directory_child_unlink(
+            &move_destination, "unknown.final", true);
+    }
+    platform_directory_transaction_close(&move_destination);
     if (directory.native != UINTPTR_MAX) {
         (void)platform_directory_child_unlink(&directory, "alpha.stage", true);
         (void)platform_directory_child_unlink(&directory, "alpha", true);
@@ -383,6 +532,11 @@ cleanup:
         (void)platform_directory_child_unlink(&directory, "concurrent", true);
         (void)platform_directory_child_unlink(&directory, "exact", true);
         (void)platform_directory_child_unlink(&directory, "state.lock", true);
+        (void)platform_directory_child_unlink(&directory, "move.stage", true);
+        (void)platform_directory_child_unlink(
+            &directory, "collision.stage", true);
+        (void)platform_directory_child_unlink(
+            &directory, "unknown.stage", true);
         for (unsigned i = 0; i < 900; i++) {
             char leaf[96];
             snprintf(leaf, sizeof(leaf),
@@ -397,6 +551,10 @@ cleanup:
     wchar_t nested_cleanup[MAX_PATH];
     if (swprintf(nested_cleanup, MAX_PATH, L"%ls\\nested", root_wide) > 0)
         (void)RemoveDirectoryW(nested_cleanup);
+    wchar_t move_target_cleanup[MAX_PATH];
+    if (swprintf(move_target_cleanup, MAX_PATH, L"%ls\\move-target",
+                 root_wide) > 0)
+        (void)RemoveDirectoryW(move_target_cleanup);
     if (!platform_private_directory_remove_empty(root)) result = 1;
     if (result) {
         fprintf(stderr, "directory_transaction_acceptance detail: %s "

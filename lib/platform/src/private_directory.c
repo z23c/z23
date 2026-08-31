@@ -167,6 +167,32 @@ bool platform_private_directory_open_validated(const char *path,
     return true;
 }
 
+static bool private_directory_open_validated_traverse_platform(
+    const char *path, uintptr_t *native_handle)
+{
+    wchar_t wide[32768];
+    if (!native_handle || !private_directory_wide(path, wide))
+        return false;
+    /* A cross-directory rename makes an internal relative FILE_WRITE_DATA
+     * open of RootDirectory.  Retaining FILE_WRITE_DATA on that same object
+     * creates a reverse share-access conflict, so namespace transactions use
+     * this deliberately narrower retained capability. */
+    HANDLE directory = CreateFileW(
+        wide, FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES |
+                  READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    bool ok = directory != INVALID_HANDLE_VALUE &&
+              platform_private_acl_validate_handle(directory, true);
+    if (!ok) {
+        if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+        return false;
+    }
+    *native_handle = (uintptr_t)directory;
+    return true;
+}
+
 void platform_private_directory_close(uintptr_t native_handle)
 {
     if ((HANDLE)native_handle != INVALID_HANDLE_VALUE)
@@ -253,8 +279,21 @@ bool platform_private_directory_open_validated(const char *path,
     return true;
 }
 
+static bool private_directory_open_validated_traverse_platform(
+    const char *path, uintptr_t *native_handle)
+{
+    return platform_private_directory_open_validated(path, native_handle);
+}
+
 void platform_private_directory_close(uintptr_t native_handle)
 {
     if ((int)native_handle >= 0) close((int)native_handle);
 }
 #endif
+
+bool platform_private_directory_open_validated_traverse(
+    const char *path, uintptr_t *native_handle)
+{
+    return private_directory_open_validated_traverse_platform(
+        path, native_handle);
+}

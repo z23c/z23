@@ -422,6 +422,13 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
+else ifneq ($(filter lint lint-cached lint-cold-audit,$(ZCL_EPOCH_SINGLE_GOAL)),)
+# The lint umbrellas name the dev node and confined package verifier as cold
+# prerequisites below.  Their compile epoch must therefore be selected at
+# parse time just as it is for dev-package-verifier; a zero epoch would acquire
+# a lease before the real compiler fingerprint exists and correctly fail the
+# post-link toolchain-integrity check.
+ZCL_EPOCH_PROFILES := dev
 else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-fast
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -436,7 +443,7 @@ else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_EPOCH_SINGL
 ZCL_EPOCH_PROFILES := dev-tsan
 else ifneq ($(filter coverage coverage-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := coverage
-else ifneq ($(filter lint lint-fast watcher-safety-gates dev-failure-execution-id ff t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast watcher-safety-gates dev-failure-execution-id ff t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
 endif
 endif
@@ -1932,6 +1939,7 @@ ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
 	$(ADAPTERS_INCLUDES) -Ivendor/include
 ZCL_WINDOWS_ACCEPTANCE_BINS := $(addprefix \
 	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
+ZCL_WINDOWS_ACCEPTANCE_COUNT := $(words $(ZCL_WINDOWS_ACCEPTANCE_TESTS))
 
 define ZCL_WINDOWS_ACCEPTANCE_RULE
 $$(ZCL_WINDOWS_ACCEPTANCE_DIR)/$(1).exe: \
@@ -1945,43 +1953,88 @@ endef
 $(foreach test,$(ZCL_WINDOWS_ACCEPTANCE_TESTS), \
 	$(eval $(call ZCL_WINDOWS_ACCEPTANCE_RULE,$(test))))
 
-.PHONY: windows-acceptance-compile windows-acceptance
+.PHONY: windows-acceptance-compile windows-acceptance windows-acceptance-wine
 windows-acceptance-compile: $(ZCL_WINDOWS_ACCEPTANCE_BINS)
-	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS'
+	@if test '$(ZCL_WINDOWS_ACCEPTANCE_COUNT)' -lt 1; then \
+		printf '%s\n' 'windows-acceptance: FAIL: catalog selected zero programs' >&2; \
+		exit 2; \
+	fi
+	@if test '$(ZCL_WINDOWS_ACCEPTANCE_COUNT)' -ne \
+		'$(words $(sort $(ZCL_WINDOWS_ACCEPTANCE_TESTS)))'; then \
+		printf '%s\n' 'windows-acceptance: FAIL: duplicate catalog program id' >&2; \
+		exit 2; \
+	fi
+	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+		test -s "$$executable" || { \
+			printf '%s\n' "windows-acceptance: FAIL: missing/empty $$executable" >&2; \
+			exit 2; \
+		}; \
+	done
+	@printf '%s\n' 'windows-acceptance: strict C23 cross-link PASS ($(ZCL_WINDOWS_ACCEPTANCE_COUNT) programs)'
 
 windows-acceptance: windows-acceptance-compile
 
 ifeq ($(ZCL_HOST_WINDOWS),1)
 windows-acceptance: windows-headless-run-selftest
 
-	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+	@root="$$(cygpath -aw .)"; \
+	runner="$$(cygpath -aw $(WINDOWS_HEADLESS_RUN_BIN))"; \
+	log_dir="build/tests/windows/logs"; mkdir -p "$$log_dir"; \
+	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
 		case "$$executable" in */headless_run.exe) continue ;; esac; \
-		"$$executable"; rc=$$?; \
+		name="$$(basename "$$executable" .exe)"; \
+		log="$$log_dir/$$name.log"; \
+		executable_win="$$(cygpath -aw "$$executable")"; \
+		log_win="$$(cygpath -aw "$$log")"; \
+		"$$runner" --cwd "$$root" --log "$$log_win" -- \
+			"$$executable_win"; rc=$$?; \
+		test ! -f "$$log" || cat "$$log"; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
 	printf '%s\n' 'windows-acceptance: native execution PASS (explicit runtime refusals reported above)'
 else
-	@command -v wine >/dev/null 2>&1 || { \
-		printf '%s\n' 'windows-acceptance: REFUSE: Wine unavailable; use windows-acceptance-compile for cross-link evidence'; \
+	@printf '%s\n' \
+	  'windows-acceptance: native runtime UNOBSERVED (host=$(ZCL_HOST_OS)); MinGW cross-link PASS; run make windows-acceptance on native Windows to close it'
+endif
+
+windows-acceptance-wine: windows-acceptance-compile
+	@if test '$(ZCL_HOST_WINDOWS)' = 1; then \
+		printf '%s\n' 'windows-acceptance-wine: REFUSE: this optional compatibility leg is for a POSIX Wine host, not native Windows'; \
+		exit 2; \
+	fi; \
+	command -v wine >/dev/null 2>&1 || { \
+		printf '%s\n' 'windows-acceptance-wine: REFUSE: Wine unavailable'; \
 		exit 2; \
 	}; \
 	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
 		case "$$executable" in */headless_run.exe) continue ;; esac; \
 		WINEDEBUG=-all wine "$$executable"; rc=$$?; \
 		if test $$rc -eq 77; then \
-			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
+			printf '%s\n' "windows-acceptance-wine: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
-	printf '%s\n' 'windows-acceptance: execution PASS (explicit runtime refusals reported above)'
-endif
+	printf '%s\n' 'windows-acceptance-wine: Wine compatibility execution PASS (not native Windows evidence)'
+
+.PHONY: windows-portability-acceptance
+# Mandatory Linux-hosted acceptance aggregate. Individual lint gates retain an
+# explicit UNOBSERVED mode for contributors without MinGW; this acceptance,
+# pre-push and hosted-CI path does not.
+windows-portability-acceptance:
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh --self-test
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_cross_syntax.sh --self-test
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_cross_syntax.sh
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh --self-test
+	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh
+	@printf '%s\n' 'windows-portability-acceptance: PASS (cross-compiled on host=$(ZCL_HOST_OS); native Windows runtime UNOBSERVED)'
 
 .PHONY: macos-acceptance
 # Tier-1 darwin-arm64 aggregate.  Its exact registered-test set is derived
 # from the closed capability matrix; unavailable rows run their refusal proof
 # rather than disappearing as hand-maintained skips.
-macos-acceptance:
+macos-acceptance: z23
 	@./tools/scripts/macos_acceptance.sh --run
 
 .PHONY: windows-service-install windows-service-status windows-service-remove
@@ -9872,7 +9925,7 @@ coverage-clean:
 # Mapped focused tests for the files being pushed. Unmapped code fails
 # closed (add an impact rule) instead of expanding to the 941-group suite.
 # Full-suite/fuzz/coverage remain on make install-quality-linger.
-pre-push-ci:
+pre-push-ci: windows-portability-acceptance
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) $(CHECKOUT_LOCK_MODE) "$(CHECKOUT_LOCK)" -- \
 	  env ZCL_FAST_LIVE=0 ZCL_FAST_COMPILE=strict \
@@ -10913,13 +10966,16 @@ check-windows-platform-seam:
 #      ZCL_PLATFORM_CPPFLAGS so the two can never drift apart again).
 #
 # Compile, not execute: these are Windows binaries and this is a POSIX host.
-# `make windows-acceptance` additionally runs them under Wine and REFUSES
-# rather than skipping when Wine is absent.
+# `make windows-acceptance` executes them only on native Windows. On a POSIX
+# host it still performs every cross-link, then reports native runtime
+# UNOBSERVED. Optional Wine compatibility execution is a separately labelled
+# target and can never close the native observation.
 #
-# UNOBSERVED contract: with no mingw toolchain the compile step prints
-# UNOBSERVED, in that word, and exits 0 -- an outside contributor is never
-# blocked by a cross-compiler they do not have -- but UNOBSERVED is not a pass
-# and is not cached. The reconcile step has already run by then either way.
+# UNOBSERVED contract: an optional contributor invocation with no mingw
+# toolchain prints UNOBSERVED, in that word, and exits 0 -- but UNOBSERVED is
+# not a pass and is not cached. windows-portability-acceptance, pre-push and
+# hosted CI set ZCL_REQUIRE_MINGW=1 and fail if the compiler is unavailable.
+# The reconcile step has already run by then either way.
 #
 # --self-test runs first on every invocation because a gate not proven able to
 # go red is not evidence: it plants an undeclared program in a throwaway
@@ -10937,10 +10993,11 @@ check-windows-acceptance:
 # END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
-# Syntax-only mingw sweep of every .c under lib/ app/ config/ core/ domain/
-# ports/ whose text contains _WIN32. windows-acceptance-compile cross-links
-# the catalogued acceptance programs; gcc/clang on this box never take the
-# _WIN32 branch of the rest, so a Windows-only syntax error sat undetected.
+# Syntax-only mingw sweep of every .c under the node source roots, including
+# adapters/ application/ src/ and tools/command/, whose text contains _WIN32.
+# windows-acceptance-compile cross-links the catalogued acceptance programs;
+# gcc/clang on this box never take the _WIN32 branch of the rest, so a
+# Windows-only syntax error sat undetected.
 # -fsyntax-only, no objects, no archives. SKIP (exit 0, not a pass) when
 # mingw is absent.
 check-windows-cross-syntax:
@@ -12114,6 +12171,12 @@ LINT_GATES := \
 # it had not been built, `make lint` failed check-ship-remote-transaction in
 # about 30 ms and — because that gate's selftest was a silent assertion chain —
 # with a completely empty failure log.
+# The umbrella also runs capability-closure and cookbook checks over the DEV
+# object graph, and several gates inspect the confined dev package verifier.
+# Name those artifacts here so a parallel cold lint never depends on ambient
+# output from an earlier development build.
+lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN)
+
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"

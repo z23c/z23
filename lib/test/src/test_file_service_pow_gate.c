@@ -230,7 +230,9 @@ static int test_per_connection_budget(void)
 {
     int failures = 0;
     TEST("file_service: per-connection byte/time budget trips") {
-        int64_t now = platform_time_monotonic_ms();
+        /* Fixed positive monotonic samples keep every boundary input valid
+         * even on a host whose real monotonic epoch is still near zero. */
+        int64_t now = INT64_C(10000000);
 
         /* Fresh connection, modest bytes → OK. */
         ASSERT(fs_conn_budget_ok(1024, now, now));

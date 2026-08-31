@@ -287,10 +287,12 @@ static bool mock_server_start_blockhash_warmup(struct mock_server *m)
 static void mock_server_stop(struct mock_server *m)
 {
     atomic_store(&m->stop, true);
-    /* Closing the listen socket interrupts the blocking accept() so the
-     * thread exits (closesocket from another thread fails the in-flight
-     * accept on Windows). */
+    /* Shut down before close so a blocking accept() is reliably interrupted
+     * on Linux as well as Windows.  A close from another thread alone can
+     * leave accept() holding its own reference to the socket until another
+     * connection arrives. */
     if (m->listen_fd != PLATFORM_SOCKET_INVALID) {
+        (void)platform_socket_shutdown_both(m->listen_fd);
         platform_socket_close(m->listen_fd);
         m->listen_fd = PLATFORM_SOCKET_INVALID;
     }
