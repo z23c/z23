@@ -10,12 +10,15 @@
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
+#include "vcs/package_build.h"
+#include "vcs/package_store.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_accepted_work.h"
 #include "vcs/zcode_agent_context.h"
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_work_output.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -369,6 +372,48 @@ static const struct vcs_zcode_task_receipt_entry *index_receipt_find(
     return NULL;
 }
 
+/* A BUILD output can name the executed object directly, or it can be the
+ * action-bound carrier for a canonical package-build report.  In the latter
+ * case the exact emitted-file hashes live inside that report; the carrier
+ * root is evidence about those bytes, not the bytes themselves. */
+static bool index_app_artifact_built(
+    const char *repo_root,
+    const struct vcs_zcode_task_receipt_entry *build,
+    const uint8_t artifact_root[32])
+{
+    uint8_t output_root[32], action_root[32], *wire = NULL;
+    size_t wire_len = 0;
+    if (!repo_root || !build || !artifact_root ||
+        !zcl_hex_decode_lower(build->output_root_hex, output_root, 32) ||
+        !zcl_hex_decode_lower(build->action_root_hex, action_root, 32))
+        return false;
+    if (memcmp(output_root, artifact_root, 32) == 0 &&
+        vcs_object_load_raw(repo_root, output_root, &wire, &wire_len) == 0) {
+        free(wire);
+        return true;
+    }
+    struct vcs_package_store *store = vcs_package_store_global();
+    enum vcs_zcode_work_output_result loaded = store
+        ? vcs_zcode_work_output_get(
+              store, output_root, action_root, &wire, &wire_len)
+        : VCS_ZCODE_WORK_OUTPUT_ABSENT;
+    struct vcs_package_build_receipt report;
+    bool matched = loaded == VCS_ZCODE_WORK_OUTPUT_OK &&
+        wire_len <= VCS_PACKAGE_BUILD_MAX_WIRE_BYTES &&
+        vcs_package_build_parse(wire, wire_len, &report) ==
+            VCS_PACKAGE_BUILD_OK;
+    if (matched) {
+        matched = false;
+        for (size_t i = 0; i < report.output_count; i++)
+            if (memcmp(report.outputs[i].sha3, artifact_root, 32) == 0) {
+                matched = true;
+                break;
+            }
+    }
+    free(wire);
+    return matched;
+}
+
 /* A signed app-run receipt is display evidence only. Re-derive its nested
  * observation and require an earlier passing build receipt under the same
  * task/candidate/policy/toolchain. This establishes the exact statement the
@@ -429,8 +474,8 @@ static bool index_app_run_valid(
         strcmp(build->toolchain_capsule_root_hex,
                task->toolchain_capsule_root_hex) == 0 &&
         build->finished_unix <= out->started_unix;
-    zcl_hex_encode(out->artifact_root, 32, bound);
-    ok = ok && build && strcmp(bound, build->output_root_hex) == 0;
+    ok = ok && build && index_app_artifact_built(
+        repo_root, build, out->artifact_root);
     bool success = vcs_zcode_app_run_observation_v1_proves_success(out);
     return ok && ((success && receipt->status == VCS_ZCODE_WORK_PASS) ||
                   (!success && receipt->status != VCS_ZCODE_WORK_PASS));

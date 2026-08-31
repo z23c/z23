@@ -463,7 +463,14 @@ static bool story_render_show(struct zcl_command_reply *reply,
     bool ok = true;
     for (size_t i = 0; ok && i < loaded->graph.event_count; i++)
         ok = story_push_event(&events, &loaded->events[i], full);
-    bool app_missing = loaded->events[5].status != ZCL_ONTOLOGY_PROVED;
+    const char *largest_missing = "none";
+    for (size_t i = 0; i < loaded->graph.event_count; i++)
+        if (loaded->events[i].status != ZCL_ONTOLOGY_PROVED) {
+            largest_missing = zcl_story_event_kind_name(
+                loaded->events[i].kind);
+            break;
+        }
+    bool app_missing = strcmp(largest_missing, "app_runs") == 0;
     const char *app_next = loaded->events[5].status ==
             ZCL_ONTOLOGY_INCOMPLETE
         ? "restore or repair the nested app-run observation and its exact build-receipt binding"
@@ -497,10 +504,12 @@ static bool story_render_show(struct zcl_command_reply *reply,
         json_push_kv_str(&reply->data, "truth_system",
                          "zcl.ontology.status") &&
         json_push_kv_str(&reply->data, "largest_missing_relation",
-                         app_missing ? "app_runs" : "none") &&
+                         largest_missing) &&
         json_push_kv_str(&reply->data, "next_action",
                          app_missing ? app_next
-                                     : "inspect story why for any non-PROVED relation");
+                         : strcmp(largest_missing, "none") == 0
+                             ? "inspect story why for the complete causal chain"
+                             : "inspect story why for the first non-PROVED causal relation");
     json_free(&events);
     return ok;
 }

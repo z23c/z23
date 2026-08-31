@@ -35,11 +35,12 @@ enum vcs_zcode_app_run_flag {
      VCS_ZCODE_APP_RUN_FULL_ISOLATION | \
      VCS_ZCODE_APP_RUN_NETWORK_DENIED)
 
+/* These flags prove the narrow claim that the named bytes ran to a captured
+ * successful exit. Isolation and network denial are independent facts: their
+ * absence must remain visible, but does not turn an observed run into UNKNOWN. */
 #define VCS_ZCODE_APP_RUN_PROVED_FLAGS \
     (VCS_ZCODE_APP_RUN_ATTEMPTED | VCS_ZCODE_APP_RUN_LAUNCHED | \
-     VCS_ZCODE_APP_RUN_EXITED | VCS_ZCODE_APP_RUN_OUTPUT_COMPLETE | \
-     VCS_ZCODE_APP_RUN_FULL_ISOLATION | \
-     VCS_ZCODE_APP_RUN_NETWORK_DENIED)
+     VCS_ZCODE_APP_RUN_EXITED | VCS_ZCODE_APP_RUN_OUTPUT_COMPLETE)
 
 enum vcs_zcode_app_run_observation_error {
     VCS_ZCODE_APP_RUN_OK = 0,

@@ -7,13 +7,16 @@
 #include "command/native_command.h"
 #include "command/native_zcode_join.h"
 #include "config/command_catalog.h"
+#include "crypto/ed25519.h"
 #include "json/json.h"
 #include "models/build_fabric.h"
 #include "models/database.h"
 #include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
 #include "services/zcode_lane_service.h"
+#include "dev/devloop.h"
 #include "util/file_tree_ops.h"
 #include "util/util.h"
 #include "chain/chainparams.h"
@@ -24,6 +27,9 @@
 #include "vcs/package_reuse.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_devloop.h"
+#include "vcs/vcs_object.h"
+#include "vcs/zcode_app_run_observation.h"
+#include "vcs/zcode_dev.h"
 
 #include <secp256k1.h>
 #include <stdio.h>
@@ -300,6 +306,279 @@ static bool zpd_benchmark_project(const char *root, const char *name,
     return zpd_write(path, text);
 }
 
+static bool zpd_expert_root(const struct json_value *expert,
+                            const char *key, uint8_t out[32])
+{
+    const struct json_value *value = expert ? json_get(expert, key) : NULL;
+    return value && value->type == JSON_STR &&
+           zcl_hex_decode_lower(json_get_str(value), out, 32);
+}
+
+static bool zpd_find_build_receipt(
+    const char *workspace, const char *candidate_workspace,
+    const struct json_value *expert,
+    struct vcs_zcode_work_receipt_v1 *out, uint8_t out_root[32])
+{
+    uint8_t checked[32], expected_task[32];
+    uint8_t expected_candidate[32], expected_policy[32], expected_toolchain[32];
+    uint8_t expected_action[32];
+    if (!workspace || !candidate_workspace || !out || !out_root ||
+        !zpd_expert_root(expert, "task_root", expected_task) ||
+        !zpd_expert_root(expert, "candidate_root", expected_candidate) ||
+        !zpd_expert_root(expert, "proof_policy_root", expected_policy) ||
+        !zpd_expert_root(expert, "toolchain_capsule_root",
+                         expected_toolchain) ||
+        !zpd_expert_root(expert, "proof_action_root", expected_action))
+        return false;
+    char proof_db[4608];
+    int n = snprintf(proof_db, sizeof(proof_db), "%s", candidate_workspace);
+    char *attempt = n > 0 && (size_t)n < sizeof(proof_db)
+        ? strrchr(proof_db, '/') : NULL;
+    size_t remaining = attempt
+        ? (size_t)(proof_db + sizeof(proof_db) - attempt) : 0;
+    int replaced = attempt
+        ? snprintf(attempt, remaining, "/zbuild/node.db") : -1;
+    if (!attempt || replaced <= 0 || (size_t)replaced >= remaining)
+        return false;
+    struct node_db ndb = {0};
+    if (!node_db_open_existing_runtime(
+            &ndb, proof_db, "zcode.benchmark.app-run"))
+        return false;
+    char task_hex[65], candidate_hex[65], policy_hex[65];
+    zcl_hex_encode(expected_task, 32, task_hex);
+    zcl_hex_encode(expected_candidate, 32, candidate_hex);
+    zcl_hex_encode(expected_policy, 32, policy_hex);
+    struct db_build_receipt rows[64];
+    int receipt_count = db_build_candidate_receipts(
+        &ndb, task_hex, candidate_hex, policy_hex,
+        rows, sizeof(rows) / sizeof(rows[0]));
+    node_db_close(&ndb);
+    if (receipt_count <= 0) return false;
+    char action_hex[65];
+    zcl_hex_encode(expected_action, 32, action_hex);
+    for (int i = 0; i < receipt_count; i++) {
+        if (rows[i].exit_status != 0 ||
+            strcmp(rows[i].action_id, action_hex) != 0 ||
+            !zcl_hex_decode_lower(rows[i].work_receipt_sha3, out_root, 32))
+            continue;
+        uint8_t *wire = NULL;
+        size_t wire_len = 0;
+        struct vcs_zcode_work_receipt_v1 receipt;
+        bool ok = vcs_object_load_raw_bounded(
+                 workspace, out_root,
+                 VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES, &wire, &wire_len) == 0 &&
+             vcs_zcode_work_receipt_parse(wire, wire_len, &receipt) ==
+                 VCS_ZCODE_DEV_OK &&
+             vcs_zcode_work_receipt_id(&receipt, checked) ==
+                 VCS_ZCODE_DEV_OK &&
+             memcmp(checked, out_root, 32) == 0 &&
+             vcs_zcode_work_receipt_verify(
+                 &receipt, receipt.signer_pubkey) == VCS_ZCODE_DEV_OK;
+        free(wire);
+        if (!ok || receipt.work_kind != VCS_ZCODE_WORK_BUILD ||
+            receipt.status != VCS_ZCODE_WORK_PASS || receipt.exit_status != 0 ||
+            memcmp(receipt.task_root, expected_task, 32) != 0 ||
+            memcmp(receipt.candidate_root, expected_candidate, 32) != 0 ||
+            memcmp(receipt.proof_policy_root, expected_policy, 32) != 0 ||
+            memcmp(receipt.toolchain_capsule_root,
+                   expected_toolchain, 32) != 0 ||
+            memcmp(receipt.action_root, expected_action, 32) != 0)
+            continue;
+        *out = receipt;
+        return true;
+    }
+    return false;
+}
+
+static bool zpd_store_app_run_evidence(
+    const char *workspace, const char *candidate_workspace,
+    const struct json_value *expert)
+{
+    struct vcs_zcode_work_receipt_v1 build;
+    uint8_t build_root[32];
+    if (!zpd_find_build_receipt(workspace, candidate_workspace, expert,
+                                &build, build_root) ||
+        build.finished_unix > INT64_MAX - 2)
+        return false;
+    char app_source[4608], app_binary[4608];
+    int source_n = snprintf(app_source, sizeof(app_source),
+                            "%s/.story-app.c", candidate_workspace);
+    int binary_n = snprintf(app_binary, sizeof(app_binary),
+                            "%s/.story-app", candidate_workspace);
+    static const char app_source_text[] =
+        "#include <stdio.h>\n#include \"x.h\"\n"
+        "int main(void) { printf(\"x=%d\\n\", x()); return 0; }\n";
+    if (source_n <= 0 || (size_t)source_n >= sizeof(app_source) ||
+        binary_n <= 0 || (size_t)binary_n >= sizeof(app_binary) ||
+        !zpd_write(app_source, app_source_text))
+        return false;
+    const char *compile_argv[] = {
+        "cc", "-std=c23", "-O1", "-Iinclude", ".story-app.c", "src/x.c",
+        "-o", ".story-app", NULL,
+    };
+    struct zcl_devloop_process_result compiled = {0};
+    bool compile_ok = zcl_devloop_process_run(
+        candidate_workspace, compile_argv, 30000, &compiled) &&
+        !compiled.timed_out && !compiled.cancelled &&
+        compiled.term_signal == 0 && compiled.exit_code == 0 &&
+        !compiled.output_truncated;
+    char *artifact = compile_ok
+        ? zpd_read_bounded(app_binary, 16u * 1024u * 1024u) : NULL;
+    struct stat artifact_stat;
+    bool artifact_ok = artifact && stat(app_binary, &artifact_stat) == 0 &&
+        artifact_stat.st_size > 0 &&
+        (uint64_t)artifact_stat.st_size <= 16u * 1024u * 1024u;
+    uint8_t artifact_root[32];
+    artifact_ok = artifact_ok && vcs_object_put(
+        workspace, (const uint8_t *)artifact, (size_t)artifact_stat.st_size,
+        VCS_TAG_BLOB, artifact_root);
+    free(artifact);
+    if (!artifact_ok) {
+        (void)unlink(app_source);
+        (void)unlink(app_binary);
+        return false;
+    }
+    static const uint8_t compile_invocation[] =
+        "cc -std=c23 -O1 -Iinclude .story-app.c src/x.c -o .story-app";
+    static const uint8_t compile_confinement[] =
+        "fixture compiler; timeout=30000ms; network state unclaimed";
+    static const uint8_t compile_silent[] = "compiler produced no output";
+    const uint8_t *compile_evidence = compiled.output_len
+        ? (const uint8_t *)compiled.output : compile_silent;
+    size_t compile_evidence_len = compiled.output_len
+        ? compiled.output_len : sizeof(compile_silent) - 1u;
+    uint8_t compile_invocation_root[32], compile_output_root[32];
+    uint8_t compile_confinement_root[32];
+    if (!vcs_object_put(workspace, compile_invocation,
+                        sizeof(compile_invocation) - 1u, VCS_TAG_BLOB,
+                        compile_invocation_root) ||
+        !vcs_object_put(workspace, compile_evidence,
+                        compile_evidence_len, VCS_TAG_BLOB,
+                        compile_output_root) ||
+        !vcs_object_put(workspace, compile_confinement,
+                        sizeof(compile_confinement) - 1u, VCS_TAG_BLOB,
+                        compile_confinement_root)) {
+        (void)unlink(app_source);
+        (void)unlink(app_binary);
+        return false;
+    }
+    struct vcs_zcode_work_receipt_v1 app_build = {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .work_kind = VCS_ZCODE_WORK_BUILD,
+        .status = VCS_ZCODE_WORK_PASS,
+        .exit_status = 0,
+        .started_unix = build.finished_unix + 1,
+        .finished_unix = build.finished_unix + 2,
+    };
+    memcpy(app_build.task_root, build.task_root, 32);
+    memcpy(app_build.candidate_root, build.candidate_root, 32);
+    memcpy(app_build.action_root, compile_invocation_root, 32);
+    memcpy(app_build.input_root, build.input_root, 32);
+    memcpy(app_build.output_root, artifact_root, 32);
+    memcpy(app_build.proof_policy_root, build.proof_policy_root, 32);
+    memcpy(app_build.toolchain_capsule_root,
+           build.toolchain_capsule_root, 32);
+    memcpy(app_build.lease_id, compile_confinement_root, 32);
+    memcpy(app_build.evidence_root, compile_output_root, 32);
+    memcpy(app_build.confinement_root, compile_confinement_root, 32);
+    uint8_t seed[32], secret[64], pubkey[32];
+    memset(seed, 0xb7, sizeof(seed));
+    ed25519_keypair(pubkey, secret, seed);
+    bool sealed = vcs_zcode_work_receipt_seal(
+        &app_build, secret, pubkey) == VCS_ZCODE_DEV_OK;
+    uint8_t build_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    sealed = sealed && vcs_zcode_work_receipt_serialize(
+        &app_build, build_wire) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(&app_build, build_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_object_put_addressed(workspace, build_root, build_wire,
+                                 sizeof(build_wire));
+    static const uint8_t invocation[] = "./.story-app";
+    struct zcl_devloop_process_result ran = {0};
+    const char *run_argv[] = {"./.story-app", NULL};
+    bool ran_ok = sealed && zcl_devloop_process_run(
+        candidate_workspace, run_argv, 10000, &ran) &&
+        !ran.timed_out && !ran.cancelled && ran.term_signal == 0 &&
+        ran.exit_code == 0 && !ran.output_truncated &&
+        strcmp(ran.output, "x=10\n") == 0;
+    (void)unlink(app_source);
+    (void)unlink(app_binary);
+    static const uint8_t stream_note[] =
+        "stderr is merged into the complete captured process stream";
+    static const uint8_t confinement[] =
+        "fixture executor; timeout=10000ms; network state unclaimed; streams merged";
+    uint8_t invocation_root[32], stdout_root[32], stderr_root[32];
+    uint8_t confinement_root[32];
+    if (!ran_ok ||
+        !vcs_object_put(workspace, invocation, sizeof(invocation) - 1u,
+                        VCS_TAG_BLOB, invocation_root) ||
+        !vcs_object_put(workspace, (const uint8_t *)ran.output,
+                        ran.output_len, VCS_TAG_BLOB, stdout_root) ||
+        !vcs_object_put(workspace, stream_note, sizeof(stream_note) - 1u,
+                        VCS_TAG_BLOB, stderr_root) ||
+        !vcs_object_put(workspace, confinement, sizeof(confinement) - 1u,
+                        VCS_TAG_BLOB, confinement_root)) {
+        memset(secret, 0, sizeof(secret));
+        return false;
+    }
+    struct vcs_zcode_app_run_observation_v1 observation = {
+        .schema_version = VCS_ZCODE_APP_RUN_OBSERVATION_VERSION,
+        .flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS,
+        .exit_status = 0,
+        .started_unix = app_build.finished_unix + 1,
+        .finished_unix = app_build.finished_unix + 2,
+    };
+    memcpy(observation.task_root, build.task_root, 32);
+    memcpy(observation.candidate_root, build.candidate_root, 32);
+    memcpy(observation.build_receipt_root, build_root, 32);
+    memcpy(observation.artifact_root, artifact_root, 32);
+    memcpy(observation.invocation_root, invocation_root, 32);
+    memcpy(observation.stdout_root, stdout_root, 32);
+    memcpy(observation.stderr_root, stderr_root, 32);
+    memcpy(observation.confinement_root, confinement_root, 32);
+    uint8_t observation_wire[VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES];
+    uint8_t observation_root[32];
+    if (vcs_zcode_app_run_observation_v1_serialize(
+            &observation, observation_wire) != VCS_ZCODE_APP_RUN_OK ||
+        vcs_zcode_app_run_observation_v1_root(
+            &observation, observation_root) != VCS_ZCODE_APP_RUN_OK ||
+        !vcs_object_put_addressed(
+            workspace, observation_root, observation_wire,
+            sizeof(observation_wire)))
+        return false;
+    struct vcs_zcode_work_receipt_v1 receipt = {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .work_kind = VCS_ZCODE_WORK_APP_RUN,
+        .status = VCS_ZCODE_WORK_PASS,
+        .exit_status = 0,
+        .started_unix = observation.started_unix,
+        .finished_unix = observation.finished_unix,
+    };
+    memcpy(receipt.task_root, build.task_root, 32);
+    memcpy(receipt.candidate_root, build.candidate_root, 32);
+    memcpy(receipt.action_root, invocation_root, 32);
+    memcpy(receipt.input_root, invocation_root, 32);
+    memcpy(receipt.output_root, observation_root, 32);
+    memcpy(receipt.proof_policy_root, build.proof_policy_root, 32);
+    memcpy(receipt.toolchain_capsule_root,
+           build.toolchain_capsule_root, 32);
+    memcpy(receipt.lease_id, confinement_root, 32);
+    memcpy(receipt.evidence_root, observation_root, 32);
+    memcpy(receipt.confinement_root, confinement_root, 32);
+    bool ok = vcs_zcode_work_receipt_seal(&receipt, secret, pubkey) ==
+              VCS_ZCODE_DEV_OK;
+    memset(secret, 0, sizeof(secret));
+    uint8_t receipt_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    uint8_t receipt_root[32];
+    return ok &&
+        vcs_zcode_work_receipt_serialize(&receipt, receipt_wire) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(&receipt, receipt_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_object_put_addressed(workspace, receipt_root, receipt_wire,
+                                 sizeof(receipt_wire));
+}
+
 struct zpd_benchmark_case {
     const char *kind;
     const char *goal;
@@ -427,6 +706,41 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
             zcl_command_reply_free(&reply); json_free(&input);
 
             if (!cases[i].refused) {
+                if (i == 0) {
+                    /* One independently authorized fixture executor records
+                     * the exact built artifact and bounded invocation before
+                     * the human acceptance transition.  StoryGraph reads the
+                     * resulting CAS objects; it does not own this fact. */
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace",
+                                            roots[cases[i].project]));
+                    ASSERT(json_push_kv_str(&input, "work", work_id));
+                    ASSERT(json_push_kv_bool(&input, "details", true));
+                    request.input = &input;
+                    zcl_command_reply_init(
+                        &reply, "zcl.zcode_benchmark_app_status.v1");
+                    zcl_native_handle_zcode_work_status(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    const struct json_value *expert =
+                        json_get(&reply.data, "expert");
+                    ASSERT(expert && expert->type == JSON_OBJ);
+                    const char *process_env =
+                        getenv("ZCL_DEVLOOP_TEST_PROCESS");
+                    char *saved_process_env = process_env
+                        ? strdup(process_env) : NULL;
+                    ASSERT(!process_env || saved_process_env);
+                    ASSERT(platform_environment_set(
+                               "ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+                    bool app_evidence = zpd_store_app_run_evidence(
+                        roots[cases[i].project], candidate, expert);
+                    ASSERT(platform_environment_set(
+                               "ZCL_DEVLOOP_TEST_PROCESS",
+                               saved_process_env ? saved_process_env : "",
+                               1) == 0);
+                    free(saved_process_env);
+                    ASSERT(app_evidence);
+                    zcl_command_reply_free(&reply); json_free(&input);
+                }
                 json_init(&input); json_set_object(&input);
                 ASSERT(json_push_kv_str(&input, "workspace",
                                         roots[cases[i].project]));
@@ -474,11 +788,11 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     zcl_native_handle_story_show(&request, &reply);
                     ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
                     ASSERT(strcmp(json_get_str(json_get(&reply.data, "status")),
-                                  "UNKNOWN") == 0);
-                    ASSERT(!json_get_bool(json_get(&reply.data, "complete")));
+                                  "PROVED") == 0);
+                    ASSERT(json_get_bool(json_get(&reply.data, "complete")));
                     ASSERT(strcmp(json_get_str(json_get(
                                       &reply.data, "largest_missing_relation")),
-                                  "app_runs") == 0);
+                                  "none") == 0);
                     ASSERT(json_size(json_get(&reply.data, "events")) == 7);
                     story_projection_bytes = json_write(
                         &reply.data, NULL, 0);
@@ -509,7 +823,8 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     zcl_native_handle_story_why(&request, &reply);
                     ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
                     ASSERT(strcmp(json_get_str(json_get(&reply.data, "status")),
-                                  "UNKNOWN") == 0);
+                                  "PROVED") == 0);
+                    ASSERT(json_get_bool(json_get(&reply.data, "complete")));
                     ASSERT(json_size(json_get(&reply.data, "causal_chain")) ==
                            7);
                     zcl_command_reply_free(&reply); json_free(&input);

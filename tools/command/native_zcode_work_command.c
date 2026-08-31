@@ -1521,13 +1521,36 @@ static void zwork_proof_snapshot_read(
             (void)snprintf(action, sizeof(action), "%s", latest->action_id);
     }
     out->ledger_supervised = explicit_datadir || owned;
-    if (action[0])
-        (void)snprintf(out->action_root, sizeof(out->action_root), "%s",
-                       action);
     struct zcl_result result = action[0]
         ? build_fabric_proof_evaluate_readonly(ndb, workspace, action, now,
                                                &out->facts)
         : ZCL_ERR(-1, "no action identity is bound to this task yet");
+    /* A later independently signed display receipt may name an action that
+     * is not in this operator's ledger. It stays visible in the task index,
+     * but cannot redirect the proof snapshot away from the durable proof
+     * event chain. */
+    if (!result.ok || !out->facts.policy_satisfied) {
+        for (int i = event_count - 1; i >= 0; i--) {
+            if (candidate_known && strcmp(
+                    events[i].candidate_root_sha3, candidate_root) != 0)
+                continue;
+            struct build_fabric_proof_evaluation candidate_facts = {0};
+            struct zcl_result candidate_result =
+                build_fabric_proof_evaluate_readonly(
+                    ndb, workspace, events[i].action_id, now,
+                    &candidate_facts);
+            if (!candidate_result.ok || !candidate_facts.policy_satisfied)
+                continue;
+            (void)snprintf(action, sizeof(action), "%s",
+                           events[i].action_id);
+            out->facts = candidate_facts;
+            result = candidate_result;
+            break;
+        }
+    }
+    if (action[0])
+        (void)snprintf(out->action_root, sizeof(out->action_root), "%s",
+                       action);
     if (!owned) node_db_close(ndb);
     out->available = result.ok;
 }
@@ -2426,6 +2449,46 @@ void zcl_native_handle_zcode_work_review(
                    "review result could not be rendered", false, true);
 }
 
+/* The workspace index deliberately projects every valid signed receipt, but
+ * acceptance authority lives in the task-local build ledger. Resolve the
+ * action whose independently re-evaluated proof policy is satisfied; an
+ * unrelated later display receipt must never redirect acceptance. */
+static bool zwork_accept_action_resolve(
+    const char *workspace, const char *datadir,
+    const struct vcs_zcode_task_index_entry *entry,
+    char out[BUILD_FABRIC_ID_HEX + 1])
+{
+    if (!workspace || !datadir || !entry || !out) return false;
+    out[0] = '\0';
+    char db_path[ZWORK_PATH_MAX];
+    int n = snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
+    struct node_db local = {0};
+    struct node_db *ndb = n > 0 && (size_t)n < sizeof(db_path)
+        ? zwork_runtime_ledger(db_path) : NULL;
+    bool owned = ndb != NULL;
+    if (!owned) ndb = &local;
+    bool opened = n > 0 && (size_t)n < sizeof(db_path) &&
+        (owned || node_db_open_existing_runtime(
+            ndb, db_path, "zcode.work.accept.action"));
+    struct db_build_action actions[64];
+    int count = opened ? db_build_candidate_actions(
+        ndb, entry->task_root_hex, entry->latest_candidate_root_hex,
+        entry->proof_policy_root_hex, actions,
+        sizeof(actions) / sizeof(actions[0])) : 0;
+    int64_t now = (int64_t)platform_time_wall_unix();
+    for (int i = 0; i < count; i++) {
+        struct build_fabric_proof_evaluation facts = {0};
+        if (build_fabric_proof_evaluate_readonly(
+                ndb, workspace, actions[i].action_id, now, &facts).ok &&
+            facts.policy_satisfied &&
+            (!out[0] || strcmp(actions[i].action_id, out) < 0))
+            (void)snprintf(out, BUILD_FABRIC_ID_HEX + 1, "%s",
+                           actions[i].action_id);
+    }
+    if (!owned && opened) node_db_close(ndb);
+    return out[0] != '\0';
+}
+
 void zcl_native_handle_zcode_work_accept(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -2483,6 +2546,14 @@ void zcl_native_handle_zcode_work_accept(
                      : "task-local ZBuild path is too long", false, false);
         vcs_zcode_task_index_free(index); return;
     }
+    char acceptance_action[BUILD_FABRIC_ID_HEX + 1];
+    if (!zwork_accept_action_resolve(
+            workspace, datadir, entry, acceptance_action)) {
+        zwork_fail(reply, "PROOF_PROFILE_INCOMPLETE", "evidence",
+                   "no canonical action currently satisfies the exact proof profile",
+                   true, false);
+        vcs_zcode_task_index_free(index); return;
+    }
     char acceptance_hex[65] = {0};
     if (confirmed_identity) {
         char db_path[ZWORK_PATH_MAX];
@@ -2499,7 +2570,7 @@ void zcl_native_handle_zcode_work_accept(
                 identity_db, db_path, "zcode.work.accept.confirmation"));
         if (identity_ready) {
             identity_ready = build_fabric_proof_evaluate_readonly(
-                identity_db, workspace, entry->latest_action_root_hex,
+                identity_db, workspace, acceptance_action,
                 (int64_t)platform_time_wall_unix(), &identity_facts).ok;
             if (!identity_owned) node_db_close(identity_db);
         }
@@ -2554,7 +2625,7 @@ void zcl_native_handle_zcode_work_accept(
         struct zcl_command_reply evidence;
         zcl_command_reply_init(&evidence, "zcl.zcode_evidence.v1");
         zwork_evidence_inner(workspace, datadir,
-                             entry->latest_action_root_hex, &evidence);
+                             acceptance_action, &evidence);
         const struct json_value *satisfied = evidence.status ==
                 ZCL_COMMAND_STATUS_PASSED
             ? json_get(&evidence.data, "policy_satisfied") : NULL;
@@ -2574,7 +2645,7 @@ void zcl_native_handle_zcode_work_accept(
             struct zcl_command_reply candidate;
             zcl_command_reply_init(&candidate, "zcl.zcode_accept.v1");
             zwork_accept_inner(workspace, datadir,
-                               entry->latest_action_root_hex,
+                               acceptance_action,
                                "CANDIDATE", &candidate);
             if (candidate.status != ZCL_COMMAND_STATUS_PASSED) {
                 zwork_fail(reply, "CANDIDATE_ACCEPTANCE_REFUSED", "accept",
@@ -2587,7 +2658,7 @@ void zcl_native_handle_zcode_work_accept(
             zcl_command_reply_free(&candidate);
         }
         zwork_accept_inner(workspace, datadir,
-                           entry->latest_action_root_hex, "PROVEN",
+                           acceptance_action, "PROVEN",
                            &final_reply);
     }
     if (final_reply.status != ZCL_COMMAND_STATUS_PASSED) {

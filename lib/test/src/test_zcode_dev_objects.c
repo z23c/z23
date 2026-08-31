@@ -5872,7 +5872,9 @@ static int test_zd_task_index(void)
                task_a.toolchain_capsule_root, 32);
         zd_root(build_receipt.action_root, 0x90);
         zd_root(build_receipt.input_root, 0x91);
-        zd_root(build_receipt.output_root, 0x92);
+        static const uint8_t built_app[] = "exact-fixture-app-bytes";
+        ASSERT(vcs_object_put(workspace, built_app, sizeof(built_app) - 1u,
+                              VCS_TAG_BLOB, build_receipt.output_root));
         zd_root(build_receipt.lease_id, 0x93);
         zd_root(build_receipt.evidence_root, 0x94);
         zd_root(build_receipt.confinement_root, 0x95);
@@ -5948,8 +5950,8 @@ static int test_zd_task_index(void)
          * relation. */
         ASSERT_EQ(entry_a->valid_app_run_receipt_count, 0u);
 
-        /* Bind a second observation to the exact output root committed by
-         * the referenced build receipt.  Only this relation is valid. */
+        /* Bind a second observation to the exact, present object committed
+         * by the referenced build receipt. Only this relation is valid. */
         memcpy(app_observation.artifact_root,
                build_receipt.output_root, 32);
         ASSERT_EQ(vcs_zcode_app_run_observation_v1_serialize(
