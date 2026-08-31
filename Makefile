@@ -6620,7 +6620,7 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     retrieval-gold-benchmark-scope-selftest \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
     retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check \
-    retrieval-gold-current-receipt-check
+    retrieval-gold-current-receipt-check retrieval-gold-scope-receipt-check
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
@@ -6644,8 +6644,9 @@ retrieval-gold-benchmark-publishable: z23 dev-bin jsonq agent-sha3 retrieval-eva
     retrieval-gold-benchmark-scope-selftest
 	@./tools/dev/retrieval-gold-benchmark.sh --run
 
-# Capture-only rail: recursive prerequisite output goes to stderr, leaving
-# stdout as exactly the runner's JSON records for safe redirection.
+# Capture helper: recursive prerequisite output goes to stderr. Make can still
+# emit evaluation-time build-epoch diagnostics before this recipe; for a
+# byte-pure file, finish this target once and then invoke the runner directly.
 retrieval-gold-benchmark-publishable-capture:
 	@$(MAKE) --no-print-directory z23 dev-bin jsonq agent-sha3 retrieval-eval \
 	    retrieval-eval-selftest retrieval-gold-corpus-check \
@@ -6664,6 +6665,12 @@ retrieval-gold-receipt-check: jsonq agent-sha3 retrieval-eval
 retrieval-gold-current-receipt-check: jsonq agent-sha3 retrieval-eval
 	@./tools/dev/retrieval-gold-current-receipt-check.sh --selftest
 	@./tools/dev/retrieval-gold-current-receipt-check.sh --check
+
+# Independent checkpoint for the same ten-task cohort with the post-ranking
+# directory-group scope proxy available. Older frozen receipts stay immutable.
+retrieval-gold-scope-receipt-check: jsonq agent-sha3 retrieval-eval
+	@./tools/dev/retrieval-gold-scope-receipt-check.sh --selftest
+	@./tools/dev/retrieval-gold-scope-receipt-check.sh --check
 
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under

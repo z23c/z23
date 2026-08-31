@@ -98,6 +98,24 @@ Context cost is projected from whole source-file sizes; those bytes were not
 read into a model context. Production BM25 reduced that projection by 92,968
 bytes, or 9.83%, at rank five.
 
+### Later exact-main directory-group checkpoint
+
+A later clean, remote-equal run at `705d16ccab6b9732c81f95159627eef18fb05a08`
+made one previously unavailable proxy measurable without changing either
+ranking. For every top-five selection, the runner applied the hash-recorded
+`code room` classifier to the exact-parent source and compared its directory
+group with the union of all reviewed relevant-path groups for that task. It
+then rechecked the exact-parent source root. The frozen receipt is
+[`retrieval-gold-benchmark-705d16ccab6b.jsonl`](../work/retrieval-gold-evidence/retrieval-gold-benchmark-705d16ccab6b.jsonl).
+
+The literal arm placed 31 of 43 selections outside that reviewed group union
+(7,209 basis points); BM25 placed 22 of 45 outside (4,888 basis points). This
+is a micro-weighted directory-taxonomy proxy, not semantic wrong-scope proof:
+groups such as `config` are coarse, and valid collaborators can cross group
+boundaries. Reuse success and new unique LOC avoided remain unavailable
+because this corpus has no exact accepted outcome or paired counterfactual
+implementation baseline.
+
 Before expanding the corpus, the original production literal selector was
 also run over the first seven tasks. It placed no relevant path in the returned
 16-file window: zero task hits, zero relevant hits from 31 labels, and zero
