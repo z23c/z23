@@ -775,6 +775,7 @@ DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
 	tools/dev/mutation_campaign.c \
 	tools/dev/source_identity_batch.c \
 	tools/dev/windows_headless_run.c \
+	tools/dev/z23_bounded_run.c \
 	tools/dev/z23_git_hook.c \
 	tools/dev/z23_doctor.c
 # The mutation harness proper (operators + campaign core) has no main() and
@@ -3318,9 +3319,13 @@ check-package-capabilities:
 	@./tools/lint/check_package_capabilities.sh --selftest
 	@./tools/lint/check_package_capabilities.sh
 .PHONY: check-package-anatomy
-check-package-anatomy:
+check-package-anatomy: $(BIN_DIR)/z23_bounded_run
 	@./tools/lint/check_package_anatomy.sh --selftest
 	@./tools/lint/check_package_anatomy.sh
+$(BIN_DIR)/z23_bounded_run: tools/dev/z23_bounded_run.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -o $@ $<
 .PHONY: check-capability-closure
 check-capability-closure:
 	@./tools/lint/check_capability_closure.sh --selftest
@@ -12189,7 +12194,8 @@ LINT_GATES := \
 # cold-audit modes, so their build prerequisites must not drift apart.
 LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) \
-	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL)
+	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL) \
+	$(BIN_DIR)/z23_bounded_run
 lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) \
 	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS)
 

@@ -34,8 +34,12 @@ BEGIN { inblk = 0 }
             if (d == "*/") { inblk = 0; i += 2 } else { i++ }
             continue
         }
-        if (d == "/*") { inblk = 1; i += 2; continue }
-        if (d == "//") { break }
+        # C translation phase 3 replaces each comment with one space.  The
+        # space is load-bearing: deleting a comment would merge the tokens
+        # around `static/**/inline`, while turning `F/**/(x)` into the
+        # different function-like macro token sequence `F(x)`.
+        if (d == "/*") { out = out " "; inblk = 1; i += 2; continue }
+        if (d == "//") { out = out " "; break }
         if (c == "\"" || c == "'") {
             q = c
             lit = c

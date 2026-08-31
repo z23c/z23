@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "name": "zcsv/zcsv",
+  "name": "zhello/zhello",
   "semver": "0.1.0",
   "language": "c23",
   "license": "Apache-2.0",
@@ -11,9 +11,9 @@
     "LICENSE",
     "README.md",
     "app/main.c",
-    "include/zcsv/zcsv.h",
-    "src/zcsv.c",
-    "tests/test_zcsv.c",
+    "include/zhello/zhello.h",
+    "src/zhello.c",
+    "tests/test_zhello.c",
     "zcode-package.json"
   ]
 }

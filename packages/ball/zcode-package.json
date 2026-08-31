@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "name": "zcsv/zcsv",
+  "name": "ball/ball",
   "semver": "0.1.0",
   "language": "c23",
   "license": "Apache-2.0",
@@ -11,9 +11,9 @@
     "LICENSE",
     "README.md",
     "app/main.c",
-    "include/zcsv/zcsv.h",
-    "src/zcsv.c",
-    "tests/test_zcsv.c",
+    "include/ball/ball.h",
+    "src/ball.c",
+    "tests/test_ball.c",
     "zcode-package.json"
   ]
 }

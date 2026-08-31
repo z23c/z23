@@ -22,22 +22,76 @@ to reproduce, is not the current mission.
 
 ## Product priority order
 
-1. **Public-node correctness and remaining V1 acceptance.** Consensus, wallet
-   custody, block processing, synchronization, peer health, and recovery have
-   absolute resource and authority priority.
-2. **C23 Commons Alpha complete user story.** An ordinary full node can
+1. **P0 — public-node correctness and remaining V1 acceptance.** Consensus,
+   wallet custody, block processing, synchronization, peer health, and recovery
+   retain absolute resource and authority priority.
+2. **Temporary P0.5 — Fearless Scale code, proof, and science fabric.** Build
+   the bounded, content-addressed navigation and evidence rails needed to work
+   safely across a federated billion-line C23 corpus. This program may consume
+   only resources left after P0 work and grants no consensus, custody,
+   deployment, publication-signing, or fetched-code execution authority.
+3. **C23 Commons Alpha complete user story.** An ordinary full node can
    publish, discover, fetch, verify, build, independently reproduce, and serve
    an exact C23 package without GitHub or a central registry.
-3. **Core consolidation only when driven by that user story.** Reuse existing
+4. **Core consolidation only when driven by that user story.** Reuse existing
    source, CAS, DHT, queue, lease, action, receipt, and policy authorities.
-4. **Developer tooling is frozen except for correctness or product blockers.**
-   The reflex reactor is factory equipment, not the product.
-5. **Token economics and speculative expansion remain simulation-only.** They
+5. **Developer tooling outside the P0.5 mission is frozen except for
+   correctness or product blockers.** The reflex reactor is factory equipment,
+   not the product.
+6. **Token economics and speculative expansion remain simulation-only.** They
    do not displace public-node or package-network acceptance.
 
 The blockchain wins every resource and authority conflict. Package work must
 remain bounded and asynchronous; it may not delay consensus, transaction relay,
 sync, peer health, wallet custody, or deployment.
+
+## Temporary P0.5: Fearless Scale
+
+The user outcome is one versioned native interface through which an agent can
+orient, query, assemble bounded context, plan conservative proof, and verify
+the exact evidence behind each answer across local and federated C23 source.
+The same existing Commons authorities carry immutable index shards and
+universal science statements. SQLite remains an optional rebuildable local
+catalog; metaverse remains a derived collection and visualization view.
+
+Work proceeds in this order:
+
+1. Govern one source universe and close the current index correctness gaps.
+2. Use native immutable receipt admission; push hooks never compile, lint,
+   test, wait, fetch, or invoke Make or shell.
+3. Ship local navigation v2 behind born-red fixtures and dual-run it against
+   v1 wherever v1 claims completeness.
+4. Federate immutable shards through the existing Commons CAS/DHT and prove
+   bounded 1M, 10M, 100M, and 1B non-deduplicated-line fixtures.
+5. Project existing science evidence into universal statement and realm-head
+   envelopes with rights-aware inert fetch and local action acceptance.
+6. Retire compatibility only after two green release cycles and demonstrated
+   reconstruction from immutable shards.
+
+Temporary P0.5 ends only when all of these exit gates are evidenced:
+
+- census, Merkle, inventory, and index agree on one governed source universe;
+- clean and incremental Linux/macOS builds produce identical manifest and
+  shard roots, with missing dimensions reported as typed `INCOMPLETE`;
+- warm exact, ranked, context, incremental-delta, and federated billion-line
+  acceptance meet their declared latency, RSS, and storage budgets without
+  silent truncation, false completeness, overflow, or root disagreement;
+- receipt admission and status meet their bounded latency contracts, ordinary
+  small changes reach verified green within the program budget, and cold
+  audits show no unexplained selector miss, cache disagreement, accounting
+  hole, duplicate action, or omitted mandatory P0/P1 gate;
+- the frozen multi-agent task corpus records exact model, prompt, tool schema,
+  source root, outcome, context cost, proof latency, and landed correctness;
+- three isolated peers can publish, discover, fetch, rederive, review,
+  replicate, conflict, supersede, and retract rights-compatible science
+  statements and realm heads while poisoned or incomplete evidence fails
+  closed; and
+- maximum corpus, science-radar, and indexing load demonstrably preserves
+  blockchain sync, peer health, wallet custody, and consensus priority.
+
+After these gates pass, public-node and Commons feature ordering above resumes
+without the temporary elevation; the proven fabric continues as ordinary
+Commons infrastructure.
 
 ## 1. Public-node V1 acceptance
 
