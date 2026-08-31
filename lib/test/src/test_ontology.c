@@ -122,12 +122,11 @@ static int test_ontology_four_valued_calculus(void)
     uint8_t predicate_roots[2][32];
     for (size_t i = 0; i < 2; i++) {
         predicates[i].schema_version = 1;
-        predicates[i].arity = 1;
+        predicates[i].arity = 0;
         predicates[i].world = ZCL_ONTOLOGY_OPEN_WORLD;
         predicates[i].execution_tier = ZCL_ONTOLOGY_TIER_EXACT;
         predicates[i].explicit_negation = 1;
         root(predicates[i].term_root, (uint8_t)(20u + i));
-        memcpy(predicates[i].argument_type_roots[0], entity_type, 32);
         ASSERT(zcl_ontology_predicate_v1_root(
             &predicates[i], predicate_roots[i]));
     }
@@ -140,10 +139,15 @@ static int test_ontology_four_valued_calculus(void)
                       value_a, ZCL_ONTOLOGY_POSITIVE, 32);
     formula_assertion(&prototypes[3], context_root, predicate_roots[1],
                       value_a, ZCL_ONTOLOGY_NEGATIVE, 33);
+    for (size_t i = 0; i < 4; i++) {
+        prototypes[i].arity = 0;
+        memset(prototypes[i].argument_roots, 0,
+               sizeof(prototypes[i].argument_roots));
+    }
 
     struct zcl_ontology_budget_v1 budget = {
         .schema_version = 1,
-        .memory_limit_bytes = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES,
+        .memory_limit_bytes = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES + 65536u,
         .fact_limit = 64, .step_limit = 256, .recursion_limit = 8,
         .derivation_limit = 64, .time_limit_us = 1000,
     };
@@ -215,13 +219,9 @@ static int test_ontology_four_valued_calculus(void)
             for (size_t i = 0; i < 3; i++)
                 formula_node_init(&nodes[i], 0, 3);
             nodes[0].op = ZCL_ONTOLOGY_FORMULA_ATOM;
-            nodes[0].arity = 1;
             memcpy(nodes[0].predicate_root, predicate_roots[0], 32);
-            formula_constant(&nodes[0].terms[0], entity_type, value_a);
             nodes[1].op = ZCL_ONTOLOGY_FORMULA_ATOM;
-            nodes[1].arity = 1;
             memcpy(nodes[1].predicate_root, predicate_roots[1], 32);
-            formula_constant(&nodes[1].terms[0], entity_type, value_a);
             nodes[2].op = operations[operation];
             nodes[2].left = 0; nodes[2].right = 1;
             ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
@@ -246,9 +246,7 @@ static int test_ontology_four_valued_calculus(void)
             formula_node_init(&nodes[i], 0, 2);
         formula.node_count = 2; formula.root_index = 1;
         nodes[0].op = ZCL_ONTOLOGY_FORMULA_ATOM;
-        nodes[0].arity = 1;
         memcpy(nodes[0].predicate_root, predicate_roots[0], 32);
-        formula_constant(&nodes[0].terms[0], entity_type, value_a);
         nodes[1].op = ZCL_ONTOLOGY_FORMULA_NOT; nodes[1].left = 0;
         static const uint8_t not_expected[4] = {
             ZCL_ONTOLOGY_UNKNOWN, ZCL_ONTOLOGY_DISPROVED,
@@ -270,15 +268,32 @@ static int test_ontology_four_valued_calculus(void)
         nodes[0].arity = 2;
         formula_constant(&nodes[0].terms[0], entity_type, value_a);
         formula_constant(&nodes[0].terms[1], entity_type, value_a);
+        struct zcl_ontology_term_v1 substituted_term = {
+            .schema_version = 1, .kind = ZCL_ONTOLOGY_TERM_ENTITY,
+        };
+        root(substituted_term.vocabulary_root, 40);
+        root(substituted_term.type_root, 41);
+        memcpy(substituted_term.identity_root, value_a, 32);
+        root(substituted_term.lexical_root, 42);
+        uint8_t substituted_term_root[32];
+        ASSERT(zcl_ontology_term_v1_root(
+            &substituted_term, substituted_term_root));
+        ASSERT(memcmp(substituted_term.type_root, entity_type, 32) != 0);
         query.assertions = NULL; query.assertion_count = 0;
         ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_PROVED);
+        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.observed_positive && !result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED);
         memcpy(nodes[0].terms[1].value_root, value_b, 32);
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_DISPROVED);
+        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(!result.observed_positive && result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED);
         PASS();
     } _test_next:;
     return failures;
@@ -501,6 +516,55 @@ static int test_ontology_manifest_codec(void)
             manifest.formula_set_root));
         manifest.formula_count = 1;
         inputs.formulas = &child_formula; inputs.formula_count = 1;
+        ASSERT(zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+
+        child_predicate.explicit_negation = 0;
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &child_predicate, child_predicate_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_PREDICATE,
+            (const uint8_t (*)[32])&child_predicate_root, 1,
+            manifest.predicate_set_root));
+        memcpy(child_node.predicate_root, child_predicate_root, 32);
+        ASSERT(zcl_ontology_formula_v1_root(
+            &child_formula, child_formula_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_FORMULA,
+            (const uint8_t (*)[32])&child_formula_root, 1,
+            manifest.formula_set_root));
+        child_assertion.polarity = ZCL_ONTOLOGY_NEGATIVE;
+        memcpy(child_assertion.predicate_root, child_predicate_root, 32);
+        ASSERT(zcl_ontology_assertion_v1_root(
+            &child_assertion, child_assertion_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_ASSERTION,
+            (const uint8_t (*)[32])&child_assertion_root, 1,
+            manifest.assertion_set_root));
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+        child_predicate.explicit_negation = 1;
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &child_predicate, child_predicate_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_PREDICATE,
+            (const uint8_t (*)[32])&child_predicate_root, 1,
+            manifest.predicate_set_root));
+        memcpy(child_node.predicate_root, child_predicate_root, 32);
+        ASSERT(zcl_ontology_formula_v1_root(
+            &child_formula, child_formula_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_FORMULA,
+            (const uint8_t (*)[32])&child_formula_root, 1,
+            manifest.formula_set_root));
+        child_assertion.polarity = ZCL_ONTOLOGY_POSITIVE;
+        memcpy(child_assertion.predicate_root, child_predicate_root, 32);
+        ASSERT(zcl_ontology_assertion_v1_root(
+            &child_assertion, child_assertion_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_ASSERTION,
+            (const uint8_t (*)[32])&child_assertion_root, 1,
+            manifest.assertion_set_root));
         ASSERT(zcl_ontology_manifest_v1_validate(
             &manifest, &universe, &inputs));
 
@@ -736,7 +800,7 @@ static int test_ontology_formula_language(void)
 
     struct zcl_ontology_budget_v1 budget = {
         .schema_version = 1,
-        .memory_limit_bytes = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES,
+        .memory_limit_bytes = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES + 65536u,
         .fact_limit = 64, .step_limit = 128, .recursion_limit = 16,
         .derivation_limit = 64, .time_limit_us = 1000,
     };
@@ -787,16 +851,45 @@ static int test_ontology_formula_language(void)
 
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
-        ASSERT(result.status == ZCL_ONTOLOGY_PROVED && result.complete);
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
         ASSERT(result.observed_positive && !result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
         ASSERT(result.facts_examined == 16);
+        predicates[1].explicit_negation = 0;
+        uint8_t no_negation_root[32];
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &predicates[1], no_negation_root));
+        memcpy(nodes[1].predicate_root, no_negation_root, 32);
+        memcpy(facts[2].predicate_root, no_negation_root, 32);
+        ASSERT(zcl_ontology_evaluate_formula_v1(
+            evaluator, &universe, &formula, &query, &result));
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED);
+        ASSERT(strcmp(result.truncation_reason,
+                      "explicit_negation_unsupported") == 0);
+        uint8_t hidden_context_root[32];
+        root(hidden_context_root, 89);
+        memcpy(facts[2].context_root, hidden_context_root, 32);
+        ASSERT(zcl_ontology_evaluate_formula_v1(
+            evaluator, &universe, &formula, &query, &result));
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
+        memcpy(facts[2].context_root, context_root, 32);
+        predicates[1].explicit_negation = 1;
+        memcpy(nodes[1].predicate_root, predicate_roots[1], 32);
+        memcpy(facts[2].predicate_root, predicate_roots[1], 32);
         /* forall x. P(x) and not Q(x) is disproved by b. */
         nodes[4].op = ZCL_ONTOLOGY_FORMULA_FORALL;
         ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
-        ASSERT(result.status == ZCL_ONTOLOGY_DISPROVED && result.complete);
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
         ASSERT(!result.observed_positive && result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
         nodes[4].op = ZCL_ONTOLOGY_FORMULA_EXISTS;
 
         /* Every independently enforced resource dimension fails incomplete. */
@@ -823,13 +916,28 @@ static int test_ontology_formula_language(void)
         ASSERT(strcmp(result.truncation_reason,
                       "derivation_budget_exhausted") == 0);
         budget.derivation_limit = 64;
+        budget.memory_limit_bytes = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES + 1u;
+        ASSERT(zcl_ontology_evaluate_formula_v1(
+            evaluator, &universe, &formula, &query, &result));
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_MEMORY_BUDGET);
         budget.memory_limit_bytes = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES - 1u;
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
         ASSERT(strcmp(result.truncation_reason,
                       "memory_budget_exhausted") == 0);
-        budget.memory_limit_bytes = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES;
+        struct zcl_ontology_domain_v1 overflow_domain = domain;
+        overflow_domain.value_count = UINT64_MAX;
+        query.domains = &overflow_domain;
+        budget.memory_limit_bytes = UINT64_MAX;
+        ASSERT(zcl_ontology_evaluate_formula_v1(
+            evaluator, &universe, &formula, &query, &result));
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_MEMORY_BUDGET);
+        query.domains = &domain;
+        budget.memory_limit_bytes =
+            ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES + 65536u;
         clock.now_us = 0; clock.advance_us = 2; budget.time_limit_us = 1;
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
@@ -886,11 +994,17 @@ static int test_ontology_formula_language(void)
         nodes[4].op = ZCL_ONTOLOGY_FORMULA_EXISTS;
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_DISPROVED);
+        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(!result.observed_positive && !result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
         nodes[4].op = ZCL_ONTOLOGY_FORMULA_FORALL;
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_PROVED);
+        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(!result.observed_positive && !result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
         nodes[4].op = ZCL_ONTOLOGY_FORMULA_EXISTS;
         query.domains = NULL; query.domain_count = 0;
         ASSERT(zcl_ontology_evaluate_formula_v1(
@@ -944,6 +1058,50 @@ static int test_ontology_formula_language(void)
         ASSERT(zcl_ontology_derivation_v1_root(
             &derivation, derivation_root));
         ASSERT(memcmp(incomplete_derivation_root, derivation_root, 32) != 0);
+        derivation.incomplete_reason =
+            ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED;
+        ASSERT(zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.incomplete_reason =
+            ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED + 1;
+        ASSERT(!zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+
+        /* Pre-traversal refusals are canonical even when no work ran. */
+        derivation.missing_coverage_mask = 0;
+        derivation.incomplete_reason =
+            ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING;
+        derivation.facts_examined = 0;
+        derivation.steps_taken = 0;
+        derivation.derivations_produced = 0;
+        derivation.max_recursion_depth = 0;
+        ASSERT(zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.incomplete_reason =
+            ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED;
+        ASSERT(!zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.incomplete_reason =
+            ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED;
+        ASSERT(!zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.incomplete_reason = ZCL_ONTOLOGY_REASON_MEMORY_BUDGET;
+        ASSERT(zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.incomplete_reason = ZCL_ONTOLOGY_REASON_TIME_BUDGET;
+        derivation.max_recursion_depth = 1;
+        ASSERT(zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.status = ZCL_ONTOLOGY_PROVED;
+        derivation.complete = 1;
+        derivation.incomplete_reason = ZCL_ONTOLOGY_REASON_NONE;
+        derivation.observed_positive = 1;
+        ASSERT(!zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.status = ZCL_ONTOLOGY_INCOMPLETE;
+        derivation.complete = 0;
+        derivation.incomplete_reason =
+            ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED;
         derivation.missing_coverage_mask = UINT32_MAX;
         ASSERT(!zcl_ontology_derivation_v1_root(
             &derivation, derivation_root));
@@ -1006,7 +1164,9 @@ static int test_ontology_formula_language(void)
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &imported_formula, &imported_query,
             &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_PROVED);
+        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
         struct zcl_ontology_domain_v1 primary_domain = empty_domain;
         memcpy(primary_domain.context_root, importing_context_root, 32);
         root(primary_domain.coverage_evidence_root, 74);
@@ -1026,6 +1186,450 @@ static int test_ontology_formula_language(void)
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
         ASSERT(result.incomplete_reason ==
                ZCL_ONTOLOGY_REASON_DOMAIN_REGISTRY_INVALID);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void horn_binary_atom(
+    struct zcl_ontology_formula_node_v1 *node, uint32_t node_count,
+    const uint8_t predicate_root[32], const uint8_t type_root[32],
+    uint8_t left_variable, uint8_t right_variable)
+{
+    formula_node_init(node, ZCL_ONTOLOGY_FORMULA_ATOM, node_count);
+    node->arity = 2;
+    memcpy(node->predicate_root, predicate_root, 32);
+    formula_variable(&node->terms[0], left_variable, type_root);
+    formula_variable(&node->terms[1], right_variable, type_root);
+}
+
+static int test_ontology_horn_rule_codec(void)
+{
+    int failures = 0;
+    struct zcl_source_universe_v1 universe = {
+        .schema_version = 1, .coverage_mask = ZCL_SOURCE_COVER_ALL,
+        .governed_path_count = 11, .total_bytes = 211,
+    };
+    root(universe.source_manifest_root, 101);
+    root(universe.governed_paths_root, 102);
+    root(universe.generated_paths_root, 103);
+    root(universe.vendor_paths_root, 104);
+    root(universe.metadata_paths_root, 105);
+    root(universe.publishable_paths_root, 106);
+    root(universe.consensus_seal_root, 107);
+    root(universe.indexed_paths_root, 108);
+    uint8_t universe_root[32], imports_root[32], context_root[32];
+    ASSERT(zcl_source_universe_v1_root(&universe, universe_root));
+    ASSERT(zcl_ontology_import_manifest_v1_root(
+        universe_root, NULL, 0, imports_root));
+    struct zcl_ontology_context_v1 context = {
+        .schema_version = 1, .kind = ZCL_ONTOLOGY_CONTEXT_CORPUS,
+    };
+    memcpy(context.universe_root, universe_root, 32);
+    memcpy(context.import_manifest_root, imports_root, 32);
+    root(context.subject_root, 109); root(context.policy_root, 110);
+    ASSERT(zcl_ontology_context_v1_root(&context, context_root));
+
+    uint8_t entity_type[32]; root(entity_type, 111);
+    struct zcl_ontology_predicate_v1 predicates[3] = {0};
+    uint8_t predicate_roots[3][32];
+    for (size_t i = 0; i < 3; i++) {
+        predicates[i].schema_version = 1;
+        predicates[i].arity = 2;
+        predicates[i].world = ZCL_ONTOLOGY_OPEN_WORLD;
+        predicates[i].execution_tier = i == 2 ? ZCL_ONTOLOGY_TIER_EXACT
+                                               : ZCL_ONTOLOGY_TIER_HORN;
+        predicates[i].explicit_negation = 1;
+        root(predicates[i].term_root, (uint8_t)(112u + i));
+        memcpy(predicates[i].argument_type_roots[0], entity_type, 32);
+        memcpy(predicates[i].argument_type_roots[1], entity_type, 32);
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &predicates[i], predicate_roots[i]));
+    }
+
+    enum { HORN_NODES = 8 };
+    struct zcl_ontology_formula_node_v1 nodes[HORN_NODES];
+    horn_binary_atom(&nodes[0], HORN_NODES, predicate_roots[1], entity_type,
+                     0, 1);
+    horn_binary_atom(&nodes[1], HORN_NODES, predicate_roots[1], entity_type,
+                     1, 2);
+    formula_node_init(&nodes[2], ZCL_ONTOLOGY_FORMULA_AND, HORN_NODES);
+    nodes[2].left = 0; nodes[2].right = 1;
+    horn_binary_atom(&nodes[3], HORN_NODES, predicate_roots[1], entity_type,
+                     0, 2);
+    formula_node_init(&nodes[4], ZCL_ONTOLOGY_FORMULA_IMPLIES, HORN_NODES);
+    nodes[4].left = 2; nodes[4].right = 3;
+    for (uint8_t variable = 0; variable < 3; variable++) {
+        uint32_t index = (uint32_t)(7u - variable);
+        formula_node_init(&nodes[index], ZCL_ONTOLOGY_FORMULA_FORALL,
+                          HORN_NODES);
+        nodes[index].left = index - 1u;
+        nodes[index].variable = variable;
+        memcpy(nodes[index].quantified_type_root, entity_type, 32);
+    }
+    struct zcl_ontology_formula_v1 formula = {
+        .schema_version = 1, .node_count = HORN_NODES,
+        .root_index = HORN_NODES - 1u, .variable_count = 3,
+        .nodes = nodes,
+    };
+    uint8_t formula_root[32];
+    ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+    struct zcl_ontology_horn_rule_v1 rule = {
+        .schema_version = 1,
+        .head_polarity = ZCL_ONTOLOGY_POSITIVE,
+        .quantified_variable_count = 3,
+        .body_clause_count = 2,
+    };
+    memcpy(rule.universe_root, universe_root, 32);
+    memcpy(rule.context_root, context_root, 32);
+    memcpy(rule.formula_root, formula_root, 32);
+    root(rule.evidence_root, 116);
+
+    TEST("ontology: canonical Horn rules are typed and range restricted") {
+        ASSERT(ZCL_ONTOLOGY_HORN_RULE_WIRE_BYTES == 136);
+        ASSERT(zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+
+        uint8_t wire[ZCL_ONTOLOGY_HORN_RULE_WIRE_BYTES];
+        uint8_t wire_again[ZCL_ONTOLOGY_HORN_RULE_WIRE_BYTES];
+        uint8_t rule_root[32];
+        struct zcl_ontology_horn_rule_v1 parsed;
+        ASSERT(zcl_ontology_horn_rule_v1_encode(&rule, wire, sizeof(wire)));
+        ASSERT(zcl_ontology_horn_rule_v1_decode(
+            wire, sizeof(wire), &parsed));
+        ASSERT(zcl_ontology_horn_rule_v1_encode(
+            &parsed, wire_again, sizeof(wire_again)));
+        ASSERT(memcmp(wire, wire_again, sizeof(wire)) == 0);
+        ASSERT(zcl_ontology_horn_rule_v1_root(&rule, rule_root));
+        char rule_root_hex[65];
+        zcl_hex_encode(rule_root, sizeof(rule_root), rule_root_hex);
+        ASSERT_STR_EQ(rule_root_hex,
+            "29934f6afecd8cb360bd3581f3b52d6eaf5b3426fe32879c8c2c47b5d8c85aa2");
+        wire[0] = 2;
+        ASSERT(!zcl_ontology_horn_rule_v1_decode(
+            wire, sizeof(wire), &parsed));
+        wire[0] = 1; wire[3] = 1;
+        ASSERT(!zcl_ontology_horn_rule_v1_decode(
+            wire, sizeof(wire), &parsed));
+        wire[3] = 0;
+
+        /* isa(x,a) and genls(a,b) -> isa(x,b). */
+        horn_binary_atom(&nodes[0], HORN_NODES, predicate_roots[0], entity_type,
+                         0, 1);
+        horn_binary_atom(&nodes[1], HORN_NODES, predicate_roots[1], entity_type,
+                         1, 2);
+        horn_binary_atom(&nodes[3], HORN_NODES, predicate_roots[0], entity_type,
+                         0, 2);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+
+        nodes[2].op = ZCL_ONTOLOGY_FORMULA_OR;
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        nodes[2].op = ZCL_ONTOLOGY_FORMULA_AND;
+
+        /* A head-only variable is not range restricted. */
+        formula_variable(&nodes[1].terms[1], 1, entity_type);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        formula_variable(&nodes[1].terms[1], 2, entity_type);
+
+        /* EXACT is legal in the body but never in the head. */
+        horn_binary_atom(&nodes[1], HORN_NODES, predicate_roots[2], entity_type,
+                         1, 2);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        uint8_t wrong_type[32];
+        root(wrong_type, 119);
+        memcpy(predicates[2].argument_type_roots[0], wrong_type, 32);
+        uint8_t inadmissible_root[32];
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &predicates[2], inadmissible_root));
+        memcpy(nodes[1].predicate_root, inadmissible_root, 32);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        memcpy(predicates[2].argument_type_roots[0], entity_type, 32);
+        memcpy(nodes[1].predicate_root, predicate_roots[2], 32);
+        horn_binary_atom(&nodes[3], HORN_NODES, predicate_roots[2], entity_type,
+                         0, 2);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        horn_binary_atom(&nodes[3], HORN_NODES, predicate_roots[0], entity_type,
+                         0, 2);
+        horn_binary_atom(&nodes[1], HORN_NODES, predicate_roots[1], entity_type,
+                         1, 2);
+
+        /* GOAL predicates and closed-world absence cannot drive a rule. */
+        predicates[2].execution_tier = ZCL_ONTOLOGY_TIER_GOAL;
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &predicates[2], inadmissible_root));
+        horn_binary_atom(&nodes[1], HORN_NODES, inadmissible_root, entity_type,
+                         1, 2);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        horn_binary_atom(&nodes[1], HORN_NODES, predicate_roots[1], entity_type,
+                         1, 2);
+        horn_binary_atom(&nodes[3], HORN_NODES, inadmissible_root, entity_type,
+                         0, 2);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        predicates[2].execution_tier = ZCL_ONTOLOGY_TIER_EXACT;
+        horn_binary_atom(&nodes[3], HORN_NODES, predicate_roots[0], entity_type,
+                         0, 2);
+        horn_binary_atom(&nodes[1], HORN_NODES, predicate_roots[1], entity_type,
+                         1, 2);
+
+        /* Explicit-negative premises are legal only for open-world facts. */
+        enum { NEGATIVE_NODES = 8 };
+        struct zcl_ontology_formula_node_v1 negative_nodes[NEGATIVE_NODES];
+        horn_binary_atom(&negative_nodes[0], NEGATIVE_NODES,
+                         predicate_roots[0], entity_type, 0, 1);
+        horn_binary_atom(&negative_nodes[1], NEGATIVE_NODES,
+                         predicate_roots[2], entity_type, 0, 1);
+        formula_node_init(&negative_nodes[2], ZCL_ONTOLOGY_FORMULA_NOT,
+                          NEGATIVE_NODES);
+        negative_nodes[2].left = 1;
+        formula_node_init(&negative_nodes[3], ZCL_ONTOLOGY_FORMULA_AND,
+                          NEGATIVE_NODES);
+        negative_nodes[3].left = 0; negative_nodes[3].right = 2;
+        horn_binary_atom(&negative_nodes[4], NEGATIVE_NODES,
+                         predicate_roots[0], entity_type, 0, 1);
+        formula_node_init(&negative_nodes[5], ZCL_ONTOLOGY_FORMULA_IMPLIES,
+                          NEGATIVE_NODES);
+        negative_nodes[5].left = 3; negative_nodes[5].right = 4;
+        for (uint8_t variable = 0; variable < 2; variable++) {
+            uint32_t index = (uint32_t)(7u - variable);
+            formula_node_init(&negative_nodes[index],
+                              ZCL_ONTOLOGY_FORMULA_FORALL, NEGATIVE_NODES);
+            negative_nodes[index].left = index - 1u;
+            negative_nodes[index].variable = variable;
+            memcpy(negative_nodes[index].quantified_type_root,
+                   entity_type, 32);
+        }
+        struct zcl_ontology_formula_v1 negative_formula = {
+            .schema_version = 1, .node_count = NEGATIVE_NODES,
+            .root_index = NEGATIVE_NODES - 1u, .variable_count = 2,
+            .nodes = negative_nodes,
+        };
+        rule.quantified_variable_count = 2;
+        ASSERT(zcl_ontology_formula_v1_root(
+            &negative_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &negative_formula, predicates, 3));
+
+        enum { NEGATIVE_HEAD_NODES = 6 };
+        struct zcl_ontology_formula_node_v1
+            negative_head_nodes[NEGATIVE_HEAD_NODES];
+        horn_binary_atom(&negative_head_nodes[0], NEGATIVE_HEAD_NODES,
+                         predicate_roots[0], entity_type, 0, 1);
+        horn_binary_atom(&negative_head_nodes[1], NEGATIVE_HEAD_NODES,
+                         predicate_roots[0], entity_type, 0, 1);
+        formula_node_init(&negative_head_nodes[2],
+                          ZCL_ONTOLOGY_FORMULA_NOT, NEGATIVE_HEAD_NODES);
+        negative_head_nodes[2].left = 1;
+        formula_node_init(&negative_head_nodes[3],
+                          ZCL_ONTOLOGY_FORMULA_IMPLIES,
+                          NEGATIVE_HEAD_NODES);
+        negative_head_nodes[3].left = 0;
+        negative_head_nodes[3].right = 2;
+        for (uint8_t variable = 0; variable < 2; variable++) {
+            uint32_t index = (uint32_t)(5u - variable);
+            formula_node_init(&negative_head_nodes[index],
+                              ZCL_ONTOLOGY_FORMULA_FORALL,
+                              NEGATIVE_HEAD_NODES);
+            negative_head_nodes[index].left = index - 1u;
+            negative_head_nodes[index].variable = variable;
+            memcpy(negative_head_nodes[index].quantified_type_root,
+                   entity_type, 32);
+        }
+        struct zcl_ontology_formula_v1 negative_head_formula = {
+            .schema_version = 1, .node_count = NEGATIVE_HEAD_NODES,
+            .root_index = NEGATIVE_HEAD_NODES - 1u, .variable_count = 2,
+            .nodes = negative_head_nodes,
+        };
+        rule.body_clause_count = 1;
+        rule.head_polarity = ZCL_ONTOLOGY_NEGATIVE;
+        ASSERT(zcl_ontology_formula_v1_root(
+            &negative_head_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &negative_head_formula,
+            predicates, 3));
+        rule.head_polarity = ZCL_ONTOLOGY_POSITIVE;
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &negative_head_formula,
+            predicates, 3));
+        rule.body_clause_count = 2;
+        ASSERT(zcl_ontology_formula_v1_root(
+            &negative_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+
+        predicates[2].explicit_negation = 0;
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &predicates[2], inadmissible_root));
+        memcpy(negative_nodes[1].predicate_root, inadmissible_root, 32);
+        ASSERT(zcl_ontology_formula_v1_root(
+            &negative_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &negative_formula, predicates, 3));
+        predicates[2].explicit_negation = 1;
+        predicates[2].explicit_negation = 2;
+        ASSERT(!zcl_ontology_predicate_v1_root(
+            &predicates[2], inadmissible_root));
+        predicates[2].explicit_negation = 1;
+        predicates[2].world = ZCL_ONTOLOGY_CLOSED_WORLD;
+        predicates[2].coverage_required = ZCL_SOURCE_COVER_INDEXED;
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &predicates[2], inadmissible_root));
+        memcpy(negative_nodes[1].predicate_root, inadmissible_root, 32);
+        ASSERT(zcl_ontology_formula_v1_root(
+            &negative_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &negative_formula, predicates, 3));
+        predicates[2].world = ZCL_ONTOLOGY_OPEN_WORLD;
+        predicates[2].coverage_required = 0;
+        memcpy(negative_nodes[1].predicate_root, predicate_roots[2], 32);
+        formula_constant(&negative_nodes[0].terms[1], entity_type,
+                         context.subject_root);
+        ASSERT(zcl_ontology_formula_v1_root(
+            &negative_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &negative_formula, predicates, 3));
+        rule.quantified_variable_count = 3;
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+
+        /* Equality does not range-restrict variables either. */
+        formula_node_init(&nodes[1], ZCL_ONTOLOGY_FORMULA_EQUAL, HORN_NODES);
+        nodes[1].arity = 2;
+        formula_variable(&nodes[1].terms[0], 1, entity_type);
+        formula_variable(&nodes[1].terms[1], 2, entity_type);
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        horn_binary_atom(&nodes[1], HORN_NODES, predicate_roots[1], entity_type,
+                         1, 2);
+
+        /* An equality-only body has no positive range-generating premise. */
+        enum { EQUALITY_NODES = 3 };
+        struct zcl_ontology_formula_node_v1 equality_nodes[EQUALITY_NODES];
+        uint8_t value_a[32], value_b[32];
+        root(value_a, 117); root(value_b, 118);
+        formula_node_init(&equality_nodes[0], ZCL_ONTOLOGY_FORMULA_EQUAL,
+                          EQUALITY_NODES);
+        equality_nodes[0].arity = 2;
+        formula_constant(&equality_nodes[0].terms[0], entity_type, value_a);
+        formula_constant(&equality_nodes[0].terms[1], entity_type, value_a);
+        formula_node_init(&equality_nodes[1], ZCL_ONTOLOGY_FORMULA_ATOM,
+                          EQUALITY_NODES);
+        equality_nodes[1].arity = 2;
+        memcpy(equality_nodes[1].predicate_root, predicate_roots[0], 32);
+        formula_constant(&equality_nodes[1].terms[0], entity_type, value_a);
+        formula_constant(&equality_nodes[1].terms[1], entity_type, value_b);
+        formula_node_init(&equality_nodes[2], ZCL_ONTOLOGY_FORMULA_IMPLIES,
+                          EQUALITY_NODES);
+        equality_nodes[2].left = 0; equality_nodes[2].right = 1;
+        struct zcl_ontology_formula_v1 equality_formula = {
+            .schema_version = 1, .node_count = EQUALITY_NODES,
+            .root_index = EQUALITY_NODES - 1u, .variable_count = 0,
+            .nodes = equality_nodes,
+        };
+        rule.quantified_variable_count = 0;
+        rule.body_clause_count = 1;
+        ASSERT(zcl_ontology_formula_v1_root(&equality_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &equality_formula, predicates, 3));
+
+        /* A zero-arity positive atom still constitutes a body premise. */
+        struct zcl_ontology_predicate_v1 zero_predicate = predicates[0];
+        zero_predicate.arity = 0;
+        memset(zero_predicate.argument_type_roots, 0,
+               sizeof(zero_predicate.argument_type_roots));
+        uint8_t zero_predicate_root[32];
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &zero_predicate, zero_predicate_root));
+        formula_node_init(&equality_nodes[0], ZCL_ONTOLOGY_FORMULA_ATOM,
+                          EQUALITY_NODES);
+        memcpy(equality_nodes[0].predicate_root, zero_predicate_root, 32);
+        formula_node_init(&equality_nodes[1], ZCL_ONTOLOGY_FORMULA_ATOM,
+                          EQUALITY_NODES);
+        memcpy(equality_nodes[1].predicate_root, zero_predicate_root, 32);
+        ASSERT(zcl_ontology_formula_v1_root(&equality_formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &equality_formula,
+            &zero_predicate, 1));
+        rule.quantified_variable_count = 3;
+        rule.body_clause_count = 2;
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+
+        rule.body_clause_count = 3;
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        rule.body_clause_count = 2;
+        rule.head_polarity = ZCL_ONTOLOGY_NEGATIVE;
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        rule.head_polarity = ZCL_ONTOLOGY_POSITIVE;
+
+        nodes[7].op = ZCL_ONTOLOGY_FORMULA_EXISTS;
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        nodes[7].op = ZCL_ONTOLOGY_FORMULA_FORALL;
+        ASSERT(zcl_ontology_formula_v1_root(&formula, formula_root));
+        memcpy(rule.formula_root, formula_root, 32);
+        rule.context_root[0] ^= 1u;
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        rule.context_root[0] ^= 1u;
+        rule.formula_root[0] ^= 1u;
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        rule.formula_root[0] ^= 1u;
+        rule.universe_root[0] ^= 1u;
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, predicates, 3));
+        rule.universe_root[0] ^= 1u;
+
+        ASSERT(!zcl_ontology_horn_rule_v1_encode(
+            &rule, wire, sizeof(wire) - 1u));
+        ASSERT(!zcl_ontology_horn_rule_v1_decode(
+            wire, sizeof(wire) - 1u, &parsed));
+        ASSERT(!zcl_ontology_horn_rule_v1_encode(
+            &rule, (uint8_t *)&rule, sizeof(wire)));
+        ASSERT(!zcl_ontology_horn_rule_v1_decode(
+            (const uint8_t *)&parsed, sizeof(wire), &parsed));
+        ASSERT(!zcl_ontology_horn_rule_v1_root(
+            &rule, rule.universe_root));
+        ASSERT(!zcl_ontology_horn_rule_v1_validate(
+            &rule, &universe, &context, &formula, NULL, 1));
         PASS();
     } _test_next:;
     return failures;
@@ -1104,17 +1708,57 @@ int test_ontology(void)
         contexts[0].policy_root[0] ^= 1u;
         /* Contradictions remain visible and do not explode. */
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
-        ASSERT(result.status == ZCL_ONTOLOGY_BOTH && result.complete);
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
         ASSERT(result.observed_positive && result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED);
+        p.explicit_negation = 0;
+        ASSERT(zcl_ontology_predicate_v1_root(&p, pr));
+        memcpy(q.predicate_root, pr, 32);
+        memcpy(facts[1].predicate_root, pr, 32);
+        q.assertions = &facts[1]; q.assertion_count = 1; q.fact_budget = 1;
+        ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED);
+        ASSERT(strcmp(result.truncation_reason,
+                      "explicit_negation_unsupported") == 0);
+        p.explicit_negation = 1;
+        ASSERT(zcl_ontology_predicate_v1_root(&p, pr));
+        memcpy(q.predicate_root, pr, 32);
+        memcpy(facts[1].predicate_root, pr, 32);
+        /* An unsupported negative outside the visible context is irrelevant;
+         * the remaining named gap is the absent accepted term binding. */
+        p.explicit_negation = 0;
+        ASSERT(zcl_ontology_predicate_v1_root(&p, pr));
+        memcpy(q.predicate_root, pr, 32);
+        memcpy(facts[1].predicate_root, pr, 32);
+        memcpy(facts[1].context_root, foreign, 32);
+        q.assertions = &facts[1]; q.assertion_count = 1; q.fact_budget = 1;
+        ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED);
+        memcpy(facts[1].context_root, here, 32);
+        p.explicit_negation = 1;
+        ASSERT(zcl_ontology_predicate_v1_root(&p, pr));
+        memcpy(q.predicate_root, pr, 32);
+        memcpy(facts[1].predicate_root, pr, 32);
         /* Foreign contexts remain invisible until explicitly imported. */
         q.assertions = &facts[2]; q.assertion_count = 1; q.fact_budget = 1;
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
-        ASSERT(result.status == ZCL_ONTOLOGY_UNKNOWN);
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(!result.observed_positive && !result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED);
         q.import_context_roots = (const uint8_t (*)[32])&foreign;
         q.import_count = 1;
         memcpy(q.context_root, importing, 32);
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
-        ASSERT(result.status == ZCL_ONTOLOGY_PROVED);
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.observed_positive && !result.observed_negative);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED);
         memcpy(q.context_root, here, 32);
         q.import_context_roots = NULL; q.import_count = 0;
         contexts[1].universe_root[0] ^= 1u;
@@ -1142,7 +1786,10 @@ int test_ontology(void)
         root(coverage.evidence_root, 30);
         q.coverage = &coverage; q.coverage_count = 1;
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
-        ASSERT(result.status == ZCL_ONTOLOGY_DISPROVED && result.complete);
+        ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
+        ASSERT(result.missing_coverage_mask == ZCL_SOURCE_COVER_INDEXED);
+        ASSERT(result.incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
         q.coverage = NULL;
         ASSERT(!zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         q.coverage = &coverage;
@@ -1158,6 +1805,7 @@ int test_ontology(void)
         memset(coverage.evidence_root, 0, sizeof(coverage.evidence_root));
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_COVERAGE_MISSING);
         root(coverage.evidence_root, 30);
         /* Budget exhaustion retains observations but refuses completeness. */
         p.world = ZCL_ONTOLOGY_OPEN_WORLD;
@@ -1169,19 +1817,51 @@ int test_ontology(void)
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
         ASSERT(result.observed_positive && !result.observed_negative);
+        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_FACT_BUDGET);
         ASSERT(strcmp(result.truncation_reason, "fact_budget_exhausted") == 0);
         memset(facts[0].evidence_root, 0, sizeof(facts[0].evidence_root));
         q.assertion_count = 1; q.fact_budget = 1;
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_ASSERTION_INVALID);
         ASSERT(strcmp(result.truncation_reason, "invalid_assertion") == 0);
         p.execution_tier = ZCL_ONTOLOGY_TIER_HORN;
         ASSERT(zcl_ontology_predicate_v1_root(&p, pr));
         memcpy(q.predicate_root, pr, 32);
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
+        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_PREDICATE_TIER);
         ASSERT(strcmp(result.truncation_reason,
                       "predicate_tier_unsupported") == 0);
+        /* Zero-arity exact propositions need no unverified term typing and
+         * retain complete four-valued answers. */
+        struct zcl_ontology_predicate_v1 proposition = p;
+        proposition.arity = 0;
+        proposition.world = ZCL_ONTOLOGY_OPEN_WORLD;
+        proposition.execution_tier = ZCL_ONTOLOGY_TIER_EXACT;
+        memset(proposition.argument_type_roots, 0,
+               sizeof(proposition.argument_type_roots));
+        uint8_t proposition_root[32];
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &proposition, proposition_root));
+        struct zcl_ontology_assertion_v1 proposition_fact = {
+            .schema_version = 1, .polarity = ZCL_ONTOLOGY_POSITIVE,
+        };
+        memcpy(proposition_fact.context_root, here, 32);
+        memcpy(proposition_fact.predicate_root, proposition_root, 32);
+        root(proposition_fact.evidence_root, 31);
+        struct zcl_ontology_query_v1 proposition_query = q;
+        proposition_query.arity = 0;
+        memcpy(proposition_query.predicate_root, proposition_root, 32);
+        memset(proposition_query.argument_roots, 0,
+               sizeof(proposition_query.argument_roots));
+        proposition_query.assertions = &proposition_fact;
+        proposition_query.assertion_count = 1;
+        proposition_query.fact_budget = 1;
+        ASSERT(zcl_ontology_evaluate_atom_v1(
+            &u, &proposition, &proposition_query, &result));
+        ASSERT(result.status == ZCL_ONTOLOGY_PROVED && result.complete);
+        ASSERT(result.observed_positive && !result.observed_negative);
         /* A partial source census cannot mint the universe root. */
         ASSERT(zcl_source_universe_v1_root(&u, ur));
         u.coverage_mask &= ~ZCL_SOURCE_COVER_VENDOR;
@@ -1191,5 +1871,6 @@ int test_ontology(void)
     failures += test_ontology_formula_language();
     failures += test_ontology_four_valued_calculus();
     failures += test_ontology_manifest_codec();
+    failures += test_ontology_horn_rule_codec();
     return failures;
 }

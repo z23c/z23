@@ -34,6 +34,7 @@ struct ontology_eval_runtime {
     struct zcl_ontology_result_v1 *result;
     uint64_t started_us;
     enum zcl_ontology_incomplete_reason reason;
+    enum zcl_ontology_incomplete_reason soft_reason;
 };
 
 static const char *formula_reason_string(
@@ -82,6 +83,12 @@ static const char *formula_reason_string(
         return "variable_unbound";
     case ZCL_ONTOLOGY_REASON_FORMULA_EVIDENCE:
         return "formula_evidence_incomplete";
+    case ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED:
+        return "explicit_negation_unsupported";
+    case ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED:
+        return "enumeration_evidence_unverified";
+    case ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED:
+        return "type_evidence_unverified";
     case ZCL_ONTOLOGY_REASON_NONE:
         break;
     }
@@ -430,7 +437,7 @@ static bool derivation_status_valid(
         return derivation->complete == 0 &&
                derivation->incomplete_reason > ZCL_ONTOLOGY_REASON_NONE &&
                derivation->incomplete_reason <=
-                   ZCL_ONTOLOGY_REASON_FORMULA_EVIDENCE;
+                   ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED;
     if (derivation->complete == 0 ||
         derivation->incomplete_reason != ZCL_ONTOLOGY_REASON_NONE)
         return false;
@@ -443,6 +450,46 @@ static bool derivation_status_valid(
     if (derivation->status == ZCL_ONTOLOGY_UNKNOWN)
         return !positive && !negative;
     return false;
+}
+
+static bool derivation_zero_work_reason_valid(uint8_t reason)
+{
+    return reason == ZCL_ONTOLOGY_REASON_MEMORY_BUDGET ||
+           reason == ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING ||
+           reason == ZCL_ONTOLOGY_REASON_PREDICATE_REGISTRY_INVALID ||
+           reason == ZCL_ONTOLOGY_REASON_DOMAIN_REGISTRY_INVALID ||
+           reason == ZCL_ONTOLOGY_REASON_RECURSION_BUDGET;
+}
+
+static bool derivation_pre_step_reason_valid(uint8_t reason)
+{
+    return reason == ZCL_ONTOLOGY_REASON_STEP_BUDGET ||
+           reason == ZCL_ONTOLOGY_REASON_TIME_BUDGET ||
+           reason == ZCL_ONTOLOGY_REASON_TIME_SOURCE_REGRESSED;
+}
+
+static bool derivation_counters_valid(
+    const struct zcl_ontology_derivation_v1 *derivation)
+{
+    if (derivation->derivations_produced > derivation->steps_taken)
+        return false;
+    if (derivation->status != ZCL_ONTOLOGY_INCOMPLETE)
+        return derivation->steps_taken != 0 &&
+               derivation->derivations_produced != 0 &&
+               derivation->max_recursion_depth != 0;
+    if (derivation->steps_taken == 0) {
+        if (derivation->derivations_produced != 0) return false;
+        if (derivation->max_recursion_depth == 0)
+            return derivation_zero_work_reason_valid(
+                derivation->incomplete_reason);
+        return derivation_pre_step_reason_valid(
+            derivation->incomplete_reason);
+    }
+    if (derivation->max_recursion_depth == 0) return false;
+    if (derivation->derivations_produced == 0)
+        return derivation->incomplete_reason ==
+               ZCL_ONTOLOGY_REASON_DERIVATION_BUDGET;
+    return true;
 }
 
 bool zcl_ontology_derivation_v1_root(
@@ -458,9 +505,12 @@ bool zcl_ontology_derivation_v1_root(
         (derivation->missing_coverage_mask & ~ZCL_SOURCE_COVER_ALL) != 0 ||
         (derivation->status != ZCL_ONTOLOGY_INCOMPLETE &&
          derivation->missing_coverage_mask != 0) ||
-        derivation->steps_taken == 0 ||
-        derivation->derivations_produced == 0 ||
-        derivation->max_recursion_depth == 0 ||
+        !derivation_counters_valid(derivation) ||
+        (derivation->missing_coverage_mask != 0 &&
+         derivation->incomplete_reason !=
+             ZCL_ONTOLOGY_REASON_COVERAGE_MISSING &&
+         derivation->incomplete_reason !=
+             ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED) ||
         !formula_nonzero(derivation->universe_root) ||
         !formula_nonzero(derivation->context_root) ||
         !formula_nonzero(derivation->formula_root) ||
@@ -532,6 +582,14 @@ static void runtime_fail(struct ontology_eval_runtime *runtime,
 {
     if (runtime->reason == ZCL_ONTOLOGY_REASON_NONE)
         runtime->reason = reason;
+}
+
+static void runtime_note_incomplete(
+    struct ontology_eval_runtime *runtime,
+    enum zcl_ontology_incomplete_reason reason)
+{
+    if (runtime->soft_reason == ZCL_ONTOLOGY_REASON_NONE)
+        runtime->soft_reason = reason;
 }
 
 static bool runtime_time_available(struct ontology_eval_runtime *runtime)
@@ -624,25 +682,27 @@ static bool formula_contexts_bound(
     return false;
 }
 
-static uint32_t formula_missing_coverage(
+static bool formula_coverage_declared_for_all_contexts(
     const struct zcl_ontology_formula_query_v1 *query, uint32_t required)
 {
-    uint32_t missing = 0;
     for (size_t wanted = 0; wanted <= query->import_count; wanted++) {
         const uint8_t *context = wanted == 0 ? query->context_root :
             query->import_context_roots[wanted - 1u];
-        uint32_t proved = 0;
+        bool declared = false;
         for (size_t i = 0; i < query->coverage_count; i++) {
             uint8_t ignored[32];
             if (zcl_ontology_coverage_v1_root(&query->coverage[i], ignored) &&
                 memcmp(query->coverage[i].universe_root,
                        query->universe_root, 32) == 0 &&
-                memcmp(query->coverage[i].context_root, context, 32) == 0)
-                proved |= query->coverage[i].complete_mask;
+                memcmp(query->coverage[i].context_root, context, 32) == 0 &&
+                (query->coverage[i].complete_mask & required) == required) {
+                declared = true;
+                break;
+            }
         }
-        missing |= required & ~proved;
+        if (!declared) return false;
     }
-    return missing;
+    return true;
 }
 
 static const struct zcl_ontology_predicate_v1 *formula_predicate(
@@ -718,6 +778,64 @@ static bool formula_domain_registry_valid(
     return true;
 }
 
+static bool formula_working_set_add(
+    uint64_t *total, uint64_t count, uint64_t element_size)
+{
+    if (!total || element_size == 0 ||
+        count > UINT64_MAX / element_size)
+        return false;
+    uint64_t bytes = count * element_size;
+    if (*total > UINT64_MAX - bytes) return false;
+    *total += bytes;
+    return true;
+}
+
+static bool formula_working_set_add_size(
+    uint64_t *total, size_t count, size_t element_size)
+{
+    uint64_t count64 = (uint64_t)count;
+    uint64_t element64 = (uint64_t)element_size;
+    if ((size_t)count64 != count || (size_t)element64 != element_size)
+        return false;
+    return formula_working_set_add(total, count64, element64);
+}
+
+static bool formula_working_set_bytes(
+    const struct zcl_ontology_formula_v1 *formula,
+    const struct zcl_ontology_formula_query_v1 *query, uint64_t *out)
+{
+    if (!formula || !query || !out) return false;
+    uint64_t total = ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES;
+    if (!formula_working_set_add(
+            &total, formula->node_count,
+            sizeof(struct zcl_ontology_formula_node_v1)) ||
+        !formula_working_set_add_size(
+            &total, query->predicate_count,
+            sizeof(struct zcl_ontology_predicate_v1)) ||
+        !formula_working_set_add_size(
+            &total, query->assertion_count,
+            sizeof(struct zcl_ontology_assertion_v1)) ||
+        !formula_working_set_add_size(
+            &total, query->context_count,
+            sizeof(struct zcl_ontology_context_v1)) ||
+        !formula_working_set_add_size(
+            &total, query->coverage_count,
+            sizeof(struct zcl_ontology_coverage_v1)) ||
+        !formula_working_set_add_size(
+            &total, query->domain_count,
+            sizeof(struct zcl_ontology_domain_v1)) ||
+        !formula_working_set_add_size(
+            &total, query->import_count, sizeof(uint8_t[32])))
+        return false;
+    for (size_t i = 0; i < query->domain_count; i++)
+        if (!formula_working_set_add(
+                &total, query->domains[i].value_count,
+                sizeof(uint8_t[32])))
+            return false;
+    *out = total;
+    return true;
+}
+
 static const struct zcl_ontology_domain_v1 *formula_domain_for_context(
     struct ontology_eval_runtime *runtime, const uint8_t type_root[32],
     const uint8_t context_root[32])
@@ -737,8 +855,11 @@ static const uint8_t *formula_resolve_term(
     struct ontology_eval_runtime *runtime,
     const struct zcl_ontology_formula_term_v1 *term)
 {
-    if (term->kind == ZCL_ONTOLOGY_FORMULA_CONSTANT)
+    if (term->kind == ZCL_ONTOLOGY_FORMULA_CONSTANT) {
+        runtime_note_incomplete(
+            runtime, ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED);
         return term->value_root;
+    }
     if (!runtime->evaluator->bound[term->variable]) {
         runtime_fail(runtime, ZCL_ONTOLOGY_REASON_VARIABLE_UNBOUND);
         return NULL;
@@ -798,6 +919,13 @@ static struct ontology_truth formula_eval_atom(
             memcmp(assertion->argument_roots, arguments,
                    sizeof(arguments)))
             continue;
+        if (assertion->polarity == ZCL_ONTOLOGY_NEGATIVE &&
+            predicate->explicit_negation == 0) {
+            runtime_fail(
+                runtime,
+                ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED);
+            return truth;
+        }
         if (assertion->polarity == ZCL_ONTOLOGY_POSITIVE)
             truth.positive = true;
         if (assertion->polarity == ZCL_ONTOLOGY_NEGATIVE)
@@ -806,14 +934,17 @@ static struct ontology_truth formula_eval_atom(
     truth.complete = true;
     if (!truth.positive && !truth.negative &&
         predicate->world == ZCL_ONTOLOGY_CLOSED_WORLD) {
-        uint32_t missing = formula_missing_coverage(
-            runtime->query, predicate->coverage_required);
-        if (missing != 0) {
-            runtime->result->missing_coverage_mask |= missing;
+        runtime->result->missing_coverage_mask |=
+            predicate->coverage_required;
+        if (!formula_coverage_declared_for_all_contexts(
+                runtime->query, predicate->coverage_required)) {
             runtime_fail(runtime, ZCL_ONTOLOGY_REASON_COVERAGE_MISSING);
             truth.complete = false;
         } else {
-            truth.negative = true;
+            runtime_note_incomplete(
+                runtime,
+                ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
+            truth.complete = false;
         }
     }
     return truth;
@@ -884,6 +1015,7 @@ static struct ontology_truth formula_eval_node(
     runtime->evaluator->bound[node->variable] = true;
     uint64_t examined = 0, expected = 0;
     size_t visible_count = runtime->query->import_count + 1u;
+    bool enumeration_unverified = false;
     for (size_t context_index = 0; context_index < visible_count;
          context_index++) {
         const uint8_t *context_root = formula_visible_context_at(
@@ -895,6 +1027,7 @@ static struct ontology_truth formula_eval_node(
             aggregate.complete = false;
             break;
         }
+        enumeration_unverified = true;
         expected += domain->value_count;
         for (uint64_t i = 0; i < domain->value_count; i++) {
             if (!runtime_step(runtime)) {
@@ -921,6 +1054,12 @@ static struct ontology_truth formula_eval_node(
     runtime->evaluator->bound[node->variable] = false;
     memset(runtime->evaluator->bindings[node->variable], 0, 32);
     if (examined != expected || runtime->reason) aggregate.complete = false;
+    if (enumeration_unverified) {
+        aggregate.complete = false;
+        runtime_note_incomplete(
+            runtime,
+            ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED);
+    }
     if (!aggregate.complete) {
         if (node->op == ZCL_ONTOLOGY_FORMULA_FORALL)
             aggregate.positive = false;
@@ -936,13 +1075,16 @@ static void formula_finish_result(struct ontology_eval_runtime *runtime,
     struct zcl_ontology_result_v1 *result = runtime->result;
     result->observed_positive = truth.positive;
     result->observed_negative = truth.negative;
-    if (runtime->reason || !truth.complete) {
+    if (runtime->reason || runtime->soft_reason || !truth.complete) {
         result->status = ZCL_ONTOLOGY_INCOMPLETE;
         result->complete = false;
-        if (runtime->reason == ZCL_ONTOLOGY_REASON_NONE)
-            runtime->reason = ZCL_ONTOLOGY_REASON_FORMULA_EVIDENCE;
-        result->incomplete_reason = runtime->reason;
-        result->truncation_reason = formula_reason_string(runtime->reason);
+        enum zcl_ontology_incomplete_reason reason = runtime->reason;
+        if (reason == ZCL_ONTOLOGY_REASON_NONE)
+            reason = runtime->soft_reason;
+        if (reason == ZCL_ONTOLOGY_REASON_NONE)
+            reason = ZCL_ONTOLOGY_REASON_FORMULA_EVIDENCE;
+        result->incomplete_reason = reason;
+        result->truncation_reason = formula_reason_string(reason);
         return;
     }
     if (truth.positive && truth.negative)
@@ -964,6 +1106,7 @@ bool zcl_ontology_evaluate_formula_v1(
     struct zcl_ontology_result_v1 *out)
 {
     uint8_t universe_root[32], formula_root[32], budget_root[32];
+    uint64_t working_set_bytes = 0;
     if (out) memset(out, 0, sizeof(*out));
     if (!evaluator || evaluator->magic != ZCL_ONTOLOGY_EVALUATOR_MAGIC ||
         !out || !query || !query->budget ||
@@ -994,8 +1137,8 @@ bool zcl_ontology_evaluate_formula_v1(
         .evaluator = evaluator, .query = query, .result = out,
         .started_us = query->elapsed_us(query->elapsed_context),
     };
-    if (query->budget->memory_limit_bytes <
-        ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES) {
+    if (!formula_working_set_bytes(formula, query, &working_set_bytes) ||
+        query->budget->memory_limit_bytes < working_set_bytes) {
         runtime_fail(&runtime, ZCL_ONTOLOGY_REASON_MEMORY_BUDGET);
         formula_finish_result(&runtime,
                               (struct ontology_truth){.complete = false});

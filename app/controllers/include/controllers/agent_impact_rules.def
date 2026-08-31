@@ -1555,7 +1555,7 @@ AGENT_IMPACT_RULE("lib/sapling/src/params_fetch.c|lib/sapling/src/params_fetch_s
  * baseline edit with no gate change, or a gate change with no baseline
  * update, is exactly how this ratchet would rust shut silently. */
 AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")
-AGENT_IMPACT_RULE("lib/ontology/include/ontology/ontology.h|lib/ontology/src/ontology.c|lib/test/src/test_ontology.c", "ontology make_lint_gates")
+AGENT_IMPACT_RULE("lib/ontology/include/ontology/ontology.h|lib/ontology/include/ontology/ontology_vocabulary.h|lib/ontology/src/ontology.c|lib/ontology/src/ontology_formula.c|lib/ontology/src/ontology_horn_rule.c|lib/ontology/src/ontology_manifest.c|lib/ontology/src/ontology_vocabulary.c|lib/test/src/test_ontology.c|lib/test/src/test_ontology_manifest_rules.c|lib/test/src/test_ontology_vocabulary.c", "ontology ontology_manifest_rules ontology_vocabulary code_vector_hint code_ontology make_lint_gates")
 /* LANE outparam-init: the gate that keeps a caller's free from walking a stale
  * value, its closed allowlist, and the three call sites hardened by the sweep
  * that produced it. Two remote-reachable bugs on 2026-08-26 were the same

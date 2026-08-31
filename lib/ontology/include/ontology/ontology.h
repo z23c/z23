@@ -21,6 +21,7 @@ enum {
     ZCL_ONTOLOGY_MAX_DOMAIN_VALUES = 64,
     ZCL_ONTOLOGY_MAX_PREDICATES = 64,
     ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES = 32768,
+    ZCL_ONTOLOGY_HORN_RULE_WIRE_BYTES = 136,
     ZCL_ONTOLOGY_MANIFEST_WIRE_BYTES = 528,
     ZCL_SOURCE_COVER_GOVERNED = 1u << 0,
     ZCL_SOURCE_COVER_GENERATED = 1u << 1,
@@ -144,6 +145,11 @@ struct zcl_ontology_domain_v1 {
     const uint8_t (*value_roots)[32];
 };
 
+/* Coverage and domain objects above are canonical observations, not proof that
+ * their enumerations are complete.  Evaluators must refuse completeness until
+ * a locally accepted action/receipt binds the exact predicate or type and the
+ * exact enumerated assertion/value set. */
+
 enum zcl_ontology_formula_term_kind {
     ZCL_ONTOLOGY_FORMULA_CONSTANT = 1,
     ZCL_ONTOLOGY_FORMULA_VARIABLE = 2,
@@ -256,6 +262,9 @@ enum zcl_ontology_incomplete_reason {
     ZCL_ONTOLOGY_REASON_DOMAIN_REGISTRY_INVALID = 19,
     ZCL_ONTOLOGY_REASON_VARIABLE_UNBOUND = 20,
     ZCL_ONTOLOGY_REASON_FORMULA_EVIDENCE = 21,
+    ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED = 22,
+    ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED = 23,
+    ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED = 24,
 };
 
 struct zcl_ontology_query_v1 {
@@ -313,6 +322,20 @@ struct zcl_ontology_derivation_v1 {
     uint8_t evaluator_root[32];
 };
 
+/* The formula root names the executable rule shape. The redundant counts and
+ * head polarity are deliberate admission checks, not an alternate syntax. */
+struct zcl_ontology_horn_rule_v1 {
+    uint16_t schema_version;
+    uint8_t head_polarity;
+    uint8_t reserved;
+    uint16_t quantified_variable_count;
+    uint16_t body_clause_count;
+    uint8_t universe_root[32];
+    uint8_t context_root[32];
+    uint8_t formula_root[32];
+    uint8_t evidence_root[32];
+};
+
 enum zcl_ontology_object_kind {
     ZCL_ONTOLOGY_OBJECT_TERM = 1,
     ZCL_ONTOLOGY_OBJECT_PREDICATE = 2,
@@ -323,6 +346,7 @@ enum zcl_ontology_object_kind {
     ZCL_ONTOLOGY_OBJECT_COVERAGE = 7,
     ZCL_ONTOLOGY_OBJECT_DOMAIN = 8,
     ZCL_ONTOLOGY_OBJECT_GAP = 9,
+    ZCL_ONTOLOGY_OBJECT_CONCEPT_CARD = 10,
 };
 
 struct zcl_ontology_manifest_v1 {
@@ -361,6 +385,8 @@ struct zcl_ontology_manifest_inputs_v1 {
     size_t predicate_count;
     const struct zcl_ontology_formula_v1 *formulas;
     size_t formula_count;
+    const struct zcl_ontology_horn_rule_v1 *rules;
+    size_t rule_count;
     const struct zcl_ontology_context_v1 *contexts;
     size_t context_count;
     const struct zcl_ontology_assertion_v1 *assertions;
@@ -394,6 +420,21 @@ bool zcl_ontology_budget_v1_root(
     const struct zcl_ontology_budget_v1 *budget, uint8_t out[32]);
 bool zcl_ontology_derivation_v1_root(
     const struct zcl_ontology_derivation_v1 *derivation, uint8_t out[32]);
+bool zcl_ontology_horn_rule_v1_encode(
+    const struct zcl_ontology_horn_rule_v1 *rule, uint8_t *out,
+    size_t out_size);
+bool zcl_ontology_horn_rule_v1_decode(
+    const uint8_t *wire, size_t wire_size,
+    struct zcl_ontology_horn_rule_v1 *out);
+bool zcl_ontology_horn_rule_v1_root(
+    const struct zcl_ontology_horn_rule_v1 *rule, uint8_t out[32]);
+bool zcl_ontology_horn_rule_v1_validate(
+    const struct zcl_ontology_horn_rule_v1 *rule,
+    const struct zcl_source_universe_v1 *universe,
+    const struct zcl_ontology_context_v1 *context,
+    const struct zcl_ontology_formula_v1 *formula,
+    const struct zcl_ontology_predicate_v1 *predicates,
+    size_t predicate_count);
 /* Builds a typed-set identity from roots that the caller has already
  * verified. This helper does not itself establish any child's object kind;
  * manifest validation below rederives roots from canonical child objects. */
@@ -409,7 +450,7 @@ bool zcl_ontology_manifest_v1_decode(
 bool zcl_ontology_manifest_v1_root(
     const struct zcl_ontology_manifest_v1 *manifest, uint8_t out[32]);
 /* Validation rederives every supported child root and cross-reference.
- * Nonempty RULE and GAP sets refuse until their canonical codecs land. */
+ * Nonempty GAP sets refuse until their canonical codec lands. */
 bool zcl_ontology_manifest_v1_validate(
     const struct zcl_ontology_manifest_v1 *manifest,
     const struct zcl_source_universe_v1 *universe,

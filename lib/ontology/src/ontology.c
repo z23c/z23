@@ -74,7 +74,7 @@ bool zcl_ontology_predicate_v1_root(
          p->world != ZCL_ONTOLOGY_CLOSED_WORLD) ||
         p->execution_tier < ZCL_ONTOLOGY_TIER_EXACT ||
         p->execution_tier > ZCL_ONTOLOGY_TIER_GOAL ||
-        p->explicit_negation != 1 || p->reserved != 0 ||
+        p->explicit_negation > 1 || p->reserved != 0 ||
         (p->coverage_required & ~ZCL_SOURCE_COVER_ALL) != 0 ||
         (p->world == ZCL_ONTOLOGY_CLOSED_WORLD &&
          p->coverage_required == 0) ||
@@ -214,24 +214,26 @@ static bool contexts_bound(const struct zcl_ontology_query_v1 *q,
     return true;
 }
 
-static uint32_t missing_coverage(const struct zcl_ontology_query_v1 *q,
-                                 uint32_t required)
+static bool coverage_declared_for_all_contexts(
+    const struct zcl_ontology_query_v1 *q, uint32_t required)
 {
-    uint32_t missing = 0;
     for (size_t wanted = 0; wanted <= q->import_count; wanted++) {
         const uint8_t *context = wanted == 0 ? q->context_root
             : q->import_context_roots[wanted - 1u];
-        uint32_t proved = 0;
+        bool declared = false;
         for (size_t i = 0; i < q->coverage_count; i++) {
             uint8_t ignored[32];
             if (zcl_ontology_coverage_v1_root(&q->coverage[i], ignored) &&
                 memcmp(q->coverage[i].universe_root, q->universe_root, 32) == 0 &&
-                memcmp(q->coverage[i].context_root, context, 32) == 0)
-                proved |= q->coverage[i].complete_mask;
+                memcmp(q->coverage[i].context_root, context, 32) == 0 &&
+                (q->coverage[i].complete_mask & required) == required) {
+                declared = true;
+                break;
+            }
         }
-        missing |= required & ~proved;
+        if (!declared) return false;
     }
-    return missing;
+    return true;
 }
 
 bool zcl_ontology_evaluate_atom_v1(
@@ -256,6 +258,7 @@ bool zcl_ontology_evaluate_atom_v1(
         if ((i < p->arity) != nonzero(q->argument_roots[i])) return false;
     if (p->execution_tier != ZCL_ONTOLOGY_TIER_EXACT) {
         out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
+        out->incomplete_reason = ZCL_ONTOLOGY_REASON_PREDICATE_TIER;
         out->truncation_reason = "predicate_tier_unsupported"; return true;
     }
     size_t limit = q->assertion_count;
@@ -266,30 +269,61 @@ bool zcl_ontology_evaluate_atom_v1(
         out->facts_examined++;
         if (!zcl_ontology_assertion_v1_root(a, assertion_root)) {
             out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
+            out->incomplete_reason = ZCL_ONTOLOGY_REASON_ASSERTION_INVALID;
             out->truncation_reason = "invalid_assertion"; return true;
         }
         if (a->arity != q->arity || !context_visible(q, a->context_root) ||
             memcmp(a->predicate_root, q->predicate_root, 32) ||
             memcmp(a->argument_roots, q->argument_roots,
                    sizeof(q->argument_roots))) continue;
+        if (a->polarity == ZCL_ONTOLOGY_NEGATIVE &&
+            p->explicit_negation == 0) {
+            out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
+            out->incomplete_reason =
+                ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED;
+            out->truncation_reason = "explicit_negation_unsupported";
+            return true;
+        }
         if (a->polarity == ZCL_ONTOLOGY_POSITIVE) out->observed_positive = true;
         if (a->polarity == ZCL_ONTOLOGY_NEGATIVE) out->observed_negative = true;
     }
     if (q->assertion_count > limit) {
         out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
+        out->incomplete_reason = ZCL_ONTOLOGY_REASON_FACT_BUDGET;
         out->truncation_reason = "fact_budget_exhausted"; return true;
+    }
+    if (!out->observed_positive && !out->observed_negative &&
+        p->world == ZCL_ONTOLOGY_CLOSED_WORLD) {
+        out->status = ZCL_ONTOLOGY_INCOMPLETE;
+        out->complete = false;
+        out->missing_coverage_mask = p->coverage_required;
+        if (coverage_declared_for_all_contexts(q, p->coverage_required)) {
+            out->incomplete_reason =
+                ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED;
+            out->truncation_reason = "enumeration_evidence_unverified";
+        } else {
+            out->incomplete_reason = ZCL_ONTOLOGY_REASON_COVERAGE_MISSING;
+            out->truncation_reason = "missing_coverage";
+        }
+        return true;
+    }
+    /* Argument roots have no accepted term manifest in this v1 request.  An
+     * exact assertion can remain visible as observed evidence, but cannot
+     * establish a typed truth claim until that binding is supplied. */
+    if (p->arity != 0) {
+        out->status = ZCL_ONTOLOGY_INCOMPLETE;
+        out->complete = false;
+        out->incomplete_reason =
+            ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED;
+        out->truncation_reason = "type_evidence_unverified";
+        return true;
     }
     if (out->observed_positive && out->observed_negative)
         out->status = ZCL_ONTOLOGY_BOTH;
     else if (out->observed_positive) out->status = ZCL_ONTOLOGY_PROVED;
     else if (out->observed_negative) out->status = ZCL_ONTOLOGY_DISPROVED;
-    else if (p->world == ZCL_ONTOLOGY_OPEN_WORLD)
+    else
         out->status = ZCL_ONTOLOGY_UNKNOWN;
-    else {
-        out->missing_coverage_mask = missing_coverage(q, p->coverage_required);
-        out->status = out->missing_coverage_mask
-            ? ZCL_ONTOLOGY_INCOMPLETE : ZCL_ONTOLOGY_DISPROVED;
-    }
     out->complete = out->status != ZCL_ONTOLOGY_INCOMPLETE;
     return true;
 }
