@@ -37,7 +37,7 @@ authority over your own machine remain.
 
 | Layer | Where it stands |
 | --- | --- |
-| **Full node** | Live. One self-contained C23 binary validates the proof-of-work chain, holds wallet custody behind local keys, and serves its own explorer and API over its persistent Tor onion address. |
+| **Full node** | Implemented; pre-V1 acceptance is tracked by [`make mvp`](docs/MVP.md). One self-contained C23 binary validates the proof-of-work chain, holds wallet custody behind local keys, and can serve its explorer and API over a persistent Tor onion address. Mutable hosted-node state belongs only in [`docs/HANDOFF.md`](docs/HANDOFF.md). |
 | **Onion mesh** | Hardening. Nodes find each other over Tor onion services — hardcoded onion seeds and peer-published `/directory.json` bootstrap discovery, and `ops mesh join` adds a peer you trust directly. No node referees the others: each one validates the chain for itself, and missing header data is backfilled peer to peer rather than trusted from a single source. |
 | **C23 Commons** | Built, transport-gated. The full loop — describe, reuse, build, accept, fetch, reproduce, serve — runs locally today via `make commons-demo`; the peer-to-peer swarm opens over mesh transport once that transport proves itself. |
 | **Acceptance** | Honest by construction. [`make mvp`](docs/MVP.md) prints PASS only after observing the whole declared criterion; anything unavailable is named BLOCKED, never silently green. |
@@ -97,6 +97,90 @@ your screen, before anyone has published anything.
 
 ---
 
+## Build C23 without guessing
+
+Ask the checkout what already exists before writing another copy. These native
+queries derive their answers from the current source and command registry:
+
+```bash
+build/bin/z23 code guide
+build/bin/z23 code have --input='{"text":"bounded parser"}'
+build/bin/z23 code map
+build/bin/z23 code group lib/ontology
+build/bin/z23 code file lib/ontology/include/ontology/ontology.h
+build/bin/z23 code capsule zcl_ontology_evaluate_formula_v1
+build/bin/z23 code impact lib/ontology/src/ontology_formula.c
+build/bin/z23 code tests lib/ontology/src/ontology_formula.c
+build/bin/z23 discover schema code.have --side=input
+```
+
+Run the exact group returned by `code tests`, then the fast defensive checks:
+
+```bash
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast-exact ONLY=<exact-group>
+make lint-fast
+```
+
+Do not copy command, module, symbol or test counts into prose. `code map`,
+`code group`, the generated [API reference](docs/API_REFERENCE.md), and the
+[capability inventory](docs/CAPABILITY_INVENTORY.jsonl) derive the live surface
+from the current tree.
+
+### Ontology and retrieval evidence
+
+Z23's self-knowledge foundation has canonical identities for the source
+universe, terms, predicates, contexts, assertions, coverage, domains, formulas,
+Horn rules, manifests and derivations. The bounded, paraconsistent evaluator
+can report `PROVED`, `DISPROVED`, `BOTH`, `UNKNOWN` or `INCOMPLETE` without
+turning a contradiction into arbitrary truth. Missing accepted coverage or
+type evidence, unsupported execution tiers, and exhausted memory, fact, step,
+recursion, derivation or time budgets remain explicitly `INCOMPLETE`.
+
+This is strong groundwork, not an omniscience claim. The source-universe
+observer currently records candidate readings but cannot yet prove every
+canonical path projection, so it reports unverified or incomplete. Horn rules
+and the canonical `isa` and `genls` taxonomy are admitted as exact rooted
+objects; general bounded fixed-point execution remains unfinished, and formula
+execution currently accepts exact-tier predicates only.
+
+Optional signed-int8 concept-card vectors are strictly `MODEL_HINT` evidence.
+They may propose or order fuzzy candidates, but cannot prove identity, truth,
+completeness, compatibility, ownership, authority, calls, permission, safety,
+and cannot omit a mandatory proof or test. Canonical codecs and root bindings
+exist today; an embedding-model runner, production ranker and live vector-search
+command do not. Exact facts, contexts, coverage and receipts remain
+authoritative.
+
+### Working asynchronously with other agents
+
+Keep one writer per component and use committed source identity on
+`origin/main` as the shared development blackboard. Nodes exchange remote work
+through the existing CAS-backed task, candidate, action, work-context and
+receipt chain—not through a second agent queue or repeated transcripts:
+
+```bash
+build/bin/z23 zcode task board
+build/bin/z23 zcode task pull --input='{"task_root":"<64hex>"}'
+build/bin/z23 zcode work pull --input='{"task_root":"<64hex>"}'
+```
+
+Exact push admission is still a checkout-local transitional service:
+
+```bash
+make dev-bin
+build/bin/z23-dev dev proof status
+build/bin/z23-dev dev proof wait
+```
+
+Peers should send immutable roots first and request only missing closure
+objects. Pulling verifies inert bytes; it neither executes nor accepts them. A
+receipt proves only its exact bound observation, every receiver applies local
+policy, and peer-local token or transport metrics stay outside portable work
+roots. Consensus, synchronization and wallet custody always preempt background
+package, indexing, ontology and proof work.
+
+---
+
 ## The game on the cover
 
 Every good box shows the toy. This one flies.
@@ -132,18 +216,20 @@ Ask for a change. See it fly. Keep that exact version. Share it peer to peer.
   is required, and no node holds a position the others cannot.
 - **Free reuse first, payment only where scarcity remains.** Copying source
   costs nothing and stays free. Compute, verification, storage and hosting are
-  real costs, and those are what ZCL is for.
+  real costs; payment is optional, and current marketplace or token economics
+  remain simulation-only. Z23 does not force ZCL as the only payment method.
 
 ---
 
 ## The chain
 
-The same binary is a ZClassic full node. The chain gives the commons durable
-ordering, payments, names and anchors, while application source and builds stay
-off-chain where they belong — a blockchain is a terrible place to put a source
-tree and a good place to agree on what happened first. The development loop
-above does not wait on it: you can run the whole flow before your node has
-caught up to the tip.
+The same binary is a ZClassic full node. The chain can provide durable ordering,
+payments, names and anchors, while application source and builds stay off-chain
+where they belong—a blockchain is a terrible place to put a source tree and a
+good place to agree on what happened first. A chain record never grants package
+acceptance, execution, publication, wallet or deployment authority. The
+development loop above does not wait on it: you can run the whole flow before
+your node has caught up to the tip.
 
 ---
 
@@ -174,8 +260,11 @@ address across restarts.
 
 ![the live command surface](docs/assets/z23-term-command-surface.svg)
 
-For development, `make dev-bin` builds the faster development binary and
-`make t-fast ONLY=<group>` runs one of the registered parallel groups.
+For development, start with `code guide`, route the changed path through
+`code tests`, run the returned registered parallel group exactly, and let the
+exact commit/base proof complete before pushing.
+[`docs/DEVELOPING.md`](docs/DEVELOPING.md) is the maintained development and
+receipt-admission contract.
 
 ---
 
@@ -189,6 +278,9 @@ For development, `make dev-bin` builds the faster development binary and
 | Verification | [Security and integrity](docs/SECURITY_AND_INTEGRITY.md) |
 | Design | [Architecture north star](docs/ARCHITECTURE_NORTH_STAR.md) |
 | Source map | [Codebase map](docs/CODEBASE_MAP.md) |
+| Native API | [Generated API reference](docs/API_REFERENCE.md) |
+| Exact capabilities | [Capability inventory](docs/CAPABILITY_INVENTORY.jsonl) |
+| Ordered mission | [Forward plan](docs/work/FORWARD_PLAN.md) |
 | Work ledger | [docs/work index](docs/work/README.md) |
 | The market | [ZCODE plan](docs/work/ZCODE_PLAN.md) |
 | Contributing | [Developing](docs/DEVELOPING.md) |
