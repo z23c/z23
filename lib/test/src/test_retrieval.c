@@ -416,6 +416,93 @@ static int case_surface(void)
     return failures;
 }
 
+static int case_gold_metrics(void)
+{
+    int failures = 0;
+    static const char *const relevant_a[] = {"a.c", "b.c"};
+    static const char *const relevant_b[] = {"c.c"};
+    static const struct zcl_retrieval_ranked_file ranked_a[] = {
+        {"x.c", 10, true}, {"a.c", 10, true}, {"y.c", 10, false},
+        {"b.c", 10, true}, {"z.c", 10, true},
+    };
+    static const struct zcl_retrieval_ranked_file ranked_b[] = {
+        {"p01.c", 20, true}, {"p02.c", 20, true},
+        {"p03.c", 20, true}, {"p04.c", 20, true},
+        {"p05.c", 20, true}, {"p06.c", 20, true},
+        {"p07.c", 20, true}, {"p08.c", 20, true},
+        {"p09.c", 20, true}, {"p10.c", 20, true},
+        {"p11.c", 20, true}, {"p12.c", 20, true},
+        {"p13.c", 20, true}, {"p14.c", 20, true},
+        {"p15.c", 20, true}, {"p16.c", 20, true},
+        {"p17.c", 20, true}, {"c.c", 20, true},
+        {"p19.c", 20, true}, {"p20.c", 20, true},
+        {"p21.c", 20, true},
+    };
+    struct zcl_retrieval_gold_task tasks[] = {
+        {"task-a", "find a and b", relevant_a, 2,
+         ranked_a, sizeof(ranked_a) / sizeof(ranked_a[0]), true},
+        {"task-b", "find c", relevant_b, 1,
+         ranked_b, sizeof(ranked_b) / sizeof(ranked_b[0]), true},
+    };
+    struct zcl_retrieval_eval_metrics m = {0};
+    RT_CHECK("gold metrics score two reviewed tasks",
+             zcl_retrieval_evaluate(tasks, 2, &m));
+    RT_CHECK("macro Recall@5 is one half",
+             m.recall_at_5_available && m.recall_at_5_bp == 5000);
+    RT_CHECK("macro Recall@20 is complete",
+             m.recall_at_20_available && m.recall_at_20_bp == 10000);
+    RT_CHECK("MRR preserves the rank-2 and rank-18 answers",
+             m.mrr_available && m.mrr_bp == 2777);
+    RT_CHECK("top-five file and context costs are explicit",
+             m.unique_files_at_5 == 10 && m.context_bytes_at_5 == 150 &&
+             m.approximate_tokens_at_5 == 38);
+    RT_CHECK("wrong-scope rate is one of ten selected files",
+             m.wrong_scope_files_at_5 == 1 &&
+             m.wrong_scope_at_5_bp == 1000);
+
+    tasks[1].ranked_count = 16;
+    tasks[1].ranking_complete = false;
+    RT_CHECK("a truncated top-16 ranking still evaluates honestly",
+             zcl_retrieval_evaluate(tasks, 2, &m));
+    RT_CHECK("Recall@5 remains observable at depth sixteen",
+             m.recall_at_5_available && m.recall_at_5_bp == 5000);
+    RT_CHECK("Recall@20 is unavailable, never counted as a miss",
+             !m.recall_at_20_available && m.recall_at_20_bp == 0);
+    RT_CHECK("MRR is unavailable when the first answer may be below the cap",
+             !m.mrr_available && m.mrr_bp == 0);
+
+    struct zcl_retrieval_ranked_file rank21[21];
+    memcpy(rank21, ranked_b, sizeof(rank21));
+    struct zcl_retrieval_ranked_file swap = rank21[17];
+    rank21[17] = rank21[20];
+    rank21[20] = swap;
+    tasks[1].ranked = rank21;
+    tasks[1].ranked_count = 21;
+    tasks[1].ranking_complete = true;
+    RT_CHECK("moving the answer to rank 21 is a measured Recall@20 miss",
+             zcl_retrieval_evaluate(tasks, 2, &m) &&
+             m.recall_at_20_available && m.recall_at_20_bp == 5000);
+
+    static const struct zcl_retrieval_ranked_file duplicated[] = {
+        {"x.c", 1, true}, {"a.c", 1, true}, {"a.c", 999, false},
+        {"y.c", 1, true}, {"b.c", 1, true},
+    };
+    tasks[0].ranked = duplicated;
+    tasks[0].ranked_count = sizeof(duplicated) / sizeof(duplicated[0]);
+    RT_CHECK("a duplicate path cannot improve rank, recall, or context cost",
+             zcl_retrieval_evaluate(tasks, 1, &m) &&
+             m.recall_at_5_bp == 10000 && m.mrr_bp == 5000 &&
+             m.unique_files_at_5 == 4 && m.context_bytes_at_5 == 4 &&
+             m.wrong_scope_files_at_5 == 0);
+
+    tasks[0].relevant_count = 0;
+    RT_CHECK("an empty relevance judgement refuses instead of scoring",
+             !zcl_retrieval_evaluate(tasks, 1, &m) && m.tasks == 0);
+    RT_CHECK("an empty corpus refuses instead of reporting perfect zeroes",
+             !zcl_retrieval_evaluate(NULL, 0, &m));
+    return failures;
+}
+
 int test_retrieval(void);
 int test_retrieval(void)
 {
@@ -426,6 +513,7 @@ int test_retrieval(void)
     failures += case_tokenizer();
     failures += case_poisoned();
     failures += case_surface();
+    failures += case_gold_metrics();
     printf("retrieval: %d failure(s)\n", failures);
     return failures;
 }
