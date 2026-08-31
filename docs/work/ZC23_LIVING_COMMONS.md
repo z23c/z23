@@ -6,8 +6,9 @@
 > reinterprets the v1 authorities frozen in this document.
 
 > User-facing entry point: [`../METAVERSE.md`](../METAVERSE.md); acceptance
-> bar: [`../METAVERSE_MVP.md`](../METAVERSE_MVP.md). This document stays the
-> authoritative maintainer spec.
+> bar: [`../METAVERSE_MVP.md`](../METAVERSE_MVP.md). This is a scoped protocol
+> and policy specification, not a current-work queue. Current ordering lives
+> only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 
 Status: owner-directed specification, updated 2026-08-07. This document freezes the
 safe pre-genesis policy and implementation order for creation-backed ZC23

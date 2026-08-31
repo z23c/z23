@@ -1,8 +1,9 @@
 # ZCODE agentic development network
 
 > User-facing entry point: [`../METAVERSE.md`](../METAVERSE.md); acceptance
-> bar: [`../METAVERSE_MVP.md`](../METAVERSE_MVP.md). This document stays the
-> authoritative maintainer spec.
+> bar: [`../METAVERSE_MVP.md`](../METAVERSE_MVP.md). This is a scoped protocol
+> specification, not a current-work queue. Current ordering lives only in
+> [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
 
 Status: active implementation contract, 2026-08-01. This document supersedes
 the payout-first tail of [`ZCODE_PLAN.md`](./ZCODE_PLAN.md). The package-hosting

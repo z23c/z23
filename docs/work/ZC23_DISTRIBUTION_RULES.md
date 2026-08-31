@@ -1,5 +1,8 @@
 # ZC23 distribution — the rules (C2, owner-decided 2026-08-09)
 
+> Retained simulation-only policy record, not a current-work queue. Current
+> ordering lives only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
+
 Phase C2 of [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md). This document
 **decides**; [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md)
 was the menu. The owner picked, with one standing guidance: **incentivize

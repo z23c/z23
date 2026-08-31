@@ -7485,21 +7485,6 @@ stopwatch-symmetry-prove:
 	 fi; \
 	 echo "stopwatch-symmetry-prove: PASS"'
 
-.PHONY: arch-score
-# Mechanical completion score for the ARCHITECTURE NORTH STAR
-# (docs/ARCHITECTURE_NORTH_STAR.md). Run as you work — the score rises only when
-# a real invariant is satisfied or an outcome gate passes. Lowest-weight-last =
-# "chase these next". This is the LLM's on-track compass toward instant-on.
-arch-score:
-	@bash tools/scripts/arch_score.sh
-
-.PHONY: metaverse-score
-# Mechanical completion score for the METAVERSE MVP (docs/METAVERSE_MVP.md,
-# criteria MM1-MM8). Same rules as arch-score: the score rises only on a
-# mechanical proof; never edit the scorer to win; ZC23 stays simulation-only.
-metaverse-score:
-	@bash tools/scripts/metaverse_score.sh
-
 # ── netdisrupt-stopwatch (PROOF B, SELF-CONTAINED two-node RUNNER) ────
 #
 # The runnable, no-fixture-needed companion to

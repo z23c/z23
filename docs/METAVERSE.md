@@ -94,8 +94,9 @@ proven, gate by gate):
 - Fail-closed pending owner gates: real ZC23 issuance (blocked by design on
   challenge-mature founding contributions, green shadow epochs, exact
   active-chain proofs, custody gates, and owner authorization).
-- The live completion score is `make metaverse-score`; the acceptance bar is
-  [`docs/METAVERSE_MVP.md`](./METAVERSE_MVP.md).
+- The scoped acceptance bar is
+  [`docs/METAVERSE_MVP.md`](./METAVERSE_MVP.md); run `make metaverse-verify`
+  only when the current forward plan selects that scope.
 
 <!-- claim: file-present docs/METAVERSE_MVP.md # the acceptance bar -->
 <!-- claim: file-present docs/work/ZCODE_PLAN.md # package commons spec -->
@@ -103,4 +104,4 @@ proven, gate by gate):
 <!-- claim: file-present docs/work/ZCODE_SCIENTIFIC_METAVERSE.md # science spec -->
 <!-- claim: file-present docs/work/ZC23_LIVING_COMMONS.md # Living Commons spec -->
 <!-- claim: file-present docs/work/ZC23_FAMILY_COMMONS.md # additive Family Commons spec -->
-<!-- claim: symbol-present metaverse-score Makefile # the live score target -->
+<!-- claim: symbol-present metaverse-verify Makefile # the scoped acceptance aggregate -->

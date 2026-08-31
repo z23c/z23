@@ -194,9 +194,9 @@ authority and the header says so.
 
 What remains is burn-down, not design. Each of the 137 is converted the same
 way — capture, then test — and every conversion should keep the assertion it
-replaced rather than merely its shape: `arch_score.sh` and `soak_evidence.sh`
-each gained a real "the command itself failed" arm that the pipeline had been
-swallowing. The ratchet is shrink-only and there is deliberately no
+replaced rather than merely its shape: the affected gates need a real "the
+command itself failed" arm where the pipeline had been swallowing that
+failure. The ratchet is shrink-only and there is deliberately no
 allow-comment escape hatch, so the counts can only go down.
 
 ## 6. Make a refusal name the thing that is missing — CLOSED

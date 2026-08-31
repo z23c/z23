@@ -201,22 +201,26 @@ on every host. Build and test instructions are in
 
 ## Orient before editing
 
-Read, in order:
+A fresh agent chooses work from one route: this contract, then the first open
+item in [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md). No other
+plan, scorecard, runbook, handoff, vendor skill, or old session note may
+reorder that mission.
 
-- [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md) for the current
-  ordered mission.
-- [`docs/DEVELOPING.md`](./docs/DEVELOPING.md) for the normal development loop,
-  integration gates, and exact build profiles.
-- [`docs/CODEBASE_MAP.md`](./docs/CODEBASE_MAP.md) for source ownership and
-  navigation.
-- [`docs/AGENT_TRAPS.md`](./docs/AGENT_TRAPS.md) before repairing something
+Load detail only when the task needs it:
+
+- Read [`docs/DEVELOPING.md`](./docs/DEVELOPING.md) before editing for the
+  development loop, integration gates, and exact build profiles.
+- Use [`docs/CODEBASE_MAP.md`](./docs/CODEBASE_MAP.md) after the built-in
+  navigator when source ownership is unclear.
+- Read [`docs/AGENT_TRAPS.md`](./docs/AGENT_TRAPS.md) before repairing behavior
   that may be intentional or already complete.
-- [`docs/SECURITY_AND_INTEGRITY.md`](./docs/SECURITY_AND_INTEGRITY.md) and
+- Read [`docs/SECURITY_AND_INTEGRITY.md`](./docs/SECURITY_AND_INTEGRITY.md) and
   [`docs/CONSENSUS_PARITY_DOCTRINE.md`](./docs/CONSENSUS_PARITY_DOCTRINE.md)
-  when work approaches a security, custody, or consensus boundary.
+  only when work approaches a security, custody, or consensus boundary.
 
-On the maintainer host only, read [`docs/HANDOFF.md`](./docs/HANDOFF.md), then
-verify it against the running node:
+Do not read [`docs/HANDOFF.md`](./docs/HANDOFF.md) for ordinary development.
+It is maintainer-host live-state routing only. When the assignment explicitly
+requires that host, read it and then verify it against the running node:
 
 ```bash
 build/bin/z23 status

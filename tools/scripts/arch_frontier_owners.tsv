@@ -1,9 +1,9 @@
 # frontier<TAB>canonical-owner-basename.c<TAB>write-pattern(ERE)
 # The North Star invariant: each frontier fact has exactly ONE canonical writer.
-# arch_score.sh KPI-3 counts files OTHER than the owner that match write-pattern;
-# zero = clean (single writer). As lanes demote cloned writers to read-only
-# views, these turn clean and the score rises. Add a row per frontier as the
-# domain model is enforced. Keep patterns tight (a write call, not a read).
+# check_frontier_single_writer.sh counts files OTHER than the owner that match
+# write-pattern; zero = clean (single writer). As lanes demote cloned writers
+# to read-only views, the gate turns clean. Add a row per frontier as the domain
+# model is enforced. Keep patterns tight (a write call, not a read).
 #
 # header spine: the validated-header frontier. pindex_best_header must become a
 # pure VIEW; today the importer writes it independently (D8) → not yet clean.

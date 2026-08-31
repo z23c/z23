@@ -1,5 +1,10 @@
 # 100-transaction micro lab
 
+> Owner-gated live-funds demonstration runbook, not ordinary development work
+> or a current-work queue. Use only after an explicit owner request and the
+> custody checks below. Current development ordering lives only in
+> [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
+
 This is the owner-visible plan for demonstrating **100 newly mined ZClassic
 transactions**, each with a primary recipient value of **0.00001000 ZCL**
 (1,000 zatoshi), while collecting enough evidence to make future AI-operated

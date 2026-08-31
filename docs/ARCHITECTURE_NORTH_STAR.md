@@ -1,5 +1,10 @@
 # Architecture North Star — one ledger per domain, views only
 
+> **Scoped architecture decision, not a work queue.** Current task selection
+> lives only in [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md). The completed
+> architecture quest board was deleted; recover it from Git history if an
+> incident needs its old narrative.
+>
 > **Read this before touching sync, boot, import, install, or any `*frontier`
 > / `*cursor` / `pindex_*` code.** It is the standing decision that governs
 > how this node acquires and tracks state: the one recurring bug shape
@@ -24,10 +29,10 @@ trust mechanisms below). The actual disease:
 > three independently-writable copies. One writer updates copy A; a reader
 > checks copy B; they disagree.**
 
-D8 in one line: `--importblockindex` PoW-verified the headers and wrote
-`pindex_best_header = 3.19M`, but the install gate reads the *other* copy
-(the `validate_headers` stage cursor = 0), so it defers forever and the node
-folds from genesis. Same fact, two copies, drift.
+The D8 defect that established this rule: `--importblockindex` PoW-verified the
+headers and wrote `pindex_best_header = 3.19M`, but the install gate read the
+*other* copy (the `validate_headers` stage cursor = 0), so it deferred forever
+and the node folded from genesis. Same fact, two copies, drift.
 
 ## Two provenance domains — keep them SEPARATE and VISIBLE
 
@@ -102,51 +107,11 @@ gap C→tip.**
    reconciles two representations of one fact, you are treating the symptom.
    Demote one of them to a view.
 
-## The rescue sequence (symptom → cure, one seam at a time)
+## Regression evidence
 
-- **D8 [in progress]** install binds on the PoW-verified header frontier the
-  importer/artifact already produced — demote the drift, don't add a check.
-- Then: audit each writer of `pindex_best_header`, coins applied-height, and
-  each stage cursor; demote every non-canonical writer to a view. Each
-  demotion is copy-proven (state actually installs / climbs) before merge.
-- Enforcement: a lint gate that flags any *write* to a frontier/cursor
-  outside its single canonical owner (grep-class gate, same family as
-  `check-consensus-parity`). This is what stops re-accretion — a future LLM
-  physically cannot add a second writer without tripling the gate.
-
-## The score — `make arch-score` (the LLM's compass)
-
-Every sub-goal is a mechanical KPI with a fixed weight; the total is a 0-100
-"how done is the architecture" number. **Run `make arch-score` as you work
-and chase the ✗/◐ rows, highest weight first.** A KPI scores its full weight
-ONLY on a real proof (a grep with zero violations, or an outcome gate that
-emits a PASS) — never partial credit for "looks close". Green theater is
-banned: e.g. "readers-read-the-fold" scores only when the end-to-end
-stopwatch PASSes, because that is the only proof the install reads the right
-authority.
-
-| KPI | wt | proof |
-|---|---|---|
-| instant-on-e2e | 20 | `make c3-stopwatch-report` says `VERDICT=PASS` (wiped node → install → tip) |
-| single-writer-per-frontier | 20 | 0 writers outside each frontier's canonical owner (`arch_frontier_owners.tsv`) |
-| readers-read-the-fold | 15 | tied to instant-on-e2e PASS (can't prove it any other way) |
-| stay-synced | 15 | `make c3-stopwatch-report` PASS **and** `make netdisrupt-stopwatch-report` PASS |
-| observability | 10 | all 3 stage dumpers use `progress_store_tx_trylock` |
-| no-silent-stall | 10 | the D7 Sapling-persist livelock raises a named blocker |
-| no-ochain-boot | 10 | bundle-installed shielded tree skips the boot rebuild |
-
-Ceiling gate (weight 0 but load-bearing): **enforcement** — the
-single-writer invariant is lint-enforced (`check_frontier_single_writer.sh`,
-wired into `make lint` as `check-frontier-single-writer`) so an LLM
-physically cannot re-clone a ledger without tripping the gate.
-
-Run `make arch-score` for the current 0-100 number and the ranked ✗/◐ rows —
-never quote a pinned score in prose, it rots. Add a KPI row to `arch_score.sh`
-whenever a new invariant becomes mechanically checkable; never inflate an
-existing one.
-
-## What "done" looks like
-
-A wiped datadir → boot → the bundle installs (state_frontier jumps to C,
-tagged `checkpoint`) → folds C→tip → at tip, on a stopwatch, in minutes.
-Proven by `make mvp-coldstart-to-tip-stopwatch`, not asserted.
+The rescue program is complete. The single-writer ceiling is enforced by
+`check_frontier_single_writer.sh`, and end-to-end state acquisition remains
+observable through the named MVP stopwatch gates. Select any new work from
+[`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md), then use these invariants as
+constraints and focused evidence. The completed score game and quest board
+were deleted; their dated results remain in Git history.
