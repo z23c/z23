@@ -1367,7 +1367,9 @@ static bool executable_reuse(const struct proof_paths *paths,
         return false;
     }
     if (strcmp(source.source_id, expected_source->source_id) != 0) {
-        proof_why(why, why_len, "proof_executable_source_identity_mismatch");
+        proof_whyf(why, why_len,
+                   "proof_executable_source_identity_mismatch_actual_%.16s_expected_%.16s",
+                   source.source_id, expected_source->source_id);
         return false;
     }
     if (!hash_file("zcl.dev_proof_executable_reuse.v1", artifact,
