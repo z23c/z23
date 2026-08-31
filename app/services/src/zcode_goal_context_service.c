@@ -177,6 +177,24 @@ static struct zcl_result zgoal_literal_candidates(
     return result;
 }
 
+static struct zcl_result zgoal_frozen_literal_candidates(
+    struct codeindex *index, struct zcode_goal_selection *out)
+{
+    for (size_t i = 0; i < out->token_count; i++) {
+        struct ci_search_hit hits[ZGOAL_HITS_PER_TOKEN];
+        int count = codeindex_search_text(
+            index, out->tokens[i], hits, ZGOAL_HITS_PER_TOKEN);
+        if (count < 0)
+            return ZCL_ERR(-1, "indexed goal search failed for '%s'",
+                           out->tokens[i]);
+        if (count == ZGOAL_HITS_PER_TOKEN) out->budget_exhausted = true;
+        for (int j = 0; j < count; j++)
+            if (!zgoal_add(out, &hits[j], out->tokens[i]))
+                return ZCL_ERR(-1, "selected symbol identity failed");
+    }
+    return ZCL_OK;
+}
+
 static int zgoal_symbol_preference(const struct ci_symbol *symbol)
 {
     int score = zgoal_fallback_score(symbol);
@@ -434,9 +452,9 @@ static struct zcl_result zgoal_exact(
     return ZCL_OK;
 }
 
-struct zcl_result zcode_goal_context_select_indexed(
+static struct zcl_result zgoal_select_indexed(
     struct codeindex *index, const char *goal, const char *exact_symbol,
-    struct zcode_goal_selection *out)
+    bool frozen_literal, struct zcode_goal_selection *out)
 {
     if (!index || !goal || !goal[0] || !out || strlen(goal) > 4096)
         return ZCL_ERR(-1,
@@ -460,9 +478,10 @@ struct zcl_result zcode_goal_context_select_indexed(
             out->budget_exhausted = tokens.budget_exhausted;
             memcpy(out->tokens, tokens.values, sizeof(out->tokens));
         }
-        if (result.ok)
-            result = zgoal_literal_candidates(index, out);
-        if (result.ok && out->candidate_count != 0)
+        if (result.ok) result = frozen_literal
+            ? zgoal_frozen_literal_candidates(index, out)
+            : zgoal_literal_candidates(index, out);
+        if (result.ok && !frozen_literal && out->candidate_count != 0)
             result = zgoal_story_candidates(index, goal, out);
         if (result.ok && out->candidate_count == 0)
             result = zgoal_project_fallback(index, out);
@@ -496,6 +515,20 @@ struct zcl_result zcode_goal_context_select_indexed(
     out->generation_us = elapsed > 0 ? (uint64_t)elapsed : 1u;
     if (!result.ok) memset(&out->selected, 0, sizeof(out->selected));
     return result;
+}
+
+struct zcl_result zcode_goal_context_select_indexed(
+    struct codeindex *index, const char *goal, const char *exact_symbol,
+    struct zcode_goal_selection *out)
+{
+    return zgoal_select_indexed(index, goal, exact_symbol, false, out);
+}
+
+struct zcl_result zcode_goal_context_select_literal_indexed(
+    struct codeindex *index, const char *goal,
+    struct zcode_goal_selection *out)
+{
+    return zgoal_select_indexed(index, goal, NULL, true, out);
 }
 
 struct zcl_result zcode_goal_context_select(

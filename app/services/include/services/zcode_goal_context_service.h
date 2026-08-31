@@ -55,4 +55,11 @@ struct zcl_result zcode_goal_context_select_indexed(
     struct codeindex *index, const char *goal, const char *exact_symbol,
     struct zcode_goal_selection *out);
 
+/* Frozen pre-story selector for observational A/B measurement only. It uses
+ * the caller-owned generation and the original token-order, 16-candidate
+ * literal budget. It grants no task, build, or promotion authority. */
+struct zcl_result zcode_goal_context_select_literal_indexed(
+    struct codeindex *index, const char *goal,
+    struct zcode_goal_selection *out);
+
 #endif /* ZCL_SERVICES_ZCODE_GOAL_CONTEXT_SERVICE_H */

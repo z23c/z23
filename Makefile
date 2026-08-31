@@ -6580,13 +6580,17 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 	    -Ilib/retrieval/include -o $@ \
 	    tools/retrieval_eval.c lib/retrieval/src/retrieval_eval.c
 
-.PHONY: retrieval-eval-selftest retrieval-gold-corpus-check
+.PHONY: retrieval-eval-selftest retrieval-gold-corpus-check retrieval-gold-benchmark
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
 retrieval-gold-corpus-check: jsonq agent-sha3
 	@./tools/dev/retrieval-gold-corpus-check.sh --selftest
 	@./tools/dev/retrieval-gold-corpus-check.sh --check
+
+retrieval-gold-benchmark: dev-bin retrieval-eval retrieval-gold-corpus-check
+	@test -n "$(OUTPUT)" || { echo "usage: make retrieval-gold-benchmark OUTPUT=/new/results/directory" >&2; exit 64; }
+	@./tools/dev/retrieval-gold-benchmark.sh "$(OUTPUT)"
 
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under

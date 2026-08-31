@@ -768,6 +768,13 @@ static int test_codeindex_platform_arm(void)
              strcmp(selected.selected.name, "foo_checksum") == 0 &&
              selected.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
              selected.budget_exhausted);
+    CI_CHECK("the observational literal baseline preserves token-order loss",
+             zcode_goal_context_select_literal_indexed(
+                 ci, "saturation checksum", &selected_indexed).ok &&
+             strcmp(selected_indexed.selected.name, "foo_checksum") != 0 &&
+             selected_indexed.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
+             selected_indexed.budget_exhausted &&
+             selected_indexed.retrieval_corpus_files == 0);
 
     /* refs */
     struct ci_ref refs[32];

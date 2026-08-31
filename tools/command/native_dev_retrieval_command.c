@@ -121,8 +121,8 @@ static bool rb_literal_rank(struct codeindex *index, const char *query,
                             struct rb_rank *rank)
 {
     struct zcode_goal_selection selected;
-    struct zcl_result result = zcode_goal_context_select_indexed(
-        index, query, NULL, &selected);
+    struct zcl_result result = zcode_goal_context_select_literal_indexed(
+        index, query, &selected);
     if (!result.ok) {
         LOG_ERROR(RB_TAG, "production selector failed: %s", result.message);
         return false;
@@ -288,7 +288,7 @@ static bool rb_render_data(
         json_push_kv_str(&reply->data, "schema",
                          "zcl.dev_retrieval_benchmark.v1") &&
         json_push_kv_bool(&reply->data, "observational", true) &&
-        json_push_kv_bool(&reply->data, "production_ordering_changed", false) &&
+        json_push_kv_bool(&reply->data, "production_ordering_changed", true) &&
         json_push_kv_bool(&reply->data, "promotion_authorized", false) &&
         json_push_kv_bool(&reply->data, "native_execution", true) &&
         json_push_kv_bool(&reply->data, "ready_to_benchmark", true) &&
@@ -316,7 +316,9 @@ static bool rb_render_data(
         json_push_kv_str(&reply->data, "token_basis",
                          "ceil(context_bytes/4)") &&
         json_push_kv_str(&reply->data, "literal_selector_basis",
-                         "production_algorithm_caller_owned_index") &&
+                         "frozen_pre_story_token_order_v1") &&
+        json_push_kv_str(&reply->data, "production_selector_basis",
+                         "hybrid_literal_bm25_story_v1") &&
         json_push_kv_str(&reply->data, "gold_basis",
                          "not_supplied_rank_only") &&
         json_push_kv_str(&reply->data, "scope_basis", "unavailable");
