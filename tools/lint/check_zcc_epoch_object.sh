@@ -12,6 +12,10 @@ else
     ZCC="$("$ROOT/tools/dev/zcc_bootstrap.sh")"
 fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-zcc-epoch.XXXXXX")"
+# Darwin exposes /var as a symlink to /private/var; use the physical path so
+# this gate tests the epoch compiler rather than tripping path containment on
+# the host's compatibility alias.
+WORK="$(cd "$WORK" && pwd -P)"
 LOCK_HOLDER_PID=""
 LOCKED_COMPILE_PID=""
 cleanup()
@@ -155,6 +159,7 @@ chmod +x "$COUNTING_COMPILER"
 LOCK_HOLDER_SOURCE="$WORK/lock-holder.c"
 LOCK_HOLDER="$WORK/lock-holder"
 cat > "$LOCK_HOLDER_SOURCE" <<'LOCK_HOLDER'
+#define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
