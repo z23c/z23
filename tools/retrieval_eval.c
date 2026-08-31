@@ -14,6 +14,7 @@
 enum {
     EVAL_TASK_MAX = 32,
     EVAL_RELEVANT_MAX = ZCL_RETRIEVAL_EVAL_RANK_MAX,
+    EVAL_RELEVANCE_TOTAL_MAX = EVAL_TASK_MAX * EVAL_RELEVANT_MAX,
     EVAL_ID_MAX = 128,
     EVAL_PATH_MAX = 255,
     EVAL_QUERY_MAX = 768,
@@ -133,15 +134,24 @@ static bool parse_size(const char *text, size_t maximum, size_t *out)
     return true;
 }
 
-static bool parse_header(char *line, size_t *tasks)
+static bool parse_header(char *line, size_t *tasks,
+                         size_t *eligible_relevance_judgments)
 {
-    char *fields[2];
-    static const char prefix[] = "tasks=";
-    return split_exact(line, fields, 2) &&
-        strcmp(fields[0], "zcl.retrieval_eval_batch.v2") == 0 &&
-        strncmp(fields[1], prefix, sizeof(prefix) - 1u) == 0 &&
-        parse_size(fields[1] + sizeof(prefix) - 1u, EVAL_TASK_MAX, tasks) &&
-        *tasks > 0;
+    char *fields[3];
+    static const char tasks_prefix[] = "tasks=";
+    static const char relevance_prefix[] =
+        "eligible_relevance_judgments=";
+    return split_exact(line, fields, 3) &&
+        strcmp(fields[0], "zcl.retrieval_eval_batch.v3") == 0 &&
+        strncmp(fields[1], tasks_prefix, sizeof(tasks_prefix) - 1u) == 0 &&
+        parse_size(fields[1] + sizeof(tasks_prefix) - 1u,
+                   EVAL_TASK_MAX, tasks) &&
+        strncmp(fields[2], relevance_prefix,
+                sizeof(relevance_prefix) - 1u) == 0 &&
+        parse_size(fields[2] + sizeof(relevance_prefix) - 1u,
+                   EVAL_RELEVANCE_TOTAL_MAX,
+                   eligible_relevance_judgments) &&
+        *tasks > 0 && *eligible_relevance_judgments > 0;
 }
 
 static bool parse_task(struct eval_task_storage *task, char *line)
@@ -354,13 +364,21 @@ int main(int argc, char **argv)
         return 64;
     }
     char line[EVAL_LINE_MAX];
-    size_t task_count;
-    if (!read_line(line) || !parse_header(line, &task_count)) {
+    size_t task_count, declared_relevance_judgments;
+    if (!read_line(line) ||
+        !parse_header(line, &task_count, &declared_relevance_judgments)) {
         (void)fail("invalid batch header");
         return 1;
     }
+    size_t observed_relevance_judgments = 0;
     for (size_t t = 0; t < task_count; t++) {
         if (!read_line(line) || !parse_task(&g_tasks[t], line)) return 1;
+        if (g_tasks[t].relevant_count >
+            SIZE_MAX - observed_relevance_judgments) {
+            (void)fail("eligible relevance-judgment count overflow");
+            return 1;
+        }
+        observed_relevance_judgments += g_tasks[t].relevant_count;
         for (size_t prior = 0; prior < t; prior++)
             if (strcmp(g_tasks[prior].id, g_tasks[t].id) == 0) {
                 (void)fail("duplicate task id");
@@ -373,6 +391,10 @@ int main(int argc, char **argv)
         if (!read_arm(&g_tasks[t].literal, "literal", line) ||
             !read_arm(&g_tasks[t].bm25, "bm25", line))
             return 1;
+    }
+    if (observed_relevance_judgments != declared_relevance_judgments) {
+        (void)fail("declared eligible relevance-judgment count differs from tasks");
+        return 1;
     }
     if (!read_line(line) || strcmp(line, "end") != 0 ||
         fgetc(stdin) != EOF || ferror(stdin)) {
@@ -402,12 +424,15 @@ int main(int argc, char **argv)
         (void)fail("maintained evaluator refused the batch");
         return 1;
     }
-    printf("{\"schema\":\"zcl.retrieval_eval_batch_result.v2\","
+    printf("{\"schema\":\"zcl.retrieval_eval_batch_result.v3\","
            "\"tasks_evaluated\":%zu,"
+           "\"aggregation_kind\":\"macro_equal_task_weight\","
+           "\"tasks_denominator\":%zu,"
+           "\"eligible_relevance_judgments\":%zu,"
            "\"binding_kind\":\"metrics_only_runner_seals_provenance\","
            "\"context_cost_kind\":\"projected_not_read\","
            "\"token_basis\":\"ceil(context_bytes/4)\",\"literal\":",
-           task_count);
+           task_count, task_count, observed_relevance_judgments);
     print_arm(&literal_metrics);
     fputs(",\"bm25\":", stdout);
     print_arm(&bm25_metrics);
