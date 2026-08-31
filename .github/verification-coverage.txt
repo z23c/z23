@@ -50,6 +50,10 @@
 # hosted run was RED, and this file tracked that honestly (see the ARCHIVED
 # paragraph below, kept verbatim for the record). See the confirmation
 # paragraph below for the run id and verdict line that closed it.
+# Its current job forces `--no-cache` and admits only one semantic cold verdict:
+# nonzero groups executed, zero cache hits/failures/environment-unobserved legs,
+# and `groups_ran + groups_gated == groups_total`. The verifier's mutation
+# self-test specifically proves that a cached zero-run headline is rejected.
 #
 # The `arena` row is hosted. It is the only job that runs the three commands
 # the README gives a stranger, from a clean checkout, with no vendored-

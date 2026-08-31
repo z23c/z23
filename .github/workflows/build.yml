@@ -455,10 +455,11 @@ jobs:
   #     reporting a real coverage difference between the two environments —
   #     that difference belongs in verification-coverage.txt, not hidden.
   #
-  # The verdict is token-gated, not exit-code-gated: `make test-parallel` is
-  # required to print ALL TESTS PASSED and to NOT print SOME TESTS FAILED,
-  # checked over the FULL captured output. A narrow tail/grep has produced a
-  # false green in this project before.
+  # The verdict is field-gated, not merely exit-code/token-gated. The semantic
+  # verifier requires one cold SUITE VERDICT with nonzero execution, zero cache
+  # hits/failures/unobserved legs, and complete ran+gated accounting. This is
+  # deliberately stronger than grepping ALL TESTS PASSED: the cached zero-run
+  # headline contains that substring too.
   tests:
     name: tests (make test-parallel)
     runs-on: ubuntu-latest
@@ -498,25 +499,14 @@ jobs:
       - name: make test-parallel
         run: |
           set -o pipefail
-          make test-parallel -j"$(nproc)" 2>&1 | tee /tmp/suite.log
+          make test-parallel -j"$(nproc)" TEST_PARALLEL_ARGS=--no-cache \
+            2>&1 | tee /tmp/suite.log
 
-      - name: Gate on the verdict token, over the full output
+      - name: Gate on one non-vacuous cold verdict
         run: |
           set -eu
-          # Both directions matter. Presence of the pass token alone is not
-          # enough: a partial run can print a per-group pass line while the
-          # suite as a whole failed elsewhere in the output.
-          if ! grep -q 'ALL TESTS PASSED' /tmp/suite.log; then
-            echo "FAIL: 'ALL TESTS PASSED' absent from the full suite output"
-            exit 1
-          fi
-          if grep -q 'SOME TESTS FAILED' /tmp/suite.log; then
-            echo "FAIL: 'SOME TESTS FAILED' present in the full suite output"
-            grep -n 'SOME TESTS FAILED' /tmp/suite.log
-            exit 1
-          fi
-          grep -E 'SUITE VERDICT' /tmp/suite.log || true
-          echo "verdict tokens agree: PASSED present, FAILED absent"
+          tools/lint/check_hosted_suite_verdict.sh --self-test
+          tools/lint/check_hosted_suite_verdict.sh /tmp/suite.log
 
       - name: Publish the suite log as an artifact
         if: always()

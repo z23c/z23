@@ -4,18 +4,11 @@
 # check_verification_coverage.sh — hosted CI's green must not overstate what it
 # checked.
 #
-# THE DEFECT THIS EXISTS FOR. .github/workflows/build.yml puts five green checks
-# on every commit to main: gcc, clang, lint, fuzz-replay, and a full per-TU
-# compile. The test suite is not among them and never has been. To anyone reading
-# the commit on GitHub — which is precisely the audience the checks exist for, a
-# person who does not trust the maintainer's machine — five green checks read as
-# "this commit is verified". Nothing stated the gap in a form a machine could
-# hold, so the workflow's own comment was free to rot, and did: it justified
-# excluding the suite by claiming `make test-parallel` is "one `cc` over ~1200
-# files at -O3 with -flto=auto", which the Makefile stopped doing when
-# test_parallel moved to a per-TU depfile-tracked object tree (see the
-# "Cached STRICT test_parallel" block in Makefile) and kept the whole-program
-# build as the separate `test_parallel_wpo` target.
+# THE DEFECT THIS EXISTS FOR. Hosted checks once omitted the test suite while a
+# reader reasonably read a row of green checks as "this commit is verified".
+# The suite is hosted now, so the same rail must also hold what that green means:
+# one cold, non-vacuous complete verdict, not a cached zero-run headline that
+# happens to contain the old ALL TESTS PASSED substring.
 #
 # So the declared coverage lives in .github/verification-coverage.txt and this
 # gate holds it to the workflow, both directions:
@@ -39,7 +32,10 @@
 #   5. ANTI-ORPHAN. build.yml must point at this manifest by path, grepped and
 #      never inferred, so a reader of the workflow is sent to the coverage
 #      statement instead of counting jobs and guessing.
-#   6. THE STANDING FACT. Whatever the manifest says, this gate names the
+#   6. TEST NON-VACUITY. The hosted test job must force --no-cache and delegate
+#      its full log to the semantic verdict checker. That checker mutation-tests
+#      the cached-zero-run case here, outside the workflow file it holds.
+#   7. THE STANDING FACT. Whatever the manifest says, this gate names the
 #      not-hosted items in its own output, so a maintainer reading a gate log
 #      sees the gap spelled out rather than inferring it.
 #      SCOPE OF THAT CLAIM, stated precisely because overstating it would be the
@@ -50,9 +46,8 @@
 #      maintainer's terminal on every `make lint`. The surface that actually
 #      reaches the audience who needs it — someone reading the commit on GitHub —
 #      is .github/workflows/build.yml itself, which prong 5 forces to point here
-#      and which states in its own comment that the test suite is not among the
-#      hosted jobs. This prong is the maintainer-facing half; the workflow
-#      comment is the reader-facing half.
+#      and which states its exact hosted test contract. This prong is the
+#      maintainer-facing half; the workflow comment is the reader-facing half.
 #
 # Field splitting uses `|` because a display name contains spaces, so the
 # `<key> <value>` helpers in gate_lib.sh cannot carry these rows. Validation uses
@@ -70,6 +65,7 @@ source "$ROOT/tools/lint/gate_lib.sh"
 
 MANIFEST=.github/verification-coverage.txt
 WORKFLOW=.github/workflows/build.yml
+HOSTED_SUITE_VERIFIER=tools/lint/check_hosted_suite_verdict.sh
 
 # The owner's five named verification items. HARD-CODED HERE ON PURPOSE — see
 # prong 2 in the header. Adding an item to this list is how a new verification
@@ -259,7 +255,26 @@ if ! gate_grep -q "verification-coverage\.txt" "$WORKFLOW"; then
     fail=1
 fi
 
-# ── prong 6: print the standing fact, every run ──────────────────────────
+# ── prong 6: hosted tests are cold and semantically non-vacuous ───────────
+if [ ! -x "$HOSTED_SUITE_VERIFIER" ]; then
+    echo "FAIL: hosted suite verifier is missing or not executable: $HOSTED_SUITE_VERIFIER"
+    fail=1
+else
+    if ! "$HOSTED_SUITE_VERIFIER" --self-test; then
+        echo "FAIL: hosted suite verifier did not reject its adversarial fixtures"
+        fail=1
+    fi
+fi
+if ! gate_grep -q 'TEST_PARALLEL_ARGS=--no-cache' "$WORKFLOW"; then
+    echo "FAIL: hosted tests do not force TEST_PARALLEL_ARGS=--no-cache"
+    fail=1
+fi
+if ! gate_grep -q 'check_hosted_suite_verdict[.]sh /tmp/suite[.]log' "$WORKFLOW"; then
+    echo "FAIL: hosted tests do not semantically verify the full captured suite log"
+    fail=1
+fi
+
+# ── prong 7: print the standing fact, every run ──────────────────────────
 not_hosted=()
 for item in "${REQUIRED_ITEMS[@]}"; do
     [ -n "${ITEM_HOSTED[$item]+x}" ] || continue
