@@ -99,6 +99,11 @@ $RequiredPackages = @(
 # without launching an interactive shell.
 $env:MSYSTEM = 'UCRT64'
 $env:CHERE_INVOKING = '1'
+$NativeUcrtBin = Join-Path $Msys2Root 'ucrt64\bin'
+$NativeUsrBin = Join-Path $Msys2Root 'usr\bin'
+# Native compiler children resolve their DLLs with Windows PATH semantics;
+# MSYS spellings added inside Bash are not sufficient for the PE loader.
+$env:Path = "$NativeUcrtBin;$NativeUsrBin;$env:Path"
 
 # Setup necessarily runs package-manager and compiler bootstrap processes
 # before the repository's native Job-Object runner exists. Make those tools

@@ -66,6 +66,13 @@ $msysRoot = $msysRoot -replace '^([A-Za-z]):', '/$1'
 
 $env:MSYSTEM = 'UCRT64'
 $env:CHERE_INVOKING = '1'
+# Bash understands /c/msys64/... but the native Windows loader resolving
+# cc1.exe's runtime DLLs does not. Give the entire contained process tree the
+# equivalent native spellings as well; this is process-local and does not
+# mutate the user's or machine's persistent PATH.
+$NativeUcrtBin = Join-Path $Msys2Root 'ucrt64\bin'
+$NativeUsrBin = Join-Path $Msys2Root 'usr\bin'
+$env:Path = "$NativeUcrtBin;$NativeUsrBin;$env:Path"
 
 # Keep make's arguments as argv entries. Joining them into shell source loses
 # spaces and lets shell metacharacters in a variable assignment or path run as

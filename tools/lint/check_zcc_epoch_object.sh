@@ -150,6 +150,28 @@ fi
 COUNTING
 chmod +x "$COUNTING_COMPILER"
 
+# A PE loader failure can terminate cc1 without writing a GCC-style
+# diagnostic. The legacy epoch compiler must still name the source and exit
+# status so Make never reports an unexplained generic Error 2.
+SILENT_COMPILER="$WORK/silent-compiler.sh"
+cat > "$SILENT_COMPILER" <<'SILENT_COMPILER'
+#!/usr/bin/env bash
+exit 2
+SILENT_COMPILER
+chmod +x "$SILENT_COMPILER"
+SILENT_OBJECT="$OBJECT_ROOT/silent-compiler.o"
+if legacy_compile dep "$SILENT_OBJECT" "$SILENT_COMPILER" \
+        >"$WORK/silent-compiler.log" 2>&1; then
+    fail 'legacy epoch object accepted a silent compiler failure'
+fi
+grep -Fq "compiler exited rc=2 source=$SOURCE" \
+    "$WORK/silent-compiler.log" || {
+    sed -n '1,80p' "$WORK/silent-compiler.log" >&2
+    fail 'silent compiler failure lacked source and exit-status context'
+}
+[ ! -e "$SILENT_OBJECT" ] && [ ! -e "${SILENT_OBJECT%.o}.d" ] ||
+    fail 'silent compiler failure published stable artifacts'
+
 # Hold the descriptor-relative admission lock across a completed compiler.
 # Stable artifacts and the durable marker must remain absent until release.
 LOCK_HOLDER_SOURCE="$WORK/lock-holder.c"

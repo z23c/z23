@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # Atomic cached-object compiler for one immutable host-local compile epoch.
 
-set -euo pipefail
+set -Eeuo pipefail
 export LC_ALL=C
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -33,6 +33,19 @@ shift 9
 [ "${1:-}" = -- ] || fail 'missing compiler argv separator'
 shift
 [ "$#" -gt 0 ] || fail 'empty compiler argv'
+
+# Every anticipated refusal below supplies its own context. This trap closes
+# the remaining set -e gap: if an unanticipated shell/runtime command dies,
+# Make must still identify the source, output and exact script line instead of
+# reducing the event to a generic "Error 2".
+unexpected_failure()
+{
+    local rc=$1 line=$2
+    printf 'compile-epoch-object: unexpected rc=%s source=%s output=%s line=%s\n' \
+        "$rc" "$SOURCE" "$OUTPUT" "$line" >&2
+    exit "$rc"
+}
+trap 'unexpected_failure "$?" "$LINENO"' ERR
 
 case "$MODE" in dep|coverage) ;; *) fail "unknown compile mode: $MODE" ;; esac
 is_sha256 "$SOURCE_ID" || fail 'source id is not lowercase SHA-256'
@@ -217,6 +230,7 @@ trap 'exit 2' HUP INT TERM
 compile_one()
 {
     local staging staging_base object dep note_record note_tmp marker_tmp
+    local compiler_rc
     local host_system deadline pid start actual
     # Long source filenames can make the staging directory path breach Windows
     # MAX_PATH. Use a short deterministic prefix derived from OUTPUT_BASE; the
@@ -229,7 +243,13 @@ compile_one()
     STAGING="$staging"
     object="$staging/$OUTPUT_BASE"
     dep="$staging/${OUTPUT_BASE%.o}.d"
-    "$@" -MMD -MP -MF "$dep" -MT "$OUTPUT" -c -o "$object" "$SOURCE"
+    if "$@" -MMD -MP -MF "$dep" -MT "$OUTPUT" -c -o "$object" "$SOURCE"; then
+        compiler_rc=0
+    else
+        compiler_rc=$?
+    fi
+    [ "$compiler_rc" = 0 ] ||
+        fail "compiler exited rc=$compiler_rc source=$SOURCE; native loader or toolchain failure may have produced no diagnostic"
     [ -s "$object" ] || fail 'compiler did not create a nonempty object'
     [ -s "$dep" ] || fail 'compiler did not create a nonempty dependency file'
 
