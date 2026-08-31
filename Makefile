@@ -3486,8 +3486,8 @@ t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 # a test. dev_proof.c admits these exact artifacts into its private generation
 # and invokes that admitted runner once; no fallback target may both build and
 # execute a suite.
-dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
-	dev-bin zcl-nodectl zclassic23-acme fbsh
+dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-bin zcl-nodectl \
+	zclassic23-acme fbsh
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also
@@ -4181,9 +4181,8 @@ $(DEV_TSAN_LINK_RSP): $(DEV_TSAN_OBJS)
 # Compile named app-layer native-handler TUs into a "generation" .so and
 # dlopen it into a running dev node via the `dev change apply` native command
 # (dev_hotswap_native RPC) — the edited handler goes live with no restart.
-# Uses ONLY the stock toolchain:
-# a plain `$(CC) -shared` link and libc dlopen (-ldl, already in LIBS). The
-# RELEASE binary never links any of this (every dlopen sits behind
+# Uses only the stock toolchain and the shared platform module link/sign rail.
+# The RELEASE binary never links any of this (every dlopen sits behind
 # ZCL_DEV_BUILD). See docs/work/HOTSWAP.md.
 HOTSWAP_OBJ_DIR = $(BUILD_DIR)/hotswap-obj
 HOTSWAP_SO_DIR  = $(BUILD_DIR)/hotswap
@@ -4248,8 +4247,8 @@ hotswap-so: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP)
 	  -DZCL_HOTSWAP_PROBE_TOOLS=\"$$probe\" \
 	  -DZCL_HOTSWAP_PROBE_LEAF=\"$$probe\" \
 	  -c -o "$$tmp_o" "$$selected" >&2; \
-	$(CC) -shared -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now \
-	  -Wl,-z,noexecstack -Wl,-Bsymbolic -o "$$tmp_so" "$$tmp_o" >&2; \
+	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o" >&2; \
+	$(HOTSWAP_MODULE_CODESIGN) "$$tmp_so"; \
 	artifact_digest="$$(sha256sum "$$tmp_so" | awk '{print $$1}')"; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	publish_exact "$$tmp_o" "$$o" || { \

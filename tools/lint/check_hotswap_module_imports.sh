@@ -602,6 +602,9 @@ scan_modules() {
             canonical_import_symbol "$sym" "$(uname -s)"
             probe_sym="$CANONICAL_IMPORT_SYMBOL"
             SEEN_IMPORT["$sym"]=1
+            if [ -n "$probe_sym" ]; then
+                SEEN_IMPORT["$probe_sym"]=1
+            fi
             if [ -n "$probe_sym" ] && [ -z "${ALLOWED[$sym]:-}" ] &&
                [ -z "${ALLOWED[$probe_sym]:-}" ]; then
                 bad_rows="$bad_rows

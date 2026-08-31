@@ -268,6 +268,25 @@ static bool path_include_applies(const char *path)
            (has_suffix(path, ".h") || has_suffix(path, ".def"));
 }
 
+static bool plan_semantic_leaf_group(
+    const char *path, char full[ZCL_TEST_GROUP_FULL_MAX])
+{
+    static const char prefix[] = "lib/test/src/";
+    size_t path_len = path ? strlen(path) : 0;
+    size_t prefix_len = sizeof(prefix) - 1;
+    if (!full || !zcl_test_group_source_is_semantic_leaf(path) ||
+        path_len <= prefix_len + 2 ||
+        strncmp(path, prefix, prefix_len) != 0 ||
+        strcmp(path + path_len - 2, ".c") != 0)
+        return false;
+    size_t group_len = path_len - prefix_len - 2;
+    if (group_len == 0 || group_len >= ZCL_TEST_GROUP_FULL_MAX)
+        return false;
+    memcpy(full, path + prefix_len, group_len);
+    full[group_len] = 0;
+    return zcl_test_group_catalog_contains(full);
+}
+
 /* Severity ordering for combining one dimension's verdict across several
  * changed files. NOT_APPLICABLE is the most benign (there was nothing to find),
  * COMPLETE beats it only in the sense that something WAS found; the two
@@ -465,6 +484,18 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
         if (crisk && !consensus_via)
             consensus_via = files[i];
         out->consensus_risk = out->consensus_risk || crisk;
+        /* An audited test translation unit is its own exact path floor. Its
+         * runner and helper dependencies do not make the test source itself
+         * an owner of every broad rule that happens to match its contents. */
+        char leaf_group[ZCL_TEST_GROUP_FULL_MAX];
+        if (plan_semantic_leaf_group(files[i], leaf_group)) {
+            plan_note_selection(out, leaf_group, ZCL_DEVLOOP_DIM_OPAQUE,
+                                files[i]);
+            if (!plan_add_path_group(out, leaf_group))
+                plan_dim_set(out, ZCL_DEVLOOP_DIM_OPAQUE,
+                             ZCL_DEVLOOP_DIM_INCOMPLETE, "path-group-cap");
+            continue;
+        }
         /* Each rule is evaluated in its original bounded accumulator, then
          * unioned directly into the graph-plan envelope. A multi-file plan is
          * not constrained by the smaller per-path result shape. */
@@ -560,6 +591,18 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
                                    const char *reached,
                                    enum zcl_devloop_dim dim)
 {
+    char leaf_group[ZCL_TEST_GROUP_FULL_MAX];
+    if (plan_semantic_leaf_group(reached, leaf_group)) {
+        if (plan_group_present(plan, leaf_group))
+            return true;
+        if (plan->closure_groups_len >= ZCL_DEVLOOP_MAX_PLAN_GROUPS)
+            return false;
+        snprintf(plan->closure_groups[plan->closure_groups_len],
+                 sizeof(plan->closure_groups[0]), "%s", leaf_group);
+        plan->closure_groups_len++;
+        plan_note_selection(plan, leaf_group, dim, reached);
+        return true;
+    }
     struct agent_impact_acc acc = {0};
     (void)agent_impact_apply_shared_rules(reached, &acc);
     for (size_t g = 0; g < acc.groups_len; g++) {
@@ -578,6 +621,8 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
 static bool plan_reached_proof_owner(const char *path, void *user)
 {
     (void)user;
+    if (zcl_test_group_source_is_semantic_leaf(path))
+        return true;
     struct agent_impact_acc impact = {0};
     (void)agent_impact_apply_shared_rules(path, &impact);
     return impact.shared_rule_hits > 0;

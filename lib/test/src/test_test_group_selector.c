@@ -519,6 +519,14 @@ static int test_native_catalog_resolution(void)
         ASSERT(!zcl_test_group_catalog_contains("api"));
         ASSERT(zcl_test_group_source_is_semantic_leaf(
             "lib/test/src/test_stage_repair_coin_backfill.c"));
+        ASSERT(zcl_test_group_source_is_semantic_leaf(
+            "lib/test/src/test_dev_platform.c"));
+        ASSERT(zcl_test_group_source_is_semantic_leaf(
+            "lib/test/src/test_file_controller.c"));
+        ASSERT(zcl_test_group_source_is_semantic_leaf(
+            "lib/test/src/test_cold_join_sovereign.c"));
+        ASSERT(zcl_test_group_source_is_semantic_leaf(
+            "lib/test/src/test_test_group_selector.c"));
         ASSERT(!zcl_test_group_source_is_semantic_leaf(
             "lib/test/src/test_api.c"));
 

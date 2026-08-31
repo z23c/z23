@@ -2348,14 +2348,9 @@ static bool dev_pid_is_watcher(dev_pid_t pid)
 #else
     if (pid <= 1 || (kill(pid, 0) != 0 && errno != EPERM))
         return false;
-    char proc[64], exe[PATH_MAX];
-    int n = snprintf(proc, sizeof(proc), "/proc/%ld/exe", (long)pid);
-    if (n <= 0 || n >= (int)sizeof(proc))
+    char exe[PATH_MAX];
+    if (!os_proc_pid_exe_path(pid, exe, sizeof(exe)))
         return false;
-    ssize_t got = readlink(proc, exe, sizeof(exe) - 1);
-    if (got <= 0 || (size_t)got >= sizeof(exe))
-        return false;
-    exe[got] = 0;
     /* A live watcher whose on-disk binary was replaced (every rebuild of
      * build/bin/zclassic23-dev does exactly this while the watcher runs)
      * shows up as "<path> (deleted)" in /proc/<pid>/exe. Strip that suffix
@@ -2365,8 +2360,9 @@ static bool dev_pid_is_watcher(dev_pid_t pid)
      * singleton lock. */
     static const char kDeleted[] = " (deleted)";
     size_t dlen = sizeof(kDeleted) - 1;
-    if ((size_t)got >= dlen && strcmp(exe + got - dlen, kDeleted) == 0)
-        exe[got - dlen] = 0;
+    size_t exe_len = strlen(exe);
+    if (exe_len >= dlen && strcmp(exe + exe_len - dlen, kDeleted) == 0)
+        exe[exe_len - dlen] = 0;
     const char *base = strrchr(exe, '/');
     return base && (strcmp(base + 1, "zclassic23-dev") == 0 ||
                     strcmp(base + 1, "z23-dev") == 0);
@@ -3060,7 +3056,7 @@ void zcl_native_handle_dev_loop_wait(
         return;
     }
     const char *repo_root = dev_source_root(request);
-    int64_t current_epoch = 0;
+    int64_t current_epoch = after;
     char body[16384], why[160] = {0};
     size_t body_len = 0;
     enum zcl_devloop_state_lookup lookup =

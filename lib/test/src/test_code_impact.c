@@ -21,7 +21,9 @@
  *   4. unknown file        — not found is never an error (mirrors
  *                      codeindex_impact_closure's own contract): closure of
  *                      a path absent from the index is itself only.
- *   5. budget           — the hub reply fits ZCL_COMMAND_LIST_BUDGET.
+ *   5. room route ownership — repeated code.room summaries retain the exact
+ *                      structured route after command lookup uses the stack.
+ *   6. budget           — the hub reply fits ZCL_COMMAND_LIST_BUDGET.
  *
  * All scratch work happens under ./test-tmp/ (project no-/tmp convention). */
 
@@ -113,6 +115,22 @@ static void ci_impact_call(const char *path, const char *source_root,
     };
     zcl_command_reply_init(reply, "zcl.code_impact.v1");
     zcl_native_handle_code_impact(&request, reply);
+    json_free(&input);
+}
+
+static void ci_room_call(const char *path, const char *source_root,
+                         struct zcl_command_reply *reply)
+{
+    struct zcl_command_context ctx = { .source_root = source_root };
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    (void)json_push_kv_str(&input, "path", path);
+    struct zcl_command_request request = {
+        .input = &input, .context = &ctx,
+        .view = "normal", .invoked_name = "code.room",
+    };
+    zcl_command_reply_init(reply, "zcl.code_room.v1");
+    zcl_native_handle_code_room(&request, reply);
     json_free(&input);
 }
 
@@ -255,6 +273,33 @@ static int test_code_impact_unknown_path(void)
     return failures;
 }
 
+static int test_code_room_route_storage(void)
+{
+    int failures = 0;
+    TEST("code_room: summary retains its caller-owned route after command lookup") {
+        system("rm -rf " CI_IMPACT_FIX);
+        ASSERT(write_ci_impact_fixture());
+
+        for (int i = 0; i < 16; i++) {
+            struct zcl_command_reply reply;
+            ci_room_call("lib/net/src/ci_hub.c", CI_IMPACT_FIX, &reply);
+            const char *route = json_get_str(json_get(&reply.data, "route"));
+            const char *summary =
+                json_get_str(json_get(&reply.data, "summary"));
+            char expected[96];
+            ASSERT(route && route[0] && summary);
+            int n = snprintf(expected, sizeof(expected), "tests→`%s`", route);
+            ASSERT(n > 0 && (size_t)n < sizeof(expected));
+            ASSERT(strstr(summary, expected) != NULL);
+            zcl_command_reply_free(&reply);
+        }
+
+        system("rm -rf " CI_IMPACT_FIX);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -306,6 +351,7 @@ int test_code_impact(void)
     failures += test_code_impact_leaf();
     failures += test_code_impact_missing_path();
     failures += test_code_impact_unknown_path();
+    failures += test_code_room_route_storage();
     failures += test_code_guide();
     return failures;
 }

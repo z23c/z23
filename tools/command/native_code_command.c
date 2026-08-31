@@ -193,6 +193,8 @@ const char *zcl_native_code_route_for_path(const char *path,
 {
     struct agent_impact_acc local = {0};
     struct agent_impact_acc *a = acc ? acc : &local;
+    if (acc)
+        memset(acc, 0, sizeof(*acc));
     (void)agent_impact_apply_shared_rules(path, a);
     bool crisk = code_path_is_consensus_risk(path);
     if (consensus_risk) *consensus_risk = crisk;
@@ -200,7 +202,23 @@ const char *zcl_native_code_route_for_path(const char *path,
      * heaviest proof; else the first matched shared-rule group; else the
      * lint-gate floor. */
     if (crisk) return "consensus_parity";
-    if (a->groups_len > 0) return a->groups[0];
+    if (a->groups_len > 0) {
+        char full[ZCL_TEST_GROUP_FULL_MAX];
+        if (zcl_test_group_resolve_exact(a->groups[0], full)) {
+            for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+                const char *registered = zcl_test_group_catalog_at(i);
+                if (!registered || strcmp(registered, full) != 0)
+                    continue;
+                if (strcmp(a->groups[0], registered) == 0)
+                    return registered;
+                if ((strncmp(registered, "test_", 5) == 0 ||
+                     strncmp(registered, "spec_", 5) == 0) &&
+                    strcmp(a->groups[0], registered + 5) == 0)
+                    return registered + 5;
+                break;
+            }
+        }
+    }
     return "make_lint_gates";
 }
 
@@ -210,12 +228,18 @@ const char *zcl_native_code_route_for_path(const char *path,
  * code.tests (top-level) and code.file (appended after the file info). Returns
  * the routed group and, via `consensus_risk`, whether it is a consensus
  * surface — so the caller can render a summary without recomputing. */
-static const char *code_emit_route(struct zcl_command_reply *reply,
-                                   const char *path, bool *consensus_risk)
+static const char *code_emit_route(
+    struct zcl_command_reply *reply, const char *path, bool *consensus_risk,
+    char route_storage[static ZCL_AGENT_IMPACT_GROUP_MAX])
 {
     struct agent_impact_acc acc = {0};
     bool crisk = false;
-    const char *route = zcl_native_code_route_for_path(path, &acc, &crisk);
+    const char *resolved =
+        zcl_native_code_route_for_path(path, &acc, &crisk);
+    if (!resolved)
+        resolved = "make_lint_gates";
+    (void)snprintf(route_storage, ZCL_AGENT_IMPACT_GROUP_MAX, "%s", resolved);
+    const char *route = route_storage;
     if (consensus_risk) *consensus_risk = crisk;
 
     struct json_value arr;
@@ -534,7 +558,8 @@ void zcl_native_handle_code_file(const struct zcl_command_request *request,
     /* The routing link: which focused test group a change to THIS file routes
      * to (mirrors `dev test plan` / code.tests). Lets an editor jump from a
      * file to its proof group in one call. */
-    (void)code_emit_route(reply, path, NULL);
+    char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
+    (void)code_emit_route(reply, path, NULL, route_storage);
 
     json_free(&sarr); json_free(&iarr);
     codeindex_close(ci);
@@ -901,7 +926,9 @@ void zcl_native_handle_code_capsule(const struct zcl_command_request *request,
 
     /* test route: the same resolver code.tests/code.room use. */
     bool crisk = false;
-    const char *route = code_emit_route(reply, def_path, &crisk);
+    char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
+    const char *route =
+        code_emit_route(reply, def_path, &crisk, route_storage);
 
     char summary[300];
     (void)snprintf(summary, sizeof(summary),
@@ -1131,7 +1158,8 @@ void zcl_native_handle_code_tests(const struct zcl_command_request *request,
 
     (void)json_push_kv_str(&reply->data, "path", path);
     bool crisk = false;
-    const char *route = code_emit_route(reply, path, &crisk);
+    char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
+    const char *route = code_emit_route(reply, path, &crisk, route_storage);
 
     char summary[224];
     (void)snprintf(summary, sizeof(summary), "%s routes to `%s`%s", path, route,
@@ -1225,7 +1253,8 @@ void zcl_native_handle_code_room(const struct zcl_command_request *request,
     /* tests[] + route + consensus_risk + matched — the same resolver code.tests
      * and `dev test plan` use, so a room view and a test plan never disagree. */
     bool crisk = false;
-    const char *route = code_emit_route(reply, path, &crisk);
+    char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
+    const char *route = code_emit_route(reply, path, &crisk, route_storage);
 
     /* commands[]: WF4 4C dispatch-index join (code_commands_for_file above) —
      * command paths whose registered native handler is DEFINED in this file.
@@ -1360,7 +1389,8 @@ void zcl_native_handle_code_impact(const struct zcl_command_request *request,
      * check and a test plan never disagree on what a change to `path` routes
      * to downstream. */
     bool crisk = false;
-    const char *route = code_emit_route(reply, path, &crisk);
+    char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
+    const char *route = code_emit_route(reply, path, &crisk, route_storage);
 
     char summary[256];
     (void)snprintf(summary, sizeof(summary),

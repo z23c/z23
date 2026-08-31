@@ -160,6 +160,7 @@ HOTSWAP_MODULE_IMPORT("_ITM_deregisterTMCloneTable", "TOOLCHAIN")
 HOTSWAP_MODULE_IMPORT("_ITM_registerTMCloneTable", "TOOLCHAIN")
 HOTSWAP_MODULE_IMPORT("__cxa_finalize", "TOOLCHAIN")
 HOTSWAP_MODULE_IMPORT("__gmon_start__", "TOOLCHAIN")
+HOTSWAP_MODULE_IMPORT("__stack_chk_guard", "TOOLCHAIN")
 
 /* ── LIBC ──────────────────────────────────────────────────────────────────
  * Plain glibc. Allocation, string/memory, stdio over a FILE the module opened
@@ -177,6 +178,7 @@ HOTSWAP_MODULE_IMPORT("__isoc23_strtoull", "LIBC")
 HOTSWAP_MODULE_IMPORT("__memcpy_chk", "LIBC")
 HOTSWAP_MODULE_IMPORT("__snprintf_chk", "LIBC")
 HOTSWAP_MODULE_IMPORT("__stack_chk_fail", "LIBC")
+HOTSWAP_MODULE_IMPORT("__stderrp", "LIBC")
 HOTSWAP_MODULE_IMPORT("__vsnprintf_chk", "LIBC")
 HOTSWAP_MODULE_IMPORT("calloc", "LIBC")
 HOTSWAP_MODULE_IMPORT("close", "LIBC")
@@ -187,6 +189,7 @@ HOTSWAP_MODULE_IMPORT("fgetc", "LIBC")
 HOTSWAP_MODULE_IMPORT("fopen", "LIBC")
 HOTSWAP_MODULE_IMPORT("fread", "LIBC")
 HOTSWAP_MODULE_IMPORT("free", "LIBC")
+HOTSWAP_MODULE_IMPORT("fprintf", "LIBC")
 HOTSWAP_MODULE_IMPORT("fstat", "LIBC")
 HOTSWAP_MODULE_IMPORT("getenv", "LIBC")
 HOTSWAP_MODULE_IMPORT("lstat", "LIBC")
@@ -213,6 +216,7 @@ HOTSWAP_MODULE_IMPORT("strnlen", "LIBC")
 HOTSWAP_MODULE_IMPORT("strstr", "LIBC")
 HOTSWAP_MODULE_IMPORT("strtod", "LIBC")
 HOTSWAP_MODULE_IMPORT("strtok", "LIBC")
+HOTSWAP_MODULE_IMPORT("strtol", "LIBC")
 
 /* ── JSON ──────────────────────────────────────────────────────────────────
  * The in-tree JSON document helpers. A command leaf's entire output is a JSON

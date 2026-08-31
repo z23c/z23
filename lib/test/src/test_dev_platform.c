@@ -388,6 +388,16 @@ static int test_change_plan_closure(void)
 {
     int failures = 0;
     TEST("dev platform: change plan unions symbol-closure groups onto the path floor") {
+        const char *leaf_files[] = {
+            "lib/test/src/test_dev_platform.c",
+        };
+        struct zcl_devloop_plan leaf_plan;
+        ASSERT(zcl_devloop_plan_files(leaf_files, 1, &leaf_plan));
+        ASSERT(leaf_plan.path_groups_len == 1);
+        ASSERT(dp_group_in(leaf_plan.path_groups,
+                           leaf_plan.path_groups_len,
+                           "test_dev_platform"));
+
         system("rm -rf " DP_CLOSURE_FIX);
         /* tor_integration.c defines the changed leaf; download.c's function
          * calls it, so download.c is in the reverse-caller closure. Both paths
@@ -401,6 +411,11 @@ static int test_change_plan_closure(void)
                            "/* download fixture */\n"
                            "#include \"net/clp.h\"\n"
                            "int dl_top(int x) { return tor_leaf(x) * 2; }\n"));
+        ASSERT(dp_mk_write(DP_CLOSURE_FIX,
+                           "lib/test/src/test_dev_platform.c",
+                           "/* semantic test leaf fixture */\n"
+                           "#include \"net/clp.h\"\n"
+                           "int test_dev_platform(void) { return tor_leaf(1); }\n"));
         ASSERT(dp_mk_write(DP_CLOSURE_FIX, "lib/net/include/net/clp.h",
                            "#ifndef NET_CLP_H\n#define NET_CLP_H\n"
                            "int tor_leaf(int x);\nint dl_top(int x);\n#endif\n"));
@@ -410,6 +425,11 @@ static int test_change_plan_closure(void)
                            "lib/net/include/net/clp.h\n"));
         ASSERT(dp_mk_write(DP_CLOSURE_FIX, "build/obj/download.d",
                            "build/obj/download.o: lib/net/src/download.c "
+                           "lib/net/include/net/clp.h\n"));
+        ASSERT(dp_mk_write(DP_CLOSURE_FIX,
+                           "build/obj/test_dev_platform.d",
+                           "build/obj/test_dev_platform.o: "
+                           "lib/test/src/test_dev_platform.c "
                            "lib/net/include/net/clp.h\n"));
 
         const char *files[] = { "lib/net/src/tor_integration.c" };
@@ -428,6 +448,10 @@ static int test_change_plan_closure(void)
         /* Closure surfaces download.c's group set as an ADDITION. */
         ASSERT(dp_group_in(plan.closure_groups, plan.closure_groups_len,
                            "download"));
+        ASSERT(dp_group_in(plan.closure_groups, plan.closure_groups_len,
+                           "test_dev_platform"));
+        ASSERT(!dp_group_in(plan.closure_groups, plan.closure_groups_len,
+                            "blog"));
         /* Additive only: the path floor is never dropped, and a closure group
          * is never also duplicated into the path set. */
         ASSERT(dp_group_in(plan.path_groups, plan.path_groups_len,

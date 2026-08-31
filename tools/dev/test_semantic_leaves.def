@@ -6,3 +6,7 @@
  * Include with ZCL_TEST_SEMANTIC_LEAF(name) defined. */
 
 ZCL_TEST_SEMANTIC_LEAF(stage_repair_coin_backfill)
+ZCL_TEST_SEMANTIC_LEAF(dev_platform)
+ZCL_TEST_SEMANTIC_LEAF(file_controller)
+ZCL_TEST_SEMANTIC_LEAF(cold_join_sovereign)
+ZCL_TEST_SEMANTIC_LEAF(test_group_selector)

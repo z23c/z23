@@ -7,9 +7,8 @@
  * Rehomed from lib/platform/tests/test_directory_watcher.c, which NOTHING
  * read: it was in no windows_acceptance.mk row, no Makefile rule and not in
  * the files list of lib/platform/zcode-package.json. As a registered group it
- * executes on every suite run, and it is the only thing that drives the POSIX
- * (inotify) arm of lib/platform/src/directory_watcher.c -- every production
- * caller of that module sits behind #if defined(_WIN32).
+ * executes on every suite run. The native resident development watcher also
+ * drives this module on macOS through the filtered kqueue recursion path.
  *
  * Every assertion is the original verbatim, in the original order. The single
  * change is where the watched root comes from: the standalone program built
@@ -30,6 +29,7 @@
 #else
 #include <fcntl.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -65,6 +65,80 @@ static int directory_watcher_probe(const char *root)
     return 0;
 }
 
+#if defined(__APPLE__)
+static bool skip_ignored(const char *name, void *opaque)
+{
+    (void)opaque;
+    return strcmp(name, "ignored") != 0;
+}
+
+static bool include_source_file(const char *path, void *opaque)
+{
+    (void)opaque;
+    const char *name = strrchr(path, '/');
+    return !name || strcmp(name + 1, "excluded.tmp") != 0;
+}
+
+static int directory_watcher_filtered_probe(const char *root)
+{
+    char ignored[1200], hidden[1200], excluded[1200], visible[1200], swap[1200];
+    (void)snprintf(ignored, sizeof(ignored), "%s/ignored", root);
+    (void)snprintf(hidden, sizeof(hidden), "%s/hidden.tmp", ignored);
+    (void)snprintf(excluded, sizeof(excluded), "%s/excluded.tmp", root);
+    (void)snprintf(visible, sizeof(visible), "%s/visible.tmp", root);
+    (void)snprintf(swap, sizeof(swap), "%s/swap.tmp", root);
+    if (mkdir(ignored, 0700) != 0)
+        return 1;
+    int fd = open(excluded, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd) != 0)
+        return 1;
+
+    struct platform_directory_watcher watcher;
+    platform_directory_watcher_init(&watcher);
+    if (!platform_directory_watcher_open_filtered(
+            &watcher, root, skip_ignored, include_source_file, NULL))
+        return 1;
+
+    fd = open(hidden, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd) != 0)
+        return 1;
+    if (platform_directory_watcher_wait(&watcher, 100, NULL, NULL) !=
+        PLATFORM_DIRECTORY_WATCH_TIMEOUT)
+        return 1;
+
+    fd = open(excluded, O_WRONLY | O_APPEND);
+    if (fd < 0 || write(fd, "y", 1) != 1 || close(fd) != 0)
+        return 1;
+    if (platform_directory_watcher_wait(&watcher, 100, NULL, NULL) !=
+        PLATFORM_DIRECTORY_WATCH_TIMEOUT)
+        return 1;
+
+    fd = open(visible, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0 || write(fd, "x", 1) != 1 || close(fd) != 0)
+        return 1;
+    if (platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) !=
+        PLATFORM_DIRECTORY_WATCH_CHANGED)
+        return 1;
+    fd = open(swap, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0 || write(fd, "z", 1) != 1 || close(fd) != 0 ||
+        rename(swap, visible) != 0)
+        return 1;
+    if (platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) !=
+        PLATFORM_DIRECTORY_WATCH_CHANGED)
+        return 1;
+    fd = open(visible, O_WRONLY | O_APPEND);
+    if (fd < 0 || write(fd, "y", 1) != 1 || close(fd) != 0)
+        return 1;
+    if (platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) !=
+        PLATFORM_DIRECTORY_WATCH_CHANGED)
+        return 1;
+    platform_directory_watcher_close(&watcher);
+    return unlink(hidden) == 0 && unlink(excluded) == 0 &&
+           unlink(visible) == 0 &&
+           rmdir(ignored) == 0 && rmdir(root) == 0 ? 0 : 1;
+}
+#endif
+
 int test_directory_watcher(void)
 {
     int failures = 0;
@@ -79,5 +153,17 @@ int test_directory_watcher(void)
         failures++;
     }
     (void)test_rm_rf_recursive(dir);
+#if defined(__APPLE__)
+    test_make_tmpdir(dir, sizeof(dir), "directory_watcher", "filtered");
+    printf("directory_watcher: filtered kqueue recursion ignores generated "
+           "subtrees/files but observes source-root creates and writes... ");
+    if (directory_watcher_filtered_probe(dir) == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL\n");
+        failures++;
+    }
+    (void)test_rm_rf_recursive(dir);
+#endif
     return failures;
 }

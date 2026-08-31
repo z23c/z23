@@ -37,6 +37,9 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <sys/file.h>
+#if defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -179,7 +182,15 @@ int zcl_devloop_watch(const char *repo_root)
 
 #define DEVLOOP_INITIAL_WATCHES 512
 #define DEVLOOP_EDIT_EPOCH_MAX_FILES 16
+#if defined(__APPLE__)
+/* kqueue reports a directory mutation rather than one final child pathname.
+ * Give an editor's vnode burst one scheduler quantum to settle before the
+ * conservative full-source epoch starts, so its rename/write pair cannot
+ * supersede itself while the first impact event is still unflushed. */
+#define DEVLOOP_EDIT_QUIET_US 50000
+#else
 #define DEVLOOP_EDIT_QUIET_US 1000
+#endif
 #define DEVLOOP_MUTATION_MASK                                                \
     (IN_CLOSE_WRITE | IN_MOVED_TO | IN_MOVED_FROM | IN_CREATE | IN_DELETE)
 
@@ -237,6 +248,10 @@ enum watch_proof_worker_kind {
 
 struct watch_context {
     int fd;
+#if defined(__APPLE__)
+    struct platform_directory_watcher directory_watcher;
+    bool watch_backend_failed;
+#endif
     char root[PATH_MAX];
     struct watched_dir *dirs;
     size_t dir_count;
@@ -414,7 +429,11 @@ static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
     if (child < 0)
         return false;
     if (child == 0) {
+#if defined(__APPLE__)
+        platform_directory_watcher_close(&ctx->directory_watcher);
+#else
         close(ctx->fd);
+#endif
         close(watcher_lock_fd);
         zcl_devloop_process_cancel_clear();
         zcl_devloop_process_cancel_poll_clear();
@@ -445,7 +464,11 @@ static bool watch_commit_proof_start(struct watch_context *ctx,
     pid_t child = fork();
     if (child < 0) return false;
     if (child == 0) {
+#if defined(__APPLE__)
+        platform_directory_watcher_close(&ctx->directory_watcher);
+#else
         close(ctx->fd);
+#endif
         close(watcher_lock_fd);
         zcl_devloop_process_cancel_clear();
         zcl_devloop_process_cancel_poll_clear();
@@ -962,6 +985,7 @@ static bool relevant_file(const char *path)
     return zcl_devloop_path_is_relevant(path);
 }
 
+#if !defined(__APPLE__)
 static struct watched_dir *find_watch(struct watch_context *ctx, int wd)
 {
     for (size_t i = 0; i < ctx->dir_count; i++) {
@@ -1039,6 +1063,7 @@ static bool add_watch_recursive(struct watch_context *ctx, const char *rel)
     closedir(dir);
     return true;
 }
+#endif
 
 static void add_changed(struct watch_context *ctx, const char *path)
 {
@@ -1067,8 +1092,68 @@ static void add_changed(struct watch_context *ctx, const char *path)
     ctx->changed_count++;
 }
 
+#if defined(__APPLE__)
+#define DEVLOOP_MACOS_WATCH_FD_BUDGET 16384u
+
+static bool watch_macos_ensure_fd_budget(void)
+{
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0)
+        return false;
+    rlim_t target = (rlim_t)DEVLOOP_MACOS_WATCH_FD_BUDGET;
+    if (limit.rlim_cur >= target)
+        return true;
+    if (limit.rlim_max != RLIM_INFINITY && target > limit.rlim_max)
+        target = limit.rlim_max;
+    if (target <= limit.rlim_cur)
+        return true;
+    struct rlimit raised = limit;
+    raised.rlim_cur = target;
+    return setrlimit(RLIMIT_NOFILE, &raised) == 0;
+}
+
+static bool watch_macos_descend(const char *name, void *opaque)
+{
+    (void)opaque;
+    return !ignored_dir(name);
+}
+
+static bool watch_macos_include_file(const char *path, void *opaque)
+{
+    const struct watch_context *ctx = opaque;
+    size_t root_len = ctx ? strlen(ctx->root) : 0;
+    if (!ctx || root_len == 0 || strncmp(path, ctx->root, root_len) != 0 ||
+        path[root_len] != '/')
+        return false;
+    return relevant_file(path + root_len + 1);
+}
+
+static bool watch_macos_record_result(
+    struct watch_context *ctx, enum platform_directory_watch_result result)
+{
+    if (result == PLATFORM_DIRECTORY_WATCH_TIMEOUT ||
+        result == PLATFORM_DIRECTORY_WATCH_STOPPED)
+        return false;
+    if (result == PLATFORM_DIRECTORY_WATCH_ERROR) {
+        ctx->watch_backend_failed = true;
+        return false;
+    }
+    mutation_sequence_advance(ctx);
+    ctx->force_full_source_rescan = true;
+    size_t before = ctx->changed_count;
+    add_changed(ctx, "Makefile");
+    return ctx->changed_count != before;
+}
+#endif
+
 static bool collect_events(struct watch_context *ctx)
 {
+#if defined(__APPLE__)
+    enum platform_directory_watch_result result =
+        platform_directory_watcher_wait(&ctx->directory_watcher, 0, NULL,
+                                        NULL);
+    return watch_macos_record_result(ctx, result);
+#else
     char buffer[64 * 1024];
     bool saw = false;
     for (;;) {
@@ -1135,13 +1220,47 @@ static bool collect_events(struct watch_context *ctx)
         }
     }
     return saw;
+#endif
 }
 
-/* Watches are armed before this runs. The reconciled refresh validates the
+static int watch_wait_for_events(struct watch_context *ctx, int timeout_ms)
+{
+#if defined(__APPLE__)
+    enum platform_directory_watch_result result =
+        platform_directory_watcher_wait(
+            &ctx->directory_watcher,
+            timeout_ms > 0 ? (uint32_t)timeout_ms : 0, NULL, NULL);
+    bool changed = watch_macos_record_result(ctx, result);
+    return ctx->watch_backend_failed ? -1 : (changed ? 1 : 0);
+#else
+    struct pollfd pfd = { .fd = ctx->fd, .events = POLLIN };
+    int rc;
+    do { rc = poll(&pfd, 1, timeout_ms); }
+    while (rc < 0 && errno == EINTR);
+    if (rc <= 0)
+        return rc;
+    return collect_events(ctx) ? 1 : 0;
+#endif
+}
+
+static void watch_backend_close(struct watch_context *ctx)
+{
+    if (!ctx) return;
+#if defined(__APPLE__)
+    platform_directory_watcher_close(&ctx->directory_watcher);
+#else
+    if (ctx->fd >= 0)
+        close(ctx->fd);
+    ctx->fd = -1;
+#endif
+}
+
+/* Native watches are armed before this runs. The reconciled refresh validates the
  * SHA3 seal, enumerates and stats the current policy inventory, and performs a
  * complete byte pass only when the prior image is absent/invalid or its
- * inventory moved. Any mutation racing that work is already queued in inotify
- * and is drained before the image can be described as trusted. */
+ * inventory moved. Any mutation racing that work is already queued by the
+ * platform backend and is drained before the image can be described as
+ * trusted. */
 static bool prime_source_snapshot(struct watch_context *ctx)
 {
     int64_t started_us = platform_time_monotonic_us();
@@ -1196,16 +1315,29 @@ static bool prime_source_snapshot(struct watch_context *ctx)
     }
 
     (void)collect_events(ctx);
+#if defined(__APPLE__)
+    if (ctx->watch_backend_failed)
+        return false;
+#endif
     ctx->snapshot_raced = ctx->changed_count > 0;
     int64_t elapsed_us = platform_time_monotonic_us() - started_us;
+#if defined(__APPLE__)
+    const char *watch_backend = "kqueue";
+    const char *inotify_armed = "false";
+#else
+    const char *watch_backend = "inotify";
+    const char *inotify_armed = "true";
+#endif
     printf("{\"schema\":\"zcl.dev_source_snapshot.v1\","
-           "\"status\":\"reconciled\",\"inotify_armed\":true,"
+           "\"status\":\"reconciled\",\"inotify_armed\":%s,"
+           "\"watch_backend\":\"%s\","
            "\"seal_verified\":%s,\"snapshot_used\":%s,"
            "\"full_rescan\":%s,\"inventory_changed\":%s,"
            "\"files_total\":%u,\"files_read\":%u,"
            "\"bytes_read\":%llu,\"queued_paths\":%zu,"
            "\"mutation_sequence\":%llu,\"elapsed_us\":%lld,"
            "\"source_root\":\"%s\"}\n",
+           inotify_armed, watch_backend,
            cost.snapshot_used ? "true" : "false",
            cost.snapshot_used ? "true" : "false",
            cost.full_rescan ? "true" : "false",
@@ -1224,6 +1356,12 @@ static bool watch_cancel_poll(void *opaque)
     if (g_watch_stop)
         return true;
     bool changed = collect_events(ctx) && ctx->changed_count > 0;
+#if defined(__APPLE__)
+    if (ctx->watch_backend_failed) {
+        g_watch_stop = 1;
+        return true;
+    }
+#endif
     if (changed && !ctx->edit_seen_emitted && !watch_emit_edit_seen(ctx)) {
         g_watch_stop = 1;
         return true;
@@ -1318,6 +1456,10 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
     zcl_devloop_stop_predicate stop, void *stop_opaque)
 {
     struct watch_context ctx = {0};
+    ctx.fd = -1;
+#if defined(__APPLE__)
+    platform_directory_watcher_init(&ctx.directory_watcher);
+#endif
     const char *root = repo_root && repo_root[0] ? repo_root : ".";
     const char *mode_name = zcl_devloop_publish_mode_name(publish_mode);
     if (!mode_name) {
@@ -1356,20 +1498,37 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 "[devloop] watch: another watcher owns this worktree lane\n");
         return 1;
     }
+#if defined(__APPLE__)
+    if (!watch_macos_ensure_fd_budget()) {
+        fprintf(stderr,
+                "[devloop] watch: cannot raise bounded kqueue descriptor "
+                "budget: %s\n", strerror(errno));
+        close(lock_fd);
+        return 1;
+    }
+    if (!platform_directory_watcher_open_filtered(
+            &ctx.directory_watcher, ctx.root, watch_macos_descend,
+            watch_macos_include_file, &ctx)) {
+        fprintf(stderr, "[devloop] watch: recursive kqueue setup failed: %s\n",
+                strerror(errno));
+        close(lock_fd);
+        return 1;
+    }
+#else
     ctx.fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
     if (ctx.fd < 0 || !add_watch_recursive(&ctx, "")) {
         fprintf(stderr, "[devloop] watch: recursive inotify setup failed: %s\n",
                 strerror(errno));
-        if (ctx.fd >= 0)
-            close(ctx.fd);
+        watch_backend_close(&ctx);
         free(ctx.dirs);
         close(lock_fd);
         return 1;
     }
+#endif
     if (!prime_source_snapshot(&ctx)) {
         fprintf(stderr,
                 "[devloop] watch: source snapshot reconciliation failed\n");
-        close(ctx.fd);
+        watch_backend_close(&ctx);
         free(ctx.dirs);
         close(lock_fd);
         return 1;
@@ -1378,7 +1537,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         fprintf(stderr,
                 "[devloop] watch: bounded local event stream unavailable\n");
         ci_merkle_free(ctx.verified_tree);
-        close(ctx.fd);
+        watch_backend_close(&ctx);
         free(ctx.dirs);
         close(lock_fd);
         return 1;
@@ -1386,7 +1545,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
     if (!mark_singleton_ready(lock_fd, publish_mode)) {
         fprintf(stderr,
                 "[devloop] watch: could not publish ready ownership\n");
-        close(ctx.fd);
+        watch_backend_close(&ctx);
         free(ctx.dirs);
         close(lock_fd);
         return 1;
@@ -1416,20 +1575,63 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             break;
         }
         if (ctx.changed_count == 0 && !ctx.prepared_epoch_ready) {
-            struct pollfd pfd = { .fd = ctx.fd, .events = POLLIN };
-            int prc = poll(&pfd, 1, stop ? 100 : 1000);
-            if (prc < 0 && errno == EINTR)
-                continue;
+            int prc = watch_wait_for_events(&ctx, stop ? 100 : 1000);
             if (prc < 0) {
-                fprintf(stderr, "[devloop] watch: poll failed: %s\n",
+                fprintf(stderr, "[devloop] watch: event wait failed: %s\n",
                         strerror(errno));
                 break;
             }
             if (prc == 0)
                 continue;
-            if (!collect_events(&ctx) || ctx.changed_count == 0)
+            if (ctx.changed_count == 0)
                 continue;
         }
+
+#if defined(__APPLE__)
+        /* EVFILT_VNODE identifies the directory that moved, not the final
+         * child pathname. Feeding a synthetic path into the path-qualified
+         * hot-reflex reactor would mint false blob evidence. Coalesce the
+         * vnode burst, then use the established conservative full-source
+         * cycle (the same safety posture as ReadDirectoryChangesW) until a
+         * filename-bearing Darwin backend exists. Proof-queue workers remain
+         * exact commit/base jobs and are started above this branch. */
+        if (ctx.changed_count > 0) {
+            if (!ctx.edit_seen_emitted &&
+                (!watch_emit_edit_seen(&ctx) || !watch_stream_flush(&ctx))) {
+                fprintf(stderr,
+                        "[devloop] watch: macOS edit acknowledgement failed\n");
+                break;
+            }
+            int64_t quiet_until =
+                platform_time_monotonic_us() + DEVLOOP_EDIT_QUIET_US;
+            while (!g_watch_stop && !(stop && stop(stop_opaque))) {
+                int64_t remain_us =
+                    quiet_until - platform_time_monotonic_us();
+                if (remain_us <= 0)
+                    break;
+                int wait_ms = (int)((remain_us + 999) / 1000);
+                if (stop && wait_ms > 100) wait_ms = 100;
+                int drc = watch_wait_for_events(&ctx, wait_ms);
+                if (drc > 0)
+                    quiet_until = platform_time_monotonic_us() +
+                        DEVLOOP_EDIT_QUIET_US;
+                else if (drc < 0)
+                    break;
+            }
+            ctx.changed_count = 0;
+            ctx.first_mutation_us = 0;
+            ctx.force_full_source_rescan = false;
+            ctx.edit_seen_emitted = false;
+            const char *files[] = {"Makefile"};
+            int cycle_rc = zcl_devloop_run_cycle_mode(
+                ctx.root, files, 1, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+            if (cycle_rc != 0)
+                fprintf(stderr,
+                        "[devloop] watch: conservative macOS cycle reported "
+                        "red; watcher remains available\n");
+            continue;
+        }
+#endif
 
         char epoch_changed[ZCL_DEVLOOP_MAX_FILES][ZCL_DEVLOOP_PATH_MAX];
         const char *files[ZCL_DEVLOOP_MAX_FILES];
@@ -1466,12 +1668,11 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                     break;
                 int wait_ms = (int)((remain_us + 999) / 1000);
                 if (stop && wait_ms > 100) wait_ms = 100;
-                struct pollfd debounce = { .fd = ctx.fd, .events = POLLIN };
-                int drc = poll(&debounce, 1, wait_ms);
-                if (drc > 0 && collect_events(&ctx))
+                int drc = watch_wait_for_events(&ctx, wait_ms);
+                if (drc > 0)
                     quiet_until = platform_time_monotonic_us() +
                         DEVLOOP_EDIT_QUIET_US;
-                else if (drc < 0 && errno != EINTR)
+                else if (drc < 0)
                     break;
             }
 
@@ -1615,7 +1816,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
     zcl_devloop_process_cancel_poll_clear();
     printf("{\"schema\":\"zcl.dev_watch_heartbeat.v1\","
            "\"status\":\"stopped\",\"pid\":%ld}\n", (long)getpid());
-    close(ctx.fd);
+    watch_backend_close(&ctx);
     /* Release singleton ownership after the obsolete proof's active child
      * session has been signalled. Reaping the already-cancelled worker cannot
      * delay the next resident reactor from attaching to this checkout. */

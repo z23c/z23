@@ -181,6 +181,9 @@ for dir in app/*/include config/include lib/*/include core/*/include \
     [ -d "$dir" ] && LEAF_INCLUDE_FLAGS+=("-I$dir")
 done
 LEAF_INCLUDE_FLAGS+=("-Itools" "-Itools/dev" "-Ivendor/include")
+if [ "$(uname -s)" = "Darwin" ]; then
+    LEAF_INCLUDE_FLAGS+=("-D_DARWIN_C_SOURCE")
+fi
 leaf_drift=""
 for name in $semantic_leaves; do
     source="$TEST_DIR/test_${name}.c"
