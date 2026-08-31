@@ -142,6 +142,75 @@ test prerequisite alongside `zcl-nodectl`. The merged mesh-terminal acceptance
 also requires the confined `fbsh` runtime, which is built and hashed in the
 same isolated helper set; absence remains a hard failure.
 
+## Resident queue cutover
+
+At `2026-08-30T19:10:01-04:00` (`2026-08-30T23:10:01+00:00`), the Linux
+host still reported 16 logical CPUs and an AMD Ryzen 7 PRO 8840U processor.
+The canonical compiler was GCC 16.1.1 20260430 with `-std=c23`; Clang 22.1.6
+was also installed.
+
+Exact-pair scheduling moved from one detached worker per notification into the
+singleton `z23-dev` watcher. A notification now atomically publishes one
+versioned pair request and returns. The resident watcher advertises
+`proof_queue_version=1`, coalesces only Git-proven superseded pending pairs,
+owns one supervised proof slot, and assigns each claimed request a private
+attempt directory and lease. Receipt, failure, and lease removal recheck that
+lease while holding the queue lock; an obsolete attempt therefore cannot
+publish over a newer one.
+
+A disposable real watcher accepted an exact-pair request in 124 milliseconds
+of caller-observed wall time. The typed command measured 316 microseconds
+inside its handler, below its 250 millisecond budget. Status first reported
+`resident_proof_request_queued`; two seconds later it reported the expected
+fixture refusal, `head_changed_during_proof`. The attempt retained its claimed
+request under a private directory, published one canonical failure, and left
+no lease. Native stop verified and stopped the exact watcher ID in 20
+milliseconds. No compiler, lint, test, Make, Bash, or PowerShell process is
+reachable from notification enqueue or push admission.
+
+The first clean-checkout launch exposed a separate scale refusal before any
+proof work began: the Linux watcher stored at most 512 directory descriptors,
+while the tracked tree contained 935 distinct directory paths. The watcher
+now grows its checked descriptor table geometrically instead of placing a
+fixed table on the stack. At `2026-08-30T19:31:42-04:00`
+(`2026-08-30T23:31:42+00:00`), a disposable checkout fixture containing 600
+child directories plus its root reached `watcher_ready=true` in 21
+milliseconds, advertised `proof_queue_version=1`, and stopped its exact owner
+in 20 milliseconds. The host had 16 logical CPUs, an AMD Ryzen 7 PRO 8840U,
+and GCC 16.1.1 20260430. The exact clean pair then enqueued in one millisecond;
+the earlier fixed-capacity binary had left the same pair queued without a
+resident owner.
+
+Build cost remains the measured dominant problem. A warm `make dev-bin` before
+the directory fix took 35.319 seconds of wall time, 27.520 seconds of user CPU,
+and 8.866 seconds of system CPU. Rebuilding the changed watcher and its test
+artifact took 98.134 seconds wall, 74.433 seconds user, and 24.818 seconds
+system. These are build measurements, not proof or push latency claims.
+
+The registered `test_impact_composition` queue fixture enqueued two pairs,
+selected the newer request, preserved the older request because its ancestry
+was unavailable, then claimed both private attempts in order. Each attempt
+published its intentional failure and released its lease. The complete group
+passed one of one with zero skips and zero unobserved cases in 52.4 seconds;
+most of that time remains the existing composition fixture, not the queue
+operations. `test_dev_platform` passed one
+of one in 2.8 seconds and `test_native_api_contract` passed one of one in 0.6
+seconds, also with zero skips and zero unobserved cases. `lint-fast` passed all
+24 selected gates in 14.075 seconds. The source-derived capability inventory
+then regenerated 1,412 capabilities and 18,684 symbols; its freshness and
+cross-artifact contradiction gates passed.
+
+The full 182-gate lint run completed in 274.430 seconds. Before regeneration
+and arm consolidation it passed 175 gates and refused seven. The two
+slice-owned refusals—duplicate public definitions across platform arms and a
+stale capability inventory—were corrected and their individual gates passed.
+The tracked platform gate's missing executable bit was also corrected and its
+individual gate passed. The remaining observed refusals were a partial
+capability object epoch, pre-existing raw `/proc` use in `test_postmortem.c`,
+and 27 pre-existing MinGW syntax failures across test translation units. No
+green full-lint claim is made. Caller token count was not available from the
+native tools and is not derivable.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
