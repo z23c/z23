@@ -524,7 +524,7 @@ REMOTE_COMMAND_CLASS("vault.session.revoke", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.redeem", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
 
-/* DEV — 43 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
+/* DEV — 44 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
  * owner_capability above; they are the only two).
  *
  * The dev branch drives a checkout. It compiles (ZCL_COMMAND_CAP_COMPILER),
@@ -544,6 +544,7 @@ REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
  * The two hot-swap leaves are the deliberate, individually-named exception,
  * argued at their rows above. */
 REMOTE_COMMAND_CLASS("dev.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.retrieval.benchmark", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.begin", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.drive", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.ff", REMOTE_CLASS_NEVER, "")
@@ -680,7 +681,7 @@ REMOTE_COMMAND_CLASS("ops.telemetry.zcode.summary", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.zcode.swarm", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.zcode.installs", REMOTE_CLASS_NEVER, "")
 
-/* CODE — 18 never_remote leaves.
+/* CODE — 21 never_remote leaves.
  *
  * The whole `code` branch is a source-content read surface: it returns file
  * bytes, symbol bodies, room and capsule excerpts, and provenance facts from
@@ -715,6 +716,7 @@ REMOTE_COMMAND_CLASS("code.kpi", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.merkle", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.facts", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.emitter", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.provenance.relations", REMOTE_CLASS_NEVER, "")
 
 /* ZCODE — 204 never_remote leaves (zcode.workspace.source.bundle.fetch is
  * owner_capability above).
@@ -993,6 +995,16 @@ REMOTE_COMMAND_CLASS("yardsale.buy", REMOTE_CLASS_NEVER, "")
  * at the machine, or the whole chain of trust closes on itself. */
 REMOTE_COMMAND_CLASS("zses.invite.create", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zses.invite.accept", REMOTE_CLASS_NEVER, "")
+
+/* STORY — 3 never_remote leaves.
+ *
+ * StoryGraph is a read-only projection, but its inputs and rooted output are
+ * local development-work evidence, not public node-health state. Remote
+ * callers use verified source bundles and their own local projection instead
+ * of enumerating another operator's work identities and acceptance history. */
+REMOTE_COMMAND_CLASS("story.show", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("story.why", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("story.diff", REMOTE_CLASS_NEVER, "")
 
 /* AGENT-CONTRACT METHODS — 8 never_remote.
  *
