@@ -91,6 +91,28 @@ ENV_MUTATED_COMPILER_ID="$(CPATH="$WORK/env-include" \
     "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
 [ "$ENV_MUTATED_COMPILER_ID" != "$ENV_COMPILER_ID" ] ||
     fail 'compiler include-root mutation was omitted from fingerprint'
+
+# -MMD excludes a header found through C_INCLUDE_PATH, so compiler-id is its
+# sole rebuild authority. Prove both an ordinary edit and edit/revert ABA with
+# the original bytes and mtime restored; ctime/inode inventory must still move.
+mkdir -p "$WORK/system-include"
+SYSTEM_HEADER="$WORK/system-include/probe.h"
+SYSTEM_MTIME="$WORK/system-include/mtime.reference"
+printf '#define EPOCH_SYSTEM_PROBE 1\n' > "$SYSTEM_HEADER"
+touch -r "$SYSTEM_HEADER" "$SYSTEM_MTIME"
+SYSTEM_COMPILER_ID="$(C_INCLUDE_PATH="$WORK/system-include" \
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+printf '#define EPOCH_SYSTEM_PROBE 2\n' > "$SYSTEM_HEADER"
+SYSTEM_MUTATED_COMPILER_ID="$(C_INCLUDE_PATH="$WORK/system-include" \
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+[ "$SYSTEM_MUTATED_COMPILER_ID" != "$SYSTEM_COMPILER_ID" ] ||
+    fail 'system include-root mutation was omitted from compiler fingerprint'
+printf '#define EPOCH_SYSTEM_PROBE 1\n' > "$SYSTEM_HEADER"
+touch -r "$SYSTEM_MTIME" "$SYSTEM_HEADER"
+SYSTEM_REVERTED_COMPILER_ID="$(C_INCLUDE_PATH="$WORK/system-include" \
+    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CC_COMMAND")"
+[ "$SYSTEM_REVERTED_COMPILER_ID" != "$SYSTEM_COMPILER_ID" ] ||
+    fail 'system include-root edit/revert ABA was omitted from compiler fingerprint'
 mkdir -p "$WORK/cyclic-include/nested"
 printf '#define EPOCH_CYCLE_PROBE 1\n' > "$WORK/cyclic-include/probe.h"
 ln -s .. "$WORK/cyclic-include/nested/parent"
@@ -103,6 +125,41 @@ if "$KEY_TOOL" compiler-id 'cc; printf unsafe' "$CC_COMMAND" \
         >/dev/null 2>&1; then
     fail 'shell-active CC string was accepted'
 fi
+
+# Compile-only search roots and indirect tool loaders are not inputs to
+# compiler-id's probes. Every joined and separate spelling must refuse before
+# an epoch can be minted; ordinary project flags remain admitted.
+FORBIDDEN_COMPILE_FLAGS=(
+    '-isystem /tmp/include' '-isystem/tmp/include'
+    '-idirafter /tmp/include' '-idirafter/tmp/include'
+    '--sysroot /tmp/sdk' '--sysroot=/tmp/sdk'
+    '-isysroot /tmp/sdk' '-isysroot/tmp/sdk'
+    '-iframework /tmp/frameworks' '-iframework/tmp/frameworks'
+    '-F /tmp/frameworks' '-F/tmp/frameworks'
+    '-nostdinc' '-nostdinc++'
+    '-iprefix /tmp/prefix' '-iwithprefix include'
+    '-iwithprefixbefore include' '-B /tmp/programs'
+    '-resource-dir=/tmp/resource' '--gcc-toolchain=/tmp/toolchain'
+    '-specs=/tmp/specs' '--specs /tmp/specs'
+    '-fplugin=/tmp/plugin.so' '-fpass-plugin=/tmp/pass.so'
+    '-load=/tmp/plugin.so' '-plugin /tmp/plugin.so'
+    '-wrapper=/tmp/wrapper' '-Xclang -load'
+    '-Xpreprocessor -isystem' '-Xassembler /tmp/args'
+    '-Wp,-isystem,/tmp/include' '-Wa,@/tmp/args' '@/tmp/flags'
+    '-include-pch /tmp/header.pch' '-fmodule-file=/tmp/module.pcm'
+    'normal=-isystem/tmp/include -O2'
+)
+for forbidden in "${FORBIDDEN_COMPILE_FLAGS[@]}"; do
+    if "$KEY_TOOL" key "$COMPILER_ID" selftest \
+            "-std=c23 $forbidden" no-link "$COMPILER_ID" \
+            >/dev/null 2>&1; then
+        fail "compile epoch accepted un-inventoried modifier: $forbidden"
+    fi
+done
+"$KEY_TOOL" key "$COMPILER_ID" selftest \
+    '-std=c23 -O2 -Ilib/base/include -include test/windows_compat.h' \
+    no-link "$COMPILER_ID" >/dev/null ||
+    fail 'compile epoch rejected ordinary tracked include flags'
 
 # The build-system fingerprint is real (the checkout's own Makefile + epoch
 # scripts); synthetic labels below prove it is bound into the key.
@@ -179,6 +236,7 @@ set_state()
 # FORCE prerequisite), so the shared stable-epoch session stamp always names
 # the CURRENT source record before any compile or publish under it.
 SESSION_MAIN="$WORK/sessions/epochs/$EPOCH_MAIN/.build-session"
+SESSION_EPOCH_ROOT="$WORK/sessions/epochs/$EPOCH_MAIN"
 start_session()
 {
     local source_id="$1" mutation="$2"
@@ -197,12 +255,25 @@ start_session()
     printf '%s\n' "$SESSION_MAIN"
 }
 
+finish_session()
+{
+    local source_id="$1" mutation="$2"
+    local root="$WORK/sessions"
+    local lease="$root/epochs/$EPOCH_MAIN/.leases/selftest-$$"
+    set_state "$source_id" "$mutation"
+    STATE_FILE="$STATE" "$SESSION_TOOL" verify "$SESSION_MAIN" "$lease" \
+        "$root" "$WORK/candidates" 5 "$source_id" 1 "$mutation" \
+        "$COMPILER_ID" "$EPOCH_MAIN" "$PROFILE" "$COMPILE_FLAGS" \
+        "$LINK_FLAGS" "$CC_COMMAND" "$CC_COMMAND" "$$" "$VERIFY" \
+        >/dev/null
+}
+
 compile_graph_object()
 {
     local payload="$1" source_id="$2" mutation="$3"
     local source="$WORK/graph-$EPOCH_MAIN.c"
-    local object="$WORK/graph/epochs/$EPOCH_MAIN/graph.o"
-    local binary="$WORK/graph/epochs/$EPOCH_MAIN/graph"
+    local object="$SESSION_EPOCH_ROOT/graph/graph.o"
+    local binary="$SESSION_EPOCH_ROOT/graph/graph"
     local -a cc_argv
     start_session "$source_id" "$mutation" >/dev/null
     mkdir -p "$(dirname "$object")"
@@ -217,6 +288,7 @@ compile_graph_object()
     [ "$("$binary")" = "$payload" ] ||
         fail "epoch graph object did not execute payload $payload"
     [ -s "${object%.o}.d" ] || fail 'epoch graph dependency file is missing'
+    finish_session "$source_id" "$mutation"
     printf '%s\n' "$object"
 }
 
@@ -232,18 +304,31 @@ GRAPH_A2="$(compile_graph_object A "$SOURCE_A" "$MUTATION_A2")"
 # ...but a per-TU compile is still source-bound: the session stamp must name
 # the exact source record the compile claims, or the object tool refuses.
 start_session "$SOURCE_A" "$MUTATION_A2" >/dev/null
-if "$OBJECT_TOOL" dep "$WORK/mismatch/epochs/$EPOCH_MAIN/mismatch.o" \
+if "$OBJECT_TOOL" dep "$SESSION_EPOCH_ROOT/mismatch/mismatch.o" \
         "$WORK/graph-$EPOCH_MAIN.c" \
         "$SOURCE_B" 1 "$MUTATION_B" "$EPOCH_MAIN" "$COMPILER_ID" \
         "$SESSION_MAIN" -- /bin/true >/dev/null 2>&1; then
     fail 'object compile accepted a session stamp from another source record'
 fi
 
+# Bash line reads discard embedded NUL bytes. A binary-tampered session must
+# refuse before that normalization can turn a malformed field into a match.
+printf '\0' >> "$SESSION_MAIN"
+read -r -a cc_argv <<< "$CC_COMMAND"
+if "$OBJECT_TOOL" dep "$SESSION_EPOCH_ROOT/nul-session/nul.o" \
+        "$WORK/graph-$EPOCH_MAIN.c" \
+        "$SOURCE_A" 1 "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" \
+        "$SESSION_MAIN" -- \
+        "${cc_argv[@]}" -std=c23 -O2 -Wall -Wextra -Werror \
+        >/dev/null 2>&1; then
+    fail 'object compile accepted a session stamp containing a NUL byte'
+fi
+
 # Two Make-like processes may schedule the same missing object before either
 # publishes it.  Force one compiler to pause, let the other publish, then let
 # the first finish.  Both .d and .o must remain complete atomic files.
 CONCURRENT_SOURCE="$WORK/concurrent.c"
-CONCURRENT_OBJECT="$WORK/concurrent/epochs/$EPOCH_MAIN/concurrent.o"
+CONCURRENT_OBJECT="$SESSION_EPOCH_ROOT/concurrent/concurrent.o"
 COMPILER_WRAPPER="$WORK/compiler-wrapper.sh"
 mkdir -p "$(dirname "$CONCURRENT_OBJECT")"
 printf '#include <stdio.h>\nint main(void) { puts("A"); return 0; }\n' \
@@ -324,7 +409,7 @@ read -r -a cc_argv <<< "$CC_COMMAND"
 
 # Compiler failure must not leak a same-directory staging tree that a later
 # graph walk could mistake for a valid object input.
-FAILED_OBJECT="$WORK/failure/epochs/$EPOCH_MAIN/failure.o"
+FAILED_OBJECT="$SESSION_EPOCH_ROOT/failure/failure.o"
 mkdir -p "$(dirname "$FAILED_OBJECT")"
 if "$OBJECT_TOOL" dep "$FAILED_OBJECT" "$CONCURRENT_SOURCE" \
         "$SOURCE_A" 1 "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" \
@@ -338,7 +423,7 @@ fi
 
 # Coverage cache hits require the separately retained .gcno. Delete it and
 # prove the helper repairs the cache instead of accepting an unusable object.
-COVERAGE_OBJECT="$WORK/coverage/epochs/$EPOCH_MAIN/coverage.o"
+COVERAGE_OBJECT="$SESSION_EPOCH_ROOT/coverage/coverage.o"
 mkdir -p "$(dirname "$COVERAGE_OBJECT")"
 "$OBJECT_TOOL" coverage "$COVERAGE_OBJECT" "$CONCURRENT_SOURCE" \
     "$SOURCE_A" 1 "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" \
@@ -352,6 +437,7 @@ rm -f "$COVERAGE_NOTE"
 read -r COVERAGE_NOTE_REPAIRED < "${COVERAGE_OBJECT%.o}.gcno-path"
 [ -s "$COVERAGE_NOTE_REPAIRED" ] ||
     fail 'coverage cache did not repair its missing .gcno'
+finish_session "$SOURCE_A" "$MUTATION_A2"
 
 # Bounded GC removes dead epochs/candidates while preserving an epoch leased
 # by a live Make-like owner, even when it lies outside the retention count.
@@ -386,6 +472,110 @@ STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
 [ ! -e "$GC_CANDIDATES/epochs/$GC_DEAD_1" ] &&
 [ ! -e "$GC_CANDIDATES/epochs/$GC_DEAD_2" ] ||
     fail 'epoch GC retained dead epochs beyond its bound'
+
+# A writer can die after invalidating an epoch but before aggregate verify.
+# The next acquire must discard every artifact and candidate from that epoch
+# before it publishes a fresh session and lease for the same stable key.
+QUARANTINE_ROOT="$WORK/quarantine-objects"
+QUARANTINE_CANDIDATES="$WORK/quarantine-candidates"
+QUARANTINE_EPOCH_DIR="$QUARANTINE_ROOT/epochs/$EPOCH_MAIN"
+QUARANTINE_CANDIDATE_DIR="$QUARANTINE_CANDIDATES/epochs/$EPOCH_MAIN"
+QUARANTINE_SESSION="$QUARANTINE_EPOCH_DIR/.build-session"
+QUARANTINE_LEASE="$QUARANTINE_EPOCH_DIR/.leases/dead-writer"
+mkdir -p "$QUARANTINE_EPOCH_DIR/.leases" "$QUARANTINE_CANDIDATE_DIR"
+printf 'poisoned object\n' > "$QUARANTINE_EPOCH_DIR/poisoned.o"
+printf 'stale candidate\n' > "$QUARANTINE_CANDIDATE_DIR/stale"
+printf 'pid=99999997\nstart=1\n' > "$QUARANTINE_LEASE"
+printf 'schema=zcl.build_epoch_unverified.v1\nsource_id=%s\nmutation=%s\ncompiler_id=%s\nepoch=%s\n' \
+    "$SOURCE_A" "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
+    > "$QUARANTINE_EPOCH_DIR/.unverified"
+set_state "$SOURCE_A" "$MUTATION_A2"
+STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
+    "$QUARANTINE_SESSION" "$QUARANTINE_LEASE" \
+    "$QUARANTINE_ROOT" "$QUARANTINE_CANDIDATES" 2 \
+    "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
+    "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" \
+    "$CC_COMMAND" "$$" "$VERIFY" >/dev/null
+[ ! -e "$QUARANTINE_EPOCH_DIR/poisoned.o" ] &&
+[ ! -e "$QUARANTINE_CANDIDATE_DIR/stale" ] &&
+[ ! -e "$QUARANTINE_EPOCH_DIR/.unverified" ] ||
+    fail 'dead unverified epoch artifacts were reused'
+cmp -s "$QUARANTINE_SESSION" "$SESSION_MAIN" ||
+    fail 'dead unverified epoch did not receive a fresh exact session'
+[ -s "$QUARANTINE_LEASE" ] ||
+    fail 'dead unverified epoch did not receive a fresh live lease'
+[ -d "$QUARANTINE_CANDIDATE_DIR" ] ||
+    fail 'dead unverified epoch candidate generation was not recreated'
+[ -f "$QUARANTINE_ROOT/.epoch-admission/$EPOCH_MAIN.lock" ] &&
+[ ! -e "$QUARANTINE_EPOCH_DIR/.admission.lock" ] &&
+[ ! -e "$QUARANTINE_EPOCH_DIR/.admission.lock.d" ] ||
+    fail 'epoch admission lock was not retained outside quarantine scope'
+[ -z "$(find "$QUARANTINE_ROOT/.failed-epochs" -mindepth 1 -print -quit)" ] ||
+    fail 'dead unverified epoch quarantine was not removed after recovery'
+
+expect_generation_symlink_refused()
+{
+    local surface="$1" base object_root candidate_root outside session lease log
+    base="$WORK/symlinked-$surface-generation"
+    object_root="$base/objects"
+    candidate_root="$base/candidates"
+    outside="$base/outside"
+    session="$object_root/epochs/$EPOCH_MAIN/.build-session"
+    lease="$object_root/epochs/$EPOCH_MAIN/.leases/selftest"
+    log="$base/session.log"
+    mkdir -p "$object_root/epochs" "$candidate_root/epochs" "$outside"
+    case "$surface" in
+        object) ln -s "$outside" "$object_root/epochs/$EPOCH_MAIN" ;;
+        candidate) ln -s "$outside" "$candidate_root/epochs/$EPOCH_MAIN" ;;
+        *) fail "unknown symlinked generation surface $surface" ;;
+    esac
+    set_state "$SOURCE_A" "$MUTATION_A2"
+    if STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
+        "$session" "$lease" "$object_root" "$candidate_root" 2 \
+        "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
+        "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" \
+        "$CC_COMMAND" "$$" "$VERIFY" >"$log" 2>&1; then
+        fail "symlinked $surface epoch generation was accepted"
+    fi
+    grep -Fq "$surface epoch generation is not a regular directory" "$log" ||
+        fail "symlinked $surface epoch generation did not fail closed"
+    [ -z "$(find "$outside" -mindepth 1 -print -quit)" ] ||
+        fail "symlinked $surface epoch generation received build state"
+    [ ! -e "$object_root/.current-epoch" ] &&
+    [ ! -e "$candidate_root/.current-epoch" ] ||
+        fail "symlinked $surface epoch generation was published"
+}
+
+expect_generation_symlink_refused object
+expect_generation_symlink_refused candidate
+
+expect_verify_root_symlink_refused()
+{
+    local base object_root outside session lease log
+    base="$WORK/symlinked-verify-root"
+    object_root="$base/objects"
+    outside="$base/outside"
+    session="$object_root/epochs/$EPOCH_MAIN/.build-session"
+    lease="$object_root/epochs/$EPOCH_MAIN/.leases/selftest"
+    log="$base/session.log"
+    mkdir -p "$outside/epochs/$EPOCH_MAIN"
+    ln -s "$outside" "$object_root"
+    if STATE_FILE="$STATE" "$SESSION_TOOL" verify \
+        "$session" "$lease" "$object_root" - 2 \
+        "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
+        "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" \
+        "$CC_COMMAND" "$$" "$VERIFY" >"$log" 2>&1; then
+        fail 'symlinked verify object root was accepted'
+    fi
+    grep -Fq 'object root is not a regular directory' "$log" ||
+        fail 'symlinked verify object root did not fail closed'
+    [ ! -e "$outside/.epoch-admission" ] &&
+    [ ! -e "$outside/epochs/$EPOCH_MAIN/.build-session" ] &&
+    [ ! -e "$outside/epochs/$EPOCH_MAIN/.leases" ] ||
+        fail 'symlinked verify object root received build state'
+}
+
+expect_verify_root_symlink_refused
 
 publish()
 {
@@ -440,14 +630,26 @@ if [ ! -e "$BLOCK_MARKER" ]; then
     fail 'stale publisher did not enter the locked verifier'
 fi
 
-SESSION_B="$(start_session "$SOURCE_B" "$MUTATION_B")"
-CANDIDATE_B2="$(build_candidate "$EPOCH_MAIN" B)"
-STATE_FILE="$STATE" "$PUBLISH_TOOL" "$CANDIDATE_B2" "$STABLE" \
-    "$SESSION_B" "$SOURCE_B" 1 "$MUTATION_B" "$EPOCH_MAIN" \
-    "$COMPILER_ID" "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" \
-    "$CC_COMMAND" "$VERIFY" >/dev/null &
+(
+    SESSION_B="$(start_session "$SOURCE_B" "$MUTATION_B")"
+    CANDIDATE_B2="$(build_candidate "$EPOCH_MAIN" B)"
+    STATE_FILE="$STATE" "$PUBLISH_TOOL" "$CANDIDATE_B2" "$STABLE" \
+        "$SESSION_B" "$SOURCE_B" 1 "$MUTATION_B" "$EPOCH_MAIN" \
+        "$COMPILER_ID" "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" \
+        "$CC_COMMAND" "$CC_COMMAND" "$VERIFY" >/dev/null
+) &
 CURRENT_PID=$!
 CHILD_PIDS+=("$CURRENT_PID")
+# The new source state is written before B waits on A's admission lock. Wait
+# for that transition so releasing A deterministically makes its exact source
+# verification fail rather than racing the background scheduler.
+while :; do
+    read -r state_source _ < "$STATE"
+    [ "$state_source" = "$SOURCE_B" ] && break
+    kill -0 "$CURRENT_PID" 2>/dev/null ||
+        fail 'current B publisher died before advancing source state'
+    sleep 0.01
+done
 : > "$BLOCK_RELEASE"
 
 set +e

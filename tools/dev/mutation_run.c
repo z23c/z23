@@ -520,7 +520,7 @@ static bool mut_seg_has(const char *seg, const char *needle)
 }
 
 /* The compile recipe is `compile-epoch-object.sh dep "OBJ" "SRC" ... --
- * COMPILER FLAGS...`; the wrapper then appends -MD -MP -c -o OBJ SRC. Only
+ * COMPILER FLAGS...`; the wrapper then appends -MMD -MP -c -o OBJ SRC. Only
  * the tail after ` -- ` is wanted, because the harness supplies its own -c
  * -o and its own scratch source. */
 static bool mut_plan_compile(const char *seg, const char *src_rel,

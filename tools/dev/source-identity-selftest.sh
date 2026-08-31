@@ -15,6 +15,8 @@ fail()
     exit 1
 }
 
+"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source-identity-batch-selftest.sh"
+
 cd "$SANDBOX"
 git init -q
 git config user.email source-identity-selftest@example.invalid
@@ -291,7 +293,8 @@ chmod +x _module-origin/verify-mutation-race-bin/sha256sum
 
 run_verify_mutation_race()
 {
-    local label="$1" expected="${2:-source directory or index changed during post-proof verification}"
+    local label="$1"
+    local expected="${2:-source (directory or index|inventory) changed during post-proof verification}"
     rm -f _module-origin/verify-mutation-race-fired
     if PATH="$PWD/_module-origin/verify-mutation-race-bin:$PATH" \
             REAL_SHA256SUM="$real_sha256sum" REAL_GIT="$REAL_GIT" \
@@ -308,7 +311,7 @@ run_verify_mutation_race()
     fi
     [ -f _module-origin/verify-mutation-race-fired ] ||
         fail "$label fixture did not fire in the marked rescan child"
-    grep -q "$expected" \
+    grep -Eq "$expected" \
         _module-origin/verify-mutation-race.err ||
         fail "$label did not trip its epoch: $(cat _module-origin/verify-mutation-race.err)"
 }
@@ -357,7 +360,7 @@ race_kind=exclude-policy race_source=
 race_gitlink_root= race_gitlink_file=
 race_exclude_file="$PWD/.git/info/exclude"
 run_verify_mutation_race 'exclude-policy traversal race' \
-    'source exclude policy changed during post-proof verification'
+    'source (inventory|exclude policy) changed during post-proof verification'
 if git check-ignore -q late-exclude-policy.c; then
     fail 'exclude-policy race fixture did not reveal its path'
 fi
@@ -379,7 +382,7 @@ race_gitlink_root= race_gitlink_file=
 race_exclude_file="$PWD/directory-policy-race/.gitignore"
 race_exclude_keep=.gitignore
 run_verify_mutation_race 'per-directory exclude-policy traversal race' \
-    'source exclude policy changed during post-proof verification'
+    'source (inventory|exclude policy) changed during post-proof verification'
 if git check-ignore -q directory-policy-race/late-directory-policy.c; then
     fail 'directory-policy race fixture did not reveal its path'
 fi
@@ -403,7 +406,7 @@ race_gitlink_root= race_gitlink_file=
 race_exclude_file="$PWD/vendor/sub/relative-global-ignore"
 race_exclude_keep=relative-global-ignore
 run_verify_mutation_race 'relative gitlink global-exclude traversal race' \
-    'source exclude policy changed during post-proof verification'
+    'source (inventory|exclude policy) changed during post-proof verification'
 if git -C vendor/sub check-ignore -q late-relative-global.c; then
     fail 'relative-global exclude-policy fixture did not reveal its path'
 fi
@@ -420,9 +423,17 @@ rm -rf _module-origin/verify-mutation-race-bin \
 real_sha256sum="$(command -v sha256sum)"
 mkdir inventory-race-bin
 printf '%s\n' '#!/usr/bin/env bash' \
-    'if [ "$#" -eq 0 ] && [ ! -e "$INVENTORY_RACE_FLAG" ]; then' \
-    '  : > "$INVENTORY_RACE_FLAG"' \
-    '  printf "late inventory input\\n" > "$INVENTORY_RACE_SOURCE"' \
+    'if [ "$#" -eq 0 ]; then' \
+    '  input="$(mktemp)" || exit 98' \
+    '  trap '\''rm -f "$input"'\'' EXIT HUP INT TERM' \
+    '  cat > "$input" || exit 98' \
+    '  if grep -aFq zcl.dev_source_identity.v2 "$input" &&' \
+    '     [ ! -e "$INVENTORY_RACE_FLAG" ]; then' \
+    '    : > "$INVENTORY_RACE_FLAG"' \
+    '    printf "late inventory input\\n" > "$INVENTORY_RACE_SOURCE"' \
+    '  fi' \
+    '  "$REAL_SHA256SUM" < "$input"' \
+    '  exit $?' \
     'fi' \
     'exec "$REAL_SHA256SUM" "$@"' > inventory-race-bin/sha256sum
 chmod +x inventory-race-bin/sha256sum
@@ -430,6 +441,7 @@ if PATH="$PWD/inventory-race-bin:$PATH" \
         REAL_SHA256SUM="$real_sha256sum" \
         INVENTORY_RACE_FLAG="$PWD/inventory-race-fired" \
         INVENTORY_RACE_SOURCE="$PWD/late-inventory-source.c" \
+        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
         "$SCRIPT" capture-record > /dev/null 2>&1; then
     fail 'new source created during capture escaped the inventory guard'
 fi
