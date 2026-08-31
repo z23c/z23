@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Windows acceptance for the consensus progress-store refusal boundary. */
+ * Windows acceptance for the legacy consensus progress-store refusal. */
 #if defined(_WIN32)
 
 #include "platform/private_directory.h"
@@ -126,7 +126,7 @@ int main(void)
         return fail("datadir state snapshot failed");
 
     if (progress_store_open(root_utf8))
-        return fail("progress_store_open accepted native Windows");
+        return fail("progress_store_open accepted an unqualified legacy migration");
 
     if (!GetFileInformationByHandle(directory, &directory_after) ||
         !same_file_state(&directory_before, &directory_after) ||
