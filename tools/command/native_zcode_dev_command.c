@@ -909,32 +909,119 @@ void zcl_native_handle_zcode_lane(
                            "SIGNED_CAS_RECEIPT");
 }
 
-#define ZDEV_TASKS_MAX_ROWS 256
+#define ZDEV_TASKS_MAX_ROWS 3
+#define ZDEV_TASKS_DETAIL_CANDIDATES 4
+#define ZDEV_TASKS_MULTIROW_WORKSPACE_MAX 256
+#define ZDEV_TASKS_WORKSPACE_JSON_MAX 1024
+
+static size_t zdev_json_escaped_size(const char *value)
+{
+    size_t size = 0;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p == '"' || *p == '\\')
+            size += 2;
+        else if (*p <= 0x1f)
+            size += 6;
+        else
+            size++;
+    }
+    return size;
+}
+
+static void zdev_task_safe_next(struct json_value *parent,
+                                const char *workspace,
+                                const char *task_root)
+{
+    struct json_value next;
+    struct json_value input;
+    json_init(&next);
+    json_init(&input);
+    json_set_object(&next);
+    json_set_object(&input);
+    (void)json_push_kv_str(&next, "command", "zcode.work.status");
+    (void)json_push_kv_str(&input, "workspace", workspace);
+    (void)json_push_kv_str(&input, "work", task_root);
+    (void)json_push_kv(&next, "input", &input);
+    (void)json_push_kv(parent, "safe_next", &next);
+    json_free(&input);
+    json_free(&next);
+}
 
 static void zdev_task_row_json(struct json_value *row,
                                const struct vcs_zcode_task_index *index,
-                               const struct vcs_zcode_task_index_entry *e)
+                               const struct vcs_zcode_task_index_entry *e,
+                               const char *workspace, bool details)
 {
+    char work_id[32];
+    (void)snprintf(work_id, sizeof(work_id), "work-%.12s",
+                   e->task_root_hex);
+    const char *blocker_class = "none_from_cas";
+    if (e->expired)
+        blocker_class = "expired";
+    else if (strcmp(e->state, VCS_ZCODE_TASK_STATE_REPAIR_NEEDED) == 0)
+        blocker_class = "repair_needed";
     json_set_object(row);
+    (void)json_push_kv_str(row, "work_id", work_id);
     (void)json_push_kv_str(row, "task_root", e->task_root_hex);
     (void)json_push_kv_str(row, "source_root", e->source_root_hex);
-    (void)json_push_kv_str(row, "goal_root", e->goal_root_hex);
-    (void)json_push_kv_str(row, "proof_policy_root",
-                           e->proof_policy_root_hex);
-    (void)json_push_kv_str(row, "toolchain_capsule_root",
-                           e->toolchain_capsule_root_hex);
+    (void)json_push_kv_str(row, "latest_candidate_source_root",
+                           e->latest_candidate_source_root_hex);
+    (void)json_push_kv_str(row, "latest_patch_root",
+                           e->latest_patch_root_hex);
     (void)json_push_kv_int(row, "expires_unix", e->expires_unix);
     (void)json_push_kv_bool(row, "expired", e->expired);
     (void)json_push_kv_str(row, "state", e->state);
     (void)json_push_kv_int(row, "candidate_count",
                            (int64_t)e->candidate_count);
+    (void)json_push_kv_int(row, "receipt_count",
+                           (int64_t)e->receipt_count);
+    (void)json_push_kv_int(row, "passing_receipt_count",
+                           (int64_t)e->passing_receipt_count);
+    (void)json_push_kv_int(row, "review_count",
+                           (int64_t)e->review_count);
+    (void)json_push_kv_str(row, "assignment_status", "UNOBSERVED");
+    (void)json_push_kv_str(row, "active_execution", "UNOBSERVED");
+    (void)json_push_kv_str(row, "blocker_class", blocker_class);
+    zdev_task_safe_next(row, workspace, e->task_root_hex);
+    if (!details) return;
+
+    bool context_ambiguous = false;
+    const struct vcs_zcode_task_context_entry *context =
+        vcs_zcode_task_index_context_for_task(
+            index, e->task_root_hex, &context_ambiguous);
+    (void)json_push_kv_str(row, "latest_candidate_root",
+                           e->latest_candidate_root_hex);
+    (void)json_push_kv_str(row, "agent_context_root",
+                           context ? context->context_root_hex : "");
+    (void)json_push_kv_bool(row, "agent_context_ambiguous",
+                            context_ambiguous);
+    (void)json_push_kv_str(row, "latest_receipt_action_root",
+                           e->latest_action_root_hex);
+    (void)json_push_kv_str(row, "latest_work_receipt_root",
+                           e->latest_work_receipt_hex);
+    (void)json_push_kv_str(row, "latest_lane_proof_set_root",
+                           e->latest_proof_set_root_hex);
+    (void)json_push_kv_str(row, "latest_lane_receipt_root",
+                           e->latest_lane_receipt_hex);
+    (void)json_push_kv_str(row, "goal_root", e->goal_root_hex);
+    (void)json_push_kv_str(row, "proof_policy_root",
+                           e->proof_policy_root_hex);
+    (void)json_push_kv_str(row, "toolchain_capsule_root",
+                           e->toolchain_capsule_root_hex);
+    (void)json_push_kv_int(row, "app_run_receipt_count",
+                           (int64_t)e->app_run_receipt_count);
     struct json_value candidates;
     json_init(&candidates);
     json_set_array(&candidates);
+    size_t candidate_items = 0;
+    size_t task_candidates = 0;
     for (size_t c = 0; c < vcs_zcode_task_index_candidate_count(index); c++) {
         const struct vcs_zcode_task_candidate_entry *candidate =
             vcs_zcode_task_index_candidate_at(index, c);
         if (strcmp(candidate->task_root_hex, e->task_root_hex) != 0)
+            continue;
+        task_candidates++;
+        if (candidate_items >= ZDEV_TASKS_DETAIL_CANDIDATES)
             continue;
         struct json_value entry;
         json_init(&entry);
@@ -949,8 +1036,11 @@ static void zdev_task_row_json(struct json_value *row,
                                candidate->created_unix);
         (void)json_push_back(&candidates, &entry);
         json_free(&entry);
+        candidate_items++;
     }
     (void)json_push_kv(row, "candidates", &candidates);
+    (void)json_push_kv_bool(row, "candidate_items_truncated",
+                            task_candidates > candidate_items);
     json_free(&candidates);
 }
 
@@ -968,9 +1058,23 @@ void zcl_native_handle_zcode_tasks(
             "workspace must resolve to an existing directory", "zcode.tasks");
         return;
     }
-    int64_t limit = zdev_int(request->input, "limit", 100);
+    size_t workspace_json_size = zdev_json_escaped_size(workspace);
+    if (workspace_json_size > ZDEV_TASKS_WORKSPACE_JSON_MAX) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "WORKSPACE_RESPONSE_BOUND", "validate", false, false,
+            "the canonical workspace path is too large for a bounded task view",
+            "zcode.tasks");
+        return;
+    }
+    bool details = json_get_bool(json_get(request->input, "details"));
+    int64_t limit = zdev_int(request->input, "limit",
+                             ZDEV_TASKS_MAX_ROWS);
     if (limit < 1) limit = 1;
     if (limit > ZDEV_TASKS_MAX_ROWS) limit = ZDEV_TASKS_MAX_ROWS;
+    if (details && limit > 1) limit = 1;
+    if (workspace_json_size > ZDEV_TASKS_MULTIROW_WORKSPACE_MAX && limit > 1)
+        limit = 1;
     struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(
         workspace, (int64_t)platform_time_wall_unix());
     if (!index) {
@@ -997,7 +1101,7 @@ void zcl_native_handle_zcode_tasks(
     for (size_t i = 0; i < rendered; i++) {
         struct json_value row;
         json_init(&row);
-        zdev_task_row_json(&row, index, rows[i]);
+        zdev_task_row_json(&row, index, rows[i], workspace, details);
         (void)json_push_back(&arr, &row);
         json_free(&row);
     }
@@ -1011,8 +1115,13 @@ void zcl_native_handle_zcode_tasks(
     (void)json_push_kv_int(&reply->data, "candidates_scanned",
                            (int64_t)vcs_zcode_task_index_candidate_count(index));
     (void)json_push_kv_int(&reply->data, "limit", limit);
+    (void)json_push_kv_bool(&reply->data, "details", details);
     (void)json_push_kv_str(&reply->data, "authority",
-                           "CAS_TASK_AND_CANDIDATE_WIRES");
+                           "REBUILT_CAS_TASK_PROJECTION");
+    if (total == 0)
+        (void)zcl_command_reply_add_next(
+            reply, "discover.describe", "{\"path\":\"zcode.work.start\"}",
+            "No matching task; inspect the required work-start input.");
     vcs_zcode_task_index_free(index);
 }
 

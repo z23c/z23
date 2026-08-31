@@ -8,6 +8,7 @@
 #include "base/hex.h"
 #include "codeindex/codeindex_merkle.h"
 #include "command/native_command.h"
+#include "config/command_catalog.h"
 #include "controllers/rpc_client.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
@@ -6042,8 +6043,20 @@ static int test_zd_task_index(void)
         task_live.expires_unix = (int64_t)platform_time_wall_unix() + 3600;
         uint8_t root_live[32];
         ASSERT(zd_index_store_task(workspace, &task_live, root_live));
+        /* Restore the exact earlier candidate so the typed projection must
+         * expose its generation and the already-present receipt evidence. */
+        ASSERT(zd_index_store_candidate(
+            workspace, &candidate, candidate_root));
         char root_live_hex[65];
         zcl_hex_encode(root_live, 32, root_live_hex);
+        char candidate_root_hex[65], candidate_source_hex[65];
+        char patch_hex[65], receipt_action_hex[65], work_receipt_hex[65];
+        zcl_hex_encode(candidate_root, 32, candidate_root_hex);
+        zcl_hex_encode(candidate.candidate_source_root, 32,
+                       candidate_source_hex);
+        zcl_hex_encode(candidate.patch_root, 32, patch_hex);
+        zcl_hex_encode(build_receipt.action_root, 32, receipt_action_hex);
+        zcl_hex_encode(build_receipt_root, 32, work_receipt_hex);
         struct json_value tasks_input;
         json_init(&tasks_input);
         json_set_object(&tasks_input);
@@ -6056,20 +6069,157 @@ static int test_zd_task_index(void)
         ASSERT_EQ(json_get_int(json_get(&tasks_reply.data, "tasks_scanned")),
                   3);
         ASSERT_STR_EQ(json_get_str(json_get(&tasks_reply.data, "authority")),
-                      "CAS_TASK_AND_CANDIDATE_WIRES");
+                      "REBUILT_CAS_TASK_PROJECTION");
         const struct json_value *tasks = json_get(&tasks_reply.data, "tasks");
         ASSERT(tasks != NULL);
         ASSERT_EQ(json_size(tasks), 3u);
         bool saw_awaiting = false, saw_expired = false;
+        const struct json_value *task_a_row = NULL;
         for (size_t i = 0; i < 3; i++) {
+            const struct json_value *task_row = json_at(tasks, i);
             const char *state =
-                json_get_str(json_get(json_at(tasks, i), "state"));
+                json_get_str(json_get(task_row, "state"));
             saw_awaiting = saw_awaiting ||
                 (state && strcmp(state, "AWAITING_CANDIDATE") == 0);
             saw_expired = saw_expired ||
                 (state && strcmp(state, "EXPIRED") == 0);
+            const char *task_root =
+                json_get_str(json_get(task_row, "task_root"));
+            if (task_root && strcmp(task_root, root_a_hex) == 0)
+                task_a_row = task_row;
         }
         ASSERT(saw_awaiting && saw_expired);
+        ASSERT(task_a_row != NULL);
+        char work_id[32];
+        (void)snprintf(work_id, sizeof(work_id), "work-%.12s", root_a_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(task_a_row, "work_id")), work_id);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          task_a_row, "latest_candidate_source_root")),
+                      candidate_source_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(task_a_row, "latest_patch_root")),
+                      patch_hex);
+        ASSERT(json_get(task_a_row, "latest_candidate_root") == NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          task_a_row, "assignment_status")), "UNOBSERVED");
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          task_a_row, "active_execution")), "UNOBSERVED");
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          task_a_row, "blocker_class")), "expired");
+        const struct json_value *safe_next =
+            json_get(task_a_row, "safe_next");
+        ASSERT(safe_next != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(safe_next, "command")),
+                      "zcode.work.status");
+        const struct json_value *safe_input = json_get(safe_next, "input");
+        ASSERT(safe_input != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(safe_input, "workspace")),
+                      workspace);
+        ASSERT_STR_EQ(json_get_str(json_get(safe_input, "work")),
+                      root_a_hex);
+        ASSERT_EQ(json_get_int(json_get(task_a_row, "receipt_count")), 1);
+        ASSERT_EQ(json_get_int(json_get(
+                      task_a_row, "passing_receipt_count")), 1);
+        ASSERT(json_get(task_a_row, "agent_context_root") == NULL);
+
+        /* Exercise the real registry serializer so the compact projection is
+         * proven inside the leaf's declared response budget, not only as an
+         * unbounded direct-handler object. */
+        const struct zcl_command_registry *registry = zcl_command_catalog();
+        const struct zcl_command_spec *tasks_spec =
+            zcl_command_registry_find(registry, "zcode.tasks", NULL);
+        ASSERT(tasks_spec != NULL);
+        ASSERT_EQ(tasks_spec->budget_bytes, ZCL_COMMAND_LIST_BUDGET);
+        struct zcl_command_context tasks_context = {
+            .registry = registry,
+            .granted_capabilities = ~(uint64_t)0,
+            .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+        };
+        char serialized[ZCL_COMMAND_LIST_BUDGET + 1u];
+        enum zcl_command_exit serialized_exit = ZCL_COMMAND_EXIT_INTERNAL;
+        size_t serialized_len = zcl_command_registry_execute_json(
+            registry, tasks_spec, &tasks_context, &tasks_input, true,
+            "zcode.tasks", "normal", 0, 0, NULL,
+            serialized, sizeof(serialized), &serialized_exit);
+        ASSERT(serialized_len > 0);
+        ASSERT(serialized_len <= ZCL_COMMAND_LIST_BUDGET);
+        ASSERT_EQ(serialized_exit, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(serialized, "REBUILT_CAS_TASK_PROJECTION") != NULL);
+
+        /* JSON escaping, not raw path length, owns the response bound. A
+         * quote-heavy canonical workspace fails as a serialized typed error
+         * before any CAS scan rather than disappearing at envelope encoding. */
+        char quote_segment[241];
+        memset(quote_segment, '"', sizeof(quote_segment) - 1u);
+        quote_segment[sizeof(quote_segment) - 1u] = '\0';
+        char quote_dir_a[1024], quote_dir_b[1536];
+        ASSERT(snprintf(quote_dir_a, sizeof(quote_dir_a), "%s/%s",
+                        dir, quote_segment) > 0);
+        ASSERT_EQ(mkdir(quote_dir_a, 0700), 0);
+        ASSERT(snprintf(quote_dir_b, sizeof(quote_dir_b), "%s/%s",
+                        quote_dir_a, quote_segment) > 0);
+        ASSERT_EQ(mkdir(quote_dir_b, 0700), 0);
+        struct json_value bounded_input;
+        json_init(&bounded_input);
+        json_set_object(&bounded_input);
+        (void)json_push_kv_str(&bounded_input, "workspace", quote_dir_b);
+        (void)json_push_kv_bool(&bounded_input, "details", true);
+        enum zcl_command_exit bounded_exit = ZCL_COMMAND_EXIT_INTERNAL;
+        size_t bounded_len = zcl_command_registry_execute_json(
+            registry, tasks_spec, &tasks_context, &bounded_input, true,
+            "zcode.tasks", "normal", 0, 0, NULL,
+            serialized, sizeof(serialized), &bounded_exit);
+        ASSERT(bounded_len > 0);
+        ASSERT(bounded_len <= ZCL_COMMAND_LIST_BUDGET);
+        ASSERT_EQ(bounded_exit, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(serialized, "WORKSPACE_RESPONSE_BOUND") != NULL);
+        json_free(&bounded_input);
+
+        /* Detailed mode is deliberately one-row and binds receipt-selected
+         * evidence to its precise provenance without inflating the compact
+         * coordination board. */
+        struct json_value detail_input;
+        json_init(&detail_input);
+        json_set_object(&detail_input);
+        (void)json_push_kv_str(&detail_input, "workspace", workspace);
+        (void)json_push_kv_str(&detail_input, "task_root", root_a_hex);
+        (void)json_push_kv_bool(&detail_input, "details", true);
+        struct zcl_command_request detail_request = { .input = &detail_input };
+        struct zcl_command_reply detail_reply;
+        zcl_command_reply_init(&detail_reply, "zcl.zcode_tasks.v1");
+        zcl_native_handle_zcode_tasks(&detail_request, &detail_reply);
+        ASSERT_EQ(detail_reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&detail_reply.data, "rendered")), 1);
+        ASSERT_EQ(json_get_int(json_get(&detail_reply.data, "limit")), 1);
+        const struct json_value *detail_tasks =
+            json_get(&detail_reply.data, "tasks");
+        ASSERT(detail_tasks != NULL);
+        const struct json_value *detail_row = json_at(detail_tasks, 0);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "latest_candidate_root")),
+                      candidate_root_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "latest_receipt_action_root")),
+                      receipt_action_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "latest_work_receipt_root")),
+                      work_receipt_hex);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "latest_lane_proof_set_root")), "");
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "latest_lane_receipt_root")), "");
+        ASSERT(!json_get_bool(json_get(
+            detail_row, "agent_context_ambiguous")));
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          detail_row, "agent_context_root")), "");
+        const struct json_value *detail_candidates =
+            json_get(detail_row, "candidates");
+        ASSERT(detail_candidates != NULL);
+        ASSERT_EQ(json_size(detail_candidates), 1u);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          json_at(detail_candidates, 0), "candidate_root")),
+                      candidate_root_hex);
+        zcl_command_reply_free(&detail_reply);
+        json_free(&detail_input);
         zcl_command_reply_free(&tasks_reply);
         (void)json_push_kv_str(&tasks_input, "state", "AWAITING_CANDIDATE");
         struct zcl_command_reply live_reply;
@@ -6105,6 +6255,19 @@ static int test_zd_task_index(void)
         }
         ASSERT(saw_expired_root);
         zcl_command_reply_free(&expired_reply);
+        json_set_str((struct json_value *)json_get(&tasks_input, "state"),
+                     "NO_SUCH_STATE");
+        struct zcl_command_reply empty_reply;
+        zcl_command_reply_init(&empty_reply, "zcl.zcode_tasks.v1");
+        zcl_native_handle_zcode_tasks(&tasks_request, &empty_reply);
+        ASSERT_EQ(empty_reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&empty_reply.data,
+                                        "total_matches")), 0);
+        ASSERT_EQ(empty_reply.next_count, 1u);
+        ASSERT_STR_EQ(empty_reply.next[0].command, "discover.describe");
+        ASSERT_STR_EQ(empty_reply.next[0].input_json,
+                      "{\"path\":\"zcode.work.start\"}");
+        zcl_command_reply_free(&empty_reply);
         json_free(&tasks_input);
         test_rm_rf(dir);
         PASS();
