@@ -654,7 +654,7 @@ while IFS= read -r row || [[ -n $row ]]; do
         [[ $(capture_root) = "$expected_root" ]] ||
             fail "post-membership source root changed for $id"
         unsupported=$((unsupported + 1))
-        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v1","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null}\n' \
+        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v2","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null}\n' \
             "$(json_escape "$id")" "$expected_root" \
             "$invariant_membership_tree_root" >>"$task_rows"
     else
