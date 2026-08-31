@@ -1216,23 +1216,38 @@ static bool test_epoch_pointer_prepare(const struct proof_paths *paths,
 
 static bool test_depfiles_prepare(const struct proof_paths *paths,
                                   const char *generation,
-                                  uint8_t depfile_root[32])
+                                  uint8_t depfile_root[32],
+                                  char *why, size_t why_len)
 {
     char relative[PATH_MAX], source[PATH_MAX], target[PATH_MAX];
     uint8_t pointer_root[32];
-    if (!test_object_dir_relative(paths, relative) ||
-        snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
+    if (!test_object_dir_relative(paths, relative)) {
+        proof_why(why, why_len, "proof_test_restart_plan_invalid");
+        return false;
+    }
+    if (snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
             (int)sizeof(source) ||
         snprintf(target, sizeof(target), "%s/%s", generation, relative) >=
-            (int)sizeof(target))
+            (int)sizeof(target)) {
+        proof_why(why, why_len, "proof_test_depfile_path_invalid");
         return false;
+    }
     struct sha3_256_ctx root;
     hash_begin(&root, "zcl.dev_proof_depfiles.v1");
     size_t count = 0;
-    if (!depfile_tree_copy(source, target, strlen(source), &root, &count) ||
-        count == 0 ||
-        !test_epoch_pointer_prepare(paths, generation, relative, pointer_root))
+    if (!depfile_tree_copy(source, target, strlen(source), &root, &count)) {
+        proof_why(why, why_len, "proof_test_depfile_copy_failed");
         return false;
+    }
+    if (count == 0) {
+        proof_why(why, why_len, "proof_test_depfile_tree_empty");
+        return false;
+    }
+    if (!test_epoch_pointer_prepare(paths, generation, relative,
+                                    pointer_root)) {
+        proof_why(why, why_len, "proof_test_epoch_pointer_failed");
+        return false;
+    }
     uint8_t count_le[8];
     zcl_write_u64_le(count_le, (uint64_t)count);
     sha3_256_write(&root, count_le, sizeof(count_le));
@@ -1267,20 +1282,35 @@ static bool test_helpers_prepare(
         node_len <= 0 || (size_t)node_len >= sizeof(node_source) ||
         nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
         acme_len <= 0 || (size_t)acme_len >= sizeof(acme_target) ||
-        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target) ||
-        !admitted_executable_materialize(
+        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target)) {
+        proof_why(why, why_len, "proof_test_helper_path_invalid");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, runner_source, "build/bin/test_parallel_fast",
-            expected_source, runner_target) ||
-        !admitted_executable_materialize(
+            expected_source, runner_target)) {
+        proof_why(why, why_len, "proof_test_runner_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, verifier_source,
             "build/bin/zclassic23-package-verify-dev", expected_source,
-            verifier_target) ||
-        !admitted_executable_materialize(
+            verifier_target)) {
+        proof_why(why, why_len, "proof_test_verifier_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, node_source, "build/bin/zclassic23",
-            expected_source,
-            node_target) || !admitted_executable_mark_fresh(node_target) ||
-        !test_depfiles_prepare(paths, generation, depfile_root)) {
-        proof_why(why, why_len, "proof_test_helper_admission_failed");
+            expected_source, node_target)) {
+        proof_why(why, why_len, "proof_test_node_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_mark_fresh(node_target)) {
+        proof_why(why, why_len, "proof_test_node_freshness_failed");
+        return false;
+    }
+    if (!test_depfiles_prepare(paths, generation, depfile_root,
+                               why, why_len)) {
         return false;
     }
     const char *prerequisite_argv[] = {
