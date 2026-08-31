@@ -6620,7 +6620,8 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     retrieval-gold-benchmark-scope-selftest \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
     retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check \
-    retrieval-gold-current-receipt-check retrieval-gold-scope-receipt-check
+    retrieval-gold-current-receipt-check retrieval-gold-scope-receipt-check \
+    retrieval-gold-identifier-graph-receipt-check
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
@@ -6671,6 +6672,12 @@ retrieval-gold-current-receipt-check: jsonq agent-sha3 retrieval-eval
 retrieval-gold-scope-receipt-check: jsonq agent-sha3 retrieval-eval
 	@./tools/dev/retrieval-gold-scope-receipt-check.sh --selftest
 	@./tools/dev/retrieval-gold-scope-receipt-check.sh --check
+
+# Independent checkpoint for the identifier-graph third arm. It replays both
+# sealed evaluator batches and keeps every older reviewed receipt immutable.
+retrieval-gold-identifier-graph-receipt-check: jsonq agent-sha3 retrieval-eval
+	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --selftest
+	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check
 
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under
