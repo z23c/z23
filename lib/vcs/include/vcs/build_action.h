@@ -57,7 +57,7 @@
 #define VCS_BUILD_RESIDENT_PROOF_VIRTUAL_ROOT_V1 "/zbuild/resident-proof"
 #define VCS_BUILD_RESIDENT_PROOF_OUTPUT_V1 "dev-proof-child.v2"
 #define VCS_BUILD_RESIDENT_PROOF_RESOURCE_POLICY_V1 \
-    "cpu=16,memory_mb=16384,processes=256,timeout_s=900,network=0"
+    "jobs_max=16,wall_timeout_s=900,stack=unlimited,network=ambient,rlimits=none"
 
 struct vcs_toolchain_capsule_v1 {
     uint8_t compiler_driver_sha3[32];

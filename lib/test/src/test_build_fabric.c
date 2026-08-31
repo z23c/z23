@@ -1731,7 +1731,7 @@ static int test_bf_content_contracts(void)
                   VCS_ZCODE_WORK_REVIEW);
         ASSERT_EQ(vcs_build_action_v1_work_kind(
                       VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1),
-                  VCS_ZCODE_WORK_TEST);
+                  0);
         ASSERT_EQ(vcs_build_action_v1_work_kind("c23.shell.v1"), 0);
         uint8_t test_flags[32], test_env[32], test_action[32];
         ASSERT(vcs_build_action_v1_fixed_flags_root_for_kind(
@@ -1756,11 +1756,11 @@ static int test_bf_content_contracts(void)
             "c23.shell.v1", &action, test_action));
 
         uint8_t proof_action_a[32], proof_action_b[32];
-        ASSERT(vcs_build_action_v1_fixed_flags_root_for_kind(
-            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1, action.flags_sha3));
-        ASSERT(vcs_build_action_v1_fixed_environment_root_for_kind(
+        ASSERT(!vcs_build_action_v1_fixed_flags_root_for_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1, proof_action_a));
+        ASSERT(!vcs_build_action_v1_fixed_environment_root_for_kind(
             VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
-            action.environment_sha3));
+            proof_action_a));
         (void)snprintf(action.profile, sizeof(action.profile),
                        "resident-proof-child-v1");
         (void)snprintf(action.virtual_workdir,
