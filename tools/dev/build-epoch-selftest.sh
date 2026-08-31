@@ -10,6 +10,10 @@ set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SELF_DIR/../.." && pwd)"
+if ! cd "$ROOT"; then
+    printf 'build-epoch-selftest: FAIL: cannot enter repository root\n' >&2
+    exit 1
+fi
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
 PUBLISH_TOOL="$SELF_DIR/publish-build-alias.sh"
 OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"

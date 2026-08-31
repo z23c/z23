@@ -234,7 +234,8 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_canonical_operator_diagnostics_contract),
     S_(t_canonical_deploy_proof_binding_contract),
     S_(t_dev_lane_deploy_contract),
-    S_(t_agent_fast_ci_contract),
+    /* Captures exact Git source identity through build-epoch-selftest. */
+    N_(t_agent_fast_ci_contract),
     /* Hermetic: each script proves itself inside its own mktemp sandbox and
      * no tracked path is written, so this needs no worktree clone. */
     N_(t_slow_disk_progress_verdicts_contract),
