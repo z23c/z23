@@ -36,6 +36,7 @@
 #include "codeindex/codeindex.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
+#include "dev_proof.h"
 #include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "json/json.h"
@@ -46,6 +47,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define IC_FIX_ROOT   "test-tmp/impact_composition"
 #define IC_FIX_TRUNC  IC_FIX_ROOT "/trunc"
@@ -1119,6 +1123,55 @@ static int test_ic_dev_proof_receipt_admission(void)
     return failures;
 }
 
+static int test_ic_resident_proof_queue(void)
+{
+    int failures = 0;
+    TEST("impact composition: resident proof queue preserves unknown ancestry") {
+#if defined(_WIN32)
+        ASSERT(!zcl_dev_proof_queue_has_pending(IC_FIX_ROOT));
+#else
+        char root[4096];
+        static const char local_a[] =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        static const char local_b[] =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        static const char base[] =
+            "1111111111111111111111111111111111111111";
+        ASSERT(snprintf(root, sizeof(root), IC_FIX_ROOT "/proof_queue_%ld",
+                        (long)getpid()) > 0);
+        ASSERT(ic_write(root, "fixture", "proof queue fixture\n"));
+        ASSERT(ic_write(root, ".cache/fixture", "private state parent\n"));
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_ensure(root, local_a, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT(strcmp(status.detail, "resident_proof_request_queued") == 0);
+        ASSERT(zcl_dev_proof_ensure(root, local_b, base, &status));
+        ASSERT(zcl_dev_proof_queue_has_pending(root));
+        char why[256] = {0};
+        ASSERT(zcl_dev_proof_queue_run_next(root, why, sizeof(why)) == 1);
+        ASSERT(why[0]);
+        ASSERT(zcl_dev_proof_queue_has_pending(root));
+        ASSERT(zcl_dev_proof_status_read(root, local_a, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT(zcl_dev_proof_status_read(root, local_b, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        why[0] = 0;
+        ASSERT(zcl_dev_proof_queue_run_next(root, why, sizeof(why)) == 1);
+        ASSERT(why[0]);
+        ASSERT(!zcl_dev_proof_queue_has_pending(root));
+        ASSERT(zcl_dev_proof_status_read(root, local_a, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        char lease[4096];
+        ASSERT(snprintf(lease, sizeof(lease),
+                        "%s/.cache/zcl-dev-proof/leases/%s-%s.lease",
+                        root, local_b, base) > 0);
+        ASSERT(access(lease, F_OK) != 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_native_compositor_selects_physical_proof(void)
 {
     int failures = 0;
@@ -1196,6 +1249,7 @@ int test_impact_composition(void)
     failures += test_ic_dev_proof_contract_is_direct();
     failures += test_ic_lint_helpers_exclude_onion_stress();
     failures += test_ic_dev_proof_receipt_admission();
+    failures += test_ic_resident_proof_queue();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();

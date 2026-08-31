@@ -2342,7 +2342,9 @@ static bool dev_pid_is_watcher(dev_pid_t pid)
     const char *base = strrchr(exe, '\\');
     if (!base) base = strrchr(exe, '/');
     return base && (_stricmp(base + 1, "zclassic23-dev.exe") == 0 ||
-                    _stricmp(base + 1, "zclassic23-dev") == 0);
+                    _stricmp(base + 1, "zclassic23-dev") == 0 ||
+                    _stricmp(base + 1, "z23-dev.exe") == 0 ||
+                    _stricmp(base + 1, "z23-dev") == 0);
 #else
     if (pid <= 1 || (kill(pid, 0) != 0 && errno != EPERM))
         return false;
@@ -2366,7 +2368,8 @@ static bool dev_pid_is_watcher(dev_pid_t pid)
     if ((size_t)got >= dlen && strcmp(exe + got - dlen, kDeleted) == 0)
         exe[got - dlen] = 0;
     const char *base = strrchr(exe, '/');
-    return base && strcmp(base + 1, "zclassic23-dev") == 0;
+    return base && (strcmp(base + 1, "zclassic23-dev") == 0 ||
+                    strcmp(base + 1, "z23-dev") == 0);
 #endif
 }
 
@@ -2393,6 +2396,7 @@ struct dev_watcher_info {
     enum zcl_devloop_publish_mode publish_mode;
     char mode_name[16];
     bool ready;
+    bool proof_queue_ready;
 #if defined(_WIN32)
     uint64_t start_token;
     char nonce[65];
@@ -2404,7 +2408,8 @@ struct dev_watcher_info {
  * executable-checked only before stop ever sends a signal.  This deliberately
  * recognizes both the native watcher and the shell compatibility watcher so
  * either owner excludes the other.  New lock records bind the watcher mode
- * (`pid verify|auto`).  A pid-only record is an already-running
+ * (`pid verify|auto ready|starting [proofq1]`). A pid-only record is an
+ * already-running
  * pre-containment watcher, whose historical behavior was auto publication, so
  * it is reported truthfully as legacy-auto. */
 #if !defined(_WIN32)
@@ -2476,8 +2481,19 @@ static bool dev_watcher_active_at(const char *lock,
                 return false;
             while (*state_end == ' ' || *state_end == '\t')
                 state_end++;
-            if (*state_end != '\n' && *state_end != 0)
-                return false;
+            if (*state_end != '\n' && *state_end != 0) {
+                static const char capability[] = "proofq1";
+                char *cap_end = state_end;
+                while (*cap_end && *cap_end != '\n' &&
+                       *cap_end != ' ' && *cap_end != '\t')
+                    cap_end++;
+                if ((size_t)(cap_end - state_end) != sizeof(capability) - 1 ||
+                    memcmp(state_end, capability, sizeof(capability) - 1) != 0)
+                    return false;
+                if (info_out) info_out->proof_queue_ready = true;
+                while (*cap_end == ' ' || *cap_end == '\t') cap_end++;
+                if (*cap_end != '\n' && *cap_end != 0) return false;
+            }
         }
     }
     dev_pid_t pid = (dev_pid_t)value;
@@ -2614,6 +2630,13 @@ static bool dev_watcher_active(const char *repo_root,
 #endif
 }
 
+bool zcl_native_dev_loop_proof_queue_ready(const char *repo_root)
+{
+    struct dev_watcher_info info = {0};
+    return dev_watcher_active(repo_root, &info) && info.ready &&
+           info.proof_queue_ready;
+}
+
 static enum zcl_devloop_state_lookup dev_read_cycle(
     const char *repo_root, struct json_value *out, int64_t *epoch_out,
     char *why, size_t why_len)
@@ -2685,6 +2708,8 @@ static void dev_emit_loop_status(const char *repo_root,
                            active ? info.mode_name : "");
     (void)json_push_kv_bool(&reply->data, "source_snapshot_ready",
                             active && info.ready);
+    (void)json_push_kv_int(&reply->data, "proof_queue_version",
+                           active && info.proof_queue_ready ? 1 : 0);
     (void)json_push_kv_bool(&reply->data, "publication_target_required",
                             publication_required);
     (void)json_push_kv_int(&reply->data, "publication_target_rpc_port",

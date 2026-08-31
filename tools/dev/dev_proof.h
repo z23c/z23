@@ -45,6 +45,12 @@ bool zcl_dev_proof_ensure(const char *repo_root,
                           const char *local_commit,
                           const char *remote_base,
                           struct zcl_dev_proof_status *out);
+/* The singleton development watcher owns this queue. Notifications only
+ * publish immutable pair requests; the resident owner claims and executes at
+ * most one leased attempt at a time. */
+bool zcl_dev_proof_queue_has_pending(const char *repo_root);
+int zcl_dev_proof_queue_run_next(const char *repo_root,
+                                 char *why, size_t why_len);
 bool zcl_dev_proof_wait(const char *repo_root,
                         const char *local_commit,
                         const char *remote_base,
