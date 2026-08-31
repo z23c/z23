@@ -69,6 +69,36 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_ff)
 
+ZCL_COMMAND_BRANCH("dev.retrieval", "dev",
+                   "Observe retrieval quality on an exact source generation",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_DEV_READ(
+    "dev.retrieval.benchmark", "dev.retrieval", "",
+    "Compare literal and BM25 file retrieval on one reviewed task",
+    "An observational, native-only comparison over one exact ZVCS manifest "
+    "root. The unchanged production goal selector is projected to unique "
+    "files beside a BM25 index built from indexed source metadata. It emits "
+    "rankings and exact full-file context byte costs only; a separate "
+    "evaluator may join reviewed gold after both rankings are sealed. No "
+    "result changes production ordering or authorizes promotion.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "dev,retrieval,benchmark,bm25,recall,mrr,context",
+    "zcl.dev_retrieval_benchmark_input.v1",
+    "zcl.dev_retrieval_benchmark.v1",
+    "workspace,expected_vcs_root,task_id,query", "",
+    "z23-dev dev retrieval benchmark --input='"
+    "{\"workspace\":\"<canonical-absolute-checkout>\","
+    "\"expected_vcs_root\":\"<64-lowercase-hex>\","
+    "\"task_id\":\"task\",\"query\":\"goal\"}'",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_CHECKOUT_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_retrieval_benchmark,
+    "retrieval benchmarking requires the dev binary",
+    "z23-dev dev retrieval benchmark")
+
 ZCL_COMMAND_BRANCH("dev.publication", "dev",
                    "Inspect asynchronous proven-source publication",
                    ZCL_COMMAND_LAYER_DEV)

@@ -151,6 +151,9 @@ void zcl_native_handle_dev_status(
 void zcl_native_handle_dev_ff(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_dev_retrieval_benchmark(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_dev_publication_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

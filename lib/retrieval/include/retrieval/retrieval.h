@@ -92,6 +92,16 @@ uint32_t zcl_retrieval_add(struct zcl_retrieval *r, const char *name,
 size_t zcl_retrieval_query(const struct zcl_retrieval *r, const char *query,
                            struct zcl_retrieval_hit *out, size_t cap);
 
+/* Checked form for callers that must distinguish an observed zero-hit result
+ * from an unobserved ranking caused by invalid input, a poisoned index, or a
+ * scoring allocation failure. On every failure *out_count is set to zero.
+ * The legacy count-returning API above remains for callers where zero is a
+ * sufficient refusal value. */
+bool zcl_retrieval_query_checked(const struct zcl_retrieval *r,
+                                 const char *query,
+                                 struct zcl_retrieval_hit *out, size_t cap,
+                                 size_t *out_count);
+
 /* Stored fields. NULL for an unknown id. */
 const char *zcl_retrieval_name(const struct zcl_retrieval *r, uint32_t doc);
 const char *zcl_retrieval_text(const struct zcl_retrieval *r, uint32_t doc);

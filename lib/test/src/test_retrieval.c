@@ -399,6 +399,11 @@ static int case_surface(void)
              zcl_retrieval_avgdl(r) == 0.0);
     RT_CHECK("an empty index answers nothing",
              zcl_retrieval_query(r, "anything", h, 4) == 0);
+    size_t checked_count = 99;
+    RT_CHECK("checked empty query is an observed zero-hit result",
+             zcl_retrieval_query_checked(r, "anything", h, 4,
+                                         &checked_count) &&
+             checked_count == 0);
     RT_CHECK("a NULL name refuses", zcl_retrieval_add(r, NULL, "t") == 0);
     RT_CHECK("a NULL text refuses", zcl_retrieval_add(r, "n", NULL) == 0);
     RT_CHECK("a refused insertion did not poison the index",
@@ -411,6 +416,15 @@ static int case_surface(void)
     RT_CHECK("a zero cap refuses", zcl_retrieval_query(r, "solo", h, 0) == 0);
     RT_CHECK("a single-document corpus still scores above zero",
              zcl_retrieval_query(r, "solo", h, 4) == 1 && h[0].score > 0.0);
+    checked_count = 99;
+    zcl_alloc_fault_fail_next("retrieval_scores");
+    RT_CHECK("checked query exposes scoring allocation failure",
+             !zcl_retrieval_query_checked(r, "solo", h, 4,
+                                          &checked_count) &&
+             checked_count == 0);
+    zcl_alloc_fault_clear();
+    RT_CHECK("legacy query keeps its zero-on-refusal contract",
+             zcl_retrieval_query(r, "solo", h, 4) == 1);
 
     zcl_retrieval_destroy(r);
     return failures;

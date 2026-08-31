@@ -378,20 +378,25 @@ static int cmp_hit(const void *va, const void *vb)
     return 0;
 }
 
-size_t zcl_retrieval_query(const struct zcl_retrieval *r, const char *query,
-                           struct zcl_retrieval_hit *out, size_t cap)
+bool zcl_retrieval_query_checked(const struct zcl_retrieval *r,
+                                 const char *query,
+                                 struct zcl_retrieval_hit *out, size_t cap,
+                                 size_t *out_count)
 {
+    if (!out_count)
+        return false;
+    *out_count = 0;
     if (!r || !query || !out || cap == 0)
-        return 0;
+        return false;
     if (r->poisoned)
-        LOG_RETURN(0, "retrieval", "index poisoned; refusing to answer");
+        LOG_FAIL("retrieval", "index poisoned; refusing to answer");
     if (r->count <= 1)
-        return 0;
+        return true;
 
     struct zcl_retrieval_hit *acc =
         zcl_calloc(r->count, sizeof *acc, "retrieval_scores");
     if (!acc)
-        LOG_RETURN(0, "retrieval", "scoring %zu documents failed", r->count);
+        LOG_FAIL("retrieval", "scoring %zu documents failed", r->count);
     for (size_t i = 0; i < r->count; i++)
         acc[i].doc = (uint32_t)i;
 
@@ -406,7 +411,15 @@ size_t zcl_retrieval_query(const struct zcl_retrieval *r, const char *query,
             out[n++] = acc[i];
     }
     free(acc);
-    return n;
+    *out_count = n;
+    return true;
+}
+
+size_t zcl_retrieval_query(const struct zcl_retrieval *r, const char *query,
+                           struct zcl_retrieval_hit *out, size_t cap)
+{
+    size_t count = 0;
+    return zcl_retrieval_query_checked(r, query, out, cap, &count) ? count : 0;
 }
 
 /* ── accessors ─────────────────────────────────────────────────────── */

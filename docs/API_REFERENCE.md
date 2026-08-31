@@ -74,14 +74,14 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 766 |
+| Registry entries (branches + leaves) | 768 |
 | Top-level roots | 12 |
-| Branches | 176 |
-| Leaves (dispatchable command paths) | 590 |
+| Branches | 177 |
+| Leaves (dispatchable command paths) | 591 |
 | … `ready` (live handler in this build) | 531 |
-| … `compat` (metadata only, names a fallback) | 28 |
+| … `compat` (metadata only, names a fallback) | 29 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 27 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 28 |
 | Leaves with `effect=mutate` | 209 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 119 |
@@ -96,7 +96,7 @@ Per source file:
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
-| `config/commands/dev.def` | 63 | 15 | 48 |
+| `config/commands/dev.def` | 65 | 16 | 49 |
 | `config/commands/code.def` | 23 | 2 | 21 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
@@ -649,6 +649,12 @@ represented by its children's sections.
 | `dev drive` | compat 🔧 → `z23-dev dev drive` | read / read / operator · persistent/low | `after_epoch`, `timeout_ms`, `wait_for_edit` | `zcl.dev_drive.v1` | `z23-dev dev drive` | Wait for feedback and return one compact next action — *bounded warm-service driving requires the dev binary* |
 | `dev ff` | ready | read / read / operator · instant/low | none | `zcl.dev_ff.v1` | `z23 dev ff` | Fail-fast ladder: compile, test, lint |
 | `dev verify-change` | compat 🔧 → `make dev-bin, then z23-dev dev verify-change` | read / read / **owner** · background/high | none | `zcl.dev_verify_change.v1` | `z23-dev dev verify-change` | Compile affected code and run mapped focused proofs with compact output — *changed-scope verification requires the dev-only process executor* |
+
+#### `dev.retrieval` — Observe retrieval quality on an exact source generation
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev retrieval benchmark` | compat 🔧 → `z23-dev dev retrieval benchmark` | read / read / operator · persistent/high | `workspace`, `expected_vcs_root`, `task_id`, `query` | `zcl.dev_retrieval_benchmark.v1` | `z23-dev dev retrieval benchmark --input='{"workspace":"<canonical-absolute-checkout>","expected_vcs_root":"<64-lowercase-hex>","task_id":"task","query":"goal"}'` | Compare literal and BM25 file retrieval on one reviewed task — *retrieval benchmarking requires the dev binary* |
 
 #### `dev.publication` — Inspect asynchronous proven-source publication
 
