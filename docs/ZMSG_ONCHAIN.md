@@ -112,5 +112,6 @@ When the wallet decrypts an incoming Sapling note
 simulator: a `t→z` output built with the real Sapling prover carrying a ZMSG
 memo, decrypted by the recipient, parsed, ingested, and surfaced in the store.
 The params-free legs (encode/decode + store ingest + negatives) run
-unconditionally; the real-prover leg skips cleanly when `~/.zcash-params` is
+unconditionally; the real-prover leg reports `UNOBSERVED` when
+`~/.zcash-params` is
 absent.

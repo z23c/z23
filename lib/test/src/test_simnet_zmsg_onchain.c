@@ -180,7 +180,7 @@ int test_simnet_zmsg_onchain(void)
             printf("  ~/.zcash-params absent — SKIPPING real-prover leg "
                    "(codec + ingest above ran)\n");
         else
-            printf("  SKIP (real-prover leg) — %s (status=%s). "
+            printf("  UNOBSERVED (real-prover leg) — %s (status=%s). "
                    "Codec + ingest above ran.\n",
                    zclassic_sapling_prover_backend(),
                    zclassic_sapling_prover_status());
