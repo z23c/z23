@@ -155,7 +155,12 @@ The directory watcher now uses kqueue on macOS. `make macos-acceptance`
 validates the closed matrix in `config/platform/macos_capabilities.def`, unions
 its capability evidence with the eight declarative required baseline groups,
 and executes the resulting 37 exact registered groups. It refuses any
-self-skip or unobserved eligible environment. The `self_backtrace` group in
+self-skip or unobserved eligible environment. After that verdict it uses the
+canonical release cutter to create a temporary four-member `darwin-arm64`
+runtime, verifies the macOS 14 floor, Mach-O dependency boundary and closed
+checksums, then executes the packaged node's node-free code guide. This proves
+local packaging and execution, not installation, notarization, publication or
+chain sync. The `self_backtrace` group in
 that union proves the fail-closed macOS capability boundary; it does not claim
 Linux signal-context backtraces on Darwin. Intel macOS has not yet been
 measured.

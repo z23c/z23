@@ -37,7 +37,7 @@ without re-running them.
 
 | | Linux x86_64 | macOS arm64 | Windows x86_64 |
 |---|---|---|---|
-| build | yes, primary | yes, native Clang (`AGENTS.md` §Verified platform baseline) | yes, native UCRT64 PE (`docs/WINDOWS.md`) |
+| build | yes, primary | yes, native Clang; `make macos-acceptance` also cuts, audits, checksums, and executes the temporary stripped runtime | yes, native UCRT64 PE (`docs/WINDOWS.md`) |
 | sync | yes | **no receipt** — startup evidence only, explicitly not chain-sync acceptance | boot and block sync ported; no observed full-sync receipt |
 | install | bootstrap published | **none** | **none** |
 
@@ -53,8 +53,10 @@ The cutter already produces a **runtime** for all three. It produces a
 `PUBLISHED_PLATFORMS=" linux-x86_64 "` and `packaging/install/install.ps1`
 carries `$BootPins = @{}`. Both refuse honestly rather than 404, which is the
 correct behaviour for an unpublished platform — but it means the answer to
-"can my friend with a Mac run this" is still no, and the missing piece is
-packaging, not portability.
+"can my friend with a Mac install this in one command" is still no. Native Mac
+runtime packaging is now exercised by `make macos-acceptance`; the remaining
+gap is the owner-gated notarized publication/bootstrap and its transactional
+stranger-install proof, not the local package cutter or compiler portability.
 
 ## 1. The darwin naming split — CLOSED
 

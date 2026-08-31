@@ -128,7 +128,8 @@ case "${1:---check}" in
         count="$(printf '%s' "$groups" | tr ',' '\n' | awk 'NF {n++} END {print n+0}')"
         printf 'macos-acceptance: running %s exact groups derived from %s\n' "$count" "${MATRIX#"$REPO_ROOT/"}"
         log="$(mktemp "${TMPDIR:-/tmp}/z23-macos-acceptance.XXXXXX")"
-        trap 'rm -f "$log"' EXIT
+        package_root="$(mktemp -d "${TMPDIR:-/tmp}/z23-macos-runtime.XXXXXX")"
+        trap 'rm -f "$log"; rm -rf "$package_root"' EXIT
         if make --no-print-directory t-fast-exact \
             ONLY="$groups" EXACT_ONLY_MATCHED="$groups" \
             T_FAST_EXACT_ARGS=--no-cache \
@@ -149,7 +150,20 @@ case "${1:---check}" in
         [ "$failed" = 0 ] || die "verdict reports ${failed:-missing} failed groups"
         [ "$skips" = 0 ] || die "unexpected eligible self-skips: ${skips:-missing}"
         [ "$unobserved" = 0 ] || die "unobserved eligible environments: ${unobserved:-missing}"
-        printf 'macos-acceptance: PASS (%s exact groups, zero skips)\n' "$count"
+
+        # Accept the bytes a Mac user would actually receive, not only the
+        # unstripped source-test binaries.  The canonical cutter requires the
+        # closed four-member darwin-arm64 runtime, strips every Mach-O, checks
+        # the macOS 14 floor and system-runtime-only dependency boundary, then
+        # verifies its closed SHA256SUMS.  The node-free guide call proves the
+        # stripped packaged node executes; it never opens a datadir or network.
+        "$REPO_ROOT/packaging/release/build_release.sh" --bin "$REPO_ROOT/build/bin" --out "$package_root/runtime" --platform darwin-arm64
+        "$package_root/runtime/z23" code guide >"$package_root/code-guide.json"
+        [ -s "$package_root/code-guide.json" ] || die "packaged z23 code guide emitted no response"
+
+        printf 'macos-acceptance: runtime package PASS (darwin-arm64, macOS 14 floor, audited, checksummed, node-free execution)\n'
+        printf 'macos-acceptance: UNOBSERVED installed=false synced=false published=false notarized=false\n'
+        printf 'macos-acceptance: PASS (%s exact groups, zero skips, runtime package accepted)\n' "$count"
         ;;
     *) die "usage: $0 [--check|--groups|--run]" ;;
 esac
