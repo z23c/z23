@@ -131,6 +131,7 @@ struct zcl_retrieval_ranked_file {
     const char *path;
     uint64_t context_bytes;
     bool in_scope;
+    bool in_scope_available;
 };
 
 struct zcl_retrieval_gold_task {
@@ -156,12 +157,17 @@ struct zcl_retrieval_eval_metrics {
     uint64_t approximate_tokens_at_5;
     uint64_t wrong_scope_files_at_5;
     uint32_t wrong_scope_at_5_bp;
+    bool wrong_scope_at_5_available;
 };
 
 /* Evaluate macro Recall@5/20 and MRR in integer basis points. A metric is
  * unavailable when any task's ranking is truncated before the required depth
  * and the needed answer has not already been observed. Context tokens use the
- * declared byte/4 approximation and are never presented as tokenizer output. */
+ * declared byte/4 approximation and are never presented as tokenizer output.
+ * File and context totals sum each task's unique observed selections up to
+ * rank five; they are not global-unique corpus counts. Wrong-scope is available
+ * only when at least one file was selected and every selected row has an
+ * explicit scope classification. */
 bool zcl_retrieval_evaluate(
     const struct zcl_retrieval_gold_task *tasks, size_t task_count,
     struct zcl_retrieval_eval_metrics *out);
