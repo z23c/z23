@@ -6,9 +6,23 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct platform_directory_entry {
     char *name;
+    /* Handle-bound directory enumeration metadata.  Windows obtains these
+     * fields from FILE_ID_BOTH_DIR_INFORMATION on one retained directory
+     * handle; POSIX obtains them with fstatat() on the opened directory.
+     * Callers that need an exact freshness key must require snapshot_valid. */
+    bool snapshot_valid;
+    uint64_t size;
+    int64_t modified_seconds;
+    uint32_t modified_nanoseconds;
+    int64_t changed_seconds;
+    uint32_t changed_nanoseconds;
+    uint64_t volume;
+    uint64_t file_low;
+    uint64_t file_high;
 };
 
 struct platform_directory_list {
@@ -43,8 +57,9 @@ bool platform_directory_ensure(const char *path, int mode);
 bool platform_directory_list_real_sorted(const char *path,
                                          struct platform_directory_list *out);
 
-/* Return real, immediate child regular files in bytewise name order.
- * Symbolic links and Windows reparse points are omitted. */
+/* Return real, immediate child regular files in bytewise name order with a
+ * valid metadata snapshot for every entry. Symbolic links and Windows reparse
+ * points are omitted. */
 bool platform_directory_list_regular_sorted(
     const char *path, struct platform_directory_list *out);
 void platform_directory_list_free(struct platform_directory_list *list);

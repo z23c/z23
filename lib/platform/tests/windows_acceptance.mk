@@ -12,6 +12,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	build_fabric_worker_refusal \
 	bundle_exporter_refusal \
 	cli_render_env \
+	codeindex_freshness \
 	consensus_bundle_marker \
 	consensus_export_fd_io_refusal \
 	consensus_export_output_seal_refusal \
@@ -166,6 +167,16 @@ ZCL_WINDOWS_ACCEPTANCE_database_lifetime_FLAGS := \
 	-Wno-unused-but-set-variable -Wno-unused-parameter
 ZCL_WINDOWS_ACCEPTANCE_database_lifetime_LIBS := \
 	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+
+ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_SOURCES := \
+	lib/test/src/codeindex_freshness_windows_acceptance.c \
+	lib/codeindex/src/codeindex_build_windows.c \
+	lib/platform/src/directory_compat.c \
+	lib/base/src/safe_alloc.c \
+	lib/base/src/log_level.c \
+	lib/sha3/src/sha3.c
+ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_FLAGS := \
+	-DCI_WINDOWS_FRESHNESS_ONLY -Ilib/codeindex/src
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	lib/platform/tests/directory_compat_windows_acceptance.c \

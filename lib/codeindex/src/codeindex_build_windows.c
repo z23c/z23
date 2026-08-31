@@ -22,35 +22,52 @@
 #include <sys/stat.h>
 #include <windows.h>
 
-struct strvec { char **items; size_t count, capacity; };
+struct source_path {
+    char *value;
+    struct platform_directory_entry snapshot;
+};
 
-static bool strvec_push(struct strvec *vec, const char *value)
+struct strvec { struct source_path *items; size_t count, capacity; };
+
+static bool strvec_push(struct strvec *vec, const char *value,
+                        const struct platform_directory_entry *snapshot)
 {
     if (vec->count == vec->capacity) {
         size_t next_capacity = vec->capacity ? vec->capacity * 2 : 256;
-        char **next = zcl_realloc(vec->items,
-                                  next_capacity * sizeof(*vec->items),
-                                  "windows codeindex paths");
+        struct source_path *next = zcl_realloc(
+            vec->items, next_capacity * sizeof(*vec->items),
+            "windows codeindex paths");
         if (!next) return false;
         vec->items = next;
         vec->capacity = next_capacity;
     }
-    vec->items[vec->count] = zcl_strdup(value, "windows codeindex path");
-    if (!vec->items[vec->count]) return false;
+    vec->items[vec->count] = (struct source_path){0};
+    vec->items[vec->count].value =
+        zcl_strdup(value, "windows codeindex path");
+    if (!vec->items[vec->count].value) return false;
+    if (!snapshot || !snapshot->snapshot_valid) {
+        free(vec->items[vec->count].value);
+        vec->items[vec->count].value = NULL;
+        return false;
+    }
+    vec->items[vec->count].snapshot = *snapshot;
+    vec->items[vec->count].snapshot.name = NULL;
     vec->count++;
     return true;
 }
 
 static void strvec_free(struct strvec *vec)
 {
-    for (size_t i = 0; i < vec->count; i++) free(vec->items[i]);
+    for (size_t i = 0; i < vec->count; i++) free(vec->items[i].value);
     free(vec->items);
     memset(vec, 0, sizeof(*vec));
 }
 
 static int path_compare(const void *left, const void *right)
 {
-    return strcmp(*(const char *const *)left, *(const char *const *)right);
+    const struct source_path *a = left;
+    const struct source_path *b = right;
+    return strcmp(a->value, b->value);
 }
 
 static bool registry_name(const char *name)
@@ -98,11 +115,15 @@ static bool collect_directory(const char *root, const char *relative,
     if (probe != PLATFORM_DIRECTORY_PROBE_OK) return false;
 
     struct platform_directory_list directories = {0}, files = {0};
-    if (!platform_directory_list_real_sorted(full, &directories) ||
-        !platform_directory_list_regular_sorted(full, &files)) {
+    if (!platform_directory_list_real_sorted(full, &directories)) {
         platform_directory_list_free(&directories);
         platform_directory_list_free(&files);
-        return false;
+        LOG_FAIL("codeindex", "list Windows source directories: %s", full);
+    }
+    if (!platform_directory_list_regular_sorted(full, &files)) {
+        platform_directory_list_free(&directories);
+        platform_directory_list_free(&files);
+        LOG_FAIL("codeindex", "list Windows source files: %s", full);
     }
 
     bool ok = true;
@@ -124,30 +145,30 @@ static bool collect_directory(const char *root, const char *relative,
             ? snprintf(child, sizeof(child), "%s/%s", relative, name)
             : snprintf(child, sizeof(child), "%s", name);
         ok = n > 0 && (size_t)n < sizeof(child) &&
-             strvec_push(paths, child);
+             strvec_push(paths, child, &files.entries[i]);
     }
     platform_directory_list_free(&directories);
     platform_directory_list_free(&files);
     return ok;
 }
 
-static bool source_snapshot(const char *root, const char *relpath,
-                            struct platform_positioned_file_snapshot *out)
-{
-    struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
-    platform_positioned_file_init(&file);
-    bool ok = platform_positioned_file_open_beneath(&file, root, relpath) &&
-              platform_positioned_file_snapshot(&file, &before) &&
-              platform_positioned_file_snapshot(&file, &after) &&
-              platform_positioned_file_snapshot_equal(&before, &after);
-    platform_positioned_file_close(&file);
-    if (ok) *out = after;
-    return ok;
-}
-
+#if !defined(CI_WINDOWS_FRESHNESS_ONLY)
 static void snapshot_to_stat(
     const struct platform_positioned_file_snapshot *snapshot, struct stat *st)
+{
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFREG;
+    st->st_nlink = 1;
+    st->st_dev = (dev_t)snapshot->volume;
+    st->st_ino = (ino_t)snapshot->file_low;
+    st->st_size = (off_t)snapshot->size;
+    st->st_mtime = (time_t)snapshot->modified_seconds;
+    st->st_ctime = (time_t)snapshot->changed_seconds;
+}
+#endif
+
+static void directory_snapshot_to_stat(
+    const struct platform_directory_entry *snapshot, struct stat *st)
 {
     memset(st, 0, sizeof(*st));
     st->st_mode = S_IFREG;
@@ -193,14 +214,12 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb callback, void *user)
     qsort(paths.items, paths.count, sizeof(paths.items[0]), path_compare);
     bool ok = true;
     for (size_t i = 0; ok && i < paths.count; i++) {
-        if (i > 0 && strcmp(paths.items[i], paths.items[i - 1]) == 0) continue;
-        struct platform_positioned_file_snapshot snapshot;
+        if (i > 0 && strcmp(paths.items[i].value,
+                            paths.items[i - 1].value) == 0)
+            continue;
         struct stat st;
-        ok = source_snapshot(root, paths.items[i], &snapshot);
-        if (ok) {
-            snapshot_to_stat(&snapshot, &st);
-            ok = callback(paths.items[i], &st, user);
-        }
+        directory_snapshot_to_stat(&paths.items[i].snapshot, &st);
+        ok = callback(paths.items[i].value, &st, user);
     }
     strvec_free(&paths);
     return ok;
@@ -239,6 +258,7 @@ static void source_stat_root_add(struct sha3_256_ctx *sha,
     write_u64le(sha, 0);
 }
 
+#if !defined(CI_WINDOWS_FRESHNESS_ONLY)
 static bool source_file_sha3(const char *root, const char *relpath,
                              uint8_t out[32], struct stat *out_st)
 {
@@ -277,7 +297,9 @@ static bool source_file_sha3(const char *root, const char *relpath,
     if (out_st) snapshot_to_stat(&after, out_st);
     return true;
 }
+#endif
 
+#if !defined(CI_WINDOWS_FRESHNESS_ONLY)
 struct stamp_context {
     const char *root;
     struct sha3_256_ctx exact, stat;
@@ -296,6 +318,7 @@ static bool exact_stamp_cb(const char *relpath, const struct stat *ignored,
     source_stat_root_add(&context->stat, relpath, &opened);
     return true;
 }
+#endif
 
 static bool stat_stamp_cb(const char *relpath, const struct stat *st, void *user)
 {
@@ -303,6 +326,7 @@ static bool stat_stamp_cb(const char *relpath, const struct stat *st, void *user
     return true;
 }
 
+#if !defined(CI_WINDOWS_FRESHNESS_ONLY)
 bool ci_source_roots_sha3(const char *root, uint8_t exact_out[32],
                           uint8_t stat_out[32])
 {
@@ -317,6 +341,7 @@ bool ci_source_roots_sha3(const char *root, uint8_t exact_out[32],
     sha3_256_finalize(&context.stat, stat_out);
     return true;
 }
+#endif
 
 bool ci_source_stat_root_sha3(const char *root, uint8_t out[32])
 {
@@ -330,6 +355,7 @@ bool ci_source_stat_root_sha3(const char *root, uint8_t out[32])
     return true;
 }
 
+#if !defined(CI_WINDOWS_FRESHNESS_ONLY)
 static _Atomic uint64_t g_stage_sequence = 1;
 
 #ifdef ZCL_TESTING
@@ -647,6 +673,7 @@ bool codeindex_rebuild(struct codeindex *ci)
 {
     return codeindex_rebuild_internal(ci, false);
 }
+#endif
 
 #else
 typedef int codeindex_build_windows_not_built;

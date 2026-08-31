@@ -26,6 +26,11 @@ stat-root and empty SQLite journal, flushes the staged bytes, and atomically
 moves the retained child into place. `make windows-acceptance` executes
 `z23.exe code have` through the headless runner and requires a successful typed
 response; a Windows rebuild refusal is no longer accepted as a passing result.
+The same native acceptance requires the canonical warm capability query to
+remain inside the command's declared 250 ms latency budget. A separate native
+program bounds the unchanged source-metadata freshness root at 150 ms, using
+one retained directory handle per source directory rather than reopening every
+source path. These are executable Windows contracts, not cross-compile claims.
 The source-tree Merkle cache and territory roll-up memo use the same retained
 private child transaction on Windows, so warm provenance and dispatch queries
 can reuse sealed derived state after the source generation is unchanged. The

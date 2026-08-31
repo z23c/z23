@@ -2013,9 +2013,18 @@ windows-acceptance: windows-headless-run-selftest
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \
 	done; \
+	codeindex_prepare_log="$$log_dir/codeindex_prepare.log"; \
+	codeindex_prepare_log_win="$$(cygpath -aw "$$codeindex_prepare_log")"; \
 	codeindex_log="$$log_dir/codeindex_native.log"; \
 	codeindex_log_win="$$(cygpath -aw "$$codeindex_log")"; \
 	z23_win="$$(cygpath -aw build/bin/z23.exe)"; \
+	"$$runner" --cwd "$$root" --log "$$codeindex_prepare_log_win" -- \
+		"$$z23_win" code have '--input={"text":"windows native codeindex acceptance"}'; rc=$$?; \
+	test ! -f "$$codeindex_prepare_log" || cat "$$codeindex_prepare_log"; \
+	if test $$rc -ne 0; then \
+		printf '%s\n' 'windows-acceptance: FAIL: native codeindex preparation failed' >&2; \
+		exit $$rc; \
+	fi; \
 	"$$runner" --cwd "$$root" --log "$$codeindex_log_win" -- \
 		"$$z23_win" code have '--input={"text":"windows native codeindex acceptance"}'; rc=$$?; \
 	test ! -f "$$codeindex_log" || cat "$$codeindex_log"; \
@@ -2029,6 +2038,10 @@ windows-acceptance: windows-headless-run-selftest
 	}; \
 	grep -q '"data_schema":"zcl.code_have.v1"' "$$codeindex_log" || { \
 		printf '%s\n' 'windows-acceptance: FAIL: native codeindex response schema missing' >&2; \
+		exit 2; \
+	}; \
+	grep -q '"budget_exceeded":false' "$$codeindex_log" || { \
+		printf '%s\n' 'windows-acceptance: FAIL: native codeindex exceeded its latency budget' >&2; \
 		exit 2; \
 	}; \
 	printf '%s\n' 'windows-acceptance: native codeindex rebuild/open/query PASS'; \

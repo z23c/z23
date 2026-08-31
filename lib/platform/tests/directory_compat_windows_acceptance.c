@@ -27,6 +27,16 @@ static bool join_path(char *out, size_t capacity, const char *root,
     return true;
 }
 
+static void split_ticks(uint64_t ticks, int64_t *seconds,
+                        uint32_t *nanoseconds)
+{
+    const uint64_t epoch = UINT64_C(116444736000000000);
+    *seconds = ticks >= epoch
+        ? (int64_t)((ticks - epoch) / UINT64_C(10000000))
+        : -(int64_t)((epoch - ticks) / UINT64_C(10000000));
+    *nanoseconds = (uint32_t)(ticks % UINT64_C(10000000)) * 100u;
+}
+
 int main(void)
 {
     wchar_t temp[MAX_PATH], root_wide[MAX_PATH];
@@ -55,6 +65,11 @@ int main(void)
     file = CreateFileW(plain_wide, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                        FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return fail("file fixture");
+    DWORD written = 0;
+    if (!WriteFile(file, "abc", 3, &written, NULL) || written != 3) {
+        CloseHandle(file);
+        return fail("file fixture bytes");
+    }
     CloseHandle(file);
 
     wchar_t link_wide[4 * MAX_PATH], alpha_wide[4 * MAX_PATH];
@@ -85,7 +100,40 @@ int main(void)
 
     if (!platform_directory_list_regular_sorted(root, &list))
         return fail("regular-file enumeration");
-    if (list.count != 1 || strcmp(list.entries[0].name, "plain-file"))
+    HANDLE observed = CreateFileW(
+        plain_wide, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    FILE_BASIC_INFO basic = {0};
+    if (observed == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(observed, &info) ||
+        !GetFileInformationByHandleEx(observed, FileBasicInfo, &basic,
+                                      sizeof(basic))) {
+        if (observed != INVALID_HANDLE_VALUE) CloseHandle(observed);
+        return fail("regular-file reference metadata");
+    }
+    CloseHandle(observed);
+    ULARGE_INTEGER modified = {
+        .LowPart = info.ftLastWriteTime.dwLowDateTime,
+        .HighPart = info.ftLastWriteTime.dwHighDateTime,
+    };
+    int64_t modified_seconds = 0, changed_seconds = 0;
+    uint32_t modified_nanoseconds = 0, changed_nanoseconds = 0;
+    split_ticks(modified.QuadPart, &modified_seconds, &modified_nanoseconds);
+    split_ticks((uint64_t)basic.ChangeTime.QuadPart, &changed_seconds,
+                &changed_nanoseconds);
+    uint64_t file_id = ((uint64_t)info.nFileIndexHigh << 32) |
+                       info.nFileIndexLow;
+    if (list.count != 1 || strcmp(list.entries[0].name, "plain-file") ||
+        !list.entries[0].snapshot_valid || list.entries[0].size != 3 ||
+        list.entries[0].volume != info.dwVolumeSerialNumber ||
+        list.entries[0].file_low != file_id ||
+        list.entries[0].file_high != 0 ||
+        list.entries[0].modified_seconds != modified_seconds ||
+        list.entries[0].modified_nanoseconds != modified_nanoseconds ||
+        list.entries[0].changed_seconds != changed_seconds ||
+        list.entries[0].changed_nanoseconds != changed_nanoseconds)
         return fail("sorted regular-file filtering");
     platform_directory_list_free(&list);
 

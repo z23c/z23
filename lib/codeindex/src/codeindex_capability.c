@@ -8,13 +8,15 @@
  * stemming, the two candidate scans, anchor aggregation, the usage count, and
  * the verdict thresholds.
  *
- * Cost shape. Both candidate scans push their matching into SQLite's own
- * instr()/lower() so the 69k symbol rows and 6.3k file rows are filtered in C
- * without being marshalled out; only rows that matched a stem cross into this
- * file. The expensive per-candidate step is the usage count, so it runs for
- * the top CI_CAP_RANK_POOL anchors only, AFTER the cheap score has ordered
- * them — then the pool is re-ranked with the usage number in hand, because
- * "how many files actually call this" is the fact the caller came for.
+ * Cost shape. Both candidate scans push their matching into SQLite's
+ * case-insensitive LIKE operator so the 69k symbol rows and 6.3k file rows are
+ * filtered in C without being marshalled out. This avoids recomputing
+ * lower(column) for every query stem while retaining ASCII case folding; only
+ * rows that matched a stem cross into this file. The expensive per-candidate
+ * step is the usage count, so it runs for the top CI_CAP_RANK_POOL anchors
+ * only, AFTER the cheap score has ordered them — then the pool is re-ranked
+ * with the usage number in hand, because "how many files actually call this"
+ * is the fact the caller came for.
  */
 
 #include "codeindex_priv.h"
@@ -274,8 +276,10 @@ static bool cap_contains(const char *hay, const char *needle)
     return false;
 }
 
-/* Build "(instr(lower(<col>),?k)>0 OR ...)" over `cols` for every stem.
- * The stems are BOUND, never spliced, so this is a shape, not a value. */
+/* Build "(<col> LIKE ?k ESCAPE '\\' OR ...)" over `cols` for every stem.
+ * The wildcard patterns are BOUND, never spliced, so this is a shape, not a
+ * value. SQLite LIKE folds ASCII case without allocating a lower-case copy of
+ * every candidate column for every term. */
 static bool cap_where(char *sql, size_t cap, const char *const *cols,
                       int ncols, int nterms)
 {
@@ -284,7 +288,7 @@ static bool cap_where(char *sql, size_t cap, const char *const *cols,
     for (int t = 0; t < nterms; t++) {
         for (int c = 0; c < ncols; c++) {
             int n = snprintf(sql + used, cap - used,
-                             "%sinstr(lower(%s),?%d)>0",
+                             "%s%s LIKE ?%d ESCAPE '\\'",
                              written ? " OR " : "", cols[c], t + 1);
             if (n < 0 || (size_t)n >= cap - used) return false;
             used += (size_t)n;
@@ -294,11 +298,22 @@ static bool cap_where(char *sql, size_t cap, const char *const *cols,
     return written > 0;
 }
 
-static void cap_bind_stems(sqlite3_stmt *stmt,
-                           const struct ci_capability_query *q)
+static void cap_bind_patterns(sqlite3_stmt *stmt,
+                              const struct ci_capability_query *q)
 {
-    for (int t = 0; t < q->term_count; t++)
-        sqlite3_bind_text(stmt, t + 1, q->stems[t], -1, SQLITE_TRANSIENT);
+    for (int t = 0; t < q->term_count; t++) {
+        char pattern[2 * CI_CAPABILITY_TERM_MAX + 3];
+        size_t at = 0;
+        pattern[at++] = '%';
+        for (size_t i = 0; q->stems[t][i]; i++) {
+            char c = q->stems[t][i];
+            if (c == '%' || c == '_' || c == '\\') pattern[at++] = '\\';
+            pattern[at++] = c;
+        }
+        pattern[at++] = '%';
+        pattern[at] = '\0';
+        sqlite3_bind_text(stmt, t + 1, pattern, -1, SQLITE_TRANSIENT);
+    }
 }
 
 /* ── candidate scans ──────────────────────────────────────────────────── */
@@ -321,7 +336,7 @@ static bool cap_scan_symbols(struct ci_store *st, struct cap_scan *s,
     sqlite3_stmt *stmt = NULL;
     if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         LOG_FAIL("codeindex", "prepare capability symbol scan");
-    cap_bind_stems(stmt, q);
+    cap_bind_patterns(stmt, q);
 
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
@@ -387,7 +402,7 @@ static bool cap_scan_files(struct ci_store *st, struct cap_scan *s,
     sqlite3_stmt *stmt = NULL;
     if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         LOG_FAIL("codeindex", "prepare capability file scan");
-    cap_bind_stems(stmt, q);
+    cap_bind_patterns(stmt, q);
 
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
@@ -454,7 +469,7 @@ static bool cap_usage(struct ci_store *st, const struct ci_capability_query *q,
     sqlite3_stmt *stmt = NULL;
     if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         LOG_FAIL("codeindex", "prepare capability usage");
-    cap_bind_stems(stmt, q);
+    cap_bind_patterns(stmt, q);
     sqlite3_bind_text(stmt, anchor_idx, anchor, -1, SQLITE_TRANSIENT);
 
     int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
