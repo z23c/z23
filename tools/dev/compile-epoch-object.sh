@@ -247,6 +247,7 @@ compile_one()
     local staging staging_base object dep note_record note_tmp marker_tmp
     local compiler_rc
     local host_system empty_deadline pid start actual owner_start now
+    local stale_pid= stale_start= stale_deadline=0
     # Long source filenames can make the staging directory path breach Windows
     # MAX_PATH. Use a short deterministic prefix derived from OUTPUT_BASE; the
     # XXXXXX suffix still gives mktemp its uniqueness.
@@ -306,8 +307,21 @@ compile_one()
                 empty_deadline=0
                 actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
                 if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
-                    fail 'epoch admission lock owner is stale; rerun for serialized recovery'
+                    now="$(date +%s)"
+                    if [ "$pid" != "$stale_pid" ] ||
+                       [ "$start" != "$stale_start" ]; then
+                        stale_pid="$pid"
+                        stale_start="$start"
+                        stale_deadline=$((now + 30))
+                    elif [ "$now" -ge "$stale_deadline" ]; then
+                        fail 'epoch admission lock owner remained stale; rerun for serialized recovery'
+                    fi
+                    sleep 0.05
+                    continue
                 fi
+                stale_pid=
+                stale_start=
+                stale_deadline=0
                 sleep 0.05
             done
             [ -d "$ADMISSION_LOCK_DIR" ] && [ ! -L "$ADMISSION_LOCK_DIR" ] ||

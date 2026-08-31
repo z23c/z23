@@ -146,21 +146,7 @@ if ($DryRun) {
 # before the repository's native Job-Object runner exists. Make those tools
 # inherit fail-fast, headless Windows error handling so a damaged compiler or
 # DLL reports failure instead of opening a blocking WER/critical-error popup.
-if (-not ('Z23.NativeErrorMode' -as [type])) {
-    Add-Type -TypeDefinition @'
-namespace Z23 {
-    using System.Runtime.InteropServices;
-    public static class NativeErrorMode {
-        [DllImport("kernel32.dll")]
-        public static extern uint GetErrorMode();
-        [DllImport("kernel32.dll")]
-        public static extern uint SetErrorMode(uint mode);
-    }
-}
-'@
-}
-$PreviousErrorMode = [Z23.NativeErrorMode]::GetErrorMode()
-[void][Z23.NativeErrorMode]::SetErrorMode($PreviousErrorMode -bor 0x00008003)
+Enable-Z23NativeErrorMode
 
 Write-Note "fully upgrading MSYS2 (rolling releases do not support partial upgrades)..."
 for ($UpgradePass = 1; $UpgradePass -le 2; $UpgradePass++) {

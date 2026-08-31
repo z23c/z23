@@ -72,6 +72,19 @@ if (-not (Test-Path -LiteralPath $Bash)) {
     Write-Error -Message "z23-make: REFUSE: MSYS2 bash not found at $Bash; run tools\dev\windows-setup.ps1 first" -ErrorAction Continue
     exit 1
 }
+$SelectedMake = Join-Path $Msys2Root 'usr\bin\make.exe'
+$SelectedGcc = Join-Path $Msys2Root 'ucrt64\bin\gcc.exe'
+foreach ($RequiredTool in @($SelectedMake, $SelectedGcc)) {
+    if (-not (Test-Path -LiteralPath $RequiredTool -PathType Leaf)) {
+        Write-Error -Message "z23-make: REFUSE: selected MSYS2 root is missing $RequiredTool; run tools\dev\windows-setup.ps1 -Msys2Root $Msys2Root" -ErrorAction Continue
+        exit 1
+    }
+}
+$SelectedCc1 = @(Get-ChildItem -LiteralPath (Join-Path $Msys2Root 'ucrt64\lib\gcc\x86_64-w64-mingw32') -Filter 'cc1.exe' -File -Recurse -ErrorAction SilentlyContinue)
+if ($SelectedCc1.Count -lt 1) {
+    Write-Error -Message "z23-make: REFUSE: selected MSYS2 root has no root-owned UCRT64 cc1.exe; run tools\dev\windows-setup.ps1 -Msys2Root $Msys2Root" -ErrorAction Continue
+    exit 1
+}
 
 $repoRoot = ConvertTo-Z23MsysPath -Path $CheckoutRoot
 $msysRoot = ConvertTo-Z23MsysPath -Path $Msys2Root
@@ -130,21 +143,7 @@ if ($NeedsBootstrap) {
     # already be placed inside it. Suppress inherited Windows Error Reporting
     # and critical-error UI before spawning Bash: a broken cc1 must return an
     # exit status, never block an unattended setup behind a desktop popup.
-    if (-not ('Z23.NativeErrorMode' -as [type])) {
-        Add-Type -TypeDefinition @'
-namespace Z23 {
-    using System.Runtime.InteropServices;
-    public static class NativeErrorMode {
-        [DllImport("kernel32.dll")]
-        public static extern uint GetErrorMode();
-        [DllImport("kernel32.dll")]
-        public static extern uint SetErrorMode(uint mode);
-    }
-}
-'@
-    }
-    $PreviousErrorMode = [Z23.NativeErrorMode]::GetErrorMode()
-    [void][Z23.NativeErrorMode]::SetErrorMode($PreviousErrorMode -bor 0x00008003)
+    Enable-Z23NativeErrorMode
     $BootstrapArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot,
                        $msysRoot, 'build/bin/z23-headless-run.exe')
     & $Bash @BootstrapArgs

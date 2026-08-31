@@ -251,6 +251,7 @@ acquire_admission_lock()
 {
     local empty_deadline pid start actual owner_start now
     local verify_pid verify_start verify_actual
+    local stale_pid= stale_start= stale_deadline=0
     [ -d "$OBJECT_ROOT" ] && [ ! -L "$OBJECT_ROOT" ] ||
         fail 'object root is not a regular directory'
     [ -d "$OBJECT_ROOT/epochs" ] && [ ! -L "$OBJECT_ROOT/epochs" ] ||
@@ -319,21 +320,38 @@ acquire_admission_lock()
         empty_deadline=0
         actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
         if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
-            sleep 0.05
+            now="$(date +%s)"
+            if [ "$pid" != "$stale_pid" ] || [ "$start" != "$stale_start" ]; then
+                stale_pid="$pid"
+                stale_start="$start"
+                stale_deadline=$((now + 30))
+                sleep 0.05
+                continue
+            fi
+            [ "$now" -ge "$stale_deadline" ] || {
+                sleep 0.05
+                continue
+            }
+            [ "$MODE" = acquire ] &&
+            [ "${EPOCH_GC_LOCK_HELD:-0}" = 1 ] ||
+                fail 'epoch admission lock owner remained stale'
             verify_pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
             verify_start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null || true)"
             verify_actual="$("$SELF_DIR/process-start-token.sh" "$verify_pid" 2>/dev/null || true)"
             [ "$verify_pid" = "$pid" ] && [ "$verify_start" = "$start" ] &&
             { [ -z "$verify_actual" ] || [ "$verify_actual" != "$verify_start" ]; } ||
                 continue
-            [ "$MODE" = acquire ] &&
-            [ "${EPOCH_GC_LOCK_HELD:-0}" = 1 ] ||
-                fail 'epoch admission lock owner is stale'
             rm -f -- "$ADMISSION_LOCK_OWNER"
             rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null ||
                 fail 'could not recover stale epoch admission lock'
+            stale_pid=
+            stale_start=
+            stale_deadline=0
             continue
         fi
+        stale_pid=
+        stale_start=
+        stale_deadline=0
         sleep 0.05
     done
 }
