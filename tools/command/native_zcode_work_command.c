@@ -1882,6 +1882,11 @@ void zcl_native_handle_zcode_work_status(
                          entry->latest_work_receipt_hex) &&
         json_push_kv_str(&expert, "output_root",
                          entry->latest_receipt_output_root_hex) &&
+        json_push_kv_str(&expert, "proof_action_root",
+                         proof.action_root) &&
+        json_push_kv_str(&expert, "build_output_root",
+                         proof.available
+                             ? proof.facts.output_root_sha3 : "") &&
         json_push_kv_int(&expert, "app_run_receipt_count",
                          (int64_t)entry->app_run_receipt_count) &&
         json_push_kv_int(&expert, "valid_app_run_receipt_count",

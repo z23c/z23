@@ -25,6 +25,8 @@ struct zcl_story_work_facts_v1 {
     const char *action_root;
     const char *work_receipt_root;
     const char *output_root;
+    const char *proof_action_root;
+    const char *build_output_root;
     uint32_t app_run_receipt_count;
     uint32_t valid_app_run_receipt_count;
     const char *app_run_receipt_root;

@@ -1758,6 +1758,17 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(json_get_bool(json_get(status_proof, "policy_satisfied")));
         ASSERT(json_get_int(json_get(status_proof, "compile_receipts")) > 0);
         ASSERT(json_get_int(json_get(status_proof, "test_receipts")) > 0);
+        const struct json_value *proof_expert =
+            json_get(&reply.data, "expert");
+        const char *proof_action_root = proof_expert
+            ? json_get_str(json_get(proof_expert, "proof_action_root"))
+            : NULL;
+        const char *build_output_root = proof_expert
+            ? json_get_str(json_get(proof_expert, "build_output_root"))
+            : NULL;
+        ASSERT(proof_action_root && strlen(proof_action_root) == 64);
+        ASSERT(build_output_root && strlen(build_output_root) == 64);
+        ASSERT(strcmp(proof_action_root, saved_action_id) == 0);
         ASSERT(json_write(&reply.data, NULL, 0) < 4096u);
         zcl_command_reply_free(&reply);
         json_free(&input);
