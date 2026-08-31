@@ -11,6 +11,7 @@
  * Linux epoch. CAP_NONE is an explicit empty override, not a capability
  * class. Ordering is alphabetical by source path and carries no meaning. */
 
+ZCL_MODULE_CAPABILITY("app/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
 ZCL_MODULE_CAPABILITY("config/src/boot_memory_guard.c", CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mesh_terminal.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mint_anchor_preflight.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")

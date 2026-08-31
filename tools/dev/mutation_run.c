@@ -618,9 +618,10 @@ bool zcl_mut_plan_from_dryrun(const char *text, const char *src_rel,
 {
     if (err && err_cap)
         err[0] = '\0';
+    if (out)
+        memset(out, 0, sizeof *out);
     if (!text || !src_rel || !out)
         return false;
-    memset(out, 0, sizeof *out);
     char *segs = mut_segments(text, strlen(text));
     if (!segs) {
         if (err)
