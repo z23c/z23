@@ -1002,6 +1002,51 @@ static void zs_statement(struct vcs_zcode_science_statement_v1 *statement,
     statement->observed_unix = 1500;
 }
 
+static void zs_vector_navigation_preregistration(
+    const struct vcs_zcode_study_spec_v1 *study,
+    struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
+{
+    memset(prereg, 0, sizeof(*prereg));
+    prereg->schema_version =
+        VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_VERSION;
+    prereg->arm_count = VCS_ZCODE_VECTOR_NAVIGATION_ARM_COUNT - 1u;
+    prereg->gate_count = VCS_ZCODE_VECTOR_NAVIGATION_GATE_COUNT - 1u;
+    prereg->evidence_kind = VCS_ZCODE_VECTOR_NAVIGATION_EVIDENCE_MODEL_HINT;
+    prereg->prohibited_claims =
+        VCS_ZCODE_VECTOR_NAVIGATION_REQUIRED_PROHIBITIONS;
+    prereg->development_queries =
+        VCS_ZCODE_VECTOR_NAVIGATION_DEVELOPMENT_QUERIES;
+    prereg->sealed_holdout_queries =
+        VCS_ZCODE_VECTOR_NAVIGATION_SEALED_HOLDOUT_QUERIES;
+    prereg->paired_bootstrap_samples =
+        VCS_ZCODE_VECTOR_NAVIGATION_BOOTSTRAP_SAMPLES;
+    prereg->bootstrap_seed = UINT64_C(0x0123456789abcdef);
+    prereg->bootstrap_confidence_bp =
+        VCS_ZCODE_VECTOR_NAVIGATION_BOOTSTRAP_CONFIDENCE_BP;
+    prereg->paraphrase_hit_at_10_gain_bp =
+        VCS_ZCODE_VECTOR_NAVIGATION_HIT_AT_10_GAIN_BP;
+    prereg->overall_ndcg_at_10_gain_ppm =
+        VCS_ZCODE_VECTOR_NAVIGATION_NDCG_AT_10_GAIN_PPM;
+    prereg->agent_noninferiority_bp =
+        VCS_ZCODE_VECTOR_NAVIGATION_AGENT_NONINFERIORITY_BP;
+    prereg->efficiency_gain_bp =
+        VCS_ZCODE_VECTOR_NAVIGATION_EFFICIENCY_GAIN_BP;
+    prereg->approximate_recall_at_20_bp =
+        VCS_ZCODE_VECTOR_NAVIGATION_APPROX_RECALL_AT_20_BP;
+    (void)vcs_zcode_study_spec_root(study, prereg->study_spec_root);
+    memcpy(prereg->source_root, study->source_root, 32);
+    zs_root(prereg->task_root, 0xb1);
+    zs_root(prereg->ontology_root, 0xb2);
+    zs_root(prereg->concept_card_root, 0xb3);
+    zs_root(prereg->model_root, 0xb4);
+    zs_root(prereg->embedding_profile_root, 0xb5);
+    zs_root(prereg->result_root, 0xb6);
+    for (size_t i = 0; i < prereg->arm_count; i++)
+        zs_root(prereg->arm_roots[i], (uint8_t)(0xc1u + i));
+    for (size_t i = 0; i < prereg->gate_count; i++)
+        zs_root(prereg->gate_roots[i], (uint8_t)(0xd1u + i));
+}
+
 static int test_zs_wire_enum_values(void)
 {
     int failures = 0;
@@ -1268,6 +1313,143 @@ static int test_zs_statement_codec(void)
     return failures;
 }
 
+static int test_zs_vector_navigation_preregistration(void)
+{
+    int failures = 0;
+    TEST("zcode_science: vector navigation adoption is exactly preregistered") {
+        struct vcs_zcode_study_spec_v1 study, changed_study;
+        struct vcs_zcode_vector_navigation_preregistration_v1 prereg, parsed;
+        struct vcs_zcode_vector_navigation_preregistration_v1 changed, zero;
+        struct vcs_zcode_science_statement_v1 statement, changed_statement;
+        uint8_t wire[VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_WIRE_BYTES];
+        uint8_t root[32], again[32];
+        char root_hex[65];
+
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_EXACT, 1);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_BM25, 2);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_TRIGRAM, 3);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_DETERMINISTIC, 4);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_LEARNED, 5);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_RERANK, 6);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_HYBRID, 7);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_ARM_COUNT, 8);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_GATE_QUALITY, 1);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_GATE_PRIVACY, 2);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_GATE_RIGHTS, 3);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_GATE_DETERMINISM, 4);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_GATE_RESOURCE, 5);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_GATE_COUNT, 6);
+        ASSERT_EQ(VCS_ZCODE_VECTOR_NAVIGATION_EVIDENCE_MODEL_HINT, 1);
+
+        zs_study(&study);
+        zs_vector_navigation_preregistration(&study, &prereg);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &prereg), VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_serialize(
+                      &prereg, wire), VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(wire, "ZCVNAV\r\n", 8) == 0);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_parse(
+                      wire, sizeof(wire), &parsed), VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(&prereg, &parsed, sizeof(prereg)) == 0);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_root(
+                      &prereg, root), VCS_ZCODE_SCIENCE_OK);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_root(
+                      &parsed, again), VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(root, again, sizeof(root)) == 0);
+        zcl_hex_encode(root, sizeof(root), root_hex);
+        ASSERT_STR_EQ(root_hex,
+            "002d9da8cb2014f65b0fa5832b626db281b037cffb70cbf336c54a9db06b6d43");
+
+        zs_statement(&statement, root);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate_bindings(
+                      &prereg, &study, &statement), VCS_ZCODE_SCIENCE_OK);
+
+        changed = prereg;
+        changed.model_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_root(
+                      &changed, again), VCS_ZCODE_SCIENCE_OK);
+        ASSERT(memcmp(root, again, sizeof(root)) != 0);
+        changed = prereg;
+        changed.development_queries--;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_LIMIT);
+        changed = prereg;
+        changed.sealed_holdout_queries--;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_LIMIT);
+        changed = prereg;
+        changed.paired_bootstrap_samples--;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_LIMIT);
+        changed = prereg;
+        changed.bootstrap_seed = 0;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_LIMIT);
+        changed = prereg;
+        changed.prohibited_claims &= (uint16_t)~
+            VCS_ZCODE_VECTOR_NAVIGATION_CANNOT_OMIT_MANDATORY_PROOF;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_FLAGS);
+        changed = prereg;
+        changed.maximum_mandatory_proof_omissions = 1;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_FLAGS);
+        changed = prereg;
+        memset(changed.arm_roots[VCS_ZCODE_VECTOR_NAVIGATION_ARM_HYBRID - 1u],
+               0, 32);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO);
+        changed = prereg;
+        memset(changed.gate_roots[VCS_ZCODE_VECTOR_NAVIGATION_GATE_RIGHTS - 1u],
+               0, 32);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO);
+        changed = prereg;
+        memcpy(changed.arm_roots[VCS_ZCODE_VECTOR_NAVIGATION_ARM_HYBRID - 1u],
+               changed.arm_roots[VCS_ZCODE_VECTOR_NAVIGATION_ARM_EXACT - 1u],
+               32);
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate(
+                      &changed), VCS_ZCODE_SCIENCE_ERR_ROOT_REUSED);
+
+        memset(&zero, 0, sizeof(zero));
+        memset(&parsed, 0xa5, sizeof(parsed));
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_parse(
+                      wire, sizeof(wire) - 1u, &parsed),
+                  VCS_ZCODE_SCIENCE_ERR_WIRE_SIZE);
+        ASSERT(memcmp(&parsed, &zero, sizeof(parsed)) == 0);
+        wire[12] = 0xff;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_parse(
+                      wire, sizeof(wire), &parsed),
+                  VCS_ZCODE_SCIENCE_ERR_FLAGS);
+        ASSERT(memcmp(&parsed, &zero, sizeof(parsed)) == 0);
+        wire[12] = VCS_ZCODE_VECTOR_NAVIGATION_EVIDENCE_MODEL_HINT;
+        wire[13] = 1;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_parse(
+                      wire, sizeof(wire), &parsed),
+                  VCS_ZCODE_SCIENCE_ERR_FLAGS);
+        ASSERT(memcmp(&parsed, &zero, sizeof(parsed)) == 0);
+        wire[13] = 0;
+
+        changed_statement = statement;
+        changed_statement.profile = VCS_ZCODE_SCIENCE_PROFILE_PROTOCOL;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate_bindings(
+                      &prereg, &study, &changed_statement),
+                  VCS_ZCODE_SCIENCE_ERR_PROFILE);
+        changed_statement = statement;
+        changed_statement.predicate_body_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate_bindings(
+                      &prereg, &study, &changed_statement),
+                  VCS_ZCODE_SCIENCE_ERR_STUDY_MISMATCH);
+        changed_study = study;
+        changed_study.source_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_vector_navigation_preregistration_validate_bindings(
+                      &prereg, &changed_study, &statement),
+                  VCS_ZCODE_SCIENCE_ERR_STUDY_MISMATCH);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_science(void)
 {
     int failures = 0;
@@ -1284,6 +1466,7 @@ int test_zcode_science(void)
     failures += test_zs_wire_enum_values();
     failures += test_zs_relation_set_codec();
     failures += test_zs_statement_codec();
+    failures += test_zs_vector_navigation_preregistration();
     printf("=== zcode_science: %d failures ===\n", failures);
     return failures;
 }
