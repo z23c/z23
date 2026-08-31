@@ -663,7 +663,7 @@ static void bench_equihash_blake2b(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * Primitive 6 — caller-shaped ChaCha20-Poly1305 seal
+ * Primitive 6 — caller-shaped ChaCha20-Poly1305 seal/open
  *
  * The paired schedule alternates portable→vector and vector→portable for
  * every measured repetition. This bounds first/second-order thermal and
@@ -679,6 +679,7 @@ static void bench_equihash_blake2b(void)
 static uint8_t g_chacha_plain[CHACHA_BENCH_MAX_PLAIN];
 static uint8_t g_chacha_aad[CHACHA_BENCH_MAX_AAD];
 static uint8_t g_chacha_sealed[2][CHACHA_BENCH_MAX_PLAIN + POLY1305_TAG_SIZE];
+static uint8_t g_chacha_opened[2][CHACHA_BENCH_MAX_PLAIN];
 
 struct chacha_aead_ctx {
     size_t plen;
@@ -686,23 +687,34 @@ struct chacha_aead_ctx {
     uint8_t key[CHACHA20_KEY_SIZE];
     uint8_t nonce[CHACHA20_NONCE_SIZE];
     uint8_t *sealed;
+    uint8_t *opened;
+    bool open;
     bool failed;
 };
 
-static void chacha_aead_seal_body(long inner, void *vctx)
+static void chacha_aead_body(long inner, void *vctx)
 {
     struct chacha_aead_ctx *c = vctx;
     uint8_t nonce[CHACHA20_NONCE_SIZE];
     for (long i = 0; i < inner; i++) {
         memcpy(nonce, c->nonce, sizeof nonce);
-        zcl_write_u32_le(nonce + 8, (uint32_t)i);
-        if (!chacha20poly1305_encrypt(g_chacha_plain, c->plen,
-                                      g_chacha_aad, c->aad_len,
-                                      nonce, c->key, c->sealed)) {
+        if (!c->open)
+            zcl_write_u32_le(nonce + 8, (uint32_t)i);
+        bool ok = c->open
+            ? chacha20poly1305_decrypt(
+                  c->sealed, c->plen + POLY1305_TAG_SIZE,
+                  g_chacha_aad, c->aad_len, nonce, c->key, c->opened)
+            : chacha20poly1305_encrypt(
+                  g_chacha_plain, c->plen, g_chacha_aad, c->aad_len,
+                  nonce, c->key, c->sealed);
+        if (!ok) {
             c->failed = true;
             return;
         }
-        g_sink += c->sealed[(size_t)i % (c->plen + POLY1305_TAG_SIZE)];
+        const uint8_t *observed = c->open ? c->opened : c->sealed;
+        size_t observed_len = c->open ? c->plen
+                                      : c->plen + POLY1305_TAG_SIZE;
+        g_sink += observed[(size_t)i % observed_len];
     }
 }
 
@@ -714,7 +726,7 @@ static uint64_t chacha_time_selected(enum chacha20_impl impl, long inner,
         return 0;
     }
     uint64_t started = now_ns();
-    chacha_aead_seal_body(inner, ctx);
+    chacha_aead_body(inner, ctx);
     return now_ns() - started;
 }
 
@@ -733,12 +745,12 @@ static bool chacha_promotion_sample_passes(const struct tier_result *portable,
 }
 
 static void bench_chacha_aead_row(const char *label, size_t plen,
-                                  size_t aad_len, long inner)
+                                  size_t aad_len, long inner, bool open)
 {
     bool every_pair_won = false;
     struct bench b = {
         .primitive = label,
-        .unit = "seals",
+        .unit = open ? "opens" : "seals",
         .inner = inner,
         .bytes_per_op = (double)plen,
         .ntiers = 2,
@@ -758,6 +770,8 @@ static void bench_chacha_aead_row(const char *label, size_t plen,
         ctx[tier].plen = plen;
         ctx[tier].aad_len = aad_len;
         ctx[tier].sealed = g_chacha_sealed[tier];
+        ctx[tier].opened = g_chacha_opened[tier];
+        ctx[tier].open = open;
         for (size_t i = 0; i < sizeof ctx[tier].key; i++)
             ctx[tier].key[i] = (uint8_t)(i * 29u + 7u);
         for (size_t i = 0; i < sizeof ctx[tier].nonce; i++)
@@ -772,21 +786,36 @@ static void bench_chacha_aead_row(const char *label, size_t plen,
                                  g_chacha_aad, aad_len,
                                  ctx[0].nonce, ctx[0].key,
                                  ctx[0].sealed);
+    if (portable_ok && open) {
+        memcpy(ctx[1].sealed, ctx[0].sealed,
+               plen + POLY1305_TAG_SIZE);
+        portable_ok = chacha20poly1305_decrypt(
+            ctx[0].sealed, plen + POLY1305_TAG_SIZE,
+            g_chacha_aad, aad_len, ctx[0].nonce, ctx[0].key,
+            ctx[0].opened) &&
+            memcmp(ctx[0].opened, g_chacha_plain, plen) == 0;
+    }
     b.tier[0].verified = portable_ok;
 
     b.tier[1].available =
         chacha20_select_impl(CHACHA20_IMPL_VECTOR4) ==
         CHACHA20_IMPL_VECTOR4;
     if (b.tier[1].available) {
-        bool vector_ok = chacha20poly1305_encrypt(
-            g_chacha_plain, plen, g_chacha_aad, aad_len,
-            ctx[1].nonce, ctx[1].key, ctx[1].sealed);
+        bool vector_ok = open
+            ? chacha20poly1305_decrypt(
+                  ctx[1].sealed, plen + POLY1305_TAG_SIZE,
+                  g_chacha_aad, aad_len, ctx[1].nonce, ctx[1].key,
+                  ctx[1].opened)
+            : chacha20poly1305_encrypt(
+                  g_chacha_plain, plen, g_chacha_aad, aad_len,
+                  ctx[1].nonce, ctx[1].key, ctx[1].sealed);
+        const uint8_t *want = open ? ctx[0].opened : ctx[0].sealed;
+        const uint8_t *got = open ? ctx[1].opened : ctx[1].sealed;
+        size_t compare_len = open ? plen : plen + POLY1305_TAG_SIZE;
         if (!portable_ok || !vector_ok ||
-            memcmp(ctx[1].sealed, ctx[0].sealed,
-                   plen + POLY1305_TAG_SIZE) != 0) {
+            memcmp(got, want, compare_len) != 0) {
             parity_fail(b.primitive, b.tier[1].name,
-                        ctx[1].sealed, ctx[0].sealed,
-                        plen + POLY1305_TAG_SIZE);
+                        got, want, compare_len);
         } else {
             b.tier[1].verified = true;
         }
@@ -822,8 +851,8 @@ static void bench_chacha_aead_row(const char *label, size_t plen,
                 every_pair_won = false;
         }
         if (ctx[0].failed || ctx[1].failed) {
-            fprintf(stderr, "FATAL: %s AEAD seal failed during timing.\n",
-                    b.primitive);
+            fprintf(stderr, "FATAL: %s AEAD %s failed during timing.\n",
+                    b.primitive, open ? "open" : "seal");
             g_failures++;
             b.tier[0].verified = false;
             b.tier[1].verified = false;
@@ -833,7 +862,7 @@ static void bench_chacha_aead_row(const char *label, size_t plen,
         }
     } else if (b.tier[0].verified) {
         chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
-        time_tier(&b.tier[0], &b, chacha_aead_seal_body, &ctx[0]);
+        time_tier(&b.tier[0], &b, chacha_aead_body, &ctx[0]);
     }
 
     chacha20_select_impl(CHACHA20_IMPL_AUTO);
@@ -866,13 +895,22 @@ static void bench_chacha_aead(void)
 
     bench_chacha_aead_row(
         "ChaCha20-Poly1305 Sapling note seal (564 B; AAD 0)",
-        564u, 0u, 32768);
+        564u, 0u, 32768, false);
+    bench_chacha_aead_row(
+        "ChaCha20-Poly1305 Sapling note open (564 B; AAD 0)",
+        564u, 0u, 32768, true);
     bench_chacha_aead_row(
         "ChaCha20-Poly1305 Noise frame seal (1536 B; AAD 7)",
-        1536u, 7u, 12288);
+        1536u, 7u, 12288, false);
+    bench_chacha_aead_row(
+        "ChaCha20-Poly1305 Noise frame open (1536 B; AAD 7)",
+        1536u, 7u, 12288, true);
     bench_chacha_aead_row(
         "ChaCha20-Poly1305 private-object seal (65520 B; AAD 85)",
-        65520u, 85u, 256);
+        65520u, 85u, 256, false);
+    bench_chacha_aead_row(
+        "ChaCha20-Poly1305 private-object open (65520 B; AAD 85)",
+        65520u, 85u, 256, true);
 }
 
 /* ═══════════════════════════════════════════════════════════════════

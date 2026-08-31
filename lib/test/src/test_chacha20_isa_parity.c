@@ -72,6 +72,76 @@ static int parity_case(const uint8_t key[32], const uint8_t nonce[12],
     return memcmp(ref, got, len) != 0 || memcmp(ref, inplace, len) != 0;
 }
 
+#define CHACHA_CALLER_MAX_PLAIN 65520u
+#define CHACHA_CALLER_MAX_AAD      85u
+static uint8_t chacha_caller_plain[CHACHA_CALLER_MAX_PLAIN];
+static uint8_t chacha_caller_sealed[CHACHA_CALLER_MAX_PLAIN +
+                                    POLY1305_TAG_SIZE];
+static uint8_t chacha_caller_opened[CHACHA_CALLER_MAX_PLAIN];
+static uint8_t chacha_caller_aad[CHACHA_CALLER_MAX_AAD];
+
+static bool bytes_are(const uint8_t *bytes, size_t len, uint8_t value)
+{
+    for (size_t i = 0; i < len; i++)
+        if (bytes[i] != value) return false;
+    return true;
+}
+
+static int caller_open_case(const uint8_t key[32], const uint8_t nonce[12],
+                            size_t plen, size_t aad_len)
+{
+    for (size_t i = 0; i < plen; i++)
+        chacha_caller_plain[i] = (uint8_t)(i * 131u + 17u);
+    for (size_t i = 0; i < aad_len; i++)
+        chacha_caller_aad[i] = (uint8_t)(i * 47u + 11u);
+    chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
+    if (!chacha20poly1305_encrypt(
+            chacha_caller_plain, plen, chacha_caller_aad, aad_len,
+            nonce, key, chacha_caller_sealed))
+        return 1;
+
+    const enum chacha20_impl impls[2] = {
+        CHACHA20_IMPL_PORTABLE, CHACHA20_IMPL_VECTOR4 };
+    for (size_t tier = 0; tier < 2; tier++) {
+        (void)chacha20_select_impl(impls[tier]);
+        memset(chacha_caller_opened, 0xa5, plen);
+        if (!chacha20poly1305_decrypt(
+                chacha_caller_sealed, plen + POLY1305_TAG_SIZE,
+                chacha_caller_aad, aad_len, nonce, key,
+                chacha_caller_opened) ||
+            memcmp(chacha_caller_opened, chacha_caller_plain, plen) != 0)
+            return 1;
+
+        const size_t mutation_offsets[2] = {plen / 2u, plen};
+        for (size_t mutation = 0; mutation < 2; mutation++) {
+            size_t offset = mutation_offsets[mutation];
+            chacha_caller_sealed[offset] ^= 1u;
+            memset(chacha_caller_opened, 0xa5, plen);
+            bool accepted = chacha20poly1305_decrypt(
+                chacha_caller_sealed, plen + POLY1305_TAG_SIZE,
+                chacha_caller_aad, aad_len, nonce, key,
+                chacha_caller_opened);
+            chacha_caller_sealed[offset] ^= 1u;
+            if (accepted ||
+                !bytes_are(chacha_caller_opened, plen, 0xa5))
+                return 1;
+        }
+        if (aad_len > 0) {
+            chacha_caller_aad[0] ^= 1u;
+            memset(chacha_caller_opened, 0xa5, plen);
+            bool accepted = chacha20poly1305_decrypt(
+                chacha_caller_sealed, plen + POLY1305_TAG_SIZE,
+                chacha_caller_aad, aad_len, nonce, key,
+                chacha_caller_opened);
+            chacha_caller_aad[0] ^= 1u;
+            if (accepted ||
+                !bytes_are(chacha_caller_opened, plen, 0xa5))
+                return 1;
+        }
+    }
+    return 0;
+}
+
 int test_chacha20_isa_parity(void)
 {
     printf("\n=== chacha20_isa_parity (portable vs four-block differential oracle) ===\n");
@@ -215,6 +285,19 @@ int test_chacha20_isa_parity(void)
             if (!a || !b || !c || memcmp(ref, got, len + 16) != 0 ||
                 memcmp(opened, plain, len) != 0) diffs++;
         }
+        if (diffs == 0) printf("OK\n");
+        else { printf("FAIL (%d)\n", diffs); failures++; }
+    }
+
+    printf("chacha20_isa_parity: caller-shaped opens authenticate before output... ");
+    {
+        static const struct { size_t plen, aad_len; } shapes[] = {
+            {564u, 0u}, {1536u, 7u}, {65520u, 85u},
+        };
+        int diffs = 0;
+        for (size_t i = 0; i < sizeof shapes / sizeof shapes[0]; i++)
+            diffs += caller_open_case(key, nonce, shapes[i].plen,
+                                      shapes[i].aad_len);
         if (diffs == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", diffs); failures++; }
     }
