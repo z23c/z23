@@ -356,6 +356,34 @@ int test_mutation_harness(void)
         PASS();
     }
 
+    TEST("invalid plan inputs leave a non-null output free-safe") {
+        struct zcl_mut_plan p;
+        char err[256];
+
+        memset(&p, 0xa5, sizeof p);
+        ASSERT(!zcl_mut_plan_from_dryrun(NULL, "lib/x/src/y.c", &p, err,
+                                         sizeof err));
+        ASSERT_EQ(p.compile.count, (size_t)0);
+        ASSERT_EQ(p.link.count, (size_t)0);
+        ASSERT(p.compile.argv[0] == NULL);
+        ASSERT(p.link.argv[0] == NULL);
+        ASSERT_EQ(p.object[0], '\0');
+        ASSERT_EQ(p.rsp[0], '\0');
+        zcl_mut_plan_free(&p);
+
+        memset(&p, 0xa5, sizeof p);
+        ASSERT(!zcl_mut_plan_from_dryrun("make: nothing to be done\n", NULL,
+                                         &p, err, sizeof err));
+        ASSERT_EQ(p.compile.count, (size_t)0);
+        ASSERT_EQ(p.link.count, (size_t)0);
+        ASSERT(p.compile.argv[0] == NULL);
+        ASSERT(p.link.argv[0] == NULL);
+        ASSERT_EQ(p.object[0], '\0');
+        ASSERT_EQ(p.rsp[0], '\0');
+        zcl_mut_plan_free(&p);
+        PASS();
+    }
+
     TEST("a transcript that names no compile for the file is refused") {
         struct zcl_mut_plan p;
         char err[256];

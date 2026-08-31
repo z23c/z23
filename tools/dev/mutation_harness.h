@@ -147,7 +147,8 @@ void zcl_mut_plan_free(struct zcl_mut_plan *p);
 /* Recover the compile and link commands for `src_rel` from the transcript of
  * `make -n`. Returns false with a reason in `err` when the transcript does
  * not contain both — which is the honest answer when the build changed
- * shape, and is never guessed at. */
+ * shape, and is never guessed at. On every return with non-NULL `out`, it is
+ * initialized and may be passed to zcl_mut_plan_free(). */
 bool zcl_mut_plan_from_dryrun(const char *text, const char *src_rel,
                               struct zcl_mut_plan *out, char *err,
                               size_t err_cap);

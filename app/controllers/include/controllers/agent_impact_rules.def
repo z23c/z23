@@ -2842,7 +2842,7 @@ AGENT_IMPACT_RULE("config/remote_command_classes.def", "command_registry_catalog
  * Both are developer tools with no runtime consumer; each rides only its
  * own group. */
 AGENT_IMPACT_RULE("lib/test/src/test_code_have.c", "code_have make_lint_gates")
-AGENT_IMPACT_RULE("lib/test/src/test_mutation_harness.c", "mutation_harness make_lint_gates")
+AGENT_IMPACT_RULE("tools/dev/mutation_run.c|tools/dev/mutation_ops.c|tools/dev/mutation_harness.h|lib/test/src/test_mutation_harness.c", "mutation_harness make_lint_gates")
 
 /* A character on the wire. The frame is a pure function of the identity
  * root and the birthday, so it rides node_character (which derives form

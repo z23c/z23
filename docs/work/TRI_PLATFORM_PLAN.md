@@ -219,6 +219,44 @@ generation's own build tree could not be created — and now says
 `proof_generation_build_dir_unwritable` and names the directory. Conflating
 the two sent a reader hunting a vendored archive that was present all along.
 
+## 7. Keep peer context portable and Mac-honest — PLANNED
+
+Token-efficient agent collaboration is a C23 Commons transport use, not a new
+platform authority. The same task/source/context/query roots must identify the
+same logical bytes on Linux, native Apple Silicon, and Windows. Portable
+identity therefore contains canonical repository-relative paths, byte ranges,
+content roots, compiler/configuration roots, and generation identity; it never
+contains an absolute checkout path, host path separator, inode, file handle,
+mtime, or native struct layout.
+
+The first Mac checkpoint is read-only root-first context reuse. A Mac advertises
+a context root, another peer requests only absent `content.v2` chunks, and the
+receiver re-roots and verifies the bounded wire against its exact task/source/
+goal generation. A warm lookup may use the last complete watcher generation but
+must perform no synchronous full-tree walk and must label requested/indexed
+generation and lag. Kqueue overflow, atomic replacement, cancellation, or a
+lost event triggers an exact manifest rescan in the low-priority index service,
+never in the public-node query path.
+
+Cross-platform acceptance requires:
+
+- [ ] identical committed source/config/query inputs produce byte-identical
+  context and navigator-fact roots across native platforms and absolute
+  worktree locations;
+- [ ] same-generation warm reuse transfers no duplicate excerpt chunks and
+  reads no unchanged source; counters report walks, files/bytes read, CAS
+  hits/misses, transferred bytes, and model-context bytes separately;
+- [ ] stale generation, path-normalization mismatch, missing shard, incomplete
+  dimension, tampered chunk, and cross-generation cursor each refuse by name;
+- [ ] ordinary stale navigation is labeled, while exact edit/impact/proof use
+  requires the requested generation or `INDEX_LAG`;
+- [ ] downloaded context and source remain inert, and macOS remote
+  diagnose/propose execution refuses until a qualified disposable
+  Virtualization-framework worker exists; native local verification remains
+  available without making the node run fetched code;
+- [ ] package/index activity yields to consensus, sync, P2P, wallet, and RPC
+  work under the existing async-proof blockchain-priority gate.
+
 ## What this is not
 
 - Not a rewrite of the platform seams. They are audited and they refuse by
@@ -234,6 +272,8 @@ the two sent a reader hunting a vendored archive that was present all along.
 
 Items 1, 5 and 6 are closed. Item 4 is the remaining Linux-side work, needs no
 other hardware, and unblocks honest measurement everywhere else — take it
-next. Items 2 and 3 need the Mac and the Windows box; item 2 was blocked on
-item 1 and is now unblocked. Follow the integration cadence in
+next. Item 7 begins with platform-neutral formats and Mac read-only
+verification, then needs native cross-platform identity receipts. Items 2 and
+3 need the Mac and the Windows box; item 2 was blocked on item 1 and is now
+unblocked. Follow the integration cadence in
 [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) §"Integration cadence" for each slice.
