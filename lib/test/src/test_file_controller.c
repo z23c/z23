@@ -525,10 +525,17 @@ static int test_file_service_start_stop_and_lifetime(void)
         if (ok) {
             platform_clock_set_source(&source);
             clock_installed = true;
-            ok = fs_send_frame(&client, FS_PADDING, NULL, 0);
+            /* The frame only wakes a worker already blocked in recv.  Once
+             * the injected clock is visible, the worker may instead win the
+             * race and close the expired connection before this send.  Both
+             * schedules are valid; the contract below is the bounded EOF,
+             * not whether a trigger can still be written to an expired
+             * connection. */
+            (void)fs_send_frame(&client, FS_PADDING, NULL, 0);
         }
 
-        ok = ok && file_service_wait_for_eof(fd, 2000);
+        bool peer_closed = file_service_wait_for_eof(fd, 2000);
+        ok = ok && peer_closed;
 
         if (clock_installed)
             platform_clock_clear_source();
