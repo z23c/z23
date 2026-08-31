@@ -691,14 +691,20 @@ validate_eval_arm "$metrics" bm25 "$bm25_eval_files" "$bm25_eval_context"
    $(hash_text "$(git -C "$repo_root" status --porcelain --untracked-files=all)") = "$driver_status_sha3" ]] ||
     fail "benchmark implementation identity changed during the run"
 
-printf '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v1","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":%s,"tasks_evaluated":%s,"tasks_unsupported":%s,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"evaluated_query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_bytes":%s,"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"%s","evaluator_batch_root_sha3":"%s"}\n' \
+printf -v benchmark_record '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v1","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":%s,"tasks_evaluated":%s,"tasks_unsupported":%s,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"evaluated_query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","jsonq_binary_sha3":"%s","sha3_helper_binary_sha3":"%s","corpus_checker_script_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_bytes":%s,"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"%s","evaluator_batch_root_sha3":"%s"}' \
     "${mode#--}" "$publishable" "$publication_admission" "$driver_commit" \
     "$remote_commit" "$driver_clean" "$driver_status_sha3" "$declared_tasks" \
     "$eligible" "$unsupported" \
     "$corpus_commit_subject" "$corpus_same_commit" \
     "$evaluated_commit_subject" "$evaluated_same_commit" "$rank_sha3" \
-    "$capture_sha3" "$evaluator_sha3" "$corpus_sha3" "$runner_sha3" \
+    "$capture_sha3" "$evaluator_sha3" "$jsonq_sha3" "$sha3_sha3" \
+    "$checker_sha3" "$corpus_sha3" "$runner_sha3" \
     "$batch_bytes" "$batch_base64" "$batch_sha3"
+[[ $(root_field "$benchmark_record" jsonq_binary_sha3) = "$jsonq_sha3" &&
+   $(root_field "$benchmark_record" sha3_helper_binary_sha3) = "$sha3_sha3" &&
+   $(root_field "$benchmark_record" corpus_checker_script_sha3) = "$checker_sha3" ]] ||
+    fail "benchmark tool identity fields do not match their observed inputs"
+printf '%s\n' "$benchmark_record"
 cat "$task_rows"
 printf '{"record":"aggregate","schema":"zcl.retrieval_gold_benchmark_aggregate.v1","metrics":%s,"files_read_observed":false,"observed_token_count_available":false,"wrong_scope_basis":"unavailable","reuse_success_available":false,"duplicate_avoidance_available":false,"new_unique_loc_avoided_available":false}\n' \
     "$(raw_field "$metrics" .)"
