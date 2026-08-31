@@ -429,6 +429,8 @@ static bool index_app_run_valid(
         strcmp(build->toolchain_capsule_root_hex,
                task->toolchain_capsule_root_hex) == 0 &&
         build->finished_unix <= out->started_unix;
+    zcl_hex_encode(out->artifact_root, 32, bound);
+    ok = ok && build && strcmp(bound, build->output_root_hex) == 0;
     bool success = vcs_zcode_app_run_observation_v1_proves_success(out);
     return ok && ((success && receipt->status == VCS_ZCODE_WORK_PASS) ||
                   (!success && receipt->status != VCS_ZCODE_WORK_PASS));

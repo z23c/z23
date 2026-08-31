@@ -5942,6 +5942,38 @@ static int test_zd_task_index(void)
         entry_a = vcs_zcode_task_index_find(index, root_a);
         ASSERT(entry_a != NULL);
         ASSERT_EQ(entry_a->app_run_receipt_count, 1u);
+        /* The observation names an arbitrary artifact rather than the exact
+         * output committed by its build receipt.  A matching task/candidate
+         * is not enough to establish the built-artifact -> executed-artifact
+         * relation. */
+        ASSERT_EQ(entry_a->valid_app_run_receipt_count, 0u);
+
+        /* Bind a second observation to the exact output root committed by
+         * the referenced build receipt.  Only this relation is valid. */
+        memcpy(app_observation.artifact_root,
+               build_receipt.output_root, 32);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_serialize(
+                      &app_observation, app_wire), VCS_ZCODE_APP_RUN_OK);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_root(
+                      &app_observation, app_observation_root),
+                  VCS_ZCODE_APP_RUN_OK);
+        ASSERT(vcs_object_put_addressed(
+            workspace, app_observation_root, app_wire, sizeof(app_wire)));
+        memcpy(app_receipt.output_root, app_observation_root, 32);
+        memcpy(app_receipt.evidence_root, app_observation_root, 32);
+        zd_root(app_receipt.action_root, 0x9d);
+        zd_root(app_receipt.lease_id, 0x9e);
+        memset(app_receipt.signer_pubkey, 0,
+               sizeof(app_receipt.signer_pubkey));
+        memset(app_receipt.signature, 0, sizeof(app_receipt.signature));
+        ASSERT(zd_index_store_receipt(workspace, &app_receipt, 0xa2,
+                                      app_receipt_root));
+        vcs_zcode_task_index_free(index);
+        index = vcs_zcode_task_index_build(workspace, now);
+        ASSERT(index != NULL);
+        entry_a = vcs_zcode_task_index_find(index, root_a);
+        ASSERT(entry_a != NULL);
+        ASSERT_EQ(entry_a->app_run_receipt_count, 2u);
         ASSERT_EQ(entry_a->valid_app_run_receipt_count, 1u);
         char app_receipt_hex[65], app_observation_hex[65];
         zcl_hex_encode(app_receipt_root, 32, app_receipt_hex);
