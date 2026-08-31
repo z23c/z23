@@ -197,6 +197,13 @@ struct zcl_result build_fabric_proof_evaluate(
     struct node_db *ndb, const char *workspace, const char *action_id,
     int64_t now, struct build_fabric_proof_evaluation *out);
 
+/* Re-verify the same canonical facts and persist only the immutable proof-set
+ * object. This grants no receipt trust promotion and changes no database
+ * projection. Repeated materialization of the same set is a CAS no-op. */
+struct zcl_result build_fabric_proof_materialize(
+    struct node_db *ndb, const char *workspace, const char *action_id,
+    int64_t now, struct build_fabric_proof_evaluation *out);
+
 /* Same canonical verification and policy calculation, without writing the
  * proof-set object or promoting receipt trust. Presentation/status readers
  * and release qualification use this to verify current facts without

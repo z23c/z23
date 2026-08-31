@@ -2997,7 +2997,6 @@ static int test_zd_improve_command(void)
                       &refused_action_input),
                   VCS_ZCODE_ACTION_INPUT_SHAPE);
         free(corrupt_action_input);
-        free(action_input_wire);
         ASSERT_STR_EQ(action_input.path, "unit.i");
         uint8_t action_input_check[32];
         ASSERT_EQ(vcs_zcode_action_input_root(
@@ -3036,7 +3035,10 @@ static int test_zd_improve_command(void)
         ASSERT(memcmp(authority_bundle, authority_bundle_again,
                       authority_bundle_len) == 0);
         free(authority_bundle_again);
-        char transfer_dir[256], receiver[256], corrupt_receiver[256];
+        char transfer_dir[256], receiver[256], restored_receiver[256];
+        char restored_checkout[256];
+        char mismatched_receiver[256], unbound_receiver[256];
+        char corrupt_receiver[256];
         char task_corrupt_receiver[256], task_mismatch_receiver[256];
         test_make_tmpdir(transfer_dir, sizeof(transfer_dir), "zcode_dev",
                          "authority_transfer");
@@ -3049,11 +3051,13 @@ static int test_zd_improve_command(void)
         transfer.proof_policy = policy;
         ASSERT(zcl_hex_decode_lower(sha256_saved, transfer.source_sha256, 32));
         (void)snprintf(transfer.profile, sizeof(transfer.profile), "dev");
-        transfer.fixed_input_len = sizeof(source) - 1u;
+        transfer.fixed_input_len = action_input_wire_len;
         transfer.fixed_input = zcl_malloc(transfer.fixed_input_len,
                                           "test.transfer.input");
         ASSERT(transfer.fixed_input != NULL);
-        memcpy(transfer.fixed_input, source, transfer.fixed_input_len);
+        memcpy(transfer.fixed_input, action_input_wire,
+               transfer.fixed_input_len);
+        free(action_input_wire);
         transfer.candidate_authority_len = authority_bundle_len;
         transfer.candidate_authority = zcl_malloc(
             authority_bundle_len, "test.transfer.authority");
@@ -3134,6 +3138,149 @@ static int test_zd_improve_command(void)
         ASSERT_EQ(vcs_zcode_task_authority_validate_for_candidate(
                       receiver, &task, &candidate),
                   VCS_ZCODE_TASK_AUTHORITY_OK);
+        test_make_tmpdir(restored_receiver, sizeof(restored_receiver),
+                         "zcode_dev", "context-restored-receiver");
+        uint8_t restore_policy_root[32], restore_input_root[32];
+        uint8_t restore_action_root[32];
+        uint8_t restore_task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+        uint8_t restore_candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+        uint8_t restore_policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_proof_policy_root(
+                      &policy, restore_policy_root), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_context_action_root_for_kind(
+                      &transfer, VCS_BUILD_ACTION_KIND_V1, transfer_now,
+                      restore_action_root, restore_input_root),
+                  VCS_ZCODE_WORK_CONTEXT_OK);
+        ASSERT(memcmp(restore_action_root, transfer_action, 32) == 0);
+        ASSERT_EQ(vcs_zcode_task_serialize(
+                      &task, restore_task_wire), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_candidate_serialize(
+                      &candidate, restore_candidate_wire), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_proof_policy_serialize(
+                      &policy, restore_policy_wire), VCS_ZCODE_DEV_OK);
+        const uint8_t *restore_roots[] = {
+            task_root, candidate_root, restore_policy_root, restore_input_root
+        };
+        const uint8_t *restore_wires[] = {
+            restore_task_wire, restore_candidate_wire, restore_policy_wire,
+            transfer.fixed_input
+        };
+        const size_t restore_wire_lens[] = {
+            sizeof(restore_task_wire), sizeof(restore_candidate_wire),
+            sizeof(restore_policy_wire), transfer.fixed_input_len
+        };
+        ASSERT(vcs_object_store_init(restored_receiver));
+        for (size_t i = 0;
+             i < sizeof(restore_roots) / sizeof(restore_roots[0]); i++) {
+            uint8_t *poisoned = zcl_malloc(
+                restore_wire_lens[i], "test.context.restore.poison");
+            ASSERT(poisoned != NULL);
+            memset(poisoned, 0xa5, restore_wire_lens[i]);
+            if (memcmp(poisoned, restore_wires[i],
+                       restore_wire_lens[i]) == 0)
+                poisoned[0] ^= 1u;
+            ASSERT(vcs_object_put_addressed(
+                restored_receiver, restore_roots[i], poisoned,
+                restore_wire_lens[i]));
+            free(poisoned);
+        }
+        struct vcs_zcode_work_context_roots restored_roots;
+        ASSERT_EQ(vcs_zcode_work_context_restore_for_kind(
+                      transfer_store, transfer_root, restored_receiver,
+                      VCS_BUILD_ACTION_KIND_V1, transfer_now,
+                      &restored_roots), VCS_ZCODE_WORK_CONTEXT_OK);
+        for (size_t i = 0;
+             i < sizeof(restore_roots) / sizeof(restore_roots[0]); i++) {
+            uint8_t *canonical = NULL;
+            size_t canonical_len = 0;
+            ASSERT_EQ(vcs_object_load_raw_bounded(
+                          restored_receiver, restore_roots[i],
+                          restore_wire_lens[i], &canonical,
+                          &canonical_len), 0);
+            ASSERT_EQ(canonical_len, restore_wire_lens[i]);
+            ASSERT(memcmp(canonical, restore_wires[i], canonical_len) == 0);
+            free(canonical);
+        }
+        uint8_t restored_manifest_id[32];
+        uint8_t *restored_manifest_wire = NULL;
+        size_t restored_manifest_len = 0;
+        ASSERT_EQ(vcs_object_load_raw(
+                      restored_receiver, candidate.candidate_source_root,
+                      &restored_manifest_wire, &restored_manifest_len), 0);
+        vcs_source_manifest_id(restored_manifest_wire, restored_manifest_len,
+                               restored_manifest_id);
+        free(restored_manifest_wire);
+        ASSERT(memcmp(restored_roots.source_root,
+                      candidate.candidate_source_root, 32) == 0);
+        ASSERT(memcmp(restored_roots.source_manifest_id,
+                      restored_manifest_id, 32) == 0);
+        ASSERT(memcmp(restored_roots.action_root, transfer_action, 32) == 0);
+        ASSERT(vcs_object_has(restored_receiver, restored_roots.input_root));
+        test_make_tmpdir(restored_checkout, sizeof(restored_checkout),
+                         "zcode_dev", "context-restored-checkout");
+        ASSERT_EQ(vcs_tree_materialize(
+                      restored_receiver, restored_roots.source_root,
+                      restored_checkout, task.max_context_bytes, 0u), VCS_OK);
+        uint8_t recaptured_source_root[32];
+        ASSERT_EQ(vcs_tree_capture_path(
+                      restored_checkout, recaptured_source_root), VCS_OK);
+        ASSERT(memcmp(recaptured_source_root, restored_roots.source_root,
+                      32) == 0);
+
+        transfer.source_sha256[0] ^= 1u;
+        uint8_t mismatched_root[32], mismatched_action[32];
+        ASSERT_EQ(vcs_zcode_work_context_put_for_kind_with_candidate(
+                      transfer_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
+                      transfer_now, workspace, mismatched_root,
+                      mismatched_action), VCS_ZCODE_WORK_CONTEXT_OK);
+        test_make_tmpdir(mismatched_receiver, sizeof(mismatched_receiver),
+                         "zcode_dev", "context-mismatched-receiver");
+        struct vcs_zcode_work_context_roots mismatched_roots;
+        ASSERT_EQ(vcs_zcode_work_context_restore_for_kind(
+                      transfer_store, mismatched_root, mismatched_receiver,
+                      VCS_BUILD_ACTION_KIND_V1, transfer_now,
+                      &mismatched_roots), VCS_ZCODE_WORK_CONTEXT_ACTION);
+        struct vcs_zcode_work_context_roots zero_roots = {0};
+        ASSERT(memcmp(&mismatched_roots, &zero_roots,
+                      sizeof(mismatched_roots)) == 0);
+        transfer.source_sha256[0] ^= 1u;
+
+        struct vcs_zcode_action_input_v1 unbound_input;
+        ASSERT_EQ(vcs_zcode_action_input_parse(
+                      transfer.fixed_input, transfer.fixed_input_len,
+                      &unbound_input), VCS_ZCODE_ACTION_INPUT_OK);
+        free(unbound_input.path);
+        static const char absent_path[] = "absent.i";
+        unbound_input.path = zcl_malloc(sizeof(absent_path),
+                                        "test.transfer.absent_path");
+        ASSERT(unbound_input.path != NULL);
+        memcpy(unbound_input.path, absent_path, sizeof(absent_path));
+        uint8_t *unbound_wire = NULL;
+        size_t unbound_wire_len = 0;
+        ASSERT_EQ(vcs_zcode_action_input_serialize(
+                      &unbound_input, &unbound_wire, &unbound_wire_len),
+                  VCS_ZCODE_ACTION_INPUT_OK);
+        vcs_zcode_action_input_free(&unbound_input);
+        uint8_t *bound_wire = transfer.fixed_input;
+        size_t bound_wire_len = transfer.fixed_input_len;
+        transfer.fixed_input = unbound_wire;
+        transfer.fixed_input_len = unbound_wire_len;
+        uint8_t unbound_root[32], unbound_action[32];
+        ASSERT_EQ(vcs_zcode_work_context_put_for_kind_with_candidate(
+                      transfer_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
+                      transfer_now, workspace, unbound_root, unbound_action),
+                  VCS_ZCODE_WORK_CONTEXT_OK);
+        transfer.fixed_input = bound_wire;
+        transfer.fixed_input_len = bound_wire_len;
+        free(unbound_wire);
+        test_make_tmpdir(unbound_receiver, sizeof(unbound_receiver),
+                         "zcode_dev", "context-unbound-receiver");
+        ASSERT_EQ(vcs_zcode_work_context_restore_for_kind(
+                      transfer_store, unbound_root, unbound_receiver,
+                      VCS_BUILD_ACTION_KIND_V1, transfer_now,
+                      &mismatched_roots), VCS_ZCODE_WORK_CONTEXT_ACTION);
+        ASSERT(memcmp(&mismatched_roots, &zero_roots,
+                      sizeof(mismatched_roots)) == 0);
         struct vcs_zcode_task_v1 mismatched_task = received_transfer.task;
         mismatched_task.acceptance_tests_root[0] ^= 1u;
         test_make_tmpdir(task_mismatch_receiver,
@@ -3175,6 +3322,9 @@ static int test_zd_improve_command(void)
         free(authority_bundle);
         test_rm_rf(task_mismatch_receiver); test_rm_rf(task_corrupt_receiver);
         test_rm_rf(corrupt_receiver);
+        test_rm_rf(restored_checkout);
+        test_rm_rf(unbound_receiver);
+        test_rm_rf(mismatched_receiver); test_rm_rf(restored_receiver);
         test_rm_rf(receiver);
         struct db_build_worker worker;
         uint8_t worker_secret[32], worker_key[32];

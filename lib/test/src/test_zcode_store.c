@@ -38,14 +38,26 @@
 
 #include "test/test_core.h"
 
+#include "models/build_fabric.h"
+#include "services/build_fabric_cache.h"
+#include "services/build_fabric_service.h"
+#include "vcs/build_action.h"
+#include "vcs/build_execution_observation.h"
 #include "vcs/package_store.h"
 
 #include "vcs/blob_store.h"
+#include "vcs/package_deps.h"
 #include "vcs/package_manifest.h"
+#include "vcs/package_recipe.h"
 #include "vcs/package_possession_scheduler.h"
 #include "vcs/package_swarm_node.h"
 #include "vcs/package_swarm_status.h"
 #include "vcs/zcode_work_output.h"
+#include "vcs/zcode_action_input.h"
+#include "vcs/zcode_dev.h"
+#include "vcs/zcode_task_authority.h"
+#include "vcs/vcs.h"
+#include "vcs/vcs_object.h"
 
 #include "config/boot_zcode_swarm_receipt.h"
 #include "controllers/diagnostics_internal.h"
@@ -53,6 +65,8 @@
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "core/uint256.h"
+#include "crypto/ed25519.h"
+#include "crypto/sha3.h"
 #include "json/json.h"
 #include "keys/key.h"
 #include "keys/key_io.h"
@@ -1729,6 +1743,504 @@ static int t_store_work_output(void)
     return failures;
 }
 
+static bool zs_cache_plan(const char *workspace, struct db_build_job *job,
+                          struct db_build_action *action)
+{
+    uint8_t source_sha[32], source_root[32], toolchain[32], policy[32];
+    memset(toolchain, 0x33, sizeof(toolchain));
+    memset(policy, 0x66, sizeof(policy));
+
+    char source_dir[1200], source_c[1240], source_i[1240];
+    (void)snprintf(source_dir, sizeof(source_dir), "%s/cache-source", workspace);
+    (void)snprintf(source_c, sizeof(source_c), "%s/unit.c", source_dir);
+    (void)snprintf(source_i, sizeof(source_i), "%s/unit.i", source_dir);
+    if (mkdir(source_dir, 0700) != 0) return false;
+    static const uint8_t payload[] = "int cache_fixture(void){return 23;}\n";
+    FILE *file = fopen(source_c, "wb");
+    bool files_ok = file && fwrite(payload, 1, sizeof(payload) - 1u, file) ==
+                                  sizeof(payload) - 1u;
+    if (file) files_ok = fclose(file) == 0 && files_ok;
+    file = files_ok ? fopen(source_i, "wb") : NULL;
+    files_ok = file && fwrite(payload, 1, sizeof(payload) - 1u, file) ==
+                              sizeof(payload) - 1u;
+    if (file) files_ok = fclose(file) == 0 && files_ok;
+    if (!files_ok || vcs_tree_capture_into(source_dir, workspace, source_root) !=
+                         VCS_OK)
+        return false;
+    uint8_t *source_wire = NULL;
+    size_t source_wire_len = 0;
+    if (vcs_object_load_raw(
+            workspace, source_root, &source_wire, &source_wire_len) != 0)
+        return false;
+    vcs_source_manifest_id(source_wire, source_wire_len, source_sha);
+    free(source_wire);
+
+    struct vcs_package_lock lock;
+    vcs_package_lock_init(&lock);
+    lock.count = 1;
+    memcpy(lock.nodes[0].root, source_root, 32);
+    (void)snprintf(lock.nodes[0].name, sizeof(lock.nodes[0].name),
+                   "publisher/cache-fixture");
+    (void)snprintf(lock.nodes[0].semver, sizeof(lock.nodes[0].semver), "1.0.0");
+    uint8_t *lock_wire = NULL;
+    size_t lock_len = 0;
+    struct vcs_package_recipe recipe;
+    vcs_package_recipe_init(&recipe);
+    enum vcs_package_recipe_error recipe_error;
+    bool authority_ok = vcs_package_lock_serialize(
+            &lock, &lock_wire, &lock_len) == VCS_PACKAGE_DEPS_OK &&
+        vcs_package_recipe_add_source(&recipe, "unit.c", &recipe_error);
+    vcs_package_recipe_set_test_limits(
+        &recipe, 0, 30, UINT64_C(64) * 1024u * 1024u);
+    uint8_t *recipe_wire = NULL, lock_root[32], recipe_root[32];
+    size_t recipe_len = 0;
+    authority_ok = authority_ok && vcs_package_recipe_serialize(
+            &recipe, &recipe_wire, &recipe_len) == VCS_PACKAGE_RECIPE_OK &&
+        vcs_zcode_task_authority_store(
+            workspace, lock_wire, lock_len, recipe_wire, recipe_len,
+            lock_root, recipe_root) == VCS_ZCODE_TASK_AUTHORITY_OK;
+    vcs_package_recipe_free(&recipe);
+    free(recipe_wire); free(lock_wire);
+    if (!authority_ok) return false;
+
+    struct vcs_zcode_task_v1 task = {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .capabilities = VCS_ZCODE_TASK_CAP_V1_MASK,
+        .max_changed_files = 4,
+        .max_patch_bytes = 1024u,
+        .max_context_bytes = 1024u * 1024u,
+        .max_cpu_seconds = 30,
+        .max_memory_bytes = UINT64_C(64) * 1024u * 1024u,
+        .max_output_bytes = UINT64_C(16) * 1024u * 1024u,
+        .expires_unix = 200,
+    };
+    memcpy(task.source_root, source_root, 32);
+    memcpy(task.dependency_lock_root, lock_root, 32);
+    memcpy(task.acceptance_tests_root, recipe_root, 32);
+    memcpy(task.toolchain_capsule_root, toolchain, 32);
+    memcpy(task.proof_policy_root, policy, 32);
+    memset(task.write_scope_root, 0x91, 32);
+    memset(task.model_policy_root, 0x92, 32);
+    memset(task.goal_root, 0x93, 32);
+    uint8_t task_root[32], task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    if (vcs_zcode_task_root(&task, task_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_serialize(&task, task_wire) != VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(workspace, task_root, task_wire,
+                                  sizeof(task_wire)))
+        return false;
+    struct vcs_zcode_candidate_v1 candidate = {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .sequence = 1,
+        .created_unix = 100,
+    };
+    memcpy(candidate.task_root, task_root, 32);
+    memcpy(candidate.base_source_root, source_root, 32);
+    memcpy(candidate.candidate_source_root, source_root, 32);
+    memset(candidate.patch_root, 0xa1, 32);
+    memset(candidate.adapter_policy_root, 0xa2, 32);
+    memset(candidate.author_pubkey, 0xa3, 32);
+    uint8_t candidate_root[32];
+    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    if (vcs_zcode_candidate_validate_for_task(
+            &task, &candidate, candidate.created_unix) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_root(&candidate, candidate_root) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_serialize(&candidate, candidate_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(workspace, candidate_root, candidate_wire,
+                                  sizeof(candidate_wire)))
+        return false;
+    struct vcs_zcode_action_input_v1 input;
+    enum vcs_zcode_action_input_result input_result =
+        vcs_zcode_action_input_derive_cas(
+            workspace, task_root, candidate_root, &task, &candidate,
+            VCS_ZCODE_WORK_BUILD, "unit.i", &input);
+    uint8_t input_root[32], *wire = NULL;
+    size_t wire_len = 0;
+    bool stored = input_result == VCS_ZCODE_ACTION_INPUT_OK &&
+        vcs_zcode_action_input_root(&input, input_root) ==
+            VCS_ZCODE_ACTION_INPUT_OK &&
+        vcs_zcode_action_input_serialize(&input, &wire, &wire_len) ==
+            VCS_ZCODE_ACTION_INPUT_OK &&
+        vcs_object_put_addressed(workspace, input_root, wire, wire_len);
+    free(wire);
+    vcs_zcode_action_input_free(&input);
+    if (!stored) return false;
+
+    memset(job, 0, sizeof(*job));
+    memset(action, 0, sizeof(*action));
+    zcl_hex_encode(source_sha, 32, job->source_sha256);
+    zcl_hex_encode(source_root, 32, job->source_cas_sha3);
+    zcl_hex_encode(toolchain, 32, job->toolchain_sha3);
+    (void)snprintf(job->profile, sizeof(job->profile), "dev");
+    (void)snprintf(job->state, sizeof(job->state), "ACCEPTED");
+    (void)snprintf(job->outcome, sizeof(job->outcome), "ACCEPTED");
+    job->created_at = job->updated_at = 100;
+    (void)snprintf(action->kind, sizeof(action->kind), "%s",
+                   VCS_BUILD_ACTION_KIND_V1);
+    (void)snprintf(action->state, sizeof(action->state), "ACCEPTED");
+    (void)snprintf(action->outcome, sizeof(action->outcome), "ACCEPTED");
+    zcl_hex_encode(input_root, 32, action->input_root_sha3);
+    zcl_hex_encode(task_root, 32, action->task_root_sha3);
+    zcl_hex_encode(candidate_root, 32, action->candidate_root_sha3);
+    zcl_hex_encode(policy, 32, action->proof_policy_root_sha3);
+    (void)snprintf(action->target, sizeof(action->target), "%s",
+                   VCS_BUILD_TARGET_V1);
+    uint8_t flags[32], environment[32];
+    vcs_build_action_v1_fixed_flags_root(flags);
+    vcs_build_action_v1_fixed_environment_root(environment);
+    zcl_hex_encode(flags, 32, action->flags_sha3);
+    zcl_hex_encode(environment, 32, action->environment_sha3);
+    (void)snprintf(action->virtual_workdir,
+                   sizeof(action->virtual_workdir), "%s",
+                   VCS_BUILD_VIRTUAL_ROOT_V1);
+    (void)snprintf(action->declared_outputs,
+                   sizeof(action->declared_outputs), "%s",
+                   VCS_BUILD_OUTPUT_V1);
+    (void)snprintf(action->resource_policy,
+                   sizeof(action->resource_policy), "%s",
+                   VCS_BUILD_RESOURCE_POLICY_V1);
+    action->created_at = action->updated_at = 100;
+    return build_fabric_action_id(job, action, action->action_id).ok &&
+        build_fabric_job_id(job, action->action_id, job->job_id).ok &&
+        snprintf(action->job_id, sizeof(action->job_id), "%s", job->job_id) > 0;
+}
+
+static bool zs_file_equals(const char *path, const uint8_t *bytes, size_t len)
+{
+    FILE *file = fopen(path, "rb");
+    uint8_t *actual = malloc(len ? len : 1u);
+    bool ok = file && actual && fread(actual, 1, len, file) == len &&
+              fgetc(file) == EOF && memcmp(actual, bytes, len) == 0;
+    free(actual);
+    if (file) ok = fclose(file) == 0 && ok;
+    return ok;
+}
+
+static bool zs_addressed_path(const char *workspace, const uint8_t root[32],
+                              char *out, size_t out_cap)
+{
+    char hex[65];
+    zcl_hex_encode(root, 32, hex);
+    int n = snprintf(out, out_cap, "%s/.zvcs/objects/%.2s/%s",
+                     workspace, hex, hex + 2);
+    return n > 0 && (size_t)n < out_cap;
+}
+
+static void zs_cache_worker_id(const uint8_t pubkey[32], char out[65])
+{
+    static const char domain[] = "zcl.build_worker.v1";
+    struct sha3_256_ctx sha;
+    uint8_t digest[32];
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, pubkey, 32);
+    sha3_256_finalize(&sha, digest);
+    zcl_hex_encode(digest, 32, out);
+}
+
+static bool zs_cache_observation(
+    const char *workspace, const struct db_build_job *job,
+    const struct db_build_action *action, const uint8_t output_root[32],
+    const uint8_t *output, size_t output_len, char root_hex[65])
+{
+    struct vcs_build_execution_observation_v1 observation = {
+        .schema_version = VCS_BUILD_EXECUTION_OBSERVATION_VERSION,
+        .flags = VCS_BUILD_OBS_REQUIRED_FLAGS,
+        .cpu_seconds_limit = 1,
+        .memory_bytes_limit = 1,
+        .process_limit = 1,
+        .file_limit = 1,
+        .file_bytes_limit = output_len,
+        .output_bytes_limit = output_len,
+        .wall_millis_limit = 1,
+    };
+    if (!zcl_hex_decode_lower(action->action_id, observation.action_root, 32) ||
+        !zcl_hex_decode_lower(action->input_root_sha3,
+                              observation.action_input_root, 32) ||
+        !zcl_hex_decode_lower(job->toolchain_sha3,
+                              observation.toolchain_root, 32) ||
+        !zcl_hex_decode_lower(action->flags_sha3,
+                              observation.flags_root, 32) ||
+        !zcl_hex_decode_lower(action->environment_sha3,
+                              observation.environment_root, 32))
+        return false;
+    memcpy(observation.artifact_root, output_root, 32);
+    sha3_256(output, output_len, observation.output_bytes_root);
+    memcpy(observation.observed_input_bytes_root,
+           observation.action_input_root, 32);
+    vcs_build_execution_read_set_root(
+        observation.action_input_root, observation.observed_input_bytes_root,
+        observation.toolchain_root, observation.declared_reads_root);
+    memcpy(observation.observed_reads_root,
+           observation.declared_reads_root, 32);
+    vcs_build_execution_declared_write_set_root(
+        VCS_BUILD_OUTPUT_V1, observation.declared_writes_root);
+    vcs_build_execution_observed_write_set_root(
+        VCS_BUILD_OUTPUT_V1, observation.output_bytes_root,
+        observation.observed_writes_root);
+    uint8_t wire[VCS_BUILD_EXECUTION_OBSERVATION_WIRE_BYTES], root[32];
+    if (!vcs_build_execution_observation_v1_serialize(&observation, wire) ||
+        !vcs_build_execution_observation_v1_root(&observation, root) ||
+        !vcs_object_put_addressed(workspace, root, wire, sizeof(wire)))
+        return false;
+    zcl_hex_encode(root, 32, root_hex);
+    return true;
+}
+
+static bool zs_cache_accept(
+    struct node_db *ndb, const char *workspace, struct db_build_job *job,
+    struct db_build_action *action, const uint8_t output_root[32],
+    const uint8_t *output, size_t output_len)
+{
+    uint8_t seed[32], pubkey[32], secret[32];
+    memset(seed, 0x5a, sizeof(seed));
+    ed25519_keypair(pubkey, secret, seed);
+    struct db_build_worker worker = {
+        .approved = 1,
+        .approved_at = 100,
+        .last_seen_at = 100,
+    };
+    zs_cache_worker_id(pubkey, worker.worker_id);
+    zcl_hex_encode(pubkey, 32, worker.signer_pubkey);
+    (void)snprintf(worker.capabilities, sizeof(worker.capabilities),
+                   "linux,c23,%s", VCS_BUILD_ACTION_KIND_V1);
+    (void)snprintf(job->state, sizeof(job->state), "RUNNING");
+    job->outcome[0] = '\0';
+    (void)snprintf(action->state, sizeof(action->state), "VERIFYING");
+    action->outcome[0] = '\0';
+    action->output_root_sha3[0] = '\0';
+    (void)snprintf(action->worker_id, sizeof(action->worker_id), "%s",
+                   worker.worker_id);
+    memset(seed, 0x6b, sizeof(seed));
+    zcl_hex_encode(seed, 32, action->lease_id);
+    action->lease_expires_at = 190;
+    if (!db_build_worker_save(ndb, &worker) ||
+        !db_build_job_save(ndb, job) || !db_build_action_save(ndb, action))
+        return false;
+    struct db_build_receipt receipt = { .created_at = 150 };
+    (void)snprintf(receipt.action_id, sizeof(receipt.action_id), "%s",
+                   action->action_id);
+    (void)snprintf(receipt.action_sha3, sizeof(receipt.action_sha3), "%s",
+                   action->action_id);
+    (void)snprintf(receipt.job_id, sizeof(receipt.job_id), "%s", job->job_id);
+    (void)snprintf(receipt.worker_id, sizeof(receipt.worker_id), "%s",
+                   worker.worker_id);
+    (void)snprintf(receipt.lease_id, sizeof(receipt.lease_id), "%s",
+                   action->lease_id);
+    zcl_hex_encode(output_root, 32, receipt.output_sha3);
+    if (!zs_cache_observation(
+            workspace, job, action, output_root, output, output_len,
+            receipt.observation_sha3))
+        return false;
+    (void)snprintf(receipt.confinement, sizeof(receipt.confinement),
+                   "fixture:isolation=complete,network=0");
+    (void)snprintf(receipt.trust_state, sizeof(receipt.trust_state),
+                   "REMOTE_OBSERVED");
+    if (!build_fabric_receipt_id(&receipt, receipt.receipt_id).ok)
+        return false;
+    uint8_t receipt_id[32], signature[64];
+    if (!zcl_hex_decode_lower(receipt.receipt_id, receipt_id, 32)) return false;
+    ed25519_sign(signature, receipt_id, 32, secret, pubkey);
+    zcl_hex_encode(signature, 64, receipt.signature);
+    return build_fabric_receipt_quarantine(ndb, &receipt, 150).ok &&
+        build_fabric_receipt_admit(
+            ndb, workspace, receipt.receipt_id, 151).ok &&
+        db_build_job_find(ndb, job->job_id, job) &&
+        db_build_action_find(ndb, action->action_id, action);
+}
+
+static bool zs_cache_rekey(struct db_build_job *job,
+                           struct db_build_action *action)
+{
+    char action_id[BUILD_FABRIC_ID_HEX + 1];
+    char job_id[BUILD_FABRIC_ID_HEX + 1];
+    if (!build_fabric_action_id(job, action, action_id).ok ||
+        !build_fabric_job_id(job, action_id, job_id).ok)
+        return false;
+    (void)snprintf(action->action_id, sizeof(action->action_id), "%s",
+                   action_id);
+    (void)snprintf(action->job_id, sizeof(action->job_id), "%s", job_id);
+    (void)snprintf(job->job_id, sizeof(job->job_id), "%s", job_id);
+    return true;
+}
+
+static int t_store_exact_cache_restore(void)
+{
+    int failures = 0;
+    char dd[1024], output[1200];
+    struct vcs_package_store *store = zs_open(
+        dd, sizeof(dd), "exact_cache_restore",
+        VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    ZS_CHECK("exact cache: package store opens", store != NULL);
+    if (!store) return failures + 1;
+    struct node_db ndb = {0};
+    ZS_CHECK("exact cache: ledger opens", node_db_open(&ndb, ":memory:"));
+    ZS_CHECK("exact cache: ZVCS input store opens",
+             vcs_object_store_init(dd));
+    struct db_build_job job;
+    struct db_build_action action;
+    ZS_CHECK("exact cache: canonical closure and action derive",
+             zs_cache_plan(dd, &job, &action));
+    static const uint8_t object[] = {
+        0x7f, 'E', 'L', 'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 62, 0, 'z', '2', '3', '\n'
+    };
+    uint8_t action_root[32], output_root[32];
+    ZS_CHECK("exact cache: action id decodes",
+             zcl_hex_decode_lower(action.action_id, action_root, 32));
+    ZS_CHECK("exact cache: action-bound output stores",
+             vcs_zcode_work_output_put(store, action_root, object,
+                                       sizeof(object), output_root) ==
+                 VCS_ZCODE_WORK_OUTPUT_OK);
+    (void)snprintf(output, sizeof(output), "%s/restored.o", dd);
+    zcl_hex_encode(output_root, 32, action.output_root_sha3);
+    ZS_CHECK("exact cache: hollow accepted row persists for refusal",
+             db_build_job_save(&ndb, &job) &&
+             db_build_action_save(&ndb, &action));
+    struct build_fabric_cache_report report;
+    struct zcl_result restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: accepted row without receipt is corrupt",
+             !restored.ok &&
+             report.disposition == BUILD_FABRIC_CACHE_CORRUPT &&
+             access(output, F_OK) != 0);
+    ZS_CHECK("exact cache: canonical local receipt admits expired task output",
+             zs_cache_accept(&ndb, dd, &job, &action, output_root,
+                             object, sizeof(object)) &&
+             strcmp(job.state, "ACCEPTED") == 0 &&
+             strcmp(action.state, "ACCEPTED") == 0);
+    struct db_build_job wrong_source_job = job;
+    struct db_build_action wrong_source_action = action;
+    wrong_source_job.source_sha256[0] =
+        wrong_source_job.source_sha256[0] == '0' ? '1' : '0';
+    ZS_CHECK("exact cache: mismatched source identity plan rekeys",
+             zs_cache_rekey(&wrong_source_job, &wrong_source_action));
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &wrong_source_job, &wrong_source_action,
+        output, &report);
+    ZS_CHECK("exact cache: source id must match exact candidate manifest",
+             !restored.ok &&
+             report.disposition == BUILD_FABRIC_CACHE_CORRUPT &&
+             access(output, F_OK) != 0);
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: historical accepted action restores after expiry",
+             restored.ok && report.disposition == BUILD_FABRIC_CACHE_HIT &&
+             report.restored_bytes == sizeof(object) &&
+             zs_file_equals(output, object, sizeof(object)));
+    struct stat stable_before, stable_after;
+    ZS_CHECK("exact cache: materialized object identity captures",
+             stat(output, &stable_before) == 0);
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: identical hit does not rewrite artifact",
+             restored.ok && report.disposition == BUILD_FABRIC_CACHE_HIT &&
+             stat(output, &stable_after) == 0 &&
+             stable_after.st_dev == stable_before.st_dev &&
+             stable_after.st_ino == stable_before.st_ino &&
+             stable_after.st_mtime == stable_before.st_mtime);
+    struct db_build_receipt receipts[1];
+    struct db_build_action unchanged;
+    ZS_CHECK("exact cache: hit mints no receipt or lifecycle transition",
+             db_build_job_receipts(&ndb, job.job_id, receipts, 1) == 1 &&
+             db_build_action_find(&ndb, action.action_id, &unchanged) &&
+             strcmp(unchanged.state, "ACCEPTED") == 0 &&
+             strcmp(unchanged.output_root_sha3,
+                    action.output_root_sha3) == 0);
+
+    struct db_build_action pending = action;
+    (void)snprintf(pending.state, sizeof(pending.state), "SNAPSHOTTED");
+    pending.outcome[0] = '\0';
+    pending.output_root_sha3[0] = '\0';
+    ZS_CHECK("exact cache: unaccepted exact action is a miss",
+             db_build_action_save(&ndb, &pending));
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: miss returns without changing output",
+             restored.ok && report.disposition == BUILD_FABRIC_CACHE_MISS &&
+             zs_file_equals(output, object, sizeof(object)));
+    ZS_CHECK("exact cache: accepted plan restores after miss",
+             db_build_action_save(&ndb, &action));
+
+    uint8_t other_action[32], wrong_root[32];
+    memset(other_action, 0xa5, sizeof(other_action));
+    ZS_CHECK("exact cache: mismatched action carrier stores",
+             vcs_zcode_work_output_put(store, other_action, object,
+                                       sizeof(object), wrong_root) ==
+                 VCS_ZCODE_WORK_OUTPUT_OK);
+    struct db_build_action wrong_output = action;
+    zcl_hex_encode(wrong_root, 32, wrong_output.output_root_sha3);
+    ZS_CHECK("exact cache: poisoned output reference persists for refusal",
+             db_build_action_save(&ndb, &wrong_output));
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: wrong action-bound carrier is corrupt",
+             !restored.ok &&
+             report.disposition == BUILD_FABRIC_CACHE_CORRUPT);
+    ZS_CHECK("exact cache: accepted output reference repairs",
+             db_build_action_save(&ndb, &action));
+
+#if !defined(_WIN32)
+    (void)unlink(output);
+    ZS_CHECK("exact cache: symlink destination fixture creates",
+             symlink("/dev/null", output) == 0);
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: symlink destination refuses closed",
+             !restored.ok &&
+             report.disposition == BUILD_FABRIC_CACHE_CORRUPT);
+    (void)unlink(output);
+#endif
+    uint8_t input_root[32], *input_wire = NULL;
+    size_t input_len = 0;
+    char addressed[1400];
+    ZS_CHECK("exact cache: input closure loads for corruption fixture",
+             zcl_hex_decode_lower(action.input_root_sha3, input_root, 32) &&
+             vcs_object_load_raw(dd, input_root, &input_wire, &input_len) == 0 &&
+             zs_addressed_path(dd, input_root, addressed, sizeof(addressed)));
+    FILE *poison = fopen(addressed, "wb");
+    bool poison_written = poison && fwrite("bad", 1, 3, poison) == 3;
+    if (poison) poison_written = fclose(poison) == 0 && poison_written;
+    ZS_CHECK("exact cache: invalid action input fixture writes",
+             poison_written);
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: invalid input closure refuses before restore",
+             !restored.ok &&
+             report.disposition == BUILD_FABRIC_CACHE_CORRUPT &&
+             access(output, F_OK) != 0);
+    bool repaired = false;
+    ZS_CHECK("exact cache: input closure repairs from canonical bytes",
+             vcs_object_put_addressed_repair(
+                 dd, input_root, input_wire, input_len, &repaired) && repaired);
+    free(input_wire);
+
+    uint8_t candidate_root[32];
+    ZS_CHECK("exact cache: candidate closure address resolves",
+             zcl_hex_decode_lower(action.candidate_root_sha3,
+                                  candidate_root, 32) &&
+             zs_addressed_path(dd, candidate_root, addressed,
+                               sizeof(addressed)));
+    poison = fopen(addressed, "wb");
+    poison_written = poison && fwrite("bad", 1, 3, poison) == 3;
+    if (poison)
+        poison_written = fclose(poison) == 0 && poison_written;
+    ZS_CHECK("exact cache: invalid candidate fixture writes",
+             poison_written);
+    restored = build_fabric_cache_restore(
+        &ndb, dd, store, &job, &action, output, &report);
+    ZS_CHECK("exact cache: invalid candidate refuses before restore",
+             !restored.ok &&
+             report.disposition == BUILD_FABRIC_CACHE_CORRUPT &&
+             access(output, F_OK) != 0);
+    node_db_close(&ndb);
+    vcs_package_store_close(store);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 /* ── 11: dump_state_json ──────────────────────────────────────────── */
 static int t_store_dump_state(void)
 {
@@ -2149,6 +2661,7 @@ int test_zcode_store(void)
     failures += t_store_releases();
     failures += t_store_blob();
     failures += t_store_work_output();
+    failures += t_store_exact_cache_restore();
     failures += t_store_serialized_recovery();
     failures += t_store_dump_state();
     failures += t_swarm_engine_dump_state();

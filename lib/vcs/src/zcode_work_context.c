@@ -13,6 +13,7 @@
 #include "vcs/package_content.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_store.h"
+#include "vcs/vcs_object.h"
 #include "vcs/zcode_action_input.h"
 #include "vcs/zcode_candidate_bundle.h"
 #include "vcs/zcode_candidate_tree.h"
@@ -578,5 +579,154 @@ enum vcs_zcode_work_context_result vcs_zcode_work_context_get(
     free(task_authority); free(authority);
     if (result != VCS_ZCODE_WORK_CONTEXT_OK)
         vcs_zcode_work_context_free(out);
+    return result;
+}
+
+static enum vcs_zcode_work_context_result context_restore_authority(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *receiver_root,
+    const struct vcs_zcode_work_context_v1 *context)
+{
+    if (!context->task_authority || context->task_authority_len == 0 ||
+        vcs_zcode_task_authority_bundle_import(
+            receiver_root, &context->task, context->task_authority,
+            context->task_authority_len) != VCS_ZCODE_TASK_AUTHORITY_OK)
+        return VCS_ZCODE_WORK_CONTEXT_CORRUPT;
+    if (vcs_zcode_work_context_import_authority(receiver_root, context) !=
+            VCS_ZCODE_CANDIDATE_BUNDLE_OK ||
+        vcs_zcode_candidate_tree_import(
+            store, package_root, receiver_root, &context->task,
+            &context->candidate) != VCS_ZCODE_CANDIDATE_TREE_OK)
+        return VCS_ZCODE_WORK_CONTEXT_CORRUPT;
+    return VCS_ZCODE_WORK_CONTEXT_OK;
+}
+
+static bool context_source_manifest_id(
+    const char *receiver_root, const struct vcs_zcode_work_context_v1 *context,
+    uint8_t source_manifest_id[32])
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool loaded = vcs_object_load_raw(
+        receiver_root, context->candidate.candidate_source_root,
+        &wire, &wire_len) == 0 && wire_len > 0;
+    if (loaded) vcs_source_manifest_id(wire, wire_len, source_manifest_id);
+    free(wire);
+    return loaded && memcmp(source_manifest_id, context->source_sha256, 32) == 0;
+}
+
+static bool context_addressed_exact(
+    const char *receiver_root, const uint8_t root[32], const uint8_t *wire,
+    size_t wire_len)
+{
+    uint8_t *stored = NULL;
+    size_t stored_len = 0;
+    bool exact = vcs_object_load_raw_bounded(
+            receiver_root, root, wire_len, &stored, &stored_len) == 0 &&
+        stored_len == wire_len &&
+        (wire_len == 0 || memcmp(stored, wire, wire_len) == 0);
+    free(stored);
+    return exact;
+}
+
+static bool context_store_action_objects(
+    const char *receiver_root, const struct vcs_zcode_work_context_v1 *context,
+    const uint8_t input_root[32])
+{
+    uint8_t task_root[32], candidate_root[32], policy_root[32];
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    bool canonical = vcs_zcode_task_root(
+            &context->task, task_root) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(&context->candidate, candidate_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_policy_root(&context->proof_policy, policy_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_task_serialize(&context->task, task_wire) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_serialize(&context->candidate, candidate_wire) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_policy_serialize(
+            &context->proof_policy, policy_wire) == VCS_ZCODE_DEV_OK &&
+        vcs_object_store_init(receiver_root);
+    if (!canonical) return false;
+    canonical = vcs_object_put_addressed_repair(
+            receiver_root, task_root, task_wire, sizeof(task_wire), NULL) &&
+        vcs_object_put_addressed_repair(
+            receiver_root, candidate_root, candidate_wire,
+            sizeof(candidate_wire), NULL) &&
+        vcs_object_put_addressed_repair(
+            receiver_root, policy_root, policy_wire,
+            sizeof(policy_wire), NULL) &&
+        vcs_object_put_addressed_repair(
+            receiver_root, input_root, context->fixed_input,
+            context->fixed_input_len, NULL);
+    if (!canonical) return false;
+    return context_addressed_exact(
+            receiver_root, task_root, task_wire, sizeof(task_wire)) &&
+        context_addressed_exact(
+            receiver_root, candidate_root, candidate_wire,
+            sizeof(candidate_wire)) &&
+        context_addressed_exact(
+            receiver_root, policy_root, policy_wire, sizeof(policy_wire)) &&
+        context_addressed_exact(
+            receiver_root, input_root, context->fixed_input,
+            context->fixed_input_len);
+}
+
+static bool context_action_input_current(
+    const char *receiver_root, const struct vcs_zcode_work_context_v1 *context,
+    const char *kind, const uint8_t input_root[32])
+{
+    if (strcmp(kind, VCS_BUILD_ACTION_KIND_PACKAGE_V1) == 0) {
+        struct vcs_zcode_package_action_input_v1 input;
+        return vcs_zcode_package_action_input_load_cas(
+            receiver_root, input_root, &context->task, &context->candidate,
+            &input) == VCS_ZCODE_ACTION_INPUT_OK;
+    }
+    uint8_t work_kind = vcs_build_action_v1_work_kind(kind);
+    return work_kind != 0 && vcs_zcode_action_input_verify_cas(
+        receiver_root, input_root, &context->task, &context->candidate,
+        work_kind) == VCS_ZCODE_ACTION_INPUT_OK;
+}
+
+enum vcs_zcode_work_context_result
+vcs_zcode_work_context_restore_for_kind(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *receiver_root, const char *kind, int64_t now_unix,
+    struct vcs_zcode_work_context_roots *roots)
+{
+    if (roots) memset(roots, 0, sizeof(*roots));
+    if (!store || !package_root || !receiver_root || !receiver_root[0] ||
+        !kind || !roots)
+        return VCS_ZCODE_WORK_CONTEXT_NULL;
+    struct vcs_zcode_work_context_v1 context;
+    enum vcs_zcode_work_context_result result = vcs_zcode_work_context_get(
+        store, package_root, now_unix, &context);
+    if (result != VCS_ZCODE_WORK_CONTEXT_OK) return result;
+    result = context_restore_authority(
+        store, package_root, receiver_root, &context);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
+        !context_source_manifest_id(
+            receiver_root, &context, roots->source_manifest_id))
+        result = VCS_ZCODE_WORK_CONTEXT_ACTION;
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK)
+        result = vcs_zcode_work_context_action_root_for_kind(
+            &context, kind, now_unix, roots->action_root, roots->input_root);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
+        !context_store_action_objects(
+            receiver_root, &context, roots->input_root))
+        result = VCS_ZCODE_WORK_CONTEXT_STORE;
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
+        !context_action_input_current(
+            receiver_root, &context, kind, roots->input_root))
+        result = VCS_ZCODE_WORK_CONTEXT_ACTION;
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK)
+        memcpy(roots->source_root,
+               context.candidate.candidate_source_root, 32);
+    else
+        memset(roots, 0, sizeof(*roots));
+    vcs_zcode_work_context_free(&context);
     return result;
 }

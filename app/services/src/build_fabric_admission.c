@@ -3,6 +3,8 @@
 
 #include "services/build_fabric_service.h"
 
+#include "build_fabric_observation_internal.h"
+
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "vcs/build_action.h"
@@ -64,7 +66,7 @@ struct zcl_result build_fabric_receipt_quarantine(
     return ZCL_OK;
 }
 
-static struct zcl_result bfa_observation_verify(
+struct zcl_result build_fabric_observation_verify(
     const char *workspace, const struct db_build_job *job,
     const struct db_build_action *action,
     const struct db_build_receipt *receipt)
@@ -72,7 +74,8 @@ static struct zcl_result bfa_observation_verify(
     uint8_t root[32], checked[32], *wire = NULL;
     size_t wire_len = 0;
     struct vcs_build_execution_observation_v1 observation;
-    if (!workspace || !zcl_hex_decode_lower(
+    if (!workspace || !job || !action || !receipt ||
+        !zcl_hex_decode_lower(
             receipt->observation_sha3, root, sizeof(root)) ||
         vcs_object_load_raw(workspace, root, &wire, &wire_len) != 0)
         return ZCL_ERR(-1, "physical observation is absent from CAS");
@@ -117,7 +120,8 @@ struct zcl_result build_fabric_receipt_admit(
         !db_build_job_find(ndb, action.job_id, &job))
         return ZCL_ERR(-1, "quarantined receipt is absent or not admissible");
     if (strcmp(action.kind, VCS_BUILD_ACTION_KIND_V1) == 0)
-        ZCL_CHECK(bfa_observation_verify(workspace, &job, &action, &receipt));
+        ZCL_CHECK(build_fabric_observation_verify(
+            workspace, &job, &action, &receipt));
     (void)snprintf(receipt.trust_state, sizeof(receipt.trust_state),
                    "LOCAL_ACCEPTED");
     return build_fabric_receipt_accept(ndb, &receipt, now);
@@ -222,10 +226,11 @@ struct zcl_result build_fabric_clean_shadow_compare(
     if (!db_build_action_find(ndb, primary.action_id, &action) ||
         !db_build_job_find(ndb, action.job_id, &job))
         return ZCL_ERR(-1, "clean shadow action authority is absent");
-    struct zcl_result bound = bfa_observation_verify(
+    struct zcl_result bound = build_fabric_observation_verify(
         workspace, &job, &action, &primary);
     if (!bound.ok) return bound;
-    bound = bfa_observation_verify(workspace, &job, &action, &shadow);
+    bound = build_fabric_observation_verify(
+        workspace, &job, &action, &shadow);
     if (!bound.ok) return bound;
     struct vcs_build_execution_observation_v1 a, b;
     struct zcl_result loaded = bfa_observation_load(
