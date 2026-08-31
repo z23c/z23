@@ -3,6 +3,8 @@
 
 #include "services/build_fabric_service.h"
 
+#include "build_fabric_observation_internal.h"
+
 #include "base/hex.h"
 #include "config/c23_commons_build_profile.h"
 #include "crypto/sha3.h"
@@ -449,7 +451,8 @@ static bool bf_has_local_match(
 // and trust promotion must use one verified snapshot of the receipt ledger.
 static struct zcl_result bf_proof_evaluate(
     struct node_db *ndb, const char *workspace, const char *action_id,
-    int64_t now, bool persist, struct build_fabric_proof_evaluation *out)
+    int64_t now, bool materialize, bool promote,
+    struct build_fabric_proof_evaluation *out)
 {
     if (out) memset(out, 0, sizeof(*out));
     if (!ndb || !ndb->open || !workspace || !workspace[0] || !action_id ||
@@ -460,11 +463,14 @@ static struct zcl_result bf_proof_evaluate(
         !action.task_root_sha3[0] || !action.candidate_root_sha3[0] ||
         !action.proof_policy_root_sha3[0])
         return ZCL_ERR(-1, "canonical ZCODE action not found");
-    uint8_t *wire = NULL; size_t wire_len = 0; uint8_t root[32];
+    uint8_t *wire = NULL; size_t wire_len = 0;
+    uint8_t root[32], checked_root[32];
     struct vcs_zcode_task_v1 task;
     if (!bf_load_dev_object(workspace, action.task_root_sha3, &wire,
                             &wire_len, root) ||
-        vcs_zcode_task_parse(wire, wire_len, &task) != VCS_ZCODE_DEV_OK) {
+        vcs_zcode_task_parse(wire, wire_len, &task) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_root(&task, checked_root) != VCS_ZCODE_DEV_OK ||
+        memcmp(root, checked_root, 32) != 0) {
         free(wire); return ZCL_ERR(-1, "task CAS object is absent or corrupt");
     }
     free(wire); wire = NULL;
@@ -472,7 +478,10 @@ static struct zcl_result bf_proof_evaluate(
     if (!bf_load_dev_object(workspace, action.candidate_root_sha3, &wire,
                             &wire_len, root) ||
         vcs_zcode_candidate_parse(wire, wire_len, &candidate) !=
-            VCS_ZCODE_DEV_OK) {
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_root(&candidate, checked_root) !=
+            VCS_ZCODE_DEV_OK ||
+        memcmp(root, checked_root, 32) != 0) {
         free(wire);
         return ZCL_ERR(-1, "candidate CAS object is absent or corrupt");
     }
@@ -481,7 +490,10 @@ static struct zcl_result bf_proof_evaluate(
     if (!bf_load_dev_object(workspace, action.proof_policy_root_sha3, &wire,
                             &wire_len, root) ||
         vcs_zcode_proof_policy_parse(wire, wire_len, &policy) !=
-            VCS_ZCODE_DEV_OK) {
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_policy_root(&policy, checked_root) !=
+            VCS_ZCODE_DEV_OK ||
+        memcmp(root, checked_root, 32) != 0) {
         free(wire);
         return ZCL_ERR(-1, "proof policy CAS object is absent or corrupt");
     }
@@ -515,14 +527,24 @@ static struct zcl_result bf_proof_evaluate(
         uint8_t expected_kind =
             vcs_build_action_v1_work_kind(receipt_action.kind);
         if (expected_kind == 0) continue;
+        struct db_build_job receipt_job;
+        bool compile_action = strcmp(
+            receipt_action.kind, VCS_BUILD_ACTION_KIND_V1) == 0;
+        if (compile_action && !db_build_job_find(
+                                  ndb, receipt_action.job_id, &receipt_job))
+            continue;
         uint8_t receipt_root[32]; uint8_t *receipt_wire = NULL;
         size_t receipt_len = 0;
         if (!bf_load_dev_object(workspace, rows[i].work_receipt_sha3,
                                 &receipt_wire, &receipt_len, receipt_root))
             continue;
         struct vcs_zcode_work_receipt_v1 receipt;
+        uint8_t checked_receipt_root[32];
         bool verified = vcs_zcode_work_receipt_parse(
                 receipt_wire, receipt_len, &receipt) == VCS_ZCODE_DEV_OK &&
+            vcs_zcode_work_receipt_id(&receipt, checked_receipt_root) ==
+                VCS_ZCODE_DEV_OK &&
+            memcmp(receipt_root, checked_receipt_root, 32) == 0 &&
             vcs_zcode_work_receipt_verify(&receipt,
                                            receipt.signer_pubkey) ==
                 VCS_ZCODE_DEV_OK &&
@@ -543,6 +565,19 @@ static struct zcl_result bf_proof_evaluate(
             (policy.maximum_proof_age_seconds == 0 ||
              now - receipt.finished_unix <=
                  (int64_t)policy.maximum_proof_age_seconds);
+        if (verified && compile_action) {
+            uint8_t projected_output[32], projected_observation[32];
+            verified = zcl_hex_decode_lower(
+                    rows[i].output_sha3, projected_output, 32) &&
+                zcl_hex_decode_lower(
+                    rows[i].observation_sha3, projected_observation, 32) &&
+                memcmp(projected_output, receipt.output_root, 32) == 0 &&
+                memcmp(projected_observation,
+                       receipt.evidence_root, 32) == 0 &&
+                build_fabric_observation_verify(
+                    workspace, &receipt_job, &receipt_action,
+                    &rows[i]).ok;
+        }
         bool package_test_passed = false;
         uint8_t evidence_output[32];
         memcpy(evidence_output, receipt.output_root, sizeof(evidence_output));
@@ -731,11 +766,11 @@ static struct zcl_result bf_proof_evaluate(
         vcs_zcode_proof_set_root(
             (const uint8_t (*)[32])proof_roots, proof_count, proof_root) !=
             VCS_ZCODE_DEV_OK ||
-        (persist && !vcs_object_put_addressed(workspace, proof_root,
-                                              proof_wire, proof_len)))
+        (materialize && !vcs_object_put_addressed(
+                            workspace, proof_root, proof_wire, proof_len)))
         return ZCL_ERR(-1, "canonical proof set could not enter CAS");
     zcl_hex_encode(proof_root, 32, out->proof_set_root_sha3);
-    if (!persist) return ZCL_OK;
+    if (!promote) return ZCL_OK;
     if (!node_db_begin(ndb))
         return ZCL_ERR(-1, "cannot begin receipt trust promotion");
     bool saved = true;
@@ -781,12 +816,22 @@ struct zcl_result build_fabric_proof_evaluate(
     struct node_db *ndb, const char *workspace, const char *action_id,
     int64_t now, struct build_fabric_proof_evaluation *out)
 {
-    return bf_proof_evaluate(ndb, workspace, action_id, now, true, out);
+    return bf_proof_evaluate(
+        ndb, workspace, action_id, now, true, true, out);
+}
+
+struct zcl_result build_fabric_proof_materialize(
+    struct node_db *ndb, const char *workspace, const char *action_id,
+    int64_t now, struct build_fabric_proof_evaluation *out)
+{
+    return bf_proof_evaluate(
+        ndb, workspace, action_id, now, true, false, out);
 }
 
 struct zcl_result build_fabric_proof_evaluate_readonly(
     struct node_db *ndb, const char *workspace, const char *action_id,
     int64_t now, struct build_fabric_proof_evaluation *out)
 {
-    return bf_proof_evaluate(ndb, workspace, action_id, now, false, out);
+    return bf_proof_evaluate(
+        ndb, workspace, action_id, now, false, false, out);
 }

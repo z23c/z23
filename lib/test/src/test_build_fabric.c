@@ -2,6 +2,7 @@
  * purpose: Prove the build-fabric v42 schema, leases, and relationships. */
 
 #include "test/test_core.h"
+#include "test/accepted_work_fixture.h"
 #include "test/build_release_regression_fixture.h"
 
 #include "models/build_fabric.h"
@@ -317,6 +318,7 @@ static int test_bf_async_proof_events(void)
                        sizeof(action.proof_policy_root_sha3), "%s", id_c);
         ASSERT(bf_canonicalize(&job, &action));
         ASSERT(build_fabric_plan(&ndb, &job, &action).ok);
+
         struct db_build_proof_event requested, duplicate, event;
         bool created = false;
         ASSERT(build_fabric_proof_request(
@@ -1780,6 +1782,325 @@ static int test_bf_content_contracts(void)
     return failures;
 }
 
+static int test_bf_proof_materialization(void)
+{
+    int failures = 0;
+    TEST("build_fabric: proof materialization stores evidence without trust promotion") {
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path),
+                       "proof_materialize"));
+        int64_t now = 2000;
+        static const uint8_t source[] = "proof-materialization-source";
+        uint8_t source_root[32];
+        sha3_256(source, sizeof(source) - 1u, source_root);
+        struct test_accepted_work_fixture fixture;
+        ASSERT(test_accepted_work_fixture_create(
+            dir, source_root, now, 0x35, &fixture));
+
+        struct db_build_job job;
+        struct db_build_action action;
+        bf_job(&job);
+        bf_action(&action);
+        zcl_hex_encode(source_root, 32, job.source_cas_sha3);
+        zcl_hex_encode(fixture.accepted.task.toolchain_capsule_root, 32,
+                       job.toolchain_sha3);
+        zcl_hex_encode(source_root, 32, action.input_root_sha3);
+        zcl_hex_encode(fixture.accepted.task_root, 32,
+                       action.task_root_sha3);
+        zcl_hex_encode(fixture.accepted.candidate_root, 32,
+                       action.candidate_root_sha3);
+        zcl_hex_encode(fixture.accepted.proof_policy_root, 32,
+                       action.proof_policy_root_sha3);
+        ASSERT(bf_canonicalize(&job, &action));
+        ASSERT(build_fabric_plan(&ndb, &job, &action).ok);
+
+        uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+        uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+        uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_task_serialize(
+            &fixture.accepted.task, task_wire), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_candidate_serialize(
+            &fixture.accepted.candidate, candidate_wire),
+            VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_proof_policy_serialize(
+            &fixture.accepted.policy, policy_wire), VCS_ZCODE_DEV_OK);
+        uint8_t misaddressed_authority[3][32];
+        memset(misaddressed_authority[0], 0xf1, 32);
+        memset(misaddressed_authority[1], 0xf2, 32);
+        memset(misaddressed_authority[2], 0xf3, 32);
+        ASSERT(vcs_object_put_addressed(
+            dir, misaddressed_authority[0], task_wire, sizeof(task_wire)));
+        ASSERT(vcs_object_put_addressed(
+            dir, misaddressed_authority[1], candidate_wire,
+            sizeof(candidate_wire)));
+        ASSERT(vcs_object_put_addressed(
+            dir, misaddressed_authority[2], policy_wire,
+            sizeof(policy_wire)));
+        char canonical_task_root[65], canonical_candidate_root[65];
+        char canonical_policy_root[65];
+        (void)snprintf(canonical_task_root, sizeof(canonical_task_root),
+                       "%s", action.task_root_sha3);
+        (void)snprintf(canonical_candidate_root,
+                       sizeof(canonical_candidate_root), "%s",
+                       action.candidate_root_sha3);
+        (void)snprintf(canonical_policy_root,
+                       sizeof(canonical_policy_root), "%s",
+                       action.proof_policy_root_sha3);
+        struct build_fabric_proof_evaluation rejected = {0};
+        zcl_hex_encode(misaddressed_authority[0], 32,
+                       action.task_root_sha3);
+        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT(!build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &rejected).ok);
+        (void)snprintf(action.task_root_sha3,
+                       sizeof(action.task_root_sha3), "%s",
+                       canonical_task_root);
+        zcl_hex_encode(misaddressed_authority[1], 32,
+                       action.candidate_root_sha3);
+        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT(!build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &rejected).ok);
+        (void)snprintf(action.candidate_root_sha3,
+                       sizeof(action.candidate_root_sha3), "%s",
+                       canonical_candidate_root);
+        zcl_hex_encode(misaddressed_authority[2], 32,
+                       action.proof_policy_root_sha3);
+        ASSERT(db_build_action_save(&ndb, &action));
+        ASSERT(!build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &rejected).ok);
+        (void)snprintf(action.proof_policy_root_sha3,
+                       sizeof(action.proof_policy_root_sha3), "%s",
+                       canonical_policy_root);
+        ASSERT(db_build_action_save(&ndb, &action));
+
+        struct db_build_worker worker;
+        bf_worker(&worker);
+        bf_worker_id_from_pubkey(fixture.signer_pubkey, worker.worker_id);
+        zcl_hex_encode(fixture.signer_pubkey, 32, worker.signer_pubkey);
+        worker.approved_at = now - 30;
+        worker.last_seen_at = now - 30;
+        ASSERT(db_build_worker_save(&ndb, &worker));
+
+        struct vcs_zcode_work_receipt_v1 work = {
+            .schema_version = VCS_ZCODE_DEV_VERSION,
+            .work_kind = VCS_ZCODE_WORK_BUILD,
+            .status = VCS_ZCODE_WORK_PASS,
+            .exit_status = 0,
+            .started_unix = now - 20,
+            .finished_unix = now - 10,
+        };
+        memcpy(work.task_root, fixture.accepted.task_root, 32);
+        memcpy(work.candidate_root, fixture.accepted.candidate_root, 32);
+        ASSERT(zcl_hex_decode_lower(action.action_id, work.action_root, 32));
+        memcpy(work.input_root, source_root, 32);
+        memcpy(work.proof_policy_root,
+               fixture.accepted.proof_policy_root, 32);
+        memcpy(work.toolchain_capsule_root,
+               fixture.accepted.task.toolchain_capsule_root, 32);
+        memset(work.output_root, 0xd1, 32);
+        memset(work.lease_id, 0xd2, 32);
+        memset(work.confinement_root, 0xd4, 32);
+        struct vcs_build_execution_observation_v1 observation = {
+            .schema_version = VCS_BUILD_EXECUTION_OBSERVATION_VERSION,
+            .flags = VCS_BUILD_OBS_REQUIRED_FLAGS,
+            .exit_status = 0,
+            .cpu_seconds_limit = 120,
+            .memory_bytes_limit = UINT64_C(2048) * 1024u * 1024u,
+            .process_limit = 16,
+            .file_limit = 64,
+            .file_bytes_limit = UINT64_C(256) * 1024u * 1024u,
+            .output_bytes_limit = UINT64_C(256) * 1024u * 1024u,
+            .wall_millis_limit = 120000,
+        };
+        memcpy(observation.action_root, work.action_root, 32);
+        memcpy(observation.action_input_root, work.input_root, 32);
+        memset(observation.observed_input_bytes_root, 0xc1, 32);
+        memcpy(observation.artifact_root, work.output_root, 32);
+        memset(observation.output_bytes_root, 0xc2, 32);
+        memcpy(observation.toolchain_root,
+               work.toolchain_capsule_root, 32);
+        ASSERT(zcl_hex_decode_lower(
+            action.flags_sha3, observation.flags_root, 32));
+        ASSERT(zcl_hex_decode_lower(
+            action.environment_sha3, observation.environment_root, 32));
+        vcs_build_execution_read_set_root(
+            observation.action_input_root,
+            observation.observed_input_bytes_root,
+            observation.toolchain_root,
+            observation.declared_reads_root);
+        memcpy(observation.observed_reads_root,
+               observation.declared_reads_root, 32);
+        vcs_build_execution_declared_write_set_root(
+            action.declared_outputs, observation.declared_writes_root);
+        vcs_build_execution_observed_write_set_root(
+            action.declared_outputs, observation.output_bytes_root,
+            observation.observed_writes_root);
+        ASSERT(vcs_build_execution_observation_v1_root(
+            &observation, work.evidence_root));
+        uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+        uint8_t work_root[32];
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(
+            &work, fixture.signer_secret, fixture.signer_pubkey),
+            VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_validate_for_candidate(
+            &fixture.accepted.task, &fixture.accepted.candidate,
+            &work, now), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&work, work_wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&work, work_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(
+            dir, work_root, work_wire, sizeof(work_wire)));
+
+        struct db_build_receipt row = {0};
+        zcl_hex_encode(work_root, 32, row.receipt_id);
+        (void)snprintf(row.action_id, sizeof(row.action_id), "%s",
+                       action.action_id);
+        (void)snprintf(row.job_id, sizeof(row.job_id), "%s", job.job_id);
+        (void)snprintf(row.worker_id, sizeof(row.worker_id), "%s",
+                       worker.worker_id);
+        zcl_hex_encode(work.lease_id, 32, row.lease_id);
+        (void)snprintf(row.action_sha3, sizeof(row.action_sha3), "%s",
+                       action.action_id);
+        zcl_hex_encode(work.output_root, 32, row.output_sha3);
+        (void)snprintf(row.work_receipt_sha3,
+                       sizeof(row.work_receipt_sha3), "%s", row.receipt_id);
+        zcl_hex_encode(work.signature, 64, row.signature);
+        zcl_hex_encode(work.evidence_root, 32, row.observation_sha3);
+        (void)snprintf(row.confinement, sizeof(row.confinement),
+                       "test=canonical-proof-materialization");
+        (void)snprintf(row.trust_state, sizeof(row.trust_state),
+                       "REMOTE_OBSERVED");
+        row.created_at = work.finished_unix;
+        ASSERT(db_build_receipt_save(&ndb, &row));
+
+        int db_changes = sqlite3_total_changes(ndb.db);
+        struct build_fabric_proof_evaluation readonly = {0};
+        ASSERT(build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &readonly).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
+        ASSERT_EQ(readonly.valid_receipts, 0);
+        ASSERT(readonly.proof_set_root_sha3[0] == '\0');
+
+        uint8_t observation_wire[
+            VCS_BUILD_EXECUTION_OBSERVATION_WIRE_BYTES];
+        ASSERT(vcs_build_execution_observation_v1_serialize(
+            &observation, observation_wire));
+        observation_wire[16] ^= 1u;
+        ASSERT(vcs_object_put_addressed(
+            dir, work.evidence_root, observation_wire,
+            sizeof(observation_wire)));
+        memset(&readonly, 0, sizeof(readonly));
+        ASSERT(build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &readonly).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
+        ASSERT_EQ(readonly.valid_receipts, 0);
+        ASSERT(readonly.proof_set_root_sha3[0] == '\0');
+
+        ASSERT(vcs_build_execution_observation_v1_serialize(
+            &observation, observation_wire));
+        bool repaired = false;
+        ASSERT(vcs_object_put_addressed_repair(
+            dir, work.evidence_root, observation_wire,
+            sizeof(observation_wire), &repaired));
+        ASSERT(repaired);
+        uint8_t misaddressed_receipt_root[32];
+        memset(misaddressed_receipt_root, 0xf4, 32);
+        ASSERT(vcs_object_put_addressed(
+            dir, misaddressed_receipt_root, work_wire,
+            sizeof(work_wire)));
+        zcl_hex_encode(misaddressed_receipt_root, 32,
+                       row.work_receipt_sha3);
+        ASSERT(db_build_receipt_save(&ndb, &row));
+        db_changes = sqlite3_total_changes(ndb.db);
+        memset(&readonly, 0, sizeof(readonly));
+        ASSERT(build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &readonly).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
+        ASSERT_EQ(readonly.valid_receipts, 0);
+        ASSERT(readonly.proof_set_root_sha3[0] == '\0');
+        struct build_fabric_proof_evaluation refused_materialization = {0};
+        ASSERT(build_fabric_proof_materialize(
+            &ndb, dir, action.action_id, now,
+            &refused_materialization).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
+        ASSERT_EQ(refused_materialization.valid_receipts, 0);
+        ASSERT(refused_materialization.proof_set_root_sha3[0] == '\0');
+        (void)snprintf(row.work_receipt_sha3,
+                       sizeof(row.work_receipt_sha3), "%s",
+                       row.receipt_id);
+        ASSERT(db_build_receipt_save(&ndb, &row));
+        db_changes = sqlite3_total_changes(ndb.db);
+        memset(&readonly, 0, sizeof(readonly));
+        ASSERT(build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &readonly).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
+        ASSERT_EQ(readonly.valid_receipts, 1);
+        ASSERT_EQ(readonly.compile_receipts, 1);
+        ASSERT(strlen(readonly.proof_set_root_sha3) == 64);
+        uint8_t proof_root[32];
+        ASSERT(zcl_hex_decode_lower(
+            readonly.proof_set_root_sha3, proof_root, 32));
+        ASSERT(!vcs_object_has(dir, proof_root));
+        struct db_build_receipt observed;
+        ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
+        ASSERT_STR_EQ(observed.trust_state, "REMOTE_OBSERVED");
+
+        struct build_fabric_proof_evaluation materialized = {0};
+        ASSERT(build_fabric_proof_materialize(
+            &ndb, dir, action.action_id, now, &materialized).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
+        ASSERT_STR_EQ(materialized.proof_set_root_sha3,
+                      readonly.proof_set_root_sha3);
+        ASSERT(vcs_object_has(dir, proof_root));
+        uint8_t *stored = NULL;
+        size_t stored_len = 0;
+        ASSERT_EQ(vcs_object_load_raw(
+            dir, proof_root, &stored, &stored_len), 0);
+        uint8_t stored_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
+        size_t stored_count = 0;
+        ASSERT_EQ(vcs_zcode_proof_set_parse(
+            stored, stored_len, stored_roots,
+            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, &stored_count),
+            VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(stored_count, 1);
+        ASSERT(memcmp(stored_roots[0], work_root, 32) == 0);
+        ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
+        ASSERT_STR_EQ(observed.trust_state, "REMOTE_OBSERVED");
+
+        struct build_fabric_proof_evaluation repeated = {0};
+        ASSERT(build_fabric_proof_materialize(
+            &ndb, dir, action.action_id, now, &repeated).ok);
+        ASSERT_EQ(sqlite3_total_changes(ndb.db), db_changes);
+        ASSERT_STR_EQ(repeated.proof_set_root_sha3,
+                      materialized.proof_set_root_sha3);
+        uint8_t *stored_again = NULL;
+        size_t stored_again_len = 0;
+        ASSERT_EQ(vcs_object_load_raw(
+            dir, proof_root, &stored_again, &stored_again_len), 0);
+        ASSERT_EQ(stored_again_len, stored_len);
+        ASSERT(memcmp(stored_again, stored, stored_len) == 0);
+        free(stored_again);
+        free(stored);
+        ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
+        ASSERT_STR_EQ(observed.trust_state, "REMOTE_OBSERVED");
+
+        struct build_fabric_proof_evaluation authoritative = {0};
+        ASSERT(build_fabric_proof_evaluate(
+            &ndb, dir, action.action_id, now, &authoritative).ok);
+        ASSERT(sqlite3_total_changes(ndb.db) > db_changes);
+        ASSERT_STR_EQ(authoritative.proof_set_root_sha3,
+                      materialized.proof_set_root_sha3);
+        ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
+        ASSERT_STR_EQ(observed.trust_state, "QUORUM_MATCHED");
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_subordinate_work_admission(void)
 {
     int failures = 0;
@@ -1846,6 +2167,7 @@ int test_build_fabric(void)
     failures += test_bf_native();
     failures += test_bf_runtime_dump();
     failures += test_bf_content_contracts();
+    failures += test_bf_proof_materialization();
     failures += test_bf_subordinate_work_admission();
     printf("=== build_fabric: %d failures ===\n", failures);
     return failures;

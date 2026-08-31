@@ -8,7 +8,6 @@
 #include "config/boot_mesh_status.h"
 #include "config/boot_mesh_terminal.h"
 #include "config/runtime.h"
-#include "config/boot_zcode_work_authority.h"
 #include "config/boot_zcode_async_proof.h"
 #include "config/boot_zcode_work_perf.h"
 #include "config/boot_zcode_work_progress.h"
@@ -111,12 +110,13 @@ static struct zcl_result boot_zcode_work_admit(
     if (loaded != VCS_ZCODE_WORK_CONTEXT_OK)
         return ZCL_ERR(-1, "context: %s",
                        vcs_zcode_work_context_result_string(loaded));
-    const char *action_kind = boot_zcode_work_action_kind(request->work_kind, context.fixed_input, context.fixed_input_len);
-    uint8_t action_root[32], input_root[32], task_root[32];
-    uint8_t candidate_root[32], policy_root[32];
+    const char *action_kind = boot_zcode_work_action_kind(
+        request->work_kind, context.fixed_input, context.fixed_input_len);
+    uint8_t preflight_action[32], preflight_input[32];
+    uint8_t task_root[32], candidate_root[32], policy_root[32];
     loaded = action_kind
         ? vcs_zcode_work_context_action_root_for_kind(
-              &context, action_kind, now, action_root, input_root)
+              &context, action_kind, now, preflight_action, preflight_input)
         : VCS_ZCODE_WORK_CONTEXT_ACTION;
     bool bound = loaded == VCS_ZCODE_WORK_CONTEXT_OK &&
         vcs_zcode_task_root(&context.task, task_root) == VCS_ZCODE_DEV_OK &&
@@ -124,8 +124,8 @@ static struct zcl_result boot_zcode_work_admit(
             VCS_ZCODE_DEV_OK &&
         vcs_zcode_proof_policy_root(&context.proof_policy, policy_root) ==
             VCS_ZCODE_DEV_OK &&
-        memcmp(action_root, request->action_root, 32) == 0 &&
-        memcmp(input_root, request->input_root, 32) == 0 &&
+        memcmp(preflight_action, request->action_root, 32) == 0 &&
+        memcmp(preflight_input, request->input_root, 32) == 0 &&
         memcmp(task_root, request->task_root, 32) == 0 &&
         memcmp(candidate_root, request->candidate_root, 32) == 0 &&
         memcmp(policy_root, request->proof_policy_root, 32) == 0 &&
@@ -139,34 +139,19 @@ static struct zcl_result boot_zcode_work_admit(
         vcs_zcode_work_context_free(&context);
         return ZCL_ERR(-1, "context does not reconstruct the signed request");
     }
-    struct zcl_result authority = boot_zcode_work_authority_import(
-        store, request->context_root, s_work_workspace, &context);
-    if (!authority.ok) {
+    struct vcs_zcode_work_context_roots restored;
+    loaded = vcs_zcode_work_context_restore_for_kind(
+        store, request->context_root, s_work_workspace, action_kind, now,
+        &restored);
+    bool restored_exact = loaded == VCS_ZCODE_WORK_CONTEXT_OK &&
+        memcmp(restored.action_root, preflight_action, 32) == 0 &&
+        memcmp(restored.input_root, preflight_input, 32) == 0 &&
+        memcmp(restored.source_manifest_id, context.source_sha256, 32) == 0 &&
+        memcmp(restored.source_root,
+               context.candidate.candidate_source_root, 32) == 0;
+    if (!restored_exact) {
         vcs_zcode_work_context_free(&context);
-        return authority;
-    }
-    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
-    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
-    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
-    bool stored = vcs_zcode_task_serialize(&context.task, task_wire) ==
-                      VCS_ZCODE_DEV_OK &&
-        vcs_zcode_candidate_serialize(&context.candidate, candidate_wire) ==
-                      VCS_ZCODE_DEV_OK &&
-        vcs_zcode_proof_policy_serialize(
-            &context.proof_policy, policy_wire) == VCS_ZCODE_DEV_OK &&
-        vcs_object_store_init(s_work_workspace) &&
-        vcs_object_put_addressed(s_work_workspace, task_root, task_wire,
-                                 sizeof(task_wire)) &&
-        vcs_object_put_addressed(s_work_workspace, candidate_root,
-                                 candidate_wire, sizeof(candidate_wire)) &&
-        vcs_object_put_addressed(s_work_workspace, policy_root, policy_wire,
-                                 sizeof(policy_wire)) &&
-        vcs_object_put_addressed(s_work_workspace, input_root,
-                                 context.fixed_input,
-                                 context.fixed_input_len);
-    if (!stored) {
-        vcs_zcode_work_context_free(&context);
-        return ZCL_ERR(-1, "context objects could not enter workspace CAS");
+        return ZCL_ERR(-1, "context source closure could not be restored");
     }
     struct db_build_job job = {0};
     struct db_build_action action = {0};
@@ -182,7 +167,7 @@ static struct zcl_result boot_zcode_work_admit(
     (void)snprintf(action.kind, sizeof(action.kind), "%s",
                    action_kind);
     (void)snprintf(action.state, sizeof(action.state), "SNAPSHOTTED");
-    zcl_hex_encode(input_root, 32, action.input_root_sha3);
+    zcl_hex_encode(restored.input_root, 32, action.input_root_sha3);
     zcl_hex_encode(task_root, 32, action.task_root_sha3);
     zcl_hex_encode(candidate_root, 32, action.candidate_root_sha3);
     zcl_hex_encode(policy_root, 32, action.proof_policy_root_sha3);
