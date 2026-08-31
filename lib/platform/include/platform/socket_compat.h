@@ -5,6 +5,7 @@
 #define ZCLASSIC_PLATFORM_SOCKET_COMPAT_H
 
 #include <stdbool.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
