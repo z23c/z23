@@ -5,6 +5,7 @@
 set -euo pipefail
 export LC_ALL=C
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SELF_DIR/build-epoch-open-file-identity.sh"
 
 fail()
 {
@@ -94,21 +95,6 @@ path_has_no_symlink()
     done
 }
 
-opened_regular_file_matches()
-{
-    local path="$1" fd="$2" host_system fd_inode path_inode
-    host_system="$(uname -s 2>/dev/null || printf unknown)"
-    if [ "$host_system" = Darwin ]; then
-        [ -x /usr/sbin/lsof ] || return 1
-        fd_inode=$(/usr/sbin/lsof -a -p "$$" -d "$fd" -Fi 2>/dev/null |
-            sed -n 's/^i//p')
-        path_inode=$(/usr/bin/stat -f '%i' "$path" 2>/dev/null)
-        [ -n "$fd_inode" ] && [ "$fd_inode" = "$path_inode" ]
-        return
-    fi
-    [ "$path" -ef "/dev/fd/$fd" ]
-}
-
 output_contained "$OUTPUT" || fail "object path is outside compile epoch $EPOCH"
 OUTPUT_EPOCH_ROOT="$EPOCH_ROOT"
 output_contained "$SESSION" || fail 'compile-session path is outside compile epoch'
@@ -181,7 +167,8 @@ SESSION_INITIAL="$SESSION_CAPTURE"
 session_unchanged()
 {
     [ -f "$SESSION" ] && [ ! -L "$SESSION" ] &&
-        opened_regular_file_matches "$SESSION" 8 || return 1
+        z23_build_epoch_open_fd_matches_path "$SESSION" 8 \
+            "$(uname -s 2>/dev/null || printf unknown)" || return 1
     if IFS= read -r -d '' session_binary_prefix < "$SESSION"; then
         return 1
     fi
@@ -341,12 +328,16 @@ compile_one()
                 fail 'epoch admission lock is a symlink'
             exec 6> "$ADMISSION_LOCK_FILE"
             [ -f "$ADMISSION_LOCK_FILE" ] &&
-                opened_regular_file_matches "$ADMISSION_LOCK_FILE" 6 ||
+                z23_build_epoch_open_fd_matches_path \
+                    "$ADMISSION_LOCK_FILE" 6 \
+                    "$(uname -s 2>/dev/null || printf unknown)" ||
                 fail 'epoch admission lock is not the opened regular file'
             flock -x 6
             [ -f "$ADMISSION_LOCK_FILE" ] &&
                 [ ! -L "$ADMISSION_LOCK_FILE" ] &&
-                opened_regular_file_matches "$ADMISSION_LOCK_FILE" 6 ||
+                z23_build_epoch_open_fd_matches_path \
+                    "$ADMISSION_LOCK_FILE" 6 \
+                    "$(uname -s 2>/dev/null || printf unknown)" ||
                 fail 'epoch admission lock changed while waiting'
             ;;
     esac

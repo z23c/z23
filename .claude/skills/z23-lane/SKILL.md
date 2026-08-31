@@ -1,25 +1,20 @@
 ---
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 name: z23-lane
-description: Use when launching, dispatching, or reviewing an executor lane in the Z23 repo — spinning up a worktree for a subagent, writing a lane prompt, pinning a baseline, deciding which gates to demand, splitting file ownership across parallel lanes, or judging a lane's report before merging. Covers the lane-launch checklist, the versioned executor doctrine (LANE_CONTRACT), and the required report shape (LANE_REPORT). Invoke for "start a lane", "dispatch a subagent on this", "set up a worktree for X", "what gates should this lane run", "how do I split this across lanes", or "is this lane ready to merge".
+description: Use when assigning or reviewing parallel Z23 work. Keeps file ownership disjoint, derives the current origin/main baseline, and returns immutable commit identities without duplicating the canonical development contract.
 ---
 
-This skill covers the **maintainer's** multi-agent setup: several AI executors
-running at once, each in its own git worktree on one checkout. It is not the
-project's development process and contributing requires none of it — for a
-single developer on a single checkout, use the `zclassic23-dev` skill instead.
+This compatibility skill contains no independent workflow doctrine. Read
+[`AGENTS.md`](../../../AGENTS.md) and
+[`docs/DEVELOPING.md`](../../../docs/DEVELOPING.md), then use the compact
+parallel-assignment adapter in
+[`docs/agent/LANE_LAUNCH.md`](../../../docs/agent/LANE_LAUNCH.md).
 
-The lane-launch checklist is [`docs/agent/LANE_LAUNCH.md`](../../../docs/agent/LANE_LAUNCH.md).
-It lives in `docs/` so that every agent — and every documentation-accuracy lint
-gate — sees it, not only Claude Code. This file holds the skill frontmatter and
-nothing else — do not copy checklist content here; edit `docs/agent/LANE_LAUNCH.md`.
-
-Two tracked companions the checklist points at, both versioned:
-[`docs/agent/LANE_CONTRACT.md`](../../../docs/agent/LANE_CONTRACT.md) (the doctrine a
-lane prompt references instead of pasting) and
-[`docs/agent/LANE_REPORT.md`](../../../docs/agent/LANE_REPORT.md) (the report the
-executor owes back).
-
-The import below inlines the checklist. If it did not expand, read
-`docs/agent/LANE_LAUNCH.md`.
+Worktree layout is not workflow authority. Current state comes from
+`git worktree list --porcelain`. Canonical product identities are defined by
+the existing CAS and build-fabric types; the current local Git proof queue is
+transitional and filesystem-backed. `origin/main` is the shared integration
+blackboard. The resident signed-commit promoter is not implemented yet; do not
+claim that a lane handoff automatically proves or publishes code.
 
 @docs/agent/LANE_LAUNCH.md

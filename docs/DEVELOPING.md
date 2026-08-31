@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Developing Z23
 
 This is the detailed developer procedure. The durable mission and authority
@@ -457,9 +459,10 @@ not hold the transcript says so instead of asserting it away. The propositions,
 and which are narrower than the story, are enumerated at the top of
 [`lib/test/src/test_cold_join_sovereign.c`](../lib/test/src/test_cold_join_sovereign.c).
 
-For an exact push checkpoint, commit first. The notification hook schedules
-the commit/base proof in the existing development service and returns. Inspect
-or wait for that immutable receipt with:
+For an exact push checkpoint, commit first. The notification hook makes a
+best-effort detached request to the checkout's development service and returns;
+it does not wait for or confirm durable enqueue. Inspect or wait for the
+commit/base receipt with:
 
 ```bash
 build/bin/z23-dev dev proof status
@@ -474,12 +477,23 @@ compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
 tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
 legacy parity oracle; it is not called by the installed push hook.
 
+Current limitation: proof requests, running markers, leases, failures, and
+receipts remain under each checkout's `.cache/zcl-dev-proof`. The resident
+watcher still forks one worker per claimed commit/base pair, and that worker
+initially checks the mutable submitting checkout before using its private proof
+generation. The separate `tools/land` chainlog batches the legacy
+`make pre-push-ci` path and stops at a local `land/ready` ref; it neither
+produces the native exact receipt nor publishes `main`. These are duplicate
+transitional lifecycle formats and neither is product evidence authority. Do
+not translate between them or claim that either is the unfinished signed-commit
+promoter.
+
 Full `make lint` is the umbrella (every gate, including whole-node tool links).
 Run it only when an impact rule names a gate that `lint-fast` excludes, or at
 a sub-wave / release boundary. An uncached full suite is:
 
 ```bash
-make -j"$(nproc)" test-parallel TEST_PARALLEL_ARGS=--no-cache
+make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel TEST_PARALLEL_ARGS=--no-cache
 ```
 
 An uncached suite is distinguished by its `SUITE VERDICT mode=cold` record and
@@ -523,13 +537,16 @@ Before committing:
    unrelated local work.
 5. Rerun the minimum gates affected by that integration.
 6. Commit one coherent change with an evidence-backed message.
-7. Wait for `dev proof status` to report `passed`, then push normally. The
-   native pre-push hook reads only the exact sealed receipt.
+7. On Linux and macOS, wait for `dev proof status` to report `passed`, then
+   push normally; the native pre-push hook reads only the exact sealed receipt.
+   Windows currently uses the synchronous `make windows-acceptance` shell hook
+   documented in [`WINDOWS.md`](WINDOWS.md), not receipt admission.
 8. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 Every changed C path must map to focused proof through the repository's impact
-rules. Unmapped or incomplete closure refuses receipt publication. The hook
-never builds, tests, lints, waits, invokes a shell, or fetches; a missing or
+rules. Unmapped or incomplete closure refuses receipt publication. On POSIX,
+the native receipt hook never builds, tests, lints, waits, invokes a shell, or
+fetches; a missing or
 running receipt refuses within the bounded read path and prints the exact
 `z23-dev dev proof wait` command for that commit/base pair. A normal
 non-fast-forward race also refuses without deleting reusable child evidence.
@@ -547,9 +564,19 @@ Deep decentralized proof consumes immutable candidate/action objects and emits
 signed receipts later. The originating developer does not wait on peer work,
 and no peer becomes a central scheduler or permanent coordinator.
 
-Reuse existing CAS, package, task, candidate, action, lease, worker, and receipt
-objects. Lifecycle labels such as requested, running, or ready-for-acceptance
-are derived projections, never a second source of truth.
+The canonical ontology is one chain: task and candidate; candidate source root
+and source-manifest identity; action input, action root, and work context;
+REQUESTED build-proof event and durable action lease; work receipt and
+proof-set root; PROVEN lane receipt and accepted-work root; then a versioned
+publication job and its immutable outcome receipt. A Git commit is provenance
+and user intent, never a source root, action root, or proof identity.
+
+Reuse those existing CAS, package, task, candidate, action, lease, worker,
+receipt, lane, and publication objects. Lifecycle labels such as requested,
+running, ready-for-acceptance, or published are derived projections, never a
+second source of truth. `zcl.dev_acceptance_receipt.v1` may remain a
+fixed-width hook admission envelope, but it must derive from canonical proof
+facts rather than become another proof ledger.
 
 ## Mission capsules
 

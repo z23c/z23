@@ -390,7 +390,8 @@ bool rpc_agent_impact(const struct json_value *params, bool help,
     agent_push_str(&gates, "make lint");
     agent_push_str(&gates, "make build-only");
     agent_push_str(&gates, "relevant strict make t ONLY=<group>");
-    agent_push_str(&gates, "tracked pre-push hook runs make pre-push-ci");
+    agent_push_str(&gates,
+                   "native pre-push checks ancestry and the exact sealed receipt only");
     agent_push_str(&gates,
                    "long fuzz/coverage evidence runs in background quality lanes");
 
@@ -475,21 +476,22 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_push_kv_str(&loop, "focused_fast_test", "make t-fast ONLY=<group>");
     json_push_kv_str(&loop, "immutable_history_canaries",
                      "make immutable-history-canaries");
-    json_push_kv_str(&loop, "pre_push_gate", "make pre-push-ci");
+    json_push_kv_str(&loop, "pre_push_gate",
+                     "build/bin/z23-dev dev proof status");
     json_push_kv_str(&loop, "optional_dev_binary",
                      "ZCL_AGENT_LOOP_BIN=1 make agent-loop");
     json_push_kv_str(&loop, "optional_dev_stage_no_restart",
-                     "ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop");
+                     "contained: ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop refuses");
     json_push_kv_str(&loop, "optional_dev_deploy",
-                     "ZCL_AGENT_LOOP_DEPLOY=dev make agent-loop");
+                     "contained: ZCL_AGENT_LOOP_DEPLOY=dev make agent-loop refuses");
     json_push_kv_str(&loop, "stage_dev_binary_no_restart",
-                     "make agent-stage-dev");
+                     "contained: make agent-stage-dev refuses");
     json_push_kv_str(&loop, "fast_ci_compile_default",
                      "ZCL_FAST_COMPILE=changed -> source-wide make fast-compile in an exact compile epoch");
     json_push_kv_str(&loop, "pre_push_compile_default",
-                     "ZCL_FAST_COMPILE=strict -> make build-only");
+                     "none; native pre-push never compiles");
     json_push_kv_str(&loop, "rule",
-                     "Changed paths are classification hints only; keep z23-dev dev begin running to warm exact PASS receipts, inspect ran/reused/skip counts with z23 dev status, and push through strict source-wide compile/lint.");
+                     "Changed paths are classification hints only; request exact PASS receipts asynchronously, inspect ran/reused/skip counts with dev proof status, and let push admission read only the sealed receipt.");
     json_push_kv(result, "recommended_loop", &loop);
     json_free(&loop);
 
@@ -530,11 +532,11 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_push_kv_str(&dev, "agent_loop_binary",
                      "ZCL_AGENT_LOOP_BIN=1 make agent-loop");
     json_push_kv_str(&dev, "agent_loop_stage_no_restart",
-                     "ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop");
+                     "contained: ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop refuses");
     json_push_kv_str(&dev, "fast_dev_deploy",
-                     "make agent-deploy-fast or ZCL_AGENT_LOOP_DEPLOY=dev make agent-loop");
+                     "contained: make agent-deploy-fast and ZCL_AGENT_LOOP_DEPLOY=dev refuse");
     json_push_kv_str(&dev, "stage_for_next_restart",
-                     "make agent-stage-dev");
+                     "contained: make agent-stage-dev refuses");
     json_push_kv_str(&dev, "status_command", "make agent-dev-status");
     json_push_kv_str(&dev, "native_status_command",
                      "z23 agentdevstatus");
@@ -661,7 +663,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
                              "make fast-changed-compile",
                              "source-wide dev compile in an exact mutation-keyed epoch; changed paths are hints only");
     agent_push_build_command(&commands, "agent_loop", "make agent-loop",
-                             "default one-command agent loop: fast-ci checks, optional dev binary/deploy knobs");
+                             "default one-command verification loop: fast-ci checks and an optional dev binary; deployment selectors refuse");
     agent_push_build_command(&commands, "fast_compile", "make fast-compile",
                              "fastest non-LTO no-link dev compile check");
     agent_push_build_command(&commands, "compile_check", "make build-only",
@@ -679,7 +681,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
                              "make t-fast ONLY=<group>",
                              "cached non-LTO per-file test harness");
     agent_push_build_command(&commands, "agent_fast_ci", "make fast-ci",
-                             "async dev.begin receipts plus strict pre-push compile/lint; inspect reuse and skips with z23 dev status");
+                             "explicit legacy cache-aware lint/compile/test loop; native pre-push does not invoke it");
     agent_push_build_command(&commands, "immutable_history_canaries",
                              "make immutable-history-canaries",
                              "fast real-mainnet historical KATs: h=478544 oversize tx plus consensus parity pins");
@@ -794,9 +796,9 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     agent_push_str(&gates, "make build-only");
     agent_push_str(&gates, "relevant strict make t ONLY=<group>");
     agent_push_str(&gates,
-                   "tracked pre-push hook runs make pre-push-ci");
+                   "native pre-push checks ancestry and the exact sealed receipt only");
     agent_push_str(&gates,
-                   "pre-push-ci skips live service probe; inspect live health separately");
+                   "make pre-push-ci is an explicit legacy parity oracle");
     agent_push_str(&gates,
                    "full-suite/fuzz/coverage lanes run via make install-quality-linger");
     json_push_kv(result, "pre_push_gates", &gates);

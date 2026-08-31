@@ -50,6 +50,7 @@ OWNER_PID="${17}"
 VERIFY_TOOL="${18:-tools/dev/source-identity.sh}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
+source "$SELF_DIR/build-epoch-open-file-identity.sh"
 HOST_SYSTEM="$(uname -s 2>/dev/null || printf 'unknown')"
 HOST_IS_MSYS=0
 case "$HOST_SYSTEM" in MINGW*|MSYS*) HOST_IS_MSYS=1 ;; esac
@@ -233,20 +234,6 @@ ADMISSION_LOCK_DIR="$ADMISSION_LOCK_ROOT/$EPOCH.lock.d"
 ADMISSION_LOCK_OWNER="$ADMISSION_LOCK_DIR/owner"
 ADMISSION_LOCK_HELD=0
 
-admission_lock_matches_fd()
-{
-    local fd_inode path_inode
-    if [ "$HOST_SYSTEM" = Darwin ]; then
-        [ -x /usr/sbin/lsof ] || return 1
-        fd_inode=$(/usr/sbin/lsof -a -p "$$" -d 8 -Fi 2>/dev/null |
-            sed -n 's/^i//p')
-        path_inode=$(/usr/bin/stat -f '%i' "$ADMISSION_LOCK_FILE" 2>/dev/null)
-        [ -n "$fd_inode" ] && [ "$fd_inode" = "$path_inode" ]
-        return
-    fi
-    [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/8 ]
-}
-
 acquire_admission_lock()
 {
     local empty_deadline pid start actual owner_start now
@@ -272,13 +259,15 @@ acquire_admission_lock()
             fail 'epoch admission lock is a symbolic link'
         exec 8> "$ADMISSION_LOCK_FILE"
         [ -f "$ADMISSION_LOCK_FILE" ] && [ ! -L "$ADMISSION_LOCK_FILE" ] &&
-            admission_lock_matches_fd || {
+            z23_build_epoch_open_fd_matches_path \
+                "$ADMISSION_LOCK_FILE" 8 "$HOST_SYSTEM" || {
             exec 8>&-
             fail 'epoch admission lock is not a regular file'
         }
         flock -x 8
         [ -f "$ADMISSION_LOCK_FILE" ] && [ ! -L "$ADMISSION_LOCK_FILE" ] &&
-            admission_lock_matches_fd || {
+            z23_build_epoch_open_fd_matches_path \
+                "$ADMISSION_LOCK_FILE" 8 "$HOST_SYSTEM" || {
             exec 8>&-
             fail 'epoch admission lock changed while waiting'
         }

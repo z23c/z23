@@ -398,6 +398,7 @@ build-system-id)
         "$SELF_DIR/build-epoch-key.sh"
         "$SELF_DIR/compile-epoch-object.sh"
         "$SELF_DIR/build-epoch-session.sh"
+        "$SELF_DIR/build-epoch-open-file-identity.sh"
         "$SELF_DIR/publish-build-alias.sh"
     )
     while IFS= read -r input || [ -n "$input" ]; do

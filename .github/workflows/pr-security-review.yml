@@ -1,31 +1,33 @@
-# Automated security review — part 1 of 2 (the SCAN).
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+# Automated security review.
 #
-# Runs on EVERY pull request, including from forks. Security model:
-#   - trigger is `pull_request` (NOT pull_request_target), so this job runs
-#     in the UNTRUSTED context with a READ-ONLY token and NO repo secrets;
-#   - it NEVER executes PR code — it only does `git diff` + grep/awk over the
-#     diff (tools/scripts/pr_security_scan.sh). So even a hostile PR cannot
-#     exfiltrate anything: there is nothing here to steal and no write access.
-#   - the pass/fail CHECK is the gate (works on every PR, no token needed).
-#   - the human-friendly COMMENT is posted by the companion workflow
-#     pr-security-comment.yml, which runs in the TRUSTED base context via
-#     `workflow_run` and still never runs PR code. This is the GitHub-
-#     recommended fork-safe way to comment on PRs.
+# Runs on every pull request, including from forks. Security model:
+#   - `pull_request_target` loads this workflow from the trusted base branch;
+#   - explicit read-only permissions expose no write token or repository secret;
+#   - checkout stays at the base SHA and the base scanner reads the proposed
+#     Git objects only as data; no pull-request script or executable is run;
+#   - the pass/fail check and bounded log are the complete output.
 name: PR Security Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 permissions:
   contents: read          # minimal; intentionally NO write, NO secrets
 
+concurrency:
+  group: pr-security-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   scan:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, z23-pr-scan]
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false      # never hand git credentials to the job
 
@@ -33,24 +35,13 @@ jobs:
         run: |
           BASE='${{ github.event.pull_request.base.sha }}'
           HEAD='${{ github.event.pull_request.head.sha }}'
+          git fetch --no-tags origin \
+            'refs/pull/${{ github.event.pull_request.number }}/head'
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
           set +e
           bash tools/scripts/pr_security_scan.sh "$BASE" "$HEAD" > scan.txt 2>&1
           echo $? > scan.code
           cat scan.txt
-
-      - name: Stash verdict for the trusted comment workflow
-        if: always()
-        run: |
-          mkdir -p _verdict
-          cp scan.txt scan.code _verdict/
-          echo '${{ github.event.pull_request.number }}' > _verdict/pr.txt
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pr-security-verdict
-          path: _verdict/
-          retention-days: 3
 
       - name: Enforce — fail the check on HIGH-severity findings
         if: always()

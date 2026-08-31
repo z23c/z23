@@ -78,6 +78,10 @@ COFF/PE output, while Windows compile epochs use the shell publisher because
 MSYS does not provide the directory-flush contract required by zcc's native
 publisher. The setup smoke proves this hosted-to-native boundary.
 
+`make setup` records the selected MSYS2 root in this worktree's Git config, so
+a later Git-for-Windows hook re-enters the same UCRT64 installation. The value
+is a path such as `/d/msys64`, not a global Windows `PATH` mutation.
+
 For later Make invocations from PowerShell, use the matching courier; it uses
 the same selected root for both `bash.exe` and the UCRT64 `PATH`:
 
@@ -99,12 +103,15 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23
 make windows-acceptance
 ```
 
-The tracked pre-push hook re-enters the UCRT64 shell once when Git launches it
-from a minimal MINGW/MSYS environment, then runs `make windows-acceptance` by
-default. Linux and macOS retain `make pre-push-ci`. An explicit
-`ZCL_PREPUSH_CMD` override still receives the exact semantic changed-file list,
-so changing the platform gate cannot turn a range-aware push into a whole-tree
-guess.
+On Windows, `make setup` installs the tracked shell `pre-commit` and `pre-push`
+hooks. The pre-push hook re-enters the recorded UCRT64 shell once when Git
+launches it from a minimal MINGW/MSYS environment, then runs
+`make windows-acceptance` by default. It is a synchronous fixed-catalog gate,
+not exact-receipt admission. The POSIX `z23-git-hook` uses `fork`, `execvp`, and
+`waitpid`; it is not built or installed on Windows, so asynchronous
+post-commit/post-merge/post-checkout receipt scheduling remains unavailable
+there. Linux and macOS retain those native receipt hooks. An explicit
+`ZCL_PREPUSH_CMD` override still receives the exact semantic changed-file list.
 
 Install the audited canonical binary as a supervised per-user Task Scheduler
 job with one command:

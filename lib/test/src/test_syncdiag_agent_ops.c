@@ -792,10 +792,10 @@ int syncdiag_cases_agent_ops(void)
                           "z23 agentdevstatus") == 0;
         ok = ok && strcmp(json_get_str(json_get(loop,
                            "stage_dev_binary_no_restart")),
-                          "make agent-stage-dev") == 0;
+                          "contained: make agent-stage-dev refuses") == 0;
         ok = ok && strcmp(json_get_str(json_get(loop,
                            "optional_dev_stage_no_restart")),
-                          "ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop") == 0;
+                          "contained: ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop refuses") == 0;
         ok = ok && strcmp(json_get_str(json_get(loop,
                            "direct_changed_compile")),
                           "make fast-changed-compile") == 0;
@@ -812,7 +812,7 @@ int syncdiag_cases_agent_ops(void)
                           "make immutable-history-canaries") == 0;
         ok = ok && strcmp(json_get_str(json_get(loop,
                            "pre_push_compile_default")),
-                          "ZCL_FAST_COMPILE=strict -> make build-only") == 0;
+                          "none; native pre-push never compiles") == 0;
         ok = ok && incremental && json_get_bool(json_get(incremental,
                                                          "header_depfiles"));
         ok = ok && strcmp(json_get_str(json_get(incremental,
@@ -885,7 +885,7 @@ int syncdiag_cases_agent_ops(void)
                           "z23 agentdevstatus") == 0;
         ok = ok && strcmp(json_get_str(json_get(dev_binary,
                                                 "agent_loop_stage_no_restart")),
-                          "ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop") == 0;
+                          "contained: ZCL_AGENT_LOOP_DEPLOY=stage make agent-loop refuses") == 0;
         ok = ok && !json_get_bool(json_get(dev_binary,
                                            "release_or_deploy_artifact"));
         ok = ok && strstr(json_get_str(json_get(dev_binary,

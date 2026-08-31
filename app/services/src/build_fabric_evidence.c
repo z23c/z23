@@ -498,11 +498,13 @@ static struct zcl_result bf_proof_evaluate(
         return ZCL_ERR(-1, "proof policy CAS object is absent or corrupt");
     }
     free(wire);
-    struct db_build_receipt rows[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS];
+    struct db_build_receipt rows[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS + 1u];
     int row_count = db_build_candidate_receipts(
         ndb, action.task_root_sha3, action.candidate_root_sha3,
         action.proof_policy_root_sha3, rows,
-        VCS_ZCODE_PROOF_SET_MAX_RECEIPTS);
+        VCS_ZCODE_PROOF_SET_MAX_RECEIPTS + 1u);
+    if (row_count > (int)VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
+        return ZCL_ERR(-1, "proof receipt set exceeds the bounded maximum");
     /* Selection consults the shadow/review flags after the durable fields are
      * populated below.  Zero the complete snapshot so a receipt that has not
      * gone through either classifier cannot inherit indeterminate stack bits
@@ -589,8 +591,12 @@ static struct zcl_result bf_proof_evaluate(
         if (!verified || valid_count >= VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
             continue;
         struct db_build_worker worker;
-        bool approved = db_build_worker_find(
-                ndb, rows[i].worker_id, &worker) && worker.approved &&
+        char receipt_signer_hex[65];
+        zcl_hex_encode(receipt.signer_pubkey, 32, receipt_signer_hex);
+        if (!db_build_worker_find(ndb, rows[i].worker_id, &worker) ||
+            strcmp(worker.signer_pubkey, receipt_signer_hex) != 0)
+            continue;
+        bool approved = worker.approved &&
             !worker.revoked &&
             (worker.expires_at == 0 || now < worker.expires_at);
         valid[valid_count].row = rows[i];

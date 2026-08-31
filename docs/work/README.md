@@ -9,27 +9,28 @@ parallel-worktree protocol. It is not itself a priority queue:
 2. [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) is the sole ordered execution plan.
 3. [`../MVP.md`](../MVP.md) owns the v1 acceptance contract.
 
-The active #1 track is the sovereign complete-state cure. Architecture
-cleanup remains off the v1 path unless the owner explicitly promotes an
-item. If this file and `../HANDOFF.md` ever disagree, HANDOFF wins — fix
-this file to match it.
+The ordered mission is whatever [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) says at
+the current commit: public-node correctness first, then the complete C23
+Commons user story. This index does not promote an older plan back into the
+queue. Hosted-node facts belong only in `../HANDOFF.md`; source priorities do
+not.
 
 Worktrees are dynamic; never infer current workers from a hard-coded path
-list. Inspect them with `git worktree list --porcelain`. The checkout at
-`~/github/zclassic23` is normally the orchestrator. Every other registered
-checkout is a worker or an isolated quality lane and must be inspected
-before removal; dirty worktrees are preserved.
+list. Inspect them with `git worktree list --porcelain`. No checkout path is a
+permanent orchestrator. Every registered checkout may be a worker, proof
+generation, compatibility tree, or manually owned lane and must be inspected
+before removal; dirty and locked worktrees are preserved.
 
 ## How a worker session starts
 
-Run `pwd` and `git worktree list --porcelain`, then follow
-[`agent-protocol.md`](./agent-protocol.md). The assignment owns the branch,
-scope, verification, and completion ritual; directory suffixes are labels,
-not a permanent server inventory.
+Run `pwd` and `git worktree list --porcelain`, then follow the compact
+[`agent-protocol.md`](./agent-protocol.md). The assignment owns a disjoint
+surface and returns an immutable commit identity; branch and directory suffixes
+are optional labels, not evidence or permanent inventory.
 
 ## Index — one line per file, annotated
 
-**Authority** column: **PLAN** = ordering authority, read first; **LIVE** =
+**Authority** column: **PLAN** = the sole ordering authority; **LIVE** =
 describes a shipped mechanism/procedure, reference as needed; **DESIGN** =
 still-open design record, read before touching the area, not a priority
 queue; **RETAINED** = superseded as a current plan but code/tests/scripts
@@ -39,24 +40,24 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | File | Authority | Purpose |
 |---|---|---|
 | [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) | PLAN | THE ordered execution plan (autonomous / owner-gated / operational) |
-| [`TRI_PLATFORM_PLAN.md`](./TRI_PLATFORM_PLAN.md) | PLAN | what a person on Linux, macOS or Windows can actually build, sync and install today, and the ordered work that closes each gap |
-| [`self-verified-tip-plan.md`](./self-verified-tip-plan.md) | PLAN | the `G-SOV` sovereignty-gate design + open hardening items; `G-SOV` is the active gate in `sovereignty_controller.c` |
-| [`SOVEREIGN-NETWORK-ROADMAP.md`](./SOVEREIGN-NETWORK-ROADMAP.md) | PLAN | durable Phase 0–6 hierarchy and promotion gates; ordering authority when other plans differ |
+| [`TRI_PLATFORM_PLAN.md`](./TRI_PLATFORM_PLAN.md) | DESIGN | Linux, macOS, and Windows acceptance gaps and their platform-local closure order |
+| [`self-verified-tip-plan.md`](./self-verified-tip-plan.md) | DESIGN | the `G-SOV` sovereignty-gate design + open hardening items; `G-SOV` is the active gate in `sovereignty_controller.c` |
+| [`SOVEREIGN-NETWORK-ROADMAP.md`](./SOVEREIGN-NETWORK-ROADMAP.md) | FOUNDATION | durable Phase 0–6 hierarchy and promotion gates, subordinate to `FORWARD_PLAN.md` |
 | [`SOVEREIGN_MACHINE_MESH_PLAN.md`](./SOVEREIGN_MACHINE_MESH_PLAN.md) | DESIGN | owner-paired Linux/macOS/Windows machine discovery, private transfer, typed control, secure remote-service tunnels, and hot-swap acceptance |
-| [`sovereign-cutover-runbook.md`](./sovereign-cutover-runbook.md) | PLAN/LIVE | owner-gated live cutover + revert procedure for the bundle install path |
-| [`ZCODE_DEVELOPMENT_NETWORK.md`](./ZCODE_DEVELOPMENT_NETWORK.md) | PLAN | active agentic C23 development-network contract: canonical task/evidence objects, real ZBuild worker, requester-led P2P work, typed create/use/improve, and durability lanes |
-| [`ZCODE_DEVELOPMENT_PRODUCT.md`](./ZCODE_DEVELOPMENT_PRODUCT.md) | PLAN | active v0.1 C23 product contract: measured expert-workflow baseline, project/work front door, bounded context/adapters/repair/review, self-hosting benchmark, and fresh-checkout acceptance |
+| [`sovereign-cutover-runbook.md`](./sovereign-cutover-runbook.md) | LIVE | owner-gated live cutover + revert procedure for the bundle install path |
+| [`ZCODE_DEVELOPMENT_NETWORK.md`](./ZCODE_DEVELOPMENT_NETWORK.md) | DESIGN | agentic C23 development-network contract: canonical task/evidence objects, real ZBuild worker, requester-led P2P work, typed create/use/improve, and durability lanes |
+| [`ZCODE_DEVELOPMENT_PRODUCT.md`](./ZCODE_DEVELOPMENT_PRODUCT.md) | DESIGN | v0.1 C23 product contract: measured expert-workflow baseline, project/work front door, bounded context/adapters/repair/review, self-hosting benchmark, and fresh-checkout acceptance |
 | [`ZCODE_ADAPTER_BENCHMARK.md`](./ZCODE_ADAPTER_BENCHMARK.md) | EVIDENCE | frozen native-CLI adapter control, packet/order A/B measurements, shell-only app-server pilot, blockers, and adoption decision |
 | [`ZCODE_DEVELOPMENT_WALKTHROUGH.md`](./ZCODE_DEVELOPMENT_WALKTHROUGH.md) | LIVE | five-minute small-C23-project path: inspect, start, bounded manual/Codex handoff, repair/evidence, explicit human acceptance, and the permanent hermetic acceptance target |
 | [`C23_DEV_LOOP_PERFORMANCE.md`](./C23_DEV_LOOP_PERFORMANCE.md) | LIVE | single authoritative coverage/latency ledger for resident live reload, non-LTO fast restart, affected proofs, cache reuse and batched release proof |
-| [`ZCODE_SCIENTIFIC_METAVERSE.md`](./ZCODE_SCIENTIFIC_METAVERSE.md) | PLAN | owner-directed ZCODE scientific object, evidence-network, discovery, proof-of-contribution, committee, and staged-custody implementation plan; includes parallel file ownership and no-live-funds gates |
-| [`ZC23_LIVING_COMMONS.md`](./ZC23_LIVING_COMMONS.md) | PLAN | people+AI shared-metaverse mission, one creation API, immutable pre-genesis ZC23 naming, creation-backed issuance covenant, patronage boundary, and LC0-LC5 safe implementation order |
+| [`ZCODE_SCIENTIFIC_METAVERSE.md`](./ZCODE_SCIENTIFIC_METAVERSE.md) | DESIGN | owner-directed scientific-object and evidence-network design; includes no-live-funds gates |
+| [`ZC23_LIVING_COMMONS.md`](./ZC23_LIVING_COMMONS.md) | DESIGN | people+AI shared-commons design and LC0-LC5 dependency order |
 | [`ZC23_REPRODUCTION_RUNBOOK.md`](./ZC23_REPRODUCTION_RUNBOOK.md) | LIVE | O5 three-party portable-reproduction protocol, exact same-host acceptance gate, genuine second-machine verifier command, and explicit no-credit/no-live-authority boundaries |
 | [`NATIVE_MACOS_RUNBOOK.md`](./NATIVE_MACOS_RUNBOOK.md) | LIVE | native arm64 macOS maintenance: expected-green set, per-host platform-seam selection, known host quirks, and the first fix move per gate that can go red there |
 | [`NEON_CRYPTO_MATRIX.md`](./NEON_CRYPTO_MATRIX.md) | LIVE | per-crypto-family x86-64/arm64 tier matrix: gating, the test group proving bit-identity, the bench that times each tier, and honest no-clean-NEON-equivalent markers |
 | [`ZCODE_PLAN.md`](./ZCODE_PLAN.md) | FOUNDATION | original 15-slice ZCODE package-hosting order; slices 1–13 remain live foundations, while payout slices 14–15 are deferred behind the development network; `lib/vcs/include/vcs/package_reward.h` cites its "ZCL fuel economics" section by name |
-| [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | PLAN | owner directive: on-chain P2P ZSLP/ZCL marketplace (same-chain single-tx swap + cross-chain HTLC) over the existing ZSWP/ZSLP primitives; application protocol only, no consensus surface |
-| [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | PLAN | post-metaverse-MVP ordered checklist: two-laptop Tor market test, `zmarket_buy` end-to-end settlement wiring, ZC23 distribution design (owner decision gate) |
+| [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | DESIGN | deferred application-protocol marketplace design; no consensus surface |
+| [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | DESIGN | deferred marketplace acceptance checklist and owner decision gates |
 | [`MARKET_ONION_DELIVERY.md`](./MARKET_ONION_DELIVERY.md) | DESIGN | B5 onion-routed chunk delivery: offer v2 endpoint_type=onion wire, `/market/chunk` onion route, session-binding replacement, stub fail-closed policy, and the honest non-goals (timing, gossip metadata) |
 | [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md) | RETAINED | the Phase C1 menu; C2 chose from it and `ZC23_DISTRIBUTION_RULES.md` §2 cites option **2A** by number, so the numbering stays as-is |
 | [`shielded-history-importer.md`](./shielded-history-importer.md) | LIVE | reference for the shipped `-import-complete-shielded` operational cure; operational-vs-sovereign trust-mode split |
@@ -89,7 +90,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`UX_PLAN.md`](./UX_PLAN.md) | LIVE | the two-lane UX program (shared server-rendered design system + terminal presentation); both lanes have landed, `tools/command/cli_render.h`, `tools/command/native_command.c`, `src/main_cli_modes.c` and `lib/test/src/test_cli_render.c` cite its "terminal lane" by name |
 | [`HOTSWAP.md`](./HOTSWAP.md) | LIVE | the dev-only hot-swap mechanisms |
 | [`fast-path.md`](./fast-path.md) | LIVE | the information algorithm + fast inner-loop commands for any change |
-| [`agent-protocol.md`](./agent-protocol.md) | LIVE | worker startup/completion protocol (this file's companion) |
+| [`agent-protocol.md`](./agent-protocol.md) | LIVE | compact parallel-worker adapter to AGENTS.md and DEVELOPING.md; no second workflow authority |
 | [`test-result-cache.md`](./test-result-cache.md) | LIVE | content-addressed per-group test result cache |
 | [`stopwatch-gates.md`](./stopwatch-gates.md) | LIVE | the C3 / net-disruption wall-clock stopwatch gates |
 | [`coldstart-remote-peer-proof.md`](./coldstart-remote-peer-proof.md) | LIVE | the C3 stopwatch run against a REMOTE peer (`make mvp-coldstart-to-tip-remote`) and what it names |
@@ -150,12 +151,9 @@ commit — retiring a doc is not finished until its callers are gone too.
 
 ## Active control documents
 
-- **Current work:** [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) (THE plan),
-  [`self-verified-tip-plan.md`](./self-verified-tip-plan.md) (the cure
-  spine), [`CONSENSUS-STATE-BUNDLE.md`](./CONSENSUS-STATE-BUNDLE.md) (bundle
-  naming/ownership authority), and
-  [`sovereign-cutover-runbook.md`](./sovereign-cutover-runbook.md) (install
-  runbook).
+- **Current work:** [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) is the sole ordered
+  plan. Other PLAN/LIVE rows below are scoped contracts and runbooks; they do
+  not override its priority order.
 - **Current architecture:** [`../FRAMEWORK.md`](../FRAMEWORK.md) (reference,
   off the v1 path — §9 is the open-item debt board, which self-labels NOT
   the v1 path).
@@ -164,8 +162,9 @@ commit — retiring a doc is not finished until its callers are gone too.
 
 ## Worker protocol
 
-Assignment shape, file ownership, integration, failure handling, and completion
-are defined once in [`agent-protocol.md`](./agent-protocol.md).
+Parallel-worker mechanics are adapted in
+[`agent-protocol.md`](./agent-protocol.md); project authority, integration, and
+completion remain defined by `AGENTS.md` and `docs/DEVELOPING.md`.
 
 ## Late-indexed records (reconciled 2026-08-23)
 

@@ -1,4 +1,5 @@
 #!/bin/sh
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # agent_msg_roundtrip.sh — prove a ZMSG agent-message round-trip from this
 # box's node to one operator-named peer and back.
 #
@@ -29,8 +30,8 @@
 # Exit 0 on pass, 1 on fail, 2 on usage/environment errors.
 #
 # No Python, no jq (project rule): flat fields come from grep/sed, nested
-# JSON from build/bin/jsonq. No `| grep -q` under pipefail (LANE_CONTRACT
-# A3): every grep either reads a file directly or is counted with -c.
+# JSON from build/bin/jsonq. No `| grep -q` under pipefail: every grep either
+# reads a file directly or is counted with -c.
 #
 # Environment overrides:
 #   ZCL_CLI               z23 binary        (default <repo>/build/bin/z23)

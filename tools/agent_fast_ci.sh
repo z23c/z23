@@ -1698,7 +1698,7 @@ main() {
     if maybe_fast_cache_hit; then
         maybe_live_probe
         log "PASS: fast lane cache hit; not full release CI"
-        log "Before pushing main, keep the strict gate: make lint && make build-only && relevant tests; default pre-push runs make pre-push-ci. Full-suite/fuzz/coverage run through make install-quality-linger."
+        log "Installed pre-push admits only an exact native receipt; make pre-push-ci is the explicit legacy parity oracle. Full-suite/fuzz/coverage run through make install-quality-linger."
         return
     fi
 
@@ -1718,7 +1718,7 @@ main() {
 
     record_fast_cache_pass
     log "PASS: fast lane complete; not full release CI"
-    log "Before pushing main, keep the strict gate: make lint && make build-only && relevant tests; default pre-push runs make pre-push-ci. Full-suite/fuzz/coverage run through make install-quality-linger."
+    log "Installed pre-push admits only an exact native receipt; make pre-push-ci is the explicit legacy parity oracle. Full-suite/fuzz/coverage run through make install-quality-linger."
 }
 
 main "$@"

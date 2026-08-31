@@ -16,8 +16,8 @@
 # under an explicit manual ZCL_LINT_MODE=UPDATE (never via `make lint`);
 # every selftest-style gate works in a mktemp dir. The ONE exception runs in
 # a SERIAL prologue before the parallel pool:
-#   check-git-hooks-installed — may normalize core.hooksPath via `git config`
-#     (a write; keep it away from concurrent git readers like check-core-seal).
+#   check-git-hooks-installed — validates checkout-local Git configuration
+#     after its hermetic host-selection fixture completes.
 # check-no-stray-untracked-source was also verified read-only; it no longer
 # needs to run first because the driver never circuit-breaks on the first
 # failure — all gates run and every failure is reported, strays included.
@@ -106,7 +106,7 @@ gate_command() {
         check-tu-random-seed)              echo './tools/lint/check_tu_random_seed.sh' ;;
         check-equihash-params)             echo './tools/lint/check_equihash_params.sh --selftest && ./tools/lint/check_equihash_params.sh' ;;
         check-determinism-ratchet)         echo './tools/lint/check_determinism_ratchet.sh --selftest && ./tools/lint/check_determinism_ratchet.sh' ;;
-        check-git-hooks-installed)         echo './tools/scripts/check_git_hooks_installed.sh' ;;
+        check-git-hooks-installed)         echo './tools/scripts/check_git_hooks_installed.sh --self-test && ./tools/scripts/check_git_hooks_installed.sh' ;;
         check-malloc)                      echo './tools/lint/check_malloc.sh' ;;
         check-hotswap-dev-only)            echo './tools/lint/check_hotswap_dev_only.sh' ;;
         check-hotswap-eligible-scope)      echo 'tools/lint/check_hotswap_eligible_scope.sh' ;;

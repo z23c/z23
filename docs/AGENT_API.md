@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # AGENT_API.md — native API for AI coding operators
 
 The agent interface is the **native command registry** (`z23 <command>`);
@@ -1284,17 +1286,21 @@ This is a C23 project, so the edit loop should compile only what changed.
   installed, otherwise `ccache`. Set `ZCL_USE_CCACHE=0` to force a direct
   compiler call.
 
-Before pushing `main`, the tracked pre-push hook computes the exact
-`origin/main..HEAD` changed-file set, rejects non-`main` remote refs, and runs
-`make pre-push-ci`. That command uses cached `make t-fast ONLY=<group>` tests
-selected by `tools/agent_fast_ci.sh`, plus `ZCL_FAST_COMPILE=strict` so the
-compile gate is `make build-only` for compiler and `-Werror` coverage; it does
-not rerun the full suite when the changed files only require narrower coverage.
-It also sets `ZCL_FAST_LIVE=0`, so an already-running
-node condition is visible through telemetry but does not block a code push. Set
-`ZCL_FAST_STRICT_TESTS=1` when a change needs strict whole-harness focused
-tests. Full-suite, fuzz, and coverage evidence belongs to the background quality lanes: install them with
-`make install-quality-linger` and inspect them with `make quality-linger-status`.
+On Linux and macOS, the installed native pre-push hook accepts exactly one
+`main` update only when the advertised base is an ancestor and the exact sealed
+commit/base receipt plus selected child receipts are present and valid. It does
+not build, lint, test, fetch, wait, invoke a shell, or run `make pre-push-ci`.
+Post-commit, post-merge, and post-checkout hooks make a best-effort asynchronous
+proof request. Inspect it with `build/bin/z23-dev dev proof status` or wait
+explicitly with `build/bin/z23-dev dev proof wait`.
+
+Windows currently installs the tracked shell pre-push hook and runs the fixed
+`make windows-acceptance` catalog described in [`WINDOWS.md`](WINDOWS.md); it
+does not claim exact-receipt admission. `make pre-push-ci` remains a manually
+invoked legacy parity oracle on other hosts. Full-suite, fuzz, and coverage
+evidence belongs to the background quality lanes: install them with
+`make install-quality-linger` and inspect them with
+`make quality-linger-status`.
 Status JSON is written under `~/.local/state/zclassic23-quality`. The native
 `z23 agentbuild` response also embeds
 `recommended_loop` (`zcl.agent_build_loop.v2`) with the cheapest command for

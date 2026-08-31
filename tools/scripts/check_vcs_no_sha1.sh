@@ -230,6 +230,7 @@ scan_tree()
         "$session_tool"
         "$root/tools/dev/build-epoch-key.sh"
         "$root/tools/dev/compile-epoch-object.sh"
+        "$root/tools/dev/build-epoch-open-file-identity.sh"
     )
     for path in "${authority_paths[@]}"; do
         [ -e "$path" ] || fatal "missing authority surface: $path"
@@ -344,6 +345,8 @@ self_test()
         > "$sandbox/tools/dev/build-epoch-key.sh"
     printf '%s\n' '#!/bin/sh' 'sha256sum' \
         > "$sandbox/tools/dev/compile-epoch-object.sh"
+    printf '%s\n' '#!/bin/sh' 'true' \
+        > "$sandbox/tools/dev/build-epoch-open-file-identity.sh"
     printf '%s\n' \
         'BUILD_SOURCE_RECORD := $(shell tools/dev/source-identity.sh capture-record)' \
         'BUILD_SOURCE_ID := $(word 1,$(BUILD_SOURCE_RECORD))' \

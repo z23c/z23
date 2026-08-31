@@ -116,6 +116,28 @@ has no install, execution, wallet, or publication authority.
 <!-- claim: symbol-present p2p_node_begin_message config/src/boot_zcode_dht.c # the swarm IS socket-wired -->
 <!-- claim: symbol-absent socket lib/vcs/src/package_swarm.c # the codec half stays pure -->
 
+The C23 Commons build/proof ontology is also owned here and by the build-fabric
+service; it is one chain, not a family of interchangeable queue formats:
+
+```text
+task + candidate
+  -> candidate source root + source-manifest identity
+  -> action input + action root + work context
+  -> build-proof REQUESTED event + durable action lease
+  -> work receipt + proof-set root
+  -> PROVEN lane receipt + accepted-work root
+  -> versioned publication job + immutable target outcome
+```
+
+Canonical wire/root types live in `lib/vcs/include/vcs/zcode_dev.h`,
+`zcode_action_input.h`, `build_action.h`, `zcode_work_context.h`,
+`zcode_lane.h`, `zcode_accepted_work.h`, and `vcs_devloop.h`. Durable lifecycle
+and policy live in `app/models/include/models/build_fabric.h` and
+`app/services/include/services/build_fabric_*.h`. A Git object ID records
+provenance and intent; it is not a source closure, action, receipt, proof set,
+or acceptance identity. `tools/land` and `.cache/zcl-dev-proof` are current
+developer-factory mechanisms and must not become parallel product authority.
+
 `lib/metaverse/` owns the sovereign-property vocabulary: the `property_id`
 (`<kind>:<64-hex root>`), the closed action bitmask, the view type with its
 evidence grade, and one read-only adapter per property kind. It is a
@@ -803,16 +825,15 @@ then exactly one of `ALL TESTS PASSED`, `ALL TESTS PASSED (CACHED)`, or
   `make lint` → full link build → `make test-parallel` → reads `SUITE VERDICT`
   and rejects the cached form.
 - Force a cold run: `make test-parallel TEST_PARALLEL_ARGS=--no-cache`.
-- `ONLY=` is a **substring** match, not a group name. `make t-fast ONLY=wallet`
-  runs every group whose name contains `wallet`. It is also not optional and
-  not validated: `make t-fast` with a literal `ONLY=<group>` copied out of a doc
-  compiles the whole test binary and *then* dies with
-  `sh: 1: Syntax error: end of file unexpected`. List real names first with
-  `git grep -hoE 'X\([a-z_0-9]+\)' lib/test/src/test_parallel.c | tr -d 'X()'`.
+- `ONLY=` is a **substring** match, not necessarily one group name. `make
+  t-fast ONLY=wallet` runs every registered group whose name contains
+  `wallet`. The target validates the selector before building and refuses an
+  empty, placeholder, or unmatched value. Use `make t-list` for canonical
+  group names.
 
 | Command | Effect |
 |---------|--------|
-| `make -j$(nproc)` | Build `z23`, `test_zcl`, `zclassic-cli`. `-j` only overlaps the 2–3 binaries + LTO link, not per-binary front-end. |
+| `make -j"$(getconf _NPROCESSORS_ONLN)"` | Build `z23`, `test_zcl`, `zclassic-cli`. `-j` only overlaps the 2–3 binaries + LTO link, not per-binary front-end. |
 | `make fast-changed-compile` | Compatibility name for the source-wide dev compile proof; changed paths are classification hints only. |
 | `make fast-compile` | Fastest no-link dev compile check; exact non-LTO objects under `build/dev-obj/epochs/<compile-epoch>/`, with compiler-cache recovery. |
 | `make build-only` | Strict release-flag source-wide `cc -c` proof under `build/obj/epochs/<compile-epoch>/`. **Compiles library objects only — it does not link, and never builds `src/main.c` or the binaries**, so it cannot catch a broken entry point, a missing symbol, or a link gap. Run `make -j$(nproc)` before claiming green. |
@@ -820,7 +841,7 @@ then exactly one of `ALL TESTS PASSED`, `ALL TESTS PASSED (CACHED)`, or
 | `make dev-bin` | Link an exact epoch candidate, then atomically refresh `build/bin/z23-dev`; non-LTO/unstripped, with hot consensus/crypto/script/validation buckets still optimized. Local iteration only; not deploy/release. |
 | `make dev-watch [MODE=verify\|check]` | Unified save loop. Both public modes prove and record without runtime activation. `auto`/`apply`/`hotswap`/`reload`/`stage` are recognized only to return a containment refusal. |
 | `build/bin/z23-dev dev loop ensure/status/wait/stop` | Native C23 verify-watcher lifecycle. `ensure` is singleton/idempotent and accepts verify mode; publication modes refuse. `status` reports mode and containment posture, `wait` is bounded, and `stop` requires the exact watcher ID. |
-| `build/bin/z23-dev dev proof ensure/status/wait` | Exact commit/advertised-base acceptance receipt lifecycle. Notification hooks schedule work; push admission validates the fixed-width self-sealed receipt without building, testing, linting, waiting, or invoking a shell. |
+| `build/bin/z23-dev dev proof ensure/status/wait` | Exact commit/advertised-base acceptance receipt lifecycle. Notification hooks make a best-effort per-checkout request; push admission validates the fixed-width self-sealed receipt without building, testing, linting, waiting, or invoking a shell. The queue is still filesystem-backed and is not the unfinished signed-commit publisher. |
 | `make git-hook-selftest` / `make install-hooks` | Builds, measures, and installs the native C23 Git hook in the checkout-local hook directory. `pre-push` admits receipts; post-commit/merge/checkout schedule proof work. |
 | `build/bin/z23-dev dev change apply --input='{"files":[...]}'` | Contained compatibility entry point: returns `publication_contained` before runtime mutation. Use `dev change plan`, verify/check watch, and focused proofs. |
 | `build/bin/z23-dev dev vcs revert --input='{"to":"<commit>","relink_generation":false}'` | Source-only revert remains available. `relink_generation=true` refuses before source mutation and cannot activate a binary. |
@@ -845,7 +866,7 @@ then exactly one of `ALL TESTS PASSED`, `ALL TESTS PASSED (CACHED)`, or
 | `make lint` | Every gate in the Makefile's `LINT_GATES` list (that variable is the count — never hand-pin a number). Must pass before tests. HARD gates fail the build; RATCHET gates compare to a shrink-only baseline. Always runs every gate cold — the canonical gate never accepts a cached verdict. |
 | `make lint-cached` | Same gates, but one whose entire scannable input is byte-identical to the last time it passed is skipped. Helps only when nothing changed; after any edit every gate re-runs, because the key is the whole tree. Gates that build things, run compilers, or read build output / git config / `/proc` / untracked state are never cached and always run — see the reasons in `tools/lint/lint_cache.sh`. |
 | `make lint-cold-audit` | Runs every gate FRESH and fails if any gate holding a cached PASS at its current key does not also pass the fresh run. This is what makes the cache trustworthy; run it after changing the gate set or `tools/lint/lint_cache.sh`. Warm the cache first or it has nothing to check. |
-| `make ci` | lint + bench-regress + build + `test_parallel` (retry-once for flakes) + symbol-floor. Pre-push hook runs this. |
+| `make ci` | lint + bench-regress + build + `test_parallel` (retry-once for flakes) + symbol-floor. This is an explicit full local gate; the native pre-push hook never invokes it. |
 | `make deploy` | Pin the outer source record through recursive Make, freeze and preflight one candidate, install those exact bytes, WAL checkpoint, restart, then verify exact source/artifact identity over the canonical systemd `MainPID`'s forced loopback RPC endpoint (`deploy_verify.sh`). Inherited lane selectors cannot redirect the proof. If RPC stays closed during crash-only recovery, the verifier reports `reindex-chainstate` progress from that service's datadir log. |
 | `make deploy-dev` | Phase-0 contained: always refuses before stopping a service or moving a generation link. |
 | `make deploy-dev-fast` / `make agent-deploy-fast` | Phase-0 contained: always refuses; there is no public runtime-activation entry point. |
