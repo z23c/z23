@@ -391,6 +391,59 @@ and an expanded, budget-aware `code.room` response.
   `RESPONSE_BUDGET_EXCEEDED`; remove duplicate prose in compact JSON where
   structured data already carries it; link tested invariants/traps to their
   enforcing gates rather than preloading whole manuals.
+- [ ] Measure peer-context reuse separately from model-token use: record
+  context-root cache hits, manifest/chunk bytes transferred, model input bytes,
+  approximate tokenizer counts, corpus walks, source files/bytes read,
+  unchanged-source reads, query latency, and duplicate actions avoided. A CAS
+  hit or a smaller network transfer is not by itself a model-token reduction.
+- [ ] Preserve `agent_context.v1` as a compatibility reader and transport its
+  canonical wire root-first through the existing inert `content.v2` carrier,
+  package store, provider/pointer records, and swarm. The receiver re-roots the
+  wire and checks expected task/source/goal roots; remote bytes grant no source,
+  build, execution, proof, acceptance, or publication authority. Do not fork a
+  context CAS, DHT, wire transport, task board, or scheduler.
+- [ ] Add a generation-bound navigator/context envelope over the existing
+  `code.capsule` and ZCode context owners. Bind repository/configuration,
+  requested and indexed generation, normalized query, dimension mask,
+  portable source/blob roots, canonical ranges, cursor, limits, freshness,
+  completeness per lexical/call/include/build/impact-policy dimension, work
+  counters, capsule/query-receipt roots, and one safe next action. Absolute
+  paths never enter the portable identity.
+- [ ] Verify every remote source excerpt against the locally held full blob or
+  a locally verified range proof before proof/edit use. Ordinary navigation may
+  show a stale cached range only when labeled with requested/indexed generation
+  and lag. Proof, edit, and impact require the exact requested generation or
+  refuse `INDEX_LAG`; incomplete dimensions conservatively widen the proof set
+  or refuse when sound widening cannot be derived.
+- [ ] Rendezvous by exact roots before a model call: resolve locally admissible
+  accepted work for the task, attach to an identical active action, then look
+  for a completed action whose task/candidate/input/context/policy/toolchain/
+  work-kind/target/limits all match and whose output bytes are locally present
+  and reverified. Remote-only receipts remain `UNVERIFIED` and cannot satisfy
+  local acceptance.
+- [ ] Add remote agent work only in this order: read-only `DIAGNOSE`, scoped
+  candidate-zero `PROPOSE`, independent `REVIEW`. Carry typed inputs/findings as
+  ordinary rooted CAS objects through the existing ZCode work swarm; never send
+  accumulated free-form transcripts. Missing model policy, exact source,
+  complete context, requested adapter, node headroom, or qualified disposable
+  isolation refuses by a stable name. The node may preempt or refuse all such
+  work for blockchain priority.
+
+Peer-context acceptance:
+
+- [ ] Same generation/config/query in two absolute worktree paths produces the
+  same capsule/context root; changed generation or query changes it, and a
+  cross-generation cursor refuses.
+- [ ] A warm exact lookup performs zero corpus-wide walks, zero unchanged-source
+  reads, and zero source-byte reads; a second peer/cache hit transfers no
+  duplicate chunks. Establish the first-transfer baseline before ratcheting a
+  percentage reduction.
+- [ ] Every cap, missing shard, poisoned chunk, partial write, stale generation,
+  or omitted dimension remains named; cursor exhaustion agrees with an oracle
+  without gaps or duplicates; the last complete generation remains readable.
+- [ ] The representative corpus still reaches first correct edit without a
+  whole-file read on at least 90% of tasks, and no context optimization narrows
+  the required proof union.
 
 **Exit gate:** ≥90% of corpus tasks reach the first correct edit without a
 whole-file read, and the room reports any missing relationship instead of
@@ -649,6 +702,12 @@ passes with independent build/signature evidence and exact rollback.
   coverage, independent review before stable publication; delete
   compatibility paths only after their replacement and rollback are proven
   (mutable `latest` is never authoritative evidence).
+- [ ] Peer-collaboration receipts permanently report task/source/context/query/
+  action roots, requested/indexed generation, completeness, CAS hit/miss and
+  transferred bytes, source reads/walks, model input bytes, approximate token
+  count, duplicate execution avoided, node-priority outcome, and whether the
+  evidence is local, reproduced, or remote-observed only. Identical active
+  actions execute once; changed context/toolchain/limit never reuses them.
 
 ## Recommended first implementation slice
 
