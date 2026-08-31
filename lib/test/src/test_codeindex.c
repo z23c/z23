@@ -691,7 +691,7 @@ static int test_codeindex_platform_arm(void)
              ntext >= 1 &&
              (text_hits[0].match_mask & CI_SEARCH_MATCH_PATH) != 0);
 
-    struct zcode_goal_selection selected, selected_again;
+    struct zcode_goal_selection selected, selected_again, selected_indexed;
     CI_CHECK("goal selector ranks the checksum symbol from plain language",
              zcode_goal_context_select(
                  FIX, "Repair the data frame checksum length", NULL,
@@ -699,6 +699,37 @@ static int test_codeindex_platform_arm(void)
              strcmp(selected.selected.name, "foo_checksum") == 0 &&
              selected.token_count >= 3 && selected.candidate_count >= 1 &&
              selected.generation_us > 0 && selected.why[0] != '\0');
+    bool indexed_ok = zcode_goal_context_select_indexed(
+        ci, "Repair the data frame checksum length", NULL,
+        &selected_indexed).ok;
+    bool indexed_same = indexed_ok &&
+        selected.token_count == selected_indexed.token_count &&
+        selected.candidate_count == selected_indexed.candidate_count &&
+        selected.total_matches == selected_indexed.total_matches &&
+        selected.dropped_candidates == selected_indexed.dropped_candidates &&
+        selected.budget_exhausted == selected_indexed.budget_exhausted &&
+        selected.service_generation == selected_indexed.service_generation &&
+        strcmp(selected.selected_symbol_id,
+               selected_indexed.selected_symbol_id) == 0 &&
+        strcmp(selected.why, selected_indexed.why) == 0 &&
+        selected_indexed.generation_us > 0;
+    for (size_t i = 0; indexed_same && i < selected.token_count; i++)
+        indexed_same = strcmp(selected.tokens[i],
+                              selected_indexed.tokens[i]) == 0;
+    for (size_t i = 0; indexed_same && i < selected.candidate_count; i++) {
+        indexed_same =
+            strcmp(selected.candidates[i].symbol_id,
+                   selected_indexed.candidates[i].symbol_id) == 0 &&
+            strcmp(selected.candidates[i].matched_token,
+                   selected_indexed.candidates[i].matched_token) == 0 &&
+            strcmp(selected.candidates[i].why,
+                   selected_indexed.candidates[i].why) == 0 &&
+            selected.candidates[i].match_mask ==
+                selected_indexed.candidates[i].match_mask &&
+            selected.candidates[i].score == selected_indexed.candidates[i].score;
+    }
+    CI_CHECK("caller-owned index produces the identical literal ranking",
+             indexed_same);
     CI_CHECK("goal selection is deterministic across repeated runs",
              zcode_goal_context_select(
                  FIX, "Repair the data frame checksum length", NULL,

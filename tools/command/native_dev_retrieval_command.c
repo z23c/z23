@@ -11,6 +11,7 @@
 #include "platform/directory_compat.h"
 #include "retrieval/retrieval.h"
 #include "services/zcode_goal_context_service.h"
+#include "sha3/sha3.h"
 #include "vcs/vcs_manifest.h"
 
 #include <limits.h>
@@ -24,15 +25,16 @@
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
 enum {
-    RB_MAX_ROWS = 20,
-    RB_QUERY_ROWS = RB_MAX_ROWS + 1,
+    RB_DISPLAY_ROWS = 20,
+    RB_RETAIN_ROWS = ZCL_RETRIEVAL_EVAL_RANK_MAX,
+    RB_QUERY_ROWS = RB_RETAIN_ROWS + 1,
     RB_INITIAL_ROWS = 64,
     RB_MAX_INDEX_ROWS = 65536,
 };
 
 struct rb_rank {
-    struct zcl_retrieval_ranked_file rows[RB_MAX_ROWS];
-    char paths[RB_MAX_ROWS][256];
+    struct zcl_retrieval_ranked_file rows[RB_RETAIN_ROWS];
+    char paths[RB_RETAIN_ROWS][256];
     size_t count;
     bool complete;
 };
@@ -324,7 +326,7 @@ static bool rb_rank_add(struct rb_rank *rank, const char *path,
     }
     for (size_t i = 0; i < rank->count; i++)
         if (strcmp(rank->paths[i], path) == 0) return true;
-    if (rank->count >= RB_MAX_ROWS) {
+    if (rank->count >= RB_RETAIN_ROWS) {
         rank->complete = false;
         return true;
     }
@@ -351,13 +353,13 @@ static bool rb_rank_add(struct rb_rank *rank, const char *path,
     return true;
 }
 
-static bool rb_literal_rank(const char *workspace, const char *query,
+static bool rb_literal_rank(struct codeindex *index, const char *query,
                             const struct vcs_manifest *manifest,
                             struct rb_rank *rank)
 {
     struct zcode_goal_selection selected;
-    struct zcl_result result = zcode_goal_context_select(
-        workspace, query, NULL, &selected);
+    struct zcl_result result = zcode_goal_context_select_indexed(
+        index, query, NULL, &selected);
     if (!result.ok) {
         LOG_ERROR(RB_TAG, "production selector failed: %s", result.message);
         return false;
@@ -424,8 +426,8 @@ static bool rb_bm25_rank(struct codeindex *ci, const char *query,
             LOG_ERROR(RB_TAG, "checked BM25 query failed");
             ok = false;
         } else {
-            rank->complete = n <= RB_MAX_ROWS;
-            for (size_t i = 0; i < n && i < RB_MAX_ROWS && ok; i++)
+            rank->complete = n <= RB_RETAIN_ROWS;
+            for (size_t i = 0; i < n && i < RB_RETAIN_ROWS && ok; i++)
                 ok = rb_rank_add(rank,
                     zcl_retrieval_name(retrieval, hits[i].doc), manifest);
         }
@@ -436,7 +438,38 @@ static bool rb_bm25_rank(struct codeindex *ci, const char *query,
     return ok;
 }
 
-static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank)
+static void rb_u64le(uint8_t out[8], uint64_t value)
+{
+    for (size_t i = 0; i < 8; i++) {
+        out[i] = (uint8_t)(value & 0xffu);
+        value >>= 8;
+    }
+}
+
+static void rb_rank_root(const struct rb_rank *rank, char out[65])
+{
+    static const char domain[] = "zcl.retrieval_ranked_files.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    const uint8_t complete = rank->complete ? 1u : 0u;
+    sha3_256_write(&sha, &complete, 1);
+    uint8_t encoded[8];
+    rb_u64le(encoded, (uint64_t)rank->count);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    for (size_t i = 0; i < rank->count; i++) {
+        sha3_256_write(&sha, (const uint8_t *)rank->rows[i].path,
+                       strlen(rank->rows[i].path) + 1u);
+        rb_u64le(encoded, rank->rows[i].context_bytes);
+        sha3_256_write(&sha, encoded, sizeof(encoded));
+    }
+    uint8_t root[32];
+    sha3_256_finalize(&sha, root);
+    zcl_hex_encode(root, sizeof(root), out);
+}
+
+static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank,
+                         size_t offset, size_t page_limit)
 {
     uint64_t bytes_at_5 = 0;
     for (size_t i = 0; i < rank->count && i < 5; i++) {
@@ -450,15 +483,23 @@ static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank)
         LOG_ERROR(RB_TAG, "top-five context cost exceeds output range");
         return false;
     }
+    size_t displayed = rank->count > offset ? rank->count - offset : 0;
+    if (displayed > page_limit) displayed = page_limit;
+    char ranking_root[65];
+    rb_rank_root(rank, ranking_root);
     bool ok = json_push_kv_bool(object, "ranking_complete", rank->complete) &&
         json_push_kv_int(object, "ranked_files", (int64_t)rank->count) &&
+        json_push_kv_int(object, "display_offset", (int64_t)offset) &&
+        json_push_kv_int(object, "displayed_files", (int64_t)displayed) &&
+        json_push_kv_str(object, "ranking_root_sha3", ranking_root) &&
         json_push_kv_int(object, "context_bytes_at_5", (int64_t)bytes_at_5) &&
         json_push_kv_int(object, "approximate_tokens_at_5",
                          (int64_t)((bytes_at_5 + 3u) / 4u));
     struct json_value rows;
     json_init(&rows);
     json_set_array(&rows);
-    for (size_t i = 0; i < rank->count && ok; i++) {
+    for (size_t i = offset; i < rank->count &&
+         i < offset + page_limit && ok; i++) {
         struct json_value row;
         json_init(&row);
         json_set_object(&row);
@@ -491,6 +532,91 @@ static bool rb_manifest_capture(const char *workspace,
     return true;
 }
 
+static bool rb_workspace(const struct json_value *input, char out[PATH_MAX])
+{
+    const char *value = json_get_str(json_get(input, "workspace"));
+    return value && value[0] == '/' &&
+        platform_directory_canonical_real(value, out, PATH_MAX) &&
+        strcmp(value, out) == 0;
+}
+
+static bool rb_cursor(const struct zcl_command_request *request, size_t *out)
+{
+    const char *value = request->cursor;
+    *out = 0;
+    if (!value || !value[0]) return true;
+    if (strspn(value, "0123456789") != strlen(value)) return false;
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (!end || *end != '\0' || parsed >= RB_RETAIN_ROWS)
+        return false;
+    *out = (size_t)parsed;
+    return true;
+}
+
+static bool rb_render_data(
+    struct zcl_command_reply *reply, const char *task_id, const char *query,
+    const char *expected_hex, const char *pre_hex, const char *post_hex,
+    const char *codeindex_hex, size_t rank_offset, size_t corpus_files,
+    const struct rb_rank *literal, const struct rb_rank *bm25,
+    size_t page_limit)
+{
+    size_t max_count = literal->count > bm25->count
+        ? literal->count : bm25->count;
+    size_t page_span = max_count > rank_offset ? max_count - rank_offset : 0;
+    if (page_span > page_limit) page_span = page_limit;
+    bool has_more = rank_offset + page_span < max_count;
+    json_set_object(&reply->data);
+    bool ok = corpus_files <= INT64_MAX &&
+        json_push_kv_str(&reply->data, "schema",
+                         "zcl.dev_retrieval_benchmark.v1") &&
+        json_push_kv_bool(&reply->data, "observational", true) &&
+        json_push_kv_bool(&reply->data, "production_ordering_changed", false) &&
+        json_push_kv_bool(&reply->data, "promotion_authorized", false) &&
+        json_push_kv_bool(&reply->data, "native_execution", true) &&
+        json_push_kv_bool(&reply->data, "ready_to_benchmark", true) &&
+        json_push_kv_str(&reply->data, "task_id", task_id) &&
+        json_push_kv_str(&reply->data, "query", query) &&
+        json_push_kv_str(&reply->data, "expected_vcs_root", expected_hex) &&
+        json_push_kv_str(&reply->data, "observed_vcs_root_pre", pre_hex) &&
+        json_push_kv_str(&reply->data, "observed_vcs_root_post", post_hex) &&
+        json_push_kv_str(&reply->data, "shared_codeindex_source_root_sha3",
+                         codeindex_hex) &&
+        json_push_kv_int(&reply->data, "rank_offset",
+                         (int64_t)rank_offset) &&
+        json_push_kv_int(&reply->data, "page_limit", (int64_t)page_limit) &&
+        json_push_kv_int(&reply->data, "page_span", (int64_t)page_span) &&
+        json_push_kv_bool(&reply->data, "has_more", has_more) &&
+        json_push_kv_int(&reply->data, "next_offset",
+                         has_more ? (int64_t)(rank_offset + page_span) : 0) &&
+        json_push_kv_int(&reply->data, "corpus_files", (int64_t)corpus_files) &&
+        json_push_kv_str(
+            &reply->data, "document_profile",
+            "path+group+purpose+symbol_name+signature+doc+guard") &&
+        json_push_kv_str(&reply->data, "context_basis", "full_file_bytes") &&
+        json_push_kv_str(&reply->data, "context_cost_kind",
+                         "projected_not_read") &&
+        json_push_kv_str(&reply->data, "token_basis",
+                         "ceil(context_bytes/4)") &&
+        json_push_kv_str(&reply->data, "literal_selector_basis",
+                         "production_algorithm_caller_owned_index") &&
+        json_push_kv_str(&reply->data, "gold_basis",
+                         "not_supplied_rank_only") &&
+        json_push_kv_str(&reply->data, "scope_basis", "unavailable");
+    struct json_value literal_json, bm25_json;
+    json_init(&literal_json);
+    json_set_object(&literal_json);
+    json_init(&bm25_json);
+    json_set_object(&bm25_json);
+    ok = ok && rb_push_rank(&literal_json, literal, rank_offset, page_limit) &&
+        rb_push_rank(&bm25_json, bm25, rank_offset, page_limit) &&
+        json_push_kv(&reply->data, "literal", &literal_json) &&
+        json_push_kv(&reply->data, "bm25", &bm25_json);
+    json_free(&literal_json);
+    json_free(&bm25_json);
+    return ok;
+}
+
 static void rb_run(const struct zcl_command_request *request,
                    struct zcl_command_reply *reply)
 {
@@ -499,20 +625,22 @@ static void rb_run(const struct zcl_command_request *request,
                 "benchmark input must be one JSON object", "input");
         return;
     }
-    const char *workspace_input = json_get_str(json_get(request->input,
-                                                        "workspace"));
     const char *expected_hex = json_get_str(json_get(request->input,
                                                      "expected_vcs_root"));
     const char *task_id = json_get_str(json_get(request->input, "task_id"));
     const char *query = json_get_str(json_get(request->input, "query"));
+    size_t rank_offset = 0;
     char workspace[PATH_MAX];
-    if (!workspace_input || workspace_input[0] != '/' ||
-        !platform_directory_canonical_real(workspace_input, workspace,
-                                           sizeof(workspace)) ||
-        strcmp(workspace_input, workspace) != 0) {
+    if (!rb_workspace(request->input, workspace)) {
         rb_fail(reply, "WORKSPACE_NOT_CANONICAL", "input",
                 "workspace must be a canonical absolute directory path",
-                workspace_input ? workspace_input : "missing");
+                "workspace");
+        return;
+    }
+    if (!rb_cursor(request, &rank_offset)) {
+        rb_fail(reply, "INVALID_CURSOR", "input",
+                "cursor must be a decimal rank offset from 0 through 127",
+                "cursor");
         return;
     }
     if (!task_id || !task_id[0] || strlen(task_id) > 128 || !query ||
@@ -557,7 +685,7 @@ static void rb_run(const struct zcl_command_request *request,
     struct rb_rank literal = {0}, bm25 = {0};
     size_t corpus_files = 0;
     bool ranked = ci && codeindex_source_root_sha3(ci, codeindex_root) &&
-        rb_literal_rank(workspace, query, &pre, &literal) &&
+        rb_literal_rank(ci, query, &pre, &literal) &&
         rb_bm25_rank(ci, query, &pre, &bm25, &corpus_files);
     codeindex_close(ci);
     if (!ranked) {
@@ -583,48 +711,26 @@ static void rb_run(const struct zcl_command_request *request,
     char post_hex[65], codeindex_hex[65];
     zcl_hex_encode(post_root, sizeof(post_root), post_hex);
     zcl_hex_encode(codeindex_root, sizeof(codeindex_root), codeindex_hex);
-    bool output_ok = corpus_files <= INT64_MAX &&
-        json_push_kv_str(&reply->data, "schema",
-                         "zcl.dev_retrieval_benchmark.v1") &&
-        json_push_kv_bool(&reply->data, "observational", true) &&
-        json_push_kv_bool(&reply->data, "production_ordering_changed", false) &&
-        json_push_kv_bool(&reply->data, "promotion_authorized", false) &&
-        json_push_kv_bool(&reply->data, "native_execution", true) &&
-        json_push_kv_bool(&reply->data, "ready_to_benchmark", true) &&
-        json_push_kv_str(&reply->data, "task_id", task_id) &&
-        json_push_kv_str(&reply->data, "query", query) &&
-        json_push_kv_str(&reply->data, "expected_vcs_root", expected_hex) &&
-        json_push_kv_str(&reply->data, "observed_vcs_root_pre", pre_hex) &&
-        json_push_kv_str(&reply->data, "observed_vcs_root_post", post_hex) &&
-        json_push_kv_str(&reply->data, "bm25_codeindex_source_root_sha3",
-                         codeindex_hex) &&
-        json_push_kv_int(&reply->data, "corpus_files", (int64_t)corpus_files) &&
-        json_push_kv_str(
-            &reply->data, "document_profile",
-            "path+group+purpose+symbol_name+signature+doc+guard") &&
-        json_push_kv_str(&reply->data, "context_basis", "full_file_bytes") &&
-        json_push_kv_str(&reply->data, "context_cost_kind",
-                         "projected_not_read") &&
-        json_push_kv_str(&reply->data, "token_basis",
-                         "ceil(context_bytes/4)") &&
-        json_push_kv_str(&reply->data, "literal_source_generation_basis",
-                         "unobserved_internal_selector") &&
-        json_push_kv_str(&reply->data, "gold_basis",
-                         "not_supplied_rank_only") &&
-        json_push_kv_str(&reply->data, "scope_basis", "unavailable");
-    struct json_value literal_json, bm25_json;
-    json_init(&literal_json);
-    json_set_object(&literal_json);
-    json_init(&bm25_json);
-    json_set_object(&bm25_json);
-    output_ok = output_ok && rb_push_rank(&literal_json, &literal) &&
-        rb_push_rank(&bm25_json, &bm25) &&
-        json_push_kv(&reply->data, "literal", &literal_json) &&
-        json_push_kv(&reply->data, "bm25", &bm25_json);
-    json_free(&literal_json);
-    json_free(&bm25_json);
+    size_t contract = request->spec && request->spec->budget_bytes
+        ? (size_t)request->spec->budget_bytes
+        : (size_t)ZCL_COMMAND_LIST_BUDGET;
+    if (request->budget_bytes && request->budget_bytes < contract)
+        contract = request->budget_bytes;
+    size_t data_cap = contract > 768u ? contract - 768u : 0;
+    size_t page_limit = RB_DISPLAY_ROWS;
+    bool output_ok = false;
+    while (page_limit > 0) {
+        output_ok = rb_render_data(
+            reply, task_id, query, expected_hex, pre_hex, post_hex,
+            codeindex_hex, rank_offset, corpus_files, &literal, &bm25,
+            page_limit);
+        if (!output_ok || json_write(&reply->data, NULL, 0) <= data_cap)
+            break;
+        page_limit--;
+    }
     vcs_manifest_free(&pre);
-    if (!output_ok)
+    if (!output_ok || page_limit == 0 ||
+        json_write(&reply->data, NULL, 0) > data_cap)
         rb_fail(reply, "OUTPUT_ALLOCATION_FAILED", "render",
                 "benchmark result could not be rendered completely", task_id);
 }

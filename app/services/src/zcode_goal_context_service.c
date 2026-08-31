@@ -169,16 +169,15 @@ static struct zcl_result zgoal_exact(
     return ZCL_OK;
 }
 
-struct zcl_result zcode_goal_context_select(
-    const char *workspace, const char *goal, const char *exact_symbol,
+struct zcl_result zcode_goal_context_select_indexed(
+    struct codeindex *index, const char *goal, const char *exact_symbol,
     struct zcode_goal_selection *out)
 {
-    if (!workspace || !goal || !goal[0] || !out || strlen(goal) > 4096)
-        return ZCL_ERR(-1, "goal selection requires workspace and bounded goal");
+    if (!index || !goal || !goal[0] || !out || strlen(goal) > 4096)
+        return ZCL_ERR(-1,
+                       "goal selection requires an index and bounded goal");
     memset(out, 0, sizeof(*out));
     int64_t started = platform_time_monotonic_us();
-    struct codeindex *index = codeindex_open(workspace);
-    if (!index) return ZCL_ERR(-1, "code index could not open for goal selection");
     struct zcl_hotswap_service_lease lease = {0};
     const struct zcode_goal_context_calc_service_v1 *service =
         zcl_hotswap_service_acquire(ZCODE_GOAL_CONTEXT_CALC_SERVICE_ID, &lease);
@@ -242,10 +241,28 @@ struct zcl_result zcode_goal_context_select(
         }
     }
     zcl_hotswap_service_release(&lease);
-    codeindex_close(index);
     int64_t elapsed = platform_time_monotonic_us() - started;
     out->generation_us = elapsed > 0 ? (uint64_t)elapsed : 1u;
     if (!result.ok) memset(&out->selected, 0, sizeof(out->selected));
+    return result;
+}
+
+struct zcl_result zcode_goal_context_select(
+    const char *workspace, const char *goal, const char *exact_symbol,
+    struct zcode_goal_selection *out)
+{
+    if (!workspace || !goal || !goal[0] || !out || strlen(goal) > 4096)
+        return ZCL_ERR(-1, "goal selection requires workspace and bounded goal");
+    memset(out, 0, sizeof(*out));
+    int64_t started = platform_time_monotonic_us();
+    struct codeindex *index = codeindex_open(workspace);
+    if (!index)
+        return ZCL_ERR(-1, "code index could not open for goal selection");
+    struct zcl_result result = zcode_goal_context_select_indexed(
+        index, goal, exact_symbol, out);
+    codeindex_close(index);
+    int64_t elapsed = platform_time_monotonic_us() - started;
+    out->generation_us = elapsed > 0 ? (uint64_t)elapsed : 1u;
     return result;
 }
 
