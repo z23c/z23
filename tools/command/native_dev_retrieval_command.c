@@ -35,6 +35,22 @@ struct rb_rank {
     bool complete;
 };
 
+/* One source-bound computation owns every byte needed to render any page.
+ * In particular, rank row pointers refer only to the adjacent owned path
+ * arrays, never to the manifest or code index after they are closed. */
+struct rb_computation {
+    char workspace[PATH_MAX];
+    char task_id[129];
+    char query[4097];
+    char expected_hex[65];
+    char pre_hex[65];
+    char post_hex[65];
+    char codeindex_hex[65];
+    size_t corpus_files;
+    struct rb_rank literal;
+    struct rb_rank bm25;
+};
+
 static void rb_fail(struct zcl_command_reply *reply, const char *code,
                     const char *phase, const char *message,
                     const char *evidence)
@@ -336,85 +352,74 @@ static bool rb_render_data(
     return ok;
 }
 
-static void rb_run(const struct zcl_command_request *request,
-                   struct zcl_command_reply *reply)
+static bool rb_compute(const struct json_value *input, const char *workspace,
+                       struct rb_computation *computed,
+                       struct zcl_command_reply *reply)
 {
-    if (!request->input || request->input->type != JSON_OBJ) {
-        rb_fail(reply, "INVALID_INPUT", "input",
-                "benchmark input must be one JSON object", "input");
-        return;
-    }
-    const char *expected_hex = json_get_str(json_get(request->input,
+    const char *expected_hex = json_get_str(json_get(input,
                                                      "expected_vcs_root"));
-    const char *task_id = json_get_str(json_get(request->input, "task_id"));
-    const char *query = json_get_str(json_get(request->input, "query"));
-    size_t rank_offset = 0;
-    char workspace[PATH_MAX];
-    if (!rb_workspace(request->input, workspace)) {
-        rb_fail(reply, "WORKSPACE_NOT_CANONICAL", "input",
-                "workspace must be a canonical absolute directory path",
-                "workspace");
-        return;
-    }
-    if (!rb_cursor(request, &rank_offset)) {
-        rb_fail(reply, "INVALID_CURSOR", "input",
-                "cursor must be a decimal rank offset from 0 through 127",
-                "cursor");
-        return;
-    }
+    const char *task_id = json_get_str(json_get(input, "task_id"));
+    const char *query = json_get_str(json_get(input, "query"));
     if (!task_id || !task_id[0] || strlen(task_id) > 128 || !query ||
         !query[0] || strlen(query) > 4096) {
         rb_fail(reply, "INVALID_TASK", "input",
                 "task_id and bounded non-empty query are required", "task");
-        return;
+        return false;
     }
     if (!expected_hex || !expected_hex[0]) {
         rb_fail(reply, "EXPECTED_VCS_ROOT_REQUIRED", "bind",
                 "expected_vcs_root is required for observational ranking",
                 "expected_vcs_root");
-        return;
+        return false;
     }
     uint8_t expected[32];
     if (!zcl_hex_decode_lower(expected_hex, expected, sizeof(expected))) {
         rb_fail(reply, "INVALID_VCS_ROOT", "bind",
                 "expected_vcs_root must be exactly 64 lowercase hex characters",
                 "expected_vcs_root");
-        return;
+        return false;
     }
 
-    struct vcs_manifest pre;
+    memset(computed, 0, sizeof(*computed));
+    (void)snprintf(computed->workspace, sizeof(computed->workspace), "%s",
+                   workspace);
+    (void)snprintf(computed->task_id, sizeof(computed->task_id), "%s",
+                   task_id);
+    (void)snprintf(computed->query, sizeof(computed->query), "%s", query);
+    (void)snprintf(computed->expected_hex, sizeof(computed->expected_hex),
+                   "%s", expected_hex);
+
+    struct vcs_manifest pre = {0};
     uint8_t pre_root[32];
     if (!rb_manifest_capture(workspace, &pre, pre_root)) {
         rb_fail(reply, "SOURCE_CAPTURE_FAILED", "capture",
                 "could not build the pre-run ZVCS manifest", workspace);
-        return;
+        return false;
     }
-    char pre_hex[65];
-    zcl_hex_encode(pre_root, sizeof(pre_root), pre_hex);
+    zcl_hex_encode(pre_root, sizeof(pre_root), computed->pre_hex);
     if (memcmp(expected, pre_root, sizeof(expected)) != 0) {
         vcs_manifest_free(&pre);
         rb_fail(reply, "SOURCE_ROOT_MISMATCH", "bind",
                 "expected source root does not match the pre-run manifest",
-                pre_hex);
-        return;
+                computed->pre_hex);
+        return false;
     }
 
     struct codeindex *ci = codeindex_open_source_view(workspace);
     uint8_t codeindex_root[32];
-    struct rb_rank literal = {0}, bm25 = {0};
-    size_t corpus_files = 0;
     bool ranked = ci && codeindex_source_root_sha3(ci, codeindex_root) &&
-        rb_literal_rank(ci, query, &pre, &literal) &&
-        rb_bm25_rank(ci, query, &pre, &bm25, &corpus_files);
+        rb_literal_rank(ci, query, &pre, &computed->literal) &&
+        rb_bm25_rank(ci, query, &pre, &computed->bm25,
+                     &computed->corpus_files);
     codeindex_close(ci);
     if (!ranked) {
         vcs_manifest_free(&pre);
         rb_fail(reply, "RANKING_FAILED", "rank",
                 "literal or BM25 ranking could not be sealed", workspace);
-        return;
+        return false;
     }
 
-    struct vcs_manifest post;
+    struct vcs_manifest post = {0};
     uint8_t post_root[32];
     if (!rb_manifest_capture(workspace, &post, post_root) ||
         memcmp(pre_root, post_root, sizeof(pre_root)) != 0) {
@@ -423,35 +428,75 @@ static void rb_run(const struct zcl_command_request *request,
         rb_fail(reply, "SOURCE_CHANGED_DURING_BENCHMARK", "bind",
                 "the ZVCS manifest changed while rankings were computed",
                 workspace);
-        return;
+        return false;
     }
     vcs_manifest_free(&post);
+    vcs_manifest_free(&pre);
+    zcl_hex_encode(post_root, sizeof(post_root), computed->post_hex);
+    zcl_hex_encode(codeindex_root, sizeof(codeindex_root),
+                   computed->codeindex_hex);
+    return true;
+}
 
-    char post_hex[65], codeindex_hex[65];
-    zcl_hex_encode(post_root, sizeof(post_root), post_hex);
-    zcl_hex_encode(codeindex_root, sizeof(codeindex_root), codeindex_hex);
-    size_t contract = request->spec && request->spec->budget_bytes
-        ? (size_t)request->spec->budget_bytes
-        : (size_t)ZCL_COMMAND_LIST_BUDGET;
-    if (request->budget_bytes && request->budget_bytes < contract)
-        contract = request->budget_bytes;
+static bool rb_render_fitted(struct zcl_command_reply *reply,
+                             const struct rb_computation *computed,
+                             size_t rank_offset, size_t contract,
+                             size_t *page_limit_out)
+{
     size_t data_cap = contract > 768u ? contract - 768u : 0;
     size_t page_limit = RB_DISPLAY_ROWS;
     bool output_ok = false;
     while (page_limit > 0) {
         output_ok = rb_render_data(
-            reply, task_id, query, expected_hex, pre_hex, post_hex,
-            codeindex_hex, rank_offset, corpus_files, &literal, &bm25,
-            page_limit);
+            reply, computed->task_id, computed->query, computed->expected_hex,
+            computed->pre_hex, computed->post_hex, computed->codeindex_hex,
+            rank_offset, computed->corpus_files, &computed->literal,
+            &computed->bm25, page_limit);
         if (!output_ok || json_write(&reply->data, NULL, 0) <= data_cap)
             break;
         page_limit--;
     }
-    vcs_manifest_free(&pre);
     if (!output_ok || page_limit == 0 ||
-        json_write(&reply->data, NULL, 0) > data_cap)
+        json_write(&reply->data, NULL, 0) > data_cap) {
         rb_fail(reply, "OUTPUT_ALLOCATION_FAILED", "render",
-                "benchmark result could not be rendered completely", task_id);
+                "benchmark result could not be rendered completely",
+                computed->task_id);
+        return false;
+    }
+    if (page_limit_out) *page_limit_out = page_limit;
+    return true;
+}
+
+static void rb_run(const struct zcl_command_request *request,
+                   struct zcl_command_reply *reply)
+{
+    if (!request->input || request->input->type != JSON_OBJ) {
+        rb_fail(reply, "INVALID_INPUT", "input",
+                "benchmark input must be one JSON object", "input");
+        return;
+    }
+    char workspace[PATH_MAX];
+    if (!rb_workspace(request->input, workspace)) {
+        rb_fail(reply, "WORKSPACE_NOT_CANONICAL", "input",
+                "workspace must be a canonical absolute directory path",
+                "workspace");
+        return;
+    }
+    size_t rank_offset = 0;
+    if (!rb_cursor(request, &rank_offset)) {
+        rb_fail(reply, "INVALID_CURSOR", "input",
+                "cursor must be a decimal rank offset from 0 through 127",
+                "cursor");
+        return;
+    }
+    struct rb_computation computed;
+    if (!rb_compute(request->input, workspace, &computed, reply)) return;
+    size_t contract = request->spec && request->spec->budget_bytes
+        ? (size_t)request->spec->budget_bytes
+        : (size_t)ZCL_COMMAND_LIST_BUDGET;
+    if (request->budget_bytes && request->budget_bytes < contract)
+        contract = request->budget_bytes;
+    (void)rb_render_fitted(reply, &computed, rank_offset, contract, NULL);
 }
 
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
