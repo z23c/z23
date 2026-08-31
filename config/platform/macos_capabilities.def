@@ -2,11 +2,27 @@
  *
  * Declarative darwin-arm64 capability truth.  This is deliberately data, not
  * prose: tools/scripts/macos_acceptance.sh validates the closed capability
- * set and derives the exact registered-test aggregate from the final field.
+ * set and derives the exact registered-test aggregate from the final field
+ * plus the required platform-baseline set below.
  *
  * ZCL_MACOS_CAPABILITY(id, state, reason_code, exact_test_groups_csv)
  * state is one of available, degraded, unavailable.  A capability may be
- * unavailable and still name evidence: that group proves the refusal path. */
+ * unavailable and still name evidence: that group proves the refusal path.
+ *
+ * ZCL_MACOS_REQUIRED_TEST(exact_test_group)
+ * These are the documented native-macOS baseline groups that are not already
+ * selected by a capability row.  Keeping them declarative makes deletion or
+ * renaming visible to the same static validator that checks capability
+ * evidence; tools/scripts/macos_acceptance.sh pins this exact set. */
+ZCL_MACOS_REQUIRED_TEST(test_binary_staleness)
+ZCL_MACOS_REQUIRED_TEST(test_cold_join_sovereign)
+ZCL_MACOS_REQUIRED_TEST(test_crypto)
+ZCL_MACOS_REQUIRED_TEST(test_dev_platform)
+ZCL_MACOS_REQUIRED_TEST(test_os_proc)
+ZCL_MACOS_REQUIRED_TEST(test_rng)
+ZCL_MACOS_REQUIRED_TEST(test_self_backtrace)
+ZCL_MACOS_REQUIRED_TEST(test_sqlite)
+
 ZCL_MACOS_CAPABILITY(node, available, native_public_node, test_boot_shutdown_marker_persistence,test_net,test_rpc)
 ZCL_MACOS_CAPABILITY(arm_acceleration, available, runtime_gated_and_oracle_checked_apple_arm_tiers, test_arm_hw_tiers,test_sha256_isa_parity,test_blake2b_batch_parity,test_sha3_256_x4,test_sha3_512_x4,test_encoding,test_hw_profile)
 ZCL_MACOS_CAPABILITY(wallet, available, native_wallet_custody_with_f_fullfsync_backup_publication, test_wallet,test_wallet_backup)

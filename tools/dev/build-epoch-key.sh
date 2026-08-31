@@ -328,6 +328,42 @@ key)
     case "$COMPILE_FLAGS $LINK_FLAGS" in
         *@*) fail 'response-file syntax is forbidden in compile/link flags' ;;
     esac
+
+    # -MMD deliberately leaves system headers out of each TU depfile. Their
+    # authority therefore comes from compiler-id's probed search roots and
+    # metadata inventory. A compile-only flag that redirects those roots, or
+    # loads an indirect specs/plugin program, would sit outside that inventory.
+    # Refuse it here rather than minting an epoch with an incomplete authority.
+    read -r -a COMPILE_ARGV <<< "$COMPILE_FLAGS"
+    for flag in "${COMPILE_ARGV[@]}"; do
+        case "$flag" in
+            -isystem|-isystem*|*=-isystem*| \
+            -idirafter|-idirafter*|*=-idirafter*| \
+            --sysroot|--sysroot=*|*=--sysroot*| \
+            -isysroot|-isysroot*|*=-isysroot*| \
+            -iframework|-iframework*|*=-iframework*| \
+            -F|-F*|*=-F*| \
+            -nostdinc|-nostdinc++|*=-nostdinc|*=-nostdinc++| \
+            -iprefix|-iprefix*|*=-iprefix*| \
+            -iwithprefix|-iwithprefix*|*=-iwithprefix*| \
+            -iwithprefixbefore|-iwithprefixbefore*|*=-iwithprefixbefore*| \
+            -B|-B*|*=-B*| \
+            -resource-dir|-resource-dir=*|*=-resource-dir=*| \
+            --gcc-toolchain|--gcc-toolchain=*|*=--gcc-toolchain=*| \
+            -gcc-toolchain|-gcc-toolchain=*|*=-gcc-toolchain=*| \
+            -specs|--specs|-specs=*|--specs=*|*=-specs=*|*=--specs=*| \
+            -fplugin|-fplugin=*|-fpass-plugin=*|*=-fplugin=*|*=-fpass-plugin=*| \
+            -load|-load=*|-plugin|-plugin=*|-wrapper|-wrapper=*| \
+            -include-pch|-include-pch*|-include-pth|-include-pth*| \
+            -fmodule*|-fprebuilt-module-path=*|-fmodules-cache-path=*| \
+            -Xclang|-Xpreprocessor|-Xassembler|-Wp,*|-Wa,*| \
+            *=-load*|*=-plugin*|*=-wrapper*|*=-include-pch*| \
+            *=-include-pth*|*=-fmodule*|*=-Xclang|*=-Xpreprocessor| \
+            *=-Xassembler|*=-Wp,*|*=-Wa,*)
+                fail "compile flags contain un-inventoried search/tool modifier: $flag"
+                ;;
+        esac
+    done
     is_sha256 "$BUILD_SYSTEM" || fail 'key requires a build-system fingerprint'
 
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch.XXXXXX")" ||
@@ -347,14 +383,16 @@ build-system-id)
     # Canonical fingerprint of every build-system input that can change
     # compile/link semantics WITHOUT changing a tracked TU's bytes: the root
     # Makefile (all flag variables and every per-object/per-pattern flag
-    # override) and the four epoch driver scripts (this key tool's algorithm,
-    # the per-object compiler driver, the session/lease/GC authority, and the
-    # candidate publisher).  Editing any of them must re-key every compile
-    # epoch; a stale object must never survive a flags or driver edit.  This
-    # is the single source of truth for the list — Make and
-    # build-epoch-session.sh both call this mode.
+    # override), zcc's bootstrap flags and complete compiled authority inputs,
+    # and the epoch driver scripts (this key tool's algorithm, the legacy
+    # per-object oracle, the session/lease/GC authority, and the candidate
+    # publisher). Editing any of them must re-key every compile epoch; a stale
+    # object must never survive a flags or driver edit. This is the single
+    # source of truth for the list; Make and build-epoch-session.sh both call
+    # this mode.
     SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     ROOT="$(cd "$SELF_DIR/../.." && pwd)"
+    ZCC_BOOTSTRAP_CATALOG="$SELF_DIR/zcc-bootstrap-inputs.list"
     BUILD_SYSTEM_FILES=(
         "$ROOT/Makefile"
         "$SELF_DIR/build-epoch-key.sh"
@@ -362,6 +400,14 @@ build-system-id)
         "$SELF_DIR/build-epoch-session.sh"
         "$SELF_DIR/publish-build-alias.sh"
     )
+    while IFS= read -r input || [ -n "$input" ]; do
+        case "$input" in
+            license=*) ;;
+            *) [[ "$input" =~ ^[A-Za-z0-9_./-]+$ ]] ||
+                   fail 'zcc bootstrap input catalog is malformed'
+               BUILD_SYSTEM_FILES+=("$ROOT/$input") ;;
+        esac
+    done < "$ZCC_BOOTSTRAP_CATALOG"
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-system.XXXXXX")" ||
         fail 'could not create build-system fingerprint workspace'
     : > "$WORK/build-system.preimage"

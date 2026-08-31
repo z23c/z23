@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MATRIX="${ZCL_MACOS_CAPABILITY_MATRIX:-$REPO_ROOT/config/platform/macos_capabilities.def}"
 REGISTRY="$REPO_ROOT/tools/dev/test_group_catalog.def"
+EXPECTED_EXACT_GROUPS='test_arm_hw_tiers,test_binary_ab_fallback,test_binary_staleness,test_blake2b_batch_parity,test_boot_shutdown_marker_persistence,test_cold_join_sovereign,test_confine,test_crypto,test_dev_activation,test_dev_platform,test_directory_watcher,test_encoding,test_fast_sync_coins_export,test_hw_profile,test_net,test_noise_nk_handshake,test_noise_transport_parity,test_noise_xx_handshake,test_os_proc,test_os_sandbox,test_rng,test_rpc,test_sandbox_process_budget,test_self_backtrace,test_service_state,test_service_state_driver,test_sha256_isa_parity,test_sha3_256_x4,test_sha3_512_x4,test_sqlite,test_thread_qos,test_tor,test_wallet,test_wallet_backup,test_watcher_record,test_z23_front_door,test_zcode_verify'
 
 die() {
     printf 'macos-acceptance: FAIL: %s\n' "$*" >&2
@@ -20,6 +21,15 @@ matrix_rows() {
             row=$0
             sub(/^ZCL_MACOS_CAPABILITY\(/, "", row)
             sub(/\)[[:space:]]*$/, "", row)
+            print row
+        }
+    ' "$MATRIX"
+}
+
+required_groups() {
+    awk '
+        /^ZCL_MACOS_REQUIRED_TEST\([A-Za-z_0-9]+\)[[:space:]]*$/ {
+            row=$0; sub(/^[^(]*\(/, "", row); sub(/\).*/, "", row)
             print row
         }
     ' "$MATRIX"
@@ -42,7 +52,8 @@ validate() {
     [ -f "$MATRIX" ] || die "missing capability matrix: $MATRIX"
     [ -f "$REGISTRY" ] || die "missing registered-test catalog: $REGISTRY"
 
-    local rows expected actual registered id state reason groups group
+    local rows expected actual registered required required_actual
+    local id state reason groups group required_count union_count union_actual
     rows="$(matrix_rows)"
     [ -n "$rows" ] || die "capability matrix yielded no rows"
     expected='arm_acceleration hot_activation kqueue launchd node noise package_execution release_packaging resident_confinement scheduler_qos snapshot_export tor wallet'
@@ -50,6 +61,20 @@ validate() {
     [ "$actual" = "$expected" ] || die "capability set drift: expected '$expected'; observed '$actual'"
     registered="$(registered_groups)"
     [ -n "$registered" ] || die "registered-test catalog yielded no groups"
+
+    required="$(required_groups)"
+    [ -n "$required" ] || die "required test set yielded no groups"
+    required_count="$(printf '%s\n' "$required" | awk 'NF {n++} END {print n+0}')"
+    [ "$required_count" = 8 ] ||
+        die "required test set drift: expected 8 rows; observed $required_count"
+    while IFS= read -r group; do
+        grep -Fqx "$group" <<< "$registered" ||
+            die "required test set names unregistered group '$group'"
+    done <<< "$required"
+    expected='test_binary_staleness test_cold_join_sovereign test_crypto test_dev_platform test_os_proc test_rng test_self_backtrace test_sqlite'
+    required_actual="$(printf '%s\n' "$required" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+    [ "$required_actual" = "$expected" ] ||
+        die "required test set drift: expected '$expected'; observed '$required_actual'"
 
     while IFS=',' read -r id state reason groups; do
         id="${id//[[:space:]]/}"
@@ -69,16 +94,27 @@ validate() {
         # name exactly one group (tor, release_packaging, snapshot_export).
         done < <(printf '%s\n' "$groups" | tr ',' '\n')
     done <<< "$rows"
+
+    union_actual="$(exact_groups)"
+    union_count="$(printf '%s\n' "$union_actual" | tr ',' '\n' |
+        awk 'NF {n++} END {print n+0}')"
+    [ "$union_count" = 37 ] ||
+        die "exact evidence union drift: expected 37 groups; observed $union_count"
+    [ "$union_actual" = "$EXPECTED_EXACT_GROUPS" ] ||
+        die "exact evidence set drift: expected '$EXPECTED_EXACT_GROUPS'; observed '$union_actual'"
 }
 
 exact_groups() {
-    matrix_rows | cut -d',' -f4- | tr ',' '\n' | sed 's/[[:space:]]//g' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
+    {
+        matrix_rows | cut -d',' -f4- | tr ',' '\n'
+        required_groups
+    } | sed 's/[[:space:]]//g' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
 }
 
 case "${1:---check}" in
     --check)
         validate
-        printf 'macos-acceptance: capability matrix PASS\n'
+        printf 'macos-acceptance: capability matrix + required baseline PASS (37 exact groups)\n'
         ;;
     --groups)
         validate
@@ -93,7 +129,10 @@ case "${1:---check}" in
         printf 'macos-acceptance: running %s exact groups derived from %s\n' "$count" "${MATRIX#"$REPO_ROOT/"}"
         log="$(mktemp "${TMPDIR:-/tmp}/z23-macos-acceptance.XXXXXX")"
         trap 'rm -f "$log"' EXIT
-        if make --no-print-directory t-fast-exact ONLY="$groups" T_FAST_EXACT_ARGS=--no-cache >"$log" 2>&1; then
+        if make --no-print-directory t-fast-exact \
+            ONLY="$groups" EXACT_ONLY_MATCHED="$groups" \
+            T_FAST_EXACT_ARGS=--no-cache \
+            >"$log" 2>&1; then
             sed -n '1,$p' "$log"
         else
             rc=$?

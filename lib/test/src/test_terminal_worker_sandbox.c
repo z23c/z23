@@ -67,21 +67,26 @@ static const char *tw_fbsh_path(void)
 static bool fbsh_available(void)
 {
     struct stat st;
-    return stat(FBSH_BIN, &st) == 0 && (st.st_mode & S_IXUSR) != 0;
+    return stat(tw_fbsh_path(), &st) == 0 && (st.st_mode & S_IXUSR) != 0;
 }
 
-/* The exact grant the real worker hands the shell: the per-terminal
- * tmpdir (read/write/create/execute) plus the one granted shell binary
- * (read/execute). Nothing else. */
-static void tw_rules(struct os_sandbox_path_rule *rules)
+/* Generic attacks need only the per-terminal tmpdir grant.  The executable
+ * grant belongs only to the fbsh-specific cases, and only when the standalone
+ * artifact actually exists.  Keeping that choice explicit prevents an
+ * ambient `make fbsh` from silently broadening every generic attack profile. */
+static size_t tw_rules(struct os_sandbox_path_rule *rules, bool include_fbsh)
 {
     rules[0] = (struct os_sandbox_path_rule){
         .path = g_tw_dir, .allow_read = true, .allow_write = true,
         .allow_execute = true, .allow_create = true,
     };
-    rules[1] = (struct os_sandbox_path_rule){
-        .path = tw_fbsh_path(), .allow_read = true, .allow_execute = true,
-    };
+    if (include_fbsh && fbsh_available()) {
+        rules[1] = (struct os_sandbox_path_rule){
+            .path = tw_fbsh_path(), .allow_read = true, .allow_execute = true,
+        };
+        return 2;
+    }
+    return 1;
 }
 
 /* Run fn() in a forked child. Returns the child's exit code (>= 0) or the
@@ -98,12 +103,12 @@ static int tw_run_child(int (*fn)(void))
     return WEXITSTATUS(st);
 }
 
-static int tw_enter(void)
+static int tw_enter(bool include_fbsh)
 {
     struct os_sandbox_path_rule rules[2];
-    tw_rules(rules);
+    size_t rule_count = tw_rules(rules, include_fbsh);
     struct os_sandbox_profile p =
-        os_sandbox_terminal_worker_profile(rules, 2);
+        os_sandbox_terminal_worker_profile(rules, rule_count);
     return os_sandbox_enter(&p).ok ? 0 : 70;
 }
 
@@ -147,7 +152,7 @@ static bool denyset_contains(const int *set, size_t n, long nr)
  * per-terminal tmpdir. Reading the host's secrets must EACCES. */
 static int c_tw_alive_but_confined(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     char inside[256];
     snprintf(inside, sizeof inside, "%s/in.txt", g_tw_dir);
     int in = open(inside, O_CREAT | O_RDWR, 0600);
@@ -165,7 +170,7 @@ static int c_tw_alive_but_confined(void)
 
 static int c_tw_socket_killed(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     int s = socket(AF_INET, SOCK_STREAM, 0);
     (void)s;
     return 6; /* reached only if socket() was not denied */
@@ -177,7 +182,7 @@ static int c_tw_socket_killed(void)
  * marker; the parent distinguishes by requiring exit 42 AND the marker. */
 static int c_tw_exec_outside_refused(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     execve("/bin/true", (char *const[]){"/bin/true", NULL},
            (char *const[]){NULL});
     if (errno != EACCES && errno != ENOENT) return 71;
@@ -195,7 +200,7 @@ static int c_tw_exec_outside_refused(void)
 static int c_tw_exec_granted_fbsh_runs(void)
 {
     if (chdir(g_tw_dir) != 0) return 69;
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(true) != 0) return 70;
     char script[512];
     snprintf(script, sizeof script,
              "echo caged > out.txt; echo $((6 * 7)) >> out.txt; exit 7");
@@ -210,7 +215,7 @@ static int c_tw_exec_granted_fbsh_runs(void)
 static int c_tw_fbsh_cat_shadow_fails(void)
 {
     if (chdir(g_tw_dir) != 0) return 69;
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(true) != 0) return 70;
     char *const argv[] = {(char *)tw_fbsh_path(), (char *)"-c",
                           (char *)"cat /etc/shadow", NULL};
     char *const envp[] = {NULL};
@@ -222,7 +227,7 @@ static int c_tw_fbsh_cat_shadow_fails(void)
 static int c_tw_fbsh_write_outside_fails(void)
 {
     if (chdir(g_tw_dir) != 0) return 69;
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(true) != 0) return 70;
     char *const argv[] = {(char *)tw_fbsh_path(), (char *)"-c",
                           (char *)"echo pwned > /etc/passwd", NULL};
     char *const envp[] = {NULL};
@@ -236,7 +241,7 @@ static int c_tw_fbsh_write_outside_fails(void)
  * budget is the parent's pgid census, proven at the worker layer. */
 static int c_tw_fork_ok(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     pid_t c = fork();
     if (c == 0) _exit(0);
     if (c < 0) return 71;
@@ -248,7 +253,7 @@ static int c_tw_fork_ok(void)
 /* W^X: anonymous W|X mmap is killed outright... */
 static int c_tw_wx_mmap_killed(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     (void)p;
@@ -264,7 +269,7 @@ static int c_tw_wx_mmap_killed(void)
  * maps for reasons that have nothing to do with W^X). */
 static int c_tw_mprotect_wx_refused(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     static char page[8192] __attribute__((aligned(4096)));
     uintptr_t addr = (uintptr_t)page;
     (void)page[0]; /* keep it in the image */
@@ -285,7 +290,7 @@ static bool e_mprotect_refused(int rc)
  * worker, not the harness. This assertion pins that the limit is SET.) */
 static int c_tw_as_budget_refused(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     void *p = mmap(NULL, (size_t)512 * 1024 * 1024, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p != MAP_FAILED) return 9;
@@ -295,7 +300,7 @@ static int c_tw_as_budget_refused(void)
 /* FSIZE=1 MiB: a 2 MiB write to the grant dies with SIGXFSZ. */
 static int c_tw_fsize_killed(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     char path[256];
     snprintf(path, sizeof path, "%s/big.bin", g_tw_dir);
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
@@ -312,7 +317,7 @@ static int c_tw_fsize_killed(void)
 /* NOFILE=64: opening past the ceiling must fail with EMFILE. */
 static int c_tw_nofile_budget(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     char path[256];
     snprintf(path, sizeof path, "%s/fds.txt", g_tw_dir);
     int fd = open(path, O_CREAT | O_RDWR, 0600);
@@ -332,7 +337,7 @@ static int c_tw_nofile_budget(void)
 /* The debug surface stays denied: attaching to the parent must SIGSYS. */
 static int c_tw_ptrace_killed(void)
 {
-    if (tw_enter() != 0) return 70;
+    if (tw_enter(false) != 0) return 70;
     ptrace(PTRACE_ATTACH, getppid(), NULL, NULL);
     return 12; /* reached only if ptrace was not denied */
 }
@@ -348,14 +353,15 @@ static int test_terminal_worker_sandbox_platform_arm(void)
     /* ── profile construction (no fork needed) ─────────────────────── */
     {
         struct os_sandbox_path_rule rules[2];
-        tw_rules(rules);
+        size_t rule_count = tw_rules(rules, false);
         struct os_sandbox_profile p =
-            os_sandbox_terminal_worker_profile(rules, 2);
+            os_sandbox_terminal_worker_profile(rules, rule_count);
 
         printf("terminal_worker_sandbox: profile shape... ");
         bool shape_ok = p.name && strcmp(p.name, "terminal_worker") == 0 &&
                         p.no_new_privs && p.apply_rlimits && p.landlock &&
-                        p.seccomp && p.seccomp_deny_exec_mmap;
+                        p.seccomp && p.seccomp_deny_exec_mmap &&
+                        p.n_fs_rules == 1 && p.fs_rules == rules;
         printf("%s\n", shape_ok ? "OK" : "FAIL");
         if (!shape_ok) failures++;
 

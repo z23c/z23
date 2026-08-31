@@ -142,6 +142,146 @@ test prerequisite alongside `zcl-nodectl`. The merged mesh-terminal acceptance
 also requires the confined `fbsh` runtime, which is built and hashed in the
 same isolated helper set; absence remains a hard failure.
 
+## Resident queue cutover
+
+At `2026-08-30T19:10:01-04:00` (`2026-08-30T23:10:01+00:00`), the Linux
+host still reported 16 logical CPUs and an AMD Ryzen 7 PRO 8840U processor.
+The canonical compiler was GCC 16.1.1 20260430 with `-std=c23`; Clang 22.1.6
+was also installed.
+
+Exact-pair scheduling moved from one detached worker per notification into the
+singleton `z23-dev` watcher. A notification now atomically publishes one
+versioned pair request and returns. The resident watcher advertises
+`proof_queue_version=1`, coalesces only Git-proven superseded pending pairs,
+owns one supervised proof slot, and assigns each claimed request a private
+attempt directory and lease. Receipt, failure, and lease removal recheck that
+lease while holding the queue lock; an obsolete attempt therefore cannot
+publish over a newer one.
+
+A disposable real watcher accepted an exact-pair request in 124 milliseconds
+of caller-observed wall time. The typed command measured 316 microseconds
+inside its handler, below its 250 millisecond budget. Status first reported
+`resident_proof_request_queued`; two seconds later it reported the expected
+fixture refusal, `head_changed_during_proof`. The attempt retained its claimed
+request under a private directory, published one canonical failure, and left
+no lease. Native stop verified and stopped the exact watcher ID in 20
+milliseconds. No compiler, lint, test, Make, Bash, or PowerShell process is
+reachable from notification enqueue or push admission.
+
+The first clean-checkout launch exposed a separate scale refusal before any
+proof work began: the Linux watcher stored at most 512 directory descriptors,
+while the tracked tree contained 935 distinct directory paths. The watcher
+now grows its checked descriptor table geometrically instead of placing a
+fixed table on the stack. At `2026-08-30T19:31:42-04:00`
+(`2026-08-30T23:31:42+00:00`), a disposable checkout fixture containing 600
+child directories plus its root reached `watcher_ready=true` in 21
+milliseconds, advertised `proof_queue_version=1`, and stopped its exact owner
+in 20 milliseconds. The host had 16 logical CPUs, an AMD Ryzen 7 PRO 8840U,
+and GCC 16.1.1 20260430. The exact clean pair then enqueued in one millisecond;
+the earlier fixed-capacity binary had left the same pair queued without a
+resident owner.
+
+Build cost remains the measured dominant problem. A warm `make dev-bin` before
+the directory fix took 35.319 seconds of wall time, 27.520 seconds of user CPU,
+and 8.866 seconds of system CPU. Rebuilding the changed watcher and its test
+artifact took 98.134 seconds wall, 74.433 seconds user, and 24.818 seconds
+system. These are build measurements, not proof or push latency claims.
+
+The registered `test_impact_composition` queue fixture enqueued two pairs,
+selected the newer request, preserved the older request because its ancestry
+was unavailable, then claimed both private attempts in order. Each attempt
+published its intentional failure and released its lease. The complete group
+passed one of one with zero skips and zero unobserved cases in 52.4 seconds;
+most of that time remains the existing composition fixture, not the queue
+operations. `test_dev_platform` passed one
+of one in 2.8 seconds and `test_native_api_contract` passed one of one in 0.6
+seconds, also with zero skips and zero unobserved cases. `lint-fast` passed all
+24 selected gates in 14.075 seconds. The source-derived capability inventory
+then regenerated 1,412 capabilities and 18,684 symbols; its freshness and
+cross-artifact contradiction gates passed.
+
+The full 182-gate lint run completed in 274.430 seconds. Before regeneration
+and arm consolidation it passed 175 gates and refused seven. The two
+slice-owned refusals—duplicate public definitions across platform arms and a
+stale capability inventory—were corrected and their individual gates passed.
+The tracked platform gate's missing executable bit was also corrected and its
+individual gate passed. The remaining observed refusals were a partial
+capability object epoch, pre-existing raw `/proc` use in `test_postmortem.c`,
+and 27 pre-existing MinGW syntax failures across test translation units. No
+green full-lint claim is made. Caller token count was not available from the
+native tools and is not derivable.
+
+## Native object publication and depfile cutover
+
+At `2026-08-30T21:40:15-04:00` (`2026-08-31T01:40:15+00:00`), the host still
+reported 16 logical CPUs and an AMD Ryzen 7 PRO 8840U processor. GCC was
+16.1.1 20260430 and Clang was 22.1.6. The exact proof preceding this build
+slice selected 41 groups, ran all 41, reused zero, and reported zero failures,
+skips, or unobserved cases. Its registered-test phase took 103.3 seconds; the
+complete isolated attempt ran from `2026-08-30T19:36:46-04:00` to
+`2026-08-30T19:47:27-04:00`.
+
+The source-identity hot path now batches NUL-delimited file hashing and mode
+capture through one admitted C23 helper. Stable whole-tree capture changed
+from 5.382 to 4.599 seconds, a 14.6 percent reduction. An execution trace
+changed from 354 to 208 executed lines, with `stat` executions changing from
+225 to 150 and `sha256sum` executions from 81 to 5. The native path started
+two helper processes. A `make -n build-only` trace changed from 830 to 691
+executed lines, with `stat` changing from 269 to 194 and `sha256sum` from 145
+to 69. The untraced parse midpoint improved by approximately 3.5 percent.
+Native and portable records remain byte-identical, and the selftest injects
+file, index, directory, and exclude-policy races.
+
+The first standalone-helper integration attempt failed after 92.003 seconds
+because `source_identity_batch.c` was swept into the node source set. No
+artifact was admitted. Classifying it with the existing direct-development
+standalone sources removed it from node ownership while preserving its own
+strict C23 bootstrap and parity tests.
+
+`zcc --epoch-object` now owns session validation, no-follow descriptor
+containment, compiler invocation, cache restoration, depfile publication,
+coverage serialization, and depfile-before-object publication for the
+`build-only` and `test-fast` profiles. Every publishing attempt first creates
+or exactly reuses a durable `.unverified` aggregate marker while holding the
+stable `.epoch-admission/<epoch>.lock`. Aggregate verification removes the
+marker under the same lock. A killed build therefore causes the next session
+to quarantine the complete epoch; moving the epoch cannot split the lock
+inode. Native and legacy paths refuse malformed, mismatched, or symlinked
+markers. The focused object gate passes strict GCC and Clang builds, ASan,
+UBSan, and LeakSanitizer, and exercises cache hits, path replacement, lock
+serialization, and record-last coverage publication. The integrated epoch
+session selftest exercises dead-marker quarantine and fresh-session recovery.
+
+Project, generated, and vendored dependency files now use `-MMD -MP` while the
+compiler identity binds toolchain search roots and relevant environment.
+Uninventoried include/search modifiers fail closed in the epoch key. The new
+2,054-depfile `build-only` epoch occupies 4,554,845 bytes, down 67.0 percent
+from the prior 13,797,422-byte `-MD` epoch. Its first population took 60.833
+seconds. Identical warm runs took 43.379 and then 9.262 seconds; the stabilized
+run is 87.1 percent below the prior 71.726-second identical-build measurement.
+All 2,054 objects and 2,054 depfiles retained the same content, size, mtime,
+and ctime digest across the 9.262-second run, and `.unverified` was absent
+after admission. A dry-run parse still took 6.930 seconds, identifying Make
+startup and source/build identity work as the dominant warm cost.
+
+The newly keyed `test-fast` and required dev-helper epochs took 437.629 seconds
+to populate while bounded at 16 jobs. The registered `native_api_contract`
+group then passed one of one with zero failures, skips, or unobserved cases.
+Subsequent identical invocations took 92.945 and 16.928 seconds; the test body
+took 0.636 seconds. The longer invocation had no compiler process in a process
+snapshot at 68 seconds, but no complete process trace was recorded, so its
+cause is not assigned. This is green functional evidence, but it does not
+satisfy the five-second focused-proof objective.
+
+The versioned, length-prefixed epoch-batch manifest has a strict C23 decoder
+and canonical encoder. Sixty codec cases, 785 truncations, allocation-fault
+injection, GCC, Clang, and sanitizer runs pass. There is not yet a batch
+executor, worker pool, or batch-cache-hit claim. The next measured slice is a
+cache-hit-only coordinator that preflights every job, writes nothing on any
+miss, restores complete hits without compiler children, and publishes its
+ordered ready root last. Caller-reported token count remains unavailable and
+is not derivable from repository evidence.
+
 ## Knowledge gained
 
 - Exact receipt admission is comfortably below the 250 millisecond target.
@@ -171,12 +311,23 @@ same isolated helper set; absence remains a hard failure.
   are worktree-local and must not trigger one full inventory scan per helper.
 - Compile reuse and test reuse are coupled: a reused binary still needs its
   exact depfile graph, but it does not need copied object files.
+- System-header depfiles consumed approximately two thirds of the object
+  epoch's dependency bytes without improving project-header invalidation.
+  `-MMD` is sound only because compiler bytes, search roots, environment, and
+  accepted search modifiers are independently bound.
+- A lock stored inside a directory that can be quarantined is not a stable
+  lock. The admission lock must remain in an unmoved parent namespace.
+- Native per-object publication removes shell work from misses and hits, but a
+  warm Make parse still dominates the stabilized identical build.
 
 ## Next experiment
 
-Give generated-output and remaining lint producers native content-keyed child
-receipt publication, then compare a cold audit with warm direct admission.
-Move compile-epoch session validation, depfile restoration, and hit batching
-into `zcc` and count process creation before and after. Port the remaining
-single full source-byte capture to C23, then measure proof-start process count
-and latency again.
+Add a cache-hit-only `zcc --epoch-batch-restore` coordinator. Decode and admit
+the complete manifest before writes, probe every L1 closure, refuse with zero
+writes and zero compiler children on any miss, then restore and publish the
+ordered ready root last under the stable epoch admission lock. Compare 1,000
+complete-hit batches with the current Make traversal, including child-process
+count and artifact metadata. Separately cache or residently serve the exact
+compiler/build-system identity so the 6.930-second Make parse does not remain
+the warm-build floor. Add miss scheduling only after captured diagnostics and
+POSIX process-group plus Windows Job-Object containment are available.

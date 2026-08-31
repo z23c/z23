@@ -96,11 +96,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/zcode_pkg_sources.sh"
 
 # The registry is spread over more than one .def — the library packages and
-# the sample application, which rides the same row shape. Same pair
+# the sample application, which rides the same row shape. Same registry pair
 # check_zcode_package_standalone.sh reads.
 REGISTRY_DEF_NAMES=(config/zcode_package_registry.def config/zcode_c23_commons_app.def)
 CLASSES_DEF_NAME=config/capability_classes.def
-MODULES_DEF_NAMES=(config/module_capabilities.def config/module_capabilities_windows.def)
+MODULES_DEF_NAMES=(config/module_capabilities.def
+                   config/module_capabilities_linux.def
+                   config/module_capabilities_windows.def)
 
 # ── config/capability_classes.def ───────────────────────────────────────────
 # ZCL_CAPABILITY_CLASS(NETWORK, ...) -> CAP_NETWORK, one per line.

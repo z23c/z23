@@ -195,6 +195,130 @@ verify_authority()
     "$VERIFY_TOOL" verify-record "$SOURCE_ID" "$COMPLETE" "$MUTATION" >/dev/null
 }
 
+ensure_directory()
+{
+    local path="$1" description="$2"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        [ -d "$path" ] && [ ! -L "$path" ] ||
+            fail "$description is not a regular directory"
+        return 0
+    fi
+    mkdir -- "$path" || fail "could not create $description"
+}
+
+ensure_root_directory()
+{
+    local path="$1" description="$2"
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        mkdir -p -- "$path" || fail "could not create $description"
+    fi
+    [ -d "$path" ] && [ ! -L "$path" ] ||
+        fail "$description is not a regular directory"
+}
+
+ensure_epoch_generation()
+{
+    local root="$1" description="$2"
+    [ -n "$root" ] && [ "$root" != - ] || return 0
+    ensure_root_directory "$root" "$description root"
+    ensure_directory "$root/epochs" "$description epoch namespace"
+    ensure_directory "$root/epochs/$EPOCH" "$description epoch generation"
+}
+
+EPOCH_DIR="$OBJECT_ROOT/epochs/$EPOCH"
+UNVERIFIED="$EPOCH_DIR/.unverified"
+ADMISSION_LOCK_ROOT="$OBJECT_ROOT/.epoch-admission"
+ADMISSION_LOCK_FILE="$ADMISSION_LOCK_ROOT/$EPOCH.lock"
+ADMISSION_LOCK_DIR="$ADMISSION_LOCK_ROOT/$EPOCH.lock.d"
+ADMISSION_LOCK_OWNER="$ADMISSION_LOCK_DIR/owner"
+ADMISSION_LOCK_HELD=0
+acquire_admission_lock()
+{
+    local deadline pid start actual
+    [ -d "$OBJECT_ROOT" ] && [ ! -L "$OBJECT_ROOT" ] ||
+        fail 'object root is not a regular directory'
+    [ -d "$OBJECT_ROOT/epochs" ] && [ ! -L "$OBJECT_ROOT/epochs" ] ||
+        fail 'object epoch namespace is not a regular directory'
+    [ -d "$EPOCH_DIR" ] && [ ! -L "$EPOCH_DIR" ] ||
+        fail 'object epoch generation is not a regular directory'
+    if [ -e "$ADMISSION_LOCK_ROOT" ] || [ -L "$ADMISSION_LOCK_ROOT" ]; then
+        [ -d "$ADMISSION_LOCK_ROOT" ] && [ ! -L "$ADMISSION_LOCK_ROOT" ] ||
+            fail 'epoch admission lock root is not a regular directory'
+    else
+        mkdir -p "$ADMISSION_LOCK_ROOT" ||
+            fail 'could not create epoch admission lock root'
+    fi
+    if [ "$HOST_IS_MSYS" = 0 ]; then
+        command -v flock >/dev/null 2>&1 ||
+            fail 'flock is required for epoch admission'
+        [ ! -L "$ADMISSION_LOCK_FILE" ] ||
+            fail 'epoch admission lock is a symbolic link'
+        exec 8> "$ADMISSION_LOCK_FILE"
+        [ -f "$ADMISSION_LOCK_FILE" ] && [ ! -L "$ADMISSION_LOCK_FILE" ] &&
+            [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/8 ] || {
+            exec 8>&-
+            fail 'epoch admission lock is not a regular file'
+        }
+        flock -x 8
+        [ -f "$ADMISSION_LOCK_FILE" ] && [ ! -L "$ADMISSION_LOCK_FILE" ] &&
+            [ "$ADMISSION_LOCK_FILE" -ef /dev/fd/8 ] || {
+            exec 8>&-
+            fail 'epoch admission lock changed while waiting'
+        }
+        return 0
+    fi
+    deadline=$(($(date +%s) + 30))
+    while :; do
+        if mkdir "$ADMISSION_LOCK_DIR" 2>/dev/null; then
+            printf 'pid=%s\nstart=%s\n' "$$" \
+                "$("$SELF_DIR/process-start-token.sh" "$$")" \
+                > "$ADMISSION_LOCK_OWNER"
+            ADMISSION_LOCK_HELD=1
+            return 0
+        fi
+        [ ! -L "$ADMISSION_LOCK_DIR" ] ||
+            fail 'epoch admission lock directory is a symbolic link'
+        pid="$(sed -n 's/^pid=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
+        start="$(sed -n 's/^start=//p' "$ADMISSION_LOCK_OWNER" 2>/dev/null)"
+        actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
+        if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
+            rm -f -- "$ADMISSION_LOCK_OWNER"
+            rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        [ "$(date +%s)" -lt "$deadline" ] ||
+            fail 'timed out waiting for epoch admission lock'
+        sleep 0.05
+    done
+}
+release_admission_lock()
+{
+    if [ "$HOST_IS_MSYS" = 0 ]; then
+        exec 8>&-
+    elif [ "$ADMISSION_LOCK_HELD" = 1 ]; then
+        rm -f -- "$ADMISSION_LOCK_OWNER"
+        rmdir "$ADMISSION_LOCK_DIR" 2>/dev/null || true
+        ADMISSION_LOCK_HELD=0
+    fi
+}
+
+clear_unverified()
+{
+    local expected
+    [ -e "$UNVERIFIED" ] || [ -L "$UNVERIFIED" ] || return 0
+    [ -f "$UNVERIFIED" ] && [ ! -L "$UNVERIFIED" ] ||
+        fail 'unverified epoch marker is not a regular file'
+    expected="$(mktemp "${TMPDIR:-/tmp}/zcl-build-unverified.XXXXXX")"
+    printf 'schema=zcl.build_epoch_unverified.v1\nsource_id=%s\nmutation=%s\ncompiler_id=%s\nepoch=%s\n' \
+        "$SOURCE_ID" "$MUTATION" "$COMPILER_ID" "$EPOCH" > "$expected"
+    cmp -s "$expected" "$UNVERIFIED" || {
+        rm -f -- "$expected"
+        fail 'unverified epoch marker does not match aggregate authority'
+    }
+    rm -f -- "$expected"
+    rm -f -- "$UNVERIFIED" || fail 'could not admit verified compile epoch'
+}
+
 if [ "$MODE" = check ]; then
     check_stamp
     exit 0
@@ -218,10 +342,20 @@ OWNER_START="$("$SELF_DIR/process-start-token.sh" "$OWNER_PID" 2>/dev/null)" ||
 [[ "$OWNER_START" =~ ^[0-9a-f]+$ ]] || fail 'invalid Make owner start time'
 export ZCL_SOURCE_IDENTITY_SESSION="$OWNER_PID:$OWNER_START"
 
-verify_authority
-[ "$MODE" = verify ] && { check_stamp; exit 0; }
+if [ "$MODE" = verify ]; then
+    acquire_admission_lock
+    trap 'release_admission_lock; cleanup' EXIT
+    verify_authority
+    check_stamp
+    clear_unverified
+    exit 0
+fi
 
-mkdir -p "$OBJECT_ROOT/epochs/$EPOCH/.leases"
+verify_authority
+
+ensure_epoch_generation "$OBJECT_ROOT" object
+ensure_epoch_generation "$CANDIDATE_ROOT" candidate
+ensure_directory "$EPOCH_DIR/.leases" 'object epoch lease directory'
 
 # MSYS2/Git Bash cannot reliably share inherited descriptors with the MSYS2
 # util-linux flock binary. Keep the crash-safe descriptor lock on POSIX and
@@ -284,9 +418,64 @@ release_epoch_gc_lock()
     fi
     EPOCH_GC_LOCK_HELD=0
 }
-trap 'release_epoch_gc_lock; cleanup' EXIT
+trap 'release_admission_lock; release_epoch_gc_lock; cleanup' EXIT
 trap 'exit 2' HUP INT TERM
 acquire_epoch_gc_lock
+
+# A prior writer publishes `.unverified` before it can replace any stable
+# artifact and aggregate verification removes it only while holding the same
+# admission lock. A dead build therefore leaves a durable reason to discard
+# the entire shared epoch instead of reusing an unknown subset.
+current_lease_is_live()
+{
+    local lease="$1" pid start actual
+    pid="$(sed -n 's/^pid=//p' "$lease" 2>/dev/null)"
+    start="$(sed -n 's/^start=//p' "$lease" 2>/dev/null)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9a-f]+$ ]] ||
+        return 1
+    actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null)" ||
+        return 1
+    [ "$actual" = "$start" ]
+}
+acquire_admission_lock
+if [ -e "$UNVERIFIED" ] || [ -L "$UNVERIFIED" ]; then
+    [ -f "$UNVERIFIED" ] && [ ! -L "$UNVERIFIED" ] ||
+        fail 'unverified epoch marker is not a regular file'
+    live_current_lease=0
+    if [ -d "$EPOCH_DIR/.leases" ]; then
+        while IFS= read -r -d '' current_lease; do
+            if current_lease_is_live "$current_lease"; then
+                live_current_lease=1
+            else
+                rm -f -- "$current_lease"
+            fi
+        done < <(find "$EPOCH_DIR/.leases" -maxdepth 1 -type f -print0 \
+            2>/dev/null)
+    fi
+    [ "$live_current_lease" = 0 ] ||
+        fail 'an unverified compile epoch still has a live build lease'
+    failed_root="$OBJECT_ROOT/.failed-epochs"
+    failed_epoch="$failed_root/$EPOCH.$OWNER_PID.$OWNER_START"
+    mkdir -p "$failed_root"
+    [ ! -e "$failed_epoch" ] && [ ! -L "$failed_epoch" ] ||
+        fail 'failed-epoch quarantine destination already exists'
+    mv -- "$EPOCH_DIR" "$failed_epoch" ||
+        fail 'could not quarantine unverified compile epoch'
+    if [ "$CANDIDATE_ROOT" != - ]; then
+        candidate_epoch="$CANDIDATE_ROOT/epochs/$EPOCH"
+        if [ -e "$candidate_epoch" ] || [ -L "$candidate_epoch" ]; then
+            [ -d "$candidate_epoch" ] && [ ! -L "$candidate_epoch" ] ||
+                fail 'unverified candidate epoch is not a regular directory'
+            rm -rf -- "$candidate_epoch"
+        fi
+    fi
+    ensure_epoch_generation "$OBJECT_ROOT" object
+    ensure_directory "$EPOCH_DIR/.leases" 'object epoch lease directory'
+    release_admission_lock
+    rm -rf -- "$failed_epoch"
+else
+    release_admission_lock
+fi
 
 tmp_session="$(mktemp "$(dirname "$SESSION")/.build-session.XXXXXX")"
 cp -- "$EXPECTED" "$tmp_session"
@@ -314,7 +503,7 @@ publish_current_epoch()
     # concurrent observer) can resolve only to ENOENT. The candidate may not
     # contain its linked executable yet, but its immutable generation exists
     # before it is named and the later link publishes within that directory.
-    mkdir -p "$root/epochs/$EPOCH"
+    ensure_epoch_generation "$root" current
     tmp="$(mktemp "$root/.current-epoch.XXXXXX")" ||
         fail "could not stage the current-epoch pointer under $root"
     printf '%s\n' "$EPOCH" > "$tmp"

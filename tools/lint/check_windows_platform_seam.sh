@@ -76,6 +76,7 @@
 #
 # Env:
 #   ZCL_MINGW_CC   compiler to run (default: x86_64-w64-mingw32-gcc)
+#   ZCL_REQUIRE_MINGW=1  missing compiler is a hard acceptance failure
 #
 # Exit: 0 clean (or UNOBSERVED — no mingw toolchain); 1 on a new diagnostic
 # site; 2 on a hollow/misconfigured scan (gate_require_scanned floors, a
@@ -156,6 +157,11 @@ echo "══ LINT: Windows platform-seam cross-compile (mingw -fsyntax-only) ═
 # contract check_clang_portability.sh uses for an absent clang) — never OK,
 # never PASS.
 if [ "${1:-}" != "--self-test" ] && ! command -v "$CC_BIN" >/dev/null 2>&1; then
+    if [ "${ZCL_REQUIRE_MINGW:-0}" = 1 ]; then
+        echo "  $GATE: FAIL — required compiler '$CC_BIN' is unavailable;" >&2
+        echo "  acceptance cannot succeed after checking zero files." >&2
+        exit 2
+    fi
     echo "  $GATE: UNOBSERVED — '$CC_BIN' is not installed on this box."
     echo "  0 of $SRC_FLOOR+ platform-seam files were checked. This is NOT a"
     echo "  pass: it is an unobserved leg. Install mingw-w64"
@@ -177,6 +183,11 @@ for d in "${INC_DIRS[@]}"; do INC_FLAGS+=("-I$d"); done
 # ── Self-test: prove the flag set actually rejects a Windows violation ────
 if [ "${1:-}" = "--self-test" ]; then
     if ! command -v "$CC_BIN" >/dev/null 2>&1; then
+        if [ "${ZCL_REQUIRE_MINGW:-0}" = 1 ]; then
+            echo "  $GATE --self-test: FAIL — required compiler '$CC_BIN'" \
+                 "is unavailable." >&2
+            exit 2
+        fi
         echo "  $GATE --self-test: UNOBSERVED — '$CC_BIN' is not installed;" \
              "cannot prove the gate trips without the compiler it gates."
         exit 0

@@ -443,8 +443,14 @@ ZCL_CAPABILITY_SYMBOL("OPENSSL_init_crypto", CAP_FS_READ,
 ZCL_CAPABILITY_SYMBOL("PEM_read_X509", CAP_FS_READ,
     "Reads a certificate from a stream. The private key twin of this "
     "call is CAP_WALLET.")
+ZCL_CAPABILITY_SYMBOL("posix_openpt", CAP_FS_READ,
+    "Opens the pseudo-terminal multiplexer with flags invisible to nm; "
+    "the source-level write check owns its O_RDWR half, like open.")
 ZCL_CAPABILITY_SYMBOL("pread", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("preadv2", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("ptsname_r", CAP_FS_READ,
+    "Resolves the filesystem path of the pseudo-terminal slave attached "
+    "to a caller-held master descriptor.")
 ZCL_CAPABILITY_SYMBOL("read", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("readdir", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("readlink", CAP_FS_READ, "")
@@ -563,10 +569,14 @@ ZCL_CAPABILITY_SYMBOL("sysinfo", CAP_CLOCK,
     "Returns uptime and load averages alongside memory figures. The "
     "time derived fields are why it is here and not with uname.")
 ZCL_CAPABILITY_SYMBOL("time", CAP_CLOCK, "")
+ZCL_CAPABILITY_SYMBOL("usleep", CAP_CLOCK, "")
 ZCL_CAPABILITY_SYMBOL("X509_gmtime_adj", CAP_CLOCK,
     "Sets a certificate validity bound relative to the current time.")
 
 /* ---- CAP_PRIVILEGE ---- */
+ZCL_CAPABILITY_SYMBOL("grantpt", CAP_PRIVILEGE,
+    "Grants the current process access to a pseudo-terminal slave by "
+    "changing kernel-managed ownership and permissions.")
 ZCL_CAPABILITY_SYMBOL("ioctl", CAP_PRIVILEGE,
     "The request code is invisible to nm and spans terminal settings, "
     "network interface configuration and arbitrary device control, so "
@@ -595,6 +605,9 @@ ZCL_CAPABILITY_SYMBOL("syscall", CAP_PRIVILEGE,
     "Defeats symbol level classification entirely, because the syscall "
     "number is a runtime value and no class here can bind it. It is "
     "banned separately at source level by check-capability-closure.")
+ZCL_CAPABILITY_SYMBOL("unlockpt", CAP_PRIVILEGE,
+    "Changes the kernel pseudo-terminal lock state so its slave can be "
+    "opened by another process.")
 ZCL_CAPABILITY_SYMBOL("unshare", CAP_PRIVILEGE,
     "Creates new namespaces, which is authority over what the process "
     "can see.")

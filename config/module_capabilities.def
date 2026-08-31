@@ -37,10 +37,10 @@
  * sail past this table unseen. tools/lint/check_capability_closure.sh makes
  * the same U+w extraction and carries a selftest that regresses on it.
  *
- * This records the portable/Linux object shape. Exact Windows replacements
- * live in config/module_capabilities_windows.def; package claims take the
- * union across both tables. Each records what its object tree shows TODAY.
- * Neither is an approval.
+ * This records the cross-target portable union. Exact Linux and Windows
+ * replacements live in config/module_capabilities_linux.def and
+ * config/module_capabilities_windows.def; package claims retain this union.
+ * Each records what its object tree shows TODAY. Neither is an approval.
  *
  * Ordering is alphabetical by path and carries no meaning. */
 
@@ -492,7 +492,7 @@ ZCL_MODULE_CAPABILITY("app/views/src/explorer_stats_view.c", CAP_CLOCK|CAP_FS_WR
 ZCL_MODULE_CAPABILITY("app/views/src/name_gateway_view.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/views/src/qr_popup.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/views/src/ui_present.c", CAP_FS_WRITE|CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("app/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK|CAP_FS_WRITE, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
+ZCL_MODULE_CAPABILITY("app/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
 ZCL_MODULE_CAPABILITY("app/views/src/ui_present_host_transport.c", CAP_NETWORK|CAP_FS_WRITE|CAP_FS_READ, "the owner-only local transport for native views: speaks over the AF_UNIX socket and persists the nonce that binds a session to it")
 ZCL_MODULE_CAPABILITY("app/views/src/wallet_gui.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("config/src/app_context.c", CAP_FS_WRITE, "")
@@ -533,7 +533,7 @@ ZCL_MODULE_CAPABILITY("config/src/boot_mesh_machines_rpc.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mesh_pairing.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mesh_status.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mesh_status_refresh.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("config/src/boot_mesh_status_requester.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("config/src/boot_mesh_status_requester.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mesh_terminal.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mesh_terminal_rpc.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("config/src/boot_mint_anchor.c", CAP_FS_WRITE|CAP_FS_READ, "")
@@ -625,7 +625,7 @@ ZCL_MODULE_CAPABILITY("lib/bloom/src/merkleblock.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("lib/chain/src/utxo_snapshot_loader.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("lib/chainlog/src/chainlog.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("lib/codeindex/src/codeindex.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("lib/codeindex/src/codeindex_build.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("lib/codeindex/src/codeindex_build.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("lib/codeindex/src/codeindex_capability.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("lib/codeindex/src/codeindex_deps.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("lib/codeindex/src/codeindex_emitter.c", CAP_FS_WRITE, "")
@@ -810,6 +810,7 @@ ZCL_MODULE_CAPABILITY("lib/session/src/agent_broker_peer.c", CAP_NETWORK, "the b
 ZCL_MODULE_CAPABILITY("lib/session/src/agent_broker_spawn.c", CAP_FS_WRITE|CAP_PROCESS|CAP_PRIVILEGE|CAP_NETWORK|CAP_FS_READ, "where the confined-agent boundary is BUILT: forks the child, drops its privileges before it runs untrusted code, and wires the socket between broker and child")
 ZCL_MODULE_CAPABILITY("lib/session/src/agent_confined.c", CAP_PROCESS|CAP_FS_READ|CAP_FS_WRITE|CAP_NETWORK, "the untrusted side of the confined-agent boundary: the child process itself, talking back to the broker over its socket")
 ZCL_MODULE_CAPABILITY("lib/session/src/mesh_private_object_stage.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("lib/session/src/mesh_terminal_worker.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE, "the Linux confined terminal worker: opens and configures a pseudo-terminal, forks and supervises the bounded shell process, installs its confinement, and enforces timed teardown")
 ZCL_MODULE_CAPABILITY("lib/sim/src/postmortem.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("lib/sim/src/postmortem_archive.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("lib/sim/src/postmortem_inventory.c", CAP_FS_READ|CAP_FS_WRITE, "")

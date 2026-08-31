@@ -1,6 +1,11 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # Canonical strict-C23 Windows acceptance catalog.
 
+# MinGW supplies both pthread and the clock_gettime entry points used by the
+# product-selected shared clock implementation from libwinpthread. This is
+# also the provider the full Windows node links through top-level LIBS.
+ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB := -l:libwinpthread.a
+
 ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	boot_auto_install_bundle_refusal \
 	boot_export_refusal \
@@ -104,7 +109,8 @@ ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_SOURCES := \
 	lib/platform/src/file_metadata.c \
 	lib/platform/src/clock.c \
 	lib/base/src/safe_alloc.c
-ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_consensus_bundle_marker_LIBS := \
+	-ladvapi32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_consensus_export_fd_io_refusal_SOURCES := \
 	lib/test/src/consensus_export_fd_io_refusal_acceptance.c \
 	config/src/consensus_state_snapshot_export_fd_io.c \
@@ -153,6 +159,8 @@ ZCL_WINDOWS_ACCEPTANCE_datadir_privacy_LIBS := \
 	-Wl,--gc-sections -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_FLAGS := \
 	-DZCL_TESTING
+ZCL_WINDOWS_ACCEPTANCE_consensus_state_publication_cas_refusal_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_database_lifetime_SOURCES := \
 	lib/platform/tests/database_lifetime_windows_acceptance.c \
@@ -161,7 +169,8 @@ ZCL_WINDOWS_ACCEPTANCE_database_lifetime_SOURCES := \
 	vendor/sqlite3.c
 ZCL_WINDOWS_ACCEPTANCE_database_lifetime_FLAGS := \
 	-Wno-unused-but-set-variable -Wno-unused-parameter
-ZCL_WINDOWS_ACCEPTANCE_database_lifetime_LIBS := -lpthread
+ZCL_WINDOWS_ACCEPTANCE_database_lifetime_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	lib/platform/tests/directory_compat_windows_acceptance.c \
@@ -279,7 +288,8 @@ ZCL_WINDOWS_ACCEPTANCE_nat_gateway_SOURCES := \
 ZCL_WINDOWS_ACCEPTANCE_nat_gateway_FLAGS := \
 	-ffunction-sections -fdata-sections
 ZCL_WINDOWS_ACCEPTANCE_nat_gateway_LIBS := \
-	-Wl,--gc-sections -ladvapi32 -lws2_32 -liphlpapi
+	-Wl,--gc-sections -ladvapi32 -lws2_32 -liphlpapi \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_SOURCES := \
 	lib/test/src/package_lifecycle_store_windows_refusal_acceptance.c \
@@ -366,20 +376,24 @@ ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_SOURCES := \
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_FLAGS := \
 	-ffunction-sections -fdata-sections -flto -fwhole-program
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_LIBS := \
-	-flto -Wl,--gc-sections -ladvapi32
+	-flto -Wl,--gc-sections -ladvapi32 \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_read_mapping_SOURCES := \
 	lib/platform/tests/read_mapping_windows_acceptance.c \
 	lib/platform/src/read_mapping.c
 ZCL_WINDOWS_ACCEPTANCE_rom_bundle_admission_refusal_SOURCES := \
 	lib/test/src/rom_bundle_admission_refusal_acceptance.c \
 	config/src/rom_bundle_admission.c
+ZCL_WINDOWS_ACCEPTANCE_rom_bundle_admission_refusal_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_SOURCES := \
 	lib/platform/tests/rpc_client_transport_windows_acceptance.c \
 	app/controllers/src/rpc_client.c \
 	lib/json/src/json.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
-ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_LIBS := -lws2_32
+ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_LIBS := \
+	-lws2_32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_rng_SOURCES := \
 	lib/test/src/rng_acceptance.c \
 	lib/platform/src/rng.c
@@ -438,12 +452,15 @@ ZCL_WINDOWS_ACCEPTANCE_state_root_SOURCES := \
 ZCL_WINDOWS_ACCEPTANCE_state_root_LIBS := -ladvapi32 -lshell32 -lole32 -luuid
 ZCL_WINDOWS_ACCEPTANCE_thread_join_SOURCES := \
 	lib/platform/tests/thread_join_windows_acceptance.c
+ZCL_WINDOWS_ACCEPTANCE_thread_join_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_ui_host_transport_SOURCES := \
 	lib/test/src/ui_host_transport_windows_acceptance.c \
 	app/views/src/ui_present_host_transport.c \
 	lib/base/src/safe_alloc.c \
 	lib/platform/src/clock.c
-ZCL_WINDOWS_ACCEPTANCE_ui_host_transport_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_ui_host_transport_LIBS := \
+	-ladvapi32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_utxo_recovery_ldb_copy_refusal_SOURCES := \
 	lib/test/src/utxo_recovery_ldb_copy_windows_refusal_acceptance.c \
 	app/services/src/utxo_recovery_ldb_copy.c \
@@ -491,7 +508,8 @@ ZCL_WINDOWS_ACCEPTANCE_workpool_SOURCES := \
 	lib/test/src/workpool_windows_acceptance.c \
 	lib/util/src/workpool.c \
 	lib/base/src/safe_alloc.c
-ZCL_WINDOWS_ACCEPTANCE_workpool_LIBS := -lpthread
+ZCL_WINDOWS_ACCEPTANCE_workpool_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_zcode_benchmark_executor_refusal_SOURCES := \
 	lib/test/src/zcode_benchmark_executor_windows_refusal_acceptance.c \
 	app/services/src/zcode_benchmark_executor_windows.c \

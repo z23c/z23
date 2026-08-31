@@ -27,6 +27,7 @@
 #if !defined(_WIN32)
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -44,17 +45,27 @@
 
 struct proof_paths {
     char root[PATH_MAX];
+    char cache[PATH_MAX];
     char state[PATH_MAX];
     char receipts[PATH_MAX];
     char children[PATH_MAX];
     char logs[PATH_MAX];
+    char requests[PATH_MAX];
+    char attempts[PATH_MAX];
+    char leases[PATH_MAX];
     char key[132];
     char receipt[PATH_MAX];
     char lock[PATH_MAX];
+    char request[PATH_MAX];
+    char lease[PATH_MAX];
+    char queue_lock[PATH_MAX];
     char failure[PATH_MAX];
     char changed[PATH_MAX];
     char bundle_log[PATH_MAX];
     char helper_log[PATH_MAX];
+    char attempt[PATH_MAX];
+    char attempt_token[192];
+    pid_t attempt_worker;
 };
 
 static void proof_why(char *why, size_t why_len, const char *message)
@@ -151,6 +162,20 @@ static bool proof_ensure_platform(const char *repo_root,
     return false;
 }
 
+static bool proof_queue_has_pending_platform(const char *repo_root)
+{
+    (void)repo_root;
+    return false;
+}
+
+static int proof_queue_run_next_platform(const char *repo_root,
+                                         char *why, size_t why_len)
+{
+    (void)repo_root;
+    proof_why(why, why_len, "windows_native_proof_worker_unavailable");
+    return -1;
+}
+
 static bool proof_wait_platform(const char *repo_root,
                                 const char *local_commit,
                                 const char *remote_base,
@@ -181,20 +206,35 @@ static bool proof_paths_fill(const char *repo_root, const char *local,
         !platform_directory_canonical_real(repo_root, out->root,
                                            sizeof(out->root)))
         return false;
-    if (snprintf(out->state, sizeof(out->state), "%s/.cache/zcl-dev-proof",
-                 out->root) >= (int)sizeof(out->state) ||
+    if (snprintf(out->cache, sizeof(out->cache), "%s/.cache", out->root) >=
+            (int)sizeof(out->cache) ||
+        snprintf(out->state, sizeof(out->state), "%s/zcl-dev-proof",
+                 out->cache) >=
+            (int)sizeof(out->state) ||
         snprintf(out->receipts, sizeof(out->receipts), "%s/receipts",
                  out->state) >= (int)sizeof(out->receipts) ||
         snprintf(out->children, sizeof(out->children), "%s/children",
                  out->state) >= (int)sizeof(out->children) ||
         snprintf(out->logs, sizeof(out->logs), "%s/logs", out->state) >=
             (int)sizeof(out->logs) ||
+        snprintf(out->requests, sizeof(out->requests), "%s/requests",
+                 out->state) >= (int)sizeof(out->requests) ||
+        snprintf(out->attempts, sizeof(out->attempts), "%s/attempts",
+                 out->state) >= (int)sizeof(out->attempts) ||
+        snprintf(out->leases, sizeof(out->leases), "%s/leases",
+                 out->state) >= (int)sizeof(out->leases) ||
         snprintf(out->key, sizeof(out->key), "%s-%s", local, base) >=
             (int)sizeof(out->key) ||
         snprintf(out->receipt, sizeof(out->receipt), "%s/%s.receipt",
                  out->receipts, out->key) >= (int)sizeof(out->receipt) ||
         snprintf(out->lock, sizeof(out->lock), "%s/%s.running", out->state,
                  out->key) >= (int)sizeof(out->lock) ||
+        snprintf(out->request, sizeof(out->request), "%s/%s.request",
+                 out->requests, out->key) >= (int)sizeof(out->request) ||
+        snprintf(out->lease, sizeof(out->lease), "%s/%s.lease",
+                 out->leases, out->key) >= (int)sizeof(out->lease) ||
+        snprintf(out->queue_lock, sizeof(out->queue_lock), "%s/queue.lock",
+                 out->state) >= (int)sizeof(out->queue_lock) ||
         snprintf(out->failure, sizeof(out->failure), "%s/%s.failed",
                  out->state, out->key) >= (int)sizeof(out->failure) ||
         snprintf(out->changed, sizeof(out->changed), "%s/%s.files",
@@ -210,10 +250,14 @@ static bool proof_paths_fill(const char *repo_root, const char *local,
 
 static bool proof_state_prepare(const struct proof_paths *paths)
 {
-    return paths && platform_private_directory_ensure(paths->state) &&
+    return paths && platform_private_directory_ensure(paths->cache) &&
+           platform_private_directory_ensure(paths->state) &&
            platform_private_directory_ensure(paths->receipts) &&
            platform_private_directory_ensure(paths->children) &&
-           platform_private_directory_ensure(paths->logs);
+           platform_private_directory_ensure(paths->logs) &&
+           platform_private_directory_ensure(paths->requests) &&
+           platform_private_directory_ensure(paths->attempts) &&
+           platform_private_directory_ensure(paths->leases);
 }
 
 static bool process_ok(const struct zcl_devloop_process_result *result)
@@ -350,14 +394,82 @@ static bool proof_running(const char *path, int64_t *pid_out,
     return true;
 }
 
-static bool proof_lock_stale(const char *path)
+static bool proof_private_regular(const char *path)
 {
     struct stat st;
-    int64_t now = platform_time_wall_unix();
-    if (!path || lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-        S_ISLNK(st.st_mode) || now <= 0 || now - (int64_t)st.st_mtime < 5)
+    return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           !S_ISLNK(st.st_mode) && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static bool proof_lease_read(const char *path, char *token, size_t token_len,
+                             int64_t *pid_out, int64_t *started_out)
+{
+    char text[384], parsed[192];
+    long long pid = 0, started = 0;
+    if (!token || token_len == 0 || !proof_private_regular(path) ||
+        !proof_read_text(path, text, sizeof(text)) ||
+        sscanf(text, "%191s %lld %lld", parsed, &pid, &started) != 3 ||
+        strlen(parsed) >= token_len || pid <= 1 || started <= 0)
         return false;
-    return !proof_running(path, NULL, NULL);
+    (void)snprintf(token, token_len, "%s", parsed);
+    if (pid_out) *pid_out = (int64_t)pid;
+    if (started_out) *started_out = (int64_t)started;
+    return true;
+}
+
+static bool proof_lease_running(const char *path, int64_t *pid_out,
+                                int64_t *started_out)
+{
+    char token[192];
+    int64_t pid = 0;
+    if (!proof_lease_read(path, token, sizeof(token), &pid, started_out) ||
+        (kill((pid_t)pid, 0) != 0 && errno != EPERM))
+        return false;
+    if (pid_out) *pid_out = pid;
+    return true;
+}
+
+static bool proof_request_read(const char *path, char local[65], char base[65],
+                               int64_t *wall_out, int64_t *monotonic_out)
+{
+    char text[320], *lines[5], *save = NULL;
+    if (!proof_private_regular(path) ||
+        !proof_read_text(path, text, sizeof(text)))
+        return false;
+    size_t count = 0;
+    for (char *line = strtok_r(text, "\n", &save); line && count < 5;
+         line = strtok_r(NULL, "\n", &save))
+        lines[count++] = line;
+    if (count != 5 || strcmp(lines[0], "zcl.dev_proof_request.v1") != 0 ||
+        !proof_oid_text(lines[1]) || !proof_oid_text(lines[2]))
+        return false;
+    char *wall_end = NULL, *mono_end = NULL;
+    errno = 0;
+    long long wall = strtoll(lines[3], &wall_end, 10);
+    bool wall_ok = errno == 0 && wall_end && *wall_end == 0 && wall > 0;
+    errno = 0;
+    long long mono = strtoll(lines[4], &mono_end, 10);
+    if (!wall_ok || errno != 0 || !mono_end || *mono_end != 0 || mono <= 0)
+        return false;
+    (void)snprintf(local, 65, "%s", lines[1]);
+    (void)snprintf(base, 65, "%s", lines[2]);
+    if (wall_out) *wall_out = (int64_t)wall;
+    if (monotonic_out) *monotonic_out = (int64_t)mono;
+    return true;
+}
+
+static bool proof_request_matches_pair(const char *path, const char *local,
+                                       const char *base)
+{
+    char request_local[65], request_base[65], expected[PATH_MAX];
+    int n = path && local && base
+        ? snprintf(expected, sizeof(expected), "%s-%s.request", local, base)
+        : -1;
+    const char *leaf = path ? strrchr(path, '/') : NULL;
+    return n > 0 && n < (int)sizeof(expected) && leaf &&
+        strcmp(leaf + 1, expected) == 0 &&
+        proof_request_read(path, request_local, request_base, NULL, NULL) &&
+        strcmp(request_local, local) == 0 && strcmp(request_base, base) == 0;
 }
 
 static bool proof_status_read_platform(const char *repo_root,
@@ -393,7 +505,8 @@ static bool proof_status_read_platform(const char *repo_root,
         return true;
     }
     int64_t pid = 0, started = 0;
-    if (proof_running(paths.lock, &pid, &started)) {
+    if (proof_lease_running(paths.lease, &pid, &started) ||
+        proof_running(paths.lock, &pid, &started)) {
         int64_t now = platform_time_wall_unix();
         int64_t elapsed_ms = now > started ? (now - started) * 1000 : 0;
         out->state = ZCL_DEV_PROOF_STATE_RUNNING;
@@ -403,6 +516,19 @@ static bool proof_status_read_platform(const char *repo_root,
             ? PROOF_TIMEOUT_MS - elapsed_ms : 0;
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
                        "background_verification_running");
+        return true;
+    }
+    if (proof_request_matches_pair(paths.request, local, base)) {
+        out->state = ZCL_DEV_PROOF_STATE_RUNNING;
+        out->eta_ms = PROOF_TIMEOUT_MS;
+        (void)snprintf(out->detail, sizeof(out->detail), "%s",
+                       "resident_proof_request_queued");
+        return true;
+    }
+    if (proof_private_regular(paths.request)) {
+        out->state = ZCL_DEV_PROOF_STATE_FAILED;
+        (void)snprintf(out->detail, sizeof(out->detail), "%s",
+                       "proof_request_invalid");
         return true;
     }
     if (proof_read_text(paths.failure, out->detail, sizeof(out->detail))) {
@@ -477,6 +603,124 @@ static bool write_atomic(const char *path, const void *data, size_t size,
         (void)unlink(temp);
     }
     return ok;
+}
+
+static bool proof_request_body(const char *local, const char *base,
+                               char out[320], size_t *len_out)
+{
+    int n = local && base
+        ? snprintf(out, 320,
+                   "zcl.dev_proof_request.v1\n%s\n%s\n%lld\n%lld\n",
+                   local, base,
+                   (long long)platform_time_wall_unix(),
+                   (long long)platform_time_monotonic_us())
+        : -1;
+    if (n <= 0 || n >= 320) return false;
+    if (len_out) *len_out = (size_t)n;
+    return true;
+}
+
+static bool proof_attempt_paths_prepare(const struct proof_paths *pair,
+                                        struct proof_paths *attempt)
+{
+    if (!pair || !attempt) return false;
+    *attempt = *pair;
+    char temporary[PATH_MAX];
+    if (snprintf(temporary, sizeof(temporary), "%s/%s.XXXXXX",
+                 pair->attempts, pair->key) >= (int)sizeof(temporary) ||
+        !mkdtemp(temporary) ||
+        snprintf(attempt->attempt, sizeof(attempt->attempt), "%s",
+                 temporary) >= (int)sizeof(attempt->attempt))
+        return false;
+    const char *leaf = strrchr(attempt->attempt, '/');
+    if (!leaf || !leaf[1] || strlen(leaf + 1) >= sizeof(attempt->attempt_token))
+        return false;
+    (void)snprintf(attempt->attempt_token, sizeof(attempt->attempt_token),
+                   "%s", leaf + 1);
+    attempt->attempt_worker = getpid();
+    if (snprintf(attempt->logs, sizeof(attempt->logs), "%s/logs",
+                 attempt->attempt) >= (int)sizeof(attempt->logs) ||
+        snprintf(attempt->changed, sizeof(attempt->changed),
+                 "%s/changed.files", attempt->attempt) >=
+            (int)sizeof(attempt->changed) ||
+        snprintf(attempt->bundle_log, sizeof(attempt->bundle_log),
+                 "%s/logs/bundle.log", attempt->attempt) >=
+            (int)sizeof(attempt->bundle_log) ||
+        snprintf(attempt->helper_log, sizeof(attempt->helper_log),
+                 "%s/logs/helpers.log", attempt->attempt) >=
+            (int)sizeof(attempt->helper_log) ||
+        !platform_private_directory_ensure(attempt->logs))
+        return false;
+    return true;
+}
+
+static bool proof_lease_publish(const struct proof_paths *paths)
+{
+    char body[320];
+    int n = paths
+        ? snprintf(body, sizeof(body), "%s %ld %lld\n",
+                   paths->attempt_token, (long)paths->attempt_worker,
+                   (long long)platform_time_wall_unix())
+        : -1;
+    return n > 0 && n < (int)sizeof(body) &&
+           write_atomic(paths->lease, body, (size_t)n, 0600);
+}
+
+static bool proof_lease_current(const struct proof_paths *paths)
+{
+    char token[192];
+    int64_t pid = 0;
+    return paths && paths->attempt_token[0] && paths->attempt_worker > 1 &&
+        proof_lease_read(paths->lease, token, sizeof(token), &pid, NULL) &&
+        strcmp(token, paths->attempt_token) == 0 &&
+        pid == (int64_t)paths->attempt_worker;
+}
+
+static int proof_queue_lock_acquire(const struct proof_paths *paths)
+{
+    if (!paths) return -1;
+    int fd = open(paths->queue_lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void proof_queue_lock_release(int fd)
+{
+    if (fd < 0) return;
+    (void)flock(fd, LOCK_UN);
+    (void)close(fd);
+}
+
+static bool proof_write_if_current(const struct proof_paths *paths,
+                                   const char *target, const void *data,
+                                   size_t size, mode_t mode)
+{
+    int fd = proof_queue_lock_acquire(paths);
+    if (fd < 0) return false;
+    bool ok = proof_lease_current(paths) &&
+              write_atomic(target, data, size, mode);
+    proof_queue_lock_release(fd);
+    return ok;
+}
+
+static void proof_unlink_if_current(const struct proof_paths *paths,
+                                    const char *target)
+{
+    int fd = proof_queue_lock_acquire(paths);
+    if (fd < 0) return;
+    if (proof_lease_current(paths)) (void)unlink(target);
+    proof_queue_lock_release(fd);
+}
+
+static void proof_lease_release(const struct proof_paths *paths)
+{
+    int fd = proof_queue_lock_acquire(paths);
+    if (fd < 0) return;
+    if (proof_lease_current(paths)) (void)unlink(paths->lease);
+    proof_queue_lock_release(fd);
 }
 
 static bool changed_files_capture(const struct proof_paths *paths,
@@ -1096,22 +1340,45 @@ static bool proof_make_jobs_arg(char out[16])
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
                              const struct dev_source_record *expected_source,
-                             struct zcl_dev_proof_dimension *dimension)
+                             struct zcl_dev_proof_dimension *dimension,
+                             char *why, size_t why_len)
 {
     if (!paths || !artifact || !expected_source ||
-        !expected_source->source_id[0] || !dimension || dimension->selected == 0)
+        !expected_source->source_id[0] || !dimension || dimension->selected == 0) {
+        proof_why(why, why_len, "proof_executable_reuse_input_invalid");
         return false;
+    }
     int fd = open(artifact, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    struct dev_source_record source = {0};
-    char why[160] = {0};
-    bool admitted = zcl_dev_executable_source_record_read(
-        paths->root, fd, artifact, &source, why, sizeof(why));
-    (void)close(fd);
-    if (!admitted || strcmp(source.source_id, expected_source->source_id) != 0 ||
-        !hash_file("zcl.dev_proof_executable_reuse.v1", artifact,
-                   dimension->receipt_root))
+    if (fd < 0) {
+        proof_whyf(why, why_len, "proof_executable_open_failed_errno_%d",
+                   errno);
         return false;
+    }
+    struct dev_source_record source = {0};
+    char source_why[160] = {0};
+    bool admitted = zcl_dev_executable_source_record_read(
+        paths->root, fd, artifact, &source, source_why, sizeof(source_why));
+    if (close(fd) != 0) {
+        proof_whyf(why, why_len, "proof_executable_close_failed_errno_%d",
+                   errno);
+        return false;
+    }
+    if (!admitted) {
+        proof_whyf(why, why_len, "proof_executable_%s",
+                   source_why[0] ? source_why : "source_record_failed");
+        return false;
+    }
+    if (strcmp(source.source_id, expected_source->source_id) != 0) {
+        proof_whyf(why, why_len,
+                   "proof_executable_source_identity_mismatch_actual_%.16s_expected_%.16s",
+                   source.source_id, expected_source->source_id);
+        return false;
+    }
+    if (!hash_file("zcl.dev_proof_executable_reuse.v1", artifact,
+                   dimension->receipt_root)) {
+        proof_why(why, why_len, "proof_executable_hash_failed");
+        return false;
+    }
     dimension->reused = dimension->selected;
     return true;
 }
@@ -1119,16 +1386,26 @@ static bool executable_reuse(const struct proof_paths *paths,
 static bool admitted_executable_materialize(
     const struct proof_paths *paths, const char *generation,
     const char *source, const char *relative_target,
-    const struct dev_source_record *expected_source, char target[PATH_MAX])
+    const struct dev_source_record *expected_source, char target[PATH_MAX],
+    char *why, size_t why_len)
 {
     struct zcl_dev_proof_dimension artifact = {.selected = 1};
     int target_len = generation && relative_target && target
         ? snprintf(target, PATH_MAX, "%s/%s", generation, relative_target)
         : -1;
-    return paths && source && expected_source && target &&
-        target_len > 0 && target_len < PATH_MAX &&
-        executable_reuse(paths, source, expected_source, &artifact) &&
-        dependency_materialize(source, target);
+    if (!paths || !source || !expected_source || !target || target_len <= 0 ||
+        target_len >= PATH_MAX) {
+        proof_why(why, why_len, "proof_executable_target_path_invalid");
+        return false;
+    }
+    if (!executable_reuse(paths, source, expected_source, &artifact,
+                          why, why_len))
+        return false;
+    if (!dependency_materialize(source, target)) {
+        proof_why(why, why_len, "proof_executable_materialize_failed");
+        return false;
+    }
+    return true;
 }
 
 static bool admitted_executable_mark_fresh(const char *path)
@@ -1218,23 +1495,38 @@ static bool test_epoch_pointer_prepare(const struct proof_paths *paths,
 
 static bool test_depfiles_prepare(const struct proof_paths *paths,
                                   const char *generation,
-                                  uint8_t depfile_root[32])
+                                  uint8_t depfile_root[32],
+                                  char *why, size_t why_len)
 {
     char relative[PATH_MAX], source[PATH_MAX], target[PATH_MAX];
     uint8_t pointer_root[32];
-    if (!test_object_dir_relative(paths, relative) ||
-        snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
+    if (!test_object_dir_relative(paths, relative)) {
+        proof_why(why, why_len, "proof_test_restart_plan_invalid");
+        return false;
+    }
+    if (snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
             (int)sizeof(source) ||
         snprintf(target, sizeof(target), "%s/%s", generation, relative) >=
-            (int)sizeof(target))
+            (int)sizeof(target)) {
+        proof_why(why, why_len, "proof_test_depfile_path_invalid");
         return false;
+    }
     struct sha3_256_ctx root;
     hash_begin(&root, "zcl.dev_proof_depfiles.v1");
     size_t count = 0;
-    if (!depfile_tree_copy(source, target, strlen(source), &root, &count) ||
-        count == 0 ||
-        !test_epoch_pointer_prepare(paths, generation, relative, pointer_root))
+    if (!depfile_tree_copy(source, target, strlen(source), &root, &count)) {
+        proof_why(why, why_len, "proof_test_depfile_copy_failed");
         return false;
+    }
+    if (count == 0) {
+        proof_why(why, why_len, "proof_test_depfile_tree_empty");
+        return false;
+    }
+    if (!test_epoch_pointer_prepare(paths, generation, relative,
+                                    pointer_root)) {
+        proof_why(why, why_len, "proof_test_epoch_pointer_failed");
+        return false;
+    }
     uint8_t count_le[8];
     zcl_write_u64_le(count_le, (uint64_t)count);
     sha3_256_write(&root, count_le, sizeof(count_le));
@@ -1269,20 +1561,38 @@ static bool test_helpers_prepare(
         node_len <= 0 || (size_t)node_len >= sizeof(node_source) ||
         nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
         acme_len <= 0 || (size_t)acme_len >= sizeof(acme_target) ||
-        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target) ||
-        !admitted_executable_materialize(
+        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target)) {
+        proof_why(why, why_len, "proof_test_helper_path_invalid");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, runner_source, "build/bin/test_parallel_fast",
-            expected_source, runner_target) ||
-        !admitted_executable_materialize(
+            expected_source, runner_target, why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_test_runner_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, verifier_source,
             "build/bin/zclassic23-package-verify-dev", expected_source,
-            verifier_target) ||
-        !admitted_executable_materialize(
+            verifier_target, why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_test_verifier_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, node_source, "build/bin/zclassic23",
-            expected_source,
-            node_target) || !admitted_executable_mark_fresh(node_target) ||
-        !test_depfiles_prepare(paths, generation, depfile_root)) {
-        proof_why(why, why_len, "proof_test_helper_admission_failed");
+            expected_source, node_target, why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_test_node_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_mark_fresh(node_target)) {
+        proof_why(why, why_len, "proof_test_node_freshness_failed");
+        return false;
+    }
+    if (!test_depfiles_prepare(paths, generation, depfile_root,
+                               why, why_len)) {
         return false;
     }
     const char *prerequisite_argv[] = {
@@ -1336,6 +1646,7 @@ static bool receipt_store(const struct proof_paths *paths,
                           struct zcl_dev_acceptance_receipt_v1 *receipt)
 {
     uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    if (!proof_lease_current(paths)) return false;
     for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
         struct zcl_dev_proof_dimension *dimension = &receipt->dimensions[i];
         if (!dimension->selected) continue;
@@ -1359,11 +1670,13 @@ static bool receipt_store(const struct proof_paths *paths,
             return false;
         }
     }
-    return zcl_dev_proof_receipt_child_set_root(
+    return proof_lease_current(paths) &&
+           zcl_dev_proof_receipt_child_set_root(
                receipt, receipt->child_set_root) &&
            zcl_dev_proof_receipt_seal(receipt) &&
            zcl_dev_proof_receipt_serialize(receipt, wire) &&
-           write_atomic(paths->receipt, wire, sizeof(wire), 0400);
+           proof_write_if_current(paths, paths->receipt, wire, sizeof(wire),
+                                  0400);
 }
 
 static bool proof_worker(const struct proof_paths *paths,
@@ -1408,17 +1721,21 @@ static bool proof_worker(const struct proof_paths *paths,
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
 
     struct dev_source_record source_before = {0}, source_after = {0};
+    char sealed_source_id[65], sealed_mutation_id[65];
     if (!zcl_dev_source_identity_capture(generation, &source_before, why,
                                          why_len)) {
         if (!why || !why[0])
             proof_why(why, why_len, "source_identity_capture_failed");
         return false;
     }
-    if (!zcl_dev_source_cas_capture(generation, &source_before) ||
-        !source_before.cas_present) {
+    if (!source_before.cas_present) {
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
     }
+    memcpy(sealed_source_id, source_before.source_id,
+           sizeof(sealed_source_id));
+    memcpy(sealed_mutation_id, source_before.mutation_id,
+           sizeof(sealed_mutation_id));
     struct zcl_dev_acceptance_receipt_v1 receipt = {0};
     if (!zcl_dev_proof_oid_decode(local, receipt.local_commit,
                                   &receipt.local_commit_len) ||
@@ -1508,7 +1825,7 @@ static bool proof_worker(const struct proof_paths *paths,
                                         "%s/build/bin/z23-dev", paths->root);
             if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
                 !executable_reuse(paths, artifact,
-                                  &source_before, compile)) {
+                                  &source_before, compile, NULL, 0)) {
                 const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                       "build-only", NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_COMPILE, argv,
@@ -1524,6 +1841,33 @@ static bool proof_worker(const struct proof_paths *paths,
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_LINT, lint);
         if (test->selected) {
+            if (strcmp(source_before.source_id, sealed_source_id) != 0 ||
+                strcmp(source_before.mutation_id, sealed_mutation_id) != 0) {
+                proof_whyf(
+                    why, why_len,
+                    "proof_saved_source_identity_changed_actual_%.16s_sealed_%.16s",
+                    source_before.source_id, sealed_source_id);
+                return false;
+            }
+            struct dev_source_record generation_checkpoint = {0};
+            char checkpoint_why[160] = {0};
+            if (!zcl_dev_source_identity_capture(
+                    generation, &generation_checkpoint, checkpoint_why,
+                    sizeof(checkpoint_why))) {
+                proof_whyf(why, why_len,
+                           "proof_generation_source_checkpoint_%s",
+                           checkpoint_why[0] ? checkpoint_why : "failed");
+                return false;
+            }
+            if (strcmp(generation_checkpoint.source_id, sealed_source_id) != 0 ||
+                strcmp(generation_checkpoint.mutation_id,
+                       sealed_mutation_id) != 0) {
+                proof_whyf(
+                    why, why_len,
+                    "proof_generation_source_identity_changed_actual_%.16s_sealed_%.16s",
+                    generation_checkpoint.source_id, sealed_source_id);
+                return false;
+            }
             if (setenv("ZCL_TESTCACHE_STORE_ROOT", paths->root, 1) != 0) {
                 proof_why(why, why_len, "test_cache_store_root_unavailable");
                 return false;
@@ -1544,14 +1888,14 @@ static bool proof_worker(const struct proof_paths *paths,
                 const char *bundle_argv[] = {
                     "make", "--no-print-directory", make_jobs,
                     "dev-proof-bundle", NULL};
-                if (run_logged(paths->root, paths->bundle_log, bundle_argv,
+                if (run_logged(generation, paths->bundle_log, bundle_argv,
                                PROOF_TIMEOUT_MS) != 0) {
                     proof_why(why, why_len, "proof_bundle_build_failed");
                     return false;
                 }
-                runner_ready = test_binary_path(paths, binary) &&
+                runner_ready = test_binary_path(&execution, binary) &&
                     test_helpers_prepare(
-                        paths, generation, binary, &source_before,
+                        &execution, generation, binary, &source_before,
                         make_jobs, generation_binary, helper_root,
                         why, why_len);
                 if (!runner_ready) {
@@ -1586,27 +1930,212 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "receipt_publication_failed");
         return false;
     }
-    (void)unlink(paths->failure);
+    proof_unlink_if_current(paths, paths->failure);
     return true;
 }
 
-static void proof_worker_run(const struct proof_paths *paths,
-                             const char *local, const char *base)
+static bool proof_worker_run(const struct proof_paths *paths,
+                             const char *local, const char *base,
+                             char *why, size_t why_len)
 {
-    char why[256] = {0};
     struct sigaction child_action = {0};
     child_action.sa_handler = SIG_DFL;
     sigemptyset(&child_action.sa_mask);
     bool ok = sigaction(SIGCHLD, &child_action, NULL) == 0 &&
-              proof_worker(paths, local, base, why, sizeof(why));
-    if (!ok && !why[0])
-        proof_why(why, sizeof(why), "proof_child_reaping_unavailable");
+              proof_worker(paths, local, base, why, why_len);
+    if (!ok && (!why || !why[0]))
+        proof_why(why, why_len, "proof_child_reaping_unavailable");
     if (!ok) {
-        const char *message = why[0] ? why : "background_verification_failed";
-        (void)write_atomic(paths->failure, message, strlen(message), 0600);
+        const char *message = why && why[0]
+            ? why : "background_verification_failed";
+        (void)proof_write_if_current(paths, paths->failure, message,
+                                     strlen(message), 0600);
     }
-    (void)unlink(paths->lock);
-    _exit(ok ? 0 : 1);
+    proof_lease_release(paths);
+    return ok;
+}
+
+static bool proof_queue_directories(const char *repo_root,
+                                    char state[PATH_MAX],
+                                    char requests[PATH_MAX],
+                                    char attempts[PATH_MAX])
+{
+    char root[PATH_MAX];
+    if (!repo_root ||
+        !platform_directory_canonical_real(repo_root, root, sizeof(root)))
+        return false;
+    int state_len = snprintf(state, PATH_MAX, "%s/.cache/zcl-dev-proof", root);
+    int request_len = state_len > 0 && state_len < PATH_MAX
+        ? snprintf(requests, PATH_MAX, "%s/requests", state) : -1;
+    int attempt_len = request_len > 0 && request_len < PATH_MAX
+        ? snprintf(attempts, PATH_MAX, "%s/attempts", state) : -1;
+    return state_len > 0 && state_len < PATH_MAX && request_len > 0 &&
+           request_len < PATH_MAX && attempt_len > 0 && attempt_len < PATH_MAX;
+}
+
+static bool proof_request_name(const char *name)
+{
+    static const char suffix[] = ".request";
+    size_t len = name ? strlen(name) : 0;
+    return len > sizeof(suffix) - 1 &&
+        strcmp(name + len - (sizeof(suffix) - 1), suffix) == 0 &&
+        !strchr(name, '/') && !strchr(name, '\\');
+}
+
+static bool proof_queue_has_pending_platform(const char *repo_root)
+{
+    char state[PATH_MAX], requests[PATH_MAX], attempts[PATH_MAX];
+    if (!proof_queue_directories(repo_root, state, requests, attempts))
+        return false;
+    DIR *dir = opendir(requests);
+    if (!dir) return false;
+    bool found = false;
+    for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
+        char path[PATH_MAX], local[65], base[65];
+        if (!proof_request_name(entry->d_name) ||
+            snprintf(path, sizeof(path), "%s/%s", requests,
+                     entry->d_name) >= (int)sizeof(path))
+            continue;
+        if (proof_request_read(path, local, base, NULL, NULL) &&
+            proof_request_matches_pair(path, local, base)) {
+            found = true;
+            break;
+        }
+    }
+    (void)closedir(dir);
+    return found;
+}
+
+static bool proof_queue_select(const char *requests, char selected[PATH_MAX],
+                               char local[65], char base[65])
+{
+    DIR *dir = opendir(requests);
+    if (!dir) return false;
+    int64_t newest_wall = INT64_MIN, newest_monotonic = INT64_MIN;
+    selected[0] = 0;
+    for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
+        char path[PATH_MAX], candidate_local[65], candidate_base[65];
+        int64_t wall = 0, monotonic = 0;
+        if (!proof_request_name(entry->d_name) ||
+            snprintf(path, sizeof(path), "%s/%s", requests,
+                     entry->d_name) >= (int)sizeof(path) ||
+            !proof_request_read(path, candidate_local, candidate_base,
+                                &wall, &monotonic) ||
+            !proof_request_matches_pair(path, candidate_local,
+                                        candidate_base))
+            continue;
+        if (wall < newest_wall ||
+            (wall == newest_wall && monotonic < newest_monotonic) ||
+            (wall == newest_wall && monotonic == newest_monotonic &&
+             selected[0] && strcmp(path, selected) <= 0))
+            continue;
+        newest_wall = wall;
+        newest_monotonic = monotonic;
+        (void)snprintf(selected, PATH_MAX, "%s", path);
+        (void)snprintf(local, 65, "%s", candidate_local);
+        (void)snprintf(base, 65, "%s", candidate_base);
+    }
+    bool ok = closedir(dir) == 0 && selected[0];
+    return ok;
+}
+
+static bool proof_pair_superseded(const char *root,
+                                  const char *candidate_local,
+                                  const char *candidate_base,
+                                  const char *selected_local,
+                                  const char *selected_base)
+{
+    char ignored[2];
+    const char *local_argv[] = {
+        "git", "merge-base", "--is-ancestor", candidate_local,
+        selected_local, NULL};
+    const char *base_argv[] = {
+        "git", "merge-base", "--is-ancestor", candidate_base,
+        selected_base, NULL};
+    return git_capture(root, local_argv, ignored, sizeof(ignored)) &&
+           git_capture(root, base_argv, ignored, sizeof(ignored));
+}
+
+static void proof_queue_coalesce(const char *root, const char *requests,
+                                 const char *selected, const char *attempts,
+                                 const char *selected_local,
+                                 const char *selected_base)
+{
+    char superseded[PATH_MAX];
+    if (snprintf(superseded, sizeof(superseded), "%s/superseded", attempts) >=
+            (int)sizeof(superseded) ||
+        !platform_private_directory_ensure(superseded))
+        return;
+    char batch[PATH_MAX];
+    if (snprintf(batch, sizeof(batch), "%s/batch.XXXXXX", superseded) >=
+            (int)sizeof(batch) ||
+        !mkdtemp(batch))
+        return;
+    DIR *dir = opendir(requests);
+    if (!dir) return;
+    for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
+        char source[PATH_MAX], target[PATH_MAX], local[65], base[65];
+        if (!proof_request_name(entry->d_name) ||
+            snprintf(source, sizeof(source), "%s/%s", requests,
+                     entry->d_name) >= (int)sizeof(source) ||
+            strcmp(source, selected) == 0 ||
+            !proof_request_read(source, local, base, NULL, NULL) ||
+            !proof_request_matches_pair(source, local, base) ||
+            !proof_pair_superseded(root, local, base, selected_local,
+                                   selected_base) ||
+            snprintf(target, sizeof(target), "%s/%s", batch,
+                     entry->d_name) >= (int)sizeof(target))
+            continue;
+        (void)rename(source, target);
+    }
+    (void)closedir(dir);
+}
+
+static int proof_queue_run_next_platform(const char *repo_root,
+                                         char *why, size_t why_len)
+{
+    char state[PATH_MAX], requests[PATH_MAX], attempts[PATH_MAX];
+    char queue_lock[PATH_MAX], selected[PATH_MAX], local[65], base[65];
+    if (!proof_queue_directories(repo_root, state, requests, attempts) ||
+        snprintf(queue_lock, sizeof(queue_lock), "%s/queue.lock", state) >=
+            (int)sizeof(queue_lock)) {
+        proof_why(why, why_len, "proof_queue_path_invalid");
+        return -1;
+    }
+    int fd = open(queue_lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX) != 0) {
+        if (fd >= 0) close(fd);
+        proof_why(why, why_len, "proof_queue_lock_failed");
+        return -1;
+    }
+    if (!proof_queue_select(requests, selected, local, base)) {
+        (void)flock(fd, LOCK_UN);
+        close(fd);
+        return 0;
+    }
+    struct proof_paths pair, attempt;
+    char claimed[PATH_MAX];
+    bool prepared = proof_paths_fill(repo_root, local, base, &pair) &&
+        proof_state_prepare(&pair) &&
+        proof_attempt_paths_prepare(&pair, &attempt) &&
+        snprintf(claimed, sizeof(claimed), "%s/request", attempt.attempt) <
+            (int)sizeof(claimed) && proof_lease_publish(&attempt);
+    if (prepared && rename(selected, claimed) != 0) {
+        if (proof_lease_current(&attempt)) (void)unlink(attempt.lease);
+        prepared = false;
+    }
+    if (prepared)
+        proof_queue_coalesce(pair.root, requests, selected, attempts, local,
+                             base);
+    (void)flock(fd, LOCK_UN);
+    close(fd);
+    if (!prepared) {
+        proof_why(why, why_len, "proof_queue_claim_failed");
+        return -1;
+    }
+    if (why && why_len) why[0] = 0;
+    (void)proof_worker_run(&attempt, local, base, why, why_len);
+    return 1;
 }
 
 static bool proof_ensure_platform(const char *repo_root,
@@ -1639,56 +2168,13 @@ static bool proof_ensure_platform(const char *repo_root,
                        "proof_state_unavailable");
         return false;
     }
-    int fd = -1;
-    for (int attempt = 0; attempt < 2; attempt++) {
-        fd = open(paths.lock, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (fd >= 0) break;
-        if (errno != EEXIST) break;
-        if (zcl_dev_proof_status_read(repo_root, local, base, out) &&
-            out->state == ZCL_DEV_PROOF_STATE_RUNNING)
-            return true;
-        if (!proof_lock_stale(paths.lock)) {
-            out->state = ZCL_DEV_PROOF_STATE_RUNNING;
-            out->eta_ms = PROOF_TIMEOUT_MS;
-            (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                           "proof_worker_lock_publication_pending");
-            return true;
-        }
-        if (unlink(paths.lock) != 0) break;
-    }
-    if (fd < 0) {
+    char body[320];
+    size_t body_len = 0;
+    if (!proof_request_body(local, base, body, &body_len) ||
+        !write_atomic(paths.request, body, body_len, 0600)) {
         out->state = ZCL_DEV_PROOF_STATE_INVALID;
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                       "proof_worker_lock_failed");
-        return false;
-    }
-    pid_t child = fork();
-    if (child < 0) {
-        close(fd);
-        (void)unlink(paths.lock);
-        out->state = ZCL_DEV_PROOF_STATE_INVALID;
-        (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                       "proof_worker_start_failed");
-        return false;
-    }
-    if (child == 0) {
-        close(fd);
-        (void)setsid();
-        proof_worker_run(&paths, local, base);
-    }
-    char marker[96];
-    int marker_len = snprintf(marker, sizeof(marker), "%ld %lld\n",
-                              (long)child,
-                              (long long)platform_time_wall_unix());
-    bool marker_ok = marker_len > 0 && (size_t)marker_len < sizeof(marker) &&
-                     write_all(fd, marker, (size_t)marker_len) &&
-                     fsync(fd) == 0 && close(fd) == 0;
-    if (!marker_ok) {
-        (void)kill(child, SIGTERM);
-        (void)unlink(paths.lock);
-        out->state = ZCL_DEV_PROOF_STATE_INVALID;
-        (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                       "proof_worker_publication_failed");
+                       "resident_proof_enqueue_failed");
         return false;
     }
     return zcl_dev_proof_status_read(repo_root, local, base, out);
@@ -1751,6 +2237,17 @@ bool zcl_dev_proof_ensure(const char *repo_root,
                           struct zcl_dev_proof_status *out)
 {
     return proof_ensure_platform(repo_root, local_commit, remote_base, out);
+}
+
+bool zcl_dev_proof_queue_has_pending(const char *repo_root)
+{
+    return proof_queue_has_pending_platform(repo_root);
+}
+
+int zcl_dev_proof_queue_run_next(const char *repo_root,
+                                 char *why, size_t why_len)
+{
+    return proof_queue_run_next_platform(repo_root, why, why_len);
 }
 
 bool zcl_dev_proof_wait(const char *repo_root,

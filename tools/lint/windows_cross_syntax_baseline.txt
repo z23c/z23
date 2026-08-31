@@ -11,6 +11,6 @@
 # the gate — delete the row. Counts may only go DOWN. Adding a row is a
 # review decision, not a convenience, and is not a fix.
 
-# POSIX TU. _WIN32 appears only as #if !defined(_WIN32). The whole-file
-# syntax check still hits <sys/wait.h>, which mingw does not ship.
-lib/test/src/test_parallel.c
+# Empty: lib/test inputs are graded with the same force-included test-only
+# compatibility header as the native Windows test-fast build; production
+# inputs never receive that header.

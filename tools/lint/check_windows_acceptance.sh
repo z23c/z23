@@ -55,6 +55,7 @@
 #                                The self-test aims it at a mktemp fixture;
 #                                nothing else should set it.
 #   ZCL_WINDOWS_ACCEPTANCE_CC    cross-compiler probed for the compile step.
+#   ZCL_REQUIRE_MINGW=1          missing compiler is a hard acceptance failure.
 #
 # Exit: 0 clean (or UNOBSERVED), 1 on any violation or a malformed tree.
 
@@ -98,12 +99,63 @@ EXEMPT_EOF
 }
 
 # ── catalog parse ───────────────────────────────────────────────────────────
-# Every .c path named anywhere in the catalog. Deliberately wider than "the
-# first source of each row": if a program is pulled in as a subject source of
-# some other row, a compiler still reads it, and that is what the reconcile
-# asks. Robust to reformatting, because it matches paths and not row shape.
+# Active acceptance IDs, one per continuation row in the canonical list.
+catalog_tests() {
+    LC_ALL=C awk '
+        /^ZCL_WINDOWS_ACCEPTANCE_TESTS[ \t]*:=[ \t]*\\[ \t]*$/ {
+            active = 1
+            next
+        }
+        active {
+            line = $0
+            more = (line ~ /\\[ \t]*$/)
+            sub(/[ \t]*\\[ \t]*$/, "", line)
+            gsub(/^[ \t]+|[ \t]+$/, "", line)
+            if (line != "") print line
+            if (!more) exit
+        }
+    ' "$1/$CATALOG_REL"
+}
+
+# IDs that actually define a _SOURCES row. These must be exactly the active
+# list above: an orphan definition otherwise makes reconciliation count a file
+# that Make never generates a binary for.
+catalog_source_ids() {
+    LC_ALL=C awk '
+        /^ZCL_WINDOWS_ACCEPTANCE_[A-Za-z_0-9]+_SOURCES[ \t]*:=/ {
+            line = $0
+            sub(/^ZCL_WINDOWS_ACCEPTANCE_/, "", line)
+            sub(/_SOURCES[ \t]*:=.*/, "", line)
+            print line
+        }
+    ' "$1/$CATALOG_REL" | sort
+}
+
+# Every .c path in a real _SOURCES assignment (never a comment). Wider than
+# the first source because subject sources are compiler inputs too.
 catalog_sources() {
-    LC_ALL=C grep -oE '[A-Za-z0-9_./-]+\.c\b' "$1/$CATALOG_REL" | sort -u
+    LC_ALL=C awk '
+        function emit(s, n, a, i) {
+            gsub(/\\/, " ", s)
+            n = split(s, a, /[ \t]+/)
+            for (i = 1; i <= n; i++)
+                if (a[i] ~ /^[A-Za-z0-9_./-]+\.c$/) print a[i]
+        }
+        /^ZCL_WINDOWS_ACCEPTANCE_[A-Za-z_0-9]+_SOURCES[ \t]*:=/ {
+            line = $0
+            more = (line ~ /\\[ \t]*$/)
+            sub(/^[^:]*:=[ \t]*/, "", line)
+            emit(line)
+            active = more
+            next
+        }
+        active {
+            line = $0
+            more = (line ~ /\\[ \t]*$/)
+            emit(line)
+            active = more
+        }
+    ' "$1/$CATALOG_REL" | sort -u
 }
 
 # The directories the catalog actually keeps acceptance programs in, read off
@@ -172,10 +224,37 @@ reconcile_root() {
     [ -f "$catalog" ]  || { echo "FAIL: no acceptance catalog at $catalog"; return 1; }
     [ -f "$registry" ] || { echo "FAIL: no test group registry at $registry"; return 1; }
 
-    local declared dirs groups
+    local declared dirs groups tests source_ids
     declared="$(catalog_sources "$root")"
     dirs="$(catalog_program_dirs "$root")"
     groups="$(registry_groups "$root")"
+    tests="$(catalog_tests "$root")"
+    source_ids="$(catalog_source_ids "$root")"
+
+    if [ -z "${tests//[[:space:]]/}" ]; then
+        echo "FAIL: $CATALOG_REL yielded no active acceptance IDs."
+        return 1
+    fi
+    local test_count unique_test_count source_id_count
+    test_count="$(printf '%s\n' "$tests" | grep -c .)"
+    unique_test_count="$(printf '%s\n' "$tests" | sort -u | grep -c .)"
+    source_id_count="$(printf '%s\n' "$source_ids" | grep -c .)"
+    if [ "$test_count" -ne "$unique_test_count" ]; then
+        echo "FAIL: $CATALOG_REL carries duplicate active acceptance IDs."
+        return 1
+    fi
+    if [ "$(printf '%s\n' "$tests" | sort)" != "$source_ids" ]; then
+        echo "FAIL: active acceptance IDs and _SOURCES IDs differ."
+        echo "      Every active ID must define one source row, and every source"
+        echo "      row must be active so Make actually links its program."
+        diff -u <(printf '%s\n' "$tests" | sort) \
+                <(printf '%s\n' "$source_ids") || true
+        return 1
+    fi
+    if [ "$source_id_count" -lt 1 ]; then
+        echo "FAIL: $CATALOG_REL yielded zero active source definitions."
+        return 1
+    fi
 
     if [ -z "${declared//[[:space:]]/}" ]; then
         echo "FAIL: $CATALOG_REL named no .c sources at all."
@@ -284,6 +363,10 @@ compile_step() {
         esac
         make -C "$REPO_ROOT" --no-print-directory "$target"
         return $?
+    fi
+    if [ "${ZCL_REQUIRE_MINGW:-0}" = 1 ]; then
+        printf '%s\n' "check-windows-acceptance: FAIL (required compiler $cc is unavailable)" >&2
+        return 2
     fi
     printf '%s\n' "check-windows-acceptance: UNOBSERVED ($cc not installed; reconcile still ran and PASSED)"
     return 0
@@ -401,10 +484,29 @@ run_selftest() {
     #    declaring every program on disk unrequired.
     d="$FIXTURE_ROOT/nocat"; mkdir -p "$d"; make_fixture "$d"
     printf '# every row removed\n' > "$d/$CATALOG_REL"
-    expect_red "7. an unparseable catalog fails closed" "named no .c sources" "$d" || rc=1
+    expect_red "7. an unparseable catalog fails closed" "no active acceptance IDs" "$d" || rc=1
+
+    # 8. Removing an ID from the active list while leaving its _SOURCES row
+    #    used to keep the program "declared" to reconciliation while Make no
+    #    longer generated or linked its binary.
+    d="$FIXTURE_ROOT/orphan_sources"; mkdir -p "$d"; make_fixture "$d"
+    sed '/^[[:space:]]*rng \\[[:space:]]*$/d' "$d/$CATALOG_REL" \
+        > "$d/catalog.mutated"
+    mv "$d/catalog.mutated" "$d/$CATALOG_REL"
+    expect_red "8. an inactive orphan _SOURCES row is caught" \
+               "active acceptance IDs and _SOURCES IDs differ" "$d" || rc=1
+
+    # 9. The reverse mismatch is equally hollow: an active ID with no source
+    #    definition would create a generated rule with no program input.
+    d="$FIXTURE_ROOT/missing_sources"; mkdir -p "$d"; make_fixture "$d"
+    sed '/^ZCL_WINDOWS_ACCEPTANCE_TESTS/ a\
+\tplanted_without_sources \\' "$d/$CATALOG_REL" > "$d/catalog.mutated"
+    mv "$d/catalog.mutated" "$d/$CATALOG_REL"
+    expect_red "9. an active ID without _SOURCES is caught" \
+               "active acceptance IDs and _SOURCES IDs differ" "$d" || rc=1
 
     if [ "$rc" -eq 0 ]; then
-        echo "══ self-test: PASS (7/7) — this gate is proven able to go red ══"
+        echo "══ self-test: PASS (9/9) — this gate is proven able to go red ══"
     else
         echo "══ self-test: FAIL ══"
     fi

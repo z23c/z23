@@ -31,11 +31,16 @@ repeat them.
 | `make t ONLY=<group>` | strict cached per-TU non-LTO harness | `Makefile:2554`; use before push / when chasing optimizer behavior |
 | `make test-parallel TEST_PARALLEL_ARGS=--no-cache` | full uncached suite | `Makefile:2107` |
 | `make pre-push-ci` | mapped focused proof for pushed files | unmapped code fails closed |
-| groups: `crypto`, `sqlite`, `rng`, `thread_qos`, `os_sandbox`, `os_proc`, `sandbox_process_budget`, `self_backtrace`, `binary_ab_fallback`, `binary_staleness`, `dev_platform`, `cold_join_sovereign` | platform contracts named in `AGENTS.md` §"Verified platform baseline" | ids are from `tools/dev/test_group_catalog.def`; `make t-list` is the source of truth |
+| `make macos-acceptance` | closed 37-group native aggregate with zero eligible skips | the capability matrix supplies 29 unique evidence groups; its eight `ZCL_MACOS_REQUIRED_TEST(...)` rows add the documented baseline groups not already selected there: `crypto`, `sqlite`, `rng`, `os_proc`, `self_backtrace`, `binary_staleness`, `dev_platform`, and `cold_join_sovereign` |
 
-These groups, not a green `make lint`, are the macOS evidence base.
+This exact aggregate, not a green `make lint`, is the macOS evidence base.
 `AGENTS.md`'s baseline is startup and platform-contract evidence only; it is
 not chain-sync acceptance.
+
+`self_backtrace` is intentionally part of the aggregate: on macOS it proves
+that the unsupported signal-context implementation remains behind the stubbed,
+fail-closed capability boundary. A green group there is not evidence that the
+Linux live signal handler ran on Darwin.
 
 ### Package/lint checks expected green
 
@@ -71,7 +76,7 @@ a stripped PATH you silently get 8 workers. Prefer
 | Release split-debug via `objcopy --add-gnu-debuglink` | `Makefile:4228` takes the Darwin branch instead (`cp` sidecar + `strip -S -x`) | Mach-O has no `.gnu_debuglink`; there is no back-reference, so symbolize against `build/bin/z23.debug` explicitly |
 | `ci-symbol-floor` | `Makefile:10131` | designed SKIP (exit 2 → 0) when `objdump`/`ldd` are absent; both are absent here, so the gate passes by skipping, not by proving |
 | Standalone tool links | `ZCL_GC_SECTIONS_LDFLAG` and `ZCL_TOOL_SANDBOX_SRC` in `Makefile` | host-specific linker and sandbox selections are centralized; a red gate is a regression |
-| Landlock/seccomp package confinement, full Tor, inotify dev watcher, signal-context self-backtrace, `O_TMPFILE` snapshot export | `docs/GETTING_STARTED.md:122-127` | refuse or report unavailable; never fake a pass |
+| Landlock/seccomp package confinement, inotify dev watcher, signal-context self-backtrace, `O_TMPFILE` snapshot export | `docs/GETTING_STARTED.md` §"Platform capability boundary" | refuse or report unavailable; the macOS `self_backtrace` test proves this boundary rather than unsupported signal-context behavior |
 
 ---
 
@@ -155,7 +160,7 @@ Each row carries how it was established: (m) = measured on this host,
 | Stale-lock leads are local, not sync/indexing | (c) `config/src/boot_stale_locks.c:103-140` inspects exactly `blocks/index/LOCK`, `chainstate/LOCK`, `node.db-wal`; LevelDB LOCK carries a PID checked with `kill(pid, 0)` (`:54`) | Before blaming iCloud drive indexing or Spotlight, take the lock's word: read the boot log line, identify the holder with `lsof <path>`, and remember `kill(pid, 0)` succeeds for any process you own — including a recycled PID, which is what makes a stale `blocks/index/LOCK` look live |
 | Datadir path identity resolves symlinks | (c) `lib/platform/include/platform/path_compat.h:12-14`: "Darwin exposes /tmp through /private/tmp" → leases and ownership registries key on the resolved path | Keep datadirs on the local APFS volume, not under a synced or symlinked folder; `$TMPDIR` spellings of the same directory are one resource after resolution |
 | Debugger attach needs developer mode | (m) `DevToolsSecurity -status` → "Developer mode is currently disabled"; no passwordless sudo | Attaching `lldb` to a process you did not spawn prompts for credentials and fails closed otherwise. Run `DevToolsSecurity -enable` once, deliberately, on a box where that is acceptable |
-| Crash post-mortem lags and is thin | (m) reports land under `~/Library/Logs/DiagnosticReports`; (c) self-backtrace is a stub off-Linux (`Makefile:420-427`, `docs/GETTING_STARTED.md:125-126`) | `.ips` reports are written asynchronously after the crash, so "nothing there yet" is not evidence of health. For native crashes, reproduce against `build/bin/z23.debug` rather than waiting on DiagnosticReports |
+| Crash post-mortem lags and is thin | (m) reports land under `~/Library/Logs/DiagnosticReports`; (c) self-backtrace selects the non-Linux stub (`Makefile` host source selection, `docs/GETTING_STARTED.md` §"Platform capability boundary") | The aggregate's green `self_backtrace` group proves that explicit boundary, not a Darwin signal-context dump. `.ips` reports are written asynchronously after the crash, so "nothing there yet" is not evidence of health. For native crashes, reproduce against `build/bin/z23.debug` rather than waiting on DiagnosticReports |
 | Symbolicating the shipped binary | (c) Darwin branch strips the sidecar copy and keeps no debuglink (`Makefile:4228-4230`) | Use `build/bin/z23.debug`, and expect `ldd`/`readelf` habits to be wrong: `otool -L`, `nm -m`, `atos` |
 | Reproducibility proofs differ per host | (c) `ZCL_TU_RANDOM_SEED` is empty on Darwin because it is a GCC flag (`Makefile:655`); guard that enforces it inspects Makefile text only (`tools/lint/check_tu_random_seed.sh:53-58`) | Cross-machine byte-identity gates stay on Linux. Mach-O fixture packages compensate with a fixed nonzero UUID and fixed-identifier ad-hoc signature (`AGENTS.md` baseline) |
 
