@@ -46,6 +46,7 @@ KEY_INPUT_FILES=(
     "$SELF_DIR/publish-build-alias.sh"
     "$SELF_DIR/compile-epoch-object.sh"
     "$SELF_DIR/build-epoch-session.sh"
+    "$SELF_DIR/build-epoch-open-file-identity.sh"
     "$DEPFILE_SCOPE_SELFTEST"
     "$ROOT/Makefile"
 )

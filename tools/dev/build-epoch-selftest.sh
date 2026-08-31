@@ -13,6 +13,7 @@ KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
 PUBLISH_TOOL="$SELF_DIR/publish-build-alias.sh"
 OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"
 SESSION_TOOL="$SELF_DIR/build-epoch-session.sh"
+IDENTITY_TOOL="$SELF_DIR/build-epoch-open-file-identity.sh"
 CC_COMMAND="${CC:-cc}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch-selftest.XXXXXX")"
 # Darwin exposes /var as a compatibility symlink to /private/var.  Exercise
@@ -77,7 +78,36 @@ build_candidate()
 [ -x "$PUBLISH_TOOL" ] || fail 'publisher is not executable'
 [ -x "$OBJECT_TOOL" ] || fail 'object compiler is not executable'
 [ -x "$SESSION_TOOL" ] || fail 'session tool is not executable'
+[ -f "$IDENTITY_TOOL" ] || fail 'open-file identity helper is missing'
 command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is unavailable'
+
+source "$IDENTITY_TOOL"
+z23_build_epoch_identity_values_match 0x10 00042 16 42 ||
+    fail 'equivalent device/inode values did not match'
+if z23_build_epoch_identity_values_match 0x10 42 17 42; then
+    fail 'same inode on a different device was accepted'
+fi
+if z23_build_epoch_identity_values_match 0x10 42 16 43; then
+    fail 'different inode on the same device was accepted'
+fi
+if z23_build_epoch_identity_values_match invalid 42 16 42 ||
+   z23_build_epoch_identity_values_match 0x10 invalid 16 42 ||
+   z23_build_epoch_identity_values_match 0x10 42 invalid 42; then
+    fail 'malformed device/inode values were accepted'
+fi
+IDENTITY_PATH="$WORK/open-file-identity"
+IDENTITY_OLD="$WORK/open-file-identity.old"
+printf '%s\n' original > "$IDENTITY_PATH"
+exec 9< "$IDENTITY_PATH"
+HOST_SYSTEM="$(uname -s 2>/dev/null || printf unknown)"
+z23_build_epoch_open_fd_matches_path "$IDENTITY_PATH" 9 "$HOST_SYSTEM" ||
+    fail 'opened file did not match its path'
+mv -- "$IDENTITY_PATH" "$IDENTITY_OLD"
+printf '%s\n' replacement > "$IDENTITY_PATH"
+if z23_build_epoch_open_fd_matches_path "$IDENTITY_PATH" 9 "$HOST_SYSTEM"; then
+    fail 'renamed and replaced path matched the old descriptor'
+fi
+exec 9<&-
 
 COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CC_COMMAND")" ||
     fail 'compiler fingerprint failed'
