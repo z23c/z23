@@ -262,7 +262,10 @@ static int case_concurrent_coherence(void)
 
     int64_t coherent_reads = 0, torn_fallbacks = 0;
     int64_t last_a = 0, last_b = 0;  /* last-known-good fallback */
-    bool ever_incoherent = false;    /* a coherent read that saw a != b */
+    /* This is also the weak-memory regression: without read_ok's trailing
+     * acquire fence, ARM64 may validate seq first and observe these relaxed
+     * payload loads afterwards, accepting a pair from two generations. */
+    bool ever_incoherent = false;    /* a completed read that saw a != b */
     bool fallback_ever_incoherent = false;
     bool fallback_ever_empty = false; /* fallback with nothing published to serve */
 
