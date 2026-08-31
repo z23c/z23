@@ -344,6 +344,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     /* Hermetic: builds its fixture trees under TMPDIR and reads Makefile /
      * run_lint.sh, never writing into the worktree. */
     N_(t_lint_gate_wiring_gate),
+    N_(t_lint_umbrellas_share_built_prereqs),
     S_(t_no_dev_history_in_contracts),
     S_(t_no_uncited_victory),
     /* Plants a stray file at the REAL repo root. */

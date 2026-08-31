@@ -61,6 +61,7 @@ mkdir -p "$(dirname "$BIN")" 2>/dev/null || exit 0
 tmp="$BIN.build.$$"
 if "$BOOTSTRAP_CC" "${BOOTSTRAP_FLAGS[@]}" \
         -I"$REPO_ROOT/lib/sha3/include" -I"$REPO_ROOT/lib/base/include" \
+        -I"$REPO_ROOT/lib/platform/include" \
         -o "$tmp" "$SRC" "$SHA3" "$ALLOC" >/dev/null 2>&1; then
     mv -f "$tmp" "$BIN" 2>/dev/null && printf '%s\n' "$BIN"
 else

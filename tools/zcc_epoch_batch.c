@@ -4,6 +4,7 @@
 
 #include "zcc_epoch_batch.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 
@@ -162,12 +163,6 @@ static bool batch_path_is_relative(const struct zcc_epoch_batch_bytes *path)
     return true;
 }
 
-static uint8_t batch_hex_digit(uint8_t value)
-{
-    static const uint8_t digits[] = "0123456789abcdef";
-    return digits[value & 0x0fu];
-}
-
 static bool batch_path_is_in_epoch(
     const struct zcc_epoch_batch_bytes *path,
     const struct zcc_epoch_batch_bytes *epoch)
@@ -179,14 +174,9 @@ static bool batch_path_is_in_epoch(
         memcmp(path->data, prefix, prefix_length) != 0 ||
         path->data[prefix_length + hex_length] != '/')
         return false;
-    for (size_t i = 0; i < ZCC_EPOCH_BATCH_ROOT_BYTES; ++i) {
-        if (path->data[prefix_length + i * 2u] !=
-                batch_hex_digit(epoch->data[i] >> 4) ||
-            path->data[prefix_length + i * 2u + 1u] !=
-                batch_hex_digit(epoch->data[i] & 0x0fu))
-            return false;
-    }
-    return true;
+    char epoch_hex[ZCC_EPOCH_BATCH_ROOT_BYTES * 2u + 1u];
+    zcl_hex_encode(epoch->data, epoch->length, epoch_hex);
+    return memcmp(path->data + prefix_length, epoch_hex, hex_length) == 0;
 }
 
 static bool batch_depfile_matches_output(

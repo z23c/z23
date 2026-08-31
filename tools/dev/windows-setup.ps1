@@ -11,6 +11,7 @@
 #   .\tools\dev\windows-setup.ps1
 #   .\tools\dev\windows-setup.ps1 -SkipBuild       # prepare only, do not compile
 #   .\tools\dev\windows-setup.ps1 -Msys2Root D:\msys64
+#   .\tools\dev\windows-setup.ps1 -Msys2Root D:\msys64 -DryRun
 #
 # The script refuses rather than guess when it cannot find or install MSYS2.
 
@@ -19,11 +20,14 @@ param(
     [string]$CheckoutRoot = "",
     [string]$Msys2Root = "C:\msys64",
     [switch]$SkipBuild,
+    [switch]$DryRun,
     [int]$BuildJobs = 4
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-path.ps1')
+Assert-Z23MsysPathContract
 
 function Write-Refusal {
     param([string]$Message)
@@ -99,6 +103,31 @@ $RequiredPackages = @(
 # without launching an interactive shell.
 $env:MSYSTEM = 'UCRT64'
 $env:CHERE_INVOKING = '1'
+$repoRoot = ConvertTo-Z23MsysPath -Path $CheckoutRoot
+$msys2RootMsys = ConvertTo-Z23MsysPath -Path $Msys2Root
+$env:Z23_CHECKOUT_ROOT_MSYS = $repoRoot
+$env:Z23_MSYS2_ROOT_MSYS = $msys2RootMsys
+$MakeWrapper = Join-Path $PSScriptRoot 'windows-make.ps1'
+
+$pkgList = $RequiredPackages -join ' '
+
+if ($DryRun) {
+    Write-Output "Z23_CHECKOUT_ROOT_MSYS=$repoRoot"
+    Write-Output "Z23_MSYS2_ROOT_MSYS=$msys2RootMsys"
+    Write-Output "pacman -Syu --noconfirm (pass 1)"
+    Write-Output "pacman -Syu --noconfirm (pass 2)"
+    Write-Output "pacman -S --needed --noconfirm $pkgList"
+    Write-Output 'compiler-smoke: gcc and clang -std=c23 compile and execute'
+    & $MakeWrapper '-CheckoutRoot' $CheckoutRoot '-Msys2Root' $Msys2Root `
+        '-DryRun' 'setup'
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if (-not $SkipBuild) {
+        & $MakeWrapper '-CheckoutRoot' $CheckoutRoot '-Msys2Root' $Msys2Root `
+            '-DryRun' "-j$BuildJobs" 'z23'
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    exit 0
+}
 
 # Setup necessarily runs package-manager and compiler bootstrap processes
 # before the repository's native Job-Object runner exists. Make those tools
@@ -147,9 +176,7 @@ for cc in gcc clang; do
     "$d/probe.exe"
 done
 '@
-$msysRoot = $Msys2Root -replace '\\', '/'
-$msysRoot = $msysRoot -replace '^([A-Za-z]):', '/$1'
-& $Bash '-lc' $SmokeProgram 'z23-windows-setup' $msysRoot
+& $Bash '-lc' $SmokeProgram 'z23-windows-setup' $msys2RootMsys
 if ($LASTEXITCODE -ne 0) {
     Write-Refusal "C23 compiler smoke probe failed (exit $LASTEXITCODE); repair the MSYS2 UCRT64 installation before building"
     exit 1
@@ -159,8 +186,6 @@ if ($LASTEXITCODE -ne 0) {
 # Build phase inside the UCRT64 environment.
 # The PATH order is critical: UCRT64 toolchain first, then MSYS2 utilities.
 # ---------------------------------------------------------------------------
-$MakeWrapper = Join-Path $PSScriptRoot 'windows-make.ps1'
-
 Write-Note "running make setup..."
 & $MakeWrapper '-CheckoutRoot' $CheckoutRoot '-Msys2Root' $Msys2Root 'setup'
 if ($LASTEXITCODE -ne 0) {

@@ -105,7 +105,6 @@
 #include <dirent.h>
 #include "config/cli_lane_defaults.h"
 #include "config/args.h"                /* print_usage (moved to args.c) */
-
 static bool path_join_leaf(char *out, size_t out_size,
                            const char *directory, const char *leaf)
 {
@@ -147,19 +146,12 @@ static bool bench_env_true(const char *name)
            strcmp(v, "no") != 0 &&
            strcmp(v, "NO") != 0;
 }
-static void bench_iso8601(char *out, size_t out_len)
-{
-    if (!out || out_len == 0)
-        return;
+static void bench_iso8601(char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
     out[0] = '\0';
-    time_t now = time(NULL);
-    struct tm tmv;
-    if (!zcl_utc_tm(now, &tmv)) {
-        fprintf(stderr, "bench: UTC timestamp conversion failed\n");
-        return;
-    }
-    if (strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &tmv) == 0)
-        fprintf(stderr, "bench: UTC timestamp formatting failed\n");
+    time_t now = time(NULL); struct tm tmv;
+    if (!zcl_utc_tm(now, &tmv)) fputs("bench: UTC timestamp conversion failed\n", stderr);
+    else if (strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &tmv) == 0) fputs("bench: UTC timestamp formatting failed\n", stderr);
 }
 static double bench_system_uptime_seconds(void)
 {

@@ -29,9 +29,12 @@ full-node build and service lane.
 - A C++ compiler (`c++`/`g++`), `autoconf`, `curl` or `wget`, `unzip`,
   `sha256sum`, and (optional — a fallback build path exists without it)
   `cmake`, for the one-time vendored-library build.
+- MinGW (`gcc-mingw-w64-x86-64` on Debian/Ubuntu) is not needed for `make z23`,
+  but is required by the Windows portability leg in `make pre-push-ci`.
 - No Rust toolchain or library. Shielded proving and verification are native
   C23 code in this repository.
-- **Nothing else.** In particular you do *not* need the Zcash parameter files
+- No extra node runtime dependency. In particular you do *not* need the Zcash
+  parameter files
   to run a node: the verifying keys are compiled in, so a fresh build syncs
   and validates shielded proofs out of the box. You need them only to *send*
   shielded — see ["The proving parameters"](#the-proving-parameters-optional--a-node-syncs-and-validates-without-them)
@@ -47,7 +50,7 @@ Linux compatibility layer is involved.
 
 ```bash
 xcode-select --install
-brew install autoconf automake bash cmake coreutils findutils flock libtool make pkgconf
+brew install autoconf automake bash cmake coreutils findutils flock libtool make mingw-w64 pkgconf
 export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix coreutils)/libexec/gnubin:$(brew --prefix findutils)/libexec/gnubin:$PATH"
 ```
 
@@ -56,6 +59,8 @@ lease primitive absent from the macOS base system. `bash` (4+) and `findutils`
 (GNU find with `-printf`) are required by the source-identity capture that
 selects every compile epoch and by `make lint`; Apple's stock bash 3.2 and BSD
 find are not sufficient for either.
+`mingw-w64` supplies the mandatory Windows compile/link evidence run by
+`make pre-push-ci`; it does not turn that result into native Windows evidence.
 
 **Get the source and build:**
 

@@ -92,6 +92,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
+#include "platform/fd_path.h"
 #include "sha3/sha3.h"
 
 #include <ctype.h>
@@ -2497,8 +2498,8 @@ static bool epoch_artifact_path(const struct epoch_artifacts *artifacts,
                        : artifacts->note_fd;
     return fd >= 0 && snprintf(path, PATH_MAX, "/dev/fd/%d", fd) < PATH_MAX;
 #else
-    return snprintf(path, PATH_MAX, "/proc/self/fd/%d/%s",
-                    artifacts->staging_fd, name) < PATH_MAX;
+    return platform_dirfd_child_path(path, PATH_MAX, artifacts->staging_fd,
+                                     name);
 #endif
 }
 
