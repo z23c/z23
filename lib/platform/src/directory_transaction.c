@@ -56,6 +56,33 @@ void platform_directory_child_init(struct platform_directory_child *f)
 void platform_directory_lock_init(struct platform_directory_lock *lock)
 { if (lock) lock->native = UINTPTR_MAX; }
 
+#ifdef ZCL_TESTING
+static bool g_move_fail_durability_once;
+
+void platform_directory_child_move_test_fail_durability_once(void)
+{
+    g_move_fail_durability_once = true;
+}
+
+static bool move_test_consume_durability_failure(void)
+{
+    bool fail = g_move_fail_durability_once;
+    g_move_fail_durability_once = false;
+    return fail;
+}
+#else
+static bool move_test_consume_durability_failure(void) { return false; }
+#endif
+
+static bool child_identity_equal(
+    const struct platform_directory_child_info *left,
+    const struct platform_directory_child_info *right)
+{
+    return left && right && left->volume == right->volume &&
+           left->file_low == right->file_low &&
+           left->file_high == right->file_high;
+}
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -73,6 +100,9 @@ void platform_directory_lock_init(struct platform_directory_lock *lock)
 #define FILE_SYNCHRONOUS_IO_NONALERT 0x20u
 #define FILE_DIRECTORY_FILE 0x1u
 #endif
+#ifndef FILE_REMOTE_DEVICE
+#define FILE_REMOTE_DEVICE 0x00000010u
+#endif
 
 typedef NTSTATUS (NTAPI *nt_create_file_fn)(
     PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
@@ -82,13 +112,17 @@ typedef NTSTATUS (NTAPI *nt_set_information_file_fn)(HANDLE, PIO_STATUS_BLOCK,
 typedef NTSTATUS (NTAPI *nt_query_directory_file_fn)(
     HANDLE,HANDLE,PVOID,PVOID,PIO_STATUS_BLOCK,PVOID,ULONG,
     FILE_INFORMATION_CLASS,BOOLEAN,PUNICODE_STRING,BOOLEAN);
+typedef NTSTATUS (NTAPI *nt_query_volume_information_file_fn)(
+    HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FS_INFORMATION_CLASS);
 
 static INIT_ONCE create_once = INIT_ONCE_STATIC_INIT;
 static INIT_ONCE set_once = INIT_ONCE_STATIC_INIT;
 static INIT_ONCE query_once = INIT_ONCE_STATIC_INIT;
+static INIT_ONCE volume_query_once = INIT_ONCE_STATIC_INIT;
 static nt_create_file_fn create_cached;
 static nt_set_information_file_fn set_cached;
 static nt_query_directory_file_fn query_cached;
+static nt_query_volume_information_file_fn volume_query_cached;
 
 static BOOL CALLBACK resolve_nt_symbols(PINIT_ONCE once, PVOID parameter,
                                         PVOID *context)
@@ -101,8 +135,10 @@ static BOOL CALLBACK resolve_nt_symbols(PINIT_ONCE once, PVOID parameter,
         memcpy(&create_cached, &symbol, sizeof(create_cached));
     else if (!strcmp((const char *)parameter, "NtSetInformationFile"))
         memcpy(&set_cached, &symbol, sizeof(set_cached));
-    else
+    else if (!strcmp((const char *)parameter, "NtQueryDirectoryFile"))
         memcpy(&query_cached, &symbol, sizeof(query_cached));
+    else
+        memcpy(&volume_query_cached, &symbol, sizeof(volume_query_cached));
     return TRUE;
 }
 
@@ -120,6 +156,13 @@ static nt_set_information_file_fn resolve_nt_set_information_file(void)
 }
 static nt_query_directory_file_fn resolve_nt_query_directory_file(void)
 { (void)InitOnceExecuteOnce(&query_once,resolve_nt_symbols,(PVOID)"NtQueryDirectoryFile",NULL);return query_cached; }
+static nt_query_volume_information_file_fn
+resolve_nt_query_volume_information_file(void)
+{
+    (void)InitOnceExecuteOnce(&volume_query_once, resolve_nt_symbols,
+                              (PVOID)"NtQueryVolumeInformationFile", NULL);
+    return volume_query_cached;
+}
 
 static HANDLE dh(const struct platform_directory_transaction *d)
 { return d ? (HANDLE)d->native : INVALID_HANDLE_VALUE; }
@@ -134,6 +177,7 @@ static enum platform_directory_result nt_result(NTSTATUS status)
     case 0xC0000034u: case 0xC000003Au: return PLATFORM_DIRECTORY_MISSING;
     case 0xC0000035u: return PLATFORM_DIRECTORY_EXISTS;
     case 0xC0000022u: case 0xC0000043u: case 0xC00000BAu:
+    case 0xC00000D4u: /* STATUS_NOT_SAME_DEVICE */
         return PLATFORM_DIRECTORY_REFUSED;
     default: return PLATFORM_DIRECTORY_IO;
     }
@@ -203,7 +247,8 @@ bool platform_directory_transaction_open(struct platform_directory_transaction *
                                          const char *path)
 {
     uintptr_t handle = 0;
-    if (!d || !platform_private_directory_open_validated(path, &handle))
+    if (!d ||
+        !platform_private_directory_open_validated_traverse(path, &handle))
         return false;
     d->native = handle;
     return true;
@@ -213,14 +258,66 @@ void platform_directory_transaction_close(struct platform_directory_transaction 
 bool platform_directory_transaction_flush(struct platform_directory_transaction *d)
 {
     if (!d || d->native == UINTPTR_MAX) return false;
-    BY_HANDLE_FILE_INFORMATION info = {0};
-    /* Win32 exposes no supported directory fsync.  Keep the retained parent
-     * as the namespace authority and revalidate that it is still the same
-     * real directory after the atomic NT namespace operation.  File content
-     * durability is provided by platform_directory_child_flush beforehand. */
-    return GetFileInformationByHandle(dh(d), &info) != 0 &&
-           (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-           (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    BY_HANDLE_FILE_INFORMATION before = {0}, reopened = {0}, after = {0};
+    if (!GetFileInformationByHandle(dh(d), &before) ||
+        (before.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (before.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        return false;
+
+    /* The retained RootDirectory stays traverse-only so NT's relative rename
+     * can acquire its internal FILE_WRITE_DATA open without a reverse share
+     * conflict. After the namespace mutation, OpenFileById uses that retained
+     * handle as the volume hint and the already-observed NTFS file identity to
+     * derive a temporary write/flush handle—never from a pathname. */
+    FILE_ID_DESCRIPTOR id = {
+        .dwSize = sizeof(id),
+        .Type = FileIdType,
+        .FileId = {.QuadPart =
+            ((LONGLONG)before.nFileIndexHigh << 32) |
+            (LONGLONG)before.nFileIndexLow}
+    };
+    HANDLE durable = OpenFileById(
+        dh(d), &id, FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    if (durable == INVALID_HANDLE_VALUE) {
+        fprintf(stderr,  // obs-ok:directory-transaction-flush
+                "[directory_transaction] retained directory reopen for "
+                "durability failed: win32=%lu\n",
+                (unsigned long)GetLastError());
+        return false;
+    }
+    bool ok = durable != INVALID_HANDLE_VALUE &&
+              GetFileInformationByHandle(durable, &reopened) &&
+              before.dwVolumeSerialNumber == reopened.dwVolumeSerialNumber &&
+              before.nFileIndexHigh == reopened.nFileIndexHigh &&
+              before.nFileIndexLow == reopened.nFileIndexLow &&
+              (reopened.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+              (reopened.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+              FlushFileBuffers(durable);
+    DWORD durability_error = ok ? NO_ERROR : GetLastError();
+    if (durable != INVALID_HANDLE_VALUE)
+        CloseHandle(durable);
+    if (!ok) {
+        fprintf(stderr,  // obs-ok:directory-transaction-flush
+                "[directory_transaction] retained directory durability "
+                "flush/identity failed: win32=%lu\n",
+                (unsigned long)durability_error);
+        return false;
+    }
+    ok = GetFileInformationByHandle(dh(d), &after) &&
+           before.dwVolumeSerialNumber == after.dwVolumeSerialNumber &&
+           before.nFileIndexHigh == after.nFileIndexHigh &&
+           before.nFileIndexLow == after.nFileIndexLow &&
+           (after.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (after.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    if (!ok)
+        fprintf(stderr,  // obs-ok:directory-transaction-flush
+                "[directory_transaction] retained directory changed after "
+                "durability flush: win32=%lu\n",
+                (unsigned long)GetLastError());
+    return ok;
 }
 enum platform_directory_result platform_directory_transaction_open_child(
     struct platform_directory_transaction *parent, const char *leaf,
@@ -236,8 +333,12 @@ enum platform_directory_result platform_directory_transaction_open_child(
     InitializeObjectAttributes(&attributes, &name, OBJ_CASE_INSENSITIVE,
         dh(parent), platform_private_acl_descriptor(&acl));
     IO_STATUS_BLOCK status = {0}; HANDLE handle = INVALID_HANDLE_VALUE;
+    /* A cross-directory rename makes a second internal open for
+     * FILE_WRITE_DATA | SYNCHRONIZE.  Keep this retained RootDirectory
+     * handle at traverse/read-attribute authority so those opens cannot
+     * conflict while the capability remains retained. */
     NTSTATUS result = create_file(&handle,
-        GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE | READ_CONTROL,
+        FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE | READ_CONTROL,
         &attributes, &status, NULL, FILE_ATTRIBUTE_DIRECTORY,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         create ? 3u : FILE_OPEN,
@@ -315,32 +416,133 @@ bool platform_directory_child_truncate(struct platform_directory_child *f,
 bool platform_directory_child_flush(struct platform_directory_child *f)
 { return f && FlushFileBuffers(fh(f)) != 0; }
 
-bool platform_directory_child_replace(struct platform_directory_transaction *d,
-                                      struct platform_directory_child *staged,
-                                      const char *destination, bool no_clobber)
+static bool directory_volume(struct platform_directory_transaction *directory,
+                             uint64_t *volume)
+{
+    BY_HANDLE_FILE_INFORMATION info;
+    wchar_t filesystem[32];
+    nt_query_volume_information_file_fn query_volume =
+        resolve_nt_query_volume_information_file();
+    IO_STATUS_BLOCK status = {0};
+    FILE_FS_DEVICE_INFORMATION device = {0};
+    if (!directory || !volume || directory->native == UINTPTR_MAX ||
+        !GetVolumeInformationByHandleW(
+            dh(directory), NULL, 0, NULL, NULL, NULL, filesystem,
+            (DWORD)(sizeof(filesystem) / sizeof(filesystem[0]))) ||
+        _wcsicmp(filesystem, L"NTFS") != 0 || !query_volume ||
+        query_volume(dh(directory), &status, &device, sizeof(device),
+                     FileFsDeviceInformation) < 0 ||
+        (device.Characteristics & FILE_REMOTE_DEVICE) != 0 ||
+        !GetFileInformationByHandle(dh(directory), &info) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        !platform_private_acl_validate_handle(dh(directory), true))
+        return false;
+    *volume = info.dwVolumeSerialNumber;
+    return true;
+}
+
+static enum platform_directory_result directory_child_move_between_platform(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_child *source,
+    struct platform_directory_transaction *destination_dir,
+    const char *destination_leaf, bool no_clobber)
 {
     wchar_t wide[260]; UNICODE_STRING ignored;
     nt_set_information_file_fn set_info = resolve_nt_set_information_file();
-    if (!set_info || !d || !staged || !wide_leaf(destination, wide, &ignored)) return false;
+    if (!set_info || !source_dir || !source || !destination_dir ||
+        source->native == UINTPTR_MAX || !valid_leaf(source->leaf) ||
+        !wide_leaf(destination_leaf, wide, &ignored))
+        return PLATFORM_DIRECTORY_INVALID;
+
+    uint64_t source_volume = 0, destination_volume = 0;
+    struct platform_directory_child_info before;
+    if (!directory_volume(source_dir, &source_volume) ||
+        !directory_volume(destination_dir, &destination_volume) ||
+        !platform_directory_child_info(source, &before))
+        return PLATFORM_DIRECTORY_REFUSED;
+    if (source_volume != destination_volume || before.volume != source_volume ||
+        before.link_count != 1 || !before.current_user_only)
+        return PLATFORM_DIRECTORY_REFUSED;
+
+    struct platform_directory_child named_source;
+    platform_directory_child_init(&named_source);
+    enum platform_directory_result opened = platform_directory_child_open_result(
+        source_dir, source->leaf, false, false, &named_source, NULL);
+    if (opened != PLATFORM_DIRECTORY_OK)
+        return opened;
+    struct platform_directory_child_info named_before;
+    bool source_bound = platform_directory_child_info(&named_source,
+                                                       &named_before) &&
+                        child_identity_equal(&before, &named_before);
+    platform_directory_child_close(&named_source);
+    if (!source_bound)
+        return PLATFORM_DIRECTORY_REFUSED;
+
+    /* Publication is the commit point.  Make the content durable while the
+     * retained source identity is still authoritative; callers must never
+     * have to remember this ordering themselves. */
+    if (!platform_directory_child_flush(source)) {
+        fprintf(stderr,  // obs-ok:directory-transaction-move-failure
+                "[directory_transaction] retained source flush before move "
+                "failed for %s: win32=%lu\n", source->leaf,
+                (unsigned long)GetLastError());
+        return PLATFORM_DIRECTORY_IO;
+    }
+
     size_t name_bytes = wcslen(wide) * sizeof(wchar_t);
     struct rename_ex { ULONG flags; HANDLE root; ULONG length; WCHAR name[1]; };
     size_t bytes = offsetof(struct rename_ex, name) + name_bytes;
     struct rename_ex *info = zcl_calloc(1, bytes, "directory_transaction_rename_ex");
-    if (!info) return false;
-    /* POSIX_SEMANTICS is defined only in combination with replacement.
-     * A no-clobber rename must pass zero flags; the proven NT class-65 call
-     * rejects the otherwise meaningless POSIX-only combination. */
+    if (!info) return PLATFORM_DIRECTORY_IO;
+    /* POSIX_SEMANTICS matters only for replacement of an open target.  A
+     * no-clobber rename uses no flags and must report a name collision. */
     info->flags = no_clobber ? 0u : (1u | 2u);
-    info->root = dh(d); info->length = (ULONG)name_bytes;
+    info->root = dh(destination_dir); info->length = (ULONG)name_bytes;
     memcpy(info->name, wide, name_bytes);
-    IO_STATUS_BLOCK status;
-    bool ok = set_info(fh(staged), &status, info, (ULONG)bytes,
-                       (FILE_INFORMATION_CLASS)65) >= 0 &&
-              platform_directory_transaction_flush(d);
-    if (ok)
-        (void)snprintf(staged->leaf, sizeof(staged->leaf), "%s", destination);
+    IO_STATUS_BLOCK status = {0};
+    NTSTATUS moved = set_info(fh(source), &status, info, (ULONG)bytes,
+                              (FILE_INFORMATION_CLASS)65);
     free(info);
-    return ok;
+    if (moved < 0) {
+        fprintf(stderr,  // obs-ok:directory-transaction-move-failure
+                "[directory_transaction] retained move %s -> %s failed: "
+                "NTSTATUS=0x%08lx\n", source->leaf, destination_leaf,
+                (unsigned long)moved);
+        return nt_result(moved);
+    }
+
+    /* From this instruction onward the old name is no longer authoritative,
+     * even if a later flush/revalidation fails. Preserve that fact for callers
+     * so an ordinary false result can never trigger cleanup of the old leaf. */
+    (void)snprintf(source->leaf, sizeof(source->leaf), "%s",
+                   destination_leaf);
+
+    struct platform_directory_child named_destination;
+    platform_directory_child_init(&named_destination);
+    opened = platform_directory_child_open_result(
+        destination_dir, destination_leaf, false, false, &named_destination,
+        NULL);
+    struct platform_directory_child_info after;
+    bool destination_bound = opened == PLATFORM_DIRECTORY_OK &&
+        platform_directory_child_info(&named_destination, &after) &&
+        child_identity_equal(&before, &after) && after.link_count == 1 &&
+        after.current_user_only;
+    platform_directory_child_close(&named_destination);
+    if (!destination_bound || move_test_consume_durability_failure() ||
+        !platform_directory_transaction_flush(destination_dir) ||
+        !platform_directory_transaction_flush(source_dir))
+        return PLATFORM_DIRECTORY_OUTCOME_UNKNOWN;
+    return PLATFORM_DIRECTORY_OK;
+}
+
+bool platform_directory_child_replace(struct platform_directory_transaction *d,
+                                      struct platform_directory_child *staged,
+                                      const char *destination, bool no_clobber)
+{
+    return platform_directory_child_move_between(
+               d, staged, d, destination, no_clobber) ==
+           PLATFORM_DIRECTORY_OK;
 }
 bool platform_directory_child_unlink(struct platform_directory_transaction *d,
                                      const char *leaf, bool missing_ok)
@@ -461,19 +663,14 @@ bool platform_directory_transaction_list_regular(
 #include <stdio.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#if defined(__linux__)
-#include <sys/syscall.h>
-#ifndef RENAME_NOREPLACE
-#define RENAME_NOREPLACE 1u
-#endif
-#endif
+#include "platform/rename_compat.h"
 #include <unistd.h>
 
 static int dd(const struct platform_directory_transaction *d) { return (int)d->native; }
 static int ff(const struct platform_directory_child *f) { return (int)f->native; }
 bool platform_directory_transaction_open(struct platform_directory_transaction *d,
                                          const char *path)
-{ uintptr_t h; if (!d || !platform_private_directory_open_validated(path, &h)) return false; d->native = h; return true; }
+{ uintptr_t h; if (!d || !platform_private_directory_open_validated_traverse(path, &h)) return false; d->native = h; return true; }
 void platform_directory_transaction_close(struct platform_directory_transaction *d)
 { if (d && d->native != UINTPTR_MAX) { close(dd(d)); d->native = UINTPTR_MAX; } }
 bool platform_directory_transaction_flush(struct platform_directory_transaction *d)
@@ -504,19 +701,121 @@ int64_t platform_directory_child_read(struct platform_directory_child *f,void*d,
 bool platform_directory_child_write(struct platform_directory_child *f,const void*d,size_t s,uint64_t o){const unsigned char*b=d;size_t done=0;while(done<s){ssize_t n=pwrite(ff(f),b+done,s-done,(off_t)(o+done));if(n<0&&errno==EINTR)continue;if(n<=0)return false;done+=(size_t)n;}return true;}
 bool platform_directory_child_truncate(struct platform_directory_child *f,uint64_t s){return ftruncate(ff(f),(off_t)s)==0;}
 bool platform_directory_child_flush(struct platform_directory_child *f){return fsync(ff(f))==0;}
-bool platform_directory_child_replace(struct platform_directory_transaction*d,struct platform_directory_child*f,const char*to,bool no){if(!d||!f||!valid_leaf(f->leaf)||!valid_leaf(to))return false;int moved;if(no){
-#if defined(__linux__) && defined(SYS_renameat2)
-moved=(int)syscall(SYS_renameat2,dd(d),f->leaf,dd(d),to,RENAME_NOREPLACE);
-#else
-moved=linkat(dd(d),f->leaf,dd(d),to,0);if(moved==0&&unlinkat(dd(d),f->leaf,0)!=0){(void)unlinkat(dd(d),to,0);return false;}
-#endif
-}else moved=renameat(dd(d),f->leaf,dd(d),to);if(moved!=0)return false;memcpy(f->leaf,to,strlen(to)+1u);return platform_directory_transaction_flush(d);}
+static bool directory_volume(struct platform_directory_transaction *directory,
+                             uint64_t *volume)
+{
+    struct stat status;
+    if (!directory || !volume || directory->native == UINTPTR_MAX ||
+        fstat(dd(directory), &status) != 0 || !S_ISDIR(status.st_mode) ||
+        status.st_uid != geteuid() || (status.st_mode & 077) != 0)
+        return false;
+    *volume = (uint64_t)status.st_dev;
+    return true;
+}
+
+static enum platform_directory_result move_errno_result(int error)
+{
+    if (error == EEXIST)
+        return PLATFORM_DIRECTORY_EXISTS;
+    if (error == ENOENT || error == ENOTDIR)
+        return PLATFORM_DIRECTORY_MISSING;
+    if (error == EXDEV || error == EACCES || error == EPERM ||
+        error == ELOOP || error == ENOTSUP)
+        return PLATFORM_DIRECTORY_REFUSED;
+    return PLATFORM_DIRECTORY_IO;
+}
+
+static enum platform_directory_result directory_child_move_between_platform(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_child *source,
+    struct platform_directory_transaction *destination_dir,
+    const char *destination_leaf, bool no_clobber)
+{
+    if (!source_dir || !source || !destination_dir ||
+        source->native == UINTPTR_MAX || !valid_leaf(source->leaf) ||
+        !valid_leaf(destination_leaf))
+        return PLATFORM_DIRECTORY_INVALID;
+
+    uint64_t source_volume = 0, destination_volume = 0;
+    struct platform_directory_child_info before;
+    if (!directory_volume(source_dir, &source_volume) ||
+        !directory_volume(destination_dir, &destination_volume) ||
+        !platform_directory_child_info(source, &before))
+        return PLATFORM_DIRECTORY_REFUSED;
+    if (source_volume != destination_volume || before.volume != source_volume ||
+        before.link_count != 1 || !before.current_user_only)
+        return PLATFORM_DIRECTORY_REFUSED;
+
+    struct platform_directory_child named;
+    platform_directory_child_init(&named);
+    enum platform_directory_result opened = platform_directory_child_open_result(
+        source_dir, source->leaf, false, false, &named, NULL);
+    if (opened != PLATFORM_DIRECTORY_OK)
+        return opened;
+    struct platform_directory_child_info named_before;
+    bool source_bound = platform_directory_child_info(&named, &named_before) &&
+                        child_identity_equal(&before, &named_before);
+    platform_directory_child_close(&named);
+    if (!source_bound)
+        return PLATFORM_DIRECTORY_REFUSED;
+
+    /* fsync-before-rename is part of the move seam, not a caller convention. */
+    if (!platform_directory_child_flush(source)) {
+        fprintf(stderr,  // obs-ok:directory-transaction-move-failure
+                "[directory_transaction] retained source flush before move "
+                "failed for %s: %s\n", source->leaf, strerror(errno));
+        return PLATFORM_DIRECTORY_IO;
+    }
+
+    int moved = no_clobber
+        ? platform_renameat_noreplace(dd(source_dir), source->leaf,
+                                      dd(destination_dir), destination_leaf)
+        : renameat(dd(source_dir), source->leaf, dd(destination_dir),
+                   destination_leaf);
+    if (moved != 0)
+        return move_errno_result(errno);
+
+    memcpy(source->leaf, destination_leaf, strlen(destination_leaf) + 1u);
+    platform_directory_child_init(&named);
+    opened = platform_directory_child_open_result(
+        destination_dir, destination_leaf, false, false, &named, NULL);
+    struct platform_directory_child_info after;
+    bool destination_bound = opened == PLATFORM_DIRECTORY_OK &&
+        platform_directory_child_info(&named, &after) &&
+        child_identity_equal(&before, &after) && after.link_count == 1 &&
+        after.current_user_only;
+    platform_directory_child_close(&named);
+    if (!destination_bound || move_test_consume_durability_failure() ||
+        !platform_directory_transaction_flush(destination_dir) ||
+        !platform_directory_transaction_flush(source_dir))
+        return PLATFORM_DIRECTORY_OUTCOME_UNKNOWN;
+    return PLATFORM_DIRECTORY_OK;
+}
+
+bool platform_directory_child_replace(struct platform_directory_transaction *d,
+                                      struct platform_directory_child *source,
+                                      const char *destination, bool no_clobber)
+{
+    return platform_directory_child_move_between(
+               d, source, d, destination, no_clobber) ==
+           PLATFORM_DIRECTORY_OK;
+}
 enum platform_directory_result platform_directory_child_unlink_result(struct platform_directory_transaction*d,const char*l){if(!d||!valid_leaf(l))return PLATFORM_DIRECTORY_INVALID;if(unlinkat(dd(d),l,0)==0)return platform_directory_transaction_flush(d)?PLATFORM_DIRECTORY_OK:PLATFORM_DIRECTORY_IO;if(errno==ENOENT)return PLATFORM_DIRECTORY_MISSING;if(errno==EACCES||errno==EPERM||errno==EISDIR)return PLATFORM_DIRECTORY_REFUSED;return PLATFORM_DIRECTORY_IO;}
 bool platform_directory_child_unlink(struct platform_directory_transaction*d,const char*l,bool missing){enum platform_directory_result r=platform_directory_child_unlink_result(d,l);return r==PLATFORM_DIRECTORY_OK||(missing&&r==PLATFORM_DIRECTORY_MISSING);}
 enum platform_directory_result platform_directory_lock_acquire(struct platform_directory_transaction*d,const char*l,bool create,enum platform_directory_lock_mode mode,struct platform_directory_lock*lock){if(!lock||lock->native!=UINTPTR_MAX)return PLATFORM_DIRECTORY_INVALID;struct platform_directory_child f;platform_directory_child_init(&f);enum platform_directory_result r=platform_directory_child_open_result(d,l,create,create,&f,NULL);if(r!=PLATFORM_DIRECTORY_OK)return r;if(flock(ff(&f),(mode==PLATFORM_DIRECTORY_LOCK_EXCLUSIVE?LOCK_EX:LOCK_SH)|LOCK_NB)!=0){platform_directory_child_close(&f);return errno==EWOULDBLOCK||errno==EAGAIN?PLATFORM_DIRECTORY_REFUSED:PLATFORM_DIRECTORY_IO;}lock->native=f.native;f.native=UINTPTR_MAX;return PLATFORM_DIRECTORY_OK;}
 void platform_directory_lock_release(struct platform_directory_lock*l){if(!l||l->native==UINTPTR_MAX)return;(void)flock((int)l->native,LOCK_UN);close((int)l->native);platform_directory_lock_init(l);}
 bool platform_directory_transaction_list_regular(struct platform_directory_transaction*d,struct platform_directory_names*out){if(!out)return false;memset(out,0,sizeof(*out));if(!d)return false;int dupfd=dup(dd(d));DIR*dir=dupfd>=0?fdopendir(dupfd):NULL;if(!dir){if(dupfd>=0)close(dupfd);return false;}struct dirent*e;while((e=readdir(dir))){struct stat s;if(!valid_leaf(e->d_name)||fstatat(dd(d),e->d_name,&s,AT_SYMLINK_NOFOLLOW)||!S_ISREG(s.st_mode))continue;char*n=zcl_strdup(e->d_name,"directory-child-name");if(!n){closedir(dir);platform_directory_names_free(out);return false;}char**items=zcl_realloc(out->items,(out->count+1)*sizeof(*items),"directory-child-list");if(!items){free(n);closedir(dir);platform_directory_names_free(out);return false;}out->items=items;out->items[out->count++]=n;}closedir(dir);qsort(out->items,out->count,sizeof(*out->items),name_compare);return true;}
 #endif
+
+enum platform_directory_result platform_directory_child_move_between(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_child *source,
+    struct platform_directory_transaction *destination_dir,
+    const char *destination_leaf, bool no_clobber)
+{
+    return directory_child_move_between_platform(
+        source_dir, source, destination_dir, destination_leaf, no_clobber);
+}
 
 bool platform_directory_child_read_exact(struct platform_directory_child *f,
                                          void *data, size_t size,

@@ -43,6 +43,10 @@
 #   ZCL_LINT_BUDGET_SEC  soft wall-time budget, warn-only past it (default 75)
 #   ZCL_LINT_TIMING_DIR  artifact dir (default .cache/lint-timing)
 #   ZCL_LINT_VERBOSE=1   print the full per-gate timing table, not just top 10
+#   ZCL_CC_JOBS           nested compiler workers per compiler-sweep gate;
+#                         defaults to 1 under this parallel driver
+#   ZCL_TOOLS_LINK_JOBS   nested standalone-link workers; defaults to 1 here
+#   ZCL_FUZZ_REPLAY_JOBS  nested fuzz-replay workers; defaults to 1 here
 #   ZCL_LINT_CACHE=1     opt in to the result cache (same as --cache)
 #   ZCL_LINT_CACHE_DIR   cache record dir (default .cache/lint-cache/<schema>)
 #   ZCL_LINT_CACHE_DUMP=<gate>
@@ -443,6 +447,16 @@ main() {
         echo "run_lint.sh: --jobs must be a positive integer (got '$JOBS')" >&2; exit 2; }
     [ "$JOBS" -le 32 ] || JOBS=32
     [ "${#gates[@]}" -gt 0 ] || { echo "run_lint.sh: no gates given" >&2; exit 2; }
+
+    # This driver already spends the host budget across independent gates.
+    # Compiler sweeps also have standalone parallelism, and allowing each
+    # outer worker to auto-detect the full CPU count multiplies into dozens
+    # of cc1/clang children (and OOM/backend crashes) on large Windows hosts.
+    # Explicit operator overrides remain available for standalone profiling;
+    # the umbrella's safe default is one nested worker per running gate.
+    export ZCL_CC_JOBS="${ZCL_CC_JOBS:-1}"
+    export ZCL_TOOLS_LINK_JOBS="${ZCL_TOOLS_LINK_JOBS:-1}"
+    export ZCL_FUZZ_REPLAY_JOBS="${ZCL_FUZZ_REPLAY_JOBS:-1}"
 
     # Fail loud on table drift: every requested gate needs an entry, and any
     # table gate absent from the request is named (nonfatal) so the Makefile

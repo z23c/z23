@@ -278,7 +278,11 @@ reconcile_root() {
 compile_step() {
     local cc="${ZCL_WINDOWS_ACCEPTANCE_CC:-x86_64-w64-mingw32-gcc}"
     if command -v "$cc" >/dev/null 2>&1; then
-        make -C "$REPO_ROOT" --no-print-directory windows-acceptance-compile
+        local target=windows-acceptance-compile
+        case "$(uname -s 2>/dev/null || true)" in
+            MINGW*|MSYS*|CYGWIN*) target=windows-acceptance ;;
+        esac
+        make -C "$REPO_ROOT" --no-print-directory "$target"
         return $?
     fi
     printf '%s\n' "check-windows-acceptance: UNOBSERVED ($cc not installed; reconcile still ran and PASSED)"

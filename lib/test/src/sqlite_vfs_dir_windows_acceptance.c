@@ -290,11 +290,14 @@ int main(void)
         return fail("fixture datadir did not validate as owner-private");
 
     char vfs_name[SQLITE_VFS_DIR_NAME_MAX];
+    char refused_vfs[SQLITE_VFS_DIR_NAME_MAX];
+    if (sqlite_vfs_dir_register(retained, "NUL", refused_vfs))
+        return fail("device-name registration was admitted");
     if (!sqlite_vfs_dir_register(retained, "accept.db", vfs_name))
         return fail("sqlite_vfs_dir_register failed");
-    /* The registration duplicated the handle: the caller's copy is closed
-     * here on purpose, so everything below runs only on the VFS's own. */
-    platform_private_directory_close(retained);
+    /* The registration duplicated the handle. Keep the caller's copy only
+     * through the file-control identity audit below, then close it so the
+     * remainder runs solely on the VFS-owned capability. */
 
     /* (a) open through the VFS, WAL mode, write and read back. */
     sqlite3 *writer = NULL;
@@ -321,6 +324,32 @@ int main(void)
     int count = 0;
     if (count_rows(writer, &count) != SQLITE_OK || count != 3)
         return fail("writer readback did not see 3 rows");
+    uint64_t volume_serial = 0;
+    uint64_t file_index = 0;
+    uint64_t file_size = 0;
+    if (!sqlite_vfs_dir_main_file_info(writer, retained, "accept.db",
+                                       &volume_serial,
+                                       &file_index, &file_size) ||
+        file_index == 0 || file_size == 0)
+        return fail("main-file retained identity audit failed");
+    if (sqlite_vfs_dir_main_file_info(writer, retained, "other.db",
+                                      &volume_serial, &file_index, &file_size))
+        return fail("main-file audit accepted the wrong leaf");
+    sqlite3 *ordinary = NULL;
+    if (sqlite3_open(":memory:", &ordinary) != SQLITE_OK || !ordinary)
+        return fail("ordinary VFS negative fixture open failed");
+    if (sqlite_vfs_dir_main_file_info(ordinary, retained, "accept.db",
+                                      &volume_serial, &file_index, &file_size))
+        return fail("main-file audit accepted SQLite's default VFS");
+    if (sqlite3_close(ordinary) != SQLITE_OK)
+        return fail("ordinary VFS negative fixture close failed");
+    sqlite3_file *main_file = NULL;
+    if (sqlite3_file_control(writer, "main", SQLITE_FCNTL_FILE_POINTER,
+                             &main_file) != SQLITE_OK || !main_file ||
+        (main_file->pMethods->xDeviceCharacteristics(main_file) &
+         SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN) != 0)
+        return fail("VFS falsely advertised undeletable-while-open files");
+    platform_private_directory_close(retained);
 
     /* (b) independent read-only connection through the same VFS. */
     sqlite3 *reader = NULL;
@@ -405,6 +434,7 @@ int main(void)
         "accept.db\\x", "C:\\Windows\\Temp\\z23vfsescape.db",
         "\\\\?\\C:\\z23vfsescape.db", "other.db", "accept.db-walx",
         "NUL", "accept.db ", "accept.db.",
+        "zclvfs-tmp-0123456789abcdef",
     };
     for (size_t i = 0; i < sizeof(escapes) / sizeof(escapes[0]); ++i) {
         sqlite3 *probe = NULL;
@@ -450,6 +480,25 @@ int main(void)
     if (!reparse_planted)
         return fail("could not plant a reparse-point fixture");
     sqlite3_vfs *vtable = sqlite3_vfs_find(vfs_name);
+    wchar_t reserved_temp[MAX_PATH];
+    if (!vtable ||
+        !append_leaf(reserved_temp,
+                     sizeof(reserved_temp) / sizeof(reserved_temp[0]),
+                     live_store, L"zclvfs-tmp-0123456789abcdef") ||
+        !write_seeded_file(reserved_temp, 0x5a, 256))
+        return fail("reserved temp-name fixture setup failed");
+    int reserved_exists = 1;
+    int reserved_access_rc = vtable->xAccess(
+        vtable, "zclvfs-tmp-0123456789abcdef", SQLITE_ACCESS_EXISTS,
+        &reserved_exists);
+    int reserved_delete_rc = vtable->xDelete(
+        vtable, "zclvfs-tmp-0123456789abcdef", 1);
+    if (reserved_access_rc == SQLITE_OK || reserved_delete_rc == SQLITE_OK ||
+        reserved_exists != 0 ||
+        !file_matches_seed(reserved_temp, 0x5a, 256))
+        return fail("named temp pattern gained namespace authority");
+    if (!DeleteFileW(reserved_temp))
+        return fail("reserved temp-name fixture cleanup failed");
     sqlite3_file *probe_file =
         vtable ? calloc(1, (size_t)vtable->szOsFile) : NULL;
     if (!probe_file)
@@ -515,6 +564,10 @@ int main(void)
             return fail("second datadir setup failed");
         if (!sqlite_vfs_dir_register(live_handle, "second.db", second_vfs))
             return fail("second register failed");
+        if (sqlite_vfs_dir_main_file_info(writer, live_handle, "accept.db",
+                                          &volume_serial, &file_index,
+                                          &file_size))
+            return fail("main-file audit accepted the wrong directory");
         platform_private_directory_close(live_handle);
     }
     sqlite3 *second = NULL;
@@ -524,26 +577,97 @@ int main(void)
         !exec_ok(second, "CREATE TABLE s(k INTEGER)") ||
         !exec_ok(second, "INSERT INTO s(k) VALUES(1)"))
         return fail("second binding connection failed");
+    sqlite3_vfs *second_vtable = sqlite3_vfs_find(second_vfs);
+    if (!second_vtable)
+        return fail("second binding vtable lookup failed");
     if (!sqlite_vfs_dir_unregister(second_vfs))
         return fail("unregister-while-open failed");
     if (sqlite_vfs_dir_unregister(second_vfs))
         return fail("double unregister was accepted");
+    probe_file = calloc(1, (size_t)second_vtable->szOsFile);
+    if (!probe_file)
+        return fail("post-unregister main-open probe allocation failed");
+    probe_rc = second_vtable->xOpen(
+        second_vtable, "second.db", probe_file,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_MAIN_DB, NULL);
+    free(probe_file);
+    if (probe_rc == SQLITE_OK)
+        return fail("post-unregister main database open was admitted");
     if (!exec_ok(second, "INSERT INTO s(k) VALUES(2)"))
         return fail("connection broke after unregister");
     if (sqlite3_close(second) != SQLITE_OK)
         return fail("second connection close failed");
 
-    /* Rollback-journal path: leave WAL, write through a -journal, come back.
-     * The reader must be closed first so the mode change can checkpoint. */
+    /* First-open/unregister race proof: retain the vtable pointer exactly as
+     * sqlite3_vfs_find does for an opener, unregister before its xOpen starts,
+     * then invoke the stale pointer. The inert binding tombstone must refuse
+     * without touching the already-released directory capability. */
+    wchar_t race_store[MAX_PATH];
+    uintptr_t race_handle = 0;
+    char race_utf8[MAX_PATH * 3];
+    char race_vfs[SQLITE_VFS_DIR_NAME_MAX];
+    const wchar_t *live_base = renamed ? base_aside : base;
+    if (!append_leaf(race_store,
+                     sizeof(race_store) / sizeof(race_store[0]),
+                     live_base, L"race") ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, race_store,
+                             -1, race_utf8, sizeof(race_utf8), NULL, NULL) ||
+        !platform_private_directory_create(race_utf8) ||
+        !platform_private_directory_open_validated(race_utf8, &race_handle) ||
+        !sqlite_vfs_dir_register(race_handle, "race.db", race_vfs))
+        return fail("first-open race fixture setup failed");
+    sqlite3_vfs *retiring_vtable = sqlite3_vfs_find(race_vfs);
+    if (!retiring_vtable || !sqlite_vfs_dir_unregister(race_vfs))
+        return fail("first-open race unregister failed");
+    probe_file = calloc(1, (size_t)retiring_vtable->szOsFile);
+    if (!probe_file)
+        return fail("first-open race probe allocation failed");
+    probe_rc = retiring_vtable->xOpen(
+        retiring_vtable, "race.db", probe_file,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB,
+        NULL);
+    free(probe_file);
+    int stale_access = 1;
+    int stale_access_rc = retiring_vtable->xAccess(
+        retiring_vtable, "race.db", SQLITE_ACCESS_EXISTS, &stale_access);
+    int stale_delete_rc = retiring_vtable->xDelete(
+        retiring_vtable, "race.db", 1);
+    char stale_full[MAX_PATH];
+    int stale_full_rc = retiring_vtable->xFullPathname(
+        retiring_vtable, "race.db", (int)sizeof(stale_full), stale_full);
+    platform_private_directory_close(race_handle);
+    if (probe_rc == SQLITE_OK || stale_access_rc == SQLITE_OK ||
+        stale_delete_rc == SQLITE_OK || stale_full_rc == SQLITE_OK)
+        return fail("stale VFS callback crossed unregister");
+    if (!RemoveDirectoryW(race_store))
+        return fail("retired race binding retained its directory handle");
+
+    /* Rollback-journal path: leave WAL, exercise a persistent journal with an
+     * independent reader, then return through DELETE and WAL. The reader must
+     * be closed first so the initial mode change can checkpoint. */
     if (sqlite3_close(reader) != SQLITE_OK)
         return fail("reader close failed");
-    if (!exec_ok(writer, "PRAGMA journal_mode=DELETE") ||
+    if (!exec_ok(writer, "PRAGMA journal_mode=PERSIST"))
+        return fail("persistent rollback-journal mode failed");
+    sqlite3 *rollback_reader = NULL;
+    if (sqlite3_open_v2("accept.db", &rollback_reader,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            vfs_name) != SQLITE_OK ||
+        !exec_ok(writer, "BEGIN IMMEDIATE") ||
+        !exec_ok(writer, "INSERT INTO t(v) VALUES('persistent')") ||
+        count_rows(rollback_reader, &count) != SQLITE_OK || count != 9 ||
+        !exec_ok(writer, "COMMIT") ||
+        count_rows(rollback_reader, &count) != SQLITE_OK || count != 10)
+        return fail("persistent rollback-journal isolation failed");
+    if (sqlite3_close(rollback_reader) != SQLITE_OK ||
+        !exec_ok(writer, "PRAGMA journal_mode=DELETE") ||
         !exec_ok(writer, "INSERT INTO t(v) VALUES('rollback')"))
         return fail("rollback-journal write failed");
     if (!dir_family_exact(live_store, final_family, 1, wal_family, 3))
         return fail("rollback journal left a stray sibling behind");
     if (!exec_ok(writer, "PRAGMA journal_mode=WAL") ||
-        !exec_ok(writer, "INSERT INTO t(v) VALUES('again')"))
+        !exec_ok(writer, "INSERT INTO t(v) VALUES('again')") ||
+        count_rows(writer, &count) != SQLITE_OK || count != 12)
         return fail("WAL re-entry failed");
     if (sqlite3_close(writer) != SQLITE_OK)
         return fail("writer close failed");
@@ -555,6 +679,35 @@ int main(void)
         return fail("unregister failed");
     if (sqlite_vfs_dir_unregister(vfs_name))
         return fail("unregister of a dead binding was accepted");
+
+    /* Registration tombstones close a real concurrent stale-vtable race, so
+     * they are process-lifetime objects. Prove both the hard bound and that
+     * the refused device-name registration above returned its reservation. */
+    char live_store_utf8[MAX_PATH * 3];
+    uintptr_t cap_handle = 0;
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, live_store, -1,
+                             live_store_utf8, sizeof(live_store_utf8), NULL,
+                             NULL) ||
+        !platform_private_directory_open_validated(live_store_utf8,
+                                                   &cap_handle))
+        return fail("registration-cap fixture open failed");
+    bool cap_ok = true;
+    for (unsigned i = 3; i < SQLITE_VFS_DIR_REGISTRATION_LIMIT; ++i) {
+        char capped_vfs[SQLITE_VFS_DIR_NAME_MAX];
+        if (!sqlite_vfs_dir_register(cap_handle, "cap.db", capped_vfs) ||
+            !sqlite_vfs_dir_unregister(capped_vfs)) {
+            cap_ok = false;
+            break;
+        }
+    }
+    char over_limit_vfs[SQLITE_VFS_DIR_NAME_MAX];
+    bool over_limit = sqlite_vfs_dir_register(
+        cap_handle, "cap.db", over_limit_vfs);
+    if (over_limit)
+        (void)sqlite_vfs_dir_unregister(over_limit_vfs);
+    platform_private_directory_close(cap_handle);
+    if (!cap_ok || over_limit)
+        return fail("registration tombstone bound failed");
 
     /* Cleanup: the real database family under the live store (which sits
      * under base_aside when the rename arm ran), then the decoy tree if it

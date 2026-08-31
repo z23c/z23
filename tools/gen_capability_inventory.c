@@ -19,6 +19,43 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#if defined(_WIN32)
+#include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+static int sync_output(FILE *out)
+{
+#if defined(_WIN32)
+    return _commit(_fileno(out));
+#else
+    return fsync(fileno(out));
+#endif
+}
+
+static int publish_output(const char *temporary, const char *destination)
+{
+#if defined(_WIN32)
+    wchar_t temporary_wide[4096];
+    wchar_t destination_wide[4096];
+    if (!temporary || !destination ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, temporary, -1,
+                            temporary_wide, 4096) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, destination, -1,
+                            destination_wide, 4096) <= 0 ||
+        !MoveFileExW(temporary_wide, destination_wide,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+#else
+    return rename(temporary, destination);
+#endif
+}
 
 static void json_string(FILE *out, const char *text)
 {
@@ -320,9 +357,9 @@ int main(int argc, char **argv)
     }
     FILE *out = fopen(temp, "wb");
     bool ok = out && render_report(out, report) && fflush(out) == 0 &&
-        fsync(fileno(out)) == 0;
+        sync_output(out) == 0;
     if (out && fclose(out) != 0) ok = false;
-    if (ok && rename(temp, output) != 0) ok = false;
+    if (ok && publish_output(temp, output) != 0) ok = false;
     if (!ok) {
         int saved = errno;
         unlink(temp);

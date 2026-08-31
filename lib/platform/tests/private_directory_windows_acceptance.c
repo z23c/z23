@@ -155,6 +155,7 @@ int main(void)
     uintptr_t native = (uintptr_t)INVALID_HANDLE_VALUE;
     BY_HANDLE_FILE_INFORMATION before = {0}, after = {0};
     if (!platform_private_directory_open_validated(utf8, &native) ||
+        !FlushFileBuffers((HANDLE)native) ||
         !GetFileInformationByHandle((HANDLE)native, &before) ||
         !MoveFileExW(private_path, moved_path, 0) ||
         !GetFileInformationByHandle((HANDLE)native, &after) ||

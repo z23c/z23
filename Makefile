@@ -1932,9 +1932,18 @@ windows-acceptance: windows-acceptance-compile
 ifeq ($(ZCL_HOST_WINDOWS),1)
 windows-acceptance: windows-headless-run-selftest
 
-	@for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
+	@root="$$(cygpath -aw .)"; \
+	runner="$$(cygpath -aw $(WINDOWS_HEADLESS_RUN_BIN))"; \
+	log_dir="build/tests/windows/logs"; mkdir -p "$$log_dir"; \
+	for executable in $(ZCL_WINDOWS_ACCEPTANCE_BINS); do \
 		case "$$executable" in */headless_run.exe) continue ;; esac; \
-		"$$executable"; rc=$$?; \
+		name="$$(basename "$$executable" .exe)"; \
+		log="$$log_dir/$$name.log"; \
+		executable_win="$$(cygpath -aw "$$executable")"; \
+		log_win="$$(cygpath -aw "$$log")"; \
+		"$$runner" --cwd "$$root" --log "$$log_win" -- \
+			"$$executable_win"; rc=$$?; \
+		test ! -f "$$log" || cat "$$log"; \
 		if test $$rc -eq 77; then \
 			printf '%s\n' "windows-acceptance: honest runtime refusal: $$executable"; \
 		elif test $$rc -ne 0; then exit $$rc; fi; \

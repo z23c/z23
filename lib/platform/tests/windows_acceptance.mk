@@ -173,6 +173,7 @@ ZCL_WINDOWS_ACCEPTANCE_directory_transaction_SOURCES := \
 	lib/platform/src/private_directory.c \
 	lib/platform/src/private_acl_internal.c \
 	lib/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_directory_transaction_FLAGS := -DZCL_TESTING
 ZCL_WINDOWS_ACCEPTANCE_directory_transaction_LIBS := -ladvapi32
 ZCL_WINDOWS_ACCEPTANCE_disk_space_SOURCES := \
 	lib/platform/tests/disk_space_windows_acceptance.c \
@@ -405,19 +406,20 @@ ZCL_WINDOWS_ACCEPTANCE_snapshot_install_activate_refusal_FLAGS := -Iconfig/src
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_SOURCES := \
 	lib/platform/tests/socket_compat_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_socket_compat_LIBS := -lws2_32
-# The retained-directory SQLite VFS proof. private_acl_internal.h sits next to
-# its implementation, so -Ilib/platform/src rides the row like the codeindex
-# row carries -Ilib/codeindex/src. The vendored amalgamation links from the
+# The retained-directory SQLite VFS proof binds its source-local private ACL
+# header by relative include, so this row does not broaden the include search
+# path to all of lib/platform/src. The vendored amalgamation links from the
 # private acceptance archive ($(ZCL_WINDOWS_ACCEPTANCE_SQLITE) in the top
 # Makefile), keeping the strict flags on our own sources only.
 ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_SOURCES := \
 	lib/test/src/sqlite_vfs_dir_windows_acceptance.c \
 	lib/storage/src/sqlite_vfs_dir_windows.c \
+	lib/storage/src/sqlite_vfs_dir_windows_registration.c \
 	lib/platform/src/private_directory.c \
 	lib/platform/src/private_acl_internal.c \
 	lib/base/src/safe_alloc.c
-ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_FLAGS := -Ilib/platform/src
 ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_LIBDEPS := \
+	lib/storage/src/sqlite_vfs_dir_windows_internal.h \
 	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE)
 ZCL_WINDOWS_ACCEPTANCE_sqlite_vfs_dir_LIBS := \
 	$(ZCL_WINDOWS_ACCEPTANCE_SQLITE) -ladvapi32

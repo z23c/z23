@@ -21,11 +21,11 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <stdarg.h>
 #include <sys/stat.h>
 #include <sys/resource.h>
 #include <sys/types.h>
@@ -67,6 +67,7 @@ static void proof_why(char *why, size_t why_len, const char *message)
  * refused over. A bare code makes the reader open this file and hand-check a
  * twenty-entry list; the missing path plus the command that produces it is the
  * whole diagnosis. */
+#if !defined(_WIN32)
 static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
@@ -78,6 +79,7 @@ static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
     (void)vsnprintf(why, why_len, fmt, ap);
     va_end(ap);
 }
+#endif
 
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
 {
@@ -109,12 +111,12 @@ static void proof_windows_unavailable(struct zcl_dev_proof_status *out)
     }
 }
 
-bool zcl_dev_proof_resolve_pair(const char *repo_root,
-                                const char *requested_local,
-                                const char *requested_base,
-                                char local_commit[65],
-                                char remote_base[65],
-                                char *why, size_t why_len)
+static bool proof_resolve_pair_platform(const char *repo_root,
+                                        const char *requested_local,
+                                        const char *requested_base,
+                                        char local_commit[65],
+                                        char remote_base[65],
+                                        char *why, size_t why_len)
 {
     (void)repo_root;
     (void)requested_local;
@@ -125,10 +127,10 @@ bool zcl_dev_proof_resolve_pair(const char *repo_root,
     return false;
 }
 
-bool zcl_dev_proof_status_read(const char *repo_root,
-                               const char *local_commit,
-                               const char *remote_base,
-                               struct zcl_dev_proof_status *out)
+static bool proof_status_read_platform(const char *repo_root,
+                                       const char *local_commit,
+                                       const char *remote_base,
+                                       struct zcl_dev_proof_status *out)
 {
     (void)repo_root;
     (void)local_commit;
@@ -137,10 +139,10 @@ bool zcl_dev_proof_status_read(const char *repo_root,
     return true;
 }
 
-bool zcl_dev_proof_ensure(const char *repo_root,
-                          const char *local_commit,
-                          const char *remote_base,
-                          struct zcl_dev_proof_status *out)
+static bool proof_ensure_platform(const char *repo_root,
+                                  const char *local_commit,
+                                  const char *remote_base,
+                                  struct zcl_dev_proof_status *out)
 {
     (void)repo_root;
     (void)local_commit;
@@ -149,11 +151,11 @@ bool zcl_dev_proof_ensure(const char *repo_root,
     return false;
 }
 
-bool zcl_dev_proof_wait(const char *repo_root,
-                        const char *local_commit,
-                        const char *remote_base,
-                        int timeout_ms,
-                        struct zcl_dev_proof_status *out)
+static bool proof_wait_platform(const char *repo_root,
+                                const char *local_commit,
+                                const char *remote_base,
+                                int timeout_ms,
+                                struct zcl_dev_proof_status *out)
 {
     (void)repo_root;
     (void)local_commit;
@@ -237,12 +239,12 @@ static bool git_capture(const char *root, const char *const argv[],
     return true;
 }
 
-bool zcl_dev_proof_resolve_pair(const char *repo_root,
-                                const char *requested_local,
-                                const char *requested_base,
-                                char local_commit[65],
-                                char remote_base[65],
-                                char *why, size_t why_len)
+static bool proof_resolve_pair_platform(const char *repo_root,
+                                        const char *requested_local,
+                                        const char *requested_base,
+                                        char local_commit[65],
+                                        char remote_base[65],
+                                        char *why, size_t why_len)
 {
     if (!repo_root || !local_commit || !remote_base) {
         proof_why(why, why_len, "proof_pair_input_invalid");
@@ -358,10 +360,10 @@ static bool proof_lock_stale(const char *path)
     return !proof_running(path, NULL, NULL);
 }
 
-bool zcl_dev_proof_status_read(const char *repo_root,
-                               const char *local_commit,
-                               const char *remote_base,
-                               struct zcl_dev_proof_status *out)
+static bool proof_status_read_platform(const char *repo_root,
+                                       const char *local_commit,
+                                       const char *remote_base,
+                                       struct zcl_dev_proof_status *out)
 {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
@@ -1607,10 +1609,10 @@ static void proof_worker_run(const struct proof_paths *paths,
     _exit(ok ? 0 : 1);
 }
 
-bool zcl_dev_proof_ensure(const char *repo_root,
-                          const char *local_commit,
-                          const char *remote_base,
-                          struct zcl_dev_proof_status *out)
+static bool proof_ensure_platform(const char *repo_root,
+                                  const char *local_commit,
+                                  const char *remote_base,
+                                  struct zcl_dev_proof_status *out)
 {
     char local[65], base[65], why[160] = {0};
     if (!out || !zcl_dev_proof_resolve_pair(repo_root, local_commit,
@@ -1692,11 +1694,11 @@ bool zcl_dev_proof_ensure(const char *repo_root,
     return zcl_dev_proof_status_read(repo_root, local, base, out);
 }
 
-bool zcl_dev_proof_wait(const char *repo_root,
-                        const char *local_commit,
-                        const char *remote_base,
-                        int timeout_ms,
-                        struct zcl_dev_proof_status *out)
+static bool proof_wait_platform(const char *repo_root,
+                                const char *local_commit,
+                                const char *remote_base,
+                                int timeout_ms,
+                                struct zcl_dev_proof_status *out)
 {
     if (!out || timeout_ms < 1 || timeout_ms > 900000) return false;
     int64_t deadline = platform_time_monotonic_us() + (int64_t)timeout_ms * 1000;
@@ -1718,3 +1720,45 @@ bool zcl_dev_proof_wait(const char *repo_root,
 }
 
 #endif /* _WIN32 */
+
+/* One public definition per API keeps platform arms from silently drifting
+ * as separate external symbols. The active arm remains a private, typed
+ * implementation selected above. */
+bool zcl_dev_proof_resolve_pair(const char *repo_root,
+                                const char *requested_local,
+                                const char *requested_base,
+                                char local_commit[65],
+                                char remote_base[65],
+                                char *why, size_t why_len)
+{
+    return proof_resolve_pair_platform(repo_root, requested_local,
+                                       requested_base, local_commit,
+                                       remote_base, why, why_len);
+}
+
+bool zcl_dev_proof_status_read(const char *repo_root,
+                               const char *local_commit,
+                               const char *remote_base,
+                               struct zcl_dev_proof_status *out)
+{
+    return proof_status_read_platform(repo_root, local_commit, remote_base,
+                                      out);
+}
+
+bool zcl_dev_proof_ensure(const char *repo_root,
+                          const char *local_commit,
+                          const char *remote_base,
+                          struct zcl_dev_proof_status *out)
+{
+    return proof_ensure_platform(repo_root, local_commit, remote_base, out);
+}
+
+bool zcl_dev_proof_wait(const char *repo_root,
+                        const char *local_commit,
+                        const char *remote_base,
+                        int timeout_ms,
+                        struct zcl_dev_proof_status *out)
+{
+    return proof_wait_platform(repo_root, local_commit, remote_base,
+                               timeout_ms, out);
+}

@@ -5,7 +5,7 @@
  * directory HANDLE carried in the binding's pAppData: leaf names are
  * validated and allowlisted to the bound database basename, the sibling
  * suffixes SQLite actually requests (-wal, -shm, -journal, -mjXXXXXXXXX), and
- * temp names this VFS minted itself, then resolved relative to the retained
+ * a VFS-minted nameless temporary file, then resolved relative to the retained
  * handle via NtCreateFile with FILE_OPEN_REPARSE_POINT (the child_open idiom
  * of lib/platform/src/directory_transaction.c), with post-open refusal of
  * directories and reparse points and an owner-private ACL check. Renaming or
@@ -28,16 +28,20 @@
 
 #if defined(_WIN32)
 
+#include "sqlite_vfs_dir_windows_internal.h"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <winternl.h>
 
-#include "private_acl_internal.h" /* lib/platform/src; -I carried by the row */
+#include "../../platform/src/private_acl_internal.h" /* bind the source-local
+                                                       * private platform header
+                                                       * without a broad src
+                                                       * include path */
 
 #include <sqlite3.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -51,17 +55,6 @@
 /* Shared-memory lock window, identical to os_win.c WIN_SHM_BASE/WIN_SHM_DMS. */
 #define VFS_DIR_SHM_BASE ((22 + SQLITE_SHM_NLOCK) * 4)
 #define VFS_DIR_SHM_DMS  (VFS_DIR_SHM_BASE + SQLITE_SHM_NLOCK)
-
-/* Leaf bound: the bound basename plus the longest suffix SQLite requests
- * ("-mj" + 9 hex chars) must fit with room to spare under mxPathname. */
-#define VFS_DIR_LEAF_MAX     200u
-#define VFS_DIR_BASENAME_MAX (VFS_DIR_LEAF_MAX - 16u)
-#define VFS_DIR_MX_PATHNAME  260
-
-/* Temp-leaf prefix; temp names are minted only by this VFS and always carry
- * SQLITE_OPEN_DELETEONCLOSE. */
-#define VFS_DIR_TEMP_PREFIX "zclvfs-tmp-"
-#define VFS_DIR_TEMP_HEX    16u
 
 /* Transient-error retry, mirroring os_win.c winIoerrCanRetry1 /
  * SQLITE_WIN32_IOERR_RETRY{,_DELAY}. */
@@ -119,86 +112,8 @@ static vfs_dir_nt_set_information_file_fn vfs_dir_nt_set_information_file(void)
     return vfs_dir_set_cached;
 }
 
-/* ── Structures ────────────────────────────────────────────────────────── */
-
-struct sqlite_vfs_dir_binding;
-
-struct vfs_dir_shm_conn {
-    struct vfs_dir_shm_conn *next;
-    uint16_t shared_mask;
-    uint16_t excl_mask;
-};
-
-struct vfs_dir_shm_region {
-    HANDLE map;
-    void *view;
-};
-
-/* One per binding: only the bound database's -shm file can ever be mapped
- * through this VFS, so the per-binding node replaces os_win.c's process-wide
- * winShmNodeList without changing semantics. */
-struct vfs_dir_shm_node {
-    HANDLE file;                        /* INVALID_HANDLE_VALUE when closed */
-    int region_size;
-    int region_count;
-    struct vfs_dir_shm_region *regions;
-    unsigned ref;
-    struct vfs_dir_shm_conn *first;
-};
-
-struct sqlite_vfs_dir_binding {
-    sqlite3_vfs vfs;                            /* embedded; zName = name */
-    char name[SQLITE_VFS_DIR_NAME_MAX];
-    sqlite3_vfs *base;
-    HANDLE dir;                                 /* duplicated retained handle */
-    char basename[VFS_DIR_BASENAME_MAX + 1u];
-    sqlite3_mutex *mutex;
-    unsigned open_files;
-    bool closing;
-    struct vfs_dir_shm_node shm;
-    struct sqlite_vfs_dir_binding *next;
-};
-
-struct vfs_dir_file {
-    sqlite3_file base;
-    struct sqlite_vfs_dir_binding *binding;
-    HANDLE h;
-    char leaf[VFS_DIR_LEAF_MAX + 1u];
-    int lock_type;
-    int sector_chunk;
-    bool readonly;
-    unsigned char ctrl_flags;
-    DWORD last_errno;
-    struct vfs_dir_shm_conn *shm;
-};
-
 #define VFS_DIR_CTRL_PSOW        0x01u
 #define VFS_DIR_CTRL_PERSIST_WAL 0x02u
-
-/* ── Registry (global list of live bindings) ───────────────────────────── */
-
-static INIT_ONCE vfs_dir_registry_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION vfs_dir_registry_lock;
-static struct sqlite_vfs_dir_binding *vfs_dir_registry;
-
-static BOOL CALLBACK vfs_dir_registry_init(PINIT_ONCE once, PVOID parameter,
-                                           PVOID *context)
-{
-    (void)once; (void)parameter; (void)context;
-    InitializeCriticalSection(&vfs_dir_registry_lock);
-    return TRUE;
-}
-
-static void vfs_dir_registry_enter(void)
-{
-    (void)InitOnceExecuteOnce(&vfs_dir_registry_once, vfs_dir_registry_init,
-                              NULL, NULL);
-    EnterCriticalSection(&vfs_dir_registry_lock);
-}
-static void vfs_dir_registry_leave(void)
-{
-    LeaveCriticalSection(&vfs_dir_registry_lock);
-}
 
 /* ── Logging ───────────────────────────────────────────────────────────── */
 
@@ -245,7 +160,7 @@ static bool vfs_dir_retry_ioerr(int *retries, DWORD *error)
  * lib/platform/src/directory_transaction.c: no separators or drive/stream
  * syntax, no dot-relative names, no trailing dot/space, no reserved device
  * stems. */
-static bool vfs_dir_valid_leaf(const char *leaf)
+bool vfs_dir_valid_leaf(const char *leaf)
 {
     if (!leaf || !leaf[0] || strlen(leaf) > VFS_DIR_LEAF_MAX ||
         !strcmp(leaf, ".") || !strcmp(leaf, "..") || strchr(leaf, '/') ||
@@ -284,7 +199,7 @@ static bool vfs_dir_is_hex9(const char *tail)
     return tail[12] == '\0';
 }
 
-static bool vfs_dir_is_temp_name(const char *leaf)
+bool vfs_dir_is_temp_name(const char *leaf)
 {
     size_t prefix = sizeof(VFS_DIR_TEMP_PREFIX) - 1u;
     if (strncmp(leaf, VFS_DIR_TEMP_PREFIX, prefix) != 0)
@@ -297,8 +212,10 @@ static bool vfs_dir_is_temp_name(const char *leaf)
     return leaf[prefix + VFS_DIR_TEMP_HEX] == '\0';
 }
 
-/* The whole namespace this VFS will serve: the bound basename, the sibling
- * suffixes SQLite derives from it, and temp names this VFS minted. */
+/* The whole named namespace this VFS will serve: the bound basename and the
+ * sibling suffixes SQLite derives from it. Nameless temp xOpen calls mint an
+ * exclusive delete-on-close child directly; a caller-supplied temp-looking
+ * name is never authority to open, probe, or delete a preexisting file. */
 static bool vfs_dir_name_allowed(const struct sqlite_vfs_dir_binding *b,
                                  const char *leaf)
 {
@@ -311,7 +228,7 @@ static bool vfs_dir_name_allowed(const struct sqlite_vfs_dir_binding *b,
             !strcmp(suffix, "-shm") || vfs_dir_is_hex9(suffix))
             return true;
     }
-    return vfs_dir_is_temp_name(leaf);
+    return false;
 }
 
 /* ── Handle-relative NT operations ─────────────────────────────────────── */
@@ -418,23 +335,7 @@ static int vfs_dir_xclose(sqlite3_file *fd)
     DWORD error = ok ? NO_ERROR : GetLastError();
     f->h = INVALID_HANDLE_VALUE;
     f->base.pMethods = NULL;
-    sqlite3_mutex_enter(b->mutex);
-    bool destroy = b->closing && --b->open_files == 0;
-    sqlite3_mutex_leave(b->mutex);
-    if (destroy) {
-        for (int i = 0; i < b->shm.region_count; ++i) {
-            if (b->shm.regions[i].view)
-                (void)UnmapViewOfFile(b->shm.regions[i].view);
-            if (b->shm.regions[i].map)
-                (void)CloseHandle(b->shm.regions[i].map);
-        }
-        sqlite3_free(b->shm.regions);
-        if (b->shm.file != INVALID_HANDLE_VALUE)
-            (void)CloseHandle(b->shm.file);
-        sqlite3_mutex_free(b->mutex);
-        (void)CloseHandle(b->dir);
-        sqlite3_free(b);
-    }
+    vfs_dir_binding_file_closed(b);
     return ok ? SQLITE_OK
               : vfs_dir_log_ioerr(SQLITE_IOERR_CLOSE, "xClose", f->leaf,
                                   error);
@@ -759,7 +660,11 @@ static int vfs_dir_xsector_size(sqlite3_file *fd)
 static int vfs_dir_xdevice_characteristics(sqlite3_file *fd)
 {
     struct vfs_dir_file *f = (struct vfs_dir_file *)fd;
-    return SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN | SQLITE_IOCAP_SUBPAGE_READ |
+    /* Child handles deliberately share DELETE and xDelete uses POSIX delete
+     * semantics. Advertising UNDELETABLE_WHEN_OPEN would let SQLite retain a
+     * rollback journal across unlock even though another connection can
+     * delete it underneath that open handle. */
+    return SQLITE_IOCAP_SUBPAGE_READ |
            ((f->ctrl_flags & VFS_DIR_CTRL_PSOW)
                 ? SQLITE_IOCAP_POWERSAFE_OVERWRITE : 0);
 }
@@ -870,12 +775,9 @@ static int vfs_dir_xshm_map(sqlite3_file *fd, int region, int size,
 {
     struct vfs_dir_file *f = (struct vfs_dir_file *)fd;
     struct sqlite_vfs_dir_binding *b = f->binding;
-    static DWORD granularity; /* allocation granularity; read once below */
-    if (!granularity) {
-        SYSTEM_INFO info;
-        GetSystemInfo(&info);
-        granularity = info.dwAllocationGranularity;
-    }
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    const DWORD granularity = info.dwAllocationGranularity;
     *out = NULL;
     int rc = SQLITE_OK;
     sqlite3_mutex_enter(b->mutex);
@@ -1063,7 +965,7 @@ static int vfs_dir_shm_unmap(sqlite3_file *fd, int delete_flag)
     return SQLITE_OK;
 }
 
-static const sqlite3_io_methods vfs_dir_io_methods = {
+const sqlite3_io_methods vfs_dir_io_methods = {
     .iVersion = 2,
     .xClose = vfs_dir_xclose,
     .xRead = vfs_dir_xread,
@@ -1094,13 +996,15 @@ static int vfs_dir_xopen(sqlite3_vfs *vfs, const char *name,
 {
     struct sqlite_vfs_dir_binding *b =
         (struct sqlite_vfs_dir_binding *)vfs->pAppData;
-    if (!b) {
+    if (!b || !vfs_dir_binding_open_begin(b, flags)) {
         sqlite3_log(SQLITE_CANTOPEN,
-                    "sqlite_vfs_dir: xOpen(%s) refused: no binding",
+                    "sqlite_vfs_dir: xOpen(%s) refused: binding retired",
                     name ? name : "(null)");
         return SQLITE_CANTOPEN;
     }
-    return vfs_dir_open_impl(b, name, file, flags, out_flags, false);
+    int rc = vfs_dir_open_impl(b, name, file, flags, out_flags, false);
+    vfs_dir_binding_open_end(b, rc == SQLITE_OK);
+    return rc;
 }
 
 static int vfs_dir_open_impl(struct sqlite_vfs_dir_binding *b,
@@ -1200,14 +1104,6 @@ static int vfs_dir_open_impl(struct sqlite_vfs_dir_binding *b,
         sqlite3_uri_boolean(name, "psow", 1))
         f->ctrl_flags |= VFS_DIR_CTRL_PSOW;
 
-    /* The binding is refcounted: an unregister only removes the name from the
-     * SQLite registry, so connections already open keep opening family files
-     * (journal cycles need fresh xOpens) until their last xClose retires the
-     * binding. */
-    sqlite3_mutex_enter(b->mutex);
-    b->open_files++;
-    sqlite3_mutex_leave(b->mutex);
-
     f->base.pMethods = &vfs_dir_io_methods;
     if (out_flags)
         *out_flags = is_readonly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE;
@@ -1221,35 +1117,46 @@ static int vfs_dir_xdelete(sqlite3_vfs *vfs, const char *name, int sync_dir)
     (void)sync_dir; /* Win32 exposes no directory fsync; the retained handle
                        is revalidated below instead (the
                        platform_directory_transaction_flush pattern). */
-    if (!b)
-        return vfs_dir_log_refusal("xDelete", name, "no binding");
-    if (!name || !vfs_dir_valid_leaf(name))
-        return vfs_dir_log_refusal("xDelete", name, "not a plain basename");
-    if (!vfs_dir_name_allowed(b, name))
-        return vfs_dir_log_refusal("xDelete", name,
-                                   "outside the bound database family");
+    if (!b || !vfs_dir_binding_aux_begin(b))
+        return vfs_dir_log_refusal("xDelete", name, "binding retired");
+    int rc = SQLITE_OK;
+    if (!name || !vfs_dir_valid_leaf(name)) {
+        rc = vfs_dir_log_refusal("xDelete", name, "not a plain basename");
+        goto out;
+    }
+    if (!vfs_dir_name_allowed(b, name)) {
+        rc = vfs_dir_log_refusal("xDelete", name,
+                                 "outside the bound database family");
+        goto out;
+    }
     NTSTATUS status = 0;
     int retries = 0;
     for (;;) {
         if (vfs_dir_unlink_child(b, name, &status))
             break;
-        if ((ULONG)status == 0xC0000034u || (ULONG)status == 0xC000003Au)
-            return SQLITE_IOERR_DELETE_NOENT; /* already gone (os_win.c) */
+        if ((ULONG)status == 0xC0000034u || (ULONG)status == 0xC000003Au) {
+            rc = SQLITE_IOERR_DELETE_NOENT; /* already gone (os_win.c) */
+            goto out;
+        }
         SetLastError((ULONG)status == 0xC0000043u ? ERROR_SHARING_VIOLATION
                      : (ULONG)status == 0xC0000022u ? ERROR_ACCESS_DENIED
                      : ERROR_ARENA_TRASHED);
         DWORD error = NO_ERROR;
         if (vfs_dir_retry_ioerr(&retries, &error))
             continue;
-        return vfs_dir_log_ioerr(SQLITE_IOERR_DELETE, "xDelete", name,
-                                 (DWORD)(status & 0xffff));
+        rc = vfs_dir_log_ioerr(SQLITE_IOERR_DELETE, "xDelete", name,
+                               (DWORD)(status & 0xffff));
+        goto out;
     }
     BY_HANDLE_FILE_INFORMATION info;
     if (!GetFileInformationByHandle(b->dir, &info) ||
-        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-        return vfs_dir_log_ioerr(SQLITE_IOERR_DELETE, "xDelete(dir)", name,
-                                 GetLastError());
-    return SQLITE_OK;
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        rc = vfs_dir_log_ioerr(SQLITE_IOERR_DELETE, "xDelete(dir)", name,
+                               GetLastError());
+    }
+out:
+    vfs_dir_binding_aux_end(b);
+    return rc;
 }
 
 static int vfs_dir_xaccess(sqlite3_vfs *vfs, const char *name, int flags,
@@ -1257,17 +1164,24 @@ static int vfs_dir_xaccess(sqlite3_vfs *vfs, const char *name, int flags,
 {
     struct sqlite_vfs_dir_binding *b =
         (struct sqlite_vfs_dir_binding *)vfs->pAppData;
+    if (!result)
+        return vfs_dir_log_refusal("xAccess", name, "missing result output");
+    *result = 0;
     if (!name) {
-        *result = 0;
         return SQLITE_OK;
     }
-    if (!b)
-        return vfs_dir_log_refusal("xAccess", name, "no binding");
-    if (!vfs_dir_valid_leaf(name))
-        return vfs_dir_log_refusal("xAccess", name, "not a plain basename");
-    if (!vfs_dir_name_allowed(b, name))
-        return vfs_dir_log_refusal("xAccess", name,
-                                   "outside the bound database family");
+    if (!b || !vfs_dir_binding_aux_begin(b))
+        return vfs_dir_log_refusal("xAccess", name, "binding retired");
+    int rc = SQLITE_OK;
+    if (!vfs_dir_valid_leaf(name)) {
+        rc = vfs_dir_log_refusal("xAccess", name, "not a plain basename");
+        goto out;
+    }
+    if (!vfs_dir_name_allowed(b, name)) {
+        rc = vfs_dir_log_refusal("xAccess", name,
+                                 "outside the bound database family");
+        goto out;
+    }
     NTSTATUS status = 0;
     HANDLE child = vfs_dir_open_child(b, name,
         GENERIC_READ | SYNCHRONIZE | FILE_READ_ATTRIBUTES, FILE_OPEN, 0,
@@ -1275,18 +1189,21 @@ static int vfs_dir_xaccess(sqlite3_vfs *vfs, const char *name, int flags,
     if (child == INVALID_HANDLE_VALUE) {
         if ((ULONG)status == 0xC0000034u || (ULONG)status == 0xC000003Au) {
             *result = 0;
-            return SQLITE_OK;
+            goto out;
         }
-        return vfs_dir_log_ioerr(SQLITE_IOERR_ACCESS, "xAccess", name,
-                                 (DWORD)(status & 0xffff));
+        rc = vfs_dir_log_ioerr(SQLITE_IOERR_ACCESS, "xAccess", name,
+                               (DWORD)(status & 0xffff));
+        goto out;
     }
     BY_HANDLE_FILE_INFORMATION info;
     bool got = GetFileInformationByHandle(child, &info) != 0;
     DWORD error = got ? NO_ERROR : GetLastError();
     CloseHandle(child);
-    if (!got)
-        return vfs_dir_log_ioerr(SQLITE_IOERR_ACCESS, "xAccess(info)", name,
-                                 error);
+    if (!got) {
+        rc = vfs_dir_log_ioerr(SQLITE_IOERR_ACCESS, "xAccess(info)", name,
+                               error);
+        goto out;
+    }
     uint64_t size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
     switch (flags) {
     case SQLITE_ACCESS_EXISTS:
@@ -1300,9 +1217,12 @@ static int vfs_dir_xaccess(sqlite3_vfs *vfs, const char *name, int flags,
         *result = (info.dwFileAttributes & FILE_ATTRIBUTE_READONLY) == 0;
         break;
     default:
-        return vfs_dir_log_refusal("xAccess", name, "unknown access flags");
+        rc = vfs_dir_log_refusal("xAccess", name, "unknown access flags");
+        break;
     }
-    return SQLITE_OK;
+out:
+    vfs_dir_binding_aux_end(b);
+    return rc;
 }
 
 static int vfs_dir_xfull_pathname(sqlite3_vfs *vfs, const char *name,
@@ -1313,13 +1233,21 @@ static int vfs_dir_xfull_pathname(sqlite3_vfs *vfs, const char *name,
     /* The leaf is the full name: the retained handle is the directory, so no
      * path ever materializes. SQLite derives -wal/-journal/etc. by appending
      * to this string, which keeps every sibling a leaf too. */
-    (void)b;
+    if (!b || !vfs_dir_binding_aux_begin(b))
+        return vfs_dir_log_refusal("xFullPathname", name,
+                                   "binding retired");
+    int rc = SQLITE_OK;
     if (!name || !out || size <= 0 || strlen(name) >= (size_t)size ||
         !vfs_dir_valid_leaf(name))
-        return vfs_dir_log_refusal("xFullPathname", name,
-                                   "not a plain basename or too long");
-    memcpy(out, name, strlen(name) + 1u);
-    return SQLITE_OK;
+        rc = vfs_dir_log_refusal("xFullPathname", name,
+                                 "not a plain basename or too long");
+    else if (!vfs_dir_name_allowed(b, name))
+        rc = vfs_dir_log_refusal("xFullPathname", name,
+                                 "outside the bound database family");
+    else
+        memcpy(out, name, strlen(name) + 1u);
+    vfs_dir_binding_aux_end(b);
+    return rc;
 }
 
 static void *vfs_dir_xdlopen(sqlite3_vfs *vfs, const char *name)
@@ -1411,78 +1339,10 @@ static const char *vfs_dir_xnext_system_call(sqlite3_vfs *vfs,
                ? b->base->xNextSystemCall(b->base, name) : NULL;
 }
 
-/* ── Registration ──────────────────────────────────────────────────────── */
-
-bool sqlite_vfs_dir_register(uintptr_t retained_dir, const char *db_basename,
-                             char vfs_name_out[SQLITE_VFS_DIR_NAME_MAX])
+/* Registration owns allocation and lifetime. This file owns the method table
+ * because every callback below is deliberately translation-unit private. */
+void vfs_dir_binding_initialize_vfs(struct sqlite_vfs_dir_binding *b)
 {
-    static atomic_uint_fast64_t sequence = 0;
-    HANDLE dir = (HANDLE)retained_dir;
-    if (!vfs_name_out || !db_basename ||
-        dir == INVALID_HANDLE_VALUE || !dir) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] register: null argument\n");
-        return false;
-    }
-    if (strlen(db_basename) > VFS_DIR_BASENAME_MAX ||
-        !vfs_dir_valid_leaf(db_basename) ||
-        vfs_dir_is_temp_name(db_basename)) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] register: refused db basename '%s'\n",
-                db_basename);
-        return false;
-    }
-    /* Revalidate the retained handle at the boundary: it must still be a
-     * real, owner-private, non-reparse directory. */
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!GetFileInformationByHandle(dir, &info) ||
-        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-        !platform_private_acl_validate_handle(dir, true)) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] register: retained handle failed "
-                "directory validation (win32=%lu)\n",
-                (unsigned long)GetLastError());
-        return false;
-    }
-
-    struct sqlite_vfs_dir_binding *b = sqlite3_malloc(sizeof(*b));
-    HANDLE duplicated = INVALID_HANDLE_VALUE;
-    if (b)
-        memset(b, 0, sizeof(*b));
-    if (!b || !DuplicateHandle(GetCurrentProcess(), dir,
-                               GetCurrentProcess(), &duplicated,
-                               0, FALSE, DUPLICATE_SAME_ACCESS)) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] register: allocation/duplication failed "
-                "(win32=%lu)\n", (unsigned long)GetLastError());
-        sqlite3_free(b);
-        return false;
-    }
-    b->dir = duplicated;
-    memcpy(b->basename, db_basename, strlen(db_basename) + 1u);
-    b->shm.file = INVALID_HANDLE_VALUE;
-    b->base = sqlite3_vfs_find(NULL);
-    b->mutex = b->base ? sqlite3_mutex_alloc(SQLITE_MUTEX_FAST) : NULL;
-    if (!b->base || !b->mutex) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] register: no default VFS or no mutex\n");
-        (void)CloseHandle(b->dir);
-        sqlite3_free(b);
-        return false;
-    }
-    uint64_t nonce = atomic_fetch_add(&sequence, 1) + 1;
-    int n = snprintf(b->name, sizeof(b->name), "zclvfsdir_%lu_%llu",
-                     (unsigned long)GetCurrentProcessId(),
-                     (unsigned long long)nonce);
-    if (n <= 0 || (size_t)n >= sizeof(b->name)) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] register: VFS name overflow\n");
-        sqlite3_mutex_free(b->mutex);
-        (void)CloseHandle(b->dir);
-        sqlite3_free(b);
-        return false;
-    }
     b->vfs = (sqlite3_vfs) {
         .iVersion = b->base->iVersion > 3 ? 3 : b->base->iVersion,
         .szOsFile = (int)sizeof(struct vfs_dir_file),
@@ -1507,56 +1367,6 @@ bool sqlite_vfs_dir_register(uintptr_t retained_dir, const char *db_basename,
         .xGetSystemCall = vfs_dir_xget_system_call,
         .xNextSystemCall = vfs_dir_xnext_system_call,
     };
-    if (sqlite3_vfs_register(&b->vfs, 0) != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] register: sqlite3_vfs_register failed\n");
-        sqlite3_mutex_free(b->mutex);
-        (void)CloseHandle(b->dir);
-        sqlite3_free(b);
-        return false;
-    }
-    vfs_dir_registry_enter();
-    b->next = vfs_dir_registry;
-    vfs_dir_registry = b;
-    vfs_dir_registry_leave();
-    memcpy(vfs_name_out, b->name, strlen(b->name) + 1u);
-    return true;
-}
-
-bool sqlite_vfs_dir_unregister(const char *vfs_name)
-{
-    if (!vfs_name) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] unregister: null name\n");
-        return false;
-    }
-    vfs_dir_registry_enter();
-    struct sqlite_vfs_dir_binding **link = &vfs_dir_registry;
-    while (*link && strcmp((*link)->name, vfs_name) != 0)
-        link = &(*link)->next;
-    struct sqlite_vfs_dir_binding *b = *link;
-    if (b)
-        *link = b->next;
-    vfs_dir_registry_leave();
-    if (!b) {
-        fprintf(stderr,  // obs-ok:sqlite-vfs-dir-register
-                "[sqlite_vfs_dir] unregister: no live binding named '%s'\n",
-                vfs_name);
-        return false;
-    }
-    sqlite3_vfs_unregister(&b->vfs);
-    sqlite3_mutex_enter(b->mutex);
-    b->closing = true;
-    bool destroy = b->open_files == 0;
-    sqlite3_mutex_leave(b->mutex);
-    if (destroy) {
-        /* No connection ever opened through this binding: nothing mapped,
-         * nothing to purge. */
-        sqlite3_mutex_free(b->mutex);
-        (void)CloseHandle(b->dir);
-        sqlite3_free(b);
-    }
-    return true;
 }
 
 #else

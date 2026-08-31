@@ -22,6 +22,11 @@ bool platform_private_directory_remove_empty(const char *utf8_path);
  * The caller retains this capability until platform_private_directory_close. */
 bool platform_private_directory_open_validated(const char *utf8_path,
                                                uintptr_t *native_handle);
+/* Open the same validated object with traverse/read authority only.  This is
+ * the retained RootDirectory form required by Windows relative namespace
+ * operations; callers that flush the directory must use the full form. */
+bool platform_private_directory_open_validated_traverse(
+    const char *utf8_path, uintptr_t *native_handle);
 void platform_private_directory_close(uintptr_t native_handle);
 
 #endif

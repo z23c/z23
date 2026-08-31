@@ -121,6 +121,23 @@ CC_BIN="${ZCL_CC:-clang}"
 # copy and prove the coverage check below catches a layer that fell out.
 MAKEFILE="${ZCL_CLANG_PORTABILITY_MAKEFILE:-Makefile}"
 
+compiler_result_proven() {
+    local log=$1 rc=$2
+    local crash_re='internal compiler error|cannot execute|CreateProcess|unable to execute command|frontend command failed|PLEASE submit a bug report|segmentation fault|stack dump|out of memory|killed signal|error in backend|LLVM ERROR|access violation|cc1\.exe:'
+    grep -aiEq "$crash_re" "$log" && return 1
+    if [ "$rc" = 0 ]; then
+        if grep -aEq '^[A-Za-z0-9_./\\:-]+\.[ch]:[0-9]+:[0-9]+: (fatal )?error:' \
+                "$log"; then
+            return 1
+        fi
+        return 0
+    fi
+    [ "$rc" = 1 ] || return 1
+    grep -aEq '^[A-Za-z0-9_./\\:-]+\.[ch]:[0-9]+:[0-9]+: (fatal )?(error|warning):' \
+        "$log" || return 1
+    return 0
+}
+
 # Known floor for the scan set. The node's release source set is ~1174 TUs;
 # anything under this means the Makefile variable parse below broke or a
 # whole layer moved, and a "clean" verdict off that would be hollow.
@@ -212,7 +229,9 @@ BASELINE_CC_MAJOR="$(sed -n 's/^#.*clang version \([0-9][0-9]*\)\..*/\1/p' \
 LOCAL_CC_MAJOR="$("$CC_BIN" --version 2>/dev/null \
     | sed -n 's/.*clang version \([0-9][0-9]*\)\..*/\1/p' | head -1)"
 if [ -n "$BASELINE_CC_MAJOR" ] && [ -n "$LOCAL_CC_MAJOR" ] &&
-   [ "$LOCAL_CC_MAJOR" != "$BASELINE_CC_MAJOR" ]; then
+   [ "$LOCAL_CC_MAJOR" != "$BASELINE_CC_MAJOR" ] &&
+   [ "${1:-}" != "--self-test" ] &&
+   [ "${ZCL_INTERNAL_CLANG_COVERAGE_SELFTEST:-0}" != 1 ]; then
     echo "  check-clang-portability: SKIP — compiler version skew."
     echo "    baseline recorded with: clang $BASELINE_CC_MAJOR"
     echo "    installed here:         clang $LOCAL_CC_MAJOR"
@@ -403,6 +422,36 @@ PROBE
         echo "  The gate would false-fail every contributor."
         exit 1
     fi
+    crash_log="$WORK/compiler-crash.log"
+    printf "%s\n" "gcc: fatal error: cannot execute 'cc1': CreateProcess failed" \
+        > "$crash_log"
+    if compiler_result_proven "$crash_log" 1; then
+        echo "FAIL: --self-test — a cc1 driver failure was accepted as a" \
+             "source diagnostic."
+        exit 1
+    fi
+    source_log="$WORK/source-error.log"
+    printf '%s\n' 'fixture.c:1:2: error: planted source rejection' > "$source_log"
+    if ! compiler_result_proven "$source_log" 1; then
+        echo "FAIL: --self-test — an ordinary source-located rejection was" \
+             "misclassified as compiler infrastructure failure."
+        exit 1
+    fi
+    mixed_log="$WORK/mixed-compiler.log"
+    printf '%s\n' \
+        'fixture.c:1:2: error: planted source rejection' \
+        'LLVM ERROR: out of memory' > "$mixed_log"
+    if compiler_result_proven "$mixed_log" 1; then
+        echo "FAIL: --self-test — a mixed source/backend failure was accepted."
+        exit 1
+    fi
+    success_error_log="$WORK/success-error.log"
+    printf '%s\n' 'fixture.c:1:2: error: wrapper returned success' \
+        > "$success_error_log"
+    if compiler_result_proven "$success_error_log" 0; then
+        echo "FAIL: --self-test — compiler rc=0 with an error was accepted."
+        exit 1
+    fi
     # COVERAGE, three answers not two. Cheap: all three settle before the
     # 2069-TU compile loop. The interesting case is the one no file-count
     # floor can reach — a whole layer falling out of the Makefile parse
@@ -411,7 +460,8 @@ PROBE
     cov_case() { # $1=want-rc $2=msg  rest: VAR=VAL
         local want="$1" msg="$2" rc=0
         shift 2
-        env "$@" "$cov_self" >/dev/null 2>&1 || rc=$?
+        env ZCL_INTERNAL_CLANG_COVERAGE_SELFTEST=1 "$@" "$cov_self" \
+            >/dev/null 2>&1 || rc=$?
         if [ "$rc" -ne "$want" ]; then
             echo "FAIL: --self-test — $msg (wanted exit $want, got $rc)"
             exit 1
@@ -454,14 +504,18 @@ printf '%s\0' "${WARN_FLAGS[@]}" "${BUILD_ENV_FLAGS[@]}" "${DEFINES[@]}" "${INC_
 # PIPE_BUF, which made an earlier draft of this gate report a different
 # finding set on every run. Per-TU files make the scan bit-deterministic.
 #
-# Exit status is ignored on purpose: the verdict comes from PARSING the
-# diagnostics, so a failing clang can never short-circuit the scan into a
-# hollow pass.
 xargs -a "$SRC_LIST" -P "$JOBS" -n 1 -I '{}' \
     env ZCL_GATE_FLAGS="$WORK/flags.nul" ZCL_GATE_CC="$CC_BIN" ZCL_GATE_OUT="$OUT_DIR" \
     bash -c 'mapfile -t -d "" f < "$ZCL_GATE_FLAGS"
-             o="$ZCL_GATE_OUT/$(printf "%s" "$1" | tr -c "[:alnum:]" "_").log"
-             "$ZCL_GATE_CC" "${f[@]}" "$1" > "$o" 2>&1' _ '{}' \
+             k="$(printf "%s" "$1" | tr -c "[:alnum:]" "_")"
+             o="$ZCL_GATE_OUT/$k.log"
+             r="$ZCL_GATE_OUT/$k.rc"
+             set +e
+             "$ZCL_GATE_CC" "${f[@]}" "$1" > "$o" 2>&1
+             rc=$?
+             set -e
+             printf "%s\n" "$rc" > "$r"
+             exit 0' _ '{}' \
     >/dev/null 2>&1
 cat "$OUT_DIR"/*.log > "$LOG" 2>/dev/null
 
@@ -470,6 +524,35 @@ cat "$OUT_DIR"/*.log > "$LOG" 2>/dev/null
 LOG_COUNT="$(find "$OUT_DIR" -maxdepth 1 -name '*.log' -type f | wc -l)"
 gate_require_scanned "$LOG_COUNT" "$SRC_COUNT" check-clang-portability \
     "only $LOG_COUNT of $SRC_COUNT translation units produced a clang result"
+RC_COUNT="$(find "$OUT_DIR" -maxdepth 1 -name '*.rc' -type f | wc -l)"
+gate_require_scanned "$RC_COUNT" "$SRC_COUNT" check-clang-portability \
+    "only $RC_COUNT of $SRC_COUNT translation units produced a compiler status"
+
+INFRA="$WORK/compiler-infrastructure.txt"
+: > "$INFRA"
+while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    key="$(printf '%s' "$src" | tr -c '[:alnum:]' '_')"
+    log="$OUT_DIR/$key.log"
+    status="$OUT_DIR/$key.rc"
+    rc="$(cat "$status" 2>/dev/null || true)"
+    case "$rc" in ''|*[!0-9]*) proven=false ;; *) proven=true ;; esac
+    if [ "$proven" = true ] && compiler_result_proven "$log" "$rc"; then
+        continue
+    fi
+    printf '%s|%s\n' "$src" "${rc:-missing}" >> "$INFRA"
+done < "$SRC_LIST"
+if [ -s "$INFRA" ]; then
+    count="$(wc -l < "$INFRA")"
+    echo "check-clang-portability: UNPROVEN — $count compiler/backend" \
+         "failure(s); no baseline can excuse them:" >&2
+    while IFS='|' read -r src rc; do
+        key="$(printf '%s' "$src" | tr -c '[:alnum:]' '_')"
+        echo "  $src (compiler rc=$rc)" >&2
+        sed -n '1,80p' "$OUT_DIR/$key.log" | sed 's/^/    /' >&2 || true
+    done < "$INFRA"
+    exit 2
+fi
 
 # A diagnostic SITE is "<path>:<line>:<col>: error|warning". Deduplicate:
 # a diagnostic inside a shared header is reported once per including TU, and

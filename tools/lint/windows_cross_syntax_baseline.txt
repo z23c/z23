@@ -11,16 +11,6 @@
 # the gate — delete the row. Counts may only go DOWN. Adding a row is a
 # review decision, not a convenience, and is not a fix.
 
-# POSIX TU. _WIN32 appears only as #ifndef _WIN32 to skip Windows. The
-# whole-file syntax check still hits <sys/socket.h>, which mingw does not
-# ship.
-lib/test/src/test_net.c
-
 # POSIX TU. _WIN32 appears only as #if !defined(_WIN32). The whole-file
 # syntax check still hits <sys/wait.h>, which mingw does not ship.
 lib/test/src/test_parallel.c
-
-# Real mingw compile failure: POSIX mkdir(path, mode) vs mingw mkdir(path)
-# (one argument, declared from <io.h> via <sys/stat.h>). The file also has
-# a genuine #if defined(_WIN32) arm. Fix the call; then delete this row.
-lib/test/src/test_zcode_creation_attribution.c
