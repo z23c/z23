@@ -34,6 +34,11 @@ output=$("$evaluator" <"$fixture") || fail "valid fixture was refused"
    $(printf '%s\n' "$output" | "$jsonq" get bm25.wrong_scope_at_5.available) = false ]] ||
     fail "valid fixture metrics differ from the maintained evaluator"
 
+rank_root=$(printf '1\t10\tx.c\n2\t20\ta.c\n' | \
+    "$evaluator" --rank-root 1) || fail "valid ranking-root fixture was refused"
+[[ $rank_root = b78e5feb676ba4b2d2e3032d269d929a79a49a71ff9932901b037f0466a861ec ]] ||
+    fail "ranking-root known answer changed"
+
 bad="$tmp/duplicate.batch"
 sed 's/rank 20 1 1 a.c/rank 20 1 1 x.c/' "$fixture" >"$bad"
 if "$evaluator" <"$bad" >/dev/null 2>&1; then
@@ -75,5 +80,11 @@ sed 's/literal observed 1 2/literal unobserved 1 2/' "$fixture" >"$bad"
 if "$evaluator" <"$bad" >/dev/null 2>&1; then
     fail "unobserved arm was accepted for evaluation"
 fi
+if printf '2\t10\tx.c\n' | "$evaluator" --rank-root 1 >/dev/null 2>&1; then
+    fail "non-contiguous rank-root row was accepted"
+fi
+if printf '1 10 x.c\n' | "$evaluator" --rank-root 1 >/dev/null 2>&1; then
+    fail "non-tab rank-root row was accepted"
+fi
 
-printf 'retrieval-eval-selftest: PASS mutations=8\n'
+printf 'retrieval-eval-selftest: PASS mutations=10\n'

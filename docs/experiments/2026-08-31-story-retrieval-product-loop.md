@@ -39,77 +39,94 @@ documentation or commit subjects because the original interactive prompts are
 not available. Relevant paths are reviewed outcome labels and are not added to
 the retrieval index.
 
-`make retrieval-gold-benchmark OUTPUT=<new-directory>` performs the following
-operations once per record:
+`ZCL_RETRIEVAL_BENCH_KEEP=1 make retrieval-gold-benchmark` performs the
+following operations for every record and preserves its sealed scratch
+artifacts for inspection:
 
-1. extracts the exact parent with `git archive` into an isolated directory;
-2. invokes the native retrieval command once with the expected source root;
-3. rejects a changed pre- or post-query source root;
-4. records both the frozen literal ordering and production BM25 ordering; and
-5. feeds the first 20 retained ranks to the maintained native evaluator.
+1. opens the exact parent as a clean detached worktree;
+2. independently captures and checks the expected source root;
+3. proves every relevance label is either present in or explicitly outside the
+   C23 index;
+4. paginates and independently re-roots all retained ranks from both the frozen
+   literal ordering and production BM25 ordering;
+5. rejects a changed post-query source root; and
+6. feeds the complete retained rankings to the maintained native evaluator.
 
 The production index uses path, command group, purpose, symbol names,
 signatures, documentation, and guards. The goal-context selector combines its
 score with the existing literal signal. This is the current concrete link from
 product story to work: story words select indexed taxonomy fields, ranked
 symbols select source excerpts, and the existing work command carries those
-excerpts into impact and proof planning. Formal Horn relations exposed by
-`code relations` are not yet a ranking input; that remains a measured product
-gap rather than an implied capability.
+excerpts into impact and proof planning. The canonical work context root then
+becomes StoryGraph's `agent_finds_code` evidence; later canonical receipts
+project build, test, application-run, and acceptance relations without creating
+a second authority. Formal Horn relations exposed by `code relations` are not
+yet a ranking input; that remains a measured product gap rather than an implied
+capability.
 
-The runner made 10 native benchmark invocations, no compiler invocation, and
-no retry inside the task loop. It made no model call. Development-session tool
-calls outside this bounded runner were not instrumented and are not claimed.
+The runner made 63 native benchmark invocations over nine eligible tasks, 98
+native membership queries, and 20 native source captures: 181 native command
+invocations in the bounded loop. One task was proved outside the C23 index and
+was not scored as a miss. The loop made no compiler invocation, retry, or model
+call. One serial prerequisite build was stopped and restarted with 16 jobs
+before the task loop; that setup retry is not hidden inside task timing.
+Development-session tool calls outside this bounded runner were not
+instrumented and are not claimed.
 
 ## Retrieval result
 
-All 10 tasks matched their expected source roots. The evaluator reported:
+All 10 tasks matched their expected source roots. Nine were eligible for C23
+index evaluation and one Make/shell task was explicitly unsupported. The
+evaluator reported over the nine eligible tasks:
 
 | Metric | Frozen literal | Production BM25 |
 | --- | ---: | ---: |
-| Recall@5 | unavailable | 8.42% |
-| Recall@20 | unavailable | 31.52% |
+| Recall@5 | unavailable | 9.36% |
+| Recall@20 | unavailable | 35.02% |
 | MRR | unavailable | unavailable |
-| Unique file selections at 5 | 47 | 50 |
-| Projected context bytes at 5 | 1,031,155 | 970,588 |
-| Approximate tokens at 5 | 257,789 | 242,647 |
+| Unique file selections at 5 | 43 | 45 |
+| Projected context bytes at 5 | 946,050 | 853,082 |
+| Approximate tokens at 5 | 236,513 | 213,271 |
 | Wrong-scope rate at 5 | unavailable | unavailable |
 
 The literal metrics are unavailable because several frozen rankings terminate
 before five unique files; the evaluator refuses to turn incomplete rankings
-into zeros. The BM25 page contains 20 ranks, so Recall@20 is exact for that
-page. MRR remains unavailable because a relevant result may exist beyond the
-observed page. Context cost is projected from whole source-file sizes; those
-bytes were not read into a model context. Production BM25 reduced that
-projection by 60,567 bytes, or 5.87%, at rank five.
+into zeros. All retained BM25 ranks were reconstructed across seven pages per
+eligible task, so Recall@20 is exact within the retained 128-file bound. MRR
+remains unavailable because a relevant result may exist beyond that bound.
+Context cost is projected from whole source-file sizes; those bytes were not
+read into a model context. Production BM25 reduced that projection by 92,968
+bytes, or 9.83%, at rank five.
 
 Before expanding the corpus, the original production literal selector was
 also run over the first seven tasks. It placed no relevant path in the returned
 16-file window: zero task hits, zero relevant hits from 31 labels, and zero
 Recall@5. The hybrid selector produced four task hits in the same seven tasks,
 three relevant hits at five, and seven relevant hits in the returned window.
-This supplementary measurement is not substituted for the stricter 10-task
-native evaluator above.
+This supplementary measurement is not substituted for the stricter nine-task
+eligible evaluation and one explicit unsupported classification above.
 
 Per-task native elapsed time was:
 
-| Task | Microseconds |
-| --- | ---: |
-| `zcode_embedded_nul` | 4,787,636 |
-| `api_cache_cooperative_shutdown` | 6,057,549 |
-| `package_verifier_object_reuse` | 5,943,514 |
-| `connected_peer_manifest_refresh` | 6,112,792 |
-| `private_object_grant_encryption_order` | 6,168,069 |
-| `sync_discovery_liveness` | 6,059,191 |
-| `windows_verified_checkout` | 6,151,388 |
-| `vault_holdings_exact_units` | 6,155,178 |
-| `mesh_capability_cancel_restart` | 6,150,018 |
-| `onion_discovery_catchup_contention` | 5,907,689 |
+| Task | First page (µs) | All pages (µs) |
+| --- | ---: | ---: |
+| `zcode_embedded_nul` | 4,585,306 | 12,116,327 |
+| `api_cache_cooperative_shutdown` | 6,191,216 | 19,108,627 |
+| `package_verifier_object_reuse` | unsupported | unsupported |
+| `connected_peer_manifest_refresh` | 6,114,353 | 19,197,012 |
+| `private_object_grant_encryption_order` | 6,376,380 | 20,003,797 |
+| `sync_discovery_liveness` | 6,708,151 | 20,345,808 |
+| `windows_verified_checkout` | 6,416,448 | 19,878,431 |
+| `vault_holdings_exact_units` | 32,378,487 | 77,739,656 |
+| `mesh_capability_cancel_restart` | 5,743,449 | 18,211,693 |
+| `onion_discovery_catchup_contention` | 6,569,158 | 19,507,093 |
 
-The sum was 59,493,024 microseconds, the mean was 5,949,302 microseconds, and
-the range was 4,787,636 to 6,168,069 microseconds. This exact-parent benchmark
-is intentionally cold with respect to each extracted source tree. It does not
-meet the one-second warm target.
+First-page time summed to 81,082,948 microseconds, with a 9,009,216
+microsecond mean and a 4,585,306 to 32,378,487 microsecond range. All-page time
+summed to 226,108,444 microseconds, with a 25,123,160 microsecond mean. This
+exact-parent benchmark is intentionally cold with respect to each source tree.
+It does not meet the one-second warm target; the vault epoch was a clear
+outlier rather than a value replaced by the mean.
 
 ## Product-path result
 
@@ -144,7 +161,8 @@ trading correctness for speed.
 
 The combined C23 development binary built cleanly with GCC 16.1.1, and the
 focused `codeindex` group passed with an approximately 0.5-second test body.
-The build tree contained 2,085 development objects and 3,164 test objects;
+The final build epochs contained 2,087 development objects and 3,167 test
+objects;
 these are retained artifacts, not compiler-execution counts. Current build
 receipts did not expose exact compiler invocations, compile-cache hits, or
 misses for this edit, and edit-to-first-diagnostic latency was not captured by
