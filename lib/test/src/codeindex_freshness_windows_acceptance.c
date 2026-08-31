@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Native Windows latency and determinism acceptance for the exact
  * code-index source metadata root used by every warm source-view query. */
+#if defined(_WIN32)
 
 #include "codeindex_priv.h"
 
@@ -81,3 +82,7 @@ int main(void)
            (unsigned long long)microseconds);
     return 0;
 }
+
+#else
+typedef int codeindex_freshness_windows_acceptance_not_built;
+#endif
