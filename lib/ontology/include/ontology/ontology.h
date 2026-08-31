@@ -21,6 +21,7 @@ enum {
     ZCL_ONTOLOGY_MAX_DOMAIN_VALUES = 64,
     ZCL_ONTOLOGY_MAX_PREDICATES = 64,
     ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES = 32768,
+    ZCL_ONTOLOGY_MANIFEST_WIRE_BYTES = 528,
     ZCL_SOURCE_COVER_GOVERNED = 1u << 0,
     ZCL_SOURCE_COVER_GENERATED = 1u << 1,
     ZCL_SOURCE_COVER_VENDOR = 1u << 2,
@@ -44,6 +45,8 @@ struct zcl_ontology_term_v1 {
     uint8_t kind;
     uint8_t reserved;
     uint8_t vocabulary_root[32];
+    /* Within a validated manifest, this is the identity_root of a canonical
+     * ZCL_ONTOLOGY_TERM_TYPE member; values use identity_root similarly. */
     uint8_t type_root[32];
     uint8_t identity_root[32];
     uint8_t lexical_root[32];
@@ -310,6 +313,64 @@ struct zcl_ontology_derivation_v1 {
     uint8_t evaluator_root[32];
 };
 
+enum zcl_ontology_object_kind {
+    ZCL_ONTOLOGY_OBJECT_TERM = 1,
+    ZCL_ONTOLOGY_OBJECT_PREDICATE = 2,
+    ZCL_ONTOLOGY_OBJECT_FORMULA = 3,
+    ZCL_ONTOLOGY_OBJECT_RULE = 4,
+    ZCL_ONTOLOGY_OBJECT_CONTEXT = 5,
+    ZCL_ONTOLOGY_OBJECT_ASSERTION = 6,
+    ZCL_ONTOLOGY_OBJECT_COVERAGE = 7,
+    ZCL_ONTOLOGY_OBJECT_DOMAIN = 8,
+    ZCL_ONTOLOGY_OBJECT_GAP = 9,
+};
+
+struct zcl_ontology_manifest_v1 {
+    uint16_t schema_version;
+    uint16_t flags;
+    uint32_t reserved;
+    uint64_t term_count;
+    uint64_t predicate_count;
+    uint64_t formula_count;
+    uint64_t rule_count;
+    uint64_t context_count;
+    uint64_t assertion_count;
+    uint64_t coverage_count;
+    uint64_t domain_count;
+    uint64_t gap_count;
+    uint8_t source_root[32];
+    uint8_t universe_root[32];
+    uint8_t vocabulary_root[32];
+    uint8_t term_set_root[32];
+    uint8_t predicate_set_root[32];
+    uint8_t formula_set_root[32];
+    uint8_t rule_set_root[32];
+    uint8_t context_set_root[32];
+    uint8_t assertion_set_root[32];
+    uint8_t coverage_set_root[32];
+    uint8_t domain_set_root[32];
+    uint8_t extractor_root[32];
+    uint8_t policy_root[32];
+    uint8_t gap_set_root[32];
+};
+
+struct zcl_ontology_manifest_inputs_v1 {
+    const struct zcl_ontology_term_v1 *terms;
+    size_t term_count;
+    const struct zcl_ontology_predicate_v1 *predicates;
+    size_t predicate_count;
+    const struct zcl_ontology_formula_v1 *formulas;
+    size_t formula_count;
+    const struct zcl_ontology_context_v1 *contexts;
+    size_t context_count;
+    const struct zcl_ontology_assertion_v1 *assertions;
+    size_t assertion_count;
+    const struct zcl_ontology_coverage_v1 *coverage;
+    size_t coverage_count;
+    const struct zcl_ontology_domain_v1 *domains;
+    size_t domain_count;
+};
+
 bool zcl_source_universe_v1_root(
     const struct zcl_source_universe_v1 *universe, uint8_t out[32]);
 bool zcl_ontology_term_v1_root(
@@ -333,6 +394,26 @@ bool zcl_ontology_budget_v1_root(
     const struct zcl_ontology_budget_v1 *budget, uint8_t out[32]);
 bool zcl_ontology_derivation_v1_root(
     const struct zcl_ontology_derivation_v1 *derivation, uint8_t out[32]);
+/* Builds a typed-set identity from roots that the caller has already
+ * verified. This helper does not itself establish any child's object kind;
+ * manifest validation below rederives roots from canonical child objects. */
+bool zcl_ontology_object_set_v1_root(
+    enum zcl_ontology_object_kind kind, const uint8_t (*roots)[32],
+    size_t count, uint8_t out[32]);
+bool zcl_ontology_manifest_v1_encode(
+    const struct zcl_ontology_manifest_v1 *manifest, uint8_t *out,
+    size_t out_size);
+bool zcl_ontology_manifest_v1_decode(
+    const uint8_t *wire, size_t wire_size,
+    struct zcl_ontology_manifest_v1 *out);
+bool zcl_ontology_manifest_v1_root(
+    const struct zcl_ontology_manifest_v1 *manifest, uint8_t out[32]);
+/* Validation rederives every supported child root and cross-reference.
+ * Nonempty RULE and GAP sets refuse until their canonical codecs land. */
+bool zcl_ontology_manifest_v1_validate(
+    const struct zcl_ontology_manifest_v1 *manifest,
+    const struct zcl_source_universe_v1 *universe,
+    const struct zcl_ontology_manifest_inputs_v1 *inputs);
 bool zcl_ontology_evaluator_init_v1(
     void *storage, size_t storage_size,
     struct zcl_ontology_evaluator **out_evaluator);

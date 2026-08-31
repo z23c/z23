@@ -65,6 +65,30 @@ static void formula_assertion(
     root(assertion->evidence_root, evidence);
 }
 
+static bool ontology_terms_sort(
+    struct zcl_ontology_term_v1 *terms, size_t count,
+    uint8_t (*sorted_roots)[32])
+{
+    if (!terms || !sorted_roots) return false;
+    for (size_t i = 0; i < count; i++) {
+        for (size_t j = i + 1u; j < count; j++) {
+            uint8_t left[32], right[32];
+            if (!zcl_ontology_term_v1_root(&terms[i], left) ||
+                !zcl_ontology_term_v1_root(&terms[j], right))
+                return false;
+            if (memcmp(left, right, 32) > 0) {
+                struct zcl_ontology_term_v1 swap = terms[i];
+                terms[i] = terms[j];
+                terms[j] = swap;
+            }
+        }
+    }
+    for (size_t i = 0; i < count; i++)
+        if (!zcl_ontology_term_v1_root(&terms[i], sorted_roots[i]))
+            return false;
+    return true;
+}
+
 static int test_ontology_four_valued_calculus(void)
 {
     int failures = 0;
@@ -255,6 +279,347 @@ static int test_ontology_four_valued_calculus(void)
         ASSERT(zcl_ontology_evaluate_formula_v1(
             evaluator, &universe, &formula, &query, &result));
         ASSERT(result.complete && result.status == ZCL_ONTOLOGY_DISPROVED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ontology_manifest_codec(void)
+{
+    int failures = 0;
+    struct zcl_source_universe_v1 universe = {
+        .schema_version = 1, .coverage_mask = ZCL_SOURCE_COVER_ALL,
+        .governed_path_count = 5, .total_bytes = 80,
+    };
+    root(universe.source_manifest_root, 1);
+    root(universe.governed_paths_root, 2);
+    root(universe.generated_paths_root, 3);
+    root(universe.vendor_paths_root, 4);
+    root(universe.metadata_paths_root, 5);
+    root(universe.publishable_paths_root, 6);
+    root(universe.consensus_seal_root, 7);
+    root(universe.indexed_paths_root, 8);
+    uint8_t universe_root[32];
+    ASSERT(zcl_source_universe_v1_root(&universe, universe_root));
+    struct zcl_ontology_manifest_v1 manifest = {
+        .schema_version = ZCL_ONTOLOGY_OBJECT_VERSION,
+    };
+    memcpy(manifest.source_root, universe.source_manifest_root, 32);
+    memcpy(manifest.universe_root, universe_root, 32);
+    root(manifest.vocabulary_root, 20);
+    root(manifest.extractor_root, 21);
+    root(manifest.policy_root, 22);
+    uint8_t *set_roots[] = {
+        manifest.term_set_root, manifest.predicate_set_root,
+        manifest.formula_set_root, manifest.rule_set_root,
+        manifest.context_set_root, manifest.assertion_set_root,
+        manifest.coverage_set_root, manifest.domain_set_root,
+        manifest.gap_set_root,
+    };
+    for (uint8_t kind = ZCL_ONTOLOGY_OBJECT_TERM;
+         kind <= ZCL_ONTOLOGY_OBJECT_GAP; kind++)
+        ASSERT(zcl_ontology_object_set_v1_root(
+            (enum zcl_ontology_object_kind)kind, NULL, 0,
+            set_roots[kind - 1u]));
+    static const char *const empty_set_kats[] = {
+        "e0845481eca6a4f46d1af383357bcc7d3dac752d06a774ac0cd3860ea44c2d3a",
+        "8b2ea0d5211ce8ba406f84de53769bf3355577a348195031596671be4c9eb351",
+        "fba2520486f5a3de2e574d245c02339e9d93fd563bf586a37d265a483da7b332",
+        "e27688ca850857781bf41b03e6bca3eb810666313d4620194dba7195d7228be8",
+        "2592f793157cc158961f4cf548c6a889107c0584999e7d0dbcd2794940adbdc6",
+        "0d7da02b0a746a7f5c01c476a62b1d44fd364f5d069b92adbba60f4ea412b0d4",
+        "d920aed6ee2af808d22cad2d95e88585b9521a13bb1a483cd7397fcba4ad715d",
+        "bacc313b3efc35d5f49702620355dfc503e41ee1b10526ee0a78ef077d2911e1",
+        "f87df0a96bd480548e1a86888cf00effe48afe26b7982c00e6d5db53a9a4d7b8",
+    };
+    for (size_t i = 0; i < sizeof(set_roots) / sizeof(set_roots[0]); i++) {
+        char empty_root_hex[65];
+        zcl_hex_encode(set_roots[i], 32, empty_root_hex);
+        ASSERT_STR_EQ(empty_root_hex, empty_set_kats[i]);
+    }
+    struct zcl_ontology_manifest_inputs_v1 inputs = {0};
+
+    TEST("ontology: manifest codec binds exact typed sets and source universe") {
+        ASSERT(zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+        for (size_t i = 1; i < sizeof(set_roots) / sizeof(set_roots[0]); i++)
+            ASSERT(memcmp(set_roots[0], set_roots[i], 32) != 0);
+
+        uint8_t wire[ZCL_ONTOLOGY_MANIFEST_WIRE_BYTES];
+        uint8_t wire_again[ZCL_ONTOLOGY_MANIFEST_WIRE_BYTES];
+        uint8_t manifest_root[32];
+        char manifest_root_hex[65];
+        struct zcl_ontology_manifest_v1 parsed;
+        ASSERT(zcl_ontology_manifest_v1_encode(
+            &manifest, wire, sizeof(wire)));
+        ASSERT(zcl_ontology_manifest_v1_decode(
+            wire, sizeof(wire), &parsed));
+        ASSERT(zcl_ontology_manifest_v1_encode(
+            &parsed, wire_again, sizeof(wire_again)));
+        ASSERT(memcmp(wire, wire_again, sizeof(wire)) == 0);
+        ASSERT(zcl_ontology_manifest_v1_root(&manifest, manifest_root));
+        zcl_hex_encode(manifest_root, sizeof(manifest_root), manifest_root_hex);
+        ASSERT_STR_EQ(manifest_root_hex,
+            "d28f740ef6c7091cce30ea9aabb15ea6638845efc7a29b67ee695387c5682ed8");
+
+        uint8_t meta_type[32], argument_type[32], argument[32];
+        root(meta_type, 40); root(argument_type, 41); root(argument, 42);
+        struct zcl_ontology_term_v1 child_terms[4] = {0};
+        for (size_t i = 0; i < 4; i++) {
+            child_terms[i].schema_version = 1;
+            memcpy(child_terms[i].vocabulary_root,
+                   manifest.vocabulary_root, 32);
+            root(child_terms[i].lexical_root, (uint8_t)(50u + i));
+        }
+        child_terms[0].kind = ZCL_ONTOLOGY_TERM_TYPE;
+        memcpy(child_terms[0].type_root, meta_type, 32);
+        memcpy(child_terms[0].identity_root, meta_type, 32);
+        child_terms[1].kind = ZCL_ONTOLOGY_TERM_TYPE;
+        memcpy(child_terms[1].type_root, meta_type, 32);
+        memcpy(child_terms[1].identity_root, argument_type, 32);
+        child_terms[2].kind = ZCL_ONTOLOGY_TERM_PREDICATE;
+        memcpy(child_terms[2].type_root, meta_type, 32);
+        root(child_terms[2].identity_root, 43);
+        child_terms[3].kind = ZCL_ONTOLOGY_TERM_ENTITY;
+        memcpy(child_terms[3].type_root, argument_type, 32);
+        memcpy(child_terms[3].identity_root, argument, 32);
+        uint8_t child_predicate_term_root[32];
+        ASSERT(zcl_ontology_term_v1_root(
+            &child_terms[2], child_predicate_term_root));
+        uint8_t child_term_roots[4][32];
+        ASSERT(ontology_terms_sort(child_terms, 4, child_term_roots));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_TERM, child_term_roots, 4,
+            manifest.term_set_root));
+        manifest.term_count = 4;
+        inputs.terms = child_terms; inputs.term_count = 4;
+
+        struct zcl_ontology_predicate_v1 child_predicate = {
+            .schema_version = 1, .arity = 1,
+            .world = ZCL_ONTOLOGY_OPEN_WORLD,
+            .execution_tier = ZCL_ONTOLOGY_TIER_EXACT,
+            .explicit_negation = 1,
+        };
+        memcpy(child_predicate.term_root, child_predicate_term_root, 32);
+        memcpy(child_predicate.argument_type_roots[0], argument_type, 32);
+        uint8_t child_predicate_root[32];
+        ASSERT(zcl_ontology_predicate_v1_root(
+            &child_predicate, child_predicate_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_PREDICATE,
+            (const uint8_t (*)[32])&child_predicate_root, 1,
+            manifest.predicate_set_root));
+        manifest.predicate_count = 1;
+        inputs.predicates = &child_predicate; inputs.predicate_count = 1;
+
+        uint8_t empty_imports[32];
+        ASSERT(zcl_ontology_import_manifest_v1_root(
+            universe_root, NULL, 0, empty_imports));
+        struct zcl_ontology_context_v1 child_context = {
+            .schema_version = 1, .kind = ZCL_ONTOLOGY_CONTEXT_CORPUS,
+        };
+        memcpy(child_context.universe_root, universe_root, 32);
+        memcpy(child_context.import_manifest_root, empty_imports, 32);
+        root(child_context.subject_root, 45); root(child_context.policy_root, 46);
+        uint8_t child_context_root[32];
+        ASSERT(zcl_ontology_context_v1_root(
+            &child_context, child_context_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_CONTEXT,
+            (const uint8_t (*)[32])&child_context_root, 1,
+            manifest.context_set_root));
+        manifest.context_count = 1;
+        inputs.contexts = &child_context; inputs.context_count = 1;
+
+        struct zcl_ontology_assertion_v1 child_assertion = {
+            .schema_version = 1, .arity = 1,
+            .polarity = ZCL_ONTOLOGY_POSITIVE,
+        };
+        memcpy(child_assertion.context_root, child_context_root, 32);
+        memcpy(child_assertion.predicate_root, child_predicate_root, 32);
+        memcpy(child_assertion.argument_roots[0], argument, 32);
+        root(child_assertion.evidence_root, 47);
+        uint8_t child_assertion_root[32];
+        ASSERT(zcl_ontology_assertion_v1_root(
+            &child_assertion, child_assertion_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_ASSERTION,
+            (const uint8_t (*)[32])&child_assertion_root, 1,
+            manifest.assertion_set_root));
+        manifest.assertion_count = 1;
+        inputs.assertions = &child_assertion; inputs.assertion_count = 1;
+
+        struct zcl_ontology_coverage_v1 child_coverage = {
+            .schema_version = 1,
+            .complete_mask = ZCL_SOURCE_COVER_INDEXED,
+        };
+        memcpy(child_coverage.universe_root, universe_root, 32);
+        memcpy(child_coverage.context_root, child_context_root, 32);
+        root(child_coverage.evidence_root, 48);
+        uint8_t child_coverage_root[32];
+        ASSERT(zcl_ontology_coverage_v1_root(
+            &child_coverage, child_coverage_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_COVERAGE,
+            (const uint8_t (*)[32])&child_coverage_root, 1,
+            manifest.coverage_set_root));
+        manifest.coverage_count = 1;
+        inputs.coverage = &child_coverage; inputs.coverage_count = 1;
+
+        uint8_t domain_values[1][32]; memcpy(domain_values[0], argument, 32);
+        struct zcl_ontology_domain_v1 child_domain = {
+            .schema_version = 1, .value_count = 1,
+            .value_roots = domain_values,
+        };
+        memcpy(child_domain.universe_root, universe_root, 32);
+        memcpy(child_domain.context_root, child_context_root, 32);
+        memcpy(child_domain.type_root, argument_type, 32);
+        root(child_domain.coverage_evidence_root, 49);
+        uint8_t child_domain_root[32];
+        ASSERT(zcl_ontology_domain_v1_root(&child_domain, child_domain_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_DOMAIN,
+            (const uint8_t (*)[32])&child_domain_root, 1,
+            manifest.domain_set_root));
+        manifest.domain_count = 1;
+        inputs.domains = &child_domain; inputs.domain_count = 1;
+
+        struct zcl_ontology_formula_node_v1 child_node;
+        formula_node_init(&child_node, ZCL_ONTOLOGY_FORMULA_ATOM, 1);
+        child_node.arity = 1;
+        memcpy(child_node.predicate_root, child_predicate_root, 32);
+        formula_constant(&child_node.terms[0], argument_type, argument);
+        struct zcl_ontology_formula_v1 child_formula = {
+            .schema_version = 1, .node_count = 1, .nodes = &child_node,
+        };
+        uint8_t child_formula_root[32];
+        ASSERT(zcl_ontology_formula_v1_root(
+            &child_formula, child_formula_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_FORMULA,
+            (const uint8_t (*)[32])&child_formula_root, 1,
+            manifest.formula_set_root));
+        manifest.formula_count = 1;
+        inputs.formulas = &child_formula; inputs.formula_count = 1;
+        ASSERT(zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+
+        child_terms[0].vocabulary_root[0] ^= 1u;
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+        child_terms[0].vocabulary_root[0] ^= 1u;
+        child_node.predicate_root[0] ^= 1u;
+        ASSERT(zcl_ontology_formula_v1_root(
+            &child_formula, child_formula_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_FORMULA,
+            (const uint8_t (*)[32])&child_formula_root, 1,
+            manifest.formula_set_root));
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+        child_node.predicate_root[0] ^= 1u;
+        ASSERT(zcl_ontology_formula_v1_root(
+            &child_formula, child_formula_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_FORMULA,
+            (const uint8_t (*)[32])&child_formula_root, 1,
+            manifest.formula_set_root));
+        memcpy(child_node.terms[0].type_root, meta_type, 32);
+        ASSERT(zcl_ontology_formula_v1_root(
+            &child_formula, child_formula_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_FORMULA,
+            (const uint8_t (*)[32])&child_formula_root, 1,
+            manifest.formula_set_root));
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+        memcpy(child_node.terms[0].type_root, argument_type, 32);
+        ASSERT(zcl_ontology_formula_v1_root(
+            &child_formula, child_formula_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_FORMULA,
+            (const uint8_t (*)[32])&child_formula_root, 1,
+            manifest.formula_set_root));
+        child_assertion.arity = 0;
+        memset(child_assertion.argument_roots[0], 0, 32);
+        ASSERT(zcl_ontology_assertion_v1_root(
+            &child_assertion, child_assertion_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_ASSERTION,
+            (const uint8_t (*)[32])&child_assertion_root, 1,
+            manifest.assertion_set_root));
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+        child_assertion.arity = 1;
+        memcpy(child_assertion.argument_roots[0], argument, 32);
+        ASSERT(zcl_ontology_assertion_v1_root(
+            &child_assertion, child_assertion_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_ASSERTION,
+            (const uint8_t (*)[32])&child_assertion_root, 1,
+            manifest.assertion_set_root));
+        uint8_t unregistered_type[32]; root(unregistered_type, 90);
+        memcpy(child_domain.type_root, unregistered_type, 32);
+        ASSERT(zcl_ontology_domain_v1_root(&child_domain, child_domain_root));
+        ASSERT(zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_DOMAIN,
+            (const uint8_t (*)[32])&child_domain_root, 1,
+            manifest.domain_set_root));
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &manifest, &universe, &inputs));
+
+        uint8_t object_roots[2][32];
+        root(object_roots[0], 50); root(object_roots[1], 51);
+        uint8_t swap[32]; memcpy(swap, object_roots[0], 32);
+        memcpy(object_roots[0], object_roots[1], 32);
+        memcpy(object_roots[1], swap, 32);
+        ASSERT(!zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_TERM, object_roots, 2, manifest_root));
+        memcpy(object_roots[1], object_roots[0], 32);
+        ASSERT(!zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_TERM, object_roots, 2, manifest_root));
+        memset(object_roots[0], 0, 32);
+        ASSERT(!zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_TERM, object_roots, 1, manifest_root));
+        ASSERT(!zcl_ontology_object_set_v1_root(
+            (enum zcl_ontology_object_kind)0, NULL, 0, manifest_root));
+        ASSERT(!zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_TERM, NULL, 1, manifest_root));
+
+        inputs = (struct zcl_ontology_manifest_inputs_v1){0};
+        struct zcl_ontology_manifest_v1 changed = parsed;
+        changed.term_count = 1;
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &changed, &universe, &inputs));
+        changed = parsed; changed.source_root[0] ^= 1u;
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &changed, &universe, &inputs));
+        changed = parsed; changed.universe_root[0] ^= 1u;
+        ASSERT(!zcl_ontology_manifest_v1_validate(
+            &changed, &universe, &inputs));
+        changed = parsed; changed.schema_version++;
+        ASSERT(!zcl_ontology_manifest_v1_encode(
+            &changed, wire_again, sizeof(wire_again)));
+        changed = parsed; changed.flags = 1;
+        ASSERT(!zcl_ontology_manifest_v1_encode(
+            &changed, wire_again, sizeof(wire_again)));
+        changed = parsed; memset(changed.extractor_root, 0, 32);
+        ASSERT(!zcl_ontology_manifest_v1_root(&changed, manifest_root));
+        ASSERT(!zcl_ontology_manifest_v1_encode(
+            &parsed, wire_again, sizeof(wire_again) - 1u));
+
+        struct zcl_ontology_manifest_v1 zero = {0};
+        memset(&parsed, 0xa5, sizeof(parsed));
+        ASSERT(!zcl_ontology_manifest_v1_decode(
+            wire, sizeof(wire) - 1u, &parsed));
+        ASSERT(parsed.schema_version == zero.schema_version);
+        uint8_t trailing[ZCL_ONTOLOGY_MANIFEST_WIRE_BYTES + 1u];
+        memcpy(trailing, wire, sizeof(wire)); trailing[sizeof(wire)] = 0;
+        ASSERT(!zcl_ontology_manifest_v1_decode(
+            trailing, sizeof(trailing), &parsed));
+        wire[0] = 2;
+        ASSERT(!zcl_ontology_manifest_v1_decode(
+            wire, sizeof(wire), &parsed));
         PASS();
     } _test_next:;
     return failures;
@@ -825,5 +1190,6 @@ int test_ontology(void)
     } _test_next:;
     failures += test_ontology_formula_language();
     failures += test_ontology_four_valued_calculus();
+    failures += test_ontology_manifest_codec();
     return failures;
 }
