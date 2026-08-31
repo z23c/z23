@@ -598,6 +598,8 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_is_integration_only(
             "test_event_log_benchmark"));
         ASSERT(zcl_test_group_is_integration_only(
+            "test_kill9_recovery"));
+        ASSERT(zcl_test_group_is_integration_only(
             "test_chain_advance_atomicity"));
         ASSERT(zcl_test_group_is_integration_only(
             "test_reducer_block_ingest_gate"));
@@ -615,6 +617,8 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_proof_contract(
                    "test_shielded_spend_slice") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
+                   "test_kill9_recovery") == ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
                    "test_chain_advance_atomicity") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
                    "test_reducer_block_ingest_gate") == ZCL_TEST_PROOF_STRESS);
@@ -630,6 +634,9 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_proof_contract(
                    "test_event_log_benchmark") ==
                ZCL_TEST_PROOF_EVENT_LOG_BENCH);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_golden_dev_cycle") ==
+               ZCL_TEST_PROOF_GOLDEN_TIMING);
         ASSERT(zcl_test_group_proof_contract("test_event_log") ==
                ZCL_TEST_PROOF_NONE);
         ASSERT(zcl_test_group_catalog_contains(
@@ -673,6 +680,14 @@ static int test_process_sensitive_groups_are_catalog_exclusive(void)
          * the 20 ms contract into a scheduler-contention measurement. */
         ASSERT(zcl_test_group_requires_exclusive_run(
             "test_vcs_core"));
+        /* Exact push proof enables this group's wall-clock assertions, so it
+         * must finish before the worker pool can add scheduler contention. */
+        ASSERT(zcl_test_group_requires_exclusive_run(
+            "test_golden_dev_cycle"));
+        /* SIGKILL recovery carries bounded wall-clock budgets and kill
+         * windows; execute it before unrelated workers can distort either. */
+        ASSERT(zcl_test_group_requires_exclusive_run(
+            "test_kill9_recovery"));
         /* Sandbox lint shards retain a bounded parallel lane of their own;
          * they are not smuggled into this serial predicate. */
         ASSERT(!zcl_test_group_requires_exclusive_run(

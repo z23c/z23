@@ -79,6 +79,8 @@ bool zcl_test_group_requires_exclusive_run(const char *full_id)
     return strcmp(full_id, "test_command_registry_latency") == 0 ||
            strcmp(full_id, "test_sapling_crypto") == 0 ||
            strcmp(full_id, "test_vcs_core") == 0 ||
+           strcmp(full_id, "test_golden_dev_cycle") == 0 ||
+           strcmp(full_id, "test_kill9_recovery") == 0 ||
            strcmp(full_id, "test_validate_parallel_determinism") == 0 ||
            strcmp(full_id, "test_simnet_perf") == 0 ||
            strcmp(full_id, "test_replay_canary_verdict") == 0 ||
@@ -103,7 +105,7 @@ bool zcl_test_group_proof_contracts_valid(void)
                             sizeof(g_proof_contracts[0]); i++) {
         if (!zcl_test_group_catalog_contains(g_proof_contracts[i].full_id) ||
             g_proof_contracts[i].contract <= ZCL_TEST_PROOF_NONE ||
-            g_proof_contracts[i].contract > ZCL_TEST_PROOF_EVENT_LOG_BENCH)
+            g_proof_contracts[i].contract > ZCL_TEST_PROOF_GOLDEN_TIMING)
             return false;
         for (size_t j = 0; j < i; j++)
             if (strcmp(g_proof_contracts[i].full_id,

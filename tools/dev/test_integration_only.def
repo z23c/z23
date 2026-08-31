@@ -33,6 +33,7 @@ ZCL_TEST_INTEGRATION_ONLY("test_make_lint_gates_heavy_02")
  * the separately provisioned Sapling parameters and stress lane. */
 ZCL_TEST_INTEGRATION_ONLY("test_event_log_kill9")
 ZCL_TEST_INTEGRATION_ONLY("test_event_log_benchmark")
+ZCL_TEST_INTEGRATION_ONLY("test_kill9_recovery")
 ZCL_TEST_INTEGRATION_ONLY("test_shielded_payment_gate")
 ZCL_TEST_INTEGRATION_ONLY("test_chain_advance_atomicity")
 ZCL_TEST_INTEGRATION_ONLY("test_reducer_block_ingest_gate")

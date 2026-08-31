@@ -18,6 +18,7 @@ enum zcl_test_proof_contract {
     ZCL_TEST_PROOF_STRESS,
     ZCL_TEST_PROOF_EVENT_LOG_KILL9,
     ZCL_TEST_PROOF_EVENT_LOG_BENCH,
+    ZCL_TEST_PROOF_GOLDEN_TIMING,
 };
 
 /* Canonical registry order, shared with test_parallel's dispatch table. */

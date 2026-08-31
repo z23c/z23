@@ -275,6 +275,9 @@ static bool activate_proof_contract(size_t idx)
          * measurement and is never enabled by the parallel gate. */
         env_name = "ZCL_EVENT_LOG_BENCH_PROOF";
         break;
+    case ZCL_TEST_PROOF_GOLDEN_TIMING:
+        env_name = "ZCL_GOLDEN_TIMING_STRICT";
+        break;
     default:
         fprintf(stderr,
                 "test_parallel: invalid proof contract group=%s\n",
