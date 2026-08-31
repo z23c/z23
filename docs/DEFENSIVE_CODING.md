@@ -1338,6 +1338,8 @@ add/remove a gate.
 - `check-tor-dial-prewarm`
 - `check-fleet-source-status`
 - `check-zcc-cache`
+- `check-zcc-epoch-object`
+- `check-zcc-epoch-batch`
 - `check-dev-proof-native-fast-path`
 - `check-tu-random-seed`
 - `check-outparam-init-before-return`
