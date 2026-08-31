@@ -3,6 +3,7 @@
  * packages, and source identity from a bounded source fixture. */
 
 #include "codeindex/codeindex_inventory.h"
+#include "codeindex/codeindex_semantic_candidate.h"
 #include "codeindex/codeindex_vector_hint.h"
 #include "fingerprint/fingerprint.h"
 #include "fingerprint/fp_runtime.h"
@@ -16,6 +17,9 @@
 #include <sys/types.h>
 
 #define CI_FIX "test-tmp/code-inventory-fixture"
+
+_Static_assert(ZCL_CODE_SEMANTIC_MIN_DISTINCT == FP_REPORT_MIN_DISTINCT,
+               "semantic candidate and fingerprint sample floors drifted");
 
 static int ci_failures;
 
@@ -216,7 +220,7 @@ struct ci_semantic_kat_row {
     enum ci_semantic_kat_evidence runtime_a;
     enum ci_semantic_kat_evidence runtime_b;
     enum ci_semantic_kat_evidence vector;
-    enum ci_semantic_kat_evidence candidate;
+    uint8_t candidate;
     uint32_t distinct_a_left;
     uint32_t distinct_a_right;
     uint32_t distinct_b_left;
@@ -438,20 +442,51 @@ static bool ci_semantic_model_hint(void)
            memcmp(values[0], values[1], sizeof(values[0])) == 0;
 }
 
-static enum ci_semantic_kat_evidence ci_candidate_evidence(
+static uint8_t ci_semantic_state(enum ci_semantic_kat_evidence evidence)
+{
+    switch (evidence) {
+    case CI_SEMANTIC_KAT_MATCH:
+        return ZCL_CODE_SEMANTIC_EVIDENCE_MATCH;
+    case CI_SEMANTIC_KAT_MISMATCH:
+        return ZCL_CODE_SEMANTIC_EVIDENCE_MISMATCH;
+    case CI_SEMANTIC_KAT_UNKNOWN:
+    case CI_SEMANTIC_KAT_MODEL_HINT:
+        return ZCL_CODE_SEMANTIC_EVIDENCE_UNOBSERVED;
+    }
+    return ZCL_CODE_SEMANTIC_EVIDENCE_UNOBSERVED;
+}
+
+static uint8_t ci_candidate_verdict(
     const struct ci_semantic_kat_row *row)
 {
-    if (row->shape == CI_SEMANTIC_KAT_UNKNOWN ||
-        row->graph == CI_SEMANTIC_KAT_UNKNOWN ||
-        row->runtime_a == CI_SEMANTIC_KAT_UNKNOWN ||
-        row->runtime_b == CI_SEMANTIC_KAT_UNKNOWN)
-        return CI_SEMANTIC_KAT_UNKNOWN;
-    if (row->shape == CI_SEMANTIC_KAT_MISMATCH ||
-        row->graph == CI_SEMANTIC_KAT_MISMATCH ||
-        row->runtime_a == CI_SEMANTIC_KAT_MISMATCH ||
-        row->runtime_b == CI_SEMANTIC_KAT_MISMATCH)
-        return CI_SEMANTIC_KAT_MISMATCH;
-    return CI_SEMANTIC_KAT_MATCH;
+    /* Classifier bridge only. Full roots, codec validation, canonical bytes,
+     * and vector-normalized identity are covered by code_semantic_candidate. */
+    struct zcl_code_semantic_candidate_v1 candidate = {
+        .syntax_shape = ci_semantic_state(row->shape),
+        .graph_depth1 = ci_semantic_state(row->graph),
+        .behavior_a = ci_semantic_state(row->runtime_a),
+        .behavior_b = ci_semantic_state(row->runtime_b),
+        .vector_hint = row->vector == CI_SEMANTIC_KAT_MODEL_HINT
+                           ? ZCL_CODE_SEMANTIC_VECTOR_MODEL_HINT
+                           : ZCL_CODE_SEMANTIC_VECTOR_ABSENT,
+        .behavior_a_left_distinct =
+            row->runtime_a == CI_SEMANTIC_KAT_UNKNOWN
+                ? 0 : row->distinct_a_left,
+        .behavior_a_right_distinct =
+            row->runtime_a == CI_SEMANTIC_KAT_UNKNOWN
+                ? 0 : row->distinct_a_right,
+        .behavior_b_left_distinct =
+            row->runtime_b == CI_SEMANTIC_KAT_UNKNOWN
+                ? 0 : row->distinct_b_left,
+        .behavior_b_right_distinct =
+            row->runtime_b == CI_SEMANTIC_KAT_UNKNOWN
+                ? 0 : row->distinct_b_right,
+    };
+    uint8_t verdict = 0;
+    if (zcl_code_semantic_candidate_v1_derive_verdict(
+            &candidate, &verdict) != ZCL_CODE_SEMANTIC_CANDIDATE_OK)
+        return 0;
+    return verdict;
 }
 
 static void ci_semantic_known_answers(
@@ -605,16 +640,20 @@ static void ci_semantic_known_answers(
     rows[2].runtime_a = CI_SEMANTIC_KAT_UNKNOWN;
     rows[2].runtime_b = CI_SEMANTIC_KAT_UNKNOWN;
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
-        rows[i].candidate = ci_candidate_evidence(&rows[i]);
+        rows[i].candidate = ci_candidate_verdict(&rows[i]);
 
     struct ci_semantic_kat_row graph_mismatch = {
         .shape = CI_SEMANTIC_KAT_MATCH,
         .graph = CI_SEMANTIC_KAT_MISMATCH,
         .runtime_a = CI_SEMANTIC_KAT_MATCH,
         .runtime_b = CI_SEMANTIC_KAT_MATCH,
+        .distinct_a_left = ZCL_CODE_SEMANTIC_MIN_DISTINCT,
+        .distinct_a_right = ZCL_CODE_SEMANTIC_MIN_DISTINCT,
+        .distinct_b_left = ZCL_CODE_SEMANTIC_MIN_DISTINCT,
+        .distinct_b_right = ZCL_CODE_SEMANTIC_MIN_DISTINCT,
     };
-    CI_ASSERT(ci_candidate_evidence(&graph_mismatch) ==
-              CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(ci_candidate_verdict(&graph_mismatch) ==
+              ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
 
     CI_ASSERT(rows[0].exact == CI_SEMANTIC_KAT_MISMATCH);
     CI_ASSERT(rows[0].alpha == CI_SEMANTIC_KAT_MISMATCH);
@@ -627,7 +666,7 @@ static void ci_semantic_known_answers(
     CI_ASSERT(rows[0].distinct_b_left >= FP_REPORT_MIN_DISTINCT);
     CI_ASSERT(rows[0].distinct_b_right >= FP_REPORT_MIN_DISTINCT);
     CI_ASSERT(rows[0].vector == CI_SEMANTIC_KAT_MODEL_HINT);
-    CI_ASSERT(rows[0].candidate == CI_SEMANTIC_KAT_MATCH);
+    CI_ASSERT(rows[0].candidate == ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE);
 
     CI_ASSERT(rows[1].exact == CI_SEMANTIC_KAT_MISMATCH);
     CI_ASSERT(rows[1].alpha == CI_SEMANTIC_KAT_MISMATCH);
@@ -636,16 +675,46 @@ static void ci_semantic_known_answers(
     CI_ASSERT(rows[1].runtime_a == CI_SEMANTIC_KAT_MISMATCH);
     CI_ASSERT(rows[1].runtime_b == CI_SEMANTIC_KAT_MISMATCH);
     CI_ASSERT(rows[1].vector == CI_SEMANTIC_KAT_MODEL_HINT);
-    CI_ASSERT(rows[1].candidate == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(rows[1].candidate == ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
 
     CI_ASSERT(rows[2].exact == CI_SEMANTIC_KAT_MISMATCH);
     CI_ASSERT(rows[2].alpha == CI_SEMANTIC_KAT_MISMATCH);
     CI_ASSERT(rows[2].shape == CI_SEMANTIC_KAT_UNKNOWN);
+    CI_ASSERT(!indirect_graph.known);
     CI_ASSERT(rows[2].graph == CI_SEMANTIC_KAT_UNKNOWN);
     CI_ASSERT(rows[2].runtime_a == CI_SEMANTIC_KAT_UNKNOWN);
     CI_ASSERT(rows[2].runtime_b == CI_SEMANTIC_KAT_UNKNOWN);
     CI_ASSERT(rows[2].vector == CI_SEMANTIC_KAT_MODEL_HINT);
-    CI_ASSERT(rows[2].candidate == CI_SEMANTIC_KAT_UNKNOWN);
+    CI_ASSERT(rows[2].candidate == ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
+
+    struct ci_semantic_kat_row mutation = rows[0];
+    mutation.graph = CI_SEMANTIC_KAT_UNKNOWN;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
+    mutation = rows[0];
+    mutation.runtime_b = CI_SEMANTIC_KAT_UNKNOWN;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
+    mutation = rows[0];
+    mutation.vector = CI_SEMANTIC_KAT_UNKNOWN;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE);
+    mutation = rows[0];
+    mutation.distinct_b_right = ZCL_CODE_SEMANTIC_MIN_DISTINCT - 1;
+    CI_ASSERT(ci_candidate_verdict(&mutation) == 0);
+    mutation = rows[1];
+    mutation.vector = CI_SEMANTIC_KAT_MODEL_HINT;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
+
+    size_t verdict_counts[4] = {0};
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        if (rows[i].candidate < sizeof(verdict_counts) /
+                                sizeof(verdict_counts[0]))
+            verdict_counts[rows[i].candidate]++;
+    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE] == 1);
+    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_MISMATCH] == 1);
+    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE] == 1);
 
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
         CI_ASSERT(rows[i].proof_needed != NULL &&
