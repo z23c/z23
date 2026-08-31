@@ -190,9 +190,9 @@ static int sg_refusals(void)
 
 static const char *sg_hex(uint8_t value)
 {
-    static char roots[16][65];
+    static char roots[64][65];
     static size_t next;
-    char *out = roots[next++ % 16u];
+    char *out = roots[next++ % 64u];
     static const char digits[] = "0123456789abcdef";
     for (size_t i = 0; i < 64; i++)
         out[i] = digits[(value + (uint8_t)i) & 15u];
@@ -220,6 +220,8 @@ static int sg_canonical_work_projection(void)
             .output_root = sg_hex(10),
             .lane_receipt_root = sg_hex(11),
             .proof_set_root = sg_hex(12),
+            .proof_action_root = sg_hex(13),
+            .build_output_root = sg_hex(14),
         };
         struct zcl_story_event_v1 events[7];
         struct zcl_story_graph_v1 graph;
@@ -234,6 +236,18 @@ static int sg_canonical_work_projection(void)
         ASSERT(events[4].status == ZCL_ONTOLOGY_PROVED);
         ASSERT(events[5].status == ZCL_ONTOLOGY_UNKNOWN);
         ASSERT(events[6].status == ZCL_ONTOLOGY_PROVED);
+        uint8_t expected[32];
+        ASSERT(zcl_hex_decode_lower(facts.build_output_root,
+                                    expected, sizeof(expected)));
+        ASSERT(memcmp(events[3].scene_root, expected, 32) == 0);
+        ASSERT(zcl_hex_decode_lower(facts.proof_action_root,
+                                    expected, sizeof(expected)));
+        ASSERT(memcmp(events[3].action_root, expected, 32) == 0);
+        ASSERT(memcmp(events[4].action_root, expected, 32) == 0);
+        ASSERT(zcl_hex_decode_lower(facts.proof_set_root,
+                                    expected, sizeof(expected)));
+        ASSERT(memcmp(events[3].evidence_root, expected, 32) == 0);
+        ASSERT(memcmp(events[4].evidence_root, expected, 32) == 0);
         ASSERT(show.status == ZCL_ONTOLOGY_UNKNOWN);
         ASSERT(show.unknown_mask == ZCL_STORY_STEP_APP_RUNS);
 

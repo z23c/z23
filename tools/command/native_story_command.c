@@ -95,6 +95,7 @@ bool zcl_story_graph_from_work_facts(
     uint8_t task[32], source[32], goal[32], agent_context[32];
     uint8_t candidate[32], candidate_source[32], patch[32], action[32];
     uint8_t receipt[32], output[32], lane[32], proof_set[32];
+    uint8_t proof_action[32], build_output[32];
     uint8_t app_receipt[32], app_observation[32], app_artifact[32];
     uint8_t app_invocation[32], app_action[32];
     if (!story_decode(facts->task_root, task) ||
@@ -106,9 +107,13 @@ bool zcl_story_graph_from_work_facts(
     bool have_candidate_source = story_decode(
         facts->candidate_source_root, candidate_source);
     bool have_patch = story_decode(facts->patch_root, patch);
-    bool have_action = story_decode(facts->action_root, action);
-    bool have_receipt = story_decode(facts->work_receipt_root, receipt);
-    bool have_output = story_decode(facts->output_root, output);
+    (void)story_decode(facts->action_root, action);
+    (void)story_decode(facts->work_receipt_root, receipt);
+    (void)story_decode(facts->output_root, output);
+    bool have_proof_action = story_decode(
+        facts->proof_action_root, proof_action);
+    bool have_build_output = story_decode(
+        facts->build_output_root, build_output);
     bool have_app_receipt = story_decode(
         facts->app_run_receipt_root, app_receipt);
     bool have_app_observation = story_decode(
@@ -149,15 +154,17 @@ bool zcl_story_graph_from_work_facts(
                      source, task, scene, task, relation, evidence,
                      events[1].event_root);
 
-    story_pick_root(output, candidate_source, scene);
+    story_pick_root(build_output, output, scene);
+    story_pick_root(scene, candidate_source, scene);
     story_pick_root(scene, source, scene);
-    story_pick_root(action, task, relation);
-    story_pick_root(receipt, proof_set, evidence);
+    story_pick_root(proof_action, action, relation);
+    story_pick_root(relation, task, relation);
+    story_pick_root(proof_set, receipt, evidence);
     story_pick_root(evidence, task, evidence);
     enum zcl_ontology_status build_status = story_result_status(
         facts->build_result, false);
     if (build_status == ZCL_ONTOLOGY_PROVED &&
-        (!have_action || !have_receipt || !have_output))
+        (!have_proof_action || !have_build_output || !have_proof_set))
         build_status = ZCL_ONTOLOGY_INCOMPLETE;
     story_fill_event(&events[3], ZCL_STORY_EVENT_BUILD_COMPLETES,
                      build_status, source, task, scene, task, relation,
@@ -165,14 +172,14 @@ bool zcl_story_graph_from_work_facts(
 
     story_pick_root(proof_set, output, scene);
     story_pick_root(scene, task, scene);
-    story_pick_root(proof_set, action, relation);
+    story_pick_root(proof_action, action, relation);
     story_pick_root(relation, task, relation);
     story_pick_root(proof_set, receipt, evidence);
     story_pick_root(evidence, task, evidence);
     enum zcl_ontology_status test_status = story_result_status(
         facts->test_result, true);
     if (test_status == ZCL_ONTOLOGY_PROVED &&
-        (!have_proof_set || !have_receipt))
+        (!have_proof_set || !have_proof_action))
         test_status = ZCL_ONTOLOGY_INCOMPLETE;
     story_fill_event(&events[4], ZCL_STORY_EVENT_TEST_COMPLETES, test_status,
                      source, task, scene, task, relation, evidence,
@@ -354,6 +361,10 @@ static bool story_load_work(const struct zcl_command_request *request,
         .work_receipt_root = story_object_string(expert,
                                                   "work_receipt_root"),
         .output_root = story_object_string(expert, "output_root"),
+        .proof_action_root = story_object_string(
+            expert, "proof_action_root"),
+        .build_output_root = story_object_string(
+            expert, "build_output_root"),
         .app_run_receipt_count = (uint32_t)story_object_int(
             expert, "app_run_receipt_count"),
         .valid_app_run_receipt_count = (uint32_t)story_object_int(
