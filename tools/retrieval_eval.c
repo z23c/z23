@@ -2,6 +2,8 @@
  * Purpose: strict batch adapter for the maintained retrieval evaluator. */
 
 #include "retrieval/retrieval.h"
+#include "base/hex.h"
+#include "sha3/sha3.h"
 
 #include <inttypes.h>
 #include <stdbool.h>
@@ -236,6 +238,84 @@ static bool read_arm(struct eval_arm_storage *arm, const char *name,
     return true;
 }
 
+static void u64le(uint8_t out[8], uint64_t value)
+{
+    for (size_t i = 0; i < 8; i++) {
+        out[i] = (uint8_t)(value & 0xffu);
+        value >>= 8;
+    }
+}
+
+static int rank_root_mode(const char *complete_text)
+{
+    size_t complete = 0, count = 0;
+    char line[EVAL_LINE_MAX];
+    if (!parse_size(complete_text, 1, &complete)) {
+        (void)fail("rank-root completeness must be 0 or 1");
+        return 1;
+    }
+    struct eval_arm_storage *arm = &g_tasks[0].literal;
+    while (read_line(line)) {
+        if (count == ZCL_RETRIEVAL_EVAL_RANK_MAX) {
+            (void)fail("rank-root input exceeds 128 rows");
+            return 1;
+        }
+        char *fields[3] = {line, NULL, NULL};
+        char *first_tab = strchr(line, '\t');
+        char *second_tab = first_tab ? strchr(first_tab + 1, '\t') : NULL;
+        if (!first_tab || !second_tab || strchr(second_tab + 1, '\t')) {
+            (void)fail("rank-root row is not rank<TAB>bytes<TAB>path");
+            return 1;
+        }
+        *first_tab = '\0';
+        *second_tab = '\0';
+        fields[1] = first_tab + 1;
+        fields[2] = second_tab + 1;
+        size_t rank = 0, context_bytes = 0;
+        if (!parse_size(fields[0], ZCL_RETRIEVAL_EVAL_RANK_MAX, &rank) ||
+            rank != count + 1u ||
+            !parse_size(fields[1], SIZE_MAX, &context_bytes) ||
+            !token_safe(fields[2], false)) {
+            (void)fail("invalid rank-root row");
+            return 1;
+        }
+        for (size_t i = 0; i < count; i++)
+            if (strcmp(arm->paths[i], fields[2]) == 0) {
+                (void)fail("duplicate rank-root path");
+                return 1;
+            }
+        memcpy(arm->paths[count], fields[2], strlen(fields[2]) + 1u);
+        arm->ranked[count].path = arm->paths[count];
+        arm->ranked[count].context_bytes = (uint64_t)context_bytes;
+        count++;
+    }
+    if (ferror(stdin)) {
+        (void)fail("rank-root input read failed");
+        return 1;
+    }
+    static const char domain[] = "zcl.retrieval_ranked_files.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    const uint8_t complete_byte = complete ? 1u : 0u;
+    sha3_256_write(&sha, &complete_byte, 1u);
+    uint8_t encoded[8];
+    u64le(encoded, (uint64_t)count);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    for (size_t i = 0; i < count; i++) {
+        sha3_256_write(&sha, (const uint8_t *)arm->ranked[i].path,
+                       strlen(arm->ranked[i].path) + 1u);
+        u64le(encoded, arm->ranked[i].context_bytes);
+        sha3_256_write(&sha, encoded, sizeof(encoded));
+    }
+    uint8_t digest[SHA3_256_OUTPUT_SIZE];
+    char hex[SHA3_256_OUTPUT_SIZE * 2u + 1u];
+    sha3_256_finalize(&sha, digest);
+    zcl_hex_encode(digest, sizeof(digest), hex);
+    printf("%s\n", hex);
+    return ferror(stdout) ? 1 : 0;
+}
+
 static void print_metric(const char *name, bool available, uint32_t value,
                          bool comma)
 {
@@ -266,9 +346,11 @@ static void print_arm(const struct zcl_retrieval_eval_metrics *m)
 
 int main(int argc, char **argv)
 {
-    (void)argv;
+    if (argc == 3 && strcmp(argv[1], "--rank-root") == 0)
+        return rank_root_mode(argv[2]);
     if (argc != 1) {
-        fputs("usage: retrieval-eval < batch.txt\n", stderr);
+        fputs("usage: retrieval-eval < batch.txt\n"
+              "       retrieval-eval --rank-root 0|1 < ranks.tsv\n", stderr);
         return 64;
     }
     char line[EVAL_LINE_MAX];

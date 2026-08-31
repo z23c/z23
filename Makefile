@@ -6574,19 +6574,34 @@ RETRIEVAL_EVAL_BIN = $(BIN_DIR)/retrieval-eval
 retrieval-eval: $(RETRIEVAL_EVAL_BIN)
 $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     lib/retrieval/src/retrieval_eval.c \
-    lib/retrieval/include/retrieval/retrieval.h
+    lib/retrieval/include/retrieval/retrieval.h \
+    lib/sha3/src/sha3.c lib/sha3/include/sha3/sha3.h \
+    lib/base/include/base/hex.h lib/base/include/base/serialize_le.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/retrieval/include -o $@ \
-	    tools/retrieval_eval.c lib/retrieval/src/retrieval_eval.c
+	    -Ilib/retrieval/include -Ilib/base/include -Ilib/sha3/include -o $@ \
+	    tools/retrieval_eval.c lib/retrieval/src/retrieval_eval.c \
+	    lib/sha3/src/sha3.c
 
-.PHONY: retrieval-eval-selftest retrieval-gold-corpus-check
+.PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
+    retrieval-gold-benchmark retrieval-gold-benchmark-publishable
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
 retrieval-gold-corpus-check: jsonq agent-sha3
 	@./tools/dev/retrieval-gold-corpus-check.sh --selftest
 	@./tools/dev/retrieval-gold-corpus-check.sh --check
+
+# The local rail exercises the complete historical benchmark before commit and
+# labels its evidence non-publishable. The publishable rail adds the exact,
+# clean origin/main admission without changing the benchmark core.
+retrieval-gold-benchmark: z23 dev-bin jsonq agent-sha3 retrieval-eval \
+    retrieval-eval-selftest retrieval-gold-corpus-check
+	@./tools/dev/retrieval-gold-benchmark.sh --run-local
+
+retrieval-gold-benchmark-publishable: z23 dev-bin jsonq agent-sha3 retrieval-eval \
+    retrieval-eval-selftest retrieval-gold-corpus-check
+	@./tools/dev/retrieval-gold-benchmark.sh --run
 
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under
