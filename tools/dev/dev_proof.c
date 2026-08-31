@@ -1338,22 +1338,45 @@ static bool proof_make_jobs_arg(char out[16])
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
                              const struct dev_source_record *expected_source,
-                             struct zcl_dev_proof_dimension *dimension)
+                             struct zcl_dev_proof_dimension *dimension,
+                             char *why, size_t why_len)
 {
     if (!paths || !artifact || !expected_source ||
-        !expected_source->source_id[0] || !dimension || dimension->selected == 0)
+        !expected_source->source_id[0] || !dimension || dimension->selected == 0) {
+        proof_why(why, why_len, "proof_executable_reuse_input_invalid");
         return false;
+    }
     int fd = open(artifact, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    struct dev_source_record source = {0};
-    char why[160] = {0};
-    bool admitted = zcl_dev_executable_source_record_read(
-        paths->root, fd, artifact, &source, why, sizeof(why));
-    (void)close(fd);
-    if (!admitted || strcmp(source.source_id, expected_source->source_id) != 0 ||
-        !hash_file("zcl.dev_proof_executable_reuse.v1", artifact,
-                   dimension->receipt_root))
+    if (fd < 0) {
+        proof_whyf(why, why_len, "proof_executable_open_failed_errno_%d",
+                   errno);
         return false;
+    }
+    struct dev_source_record source = {0};
+    char source_why[160] = {0};
+    bool admitted = zcl_dev_executable_source_record_read(
+        paths->root, fd, artifact, &source, source_why, sizeof(source_why));
+    if (close(fd) != 0) {
+        proof_whyf(why, why_len, "proof_executable_close_failed_errno_%d",
+                   errno);
+        return false;
+    }
+    if (!admitted) {
+        proof_whyf(why, why_len, "proof_executable_%s",
+                   source_why[0] ? source_why : "source_record_failed");
+        return false;
+    }
+    if (strcmp(source.source_id, expected_source->source_id) != 0) {
+        proof_whyf(why, why_len,
+                   "proof_executable_source_identity_mismatch_actual_%.16s_expected_%.16s",
+                   source.source_id, expected_source->source_id);
+        return false;
+    }
+    if (!hash_file("zcl.dev_proof_executable_reuse.v1", artifact,
+                   dimension->receipt_root)) {
+        proof_why(why, why_len, "proof_executable_hash_failed");
+        return false;
+    }
     dimension->reused = dimension->selected;
     return true;
 }
@@ -1361,16 +1384,26 @@ static bool executable_reuse(const struct proof_paths *paths,
 static bool admitted_executable_materialize(
     const struct proof_paths *paths, const char *generation,
     const char *source, const char *relative_target,
-    const struct dev_source_record *expected_source, char target[PATH_MAX])
+    const struct dev_source_record *expected_source, char target[PATH_MAX],
+    char *why, size_t why_len)
 {
     struct zcl_dev_proof_dimension artifact = {.selected = 1};
     int target_len = generation && relative_target && target
         ? snprintf(target, PATH_MAX, "%s/%s", generation, relative_target)
         : -1;
-    return paths && source && expected_source && target &&
-        target_len > 0 && target_len < PATH_MAX &&
-        executable_reuse(paths, source, expected_source, &artifact) &&
-        dependency_materialize(source, target);
+    if (!paths || !source || !expected_source || !target || target_len <= 0 ||
+        target_len >= PATH_MAX) {
+        proof_why(why, why_len, "proof_executable_target_path_invalid");
+        return false;
+    }
+    if (!executable_reuse(paths, source, expected_source, &artifact,
+                          why, why_len))
+        return false;
+    if (!dependency_materialize(source, target)) {
+        proof_why(why, why_len, "proof_executable_materialize_failed");
+        return false;
+    }
+    return true;
 }
 
 static bool admitted_executable_mark_fresh(const char *path)
@@ -1460,23 +1493,38 @@ static bool test_epoch_pointer_prepare(const struct proof_paths *paths,
 
 static bool test_depfiles_prepare(const struct proof_paths *paths,
                                   const char *generation,
-                                  uint8_t depfile_root[32])
+                                  uint8_t depfile_root[32],
+                                  char *why, size_t why_len)
 {
     char relative[PATH_MAX], source[PATH_MAX], target[PATH_MAX];
     uint8_t pointer_root[32];
-    if (!test_object_dir_relative(paths, relative) ||
-        snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
+    if (!test_object_dir_relative(paths, relative)) {
+        proof_why(why, why_len, "proof_test_restart_plan_invalid");
+        return false;
+    }
+    if (snprintf(source, sizeof(source), "%s/%s", paths->root, relative) >=
             (int)sizeof(source) ||
         snprintf(target, sizeof(target), "%s/%s", generation, relative) >=
-            (int)sizeof(target))
+            (int)sizeof(target)) {
+        proof_why(why, why_len, "proof_test_depfile_path_invalid");
         return false;
+    }
     struct sha3_256_ctx root;
     hash_begin(&root, "zcl.dev_proof_depfiles.v1");
     size_t count = 0;
-    if (!depfile_tree_copy(source, target, strlen(source), &root, &count) ||
-        count == 0 ||
-        !test_epoch_pointer_prepare(paths, generation, relative, pointer_root))
+    if (!depfile_tree_copy(source, target, strlen(source), &root, &count)) {
+        proof_why(why, why_len, "proof_test_depfile_copy_failed");
         return false;
+    }
+    if (count == 0) {
+        proof_why(why, why_len, "proof_test_depfile_tree_empty");
+        return false;
+    }
+    if (!test_epoch_pointer_prepare(paths, generation, relative,
+                                    pointer_root)) {
+        proof_why(why, why_len, "proof_test_epoch_pointer_failed");
+        return false;
+    }
     uint8_t count_le[8];
     zcl_write_u64_le(count_le, (uint64_t)count);
     sha3_256_write(&root, count_le, sizeof(count_le));
@@ -1511,20 +1559,38 @@ static bool test_helpers_prepare(
         node_len <= 0 || (size_t)node_len >= sizeof(node_source) ||
         nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
         acme_len <= 0 || (size_t)acme_len >= sizeof(acme_target) ||
-        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target) ||
-        !admitted_executable_materialize(
+        fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target)) {
+        proof_why(why, why_len, "proof_test_helper_path_invalid");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, runner_source, "build/bin/test_parallel_fast",
-            expected_source, runner_target) ||
-        !admitted_executable_materialize(
+            expected_source, runner_target, why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_test_runner_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, verifier_source,
             "build/bin/zclassic23-package-verify-dev", expected_source,
-            verifier_target) ||
-        !admitted_executable_materialize(
+            verifier_target, why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_test_verifier_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_materialize(
             paths, generation, node_source, "build/bin/zclassic23",
-            expected_source,
-            node_target) || !admitted_executable_mark_fresh(node_target) ||
-        !test_depfiles_prepare(paths, generation, depfile_root)) {
-        proof_why(why, why_len, "proof_test_helper_admission_failed");
+            expected_source, node_target, why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_test_node_admission_failed");
+        return false;
+    }
+    if (!admitted_executable_mark_fresh(node_target)) {
+        proof_why(why, why_len, "proof_test_node_freshness_failed");
+        return false;
+    }
+    if (!test_depfiles_prepare(paths, generation, depfile_root,
+                               why, why_len)) {
         return false;
     }
     const char *prerequisite_argv[] = {
@@ -1653,17 +1719,21 @@ static bool proof_worker(const struct proof_paths *paths,
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
 
     struct dev_source_record source_before = {0}, source_after = {0};
+    char sealed_source_id[65], sealed_mutation_id[65];
     if (!zcl_dev_source_identity_capture(generation, &source_before, why,
                                          why_len)) {
         if (!why || !why[0])
             proof_why(why, why_len, "source_identity_capture_failed");
         return false;
     }
-    if (!zcl_dev_source_cas_capture(generation, &source_before) ||
-        !source_before.cas_present) {
+    if (!source_before.cas_present) {
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
     }
+    memcpy(sealed_source_id, source_before.source_id,
+           sizeof(sealed_source_id));
+    memcpy(sealed_mutation_id, source_before.mutation_id,
+           sizeof(sealed_mutation_id));
     struct zcl_dev_acceptance_receipt_v1 receipt = {0};
     if (!zcl_dev_proof_oid_decode(local, receipt.local_commit,
                                   &receipt.local_commit_len) ||
@@ -1753,7 +1823,7 @@ static bool proof_worker(const struct proof_paths *paths,
                                         "%s/build/bin/z23-dev", paths->root);
             if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
                 !executable_reuse(paths, artifact,
-                                  &source_before, compile)) {
+                                  &source_before, compile, NULL, 0)) {
                 const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                       "build-only", NULL};
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_COMPILE, argv,
@@ -1769,6 +1839,33 @@ static bool proof_worker(const struct proof_paths *paths,
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_LINT, lint);
         if (test->selected) {
+            if (strcmp(source_before.source_id, sealed_source_id) != 0 ||
+                strcmp(source_before.mutation_id, sealed_mutation_id) != 0) {
+                proof_whyf(
+                    why, why_len,
+                    "proof_saved_source_identity_changed_actual_%.16s_sealed_%.16s",
+                    source_before.source_id, sealed_source_id);
+                return false;
+            }
+            struct dev_source_record generation_checkpoint = {0};
+            char checkpoint_why[160] = {0};
+            if (!zcl_dev_source_identity_capture(
+                    generation, &generation_checkpoint, checkpoint_why,
+                    sizeof(checkpoint_why))) {
+                proof_whyf(why, why_len,
+                           "proof_generation_source_checkpoint_%s",
+                           checkpoint_why[0] ? checkpoint_why : "failed");
+                return false;
+            }
+            if (strcmp(generation_checkpoint.source_id, sealed_source_id) != 0 ||
+                strcmp(generation_checkpoint.mutation_id,
+                       sealed_mutation_id) != 0) {
+                proof_whyf(
+                    why, why_len,
+                    "proof_generation_source_identity_changed_actual_%.16s_sealed_%.16s",
+                    generation_checkpoint.source_id, sealed_source_id);
+                return false;
+            }
             if (setenv("ZCL_TESTCACHE_STORE_ROOT", paths->root, 1) != 0) {
                 proof_why(why, why_len, "test_cache_store_root_unavailable");
                 return false;
@@ -1789,14 +1886,14 @@ static bool proof_worker(const struct proof_paths *paths,
                 const char *bundle_argv[] = {
                     "make", "--no-print-directory", make_jobs,
                     "dev-proof-bundle", NULL};
-                if (run_logged(paths->root, paths->bundle_log, bundle_argv,
+                if (run_logged(generation, paths->bundle_log, bundle_argv,
                                PROOF_TIMEOUT_MS) != 0) {
                     proof_why(why, why_len, "proof_bundle_build_failed");
                     return false;
                 }
-                runner_ready = test_binary_path(paths, binary) &&
+                runner_ready = test_binary_path(&execution, binary) &&
                     test_helpers_prepare(
-                        paths, generation, binary, &source_before,
+                        &execution, generation, binary, &source_before,
                         make_jobs, generation_binary, helper_root,
                         why, why_len);
                 if (!runner_ready) {

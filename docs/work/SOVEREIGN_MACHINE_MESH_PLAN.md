@@ -128,7 +128,7 @@ transport, and independent-host route receipts remain acceptance work.
 | Interactive access | Not implemented | Embedded terminal transport, platform PTY worker, confinement, and capability-gated service tunnels |
 | Hot swap | Implemented for a small allowlisted read-only C23 leaf set on an isolated development node | Service-island and app-cartridge activation; node/core changes remain restart-only |
 | Linux | Full node and embedded Tor path exist; confinement capabilities are host-measured | Multi-host owner-mesh acceptance and resource-priority proof |
-| macOS | Native arm64 node build and isolated startup are measured; a launchd service template exists | Native service lifecycle, independent node/session receipts, embedded-Tor build and runtime proof, and truthful confinement/tunnel probes |
+| macOS | Native arm64 node build is measured; the registered marker test proves clean-shutdown marker persistence in an isolated fixture, not node startup; a launchd service template exists | Native service lifecycle, independent node/session receipts, embedded-Tor runtime proof, and truthful confinement/tunnel probes |
 | Windows | Native UCRT64 `z23.exe` builds, retained-handle source-package traversal is cross-linked and rejects a real reparse point under Wine, and a Task Scheduler installer exists; WSL2 runs the Linux node. The native consensus store refuses before mutation because the default SQLite VFS is not directory-capability-bound | Retained-directory SQLite VFS and migration, native full-node and service acceptance, embedded Tor, and Windows confinement/tunnel probes |
 
 ### Platform service and activation truth
