@@ -17,8 +17,6 @@ readonly corpus_checker_path=tools/dev/retrieval-gold-corpus-check.sh
 jsonq=${ZCL_JSONQ:-$repo_root/build/bin/jsonq}
 sha3=${ZCL_AGENT_SHA3:-$repo_root/build/bin/agent_sha3}
 evaluator=${ZCL_RETRIEVAL_EVAL:-$repo_root/build/bin/retrieval-eval}
-rank_bin=${ZCL_RETRIEVAL_BENCH_Z23:-$repo_root/build/bin/z23-dev}
-capture_bin=${ZCL_RETRIEVAL_CAPTURE_Z23:-$repo_root/build/bin/z23}
 tmp=''
 
 readonly benchmark_keys='record,schema,corpus_id,mode,publishable,publication_admission,promotion_authorized,driver_commit,driver_commit_semantics,observed_origin_main,driver_clean,driver_status_sha3,tasks_declared,tasks_evaluated,tasks_unsupported,source_epoch_kind,source_root_basis,relevance_judgment,query_strata,commit_subject_only,same_commit_unordered,evaluated_query_strata,commit_subject_only,same_commit_unordered,original_prompts_available,canonical_task_roots_available,ranking_may_read_relevance,rank_binary_sha3,capture_binary_sha3,evaluator_binary_sha3,jsonq_binary_sha3,sha3_helper_binary_sha3,corpus_checker_script_sha3,corpus_sha3,runner_sha3,evaluator_batch_bytes,evaluator_batch_encoding,evaluator_batch_base64,evaluator_batch_root_sha3'
@@ -202,11 +200,14 @@ validate_semantics() {
     check_hash "$corpus_file" "$(root_field "$benchmark" corpus_sha3)"
     check_hash "$runner_file" "$(root_field "$benchmark" runner_sha3)"
     check_hash "$checker_file" "$(root_field "$benchmark" corpus_checker_script_sha3)"
-    check_hash "$rank_bin" "$(root_field "$benchmark" rank_binary_sha3)"
-    check_hash "$capture_bin" "$(root_field "$benchmark" capture_binary_sha3)"
-    check_hash "$evaluator" "$(root_field "$benchmark" evaluator_binary_sha3)"
-    check_hash "$jsonq" "$(root_field "$benchmark" jsonq_binary_sha3)"
-    check_hash "$sha3" "$(root_field "$benchmark" sha3_helper_binary_sha3)"
+    # These executable bytes were observed and sealed by the whole-receipt KAT,
+    # but were not archived. Mutable build aliases are not historical evidence:
+    # a later maintained build may replay the batch without becoming the binary
+    # that produced it. Keep the observations well-formed and no stronger.
+    for historical_binary_root in rank_binary_sha3 capture_binary_sha3 \
+        evaluator_binary_sha3 jsonq_binary_sha3 sha3_helper_binary_sha3; do
+        root_field "$benchmark" "$historical_binary_root" >/dev/null
+    done
 
     mapfile -t corpus_rows <"$corpus_file"
     [[ ${#corpus_rows[@]} -eq 8 ]] || fail "driver corpus is not eight records"
@@ -376,6 +377,10 @@ selftest() {
     expect_semantic_refusal base64 "$bad"; mutations=$((mutations + 1))
     bad="$tmp/batch-root.jsonl"; sed 's/abefa3f2cd30efb1bca229d99e90414ec786c59645badb239148f87a6f2f620c/0befa3f2cd30efb1bca229d99e90414ec786c59645badb239148f87a6f2f620c/' "$receipt" >"$bad"
     expect_semantic_refusal batch-root "$bad"; mutations=$((mutations + 1))
+    bad="$tmp/historical-binary-root.jsonl"
+    sed 's/116a75c69ffd6c99073cb60c146d1d07dfafa5263091ac47fc3b01a6e5462c6b/g16a75c69ffd6c99073cb60c146d1d07dfafa5263091ac47fc3b01a6e5462c6b/' \
+        "$receipt" >"$bad"
+    expect_semantic_refusal historical-binary-root "$bad"; mutations=$((mutations + 1))
     bad="$tmp/denominator.jsonl"; sed 's/"tasks_denominator":6/"tasks_denominator":5/' "$receipt" >"$bad"
     expect_semantic_refusal denominator "$bad"; mutations=$((mutations + 1))
     bad="$tmp/relevance.jsonl"; sed 's/"eligible_relevance_judgments":28/"eligible_relevance_judgments":27/' "$receipt" >"$bad"
@@ -396,7 +401,7 @@ selftest() {
 cleanup() { [[ -z ${tmp:-} ]] || rm -r -- "$tmp"; }
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/z23-retrieval-receipt-check.XXXXXX")
 trap cleanup EXIT HUP INT TERM
-for executable in "$jsonq" "$sha3" "$evaluator" "$rank_bin" "$capture_bin"; do
+for executable in "$jsonq" "$sha3" "$evaluator"; do
     [[ -x $executable ]] || fail "required executable is unavailable: $executable"
 done
 command -v base64 >/dev/null 2>&1 || fail "base64 is unavailable"
@@ -405,7 +410,7 @@ case ${1:---check} in
     --check)
         [[ $# -eq 1 ]] || fail "--check takes no receipt override"
         validate_canonical
-        printf 'retrieval-gold-receipt-check: PASS records=9 tasks=7 evaluated=6 unsupported=1 relevance=28 receipt_sha3=%s\n' "$receipt_sha3" ;;
+        printf 'retrieval-gold-receipt-check: PASS records=9 tasks=7 evaluated=6 unsupported=1 relevance=28 maintained_evaluator_replay=true historical_binary_identity=observation_unverified receipt_sha3=%s\n' "$receipt_sha3" ;;
     --selftest)
         [[ $# -eq 1 ]] || fail "--selftest takes no arguments"
         selftest ;;

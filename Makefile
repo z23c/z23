@@ -6634,7 +6634,7 @@ retrieval-gold-benchmark-publishable-capture:
 # Fast independent check of the frozen publishable receipt. This replays only
 # the maintained evaluator over the sealed batch; it does not rerun ranking or
 # turn the receipt's explicitly unavailable observations into evidence.
-retrieval-gold-receipt-check: z23 dev-bin jsonq agent-sha3 retrieval-eval
+retrieval-gold-receipt-check: jsonq agent-sha3 retrieval-eval
 	@./tools/dev/retrieval-gold-receipt-check.sh --selftest
 	@./tools/dev/retrieval-gold-receipt-check.sh --check
 
