@@ -619,7 +619,11 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                            "test-tmp/zcode-benchmark-%ld-%d",
                            (long)getpid(), p);
             char name[32];
-            (void)snprintf(name, sizeof(name), "benchmark-%d", p);
+            /* Candidate paths are host-global by task root. Give concurrent
+             * checkouts distinct fixture source identities so an identical
+             * frozen case cannot adopt another process's partial attempt. */
+            (void)snprintf(name, sizeof(name), "benchmark-%ld-%d",
+                           (long)getpid(), p);
             ASSERT(zpd_benchmark_project(roots[p], name, p + 1));
         }
         uint8_t source_roots[3][32], source_after[32];
