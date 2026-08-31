@@ -27,6 +27,7 @@
 #ifdef ZCL_DEV_BUILD
 #include "hotswap/hotswap_module.h"
 #include "command/native_dev_hotswap.h"
+#include "command/native_dev_retrieval_stream.h"
 #include "devloop.h"
 #endif
 
@@ -2839,6 +2840,101 @@ static char *nc_read_stdin(size_t max_bytes, bool *oversize)
     return buf;
 }
 
+#ifdef ZCL_DEV_BUILD
+/* CLI-only complete-page transport for the observational retrieval leaf.
+ * It deliberately sits outside the ordinary one-document formatter while
+ * reusing the leaf's exact bounded input contract and implementation. */
+static bool nc_dev_retrieval_try_stream(
+    const struct zcl_command_spec *spec, const char *const *words,
+    size_t count, size_t consumed, int *rc)
+{
+    bool requested = false;
+    for (size_t i = consumed; i < count; i++)
+        if (words[i] && strcmp(words[i], "--format=jsonl") == 0)
+            requested = true;
+    if (!requested) return false;
+
+    bool seen_format = false, seen_input = false;
+    for (size_t i = consumed; i < count; i++) {
+        const char *word = words[i];
+        if (!word || !nc_is_flag(word)) {
+            fprintf(stderr,
+                    "dev.retrieval.benchmark: BAD_FLAG: JSONL accepts only "
+                    "--format=jsonl --input=-\n");
+            *rc = ZCL_COMMAND_EXIT_INVALID;
+            return true;
+        }
+        char key[64];
+        const char *value = NULL;
+        if (!nc_split_flag(word, key, sizeof(key), &value)) {
+            fprintf(stderr,
+                    "dev.retrieval.benchmark: BAD_FLAG: malformed option\n");
+            *rc = ZCL_COMMAND_EXIT_INVALID;
+            return true;
+        }
+        if (strcmp(key, "format") == 0 && value &&
+            strcmp(value, "jsonl") == 0 && !seen_format) {
+            seen_format = true;
+        } else if (strcmp(key, "input") == 0 && value &&
+                   strcmp(value, "-") == 0 && !seen_input) {
+            seen_input = true;
+        } else {
+            fprintf(stderr,
+                    "dev.retrieval.benchmark: BAD_FLAG: JSONL accepts each "
+                    "of --format=jsonl and --input=- exactly once\n");
+            *rc = ZCL_COMMAND_EXIT_INVALID;
+            return true;
+        }
+    }
+    if (!seen_format || !seen_input) {
+        fprintf(stderr,
+                "dev.retrieval.benchmark: BAD_FLAG: JSONL requires "
+                "--format=jsonl --input=-\n");
+        *rc = ZCL_COMMAND_EXIT_INVALID;
+        return true;
+    }
+
+    bool oversize = false;
+    size_t input_budget = zcl_command_registry_input_budget_bytes(spec);
+    char *raw = nc_read_stdin(input_budget, &oversize);
+    struct json_value input;
+    json_init(&input);
+    bool parsed = raw && json_read(&input, raw, strlen(raw)) &&
+                  input.type == JSON_OBJ;
+    free(raw);
+    if (!parsed) {
+        json_free(&input);
+        fprintf(stderr,
+                "dev.retrieval.benchmark: BAD_INPUT: stdin must be one "
+                "bounded JSON object%s\n", oversize ? " (over budget)" : "");
+        *rc = ZCL_COMMAND_EXIT_INVALID;
+        return true;
+    }
+    char why[160];
+    if (!zcl_command_registry_input_validate(spec, &input, why, sizeof(why))) {
+        json_free(&input);
+        fprintf(stderr, "dev.retrieval.benchmark: INVALID_INPUT: %s\n", why);
+        *rc = ZCL_COMMAND_EXIT_INVALID;
+        return true;
+    }
+
+    char error_code[64], error_message[192];
+    g_native_input_from_stdin = true;
+    *rc = zcl_native_dev_retrieval_stream_jsonl(
+        &input, spec->budget_bytes ? (size_t)spec->budget_bytes
+                                  : (size_t)ZCL_COMMAND_LIST_BUDGET,
+        stdout, error_code, sizeof(error_code), error_message,
+        sizeof(error_message));
+    g_native_input_from_stdin = false;
+    json_free(&input);
+    if (*rc != ZCL_COMMAND_EXIT_OK)
+        fprintf(stderr, "dev.retrieval.benchmark: %s: %s\n",
+                error_code[0] ? error_code : "STREAM_FAILED",
+                error_message[0] ? error_message : "stream failed");
+    return true;
+}
+#endif
+
 static bool nc_next_input_valid(const char *current_command,
                                 const char *next_command,
                                 const struct json_value *input)
@@ -3651,6 +3747,11 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
     if (strcmp(spec->path, "dev.loop.events") == 0) {
         int rc = 0;
         if (nc_dev_events_try_stream(words, count, consumed, &rc))
+            return rc;
+    }
+    if (strcmp(spec->path, "dev.retrieval.benchmark") == 0) {
+        int rc = 0;
+        if (nc_dev_retrieval_try_stream(spec, words, count, consumed, &rc))
             return rc;
     }
 #endif

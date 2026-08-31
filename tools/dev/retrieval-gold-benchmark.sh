@@ -155,6 +155,28 @@ validate_envelope() {
         fail "budget_exceeded disagrees with elapsed time for $command"
 }
 
+validate_stream_page() {
+    local document=$1 expected_budget=$2
+    local elapsed_us elapsed_ms budget_ms exceeded should_exceed
+    [[ $(field "$document" schema) = zcl.dev_retrieval_benchmark_stream_page.v1 &&
+       $(field "$document" command) = dev.retrieval.benchmark &&
+       $(bool_field "$document" shared_computation) = true &&
+       $(uint_field "$document" ranking_computations 1) -eq 1 &&
+       $(field "$document" data_schema) = zcl.dev_retrieval_benchmark.v1 &&
+       $(field_type "$document" data) = object ]] ||
+        fail "invalid retrieval benchmark stream page"
+    elapsed_us=$(uint_field "$document" elapsed_us 9223372036854775807)
+    elapsed_ms=$(uint_field "$document" elapsed_ms 9223372036854775807)
+    budget_ms=$(uint_field "$document" budget_ms 9223372036854775807)
+    exceeded=$(bool_field "$document" budget_exceeded)
+    [[ $budget_ms -eq $expected_budget && $elapsed_ms -eq $((elapsed_us / 1000)) ]] ||
+        fail "invalid retrieval benchmark stream timing"
+    should_exceed=false
+    ((elapsed_us > budget_ms * 1000)) && should_exceed=true
+    [[ $exceeded = "$should_exceed" ]] ||
+        fail "stream budget_exceeded disagrees with elapsed time"
+}
+
 keys_exact() {
     local document=$1 path=$2 expected=$3 observed
     observed=$(printf '%s\n' "$document" | "$jsonq" keys "$path" | paste -sd, -) ||
@@ -419,10 +441,10 @@ emit_batch_task() {
 run_eligible_task() {
     local row=$1 id=$2 query=$3 expected_root=$4 task_dir=$5
     local literal_file="$task_dir/literal.tsv" bm25_file="$task_dir/bm25.tsv"
-    local offset=0 pages=0 output input started ended wall_us span next has_more
+    local offset=0 pages=0 output input started ended process_wall_us span next has_more
     local literal_display bm25_display max_display elapsed_us budget_ms exceeded
-    local page_limit max_count remaining expected_span expected_more page_file literal_take bm25_take
-    local total_elapsed=0 total_wall=0 any_budget_exceeded=false
+    local page_limit max_count remaining expected_span expected_more page_file literal_take bm25_take stream_file
+    local total_elapsed=0 total_wall=0 any_budget_exceeded=false terminal=false
     local page0_elapsed_us page0_wall_us page0_budget_ms page0_budget_exceeded arm
     : >"$literal_file"; : >"$bm25_file"
     unset invariant_task_id invariant_query invariant_expected_root \
@@ -431,21 +453,30 @@ run_eligible_task() {
         invariant_literal_count invariant_literal_complete invariant_literal_root \
         invariant_literal_context invariant_literal_tokens invariant_bm25_count \
         invariant_bm25_complete invariant_bm25_root invariant_bm25_context \
-        invariant_bm25_tokens invariant_membership_tree_root
-    while :; do
+        invariant_bm25_tokens invariant_membership_tree_root \
+        invariant_stream_elapsed_us invariant_stream_budget_ms \
+        invariant_stream_budget_exceeded
+    input=$(printf '{"workspace":"%s","expected_vcs_root":"%s","task_id":"%s","query":"%s"}' \
+        "$(json_escape "$workspace")" "$expected_root" \
+        "$(json_escape "$id")" "$(json_escape "$query")")
+    stream_file="$task_dir/pages.jsonl"
+    started=$(date +%s%N)
+    if ! printf '%s' "$input" | timeout "$command_timeout" \
+        "$rank_bin" dev retrieval benchmark --format=jsonl --input=- \
+        >"$stream_file"; then
+        fail "ranking stream failed for $id"
+    fi
+    ended=$(date +%s%N); process_wall_us=$(((ended - started) / 1000))
+    [[ -s $stream_file ]] || fail "ranking stream emitted no pages for $id"
+    while IFS= read -r output || [[ -n $output ]]; do
+        [[ $terminal = false ]] ||
+            fail "ranking stream emitted a record after its terminal page for $id"
         pages=$((pages + 1)); ((pages <= 128)) || fail "pagination cycle for $id"
-        input=$(printf '{"workspace":"%s","expected_vcs_root":"%s","task_id":"%s","query":"%s","cursor":%s}' \
-            "$(json_escape "$workspace")" "$expected_root" \
-            "$(json_escape "$id")" "$(json_escape "$query")" "$offset")
-        started=$(date +%s%N)
-        output=$(printf '%s' "$input" | timeout "$command_timeout" \
-            "$rank_bin" dev retrieval benchmark --input=-) ||
-            fail "ranking command failed for $id at offset $offset"
-        ended=$(date +%s%N); wall_us=$(((ended - started) / 1000))
         page_file=$(printf '%s/page-%03d.json' "$task_dir" "$pages")
         printf '%s\n' "$output" >"$page_file"
-        validate_envelope "$output" dev.retrieval.benchmark \
-            zcl.dev_retrieval_benchmark.v1 900
+        validate_stream_page "$output" 900
+        [[ $(uint_field "$output" page_index 127) -eq $((pages - 1)) ]] ||
+            fail "stream page index is not contiguous for $id"
         [[ $(field "$output" data.schema) = zcl.dev_retrieval_benchmark.v1 &&
            $(bool_field "$output" data.observational) = true &&
            $(bool_field "$output" data.production_ordering_changed) = true &&
@@ -502,10 +533,13 @@ run_eligible_task() {
         elapsed_us=$(uint_field "$output" elapsed_us 9223372036854775807)
         budget_ms=$(uint_field "$output" budget_ms 9223372036854775807)
         exceeded=$(bool_field "$output" budget_exceeded)
-        total_elapsed=$((total_elapsed + elapsed_us)); total_wall=$((total_wall + wall_us))
+        set_invariant stream_elapsed_us "$elapsed_us"
+        set_invariant stream_budget_ms "$budget_ms"
+        set_invariant stream_budget_exceeded "$exceeded"
         [[ $exceeded = true ]] && any_budget_exceeded=true
         if ((pages == 1)); then
-            page0_elapsed_us=$elapsed_us; page0_wall_us=$wall_us
+            total_elapsed=$elapsed_us; total_wall=$process_wall_us
+            page0_elapsed_us=$elapsed_us; page0_wall_us=$process_wall_us
             page0_budget_ms=$budget_ms; page0_budget_exceeded=$exceeded
         fi
         has_more=$(bool_field "$output" data.has_more)
@@ -516,13 +550,16 @@ run_eligible_task() {
         if [[ $has_more = false ]]; then
             [[ $next -eq 0 && $((offset + span)) -eq $max_count ]] ||
                 fail "terminal page does not close the retained ranking"
-            break
+            terminal=true
+            continue
         fi
         [[ $has_more = true && $span -gt 0 && $next -eq $((offset + span)) &&
            $next -gt $offset && $next -le 127 ]] ||
             fail "invalid pagination continuation for $id"
         offset=$next
-    done
+    done <"$stream_file"
+    ((pages > 0)) && [[ $terminal = true ]] ||
+        fail "ranking stream did not contain one terminal page for $id"
     check_rank_file literal "$literal_file" "$invariant_literal_count" \
         "$invariant_literal_context" "$invariant_literal_complete" \
         "$invariant_literal_root"

@@ -2,12 +2,14 @@
  * Purpose: source-bound observational retrieval benchmark for dev builds. */
 
 #include "command/native_command.h"
+#include "command/native_dev_retrieval_stream.h"
 
 #include "base/hex.h"
 #include "base/log_macros.h"
 #include "codeindex/codeindex.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/time_compat.h"
 #include "retrieval/retrieval.h"
 #include "services/zcode_goal_context_service.h"
 #include "sha3/sha3.h"
@@ -26,6 +28,7 @@
 enum {
     RB_DISPLAY_ROWS = 20,
     RB_RETAIN_ROWS = ZCL_RETRIEVAL_EVAL_RANK_MAX,
+    RB_STREAM_MAX_BYTES = 2 * 1024 * 1024,
 };
 
 struct rb_rank {
@@ -465,6 +468,189 @@ static bool rb_render_fitted(struct zcl_command_reply *reply,
     }
     if (page_limit_out) *page_limit_out = page_limit;
     return true;
+}
+
+struct rb_stream_buffer {
+    char *bytes;
+    size_t used;
+    size_t cap;
+};
+
+static bool rb_stream_append(struct rb_stream_buffer *buffer,
+                             const char *bytes, size_t count)
+{
+    if (!buffer || !bytes || count > RB_STREAM_MAX_BYTES ||
+        buffer->used > RB_STREAM_MAX_BYTES - count) {
+        LOG_ERROR(RB_TAG, "stream output exceeded its %d-byte bound",
+                  RB_STREAM_MAX_BYTES);
+        return false;
+    }
+    size_t need = buffer->used + count;
+    if (need > buffer->cap) {
+        size_t cap = buffer->cap ? buffer->cap : 16384u;
+        while (cap < need && cap <= RB_STREAM_MAX_BYTES / 2u) cap *= 2u;
+        if (cap < need) cap = RB_STREAM_MAX_BYTES;
+        char *grown = zcl_realloc(buffer->bytes, cap,
+                                  "retrieval benchmark stream");
+        if (!grown) {
+            LOG_ERROR(RB_TAG, "stream output allocation failed at %zu bytes",
+                      cap);
+            return false;
+        }
+        buffer->bytes = grown;
+        buffer->cap = cap;
+    }
+    memcpy(buffer->bytes + buffer->used, bytes, count);
+    buffer->used += count;
+    return true;
+}
+
+static void rb_stream_error(char *code, size_t code_cap,
+                            char *message, size_t message_cap,
+                            const char *error_code, const char *error_message)
+{
+    if (code && code_cap)
+        (void)snprintf(code, code_cap, "%s",
+                       error_code ? error_code : "STREAM_FAILED");
+    if (message && message_cap)
+        (void)snprintf(message, message_cap, "%s",
+                       error_message ? error_message
+                                     : "retrieval stream failed");
+}
+
+static bool rb_stream_cursor_zero(const struct json_value *input)
+{
+    const struct json_value *cursor = json_get(input, "cursor");
+    if (!cursor) return true;
+    if (cursor->type == JSON_INT) return json_get_int(cursor) == 0;
+    if (cursor->type == JSON_STR) {
+        const char *value = json_get_str(cursor);
+        return value && strcmp(value, "0") == 0;
+    }
+    return false;
+}
+
+int zcl_native_dev_retrieval_stream_jsonl(
+    const struct json_value *input, size_t contract_bytes, FILE *out,
+    char *error_code, size_t error_code_cap,
+    char *error_message, size_t error_message_cap)
+{
+    if (error_code && error_code_cap) error_code[0] = '\0';
+    if (error_message && error_message_cap) error_message[0] = '\0';
+    if (!input || input->type != JSON_OBJ || !out) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "INVALID_INPUT",
+                        "stream input must be one JSON object");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    if (!rb_stream_cursor_zero(input)) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "INVALID_CURSOR",
+                        "stream cursor must be absent or zero");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    char workspace[PATH_MAX];
+    if (!rb_workspace(input, workspace)) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "WORKSPACE_NOT_CANONICAL",
+                        "workspace must be a canonical absolute directory");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    if (contract_bytes < 512u || contract_bytes > ZCL_COMMAND_LIST_BUDGET)
+        contract_bytes = ZCL_COMMAND_LIST_BUDGET;
+
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_benchmark.v1");
+    struct rb_computation computed;
+    int64_t started_us = platform_time_monotonic_us();
+    if (!rb_compute(input, workspace, &computed, &reply)) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, reply.error.code,
+                        reply.error.message);
+        int rc = reply.exit_code;
+        zcl_command_reply_free(&reply);
+        return rc;
+    }
+    int64_t elapsed_us = platform_time_monotonic_us() - started_us;
+    if (elapsed_us < 0) elapsed_us = 0;
+    const int64_t budget_ms = ZCL_COMMAND_LATENCY_BUDGET_PERSISTENT_MS;
+    const bool budget_exceeded = elapsed_us > budget_ms * 1000;
+    size_t max_count = computed.literal.count > computed.bm25.count
+        ? computed.literal.count : computed.bm25.count;
+    size_t offset = 0, page_index = 0;
+    struct rb_stream_buffer stream = {0};
+    bool ok = true;
+    do {
+        json_free(&reply.data);
+        json_init(&reply.data);
+        size_t page_limit = 0;
+        if (!rb_render_fitted(&reply, &computed, offset, contract_bytes,
+                              &page_limit)) {
+            ok = false;
+            break;
+        }
+        size_t page_span = max_count > offset ? max_count - offset : 0;
+        if (page_span > page_limit) page_span = page_limit;
+        bool has_more = offset + page_span < max_count;
+
+        struct json_value line;
+        json_init(&line);
+        json_set_object(&line);
+        ok = page_index <= INT64_MAX &&
+            json_push_kv_str(
+                &line, "schema",
+                "zcl.dev_retrieval_benchmark_stream_page.v1") &&
+            json_push_kv_str(&line, "command", "dev.retrieval.benchmark") &&
+            json_push_kv_int(&line, "page_index", (int64_t)page_index) &&
+            json_push_kv_bool(&line, "shared_computation", true) &&
+            json_push_kv_int(&line, "ranking_computations", 1) &&
+            json_push_kv_int(&line, "elapsed_us", elapsed_us) &&
+            json_push_kv_int(&line, "elapsed_ms", elapsed_us / 1000) &&
+            json_push_kv_int(&line, "budget_ms", budget_ms) &&
+            json_push_kv_bool(&line, "budget_exceeded", budget_exceeded) &&
+            json_push_kv_str(&line, "data_schema",
+                             "zcl.dev_retrieval_benchmark.v1") &&
+            json_push_kv(&line, "data", &reply.data);
+        char encoded[ZCL_COMMAND_LIST_BUDGET + 1];
+        size_t encoded_len = ok
+            ? json_write(&line, encoded, sizeof(encoded)) : 0;
+        json_free(&line);
+        if (!encoded_len || encoded_len >= sizeof(encoded) ||
+            !rb_stream_append(&stream, encoded, encoded_len) ||
+            !rb_stream_append(&stream, "\n", 1u)) {
+            ok = false;
+            break;
+        }
+        page_index++;
+        if (!has_more) break;
+        if (page_span == 0 || offset > RB_RETAIN_ROWS - page_span) {
+            ok = false;
+            break;
+        }
+        offset += page_span;
+    } while (page_index <= RB_RETAIN_ROWS);
+
+    int rc = ZCL_COMMAND_EXIT_OK;
+    if (!ok || page_index == 0 || page_index > RB_RETAIN_ROWS) {
+        const char *code = reply.error.code[0]
+            ? reply.error.code : "STREAM_RENDER_FAILED";
+        const char *message = reply.error.message[0]
+            ? reply.error.message
+            : "all retrieval pages could not be buffered";
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, code, message);
+        rc = reply.exit_code == ZCL_COMMAND_EXIT_OK
+            ? ZCL_COMMAND_EXIT_INTERNAL : reply.exit_code;
+    } else if (fwrite(stream.bytes, 1, stream.used, out) != stream.used ||
+               fflush(out) != 0) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "STREAM_WRITE_FAILED",
+                        "buffered retrieval pages could not be written");
+        rc = ZCL_COMMAND_EXIT_INTERNAL;
+    }
+    free(stream.bytes);
+    zcl_command_reply_free(&reply);
+    return rc;
 }
 
 static void rb_run(const struct zcl_command_request *request,
