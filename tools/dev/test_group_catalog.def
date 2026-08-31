@@ -7,6 +7,7 @@
 ZCL_TEST_GROUP(hex_codec)
 ZCL_TEST_GROUP(code_inventory)
 ZCL_TEST_GROUP(code_ontology)
+ZCL_TEST_GROUP(code_vector_hint)
 ZCL_TEST_GROUP(base_foundation)
 ZCL_TEST_GROUP(script_tail_poison)
 ZCL_TEST_GROUP(byte_order_codec)
