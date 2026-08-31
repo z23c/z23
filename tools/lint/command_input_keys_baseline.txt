@@ -1,3 +1,4 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # check_command_input_keys.sh — grandfathered read-but-not-declared keys.
 #
 # Format: "<leaf path> <input key>  # why this read cannot reach this leaf".
@@ -18,6 +19,7 @@ app.presentation.publication-status root # handler injects package_root as root 
 app.presentation.publication-status datadir # nested package-show reads datadir only from the private object; publication-status replaces request->input before that call.
 app.presentation.publication-status operation # package-status discovery injects operation into a private RPC object; request->input never reaches that helper.
 app.presentation.release-confirm details # release confirmation injects details=true into its private work-status request so it can reverify the exact proof; request->input never reaches that nested object.
+story.focus details # story focus injects details=true into its private work-status request so roots and context identity can be reverified; request->input never reaches the nested object.
 story.show details # story show injects details=true into its private work-status request so every projected relation has reverified roots; request->input never reaches that nested object.
 story.why details # story why injects details=true into its private work-status request so every causal link has reverified roots; request->input never reaches that nested object.
 story.diff work # story diff injects each separately declared before/after selector as work into two private work-status requests; request->input never reaches either nested work key.
