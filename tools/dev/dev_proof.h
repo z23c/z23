@@ -5,6 +5,7 @@
 #define ZCL_TOOLS_DEV_PROOF_H
 
 #include "dev_proof_receipt.h"
+#include "vcs/build_action.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -30,6 +31,17 @@ struct zcl_dev_proof_status {
     bool receipt_reused;
 };
 
+struct zcl_dev_proof_child_action_inputs_v1 {
+    const char *source_sha256_hex;
+    const char *source_cas_sha3_hex;
+    uint8_t toolchain_capsule_root[32];
+    uint8_t flags_root[32];
+    uint8_t environment_root[32];
+    uint8_t build_graph_root[32];
+    const char *selector;
+    uint32_t selected;
+};
+
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state);
 /* Admit a completed cycle only when its schema, canonical action inputs, and
  * one independently derived fixed-width root per selected proof dimension
@@ -39,6 +51,12 @@ bool zcl_dev_proof_cycle_reuse_admissible(
     const char *proof_inputs_sha3,
     const struct zcl_dev_proof_dimension
         dimensions[ZCL_DEV_PROOF_DIMENSIONS]);
+/* Derive the existing zcl.build_action.v1 identity for one local proof child.
+ * This has no durable task, queue, worker, signing, or admission authority. */
+bool zcl_dev_proof_child_action_v1(
+    const struct zcl_dev_proof_child_action_inputs_v1 *inputs,
+    enum zcl_dev_proof_dimension_id dimension,
+    struct vcs_build_action_v1 *action, uint8_t action_root[32]);
 bool zcl_dev_proof_resolve_pair(const char *repo_root,
                                 const char *requested_local,
                                 const char *requested_base,

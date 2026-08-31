@@ -15,6 +15,7 @@
 #include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
+#include "vcs/build_action.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -72,6 +73,101 @@ static void proof_why(char *why, size_t why_len, const char *message)
 {
     if (why && why_len)
         (void)snprintf(why, why_len, "%s", message ? message : "unknown");
+}
+
+static bool proof_root_nonzero(const uint8_t root[32])
+{
+    uint8_t any = 0;
+    if (!root) return false;
+    for (size_t i = 0; i < 32; i++) any |= root[i];
+    return any != 0;
+}
+
+static const char *proof_dimension_operation(
+    enum zcl_dev_proof_dimension_id dimension)
+{
+    static const char *const operations[ZCL_DEV_PROOF_DIMENSIONS] = {
+        "capability-inventory-generated",
+        "build-only",
+        "lint-fast",
+        "test-exact-cache-proof-contracts",
+    };
+    return dimension >= ZCL_DEV_PROOF_GENERATED &&
+        dimension <= ZCL_DEV_PROOF_TEST ? operations[dimension] : NULL;
+}
+
+static void proof_action_hash_text(struct sha3_256_ctx *sha,
+                                   const char *text)
+{
+    uint8_t len_wire[4];
+    size_t len = strlen(text);
+    zcl_write_u32_le(len_wire, (uint32_t)len);
+    sha3_256_write(sha, len_wire, sizeof(len_wire));
+    sha3_256_write(sha, (const uint8_t *)text, len);
+}
+
+bool zcl_dev_proof_child_action_v1(
+    const struct zcl_dev_proof_child_action_inputs_v1 *inputs,
+    enum zcl_dev_proof_dimension_id dimension,
+    struct vcs_build_action_v1 *action, uint8_t action_root[32])
+{
+    const char *operation = proof_dimension_operation(dimension);
+    const char *selector = inputs ? inputs->selector : NULL;
+    size_t selector_len = selector ? strlen(selector) : 0;
+    if (!inputs || !action || !action_root || !operation ||
+        !inputs->source_sha256_hex || !inputs->source_cas_sha3_hex ||
+        !selector || inputs->selected == 0 || selector_len > UINT32_MAX ||
+        (dimension == ZCL_DEV_PROOF_TEST) != (selector_len != 0) ||
+        !proof_root_nonzero(inputs->toolchain_capsule_root) ||
+        !proof_root_nonzero(inputs->flags_root) ||
+        !proof_root_nonzero(inputs->environment_root) ||
+        !proof_root_nonzero(inputs->build_graph_root))
+        return false;
+    memset(action, 0, sizeof(*action));
+    if (!zcl_hex_decode_lower(inputs->source_sha256_hex,
+                              action->source_sha256, 32) ||
+        !zcl_hex_decode_lower(inputs->source_cas_sha3_hex,
+                              action->source_cas_sha3, 32) ||
+        !proof_root_nonzero(action->source_sha256) ||
+        !proof_root_nonzero(action->source_cas_sha3))
+        return false;
+    struct sha3_256_ctx input;
+    uint8_t number[4];
+    static const uint8_t domain[] =
+        "zcl.dev_proof_child_action_input.v1";
+    sha3_256_init(&input);
+    sha3_256_write(&input, domain, sizeof(domain));
+    zcl_write_u32_le(number, (uint32_t)dimension);
+    sha3_256_write(&input, number, sizeof(number));
+    sha3_256_write(&input, inputs->build_graph_root, 32);
+    zcl_write_u32_le(number, inputs->selected);
+    sha3_256_write(&input, number, sizeof(number));
+    proof_action_hash_text(&input, operation);
+    proof_action_hash_text(&input, selector);
+    sha3_256_finalize(&input, action->input_root_sha3);
+    memcpy(action->toolchain_capsule_sha3,
+           inputs->toolchain_capsule_root, 32);
+    memcpy(action->flags_sha3, inputs->flags_root, 32);
+    memcpy(action->environment_sha3, inputs->environment_root, 32);
+    (void)snprintf(action->target, sizeof(action->target), "%s",
+                   VCS_BUILD_TARGET_V1);
+    (void)snprintf(action->profile, sizeof(action->profile),
+                   "resident-proof-child-v1");
+    const char *workdir = NULL, *output = NULL, *resource = NULL;
+    if (!vcs_build_action_v1_descriptors(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
+            &workdir, &output, &resource))
+        return false;
+    (void)snprintf(action->virtual_workdir,
+                   sizeof(action->virtual_workdir), "%s", workdir);
+    (void)snprintf(action->declared_outputs,
+                   sizeof(action->declared_outputs), "%s", output);
+    (void)snprintf(action->resource_policy,
+                   sizeof(action->resource_policy), "%s", resource);
+    action->sequence = (uint64_t)dimension + 1u;
+    return vcs_build_action_v1_root_for_kind(
+        VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1,
+        action, action_root);
 }
 
 /* Same contract as proof_why, for a refusal that can name the exact thing it

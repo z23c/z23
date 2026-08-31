@@ -1123,6 +1123,101 @@ static int test_ic_dev_proof_receipt_admission(void)
     return failures;
 }
 
+static int test_ic_dev_proof_child_action_identity(void)
+{
+    int failures = 0;
+    TEST("impact composition: proof child action is checkout-independent") {
+        char source[65], cas[65];
+        memset(source, '1', 64);
+        memset(cas, '2', 64);
+        source[64] = '\0';
+        cas[64] = '\0';
+        struct zcl_dev_proof_child_action_inputs_v1 inputs = {
+            .source_sha256_hex = source,
+            .source_cas_sha3_hex = cas,
+            .selector = "build_fabric,vcs_core",
+            .selected = 2,
+        };
+        memset(inputs.toolchain_capsule_root, 3, 32);
+        memset(inputs.flags_root, 4, 32);
+        memset(inputs.environment_root, 5, 32);
+        memset(inputs.build_graph_root, 6, 32);
+        struct vcs_build_action_v1 action_a = {0}, action_b = {0};
+        uint8_t root_a[32], root_b[32];
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &inputs, ZCL_DEV_PROOF_TEST, &action_a, root_a));
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &inputs, ZCL_DEV_PROOF_TEST, &action_b, root_b));
+        ASSERT(memcmp(root_a, root_b, sizeof(root_a)) == 0);
+        ASSERT(memcmp(&action_a, &action_b, sizeof(action_a)) == 0);
+        ASSERT(vcs_build_action_v1_work_kind(
+            VCS_BUILD_ACTION_KIND_RESIDENT_PROOF_CHILD_V1) == 0);
+
+        struct zcl_dev_proof_child_action_inputs_v1 changed = inputs;
+        changed.selected++;
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_TEST, &action_b, root_b));
+        ASSERT(memcmp(root_a, root_b, sizeof(root_a)) != 0);
+        changed = inputs;
+        changed.selector = "build_fabric";
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_TEST, &action_b, root_b));
+        ASSERT(memcmp(root_a, root_b, sizeof(root_a)) != 0);
+
+        uint8_t *mutable_roots[] = {
+            changed.toolchain_capsule_root, changed.flags_root,
+            changed.environment_root, changed.build_graph_root,
+        };
+        for (size_t i = 0; i < sizeof(mutable_roots) / sizeof(mutable_roots[0]);
+             i++) {
+            changed = inputs;
+            uint8_t *root = i == 0 ? changed.toolchain_capsule_root :
+                i == 1 ? changed.flags_root :
+                i == 2 ? changed.environment_root : changed.build_graph_root;
+            root[0] ^= 1u;
+            ASSERT(zcl_dev_proof_child_action_v1(
+                &changed, ZCL_DEV_PROOF_TEST, &action_b, root_b));
+            ASSERT(memcmp(root_a, root_b, sizeof(root_a)) != 0);
+        }
+        (void)mutable_roots;
+
+        char source_changed[65], cas_changed[65];
+        memcpy(source_changed, source, sizeof(source_changed));
+        memcpy(cas_changed, cas, sizeof(cas_changed));
+        source_changed[0] = '3';
+        changed = inputs;
+        changed.source_sha256_hex = source_changed;
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_TEST, &action_b, root_b));
+        ASSERT(memcmp(root_a, root_b, sizeof(root_a)) != 0);
+        cas_changed[0] = '3';
+        changed = inputs;
+        changed.source_cas_sha3_hex = cas_changed;
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_TEST, &action_b, root_b));
+        ASSERT(memcmp(root_a, root_b, sizeof(root_a)) != 0);
+
+        changed = inputs;
+        changed.selector = "";
+        ASSERT(!zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_TEST, &action_b, root_b));
+        changed.selected = 0;
+        ASSERT(!zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_COMPILE, &action_b, root_b));
+        changed.selected = 1;
+        ASSERT(zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_COMPILE, &action_b, root_b));
+        ASSERT(memcmp(root_a, root_b, sizeof(root_a)) != 0);
+        changed.selector = "unexpected";
+        ASSERT(!zcl_dev_proof_child_action_v1(
+            &changed, ZCL_DEV_PROOF_COMPILE, &action_b, root_b));
+        ASSERT(!zcl_dev_proof_child_action_v1(
+            NULL, ZCL_DEV_PROOF_COMPILE, &action_b, root_b));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_resident_proof_queue(void)
 {
     int failures = 0;
@@ -1396,6 +1491,7 @@ int test_impact_composition(void)
     failures += test_ic_dev_proof_contract_is_direct();
     failures += test_ic_lint_helpers_exclude_onion_stress();
     failures += test_ic_dev_proof_receipt_admission();
+    failures += test_ic_dev_proof_child_action_identity();
     failures += test_ic_resident_proof_queue();
     failures += test_ic_cycle_reuse_requires_exact_proof_inputs();
     failures += test_ic_native_compositor_selects_physical_proof();
