@@ -1,4 +1,5 @@
 ---
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 name: c23
 description: >
   Write, fix, and extend Z23 in C23. Use on every source change in this
@@ -30,8 +31,10 @@ the first turn.
 
 ## Loop
 
-1. `git fetch origin main` and stay on current `origin/main`. Do not open
-   GitHub issues.
+1. Inspect existing work and verify the manager-pinned baseline. Parallel
+   workers do not fetch or integrate independently; the single publication
+   authority fetches `origin/main` and reconciles upstream normally. Never
+   rebase, reset, force, or discard another worktree's changes.
 2. Orient with the built binary, not a repo-root recursive search:
 
    ```bash
@@ -53,14 +56,17 @@ the first turn.
 5. Prove with the focused group, not a direct test binary:
 
    ```bash
-   make -j"$(nproc)" t-fast-exact ONLY=<group>
+   make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>
    make lint-fast
    ```
 
-   Green means `ALL TESTS PASSED` is present and `SOME TESTS FAILED` is
-   absent. Never `ZCL_TEST_CACHE=1` for a merge claim.
-6. Fetch `origin/main` again before commit and before push. Commit only
-   owned files. Map new paths in
+   Green means exactly one suite verdict, zero failures, skips, and
+   unobserved groups, and complete ran/reused accounting. Never
+   `ZCL_TEST_CACHE=1` for a merge claim.
+6. Commit only owned files and hand the exact commit to the integrator. The
+   publication authority fetches `origin/main` immediately before integration
+   and push. The installed native pre-push hook admits an exact receipt; it
+   does not run `make pre-push-ci`. Map new paths in
    `app/controllers/include/controllers/agent_impact_rules.def`.
 
 ## Do not

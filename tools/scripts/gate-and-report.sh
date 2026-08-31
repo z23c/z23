@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # Correct gate wrapper: lint then full suite, success keyed on ALL-TESTS-PASSED
 # (never on grep matching a summary line — SOME-TESTS-FAILED matches too).
 # Usage: gate-and-report.sh <lintlog> <testlog>
 #
-# Manual operator/agent tool — intentionally no in-repo caller: it is run by
-# hand (or by an agent) as the self-gate before reporting a lane done. Owning
-# runbook: docs/work/agent-protocol.md (the "self-gates (build + focused
-# tests + make lint)" step) — the PASS-TOKEN, never a grep-match, is the
-# acceptance bar this wraps.
+# Manual release-boundary tool — intentionally no in-repo caller. The
+# PASS-TOKEN and complete suite accounting, never a substring match, are the
+# acceptance bar this wraps. Normal worker handoff uses focused acceptance;
+# see docs/DEVELOPING.md.
 set -u
 LINTLOG="${1:?lintlog}"; TESTLOG="${2:?testlog}"
 cd "$(git rev-parse --show-toplevel)" || exit 3

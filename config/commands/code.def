@@ -1,3 +1,4 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
 /* Hierarchical source-code navigator. Local, read-only, deterministic leaves
  * backed by the in-binary lib/codeindex index (self-rebuilds on open if the
  * source tree is stale). Bounded output — a token-cheap alternative to reading
@@ -10,8 +11,8 @@ ZCL_COMMAND_READY_READ(
     "code.guide", "code", "",
     "How to edit and prove a change in this checkout",
     "The inner coding-agent loop: check the generated capability inventory, "
-    "inspect with code impact/tests, then prove with t-fast ONLY, lint-fast, "
-    "bare full lint plus pre-push-ci at push. It reads no checkout "
+    "inspect with code impact/tests, then prove with t-fast ONLY and lint-fast; "
+    "push admission checks the exact sealed receipt. It reads no checkout "
     "state and never runs a compiler, test, or live-node command.",
     ZCL_COMMAND_LIST_BUDGET,
     "code,guide,develop,proof,lint,t-fast,impact,agent",

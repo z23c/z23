@@ -40,10 +40,13 @@ trap '' PIPE
 # not carry the UCRT64 compiler, make, or flock used by the native Z23 lane.
 # Re-enter once through the qualified MSYS2 shell so an ordinary `git push`
 # proves the same environment as `make windows-acceptance`.
+windows_hook_lane=0
 case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*)
+        windows_hook_lane=1
         if [ "${Z23_PREPUSH_UCRT64:-0}" != "1" ]; then
-            windows_msys2_root=${Z23_WINDOWS_MSYS2_ROOT:-/c/msys64}
+            persisted_msys2_root="$(git config --worktree --get z23.windowsMsys2Root 2>/dev/null || true)"
+            windows_msys2_root=${Z23_WINDOWS_MSYS2_ROOT:-${persisted_msys2_root:-/c/msys64}}
             windows_msys2_bash=$windows_msys2_root/usr/bin/bash.exe
             if [ ! -x "$windows_msys2_bash" ]; then
                 echo "pre-push: MSYS2 UCRT64 shell missing: $windows_msys2_bash" >&2 || true
@@ -154,7 +157,11 @@ mkdir -p "$REPO_ROOT/build" 2>/dev/null || true
 
 echo "pre-push: running local CI gate ($CMD) before push to origin…" >&2 || true
 echo "pre-push: semantic changed-file count: $(wc -l < "$changed_files" | tr -d ' ')." >&2 || true
-echo "pre-push: mapped focused tests for those files; unmapped code fails closed." >&2 || true
+if [ "$windows_hook_lane" = 1 ]; then
+    echo "pre-push: fixed native Windows acceptance catalog; this is not exact-receipt admission." >&2 || true
+else
+    echo "pre-push: mapped focused tests for those files; unmapped code fails closed." >&2 || true
+fi
 echo "pre-push: full-suite/fuzz/coverage lanes run via 'make install-quality-linger'." >&2 || true
 echo "pre-push: bypass one push with 'git push --no-verify' if you must." >&2 || true
 echo "pre-push: verbose CI output -> $LOG_FILE (only a summary prints here)." >&2 || true

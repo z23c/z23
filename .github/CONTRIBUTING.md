@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Contributing to Z23
 
 ## What a good change does here
@@ -34,31 +36,24 @@ content-addressed. The durable statement of this is
 ## Step 0 — set up the checkout
 
 ```bash
-make vendor              # one-time: build the static third-party archives
-make install-hooks       # install checkout-local native receipt hooks
+make setup
 ```
 
-`make vendor` is the only step that needs the network: it fetches pinned source
-tarballs, verifies them against pinned SHA-256 hashes, and compiles them into
-`vendor/lib/`. Plain `make` auto-runs it on a fresh clone, so running it
-explicitly is just a way to get the long part over with first. Afterwards
-builds are offline.
-
-`make install-hooks` is strongly recommended — see
-[What the git hooks do](#what-the-git-hooks-do) below. It starts verification
-after source-changing Git events and keeps build/test work out of push time.
+`make setup` verifies and builds pinned dependencies, installs checkout-local
+native receipt hooks, and primes generated development state. Afterwards,
+ordinary builds are offline.
 
 ## Build and test
 
 ```bash
-make -j"$(nproc)" z23    # public node only (the default goal)
-make -j"$(nproc)" all    # test harness + node + auxiliary tools
+make -j"$(getconf _NPROCESSORS_ONLN)" z23    # public node only (the default goal)
+make -j"$(getconf _NPROCESSORS_ONLN)" all    # test harness + node + auxiliary tools
 make vendor              # build missing vendor/lib archives from pinned sources
-make -j"$(nproc)" build-only          # compile check, no final link
-make -j"$(nproc)" dev-bin             # fast non-LTO local node binary: build/bin/z23-dev
-make -j"$(nproc)" t-fast ONLY=<group> # one fast test group, e.g. make -j"$(nproc)" t-fast ONLY=service_state_driver
+make -j"$(getconf _NPROCESSORS_ONLN)" build-only          # compile check, no final link
+make -j"$(getconf _NPROCESSORS_ONLN)" dev-bin             # fast non-LTO local node binary: build/bin/z23-dev
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group> # one registered test group
 make fast-ci             # cache-aware lint/build/focused-test agent loop
-make -j"$(nproc)" test                # full test suite
+make -j"$(getconf _NPROCESSORS_ONLN)" test                # full test suite
 make lint                # defensive-coding gates (must be clean)
 make ci                  # local full gate: lint + tests + MVP slices + fuzz where available
 ```
@@ -126,9 +121,9 @@ Non-consensus changes never touch `core/`, and this gate will never bother you.
   branch work belongs in a linked worktree. It never inspects your code. In a
   worktree it always exits 0, and `ZCL_LANE_COMMIT_OK=1 git commit` overrides it.
 
-CI runs on the maintainer's own servers, never GitHub Actions, so these hooks
-plus `make ci` are the whole gate — there is nothing that will catch a problem
-for you later in a cloud runner.
+Automated jobs, when enabled, run only on explicitly managed self-hosted
+runners. They consume no GitHub-hosted minutes and do not replace exact local
+receipts or maintainer review.
 
 ## Adding a test
 
@@ -146,12 +141,12 @@ three real tests once sat in the tree for weeks, fully merged, proving nothing.
 Before opening a PR:
 
 1. `make lint` — clean, no new gate violations or baseline regressions.
-2. `make -j"$(nproc)" t-fast ONLY=<group>` for focused groups you touched.
-3. `make -j"$(nproc)" test` for broad shared behavior or before release-sized changes.
+2. `make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=<group>` for focused groups you touched.
+3. `make -j"$(getconf _NPROCESSORS_ONLN)" test` for broad shared behavior or before release-sized changes.
 
-CI runs on the maintainers' own servers (`make ci` — lint + full suite),
-not on GitHub Actions; maintainers run the full gate on every PR before
-merging, so a PR that fails lint or tests will not merge. Keep commits
+Automation uses only maintainers' self-hosted runners; untrusted pull-request
+code is not automatically compiled on persistent machines. Maintainers run
+the required local gates before merging. Keep commits
 honest about what is proven versus scaffolding — the project documents
 incomplete subsystems as incomplete, and PRs are expected to do the same.
 That expectation is partly mechanized: several lint gates exist specifically to

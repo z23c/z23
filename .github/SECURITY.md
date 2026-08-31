@@ -1,3 +1,5 @@
+<!-- Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. -->
+
 # Security Policy
 
 ## Supported status
@@ -26,7 +28,7 @@ integrity checks, and reviewer checklist are documented in
 ## Automated review of pull requests
 
 Every pull request — including from forks — is automatically security-reviewed
-before it can be merged, by two workflows in `.github/workflows/`:
+before it can be merged:
 
 - **`pr-security-review.yml`** runs `tools/scripts/pr_security_scan.sh` over the
   PR diff: consensus divergence from `zclassicd`
@@ -34,15 +36,13 @@ before it can be merged, by two workflows in `.github/workflows/`:
   supply-chain execution (fetch-and-run / decode-and-run / dynamic load / remote
   installs / new submodules + workflows), committed secrets, and dangerous C
   calls. A **HIGH** finding fails the check and blocks the merge.
-- **`pr-security-comment.yml`** posts the verdict as a friendly PR comment.
 
-This is intentionally **fork-safe**. The scan runs on the `pull_request` trigger
-with a **read-only token, no repo secrets, and never executes PR code** (it only
-diffs and greps), so a hostile PR has nothing to steal. The comment is posted by
-the separate `workflow_run` workflow in the trusted base context, which likewise
-**never runs PR code**. We do **not** use `pull_request_target`, which would
-expose secrets to untrusted code. The pass/fail check is the gate and works on
-every PR regardless of origin.
+This is intentionally **fork-safe**. The scan uses `pull_request_target` so the
+workflow and scanner come from the trusted base revision, checks out only the
+base SHA, and fetches the proposed head as inert Git data. Explicit permissions
+are read-only, no repository secrets are exposed, and no pull-request script or
+executable is run. The check result and bounded log are the complete verdict;
+no write-token comment workflow is involved.
 
 ## Reporting a vulnerability
 

@@ -115,6 +115,15 @@ static bool bfc_source_identity_valid(
     if (ok) {
         ok = vcs_manifest_tree_hash(&manifest, checked_root) &&
             memcmp(checked_root, source_root, 32) == 0;
+        for (size_t i = 0; ok && i < manifest.count; i++) {
+            uint8_t *blob = NULL;
+            size_t blob_len = 0;
+            ok = manifest.entries[i].size <= SIZE_MAX &&
+                vcs_object_get(workspace, manifest.entries[i].blob,
+                               VCS_TAG_BLOB, &blob, &blob_len) == 0 &&
+                blob_len == (size_t)manifest.entries[i].size;
+            free(blob);
+        }
         vcs_manifest_free(&manifest);
     }
     vcs_source_manifest_id(wire, wire_len, checked_id);

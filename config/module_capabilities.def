@@ -349,7 +349,7 @@ ZCL_MODULE_CAPABILITY("app/services/src/blog_anchor_transaction_service.c", CAP_
 ZCL_MODULE_CAPABILITY("app/services/src/body_backfill_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/services/src/build_fabric_admission.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/services/src/build_fabric_async.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("app/services/src/build_fabric_cache.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK|CAP_RANDOM, "restores an exact accepted output through a private same-directory staging file with a random collision-resistant name")
+ZCL_MODULE_CAPABILITY("app/services/src/build_fabric_cache.c", CAP_FS_WRITE, "reports refusal diagnostics through an arbitrary stdio stream; private-file, CAS-read, and random-secret wrappers carry authority in their own implementation modules")
 ZCL_MODULE_CAPABILITY("app/services/src/build_fabric_evidence.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/services/src/build_fabric_package_executor.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("app/services/src/build_fabric_runtime.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")

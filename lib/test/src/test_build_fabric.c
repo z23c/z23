@@ -1838,44 +1838,25 @@ static int test_bf_proof_materialization(void)
         ASSERT(vcs_object_put_addressed(
             dir, misaddressed_authority[2], policy_wire,
             sizeof(policy_wire)));
-        struct build_fabric_proof_evaluation rejected = {0};
-        struct db_build_action rejected_action = action;
-        char rejected_action_id[BUILD_FABRIC_ID_HEX + 1];
-        rejected_action.sequence = 100;
-        zcl_hex_encode(misaddressed_authority[0], 32,
-                       rejected_action.task_root_sha3);
-        ASSERT(build_fabric_action_id(
-            &job, &rejected_action, rejected_action_id).ok);
-        (void)snprintf(rejected_action.action_id,
-                       sizeof(rejected_action.action_id), "%s",
-                       rejected_action_id);
-        ASSERT(db_build_action_save(&ndb, &rejected_action));
-        ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
-        rejected_action = action;
-        rejected_action.sequence = 101;
-        zcl_hex_encode(misaddressed_authority[1], 32,
-                       rejected_action.candidate_root_sha3);
-        ASSERT(build_fabric_action_id(
-            &job, &rejected_action, rejected_action_id).ok);
-        (void)snprintf(rejected_action.action_id,
-                       sizeof(rejected_action.action_id), "%s",
-                       rejected_action_id);
-        ASSERT(db_build_action_save(&ndb, &rejected_action));
-        ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
-        rejected_action = action;
-        rejected_action.sequence = 102;
-        zcl_hex_encode(misaddressed_authority[2], 32,
-                       rejected_action.proof_policy_root_sha3);
-        ASSERT(build_fabric_action_id(
-            &job, &rejected_action, rejected_action_id).ok);
-        (void)snprintf(rejected_action.action_id,
-                       sizeof(rejected_action.action_id), "%s",
-                       rejected_action_id);
-        ASSERT(db_build_action_save(&ndb, &rejected_action));
-        ASSERT(!build_fabric_proof_evaluate_readonly(
-            &ndb, dir, rejected_action.action_id, now, &rejected).ok);
+        for (size_t i = 0; i < 3; i++) {
+            struct db_build_job bad_job = job;
+            struct db_build_action bad_action = action;
+            bad_action.sequence = (int64_t)i + 1;
+            if (i == 0)
+                zcl_hex_encode(misaddressed_authority[i], 32,
+                               bad_action.task_root_sha3);
+            else if (i == 1)
+                zcl_hex_encode(misaddressed_authority[i], 32,
+                               bad_action.candidate_root_sha3);
+            else
+                zcl_hex_encode(misaddressed_authority[i], 32,
+                               bad_action.proof_policy_root_sha3);
+            ASSERT(bf_canonicalize(&bad_job, &bad_action));
+            ASSERT(build_fabric_plan(&ndb, &bad_job, &bad_action).ok);
+            struct build_fabric_proof_evaluation rejected = {0};
+            ASSERT(!build_fabric_proof_evaluate_readonly(
+                &ndb, dir, bad_action.action_id, now, &rejected).ok);
+        }
 
         struct db_build_worker worker;
         bf_worker(&worker);
@@ -2050,6 +2031,25 @@ static int test_bf_proof_materialization(void)
         ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
         ASSERT_STR_EQ(observed.trust_state, "REMOTE_OBSERVED");
 
+        struct db_build_worker alias_worker = worker;
+        uint8_t alias_pubkey[32];
+        memset(alias_pubkey, 0xa7, sizeof(alias_pubkey));
+        bf_worker_id_from_pubkey(alias_pubkey, alias_worker.worker_id);
+        zcl_hex_encode(alias_pubkey, sizeof(alias_pubkey),
+                       alias_worker.signer_pubkey);
+        ASSERT(db_build_worker_save(&ndb, &alias_worker));
+        (void)snprintf(row.worker_id, sizeof(row.worker_id), "%s",
+                       alias_worker.worker_id);
+        ASSERT(db_build_receipt_save(&ndb, &row));
+        struct build_fabric_proof_evaluation corrupted_projection = {0};
+        ASSERT(build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &corrupted_projection).ok);
+        ASSERT_EQ(corrupted_projection.valid_receipts, 0);
+        (void)snprintf(row.worker_id, sizeof(row.worker_id), "%s",
+                       worker.worker_id);
+        ASSERT(db_build_receipt_save(&ndb, &row));
+        db_changes = sqlite3_total_changes(ndb.db);
+
         struct build_fabric_proof_evaluation materialized = {0};
         ASSERT(build_fabric_proof_materialize(
             &ndb, dir, action.action_id, now, &materialized).ok);
@@ -2097,6 +2097,27 @@ static int test_bf_proof_materialization(void)
                       materialized.proof_set_root_sha3);
         ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
         ASSERT_STR_EQ(observed.trust_state, "QUORUM_MATCHED");
+
+        struct db_build_receipt filler = row;
+        filler.work_receipt_sha3[0] = '\0';
+        filler.created_at = now + 1;
+        for (size_t i = 0; i < VCS_ZCODE_PROOF_SET_MAX_RECEIPTS; i++) {
+            uint8_t filler_root[32];
+            sha3_256((const uint8_t *)&i, sizeof(i), filler_root);
+            zcl_hex_encode(filler_root, sizeof(filler_root), filler.receipt_id);
+            if (strcmp(filler.receipt_id, row.receipt_id) == 0)
+                continue;
+            ASSERT(db_build_receipt_save(&ndb, &filler));
+            if (i + 2u == VCS_ZCODE_PROOF_SET_MAX_RECEIPTS) {
+                struct build_fabric_proof_evaluation bounded = {0};
+                ASSERT(build_fabric_proof_evaluate_readonly(
+                    &ndb, dir, action.action_id, now, &bounded).ok);
+                ASSERT_EQ(bounded.valid_receipts, 1);
+            }
+        }
+        struct build_fabric_proof_evaluation truncated = {0};
+        ASSERT(!build_fabric_proof_evaluate_readonly(
+            &ndb, dir, action.action_id, now, &truncated).ok);
         node_db_close(&ndb);
         test_rm_rf(dir);
         PASS();

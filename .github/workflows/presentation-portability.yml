@@ -1,18 +1,10 @@
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # Cross-platform proof for the reusable libzclpresentation source package.
 # It intentionally builds no node code and uses no secrets or write token.
 
 name: Presentation portability
 
 on:
-  pull_request:
-    paths:
-      - 'lib/presentation/**'
-      - 'lib/encoding/src/qr.c'
-      - 'lib/encoding/src/qrcodegen_backend.c'
-      - 'vendor/rgfw/**'
-      - 'vendor/qrcodegen/**'
-      - 'vendor/typography/**'
-      - '.github/workflows/presentation-portability.yml'
   push:
     branches: [main]
     paths:
@@ -31,20 +23,20 @@ permissions:
 jobs:
   link:
     name: libzclpresentation (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Linux
-            os: ubuntu-latest
+            runner: [self-hosted, linux, x64, z23-platform]
             libs: -ldl -lm
           - name: Windows
-            os: windows-latest
+            runner: [self-hosted, windows, x64, z23-platform]
             libs: -luser32 -lgdi32 -lshell32 -lole32
           - name: macOS
-            os: macos-latest
+            runner: [self-hosted, macos, arm64, z23-platform]
             libs: -framework Cocoa -framework CoreGraphics -framework QuartzCore -framework CoreVideo
     steps:
       - uses: actions/checkout@v5

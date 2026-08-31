@@ -595,7 +595,7 @@ static int test_guide_tree_render(void)
             "\"start_command\":\"z23 code impact <file.c>\","
             "\"proof_command\":\"make lint-fast\","
             "\"lint_command\":\"make lint-fast\","
-            "\"push_command\":\"make pre-push-ci\","
+            "\"push_command\":\"git push origin HEAD:main\","
             "\"never\":\"test_zcl\"}}";
         struct zcl_cli_render_env e = cr_env(80, false);
         char out[8192];
@@ -604,7 +604,7 @@ static int test_guide_tree_render(void)
         ASSERT(n > 0);
         ASSERT(strstr(out, "code.guide") != NULL);
         ASSERT(strstr(out, "z23 code impact <file.c>") != NULL);
-        ASSERT(strstr(out, "make pre-push-ci") != NULL);
+        ASSERT(strstr(out, "git push origin HEAD:main") != NULL);
         ASSERT(strstr(out, "start_command") == NULL);
         ASSERT(strstr(out, "\"schema\"") == NULL);
         ASSERT(cr_max_line_width(out) <= 80);
