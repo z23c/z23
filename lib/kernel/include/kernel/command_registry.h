@@ -29,8 +29,11 @@ extern "C" {
  * Raised 1536 -> 1792: the `zcode` and `metaverse` roots consumed that
  * headroom, and the `yardsale` root (for-sale-by-owner signed ads) pushed
  * the eleven-root menu past 1536 — same fixed 5-field summary, legitimate
- * growth. 1792 leaves roughly one more root of headroom. */
-#define ZCL_COMMAND_ROOT_BUDGET 1792U
+ * growth. 1792 left roughly one root of headroom.
+ * Raised 1792 -> 2048: the thirteenth root is StoryGraph, the bounded causal
+ * view over canonical ZCODE development evidence. The root document still
+ * emits the same fixed child rows; 2048 preserves one bounded growth slot. */
+#define ZCL_COMMAND_ROOT_BUDGET 2048U
 /* Raised 1600 -> 2048: each branch menu lists its immediate children as a
  * fixed 5-field summary (path, summary, risk, latency, availability), so a
  * branch's size grows one summary per leaf. The `code` navigator branch reached
@@ -130,7 +133,9 @@ enum zcl_command_latency {
 /* >= the compiled catalog's leaf count; sized with headroom for the per-leaf
  * latency-sample ring (OS-B2 §2). config/src/command_catalog.c asserts against
  * this at compile time (size guard). */
-#define ZCL_COMMAND_LATENCY_TABLE_MAX 768U
+/* Sized above the declarative catalog with deliberate growth room. The config
+ * catalog has a compile-time assertion against this fixed side table. */
+#define ZCL_COMMAND_LATENCY_TABLE_MAX 1024U
 
 /* Maps a leaf's declared `latency` enum to its dispatch budget in ms. Pure,
  * total: an out-of-range value falls back to the PERSISTENT/900ms ceiling,

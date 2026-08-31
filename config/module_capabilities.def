@@ -1088,6 +1088,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_zcode_toolchain_command.c", CAP_FS_R
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_run_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_work_transport_command.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_story_command.c", CAP_NONE, "pure causal projection and JSON composition; the nested existing zcode.work.status handler owns and declares canonical CAS/ledger reads")
 ZCL_MODULE_CAPABILITY("tools/command/native_zdesc_command.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zendp_command.c", CAP_FS_READ|CAP_NETWORK|CAP_FS_WRITE, "native handlers for `zcode endpoint`: the signed endpoint publisher dials the network to announce itself")
 ZCL_MODULE_CAPABILITY("tools/command/native_zses_command.c", CAP_FS_READ|CAP_CLOCK, "")

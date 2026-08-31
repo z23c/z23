@@ -1589,6 +1589,10 @@ void zcl_native_handle_zcode_work_status(
                    false, false);
         free(goal); vcs_zcode_task_index_free(index); return;
     }
+    bool context_ambiguous = false;
+    const struct vcs_zcode_task_context_entry *agent_context =
+        vcs_zcode_task_index_context_for_task(
+            index, entry->task_root_hex, &context_ambiguous);
     char work_id[32];
     (void)snprintf(work_id, sizeof(work_id), "work-%.12s",
                    entry->task_root_hex);
@@ -1847,6 +1851,10 @@ void zcl_native_handle_zcode_work_status(
         json_push_kv_str(&expert, "task_root", entry->task_root_hex) &&
         json_push_kv_str(&expert, "source_root", entry->source_root_hex) &&
         json_push_kv_str(&expert, "goal_root", entry->goal_root_hex) &&
+        json_push_kv_str(&expert, "agent_context_root",
+                         agent_context ? agent_context->context_root_hex : "") &&
+        json_push_kv_bool(&expert, "agent_context_ambiguous",
+                          context_ambiguous) &&
         json_push_kv_str(&expert, "proof_policy_root",
                          entry->proof_policy_root_hex) &&
         json_push_kv_str(&expert, "toolchain_capsule_root",
@@ -1857,10 +1865,14 @@ void zcl_native_handle_zcode_work_status(
                              : proof.action_root) &&
         json_push_kv_str(&expert, "candidate_root",
                          entry->latest_candidate_root_hex) &&
+        json_push_kv_str(&expert, "candidate_source_root",
+                         entry->latest_candidate_source_root_hex) &&
         json_push_kv_str(&expert, "patch_root",
                          entry->latest_patch_root_hex) &&
         json_push_kv_str(&expert, "work_receipt_root",
                          entry->latest_work_receipt_hex) &&
+        json_push_kv_str(&expert, "output_root",
+                         entry->latest_receipt_output_root_hex) &&
         json_push_kv_str(&expert, "lane_receipt_root",
                          entry->latest_lane_receipt_hex) &&
         json_push_kv_str(&expert, "proof_set_root",

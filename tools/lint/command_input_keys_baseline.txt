@@ -18,6 +18,10 @@ app.presentation.publication-status root # handler injects package_root as root 
 app.presentation.publication-status datadir # nested package-show reads datadir only from the private object; publication-status replaces request->input before that call.
 app.presentation.publication-status operation # package-status discovery injects operation into a private RPC object; request->input never reaches that helper.
 app.presentation.release-confirm details # release confirmation injects details=true into its private work-status request so it can reverify the exact proof; request->input never reaches that nested object.
+story.show details # story show injects details=true into its private work-status request so every projected relation has reverified roots; request->input never reaches that nested object.
+story.why details # story why injects details=true into its private work-status request so every causal link has reverified roots; request->input never reaches that nested object.
+story.diff work # story diff injects each separately declared before/after selector as work into two private work-status requests; request->input never reaches either nested work key.
+story.diff details # story diff injects details=true into both private work-status requests so changed evidence remains root-visible; request->input never reaches either nested object.
 zcode.science.fetch kind      # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch namespace # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch semantic_root # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.

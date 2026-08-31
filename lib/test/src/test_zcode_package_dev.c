@@ -341,6 +341,8 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
         size_t compiling = 0, profile = 0, refused = 0, accepted = 0;
         uint64_t selected_bytes = 0, total_bytes = 0, context_us = 0;
         uint64_t model_context_bytes = 0;
+        size_t story_projection_bytes = 0, story_full_bytes = 0;
+        size_t story_source_status_bytes = 0;
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             struct json_value input;
             json_init(&input); json_set_object(&input);
@@ -443,6 +445,8 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                 ASSERT(json_push_kv_str(&input, "workspace",
                                         roots[cases[i].project]));
                 ASSERT(json_push_kv_str(&input, "work", work_id));
+                if (i == 0)
+                    ASSERT(json_push_kv_bool(&input, "details", true));
                 request.input = &input;
                 zcl_command_reply_init(&reply,
                                        "zcl.zcode_benchmark_status.v1");
@@ -455,7 +459,80 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                 ASSERT(strcmp(json_get_str(json_get(&reply.data, "stage")),
                               "Accepted") == 0);
                 ASSERT(json_get(&reply.data, "next_safe_command") != NULL);
+                if (i == 0)
+                    story_source_status_bytes = json_write(
+                        &reply.data, NULL, 0);
                 zcl_command_reply_free(&reply); json_free(&input);
+
+                if (i == 0) {
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace",
+                                            roots[cases[i].project]));
+                    ASSERT(json_push_kv_str(&input, "work", work_id));
+                    request.input = &input; request.view = "normal";
+                    zcl_command_reply_init(&reply, "zcl.story_show_test.v1");
+                    zcl_native_handle_story_show(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    ASSERT(strcmp(json_get_str(json_get(&reply.data, "status")),
+                                  "UNKNOWN") == 0);
+                    ASSERT(!json_get_bool(json_get(&reply.data, "complete")));
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "largest_missing_relation")),
+                                  "app_runs") == 0);
+                    ASSERT(json_size(json_get(&reply.data, "events")) == 7);
+                    story_projection_bytes = json_write(
+                        &reply.data, NULL, 0);
+                    ASSERT(story_projection_bytes < ZCL_COMMAND_LIST_BUDGET);
+                    zcl_command_reply_free(&reply); json_free(&input);
+
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace",
+                                            roots[cases[i].project]));
+                    ASSERT(json_push_kv_str(&input, "work", work_id));
+                    request.input = &input; request.view = "full";
+                    zcl_command_reply_init(&reply,
+                                           "zcl.story_show_full_test.v1");
+                    zcl_native_handle_story_show(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    story_full_bytes = json_write(&reply.data, NULL, 0);
+                    ASSERT(story_full_bytes > story_projection_bytes);
+                    zcl_command_reply_free(&reply); json_free(&input);
+
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace",
+                                            roots[cases[i].project]));
+                    ASSERT(json_push_kv_str(&input, "work", work_id));
+                    ASSERT(json_push_kv_str(&input, "event",
+                                            "user_accepts"));
+                    request.input = &input; request.view = "normal";
+                    zcl_command_reply_init(&reply, "zcl.story_why_test.v1");
+                    zcl_native_handle_story_why(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    ASSERT(strcmp(json_get_str(json_get(&reply.data, "status")),
+                                  "UNKNOWN") == 0);
+                    ASSERT(json_size(json_get(&reply.data, "causal_chain")) ==
+                           7);
+                    zcl_command_reply_free(&reply); json_free(&input);
+
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace",
+                                            roots[cases[i].project]));
+                    ASSERT(json_push_kv_str(&input, "before", work_id));
+                    ASSERT(json_push_kv_str(&input, "after", work_id));
+                    request.input = &input; request.view = "normal";
+                    zcl_command_reply_init(&reply, "zcl.story_diff_test.v1");
+                    zcl_native_handle_story_diff(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    ASSERT(strcmp(json_get_str(json_get(&reply.data, "status")),
+                                  "PROVED") == 0);
+                    ASSERT(json_size(json_get(
+                               &reply.data, "added_event_roots")) == 0);
+                    ASSERT(json_size(json_get(
+                               &reply.data, "removed_event_roots")) == 0);
+                    ASSERT(json_size(json_get(
+                               &reply.data, "changed_event_roots")) == 0);
+                    zcl_command_reply_free(&reply); json_free(&input);
+                }
 
                 /* One lifecycle fact, one interpretation: with the work
                  * PROVEN, run is an idempotent observation of the accepted
@@ -491,17 +568,27 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
         ASSERT(selected_bytes > 0 && selected_bytes < total_bytes);
         ASSERT(model_context_bytes > selected_bytes);
         ASSERT(context_us > 0);
+        ASSERT(story_projection_bytes > 0 && story_full_bytes > 0 &&
+               story_source_status_bytes > 0);
         int64_t benchmark_elapsed =
             platform_time_monotonic_us() - benchmark_started;
         ASSERT(benchmark_elapsed > 0);
         printf("benchmark: tasks=12 projects=3 compiling=%zu profile=%zu "
                "accepted=%zu refused=%zu context=%llu/%llu bytes "
-               "model_context_bytes=%llu context_us=%llu elapsed_us=%llu\n",
+               "model_context_bytes=%llu context_us=%llu "
+               "story_bytes=%zu story_full_bytes=%zu "
+               "story_context_saved_pct=%zu "
+               "story_source_status_bytes=%zu "
+               "elapsed_us=%llu\n",
                compiling, profile, accepted, refused,
                (unsigned long long)selected_bytes,
                (unsigned long long)total_bytes,
                (unsigned long long)model_context_bytes,
                (unsigned long long)context_us,
+               story_projection_bytes, story_full_bytes,
+               (story_full_bytes - story_projection_bytes) * 100u /
+                   story_full_bytes,
+               story_source_status_bytes,
                (unsigned long long)benchmark_elapsed);
         for (int p = 0; p < 3; p++) {
             ASSERT(vcs_tree_capture_path(roots[p], source_after) == VCS_OK);

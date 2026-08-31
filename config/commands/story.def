@@ -1,0 +1,63 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* StoryGraph is a read-only explanation layer over canonical ZCODE objects.
+ * It owns no event store and never promotes absence into proof. */
+
+ZCL_COMMAND_BRANCH("story", "", "Rooted causal views of development work",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "story.show", "story", "",
+    "Show one development work item as an exact-root causal story",
+    "A bounded read-only projection of the canonical ZCODE task, context, "
+    "candidate, work receipt, proof set, and acceptance lane. Every relation "
+    "carries exact roots and ontology status; absent application-run evidence "
+    "is UNKNOWN, never inferred from a build or test.", ZCL_COMMAND_LIST_BUDGET,
+    "story,graph,development,evidence,causal,ontology,zcode",
+    "zcl.story_show.input.v1", "zcl.story_show.v1",
+    "workspace,work,datadir", "work",
+    "z23 story show work-<task-prefix>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_story_show)
+
+ZCL_COMMAND_READY_READ(
+    "story.why", "story", "",
+    "Explain the exact causal chain for one development event",
+    "Resolves a relation name or exact event root inside the same canonical "
+    "ZCODE projection and returns its ordered rooted causes. Missing causes, "
+    "unknown targets, and UNKNOWN or INCOMPLETE evidence stay explicit.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "story,why,cause,development,evidence,ontology,zcode",
+    "zcl.story_why.input.v1", "zcl.story_why.v1",
+    "workspace,work,datadir,event", "work,event",
+    "z23 story why work-<task-prefix> user_accepts",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_story_why)
+
+ZCL_COMMAND_READY_READ(
+    "story.diff", "story", "",
+    "Diff two exact-root development stories",
+    "Rebuilds two canonical ZCODE projections and reports added, removed, and "
+    "status-or-evidence-changed event identities by exact root. Comparison "
+    "success does not promote either story's UNKNOWN or INCOMPLETE facts.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "story,diff,development,evidence,roots,ontology,zcode",
+    "zcl.story_diff.input.v1", "zcl.story_diff.v1",
+    "workspace,before,after,datadir", "before,after",
+    "z23 story diff work-<before-prefix> work-<after-prefix>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_story_diff)
