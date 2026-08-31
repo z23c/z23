@@ -276,6 +276,57 @@ static void cj_check_network_has_no_names(enum chain_network net,
     CJ_CHECK(nm, bad == 0);
 }
 
+/* Mutation fixture for the P2 find selector.  The generated relocatable
+ * aggregate is exactly EPOCH/restart-base.o; a constituent production object
+ * with the same basename below that root must remain visible. */
+static bool cj_restart_aggregate_selector_selftest(void)
+{
+    char dir[512];
+    char nested_dir[576];
+    char aggregate[640];
+    char constituent[640];
+    char cmd[1600];
+    char got[704] = {0};
+    bool ok = false;
+
+    test_make_tmpdir(dir, sizeof(dir), "cold_join_selector", "epoch");
+    snprintf(nested_dir, sizeof(nested_dir), "%s/app", dir);
+    snprintf(aggregate, sizeof(aggregate), "%s/restart-base.o", dir);
+    snprintf(constituent, sizeof(constituent), "%s/app/restart-base.o", dir);
+    if (mkdir(nested_dir, 0700) != 0)
+        goto out;
+    FILE *fp = fopen(aggregate, "wb");
+    if (!fp)
+        goto out;
+    if (fclose(fp) != 0)
+        goto out;
+    fp = fopen(constituent, "wb");
+    if (!fp)
+        goto out;
+    if (fclose(fp) != 0)
+        goto out;
+
+    int n = snprintf(cmd, sizeof(cmd),
+                     "find '%s' -name '*.o' ! -path '%s/restart-base.o'"
+                     " -print 2>/dev/null",
+                     dir, dir);
+    if (n < 0 || (size_t)n >= sizeof(cmd))
+        goto out;
+    fp = popen(cmd, "r");
+    if (!fp)
+        goto out;
+    bool one_line = fgets(got, sizeof(got), fp) != NULL;
+    bool no_second_line = fgetc(fp) == EOF;
+    int close_rc = pclose(fp);
+    got[strcspn(got, "\r\n")] = '\0';
+    ok = one_line && no_second_line && close_rc == 0 &&
+         strcmp(got, constituent) == 0;
+
+out:
+    test_rm_rf(dir);
+    return ok;
+}
+
 /* ── P2 helper: scan Z23's OWN object files, not the linked blob ─────────
  * The shipped binary contains a whole static OpenSSL. The question that
  * matters is not whether that code exists but whether any Z23 code reaches
@@ -336,9 +387,9 @@ static long cj_count_trust_store_refs(char *where, size_t where_n,
     {
         char ccmd[768];
         snprintf(ccmd, sizeof(ccmd),
-                 "find '%s' -name '*.o' ! -name 'restart-base.o'"
+                 "find '%s' -name '*.o' ! -path '%s/restart-base.o'"
                  " -not -path '*/lib/test/*' 2>/dev/null"
-                 " | wc -l", root);
+                 " | wc -l", root, root);
         FILE *cf = popen(ccmd, "r");
         if (!cf) {
             snprintf(where, where_n, "popen(find) failed");
@@ -365,10 +416,10 @@ static long cj_count_trust_store_refs(char *where, size_t where_n,
      * is not shipped. */
     char cmd[4096];
     int n = snprintf(cmd, sizeof(cmd),
-                     "find '%s' -name '*.o' ! -name 'restart-base.o'"
+                     "find '%s' -name '*.o' ! -path '%s/restart-base.o'"
                      " -not -path '*/lib/test/*' -print0"
                      " | xargs -0 nm -u --print-file-name 2>/dev/null"
-                     " | grep -cwE 'U (", root);
+                     " | grep -cwE 'U (", root, root);
     if (n < 0 || (size_t)n >= sizeof(cmd))
         return -1;
     for (size_t i = 0;
@@ -517,6 +568,9 @@ int test_cold_join_sovereign(void)
     {
         char where[512] = {0};
         long scanned = 0;
+        CJ_CHECK("P2 restart aggregate exclusion keeps a same-named "
+                 "constituent production object",
+                 cj_restart_aggregate_selector_selftest());
         long refs = cj_count_trust_store_refs(where, sizeof(where), &scanned);
         if (refs < 0) {
             CJ_UNPROVEN("P2 no Z23 object references a TLS-client/trust-store "
