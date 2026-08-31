@@ -140,8 +140,15 @@ This is strong groundwork, not an omniscience claim. The source-universe
 observer currently records candidate readings but cannot yet prove every
 canonical path projection, so it reports unverified or incomplete. Horn rules
 and the canonical `isa` and `genls` taxonomy are admitted as exact rooted
-objects; general bounded fixed-point execution remains unfinished, and formula
-execution currently accepts exact-tier predicates only.
+objects. The low-level IO-free library now saturates admitted,
+range-restricted Horn rules to a bounded fixed point over a locally revalidated
+manifest closure; positive and explicit-negative derivations remain
+independent in the evaluator, while the current executable fixture proves
+their independent observation; imported facts are visible only through exact
+context roots. Executable negative-rule and equality-constraint fixtures are
+still required before those admitted Horn forms are claimed end to end.
+The separate general-formula evaluator still accepts exact-tier predicates,
+and native command/service exposure of Horn queries remains unfinished.
 
 Optional signed-int8 concept-card vectors are strictly `MODEL_HINT` evidence.
 They may propose or order fuzzy candidates, but cannot prove identity, truth,

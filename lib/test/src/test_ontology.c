@@ -1063,7 +1063,11 @@ static int test_ontology_formula_language(void)
         ASSERT(zcl_ontology_derivation_v1_root(
             &derivation, derivation_root));
         derivation.incomplete_reason =
-            ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED + 1;
+            ZCL_ONTOLOGY_REASON_HORN_CONTEXT_UNSUPPORTED;
+        ASSERT(!zcl_ontology_derivation_v1_root(
+            &derivation, derivation_root));
+        derivation.incomplete_reason =
+            ZCL_ONTOLOGY_REASON_HORN_CONTEXT_UNSUPPORTED + 1;
         ASSERT(!zcl_ontology_derivation_v1_root(
             &derivation, derivation_root));
 

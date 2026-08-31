@@ -20,6 +20,10 @@ enum {
         ZCL_ONTOLOGY_MAX_VARIABLES * ZCL_ONTOLOGY_MAX_CONTEXTS,
     ZCL_ONTOLOGY_MAX_DOMAIN_VALUES = 64,
     ZCL_ONTOLOGY_MAX_PREDICATES = 64,
+    ZCL_ONTOLOGY_MAX_HORN_RULES = 64,
+    ZCL_ONTOLOGY_MAX_HORN_FORMULAS = 64,
+    ZCL_ONTOLOGY_MAX_HORN_TERMS = 256,
+    ZCL_ONTOLOGY_MAX_HORN_FACTS = 128,
     ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES = 32768,
     ZCL_ONTOLOGY_HORN_RULE_WIRE_BYTES = 136,
     ZCL_ONTOLOGY_MANIFEST_WIRE_BYTES = 528,
@@ -210,6 +214,8 @@ struct zcl_ontology_budget_v1 {
 typedef uint64_t (*zcl_ontology_elapsed_us_fn)(void *context);
 
 struct zcl_ontology_evaluator;
+struct zcl_ontology_manifest_v1;
+struct zcl_ontology_manifest_inputs_v1;
 
 struct zcl_ontology_formula_query_v1 {
     uint8_t universe_root[32];
@@ -226,6 +232,34 @@ struct zcl_ontology_formula_query_v1 {
     size_t coverage_count;
     const struct zcl_ontology_domain_v1 *domains;
     size_t domain_count;
+    const struct zcl_ontology_budget_v1 *budget;
+    zcl_ontology_elapsed_us_fn elapsed_us;
+    void *elapsed_context;
+};
+
+/* A Horn query borrows one already canonical manifest closure. All pointers
+ * remain caller-owned, immutable, and valid for the synchronous call,
+ * including while elapsed_us runs. Evaluator handles are mutable,
+ * non-threadsafe, and non-reentrant. memory_limit_bytes accounts for the
+ * declared borrowed closure plus fixed evaluator storage; step_limit charges
+ * a deterministic conservative admission cost and evaluator traversal. The
+ * evaluator
+ * revalidates the closure before using it; a manifest root is never treated as
+ * evidence by itself. Rules rooted in the primary context may consume facts
+ * from its explicit, root-bound imports and derive only into that context. */
+struct zcl_ontology_horn_query_v1 {
+    uint16_t schema_version;
+    uint16_t reserved;
+    uint8_t universe_root[32];
+    uint8_t context_root[32];
+    uint8_t predicate_root[32];
+    uint8_t arity;
+    uint8_t reserved_bytes[7];
+    uint8_t argument_roots[ZCL_ONTOLOGY_MAX_ARITY][32];
+    const uint8_t (*import_context_roots)[32];
+    size_t import_count;
+    const struct zcl_ontology_manifest_v1 *manifest;
+    const struct zcl_ontology_manifest_inputs_v1 *inputs;
     const struct zcl_ontology_budget_v1 *budget;
     zcl_ontology_elapsed_us_fn elapsed_us;
     void *elapsed_context;
@@ -265,6 +299,10 @@ enum zcl_ontology_incomplete_reason {
     ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED = 22,
     ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED = 23,
     ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED = 24,
+    /* Append-only v1 reasons. Older validators reject them fail-closed. */
+    ZCL_ONTOLOGY_REASON_MANIFEST_INVALID = 25,
+    ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID = 26,
+    ZCL_ONTOLOGY_REASON_HORN_CONTEXT_UNSUPPORTED = 27,
 };
 
 struct zcl_ontology_query_v1 {
@@ -316,6 +354,32 @@ struct zcl_ontology_derivation_v1 {
     uint8_t universe_root[32];
     uint8_t context_root[32];
     uint8_t formula_root[32];
+    uint8_t budget_root[32];
+    uint8_t evidence_manifest_root[32];
+    uint8_t parent_manifest_root[32];
+    uint8_t evaluator_root[32];
+};
+
+/* Horn entailment is rooted separately from formula evaluation so a typed
+ * zcl.ontology_horn_query.v1 root is never mislabeled as a formula root. */
+struct zcl_ontology_horn_derivation_v1 {
+    uint16_t schema_version;
+    uint8_t status;
+    uint8_t observed_positive;
+    uint8_t observed_negative;
+    uint8_t complete;
+    uint8_t incomplete_reason;
+    uint8_t reserved_byte;
+    uint16_t reserved;
+    uint32_t missing_coverage_mask;
+    uint64_t facts_examined;
+    uint64_t steps_taken;
+    uint64_t derivations_produced;
+    uint32_t max_recursion_depth;
+    uint32_t parent_count;
+    uint8_t universe_root[32];
+    uint8_t context_root[32];
+    uint8_t query_root[32];
     uint8_t budget_root[32];
     uint8_t evidence_manifest_root[32];
     uint8_t parent_manifest_root[32];
@@ -420,6 +484,9 @@ bool zcl_ontology_budget_v1_root(
     const struct zcl_ontology_budget_v1 *budget, uint8_t out[32]);
 bool zcl_ontology_derivation_v1_root(
     const struct zcl_ontology_derivation_v1 *derivation, uint8_t out[32]);
+bool zcl_ontology_horn_derivation_v1_root(
+    const struct zcl_ontology_horn_derivation_v1 *derivation,
+    uint8_t out[32]);
 bool zcl_ontology_horn_rule_v1_encode(
     const struct zcl_ontology_horn_rule_v1 *rule, uint8_t *out,
     size_t out_size);
@@ -465,6 +532,13 @@ bool zcl_ontology_evaluate_formula_v1(
     const struct zcl_ontology_formula_v1 *formula,
     const struct zcl_ontology_formula_query_v1 *query,
     struct zcl_ontology_result_v1 *out);
+bool zcl_ontology_evaluate_horn_v1(
+    struct zcl_ontology_evaluator *evaluator,
+    const struct zcl_source_universe_v1 *universe,
+    const struct zcl_ontology_horn_query_v1 *query,
+    struct zcl_ontology_result_v1 *out);
+bool zcl_ontology_horn_query_v1_root(
+    const struct zcl_ontology_horn_query_v1 *query, uint8_t out[32]);
 bool zcl_ontology_evaluate_atom_v1(
     const struct zcl_source_universe_v1 *universe,
     const struct zcl_ontology_predicate_v1 *predicate,

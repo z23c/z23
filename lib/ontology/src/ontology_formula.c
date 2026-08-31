@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Canonical finite formulas and a bounded paraconsistent evaluator. */
 #include "ontology/ontology.h"
+#include "ontology_internal.h"
 
 #include "base/bytes.h"
 #include "base/serialize_le.h"
@@ -8,15 +9,6 @@
 
 #include <stdint.h>
 #include <string.h>
-
-enum { ZCL_ONTOLOGY_EVALUATOR_MAGIC = 0x6f6e7431u };
-
-struct zcl_ontology_evaluator {
-    uint32_t magic;
-    bool bound[ZCL_ONTOLOGY_MAX_VARIABLES];
-    uint8_t bindings[ZCL_ONTOLOGY_MAX_VARIABLES][32];
-    uint8_t predicate_roots[ZCL_ONTOLOGY_MAX_PREDICATES][32];
-};
 
 static_assert(sizeof(struct zcl_ontology_evaluator) <=
               ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES,
@@ -89,6 +81,12 @@ static const char *formula_reason_string(
         return "enumeration_evidence_unverified";
     case ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED:
         return "type_evidence_unverified";
+    case ZCL_ONTOLOGY_REASON_MANIFEST_INVALID:
+        return "manifest_invalid";
+    case ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID:
+        return "horn_query_invalid";
+    case ZCL_ONTOLOGY_REASON_HORN_CONTEXT_UNSUPPORTED:
+        return "horn_imported_context_rule_unsupported";
     case ZCL_ONTOLOGY_REASON_NONE:
         break;
     }
@@ -539,6 +537,150 @@ bool zcl_ontology_derivation_v1_root(
     sha3_256_write(&sha, derivation->universe_root, 32);
     sha3_256_write(&sha, derivation->context_root, 32);
     sha3_256_write(&sha, derivation->formula_root, 32);
+    sha3_256_write(&sha, derivation->budget_root, 32);
+    sha3_256_write(&sha, derivation->evidence_manifest_root, 32);
+    sha3_256_write(&sha, derivation->parent_manifest_root, 32);
+    sha3_256_write(&sha, derivation->evaluator_root, 32);
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
+static bool horn_derivation_reason_valid(uint8_t reason)
+{
+    switch (reason) {
+    case ZCL_ONTOLOGY_REASON_FACT_BUDGET:
+    case ZCL_ONTOLOGY_REASON_STEP_BUDGET:
+    case ZCL_ONTOLOGY_REASON_RECURSION_BUDGET:
+    case ZCL_ONTOLOGY_REASON_DERIVATION_BUDGET:
+    case ZCL_ONTOLOGY_REASON_MEMORY_BUDGET:
+    case ZCL_ONTOLOGY_REASON_TIME_BUDGET:
+    case ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING:
+    case ZCL_ONTOLOGY_REASON_TIME_SOURCE_REGRESSED:
+    case ZCL_ONTOLOGY_REASON_PREDICATE_MISSING:
+    case ZCL_ONTOLOGY_REASON_PREDICATE_REGISTRY_INVALID:
+    case ZCL_ONTOLOGY_REASON_VARIABLE_UNBOUND:
+    case ZCL_ONTOLOGY_REASON_MANIFEST_INVALID:
+    case ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID:
+    case ZCL_ONTOLOGY_REASON_HORN_CONTEXT_UNSUPPORTED:
+        return true;
+    case ZCL_ONTOLOGY_REASON_NONE:
+    case ZCL_ONTOLOGY_REASON_PREDICATE_ARITY:
+    case ZCL_ONTOLOGY_REASON_PREDICATE_TYPE:
+    case ZCL_ONTOLOGY_REASON_PREDICATE_TIER:
+    case ZCL_ONTOLOGY_REASON_ASSERTION_INVALID:
+    case ZCL_ONTOLOGY_REASON_COVERAGE_MISSING:
+    case ZCL_ONTOLOGY_REASON_DOMAIN_MISSING:
+    case ZCL_ONTOLOGY_REASON_DOMAIN_INVALID:
+    case ZCL_ONTOLOGY_REASON_DOMAIN_CONTEXT:
+    case ZCL_ONTOLOGY_REASON_DOMAIN_REGISTRY_INVALID:
+    case ZCL_ONTOLOGY_REASON_FORMULA_EVIDENCE:
+    case ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED:
+    case ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED:
+    case ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED:
+        return false;
+    }
+    return false;
+}
+
+static bool horn_derivation_status_valid(
+    const struct zcl_ontology_horn_derivation_v1 *derivation)
+{
+    bool positive = derivation->observed_positive != 0;
+    bool negative = derivation->observed_negative != 0;
+    if (derivation->status == ZCL_ONTOLOGY_INCOMPLETE)
+        return derivation->complete == 0 &&
+               horn_derivation_reason_valid(derivation->incomplete_reason);
+    if (derivation->complete == 0 ||
+        derivation->incomplete_reason != ZCL_ONTOLOGY_REASON_NONE)
+        return false;
+    if (derivation->status == ZCL_ONTOLOGY_PROVED)
+        return positive && !negative;
+    if (derivation->status == ZCL_ONTOLOGY_DISPROVED)
+        return !positive && negative;
+    if (derivation->status == ZCL_ONTOLOGY_BOTH)
+        return positive && negative;
+    if (derivation->status == ZCL_ONTOLOGY_UNKNOWN)
+        return !positive && !negative;
+    return false;
+}
+
+static bool horn_derivation_counters_valid(
+    const struct zcl_ontology_horn_derivation_v1 *derivation)
+{
+    if (derivation->facts_examined > derivation->steps_taken ||
+        derivation->derivations_produced > derivation->steps_taken ||
+        (derivation->derivations_produced != 0 &&
+         derivation->max_recursion_depth == 0))
+        return false;
+    if (derivation->status != ZCL_ONTOLOGY_INCOMPLETE)
+        return derivation->steps_taken != 0;
+    return true;
+}
+
+static bool formula_ranges_overlap(
+    const void *left, size_t left_size, const void *right, size_t right_size)
+{
+    if (!left || !right || left_size == 0 || right_size == 0) return false;
+    uintptr_t left_begin = (uintptr_t)left;
+    uintptr_t right_begin = (uintptr_t)right;
+    if (left_size > UINTPTR_MAX - left_begin ||
+        right_size > UINTPTR_MAX - right_begin)
+        return true;
+    return left_begin < right_begin + right_size &&
+           right_begin < left_begin + left_size;
+}
+
+bool zcl_ontology_horn_derivation_v1_root(
+    const struct zcl_ontology_horn_derivation_v1 *derivation,
+    uint8_t out[32])
+{
+    if (!derivation || !out || formula_ranges_overlap(
+            derivation, sizeof(*derivation), out, 32))
+        return false;
+    memset(out, 0, 32);
+    if (
+        derivation->schema_version != ZCL_ONTOLOGY_OBJECT_VERSION ||
+        derivation->reserved_byte != 0 || derivation->reserved != 0 ||
+        derivation->observed_positive > 1 ||
+        derivation->observed_negative > 1 || derivation->complete > 1 ||
+        !horn_derivation_status_valid(derivation) ||
+        (derivation->missing_coverage_mask & ~ZCL_SOURCE_COVER_ALL) != 0 ||
+        (derivation->status != ZCL_ONTOLOGY_INCOMPLETE &&
+         derivation->missing_coverage_mask != 0) ||
+        !horn_derivation_counters_valid(derivation) ||
+        (derivation->missing_coverage_mask != 0 &&
+         derivation->incomplete_reason !=
+             ZCL_ONTOLOGY_REASON_COVERAGE_MISSING &&
+         derivation->incomplete_reason !=
+             ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED) ||
+        !formula_nonzero(derivation->universe_root) ||
+        !formula_nonzero(derivation->context_root) ||
+        !formula_nonzero(derivation->query_root) ||
+        !formula_nonzero(derivation->budget_root) ||
+        !formula_nonzero(derivation->evidence_manifest_root) ||
+        !formula_nonzero(derivation->evaluator_root) ||
+        ((derivation->parent_count == 0) !=
+         formula_zero(derivation->parent_manifest_root)))
+        return false;
+    struct sha3_256_ctx sha;
+    formula_hash_start(&sha, "zcl.ontology_horn_derivation.v1");
+    formula_hash_u16(&sha, derivation->schema_version);
+    const uint8_t fields[] = {
+        derivation->status, derivation->observed_positive,
+        derivation->observed_negative, derivation->complete,
+        derivation->incomplete_reason, derivation->reserved_byte,
+    };
+    sha3_256_write(&sha, fields, sizeof(fields));
+    formula_hash_u16(&sha, derivation->reserved);
+    formula_hash_u32(&sha, derivation->missing_coverage_mask);
+    formula_hash_u64(&sha, derivation->facts_examined);
+    formula_hash_u64(&sha, derivation->steps_taken);
+    formula_hash_u64(&sha, derivation->derivations_produced);
+    formula_hash_u32(&sha, derivation->max_recursion_depth);
+    formula_hash_u32(&sha, derivation->parent_count);
+    sha3_256_write(&sha, derivation->universe_root, 32);
+    sha3_256_write(&sha, derivation->context_root, 32);
+    sha3_256_write(&sha, derivation->query_root, 32);
     sha3_256_write(&sha, derivation->budget_root, 32);
     sha3_256_write(&sha, derivation->evidence_manifest_root, 32);
     sha3_256_write(&sha, derivation->parent_manifest_root, 32);
