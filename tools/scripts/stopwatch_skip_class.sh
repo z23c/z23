@@ -21,11 +21,9 @@
 # ⛔ THIS FILE REPORTS. IT NEVER GRADES.
 # Nothing here may change a verdict, a pass threshold, or an evidence window.
 # The alarm it produces goes to STDERR and to syslog, never to stdout in a
-# form any grader consumes, and it carries no "VERDICT=" token. The
-# architecture scorer (tools/scripts/arch_score.sh) reads stdout of
-# `make c3-stopwatch-report` and greps for VERDICT=PASS; a fact that cannot
-# physically reach the grader cannot flatter it. That is the containment, not
-# a promise to be careful.
+# form any grader consumes, and it carries no "VERDICT=" token. A fact that
+# cannot physically reach the verdict consumer cannot flatter it. That is the
+# containment, not a promise to be careful.
 #
 # API (all functions echo, none exit):
 #   stopwatch_skip_class_table            -> "class|threshold|match" per line

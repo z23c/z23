@@ -32,6 +32,9 @@
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 #if !defined(_WIN32)
@@ -385,6 +388,16 @@ static int test_change_plan_closure(void)
 {
     int failures = 0;
     TEST("dev platform: change plan unions symbol-closure groups onto the path floor") {
+        const char *leaf_files[] = {
+            "lib/test/src/test_dev_platform.c",
+        };
+        struct zcl_devloop_plan leaf_plan;
+        ASSERT(zcl_devloop_plan_files(leaf_files, 1, &leaf_plan));
+        ASSERT(leaf_plan.path_groups_len == 1);
+        ASSERT(dp_group_in(leaf_plan.path_groups,
+                           leaf_plan.path_groups_len,
+                           "test_dev_platform"));
+
         system("rm -rf " DP_CLOSURE_FIX);
         /* tor_integration.c defines the changed leaf; download.c's function
          * calls it, so download.c is in the reverse-caller closure. Both paths
@@ -398,6 +411,11 @@ static int test_change_plan_closure(void)
                            "/* download fixture */\n"
                            "#include \"net/clp.h\"\n"
                            "int dl_top(int x) { return tor_leaf(x) * 2; }\n"));
+        ASSERT(dp_mk_write(DP_CLOSURE_FIX,
+                           "lib/test/src/test_dev_platform.c",
+                           "/* semantic test leaf fixture */\n"
+                           "#include \"net/clp.h\"\n"
+                           "int test_dev_platform(void) { return tor_leaf(1); }\n"));
         ASSERT(dp_mk_write(DP_CLOSURE_FIX, "lib/net/include/net/clp.h",
                            "#ifndef NET_CLP_H\n#define NET_CLP_H\n"
                            "int tor_leaf(int x);\nint dl_top(int x);\n#endif\n"));
@@ -407,6 +425,11 @@ static int test_change_plan_closure(void)
                            "lib/net/include/net/clp.h\n"));
         ASSERT(dp_mk_write(DP_CLOSURE_FIX, "build/obj/download.d",
                            "build/obj/download.o: lib/net/src/download.c "
+                           "lib/net/include/net/clp.h\n"));
+        ASSERT(dp_mk_write(DP_CLOSURE_FIX,
+                           "build/obj/test_dev_platform.d",
+                           "build/obj/test_dev_platform.o: "
+                           "lib/test/src/test_dev_platform.c "
                            "lib/net/include/net/clp.h\n"));
 
         const char *files[] = { "lib/net/src/tor_integration.c" };
@@ -425,6 +448,10 @@ static int test_change_plan_closure(void)
         /* Closure surfaces download.c's group set as an ADDITION. */
         ASSERT(dp_group_in(plan.closure_groups, plan.closure_groups_len,
                            "download"));
+        ASSERT(dp_group_in(plan.closure_groups, plan.closure_groups_len,
+                           "test_dev_platform"));
+        ASSERT(!dp_group_in(plan.closure_groups, plan.closure_groups_len,
+                            "blog"));
         /* Additive only: the path floor is never dropped, and a closure group
          * is never also duplicated into the path set. */
         ASSERT(dp_group_in(plan.path_groups, plan.path_groups_len,
@@ -3007,6 +3034,65 @@ static int test_resident_restart_builder(void)
     return failures;
 }
 
+#if defined(__APPLE__)
+static bool run_darwin_attested_descriptor_fixture(void)
+{
+    const char *saved = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    if (saved && !saved_copy)
+        return false;
+
+    char unresolved[PATH_MAX], executable[PATH_MAX];
+    uint32_t unresolved_len = sizeof(unresolved);
+    bool ok = _NSGetExecutablePath(unresolved, &unresolved_len) == 0 &&
+              realpath(unresolved, executable) != NULL;
+    int fd = ok ? open(executable, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0)
+        ok = false;
+    if (ok && platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1)
+                  != 0)
+        ok = false;
+
+    struct zcl_devloop_process_result result = {0};
+    const char *argv[] = { executable, "--source-record", NULL };
+    if (ok) {
+        ok = zcl_devloop_process_run_fd(".", fd, argv, 30000, &result) &&
+             result.exit_code == 0 && result.term_signal == 0 &&
+             !result.timed_out && !result.cancelled &&
+             result.output_len >= 131 && result.startup_us > 0;
+        char source_id[65] = {0}, mutation_id[65] = {0}, extra = 0;
+        int complete = 0;
+        if (ok)
+            ok = sscanf(result.output, "%64[0-9a-f] %d %64[0-9a-f] %c",
+                        source_id, &complete, mutation_id, &extra) == 3 &&
+                 strlen(source_id) == 64 && strlen(mutation_id) == 64 &&
+                 complete == 1;
+    }
+
+    if (fd >= 0)
+        close(fd);
+    if (saved_copy) {
+        if (platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_copy,
+                                     1) != 0)
+            ok = false;
+        free(saved_copy);
+    } else if (dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS") != 0) {
+        ok = false;
+    }
+    return ok;
+}
+
+static int test_darwin_attested_descriptor_process(void)
+{
+    int failures = 0;
+    TEST("dev platform: Darwin executes the open Mach-O only after kernel CodeDirectory attestation") {
+        ASSERT(run_darwin_attested_descriptor_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 static int test_resident_process_cancellation(void)
 {
     int failures = 0;
@@ -3501,6 +3587,9 @@ static int test_dev_platform_platform_arm(void)
     failures += test_distill_first_error();
     failures += test_hotswap_artifact_cache();
     failures += test_resident_restart_builder();
+#if defined(__APPLE__)
+    failures += test_darwin_attested_descriptor_process();
+#endif
     failures += test_resident_process_cancellation();
     failures += test_resident_process_supersession();
     failures += test_native_source_cas_shadow();

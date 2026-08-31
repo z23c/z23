@@ -1,10 +1,11 @@
-# Sovereign Network and C23 Platform — plan of record
+# Sovereign Network and C23 Platform — foundation roadmap
 
-This is the durable Phase 0–6 roadmap. It preserves the product hierarchy and
-promotion gates across individual sessions. [`../HANDOFF.md`](../HANDOFF.md) is
-the current live-state truth; [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) is the
-immediate execution queue. If they differ, inspect the live node first, update
-HANDOFF, and keep this ordering:
+This scoped foundation record preserves the Phase 0–6 product hierarchy and
+promotion gates. It does not choose current work. [`FORWARD_PLAN.md`](./FORWARD_PLAN.md)
+is the sole execution queue; [`../HANDOFF.md`](../HANDOFF.md) is consulted only
+for an explicit maintainer-host operation.
+
+The preserved hierarchy is:
 
 1. **Always-stable, fast, consensus-compatible synchronization.**
 2. **The best transactional C23 hot-swap development platform.**

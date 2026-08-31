@@ -1,5 +1,8 @@
 # `app shop` — one-command sovereign storefront
 
+> Scoped product specification, not a current-work queue. Current ordering
+> lives only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
+
 Owner-approved 2026-08-09 (after external review). Goal: run one command,
 get a live private shop: stable onion identity + storefront + wallet +
 content + discovery + payment config, ending with a printed "your shop is

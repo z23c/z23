@@ -36,6 +36,7 @@ readonly eval_base_result_keys="schema,tasks_evaluated,aggregation_kind,tasks_de
 readonly eval_result_keys="$eval_base_result_keys,identifier_graph,$eval_arm_keys"
 
 . "$repo_root/tools/dev/dev_lib.sh" # json_escape
+. "$repo_root/tools/scripts/source_identity_lib.sh" # zcl_is_sha256
 
 fail() {
     printf 'retrieval-gold-benchmark: FAIL — %s\n' "$*" >&2
@@ -121,7 +122,7 @@ root_field() {
     [[ $(field_type "$document" "$path") = string ]] ||
         fail "field is not a JSON string: $path"
     value=$(field "$document" "$path")
-    [[ $value =~ ^[0-9a-f]{64}$ ]] || fail "invalid SHA3 root: $path"
+    zcl_is_sha256 "$value" || fail "invalid SHA3 root: $path"
     printf '%s' "$value"
 }
 
@@ -129,14 +130,14 @@ hash_file() {
     local path=$1 output root
     output=$("$sha3" "$path") || fail "could not hash file: $path"
     root=${output%% *}
-    [[ $root =~ ^[0-9a-f]{64}$ ]] || fail "malformed file SHA3: $path"
+    zcl_is_sha256 "$root" || fail "malformed file SHA3: $path"
     printf '%s' "$root"
 }
 
 hash_text() {
     local value=$1 root
     root=$(printf '%s' "$value" | "$sha3") || fail "could not hash text"
-    [[ $root =~ ^[0-9a-f]{64}$ ]] || fail "malformed text SHA3"
+    zcl_is_sha256 "$root" || fail "malformed text SHA3"
     printf '%s' "$root"
 }
 
@@ -257,12 +258,11 @@ validate_eval_result_envelope() {
 }
 
 canonical_path() {
+    case "/${1:-}/" in
+        */./*|*/../*) return 1 ;;
+    esac
     [[ -n $1 && $1 != /* && $1 != ./* && $1 != */ && $1 != *//* &&
-       $1 != *\\* && $1 =~ ^[A-Za-z0-9][A-Za-z0-9._/+@-]*$ ]] || return 1
-    if [[ $1 =~ (^|/)(\.|\.\.)($|/) ]]; then
-        return 1
-    fi
-    return 0
+       $1 != *\\* && $1 =~ ^[A-Za-z0-9][A-Za-z0-9._/+@-]*$ ]]
 }
 
 tmp_base=$(cd "${TMPDIR:-/tmp}" && pwd -P) || fail "TMPDIR is unavailable"

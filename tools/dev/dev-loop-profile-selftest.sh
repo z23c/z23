@@ -72,6 +72,11 @@ git -C "$ROOT" grep -q 'dev-bin z23-dev zclassic23-dev:.*\$(ZCLASSIC23_DEV_BIN)'
     fail 'dev-bin target is missing'
 git -C "$ROOT" grep -q '\$(HOTSWAP_ACTION_PLAN) \$(DEV_PACKAGE_VERIFIER_TARGET)' -- Makefile ||
     fail 'dev-bin does not use the platform-qualified package verifier prerequisite'
+git -C "$ROOT" grep -q '^dev-proof-bundle:.*dev-bin' -- Makefile ||
+    fail 'proof bundle does not serialize its development prerequisites through dev-bin'
+if git -C "$ROOT" grep -q '^dev-proof-bundle:.*dev-package-verifier-ensure' -- Makefile; then
+    fail 'proof bundle races dev-bin through a duplicate package-verifier bootstrap'
+fi
 git -C "$ROOT" grep -q '^DEV_PACKAGE_VERIFIER_TARGET = dev-package-verifier' -- Makefile ||
     fail 'non-Windows dev-bin does not bootstrap the fixed development package verifier'
 git -C "$ROOT" grep -q '^DEV_PACKAGE_VERIFIER_TARGET =$' -- Makefile ||

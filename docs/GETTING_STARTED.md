@@ -139,7 +139,7 @@ make lint            # defensive-coding + doc-accuracy gates
 | --- | --- | --- | --- | --- |
 | Linux | Full node | Full native workflow | Eligible read-only C23 leaves | Noise transport + DHT identity |
 | WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow | Noise transport + DHT identity |
-| macOS arm64 | Native node; `make macos-acceptance` | Build and focused tests; native kqueue directory watcher | Unavailable; rebuild/restart | Noise transport works; DHT identity requires on-chain provisioning |
+| macOS arm64 | Native node; `make macos-acceptance` | Kernel-attested focused tests; native kqueue directory watcher | Unavailable; rebuild/restart | Noise transport works; DHT identity requires on-chain provisioning |
 | Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart | Not yet measured |
 
 Windows setup and the boundary between native MSYS2 and WSL2 are documented in
@@ -169,6 +169,15 @@ chain sync. The `self_backtrace` group in
 that union proves the fail-closed macOS capability boundary; it does not claim
 Linux signal-context backtraces on Darwin. Intel macOS has not yet been
 measured.
+
+Focused tests and proof identity checks do not substitute a reconstructed
+pathname for `fexecve`. The arm64 dev/test executor reads the embedded
+CodeDirectory identity through the already-open thin Mach-O descriptor, maps
+the locator path with `POSIX_SPAWN_START_SUSPENDED`, and resumes the child only
+after the kernel reports the same CodeDirectory hash for that mapped process.
+A replacement therefore remains suspended and is killed before executing.
+This development-only rail does not change the fail-closed production A/B and
+hot-activation boundary.
 
 Embedded full Tor is not in that list. It was, because the build pinned Darwin
 to the offline stub regardless of whether the Tor archives existed; that pin is

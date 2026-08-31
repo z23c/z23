@@ -100,7 +100,12 @@ MAKE
 
 fail()
 {
+    local watcher_log="$SANDBOX/.local/state/zclassic23-dev/native-watch.log"
     echo "native-dev-failure-selftest: FAIL: $*" >&2
+    if [[ -f "$watcher_log" ]]; then
+        echo "native-dev-failure-selftest: watcher log follows" >&2
+        sed -n '1,240p' "$watcher_log" >&2
+    fi
     exit 1
 }
 
@@ -116,10 +121,31 @@ WATCHER_ID="$(sed -n 's/.*"watcher_id":\([0-9][0-9]*\).*/\1/p' <<<"$ENSURE")"
 
 wait_after()
 {
-    local after="$1"
-    native dev loop wait \
-        --input="{\"after_epoch\":$after,\"timeout_ms\":10000}" \
-        --view=summary
+    local after="$1" result status epoch
+    # The native stream deliberately exposes EDIT_SEEN/IMPACT_READY. A fast
+    # Linux reactor often reaches the terminal verdict before this client is
+    # exec'd, while kqueue can truthfully expose those earlier stages. Consume
+    # them by epoch instead of making the self-test depend on scheduler speed.
+    for _ in 1 2 3 4 5 6 7 8; do
+        result="$(native dev loop wait \
+            --input="{\"after_epoch\":$after,\"timeout_ms\":10000}" \
+            --view=summary)"
+        status="$(sed -n 's/.*\"status\":\"\([^\"]*\)\".*/\1/p' \
+            <<<"$result")"
+        case "$status" in
+            edit_seen|impact_ready|proof_pending|superseded)
+                epoch="$(sed -n 's/.*\"epoch\":\([0-9][0-9]*\).*/\1/p' \
+                    <<<"$result")"
+                [[ -n "$epoch" ]] || fail "transient cycle epoch missing"
+                after="$epoch"
+                ;;
+            *)
+                printf '%s\n' "$result"
+                return 0
+                ;;
+        esac
+    done
+    fail "cycle did not reach a terminal verdict"
 }
 
 touch "$REPO/fixture.c"
@@ -228,9 +254,23 @@ case "${1:-}" in
 esac
 SCRIPT
 chmod 0700 "$REPO/build/bin/test_parallel_fast"
+printf '0\n' >"$REPO/runner.count"
+
+if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+    set +e
+    DARWIN_ADMIT="$(native dev test run api 2>&1)"
+    DARWIN_RC=$?
+    set -e
+    [[ "$DARWIN_RC" -ne 0 &&
+       "$DARWIN_ADMIT" == *'"code":"SOURCE_IDENTITY_UNAVAILABLE"'* &&
+       "$(cat "$REPO/runner.count")" == 0 ]] ||
+        fail "Darwin focused runner executed an unattested script fixture"
+    echo "native-dev-failure-selftest: PASS"
+    exit 0
+fi
+
 printf '0\n' >"$REPO/capture.count"
 printf '0\n' >"$REPO/verify.count"
-printf '0\n' >"$REPO/runner.count"
 printf '%064d 1 %064d\n' 6 7 >"$REPO/runner.record"
 printf '%064d 1 %064d\n' 6 7 >"$REPO/source.record"
 

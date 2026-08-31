@@ -462,6 +462,11 @@ static bool file_service_wait_for_eof(int fd, int timeout_ms)
             continue;
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
             continue;
+        /* Closing with an unread padding frame is allowed to surface as a
+         * reset rather than an orderly EOF. Both mean the expired peer can no
+         * longer use the connection; neither is a scheduler-speed failure. */
+        if (errno == ECONNRESET || errno == ECONNABORTED || errno == ENOTCONN)
+            return true;
         return false;
     }
 }

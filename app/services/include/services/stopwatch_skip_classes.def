@@ -46,9 +46,8 @@
  *      6h C3 cadence (deploy/examples/zcl-c3-stopwatch.timer,
  *      OnCalendar=*-*-* 0/6:00:00) a single miss is indistinguishable from a
  *      fixture bouncing; still absent 6h later it is gone, not bouncing. 2
- *      also lands ~18h BEFORE the architecture score can move (arch_score.sh
- *      reads tail -n 5, so five non-pass rows = 30h), which is the whole
- *      point: the alarm must precede the number changing. And 2 sits strictly
+ *      also reports the failure before a stale PASS can obscure repeated
+ *      non-passing samples. And 2 sits strictly
  *      inside the judge's own 24h staleness window, so the two rungs never
  *      race — streak means "the collector ran and could not prove anything",
  *      STALE means "the collector stopped running".

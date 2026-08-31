@@ -708,7 +708,8 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_read_after(
 
 /* Wait for the first exact event after `after_epoch`. The directory watch is
  * armed before the first read, closing the check/sleep race; producers wake it
- * through the bounded volatile ring. No polling sleep is used. */
+ * through the bounded volatile ring. On timeout, epoch_out retains the exact
+ * caller anchor so recovery evidence cannot regress to zero. */
 enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
     const char *repo_root, int64_t after_epoch, int timeout_ms,
     char *out, size_t out_len, size_t *len_out, int64_t *epoch_out,

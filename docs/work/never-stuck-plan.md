@@ -1,4 +1,4 @@
-# THE BIG PLAN — prove the foundation, fold forward, delete the lie-cover
+# Never-stuck foundation — retained design record
 
 > **STATUS: the wedge this doc diagnoses is CURED** — the serve node is AT
 > NETWORK TIP on self-verified state (`docs/HANDOFF.md` §0-LATEST), via the

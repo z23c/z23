@@ -21,15 +21,12 @@
 #     with and without an ALARM;
 #   - the SKIP_STREAK line is its OWN line, so anything grepping the VERDICT
 #     line is untouched;
-#   - the ALARM line goes to stderr, which every scoring path discards at the
-#     source (tools/scripts/arch_score.sh runs
-#     `make -s c3-stopwatch-report 2>/dev/null | grep -q VERDICT=PASS`, and
-#     the Makefile recipe captures stdout only), and it deliberately contains
-#     no "VERDICT=" token so it can never be read as one.
+#   - the ALARM line goes to stderr, while the gate verdict stays on stdout,
+#     and it deliberately contains no "VERDICT=" token so it can never be
+#     mistaken for one.
 # Why it exists: the C3 gate recorded verdict=skip on every scheduled run from
 # 2026-07-28 06:02 onward. This judge said FAIL the whole time — but nothing
-# ran it, and the architecture scorer reads `tail -n 5` of the ledger, so one
-# surviving old pass held the number at 85 for four consecutive skips (~30h).
+# ran it, so repeated skips remained operator-invisible.
 # The defect was the SILENCE, so the fix is a louder report, never a stricter
 # gate.
 #

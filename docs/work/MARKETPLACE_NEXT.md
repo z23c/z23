@@ -1,8 +1,13 @@
-# Marketplace next steps — ordered checklist (2026-08-08)
+# Marketplace dependency map — retained 2026-08-08 checklist
 
-Context: the metaverse MVP lane is done and pushed (`d00d5a7fd`,
-`make metaverse-score` = 100/100, `make metaverse-verify` 7/7). The owner
-asked "what's next?" and picked these three tracks, in this order.
+> **Retained scope record, not current work.** The 2026-08-08 owner session
+> used this ordering for the marketplace lane. Current task selection lives
+> only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md); unchecked boxes here are
+> dependency notes, not an execution queue.
+
+Historical context: the metaverse MVP lane was pushed at `d00d5a7fd`, with its
+then-current `make metaverse-verify` aggregate green. The owner selected these
+three tracks in the order retained below.
 
 Subordinate to [`FORWARD_PLAN.md`](./FORWARD_PLAN.md): this does **not**
 reorder the v1 node-sovereignty lane (C3/C5/C6/C8). It is the

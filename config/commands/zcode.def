@@ -2241,12 +2241,17 @@ ZCL_COMMAND_READY_READ(
     "Persisted task.v1 and candidate.v1 wires are the only task truth; each "
     "projected wire must parse, validate, and rederive the root that names "
     "its CAS object, and no task table exists. Projects task root, source "
-    "root, expiry, derived state (AWAITING_CANDIDATE, CANDIDATE_ADMITTED, "
-    "EXPIRED), and candidate authors. Filters accept task_root, source_root, "
+    "root, candidate-declared source and patch roots, expiry, derived state, "
+    "and evidence counts. details=true adds the latest projected candidate, "
+    "context, receipt-selected action, work-receipt, lane-proof and lane-receipt "
+    "roots plus bounded candidate authors. Active "
+    "execution and assignment remain explicitly UNOBSERVED because CAS "
+    "authorship is not ownership. Filters accept task_root, source_root, "
     "and author hex prefixes plus an exact state.",
-    0, "zcode,tasks,task,index,search,candidate,projection",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zcode,tasks,task,index,search,candidate,projection",
     "zcl.zcode_tasks.input.v1", "zcl.zcode_tasks.v1",
-    "workspace,task_root,source_root,author,state,limit", "workspace",
+    "workspace,task_root,source_root,author,state,limit,details", "workspace",
     "z23 zcode tasks --input='{\"workspace\":\"/src/project\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR,

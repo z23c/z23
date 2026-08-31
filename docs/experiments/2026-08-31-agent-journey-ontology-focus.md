@@ -74,10 +74,11 @@ The registered 12-task, three-project benchmark produced:
 | Full project source bytes in fixtures | 816 | 816 | unchanged |
 | Accepted feasible tasks | 10/10 | 10/10 | unchanged |
 | Correctly refused out-of-scope tasks | 2/2 | 2/2 | unchanged |
-| Upstream commits integrated during the slice | — | 2 | observed |
-| Merge conflicts during integration | — | 2 | observed |
+| Upstream commits integrated during the slice | — | 7 | observed |
+| Merge conflicts during integration | — | 3 | observed |
 | Wrong next commands caught before publication | — | 1 | removed |
 | Concurrent `make` verification collisions | — | 1 | invalidated and rerun serially |
+| Exact-receipt bootstrap failures before admission | — | 4 | observed |
 
 The focus packet stayed below the 8,192-byte registered list budget. The
 benchmark still performed canonical task creation, context selection, candidate
@@ -90,11 +91,15 @@ selector readiness, not recapture a task context. That initially proposed next
 command was removed before publication; non-reverified context now directs the
 agent to `zcode work start`.
 
-Upstream advanced by two reviewed commits before integration. Applying this
-slice produced two textual conflicts: the generated capability inventory was
-regenerated from the combined source, and the StoryGraph conflict was resolved
-by carrying the new canonical `accepted_work_root` through the split loader and
-projection. The combined focused suites then passed. Duplicate work, exact
+Upstream first advanced by two reviewed commits before integration. Applying
+this slice produced two textual conflicts: the generated capability inventory
+was regenerated from the combined source, and the StoryGraph conflict was
+resolved by carrying the new canonical `accepted_work_root` through the split
+loader and projection. Five more reviewed commits arrived during exact proof;
+their integration produced only one generated-inventory conflict. Their new
+bounded task-board projection and this single-work focus packet expose
+different scopes, so neither leaf was discarded as duplicate. The combined
+focused suites then passed. Duplicate work across unobserved sessions, exact
 model-token count, and time to first correct edit were not instrumented in this
 slice; recording zero for those dimensions would be unsupported. The next
 experiment must start from a fresh agent, choose a real unowned issue, and
@@ -105,6 +110,31 @@ contend on generated template output. Its affected platform results were
 discarded and both Windows and macOS contract gates were rerun serially. The
 serial Windows cross-syntax seam passed. The macOS capability matrix passed;
 native macOS execution remained unobserved on this Linux host.
+
+The first exact commit/base receipt was admitted 19 minutes 5 seconds after
+the commit timestamp. Four preceding attempts failed closed on worktree setup:
+missing generated OpenSSL headers, then a skipped zlib-header installation,
+then a missing `build/dev-loop/restart.env`, then one private-checkout source
+checkpoint command failure. The next retry completed the exact impact-mapped
+proof. These are bootstrap measurements, not product-test failures.
+
+## Post-integration orientation rerun
+
+A concurrently integrated cleanup changed fresh-agent orientation from six
+mandatory documents to three: `AGENTS.md`, `docs/work/FORWARD_PLAN.md`, and
+`docs/DEVELOPING.md`. Source maps, traps, security doctrine, and live handoff
+state are now conditional reads.
+
+| Measurement | Before | After | Change |
+|---|---:|---:|---:|
+| Mandatory documents before editing | 6 | 3 | -50% |
+| Lines | 2,586 | 1,276 | -51% |
+| Whitespace-delimited words | 23,766 | 8,527 | -64% |
+| UTF-8 bytes | 180,535 | 61,166 | -66% |
+
+The rerun still does not establish model-token count or time to first correct
+edit. It does remove three unconditional branches and explicitly forbids using
+the maintainer live-state handoff as an ordinary work queue.
 
 ## Reproduction
 

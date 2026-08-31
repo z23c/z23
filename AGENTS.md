@@ -176,6 +176,11 @@ passed their platform contracts. A fresh isolated test-lane datadir reached
 graceful shutdown. This is startup evidence, not chain-sync acceptance.
 Descriptor-bound A/B execution is unavailable on macOS and fails closed;
 pathname reconstruction is not accepted as a substitute for `fexecve`.
+The dev/test proof executor has a narrower native rail: it obtains the
+CodeDirectory hash from the already-open thin Mach-O, spawns the locator path
+suspended, asks the kernel for the mapped child's CodeDirectory hash, and
+resumes only on an exact match. This does not promote production A/B or hot
+activation.
 The optimized ROM-seed background-scan regression also passed after bounding
 its worker-stack use; the artifact snapshot uses checked allocation instead of
 a roughly 1 MiB automatic array.
@@ -201,22 +206,26 @@ on every host. Build and test instructions are in
 
 ## Orient before editing
 
-Read, in order:
+A fresh agent chooses work from one route: this contract, then the first open
+item in [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md). No other
+plan, scorecard, runbook, handoff, vendor skill, or old session note may
+reorder that mission.
 
-- [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md) for the current
-  ordered mission.
-- [`docs/DEVELOPING.md`](./docs/DEVELOPING.md) for the normal development loop,
-  integration gates, and exact build profiles.
-- [`docs/CODEBASE_MAP.md`](./docs/CODEBASE_MAP.md) for source ownership and
-  navigation.
-- [`docs/AGENT_TRAPS.md`](./docs/AGENT_TRAPS.md) before repairing something
+Load detail only when the task needs it:
+
+- Read [`docs/DEVELOPING.md`](./docs/DEVELOPING.md) before editing for the
+  development loop, integration gates, and exact build profiles.
+- Use [`docs/CODEBASE_MAP.md`](./docs/CODEBASE_MAP.md) after the built-in
+  navigator when source ownership is unclear.
+- Read [`docs/AGENT_TRAPS.md`](./docs/AGENT_TRAPS.md) before repairing behavior
   that may be intentional or already complete.
-- [`docs/SECURITY_AND_INTEGRITY.md`](./docs/SECURITY_AND_INTEGRITY.md) and
+- Read [`docs/SECURITY_AND_INTEGRITY.md`](./docs/SECURITY_AND_INTEGRITY.md) and
   [`docs/CONSENSUS_PARITY_DOCTRINE.md`](./docs/CONSENSUS_PARITY_DOCTRINE.md)
-  when work approaches a security, custody, or consensus boundary.
+  only when work approaches a security, custody, or consensus boundary.
 
-On the maintainer host only, read [`docs/HANDOFF.md`](./docs/HANDOFF.md), then
-verify it against the running node:
+Do not read [`docs/HANDOFF.md`](./docs/HANDOFF.md) for ordinary development.
+It is maintainer-host live-state routing only. When the assignment explicitly
+requires that host, read it and then verify it against the running node:
 
 ```bash
 build/bin/z23 status

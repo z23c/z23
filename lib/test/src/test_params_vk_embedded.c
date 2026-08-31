@@ -23,9 +23,13 @@
  *      in a private copy of sprout-verifying.key, the three big files by
  *      symlink) and drives the production loader over it.
  *
- * Sections 1 and 1b need a real parameter directory and SKIP cleanly without
- * one — which is the normal case on a machine that never had them, and the
- * whole point of the change under test. Sections 2-4 need nothing.
+ * The byte-for-byte file comparison, complete-directory corruption fixture,
+ * and late proving upgrade need a real parameter directory.  Its absence is
+ * the normal validation-only node state, not skipped coverage: sections 2-4
+ * still prove the embedded digests, fail-closed proving boundary, planted bad
+ * blob refusal, and acceptance of a real mainnet shielded proof.  When the
+ * external files are present the three additional comparisons remain
+ * mandatory and fail normally.
  */
 
 #include "test/test_core.h"
@@ -305,9 +309,9 @@ int test_params_vk_embedded(void)
         char probe[1200];
         snprintf(probe, sizeof(probe), "%s/%s", dir, vk_source_file[0]);
         if (!home || access(probe, R_OK) != 0) {
-            printf("params_vk_embedded: prefix-equals-real-file... SKIP "
-                   "(no readable %s — this is the ordinary case for a node "
-                   "that never installed proving parameters)\n", dir);
+            printf("params_vk_embedded: external prefix comparison... "
+                   "NOT INSTALLED (no readable %s; the params-free "
+                   "validation contract remains mandatory below)\n", dir);
         } else {
             for (size_t i = 0; i < ZCL_EMBEDDED_VK_COUNT; i++) {
                 const struct zcl_embedded_vk *e = &zcl_embedded_vks[i];
@@ -376,9 +380,10 @@ int test_params_vk_embedded(void)
         char scratch[1200];
         bool staged = false;
         if (!home || access(probe, R_OK) != 0) {
-            printf("params_vk_embedded: refused-directory fallback... SKIP "
-                   "(needs a readable %s to build the planted-corruption "
-                   "fixture)\n", real_dir);
+            printf("params_vk_embedded: external complete-directory "
+                   "corruption fixture... NOT INSTALLED (needs readable %s; "
+                   "embedded fallback and bad-blob refusal remain mandatory "
+                   "below)\n", real_dir);
         } else {
             /* The machine HAS the files, so a staging failure is a failure,
              * not a skip. */
@@ -569,6 +574,8 @@ int test_params_vk_embedded(void)
         VK_CHECK("keys report as embedded, not from a parameter directory",
                  sapling_vks_are_embedded());
         VK_CHECK("install is idempotent", sapling_install_embedded_vks());
+        VK_CHECK("a real mainnet shielded proof validates with the embedded "
+                 "keys", vk_contextual_ok(NULL));
     }
 
     /* ── 3. Proving stays fail-closed ─────────────────────────────────── */
@@ -660,7 +667,9 @@ int test_params_vk_embedded(void)
      * in the process, and sections 2-4 assert the opposite. It restores the
      * process to "nothing loaded" on the way out anyway.
      *
-     * Needs a real parameter directory; SKIPs cleanly without one. */
+     * Needs a real parameter directory for the upgrade half.  Without one,
+     * the validation-only state is asserted explicitly instead of emitting a
+     * SKIP that would make an exact proof incomplete. */
     {
         const char *home = getenv("HOME");
         char real_dir[1024];
@@ -672,9 +681,15 @@ int test_params_vk_embedded(void)
         char scratch[1200];
         bool staged = false;
         if (!home || access(probe, R_OK) != 0) {
-            printf("params_vk_embedded: late proving parameters... SKIP "
-                   "(needs a readable %s — the upgrade is only meaningful "
-                   "against the real trusted-setup files)\n", real_dir);
+            printf("params_vk_embedded: external late-proving upgrade... "
+                   "NOT INSTALLED (no readable %s; asserting the honest "
+                   "validation-only state)\n", real_dir);
+            VK_CHECK("without external proving parameters the prover remains "
+                     "unavailable", !zclassic_sapling_prover_is_ready());
+            VK_CHECK("without external proving parameters status remains "
+                     "params_not_initialized",
+                     strcmp(zclassic_sapling_prover_status(),
+                            "params_not_initialized") == 0);
         } else {
             staged = vk_stage_planted_dir(real_dir, scratch, sizeof(scratch));
             VK_CHECK("late-load fixture staged", staged);

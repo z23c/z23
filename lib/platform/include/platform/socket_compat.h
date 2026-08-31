@@ -4,6 +4,7 @@
 #ifndef ZCLASSIC_PLATFORM_SOCKET_COMPAT_H
 #define ZCLASSIC_PLATFORM_SOCKET_COMPAT_H
 
+#include <limits.h>
 #include <stdbool.h>
 #include <limits.h>
 #include <stdint.h>

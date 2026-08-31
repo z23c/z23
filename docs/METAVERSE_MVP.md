@@ -1,12 +1,15 @@
-# z23 — Metaverse MVP target
+# z23 — Metaverse MVP acceptance reference
+
+> **Scoped simulation acceptance, not a work queue.** Current task selection
+> lives only in [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md). Run the
+> aggregate below only when that plan selects this scope.
 
 **Metaverse MVP = "a stranger can build the node, take the five-command
 metaverse tour, publish and verify a package in the commons, see their
 property and spaces in the explorer, and read one honest page about what is
 real and what is simulation."** Eight binary acceptance criteria (MM1–MM8),
-each with a mechanical verification target. The Metaverse Readiness Score is
-`make metaverse-score` (0–100); the MVP is achieved at 100/100 with every
-criterion ✅.
+each with a mechanical verification target. `make metaverse-verify` is the
+aggregate; this page records which full claims it does and does not establish.
 
 Mission context: *"Z23 is a metaverse where people and AI create real
 things together, and nobody owns the world they build in."* The full program
@@ -51,13 +54,12 @@ actually runs and passes; a SKIP for a missing local dependency stays ◐.
 <!-- claim: file-present tools/scripts/isolated_node_env.sh # MM1 isolation helper -->
 <!-- claim: file-present docs/work/ZC23_LIVING_COMMONS.md # scope honesty source -->
 
-## Tracker
+## Verification
 
-`make metaverse-score` prints the mechanical 0–100 completion score over
-MM1–MM8 and names the highest-value unfinished criterion. The loop is:
-`make metaverse-score` → open the top ✗ criterion → make the move →
-`make lint && make -j"$(nproc)" test-parallel` → confirm the score rose →
-commit. **Never edit the scorer to win** (same rule as `make arch-score`).
+When [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) selects this scoped
+acceptance, run `make metaverse-verify` and the criterion-specific commands in
+the table. A criterion moves only when its full mechanical proof changes; the
+table does not choose the next repository task.
 
 ## Relationship to the v1 node MVP
 

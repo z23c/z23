@@ -1,5 +1,10 @@
 # Stopwatch gates — C3 and PROOF B wall-clock evidence
 
+> Operator-only acceptance reference. Do not start these time-running or
+> live-process procedures as ordinary development work. Current development
+> ordering lives only in [`FORWARD_PLAN.md`](./FORWARD_PLAN.md); current state
+> of the maintainer host lives only in [`../HANDOFF.md`](../HANDOFF.md).
+
 Two opt-in, periodic wall-clock proofs, each split the same way as
 `tools/scripts/soak_evidence.sh`: a **collect** half that runs a real
 stopwatch and durably records the outcome, and a **judge** half that reads
@@ -93,9 +98,8 @@ been dead for days"*. Both used to land in the ledger as the identical string
 `"verdict":"skip"`, and nothing looked at them. That is how the C3 gate
 recorded a skip on **every** scheduled run from 2026-07-28 06:02 onward with
 no operator-visible signal: the judge grades a skip as `FAIL`, but nothing
-ran the judge, and `tools/scripts/arch_score.sh` scores KPI1 off `tail -n 5`
-of the ledger, so one surviving old pass held the architecture score at 85
-for four consecutive skips (~30h at the 6h cadence).
+ran the judge, so repeated skips remained operator-invisible. Current verdicts
+must be read from the judge, not from a removed aggregate score.
 
 ### The class table
 
@@ -147,12 +151,9 @@ a supported way to silence this, which is the defect.
 
 Six mechanisms keep the alarm off the score, listed strongest first:
 
-1. `tools/scripts/arch_score.sh` gets a **zero-byte diff**.
-2. The alarm is on **stderr**, and every scoring path discards stderr at the
-   source (`arch_score.sh` runs
-   `make -s c3-stopwatch-report 2>/dev/null | grep -q VERDICT=PASS`; the
-   Makefile recipe captures stdout only). A fact that cannot physically reach
-   the grader cannot flatter it.
+1. The underlying stopwatch verdict gets a **zero-byte diff**.
+2. The alarm is on **stderr**, while the verdict stays on stdout. A fact that
+   cannot physically reach the verdict consumer cannot flatter it.
 3. The `ALARM` line contains **no `VERDICT=` token**, so even a consumer that
    merged the streams cannot read it as a verdict, and the recipes'
    FALSE-GREEN guard is unaffected.

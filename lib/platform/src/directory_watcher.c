@@ -237,10 +237,18 @@ void platform_directory_watcher_close(struct platform_directory_watcher *w)
 #include <sys/time.h>
 #include <unistd.h>
 
-struct watch_item { int fd; char *path; };
-struct watcher_state { int kq; struct watch_item *items; size_t count; };
+struct watch_item { int fd; char *path; bool directory; };
+struct watcher_state {
+    int kq;
+    struct watch_item *items;
+    size_t count;
+    platform_directory_watcher_descend descend;
+    platform_directory_watcher_include_file include_file;
+    void *filter_opaque;
+};
 
-static bool watch_dir(struct watcher_state *s, const char *path)
+static bool watch_path(struct watcher_state *s, const char *path,
+                       bool directory)
 {
     int fd = open(path, O_EVTONLY | O_CLOEXEC);
     if (fd < 0 && errno == EINVAL) fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -249,7 +257,7 @@ static bool watch_dir(struct watcher_state *s, const char *path)
     size_t idx = s->count;
     EV_SET(&kev, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
            NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK |
-           NOTE_RENAME | NOTE_REVOKE, 0, (void *)idx);
+           NOTE_RENAME | NOTE_DELETE | NOTE_REVOKE, 0, (void *)idx);
     if (kevent(s->kq, &kev, 1, NULL, 0, NULL) < 0) { close(fd); return false; }
     struct watch_item *items = zcl_realloc(
         s->items, (idx + 1) * sizeof(*items), "directory-watch-items");
@@ -259,44 +267,132 @@ static bool watch_dir(struct watcher_state *s, const char *path)
     s->items[idx].path = zcl_strdup(path, "directory-watch-path");
     if (!s->items[idx].path) { close(fd); return false; }
     s->items[idx].fd = fd;
+    s->items[idx].directory = directory;
     s->count = idx + 1;
     return true;
 }
 
+static bool watch_dir(struct watcher_state *s, const char *path)
+{ return watch_path(s, path, true); }
+
+static bool watch_file(struct watcher_state *s, const char *path)
+{ return watch_path(s, path, false); }
+
 static bool add_tree(struct watcher_state *s, const char *path)
 {
-    struct platform_directory_list list = {0};
-    if (!watch_dir(s, path) || !platform_directory_list_real_sorted(path, &list))
+    struct platform_directory_list dirs = {0}, files = {0};
+    if (!watch_dir(s, path) ||
+        !platform_directory_list_real_sorted(path, &dirs) ||
+        !platform_directory_list_regular_sorted(path, &files)) {
+        platform_directory_list_free(&dirs);
+        platform_directory_list_free(&files);
         return false;
+    }
     bool ok = true;
-    for (size_t i = 0; ok && i < list.count; i++) {
-        size_t n = strlen(path) + strlen(list.entries[i].name) + 2;
+    for (size_t i = 0; ok && i < dirs.count; i++) {
+        if (s->descend &&
+            !s->descend(dirs.entries[i].name, s->filter_opaque))
+            continue;
+        size_t n = strlen(path) + strlen(dirs.entries[i].name) + 2;
         char *child = zcl_malloc(n, "directory-watch-child");
         if (!child) { ok = false; break; }
-        (void)snprintf(child, n, "%s/%s", path, list.entries[i].name);
+        (void)snprintf(child, n, "%s/%s", path, dirs.entries[i].name);
         ok = add_tree(s, child);
         free(child);
     }
-    platform_directory_list_free(&list);
+    for (size_t i = 0; ok && i < files.count; i++) {
+        size_t n = strlen(path) + strlen(files.entries[i].name) + 2;
+        char *child = zcl_malloc(n, "directory-watch-file");
+        if (!child) { ok = false; break; }
+        (void)snprintf(child, n, "%s/%s", path, files.entries[i].name);
+        if (!s->include_file || s->include_file(child, s->filter_opaque))
+            ok = watch_file(s, child);
+        free(child);
+    }
+    platform_directory_list_free(&dirs);
+    platform_directory_list_free(&files);
     return ok;
 }
 
 static void rescan_children(struct watcher_state *s, const char *path)
 {
-    struct platform_directory_list list = {0};
-    if (!platform_directory_list_real_sorted(path, &list)) return;
-    for (size_t i = 0; i < list.count; i++) {
-        size_t n = strlen(path) + strlen(list.entries[i].name) + 2;
+    struct platform_directory_list dirs = {0}, files = {0};
+    if (!platform_directory_list_real_sorted(path, &dirs) ||
+        !platform_directory_list_regular_sorted(path, &files)) {
+        platform_directory_list_free(&dirs);
+        platform_directory_list_free(&files);
+        return;
+    }
+    for (size_t i = 0; i < dirs.count; i++) {
+        if (s->descend &&
+            !s->descend(dirs.entries[i].name, s->filter_opaque))
+            continue;
+        size_t n = strlen(path) + strlen(dirs.entries[i].name) + 2;
         char *child = zcl_malloc(n, "directory-watch-child");
         if (!child) continue;
-        (void)snprintf(child, n, "%s/%s", path, list.entries[i].name);
+        (void)snprintf(child, n, "%s/%s", path, dirs.entries[i].name);
         bool found = false;
         for (size_t j = 0; j < s->count; j++)
-            if (strcmp(s->items[j].path, child) == 0) { found = true; break; }
+            if (s->items[j].fd >= 0 &&
+                strcmp(s->items[j].path, child) == 0) {
+                found = true;
+                break;
+            }
         if (!found) add_tree(s, child);
         free(child);
     }
-    platform_directory_list_free(&list);
+    for (size_t i = 0; i < files.count; i++) {
+        size_t n = strlen(path) + strlen(files.entries[i].name) + 2;
+        char *child = zcl_malloc(n, "directory-watch-file");
+        if (!child) continue;
+        (void)snprintf(child, n, "%s/%s", path, files.entries[i].name);
+        if (s->include_file && !s->include_file(child, s->filter_opaque)) {
+            free(child);
+            continue;
+        }
+        bool found = false;
+        for (size_t j = 0; j < s->count; j++)
+            if (s->items[j].fd >= 0 &&
+                strcmp(s->items[j].path, child) == 0) {
+                found = true;
+                break;
+            }
+        if (!found) (void)watch_file(s, child);
+        free(child);
+    }
+    platform_directory_list_free(&dirs);
+    platform_directory_list_free(&files);
+}
+
+static void invalidate_tree(struct watcher_state *s, const char *path)
+{
+    size_t path_len = strlen(path);
+    for (size_t i = 0; i < s->count; i++) {
+        if (s->items[i].fd < 0 ||
+            (strcmp(s->items[i].path, path) != 0 &&
+             !(strncmp(s->items[i].path, path, path_len) == 0 &&
+               s->items[i].path[path_len] == '/')))
+            continue;
+        close(s->items[i].fd);
+        s->items[i].fd = -1;
+    }
+}
+
+static void rearm_replaced_path(struct watcher_state *s, size_t idx)
+{
+    if (idx >= s->count || idx == 0)
+        return;
+    char *parent = zcl_strdup(s->items[idx].path,
+                              "directory-watch-replaced-parent");
+    if (!parent)
+        return;
+    char *slash = strrchr(parent, '/');
+    if (slash) {
+        *slash = '\0';
+        invalidate_tree(s, s->items[idx].path);
+        rescan_children(s, parent);
+    }
+    free(parent);
 }
 
 static bool drain_events(struct watcher_state *s, bool *changed)
@@ -312,9 +408,12 @@ static bool drain_events(struct watcher_state *s, bool *changed)
         for (int i = 0; i < n; i++) {
             if (evs[i].flags & EV_ERROR) return false;
             *changed = true;
+            size_t idx = (size_t)evs[i].udata;
+            if (evs[i].fflags & (NOTE_RENAME | NOTE_DELETE | NOTE_REVOKE))
+                rearm_replaced_path(s, idx);
             if (evs[i].fflags & NOTE_WRITE) {
-                size_t idx = (size_t)evs[i].udata;
-                if (idx < s->count) rescan_children(s, s->items[idx].path);
+                if (idx < s->count && s->items[idx].directory)
+                    rescan_children(s, s->items[idx].path);
             }
         }
     }
@@ -326,12 +425,24 @@ void platform_directory_watcher_init(struct platform_directory_watcher *w)
 bool platform_directory_watcher_open(struct platform_directory_watcher *w,
                                      const char *root)
 {
+    return platform_directory_watcher_open_filtered(w, root, NULL, NULL,
+                                                     NULL);
+}
+
+bool platform_directory_watcher_open_filtered(
+    struct platform_directory_watcher *w, const char *root,
+    platform_directory_watcher_descend descend,
+    platform_directory_watcher_include_file include_file, void *opaque)
+{
     char canonical[PATH_MAX];
     if (!w || w->native != UINTPTR_MAX ||
         !platform_directory_canonical_real(root, canonical, sizeof(canonical)))
         return false;
     struct watcher_state *s = zcl_calloc(1, sizeof(*s), "directory-watcher-state");
     if (!s) return false;
+    s->descend = descend;
+    s->include_file = include_file;
+    s->filter_opaque = opaque;
     s->kq = kqueue();
     if (s->kq < 0 || !add_tree(s, canonical)) {
         struct platform_directory_watcher temp = {.native = (uintptr_t)s};
@@ -362,9 +473,13 @@ enum platform_directory_watch_result platform_directory_watcher_wait(
             for (int i = 0; i < n; i++) {
                 if (evs[i].flags & EV_ERROR) return PLATFORM_DIRECTORY_WATCH_ERROR;
                 changed = true;
+                size_t idx = (size_t)evs[i].udata;
+                if (evs[i].fflags &
+                    (NOTE_RENAME | NOTE_DELETE | NOTE_REVOKE))
+                    rearm_replaced_path(s, idx);
                 if (evs[i].fflags & NOTE_WRITE) {
-                    size_t idx = (size_t)evs[i].udata;
-                    if (idx < s->count) rescan_children(s, s->items[idx].path);
+                    if (idx < s->count && s->items[idx].directory)
+                        rescan_children(s, s->items[idx].path);
                 }
             }
             if (!drain_events(s, &changed)) return PLATFORM_DIRECTORY_WATCH_ERROR;

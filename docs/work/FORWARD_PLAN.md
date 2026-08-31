@@ -11,6 +11,35 @@ Do not copy live heights, process state, or dated benchmark anecdotes here.
 Derive them from the named commands and evidence ledgers. Earlier detailed
 plans and incident narratives remain available through Git history.
 
+## 0. Current mission: one clear agent route
+
+Before selecting another product or operations project, remove inherited
+context that sends fresh agents toward completed work. Work in this order:
+
+1. [x] Delete the completed architecture quest board that still presented
+   itself as the whole current queue. Its history remains in Git.
+2. [x] Make vendor-specific agent files thin adapters to `AGENTS.md`, this
+   plan, and `docs/DEVELOPING.md`; they carry no independent workflow doctrine.
+3. [x] Keep live-node, uptime, soak, server-lane, and deployment state in
+   `docs/HANDOFF.md` or an explicitly operator-only runbook. Ordinary
+   development entry documents link there only conditionally.
+4. [x] Rename or label retained plans as scoped design records, references, or
+   historical rationale. They do not choose the next task.
+5. [x] Run the documentation and lint gates, then ask whether a fresh agent can
+   choose the first open mission item without reading an old session history.
+   Repeat until the answer is yes.
+
+Fresh-agent check: **yes**. `AGENTS.md` routes directly here, this is the only
+indexed `PLAN`, retained documents label their narrower scope, and live-node
+procedures require an explicit maintainer-host assignment. With this cleanup
+checkpoint closed, continue at the first unmet item in the ordered product
+program below; do not revive a deleted scorecard or historical queue.
+
+Do not start a time-running soak, uptime watch, server-lane operation, or live
+node intervention during this mission unless the owner explicitly requests
+that operation or a P0 incident requires it. Do not rewrite working
+architecture merely to simplify its documentation.
+
 ## Near-term proof
 
 One person creates or improves a real C23 application from reusable parts,
@@ -295,10 +324,10 @@ qualified, documentation must not describe enqueue as publish.
 
 ## 5. Simulation and reference work
 
-Metaverse, marketplace expansion, live-token design, speculative services, and
-architecture-board cleanup are reference or simulation work until priorities 1
-and 2 are green or an owner explicitly changes the product decision. They must
-not change ZClassic consensus or imply live ZC23 economics.
+Metaverse, marketplace expansion, live-token design, and speculative services
+are reference or simulation work until priorities 1 and 2 are green or an
+owner explicitly changes the product decision. They must not change ZClassic
+consensus or imply live ZC23 economics.
 
 ## Integration cadence
 

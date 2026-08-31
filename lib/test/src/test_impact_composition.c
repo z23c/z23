@@ -829,7 +829,7 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
             "test-tmp/no-such-impact-index", files, 2, body, sizeof(body));
         ASSERT(n > 0 && n <= ZCL_DEVLOOP_PLAN_WIRE_MAX);
         ASSERT(strstr(body, "\"execution_selector\":\"exact\"") != NULL);
-        ASSERT(strstr(body, "\"test_stage_repair\"") != NULL);
+        ASSERT(strstr(body, "\"test_stage_repair\"") == NULL);
         ASSERT(strstr(body, "\"test_stage_repair_coin_backfill\"") != NULL);
         ASSERT(strstr(body, "\"execution_set_valid\":true") != NULL);
         ASSERT(strstr(body, "\"execution_set_sha3\":") != NULL);

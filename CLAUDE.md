@@ -7,10 +7,10 @@ Read, in order:
 
 1. [`AGENTS.md`](./AGENTS.md) — durable product direction, priorities,
    authority boundaries, first commands, and continuation rules.
-2. [`docs/DEVELOPING.md`](./docs/DEVELOPING.md) — detailed repository workflow,
-   navigation, feedback, tests, integration, and push procedure.
-3. [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md) — current ordered
+2. [`docs/work/FORWARD_PLAN.md`](./docs/work/FORWARD_PLAN.md) — current ordered
    development mission.
+3. [`docs/DEVELOPING.md`](./docs/DEVELOPING.md) — detailed repository workflow,
+   navigation, feedback, tests, integration, and push procedure.
 4. On the maintainer host only,
    [`docs/HANDOFF.md`](./docs/HANDOFF.md) — current hosted-node state, which
    must be rechecked through the node's typed status commands.

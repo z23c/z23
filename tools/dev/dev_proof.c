@@ -589,6 +589,26 @@ static bool proof_read_text(const char *path, char *out, size_t out_size)
     return ok;
 }
 
+static bool proof_log_contains(const char *path, const char *needle)
+{
+    if (!path || !needle || !needle[0])
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    char line[1024];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, needle)) {
+            found = true;
+            break;
+        }
+    }
+    bool ok = found && !ferror(f);
+    fclose(f);
+    return ok;
+}
+
 static bool proof_running(const char *path, int64_t *pid_out,
                           int64_t *started_out)
 {
@@ -1244,14 +1264,14 @@ static bool generation_prepare(const struct proof_paths *paths,
     }
     if (!generation_gitlink_prepare(paths, generation, why, why_len))
         return false;
+    /* Preserve the complete ignored compiler-input sets that source identity
+     * seals. Copying a fixed archive/header subset lets a host-specific input
+     * (for example libsecp256k1-darwin.a) appear during `make build-only`,
+     * superseding an otherwise exact isolated proof generation. Provenance
+     * stamps travel with vendor/lib so already verified inputs are not
+     * needlessly rebuilt after the source checkpoint. */
     static const char *const dependencies[] = {
-        "vendor/lib/libsecp256k1.a", "vendor/lib/libcrypto.a",
-        "vendor/lib/libssl.a", "vendor/lib/libevent.a",
-        "vendor/lib/libevent_openssl.a", "vendor/lib/libevent_pthreads.a",
-        "vendor/lib/libleveldb.a", "vendor/lib/libsqlite3.a",
-        "vendor/lib/libz.a", "vendor/lib/libtor_stub.a",
-        "vendor/include/openssl", "vendor/include/event2",
-        "vendor/include/zlib.h", "vendor/include/zconf.h",
+        "vendor/lib", "vendor/include",
         "vendor/tor/libtor.a",
         "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
@@ -2079,9 +2099,26 @@ static bool proof_worker(const struct proof_paths *paths,
                 const char *bundle_argv[] = {
                     "make", "--no-print-directory", make_jobs,
                     "dev-proof-bundle", NULL};
-                if (run_logged(generation, paths->bundle_log, bundle_argv,
-                               PROOF_TIMEOUT_MS) != 0) {
-                    proof_why(why, why_len, "proof_bundle_build_failed");
+                int bundle_rc = run_logged(
+                    generation, paths->bundle_log, bundle_argv,
+                    PROOF_TIMEOUT_MS);
+                if (bundle_rc != 0 && proof_log_contains(
+                        paths->bundle_log,
+                        "unverified compile epoch appeared after recovery "
+                        "admission; rerun make")) {
+                    char retry_log[PATH_MAX];
+                    if (snprintf(retry_log, sizeof(retry_log), "%s.retry",
+                                 paths->bundle_log) >= (int)sizeof(retry_log)) {
+                        proof_why(why, why_len,
+                                  "proof_bundle_retry_log_invalid");
+                        return false;
+                    }
+                    bundle_rc = run_logged(generation, retry_log, bundle_argv,
+                                           PROOF_TIMEOUT_MS);
+                }
+                if (bundle_rc != 0) {
+                    proof_why(why, why_len,
+                              "proof_bundle_build_failed");
                     return false;
                 }
                 runner_ready = test_binary_path(&execution, binary) &&

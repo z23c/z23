@@ -2,18 +2,17 @@
 
 # Work directory and parallel-worktree workflow
 
-This directory holds the active plans, design records, and the
-parallel-worktree protocol. It is not itself a priority queue:
+This directory holds one active plan plus scoped design records, retained
+rationale, and specialist procedures. It is not itself a priority queue:
 
-1. [`../HANDOFF.md`](../HANDOFF.md) owns current live facts.
-2. [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) is the sole ordered execution plan.
-3. [`../MVP.md`](../MVP.md) owns the v1 acceptance contract.
+1. [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) is the sole ordered execution plan.
+2. [`../MVP.md`](../MVP.md) owns the v1 acceptance contract.
+3. [`../HANDOFF.md`](../HANDOFF.md) owns maintainer-host live facts only.
 
-The ordered mission is whatever [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) says at
-the current commit: public-node correctness first, then the complete C23
-Commons user story. This index does not promote an older plan back into the
-queue. Hosted-node facts belong only in `../HANDOFF.md`; source priorities do
-not.
+The ordered mission is the first open item in
+[`FORWARD_PLAN.md`](./FORWARD_PLAN.md) at the current commit. This index does
+not summarize or promote an older plan back into the queue. Hosted-node facts
+belong only in `../HANDOFF.md`; source priorities do not.
 
 Worktrees are dynamic; never infer current workers from a hard-coded path
 list. Inspect them with `git worktree list --porcelain`. No checkout path is a
@@ -23,10 +22,12 @@ before removal; dirty and locked worktrees are preserved.
 
 ## How a worker session starts
 
-Run `pwd` and `git worktree list --porcelain`, then follow the compact
-[`agent-protocol.md`](./agent-protocol.md). The assignment owns a disjoint
-surface and returns an immutable commit identity; branch and directory suffixes
-are optional labels, not evidence or permanent inventory.
+Read [`../../AGENTS.md`](../../AGENTS.md), choose the first open item in
+[`FORWARD_PLAN.md`](./FORWARD_PLAN.md), then use `pwd` and `git worktree list
+--porcelain` before following the compact [`agent-protocol.md`](./agent-protocol.md).
+The assignment owns a disjoint surface and returns an immutable commit
+identity; branch and directory suffixes are optional labels, not evidence or
+permanent inventory.
 
 ## Index — one line per file, annotated
 
@@ -57,7 +58,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`NEON_CRYPTO_MATRIX.md`](./NEON_CRYPTO_MATRIX.md) | LIVE | per-crypto-family x86-64/arm64 tier matrix: gating, the test group proving bit-identity, the bench that times each tier, and honest no-clean-NEON-equivalent markers |
 | [`ZCODE_PLAN.md`](./ZCODE_PLAN.md) | FOUNDATION | original 15-slice ZCODE package-hosting order; slices 1–13 remain live foundations, while payout slices 14–15 are deferred behind the development network; `lib/vcs/include/vcs/package_reward.h` cites its "ZCL fuel economics" section by name |
 | [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | DESIGN | deferred application-protocol marketplace design; no consensus surface |
-| [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | DESIGN | deferred marketplace acceptance checklist and owner decision gates |
+| [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | RETAINED | 2026-08-08 marketplace dependency ordering; unchecked boxes are not current work |
 | [`MARKET_ONION_DELIVERY.md`](./MARKET_ONION_DELIVERY.md) | DESIGN | B5 onion-routed chunk delivery: offer v2 endpoint_type=onion wire, `/market/chunk` onion route, session-binding replacement, stub fail-closed policy, and the honest non-goals (timing, gossip metadata) |
 | [`ZC23_DISTRIBUTION_OPTIONS.md`](./ZC23_DISTRIBUTION_OPTIONS.md) | RETAINED | the Phase C1 menu; C2 chose from it and `ZC23_DISTRIBUTION_RULES.md` §2 cites option **2A** by number, so the numbering stays as-is |
 | [`shielded-history-importer.md`](./shielded-history-importer.md) | LIVE | reference for the shipped `-import-complete-shielded` operational cure; operational-vs-sovereign trust-mode split |
@@ -154,10 +155,12 @@ commit — retiring a doc is not finished until its callers are gone too.
 - **Current work:** [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) is the sole ordered
   plan. Other PLAN/LIVE rows below are scoped contracts and runbooks; they do
   not override its priority order.
-- **Current architecture:** [`../FRAMEWORK.md`](../FRAMEWORK.md) (reference,
-  off the v1 path — §9 is the open-item debt board, which self-labels NOT
-  the v1 path).
-- **Session entrypoint:** [`../HANDOFF.md`](../HANDOFF.md).
+- **Session entrypoint:** [`../../AGENTS.md`](../../AGENTS.md), then
+  [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).
+- **Maintainer-host live state only:** [`../HANDOFF.md`](../HANDOFF.md); never
+  use it to choose ordinary development work.
+- **Architecture reference:** [`../FRAMEWORK.md`](../FRAMEWORK.md); its scoped
+  debt inventory is not a priority queue.
 - **Worker protocol:** [`agent-protocol.md`](./agent-protocol.md).
 
 ## Worker protocol
@@ -176,10 +179,10 @@ completion remain defined by `AGENTS.md` and `docs/DEVELOPING.md`.
 | [`LIVE_TRANSACTION_DEMONSTRATIONS.md`](./LIVE_TRANSACTION_DEMONSTRATIONS.md) | LIVE | runbook: which cataloged transaction shapes are demonstrated live, and how |
 | [`REFLEX_REACTOR.md`](./REFLEX_REACTOR.md) | LIVE | local zero-wait reflex reactor: edit C23, receive first exact next-build result |
 | [`REFLEX_SUBSTRATE_AUDIT.md`](./REFLEX_SUBSTRATE_AUDIT.md) | EVIDENCE | measured coverage/latency audit of the merged reflex implementation (2026-08-12) |
-| [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | PLAN | owner-approved `app shop` one-command sovereign storefront specification |
+| [`SHOP_COMMAND.md`](./SHOP_COMMAND.md) | DESIGN | owner-approved `app shop` one-command sovereign storefront specification; not an execution queue |
 | [`TRANSACTION_LAB.md`](./TRANSACTION_LAB.md) | LIVE | transaction laboratory notebook; keeps its two questions separate |
-| [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | PLAN | owner-visible 100-transaction micro lab demonstration plan |
-| [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md) | PLAN | ZC23 distribution rules — phase C2, owner-decided 2026-08-09 |
+| [`TRANSACTION_MICRO_LAB.md`](./TRANSACTION_MICRO_LAB.md) | LIVE | owner-gated 100-transaction demonstration runbook; never ordinary development work |
+| [`ZC23_DISTRIBUTION_RULES.md`](./ZC23_DISTRIBUTION_RULES.md) | RETAINED | owner-decided phase-C2 policy record; simulation-only and not an execution queue |
 | [`WIRE_COMPILE_CACHE.md`](./WIRE_COMPILE_CACHE.md) | DESIGN | Commons WIRE lane working note: transfer framing, POINTER/PROVIDER discovery records, and the cross-node compile cache; subordinate to `../spec/c23-package-format.md`, which wins on any disagreement |
 | [`transaction-lab-events.jsonl`](./transaction-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_LAB |
 | [`transaction-micro-lab-events.jsonl`](./transaction-micro-lab-events.jsonl) | EVIDENCE | event ledger backing TRANSACTION_MICRO_LAB |

@@ -8,8 +8,8 @@ This is a curated map, not an inventory. The documentation hierarchy is:
 
 1. [`../README.md`](../README.md) — public product explanation.
 2. [`../AGENTS.md`](../AGENTS.md) — model-neutral coding-agent entry point.
-3. [`DEVELOPING.md`](DEVELOPING.md) — detailed developer procedure.
-4. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — current ordered work.
+3. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — current ordered work.
+4. [`DEVELOPING.md`](DEVELOPING.md) — detailed developer procedure.
 5. [`HANDOFF.md`](HANDOFF.md) — current state of the maintainer's hosted node
    only.
 6. This page — map to specialist documentation.
