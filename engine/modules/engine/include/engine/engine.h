@@ -117,6 +117,14 @@ enum engine_cli_prompt {
     ENGINE_CLI_PROMPT_ARG        /* the prompt text itself fills one slot */
 };
 
+/* What a CLI row emits on stdout. Plain output carries no session evidence;
+ * a structured row is parsed by the bounded response decoder. This remains
+ * table data so dispatch never branches on a vendor id. */
+enum engine_cli_output {
+    ENGINE_CLI_OUTPUT_PLAIN = 0,
+    ENGINE_CLI_OUTPUT_GROK_JSON,
+};
+
 /* An argv slot the caller fills. Anything else in a row is a literal.
  *
  *   {prompt}   the prompt file path, or the prompt text — see cli_prompt
@@ -161,6 +169,7 @@ struct engine_vendor {
      * standalone dispatcher selects the existing PTY capture transport when
      * true. It changes no authority and is never used by the node. */
     bool             cli_needs_tty;
+    enum engine_cli_output cli_output;
     enum engine_wire wire;
     enum engine_delivery delivery;
     bool             costs_money;    /* false only for the fixture engine */

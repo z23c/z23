@@ -76,12 +76,40 @@ struct engine_reply {
     struct engine_usage usage;
 };
 
+#define ENGINE_CLI_SESSION_ID_MAX 64u
+#define ENGINE_CLI_REQUEST_ID_MAX 96u
+
+/* Observable fields from one structured CLI response. There is deliberately
+ * no model-thought or transcript member: those bytes cannot flow into a
+ * receipt through this type. `known=false` means truthful UNKNOWN. */
+struct engine_cli_observation {
+    bool known;
+    char resolved_model[96];
+    char session_id[ENGINE_CLI_SESSION_ID_MAX];
+    char request_id[ENGINE_CLI_REQUEST_ID_MAX];
+    char stop_reason[32];
+    int64_t turns;
+    int64_t input_tokens;
+    int64_t cache_read_input_tokens;
+    int64_t cache_creation_input_tokens;
+    int64_t output_tokens;
+    int64_t reasoning_tokens;
+    int64_t total_tokens;
+};
+
 void engine_reply_free(struct engine_reply *r);
 
 /* Decode one chat-completion response body. `out` is zeroed on failure. */
 bool engine_response_parse(const struct engine_vendor *vendor,
                            const char *body, size_t len,
                            struct engine_reply *out);
+
+/* Parse only the observable session projection selected by the vendor row.
+ * Plain rows succeed as UNKNOWN without interpreting body. Structured rows
+ * fail atomically on malformed, missing, overflowing, or inconsistent data. */
+bool engine_cli_observation_parse(const struct engine_vendor *vendor,
+                                  const char *body, size_t len,
+                                  struct engine_cli_observation *out);
 
 /* Some vendors answer a bad request with 200 and an `error` object, others
  * with 4xx and the same shape. Extract a bounded, printable description of

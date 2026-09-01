@@ -36,7 +36,7 @@ static const char *const k_grok_cli_argv[] = {
     "--always-approve",
     "--permission-mode", "bypassPermissions",
     "--no-plan",
-    "--output-format", "plain",
+    "--output-format", "json",
     NULL
 };
 
@@ -123,6 +123,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .cli_argv      = k_grok_cli_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_FILE,
         .cli_needs_tty = true,
+        .cli_output    = ENGINE_CLI_OUTPUT_GROK_JSON,
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
         .costs_money   = true,

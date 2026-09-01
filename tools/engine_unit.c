@@ -629,8 +629,11 @@ static char *compose_prompt(const struct unit_opts *o,
 
 struct dispatch_result {
     struct engine_reply reply;
+    struct engine_cli_observation cli_observation;
     enum engine_err     err;
     int                 http_status;
+    int                 attempts;
+    int64_t             dispatch_latency_ms;
 };
 
 /* One HTTPS attempt. The credential is built into a stack buffer here, handed
@@ -773,8 +776,23 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override)
         free(log);
         return 1;
     }
-    /* The last non-empty line, flattened. A CLI prints a transcript; the
-     * probe reports that it answered, not what it said. */
+    if (v->cli_output == ENGINE_CLI_OUTPUT_GROK_JSON) {
+        struct engine_cli_observation observation;
+        if (!engine_cli_observation_parse(v, log, strlen(log), &observation)) {
+            printf("MALFORMED SESSION METADATA in %lldms\n",
+                   (long long)elapsed);
+            free(log);
+            return 1;
+        }
+        printf("exit %d in %lldms  model=%s turns=%lld session=%s\n", rc,
+               (long long)elapsed, observation.resolved_model,
+               (long long)observation.turns, observation.session_id);
+        free(log);
+        return rc == 0 ? 0 : 1;
+    }
+
+    /* The last non-empty line, flattened. A plain CLI prints a transcript;
+     * the probe reports that it answered, not what it said. */
     char tail[81] = {0};
     size_t len = strlen(log);
     while (len > 0 && (log[len - 1] == '\n' || log[len - 1] == '\r'))
@@ -955,14 +973,33 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
     bool timed_out = false;
     const int rc = run_cli(
         v, argv, log, UNIT_GATE_LOG_BYTES, timeout_ms, &timed_out);
-    free(log);
     if (rc < 0) {
+        free(log);
         dr->err = ENGINE_ERR_NETWORK;
         LOG_FAIL("engine_unit", "could not launch %s", v->program);
     }
     if (timed_out) {
+        free(log);
         dr->err = ENGINE_ERR_TIMEOUT;
         return false;
+    }
+    if (!engine_cli_observation_parse(v, log, strlen(log),
+                                      &dr->cli_observation)) {
+        free(log);
+        dr->err = ENGINE_ERR_PARSE;
+        return false;
+    }
+    free(log);
+    if (dr->cli_observation.known) {
+        dr->reply.usage.prompt_tokens =
+            dr->cli_observation.input_tokens;
+        dr->reply.usage.completion_tokens =
+            dr->cli_observation.output_tokens;
+        dr->reply.usage.total_tokens =
+            dr->cli_observation.total_tokens;
+        dr->reply.usage.tokens_known = true;
+        (void)snprintf(dr->reply.model, sizeof(dr->reply.model), "%s",
+                       dr->cli_observation.resolved_model);
     }
     /* rc is deliberately NOT consulted beyond "did it launch". A CLI engine
      * exiting 0 having written nothing is one of the three measured failures
@@ -1074,30 +1111,84 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
 
 /* ── receipt ─────────────────────────────────────────────────────────── */
 
+static bool receipt_push_null(struct json_value *doc, const char *key)
+{
+    struct json_value value;
+    json_init(&value);
+    json_set_null(&value);
+    const bool ok = json_push_kv(doc, key, &value);
+    json_free(&value);
+    return ok;
+}
+
 static void write_receipt(const struct unit_opts *o,
                           const struct engine_vendor *v,
                           const struct engine_usage *usage,
+                          const struct engine_cli_observation *observation,
                           const struct engine_gate_reading *g,
-                          size_t files_changed, enum engine_verdict verdict)
+                          size_t files_changed, int attempts,
+                          int64_t dispatch_latency_ms,
+                          int64_t proof_latency_ms,
+                          enum engine_verdict verdict)
 {
     char text[4096];
-    const int n = snprintf(text, sizeof(text),
-        "{\"schema\":\"zcl.engine_unit.v1\","
-        "\"engine\":\"%s\",\"model\":\"%s\",\"territory\":\"%s\","
-        "\"group\":\"%s\",\"files_changed\":%zu,"
-        "\"groups_ran\":%ld,\"groups_failed\":%ld,\"cached\":%s,"
-        "\"prompt_tokens\":%lld,\"completion_tokens\":%lld,"
-        "\"cost_usd_known\":%s,\"cost_usd\":%.6f,"
-        "\"verdict\":\"%s\"}\n",
-        v->id, o->model ? o->model : (v->default_model ? v->default_model : ""),
-        o->territory ? o->territory : "", o->group ? o->group : "",
-        files_changed, g->groups_ran, g->groups_failed,
-        g->cached_mode ? "true" : "false",
-        (long long)usage->prompt_tokens, (long long)usage->completion_tokens,
-        usage->cost_known ? "true" : "false", usage->cost_usd,
-        engine_verdict_name(verdict));
-    if (n < 0 || (size_t)n >= sizeof(text))
+    struct json_value doc;
+    json_init(&doc);
+    json_set_object(&doc);
+    bool ok = json_push_kv_str(&doc, "schema", "zcl.engine_unit.v1") &&
+        json_push_kv_str(&doc, "engine", v->id) &&
+        json_push_kv_str(&doc, "model", o->model ? o->model :
+                         (v->default_model ? v->default_model : "")) &&
+        json_push_kv_str(&doc, "territory", o->territory ? o->territory : "") &&
+        json_push_kv_str(&doc, "group", o->group ? o->group : "") &&
+        json_push_kv_int(&doc, "files_changed", (int64_t)files_changed) &&
+        json_push_kv_int(&doc, "groups_ran", g->groups_ran) &&
+        json_push_kv_int(&doc, "groups_failed", g->groups_failed) &&
+        json_push_kv_bool(&doc, "cached", g->cached_mode) &&
+        json_push_kv_int(&doc, "prompt_tokens", usage->prompt_tokens) &&
+        json_push_kv_int(&doc, "completion_tokens", usage->completion_tokens) &&
+        json_push_kv_bool(&doc, "cost_usd_known", usage->cost_known) &&
+        json_push_kv_real(&doc, "cost_usd", usage->cost_usd) &&
+        json_push_kv_int(&doc, "attempts", attempts) &&
+        json_push_kv_int(&doc, "dispatch_failures",
+                         attempts > 0 ? attempts - 1 : 0) &&
+        json_push_kv_int(&doc, "dispatch_latency_ms", dispatch_latency_ms) &&
+        json_push_kv_int(&doc, "proof_latency_ms", proof_latency_ms) &&
+        json_push_kv_str(&doc, "verdict", engine_verdict_name(verdict));
+    if (ok && observation && observation->known) {
+        ok = json_push_kv_str(&doc, "resolved_model",
+                              observation->resolved_model) &&
+            json_push_kv_str(&doc, "session_id", observation->session_id) &&
+            json_push_kv_str(&doc, "request_id", observation->request_id) &&
+            json_push_kv_str(&doc, "stop_reason", observation->stop_reason) &&
+            json_push_kv_int(&doc, "turns", observation->turns) &&
+            json_push_kv_int(&doc, "input_tokens", observation->input_tokens) &&
+            json_push_kv_int(&doc, "cache_read_input_tokens",
+                             observation->cache_read_input_tokens) &&
+            json_push_kv_int(&doc, "cache_creation_input_tokens",
+                             observation->cache_creation_input_tokens) &&
+            json_push_kv_int(&doc, "output_tokens", observation->output_tokens) &&
+            json_push_kv_int(&doc, "reasoning_tokens",
+                             observation->reasoning_tokens) &&
+            json_push_kv_int(&doc, "total_tokens", observation->total_tokens);
+    } else if (ok) {
+        static const char *const unknown_keys[] = {
+            "resolved_model", "session_id", "request_id", "stop_reason",
+            "turns", "input_tokens", "cache_read_input_tokens",
+            "cache_creation_input_tokens", "output_tokens",
+            "reasoning_tokens", "total_tokens",
+        };
+        for (size_t i = 0;
+             ok && i < sizeof(unknown_keys) / sizeof(unknown_keys[0]); i++)
+            ok = receipt_push_null(&doc, unknown_keys[i]);
+    }
+    const size_t n = ok ? json_write(&doc, text, sizeof(text) - 2u) :
+                          sizeof(text);
+    json_free(&doc);
+    if (!ok || n >= sizeof(text) - 2u)
         return;
+    text[n] = '\n';
+    text[n + 1u] = '\0';
     engine_emit(stdout, "%s", text);
     if (o->state_dir && o->state_dir[0]) {
         char path[1024];
@@ -1120,7 +1211,9 @@ static bool dispatch_with_retries(const struct engine_vendor *v,
 {
     struct engine_breaker breaker = {0};
     const int budget = v->max_retries < 0 ? 0 : v->max_retries;
+    const int64_t started_ns = clock_now_monotonic_ns();
     for (int attempt = 0; attempt <= budget; attempt++) {
+        dr->attempts = attempt + 1;
         const int64_t now = clock_now_monotonic_ns() / 1000000;
         if (engine_breaker_is_open(&breaker, now)) {
             dr->err = ENGINE_ERR_REFUSED;
@@ -1142,6 +1235,8 @@ static bool dispatch_with_retries(const struct engine_vendor *v,
             break;
         }
         engine_breaker_record(&breaker, ok ? ENGINE_OK : dr->err, now);
+        dr->dispatch_latency_ms =
+            (clock_now_monotonic_ns() - started_ns) / 1000000;
         if (ok)
             return true;
         if (!engine_err_should_retry(dr->err)) {
@@ -1419,13 +1514,17 @@ int main(int argc, char **argv)
 
     struct engine_gate_reading gate = {0};
     bool timed_out = false;
+    int64_t proof_latency_ms = 0;
     if (!o.no_group && changed > 0) {
         char gate_log[1024] = {0};
         if (o.state_dir && o.state_dir[0])
             (void)snprintf(gate_log, sizeof(gate_log), "%s/gate.log",
                            o.state_dir);
+        const int64_t proof_started_ns = clock_now_monotonic_ns();
         (void)run_gate(&o, workdir, &gate, &timed_out,
                        gate_log[0] ? gate_log : NULL);
+        proof_latency_ms =
+            (clock_now_monotonic_ns() - proof_started_ns) / 1000000;
         engine_emit(stdout,
                     "  gate:       verdict_line=%s mode=%s groups_ran=%ld "
                     "groups_failed=%ld\n",
@@ -1436,7 +1535,9 @@ int main(int argc, char **argv)
 
     const enum engine_verdict verdict =
         engine_verdict_of(&gate, changed, timed_out, !o.no_group);
-    write_receipt(&o, v, &dr.reply.usage, &gate, changed, verdict);
+    write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, &gate, changed,
+                  dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
+                  verdict);
     engine_emit(stdout, "engine_unit: %s\n", engine_verdict_name(verdict));
     engine_emit(stdout, "  review the diff before anything else: git -C %s diff\n",
                 workdir);

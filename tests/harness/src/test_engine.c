@@ -1314,6 +1314,117 @@ static int case_cli_argv(void)
     return failures;
 }
 
+static int case_cli_observation(void)
+{
+    int failures = 0;
+    static const char good[] =
+        "{\"text\":\"done\",\"stopReason\":\"end_turn\","
+        "\"sessionId\":\"23c9be10-5084-43a4-8e1a-2735a4650981\","
+        "\"requestId\":\"ddc16017-2c5f-4c34-9fa9-ce50a4ec48a0\","
+        "\"thought\":\"must never escape\","
+        "\"usage\":{\"input_tokens\":100,"
+        "\"cache_read_input_tokens\":60,"
+        "\"cache_creation_input_tokens\":10,\"output_tokens\":25,"
+        "\"reasoning_tokens\":7,\"total_tokens\":125},"
+        "\"num_turns\":4,\"total_cost_usd\":0.125,"
+        "\"modelUsage\":{\"grok-4.6-build\":{\"inputTokens\":100,"
+        "\"outputTokens\":25,\"cacheReadInputTokens\":60,"
+        "\"cacheCreationInputTokens\":10,\"modelCalls\":4,"
+        "\"costUSD\":0.125}}}";
+    struct engine_cli_observation observed;
+    bool ok = engine_cli_observation_parse(engine_by_id("grok-cli"), good,
+                                            sizeof(good) - 1u, &observed);
+    EN_CHECK("Grok CLI observable metadata parses",
+             ok && observed.known
+             && strcmp(observed.resolved_model, "grok-4.6-build") == 0
+             && strcmp(observed.session_id,
+                       "23c9be10-5084-43a4-8e1a-2735a4650981") == 0
+             && observed.turns == 4 && observed.input_tokens == 100
+             && observed.cache_read_input_tokens == 60
+             && observed.cache_creation_input_tokens == 10
+             && observed.output_tokens == 25
+             && observed.reasoning_tokens == 7
+             && observed.total_tokens == 125);
+
+    memset(&observed, 0xa5, sizeof(observed));
+    ok = engine_cli_observation_parse(engine_by_id("glm-cli"), "not json", 8u,
+                                      &observed);
+    EN_CHECK("plain CLI metadata stays truthful UNKNOWN",
+             ok && !observed.known && observed.session_id[0] == '\0');
+
+    static const char bad_total[] =
+        "{\"text\":\"done\",\"stopReason\":\"end_turn\","
+        "\"sessionId\":\"s\",\"requestId\":\"r\","
+        "\"usage\":{\"input_tokens\":100,"
+        "\"cache_read_input_tokens\":60,"
+        "\"cache_creation_input_tokens\":10,\"output_tokens\":25,"
+        "\"reasoning_tokens\":7,\"total_tokens\":124},"
+        "\"num_turns\":4,\"modelUsage\":{\"grok-4.6-build\":{"
+        "\"inputTokens\":100,\"outputTokens\":25,"
+        "\"cacheReadInputTokens\":60,\"cacheCreationInputTokens\":10,"
+        "\"modelCalls\":4,\"costUSD\":0.125}}}";
+    memset(&observed, 0xa5, sizeof(observed));
+    EN_CHECK("inconsistent Grok totals fail closed atomically",
+             !engine_cli_observation_parse(engine_by_id("grok-cli"),
+                                            bad_total,
+                                            sizeof(bad_total) - 1u, &observed)
+             && !observed.known && observed.resolved_model[0] == '\0');
+
+    char missing[sizeof(good)];
+    memcpy(missing, good, sizeof(good));
+    char *session_key = strstr(missing, "sessionId");
+    if (session_key) session_key[0] = 'x';
+    memset(&observed, 0xa5, sizeof(observed));
+    EN_CHECK("missing required Grok metadata fails closed atomically",
+             session_key != NULL &&
+             !engine_cli_observation_parse(engine_by_id("grok-cli"), missing,
+                                            sizeof(good) - 1u, &observed)
+             && !observed.known && observed.session_id[0] == '\0');
+
+    char negative[sizeof(good)];
+    memcpy(negative, good, sizeof(good));
+    char *input_count = strstr(negative, "input_tokens\":100");
+    if (input_count) {
+        input_count = strchr(input_count, ':');
+        if (input_count) memcpy(input_count + 1, "-10", 3u);
+    }
+    memset(&observed, 0xa5, sizeof(observed));
+    EN_CHECK("negative Grok metadata fails closed atomically",
+             input_count != NULL &&
+             !engine_cli_observation_parse(engine_by_id("grok-cli"), negative,
+                                            sizeof(good) - 1u, &observed)
+             && !observed.known && observed.total_tokens == 0);
+
+    static const char huge_integer[] =
+        "{\"text\":\"done\",\"stopReason\":\"end_turn\","
+        "\"sessionId\":\"s\",\"requestId\":\"r\","
+        "\"usage\":{\"input_tokens\":9223372036854775808,"
+        "\"cache_read_input_tokens\":0,"
+        "\"cache_creation_input_tokens\":0,\"output_tokens\":0,"
+        "\"reasoning_tokens\":0,\"total_tokens\":0},"
+        "\"num_turns\":1,\"modelUsage\":{\"m\":{"
+        "\"inputTokens\":0,\"outputTokens\":0,"
+        "\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,"
+        "\"modelCalls\":1}}}";
+    memset(&observed, 0xa5, sizeof(observed));
+    EN_CHECK("overflowing Grok metadata fails closed atomically",
+             !engine_cli_observation_parse(engine_by_id("grok-cli"),
+                                            huge_integer,
+                                            sizeof(huge_integer) - 1u,
+                                            &observed)
+             && !observed.known && observed.input_tokens == 0);
+
+    char nul_body[sizeof(good)];
+    memcpy(nul_body, good, sizeof(good));
+    nul_body[20] = '\0';
+    memset(&observed, 0xa5, sizeof(observed));
+    EN_CHECK("embedded NUL Grok metadata fails closed atomically",
+             !engine_cli_observation_parse(engine_by_id("grok-cli"), nul_body,
+                                            sizeof(good) - 1u, &observed)
+             && !observed.known && observed.request_id[0] == '\0');
+    return failures;
+}
+
 
 /* ── the default engine ───────────────────────────────────────────────────
  * A caller who names no engine gets one. Which one is a row in the table, not
@@ -1360,6 +1471,7 @@ int test_engine(void)
     failures += case_prompt();
     failures += case_prompt_shape();
     failures += case_cli_argv();
+    failures += case_cli_observation();
     failures += case_default_engine();
     printf("engine: %d failure(s)\n", failures);
     return failures;

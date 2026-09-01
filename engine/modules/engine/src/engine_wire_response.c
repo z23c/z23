@@ -71,6 +71,158 @@ static bool copy_bounded(const struct json_value *v, char *out, size_t out_len,
     return true;
 }
 
+static bool copy_required_observable_text(const char *s, char *out,
+                                          size_t out_len, const char *what)
+{
+    out[0] = '\0';
+    if (!s || !s[0])
+        LOG_FAIL("engine", "refusing Grok metadata without %s", what);
+    if (strlen(s) >= out_len)
+        LOG_FAIL("engine", "refusing oversized Grok %s", what);
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+        if (*p < 0x20u || *p > 0x7eu)
+            LOG_FAIL("engine", "refusing non-printable Grok %s", what);
+    memcpy(out, s, strlen(s) + 1u);
+    return true;
+}
+
+static bool copy_required_observable(const struct json_value *v, char *out,
+                                     size_t out_len, const char *what)
+{
+    if (!v || v->type != JSON_STR) {
+        if (out && out_len != 0) out[0] = '\0';
+        LOG_FAIL("engine", "refusing Grok metadata without %s", what);
+    }
+    return copy_required_observable_text(
+        json_get_str(v), out, out_len, what);
+}
+
+static bool read_required_nonnegative(const struct json_value *obj,
+                                      const char *key, int64_t *out)
+{
+    *out = 0;
+    const struct json_value *v = json_get(obj, key);
+    if (!v || v->type != JSON_INT || json_get_int(v) < 0)
+        LOG_FAIL("engine", "refusing invalid Grok integer %s", key);
+    *out = json_get_int(v);
+    return true;
+}
+
+static bool cli_observation_from_grok(const char *body, size_t len,
+                                      struct engine_cli_observation *out)
+{
+    if (!body_is_admissible(body, len))
+        return false;
+    struct json_value root;
+    json_init(&root);
+    if (!json_read(&root, body, len)) {
+        json_free(&root);
+        LOG_FAIL("engine", "refusing malformed Grok CLI JSON");
+    }
+
+    struct engine_cli_observation tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    bool ok = false;
+    const struct json_value *usage = json_get(&root, "usage");
+    const struct json_value *models = json_get(&root, "modelUsage");
+    const struct json_value *incomplete =
+        json_get(&root, "usage_is_incomplete");
+    const struct json_value *text = json_get(&root, "text");
+    if (root.type != JSON_OBJ || !text || text->type != JSON_STR) {
+        LOG_WARN("engine", "refusing Grok JSON without observable text");
+    } else if (incomplete &&
+               (incomplete->type != JSON_BOOL || json_get_bool(incomplete))) {
+        LOG_WARN("engine", "refusing incomplete Grok usage");
+    } else if (!usage || usage->type != JSON_OBJ ||
+               !models || models->type != JSON_OBJ ||
+               json_size(models) != 1u || !models->keys ||
+               !models->keys[0] || !models->keys[0][0]) {
+        LOG_WARN("engine", "refusing incomplete Grok usage/model metadata");
+    } else {
+        const struct json_value *model_row = json_at(models, 0u);
+        int64_t model_input = 0, model_output = 0;
+        int64_t model_cache_read = 0, model_cache_create = 0;
+        int64_t model_calls = 0;
+        if (model_row && model_row->type == JSON_OBJ &&
+            copy_required_observable(json_get(&root, "sessionId"),
+                tmp.session_id, sizeof(tmp.session_id), "sessionId") &&
+            copy_required_observable(json_get(&root, "requestId"),
+                tmp.request_id, sizeof(tmp.request_id), "requestId") &&
+            copy_required_observable(json_get(&root, "stopReason"),
+                tmp.stop_reason, sizeof(tmp.stop_reason), "stopReason") &&
+            copy_required_observable_text(models->keys[0],
+                tmp.resolved_model, sizeof(tmp.resolved_model),
+                "resolved model") &&
+            read_required_nonnegative(&root, "num_turns", &tmp.turns) &&
+            read_required_nonnegative(usage, "input_tokens",
+                &tmp.input_tokens) &&
+            read_required_nonnegative(usage, "cache_read_input_tokens",
+                &tmp.cache_read_input_tokens) &&
+            read_required_nonnegative(usage, "cache_creation_input_tokens",
+                &tmp.cache_creation_input_tokens) &&
+            read_required_nonnegative(usage, "output_tokens",
+                &tmp.output_tokens) &&
+            read_required_nonnegative(usage, "reasoning_tokens",
+                &tmp.reasoning_tokens) &&
+            read_required_nonnegative(usage, "total_tokens",
+                &tmp.total_tokens) &&
+            read_required_nonnegative(model_row, "inputTokens",
+                &model_input) &&
+            read_required_nonnegative(model_row, "outputTokens",
+                &model_output) &&
+            read_required_nonnegative(model_row, "cacheReadInputTokens",
+                &model_cache_read) &&
+            read_required_nonnegative(model_row, "cacheCreationInputTokens",
+                &model_cache_create) &&
+            read_required_nonnegative(model_row, "modelCalls",
+                &model_calls)) {
+            const bool add_ok =
+                tmp.input_tokens <= INT64_MAX - tmp.output_tokens &&
+                tmp.cache_read_input_tokens <=
+                    INT64_MAX - tmp.cache_creation_input_tokens;
+            const int64_t total = add_ok
+                ? tmp.input_tokens + tmp.output_tokens : -1;
+            const int64_t cached = add_ok
+                ? tmp.cache_read_input_tokens +
+                  tmp.cache_creation_input_tokens : -1;
+            if (tmp.turns > 0 && add_ok && total == tmp.total_tokens &&
+                cached <= tmp.input_tokens &&
+                tmp.reasoning_tokens <= tmp.output_tokens &&
+                model_input == tmp.input_tokens &&
+                model_output == tmp.output_tokens &&
+                model_cache_read == tmp.cache_read_input_tokens &&
+                model_cache_create == tmp.cache_creation_input_tokens &&
+                model_calls == tmp.turns) {
+                tmp.known = true;
+                ok = true;
+            } else {
+                LOG_WARN("engine", "refusing inconsistent Grok usage totals");
+            }
+        }
+    }
+    json_free(&root);
+    if (!ok)
+        return false;
+    *out = tmp;
+    return true;
+}
+
+bool engine_cli_observation_parse(const struct engine_vendor *vendor,
+                                  const char *body, size_t len,
+                                  struct engine_cli_observation *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!vendor)
+        LOG_FAIL("engine", "refusing CLI metadata without a vendor");
+    if (vendor->cli_output == ENGINE_CLI_OUTPUT_PLAIN)
+        return true;
+    if (vendor->cli_output != ENGINE_CLI_OUTPUT_GROK_JSON)
+        LOG_FAIL("engine", "refusing unknown CLI output shape");
+    return cli_observation_from_grok(body, len, out);
+}
+
 /* Usage is optional and stays optional. A vendor that omits it, or sends it
  * with the wrong types, leaves the operator without a cost line — which is
  * reported as unknown, not invented, and never as zero. */
