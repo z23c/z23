@@ -202,6 +202,8 @@ static const struct rlw_leaf g_rlw_leaves[] = {
      * leaves alone. */
     { "zcode.work.show", zcl_native_handle_zcode_work_status,
       "workspace", RLW_DATADIR_VALUE, "work", RLW_ZID_PUBKEY, NULL },
+    { "story.focus", zcl_native_handle_story_focus,
+      "work", RLW_ZID_PUBKEY, NULL, NULL, NULL },
     { "story.show", zcl_native_handle_story_show,
       "work", RLW_ZID_PUBKEY, NULL, NULL, NULL },
     { "story.why", zcl_native_handle_story_why,

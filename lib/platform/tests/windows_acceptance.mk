@@ -389,11 +389,14 @@ ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_LIBS := -lpsapi -lshell32
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_SOURCES := \
 	lib/test/src/progress_store_windows_refusal_acceptance.c \
 	lib/storage/src/progress_store.c \
+	lib/storage/src/progress_store_directory.c \
+	lib/platform/src/directory_transaction.c \
 	lib/platform/src/private_directory.c \
 	lib/platform/src/private_acl_internal.c \
 	lib/base/src/safe_alloc.c \
 	lib/base/src/log_level.c
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_FLAGS := \
+	-DZCL_PROGRESS_STORE_LEGACY_REFUSAL_ACCEPTANCE \
 	-ffunction-sections -fdata-sections -flto -fwhole-program
 ZCL_WINDOWS_ACCEPTANCE_progress_store_refusal_LIBS := \
 	-flto -Wl,--gc-sections -ladvapi32 \

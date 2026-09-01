@@ -17,6 +17,9 @@
 
 #include "sqlite_integrity_gate.h"
 #include "storage/consensus_db.h"
+#ifdef _WIN32
+#include "storage/sqlite_vfs_dir.h"
+#endif
 #include "storage/repair_marker.h"
 #include "event/event.h"
 #include "json/json.h"
@@ -60,6 +63,9 @@ static _Atomic(sqlite3 *) g_db = NULL;
 static char g_path[PROGRESS_STORE_PATH_MAX];
 static char g_display_path[PROGRESS_STORE_PATH_MAX];
 static uintptr_t g_dir_handle = UINTPTR_MAX;
+#ifdef _WIN32
+static char g_vfs_name[SQLITE_VFS_DIR_NAME_MAX];
+#endif
 static int64_t g_opened_at;
 /* Monotonic open-epoch. Bumped on every successful open so in-memory caches
  * seeded from the store (e.g. the log-row counters in stage_log_rows) can
@@ -181,29 +187,39 @@ static bool progress_store_quick_check_ok(sqlite3 *db)
  * (or the anchor), and the stage cursors re-fold from there. An empty store
  * therefore triggers the normal re-derivation rather than serving torn state.
  * Emits a NAMED recovery event (not a silent stop). */
+#ifndef _WIN32
 static void progress_store_quarantine_corrupt(const char *path)
 {
     sqlite_integrity_quarantine_corrupt(path, "progress_store",
                                         "progress_store_quarantine");
 }
+#endif
 
 bool progress_store_open(const char *datadir)
 {
     if (!datadir || !datadir[0]) LOG_FAIL("progress_store",
         "open: empty datadir");
 
-#ifdef _WIN32
-    /* consensus.db is authority-bearing and SQLite opens its WAL/SHM siblings
-     * by pathname. A one-time directory identity comparison does not bind
-     * those later opens, and legacy migration mutates the same namespace.
-     * Refuse before migration, quarantine, schema creation, or any other
-     * filesystem mutation until a retained-directory SQLite VFS is qualified. */
-    fprintf(stderr,  // obs-ok:progress-store-open-failure
-            "[progress_store] native Windows consensus store disabled: "
-            "retained-directory SQLite VFS is not qualified (%s)\n", datadir);
-    return false;
-#endif
+    char display_path[PROGRESS_STORE_PATH_MAX];
+    int n = snprintf(display_path, sizeof(display_path), "%s/%s",
+                     datadir, PROGRESS_STORE_FILENAME);
+    if (n <= 0 || (size_t)n >= sizeof(display_path))
+        LOG_FAIL("progress_store", "open: datadir path too long");
 
+#ifdef _WIN32
+    /* The retained-directory VFS below binds consensus.db and every SQLite
+     * sibling to the validated directory HANDLE.  The old progress.kv ->
+     * consensus.db migration still uses SQLite ATTACH plus pathname rename,
+     * however, and therefore has not earned that authority on Windows.  A
+     * native Windows node has never been able to open progress_store, so a
+     * fresh datadir is the supported first slice; a copied legacy datadir is
+     * refused before consensus.db is created or any source byte is touched. */
+    char legacy_path[PROGRESS_STORE_PATH_MAX];
+    n = snprintf(legacy_path, sizeof(legacy_path), "%s/%s", datadir,
+                 CONSENSUS_DB_LEGACY_KERNEL_FILENAME);
+    if (n <= 0 || (size_t)n >= sizeof(legacy_path))
+        LOG_FAIL("progress_store", "open: legacy path too long");
+#else
     /* Rename-in-place flip: migrate a legacy progress.kv kernel into
      * consensus.db before opening it. Idempotent (a no-op once consensus.db
      * exists, and a clean no-op on a fresh node where there is no progress.kv —
@@ -221,12 +237,7 @@ bool progress_store_open(const char *datadir)
             return false;
         }
     }
-
-    char display_path[PROGRESS_STORE_PATH_MAX];
-    int n = snprintf(display_path, sizeof(display_path), "%s/%s",
-                     datadir, PROGRESS_STORE_FILENAME);
-    if (n <= 0 || (size_t)n >= sizeof(display_path))
-        LOG_FAIL("progress_store", "open: datadir path too long");
+#endif
 
     uintptr_t opened_dir_handle = UINTPTR_MAX;
     char path[PROGRESS_STORE_PATH_MAX];
@@ -235,6 +246,36 @@ bool progress_store_open(const char *datadir)
                                  &opened_dir_handle))
         LOG_FAIL("progress_store", "open: datadir capability failed: %s",
                  strerror(errno));
+
+#ifdef _WIN32
+    bool consensus_exists = false;
+    bool legacy_exists = false;
+    if (!progress_directory_child_exists(
+            opened_dir_handle, PROGRESS_STORE_FILENAME, &consensus_exists) ||
+        !progress_directory_child_exists(
+            opened_dir_handle, CONSENSUS_DB_LEGACY_KERNEL_FILENAME,
+            &legacy_exists)) {
+        progress_directory_close(opened_dir_handle);
+        LOG_FAIL("progress_store",
+                 "open: retained legacy namespace inspection failed");
+    }
+    if (!consensus_exists && legacy_exists) {
+        fprintf(stderr,  // obs-ok:progress-store-open-failure
+                "[progress_store] native Windows legacy kernel migration "
+                "refused: %s exists while %s is absent; copy/migration is "
+                "not yet retained-directory qualified\n",
+                legacy_path, display_path);
+        progress_directory_close(opened_dir_handle);
+        return false;
+    }
+#ifdef ZCL_PROGRESS_STORE_LEGACY_REFUSAL_ACCEPTANCE
+    /* The focused legacy-refusal executable links only this pre-mutation
+     * boundary. Production never defines the macro; native full-binary
+     * startup evidence exercises the retained-VFS open below. */
+    progress_directory_close(opened_dir_handle);
+    return false;
+#endif
+#endif
 
     pthread_mutex_lock(&g_lock);
 
@@ -252,18 +293,56 @@ bool progress_store_open(const char *datadir)
     }
 
     sqlite3 *db = NULL;
-    int rc = sqlite3_open_v2(path, &db,
+#ifdef _WIN32
+    char opened_vfs_name[SQLITE_VFS_DIR_NAME_MAX] = {0};
+    if (!sqlite_vfs_dir_register(opened_dir_handle, PROGRESS_STORE_FILENAME,
+                                 opened_vfs_name)) {
+        progress_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
+    const char *sqlite_path = PROGRESS_STORE_FILENAME;
+    const char *sqlite_vfs = opened_vfs_name;
+#else
+    const char *sqlite_path = path;
+    const char *sqlite_vfs = NULL;
+#endif
+    int rc = sqlite3_open_v2(sqlite_path, &db,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-        NULL);
+        sqlite_vfs);
     if (rc != SQLITE_OK) {
         fprintf(stderr,  // obs-ok:progress-store-open-failure
                 "[progress_store] sqlite3_open_v2(%s) failed: %s\n",
                 path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
         if (db) sqlite3_close(db);
+#ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+#endif
         progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         return false;
     }
+
+#ifdef _WIN32
+    /* Registration is not enough: prove the connection's actual main file is
+     * owned by this VFS, bound to this exact retained directory object and to
+     * the one admitted leaf.  A default/pathname VFS connection cannot pass. */
+    uint64_t volume_serial = 0;
+    uint64_t file_index = 0;
+    uint64_t file_size = 0;
+    if (!sqlite_vfs_dir_main_file_info(
+            db, opened_dir_handle, PROGRESS_STORE_FILENAME,
+            &volume_serial, &file_index, &file_size)) {
+        fprintf(stderr,  // obs-ok:progress-store-open-failure
+                "[progress_store] retained-directory main-file audit failed "
+                "for %s\n", display_path);
+        sqlite3_close(db);
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+        progress_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
+#endif
 
     /* Integrity gate. progress.kv is the authority store for the stage cursors
      * and the coins_kv UTXO table; a corrupt file otherwise surfaces as a
@@ -276,6 +355,22 @@ bool progress_store_open(const char *datadir)
      * not corrupt derived state — log a terminal blocker and fail the open
      * instead of quarantine-looping. */
     if (!progress_store_quick_check_ok(db)) {
+#ifdef _WIN32
+        /* Quarantine is intentionally still contained: its current helper
+         * renames a pathname family after close, outside the retained HANDLE
+         * namespace.  Refuse the corrupt authority in place until a relative
+         * rename primitive is wired; never turn a safe open into unsafe
+         * recovery merely to make Windows boot. */
+        fprintf(stderr,  // obs-ok:progress-store-open-failure
+                "[progress_store] %s failed integrity quick_check; native "
+                "Windows retained-directory quarantine is unavailable, "
+                "refusing without mutation\n", display_path);
+        sqlite3_close(db);
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+        progress_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+#else
         fprintf(stderr,  // obs-ok:progress-store-open-failure
                 "[progress_store] %s failed integrity quick_check; "
                 "quarantining + re-deriving from snapshot/anchor\n", path);
@@ -318,6 +413,7 @@ bool progress_store_open(const char *datadir)
         fprintf(stderr,  // obs-ok:progress-store-lifecycle
                 "[progress_store] fresh %s opened after quarantine "
                 "(coins_kv will re-seed from snapshot/anchor at boot)\n", path);
+#endif
     }
 
     bool contained_candidate = false;
@@ -337,6 +433,9 @@ bool progress_store_open(const char *datadir)
                     "failed for %s\n", path);
         }
         sqlite3_close(db);
+#ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+#endif
         progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         return false;
@@ -347,6 +446,9 @@ bool progress_store_open(const char *datadir)
         !repair_marker_table_ensure(db) ||
         !repair_marker_migrate_from_progress_meta(db)) {
         sqlite3_close(db);
+#ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+#endif
         progress_directory_close(opened_dir_handle);
         pthread_mutex_unlock(&g_lock);
         return false;
@@ -367,6 +469,9 @@ bool progress_store_open(const char *datadir)
             fprintf(stderr,  // obs-ok:progress-store-open-failure
                     "[progress_store] FATAL: %s\n", derr);
             sqlite3_close(db);
+#ifdef _WIN32
+            (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+#endif
             progress_directory_close(opened_dir_handle);
             event_emitf(EV_RECOVERY_ACTION, 0,
                         "action=progress_store_downgrade_refused "
@@ -381,6 +486,9 @@ bool progress_store_open(const char *datadir)
     snprintf(g_path, sizeof(g_path), "%s", path);
     snprintf(g_display_path, sizeof(g_display_path), "%s", display_path);
     g_dir_handle = opened_dir_handle;
+#ifdef _WIN32
+    snprintf(g_vfs_name, sizeof(g_vfs_name), "%s", opened_vfs_name);
+#endif
     g_opened_at = wall_now_s();
     atomic_fetch_add_explicit(&g_epoch, 1, memory_order_release);
     atomic_store_explicit(&g_db, db, memory_order_release);
@@ -426,8 +534,18 @@ sqlite3 *progress_store_open_reader(void)
     bool available = atomic_load_explicit(&g_db, memory_order_acquire) != NULL &&
                      g_path[0] != '\0';
     int rc = available
-        ? sqlite3_open_v2(g_path, &reader,
-                          SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL)
+        ? sqlite3_open_v2(
+#ifdef _WIN32
+              PROGRESS_STORE_FILENAME,
+#else
+              g_path,
+#endif
+              &reader, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+#ifdef _WIN32
+              g_vfs_name)
+#else
+              NULL)
+#endif
         : SQLITE_CANTOPEN;
     pthread_mutex_unlock(&g_lock);
     if (rc != SQLITE_OK) {
@@ -554,6 +672,12 @@ void progress_store_close(void)
                 "[progress_store] closed %s\n", g_display_path);
     }
 
+#ifdef _WIN32
+    if (g_vfs_name[0] != '\0') {
+        (void)sqlite_vfs_dir_unregister(g_vfs_name);
+        g_vfs_name[0] = '\0';
+    }
+#endif
     progress_directory_close(g_dir_handle);
     g_dir_handle = UINTPTR_MAX;
     g_path[0] = '\0';

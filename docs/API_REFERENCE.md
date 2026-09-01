@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 772 |
+| Registry entries (branches + leaves) | 773 |
 | Top-level roots | 13 |
 | Branches | 178 |
-| Leaves (dispatchable command paths) | 594 |
-| … `ready` (live handler in this build) | 534 |
+| Leaves (dispatchable command paths) | 595 |
+| … `ready` (live handler in this build) | 535 |
 | … `compat` (metadata only, names a fallback) | 29 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 28 |
@@ -105,7 +105,7 @@ Per source file:
 | `config/commands/metaverse.def` | 30 | 7 | 23 |
 | `config/commands/yardsale.def` | 7 | 2 | 5 |
 | `config/commands/zses.def` | 4 | 2 | 2 |
-| `config/commands/story.def` | 4 | 1 | 3 |
+| `config/commands/story.def` | 5 | 1 | 4 |
 | `config/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `config/commands/telemetry/watch.def` | 1 | 0 | 1 |
 | `config/commands/telemetry/runtime.def` | 4 | 1 | 3 |
@@ -1645,6 +1645,7 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
+| `story focus` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir` | `zcl.story_focus.v1` | `z23 story focus work-<task-prefix>` | Resume one work item from a bounded ontology focus packet |
 | `story show` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir` | `zcl.story_show.v1` | `z23 story show work-<task-prefix>` | Show one development work item as an exact-root causal story |
 | `story why` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir`, **`event`** | `zcl.story_why.v1` | `z23 story why work-<task-prefix> user_accepts` | Explain the exact causal chain for one development event |
 | `story diff` | ready | read / read / public · foreground/low | `workspace`, **`before`**, **`after`**, `datadir` | `zcl.story_diff.v1` | `z23 story diff work-<before-prefix> work-<after-prefix>` | Diff two exact-root development stories |

@@ -633,7 +633,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
         uint64_t selected_bytes = 0, total_bytes = 0, context_us = 0;
         uint64_t model_context_bytes = 0;
         size_t story_projection_bytes = 0, story_full_bytes = 0;
-        size_t story_source_status_bytes = 0;
+        size_t story_source_status_bytes = 0, story_focus_bytes = 0;
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             struct json_value input;
             json_init(&input); json_set_object(&input);
@@ -796,6 +796,30 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                                             roots[cases[i].project]));
                     ASSERT(json_push_kv_str(&input, "work", work_id));
                     request.input = &input; request.view = "normal";
+                    zcl_command_reply_init(&reply,
+                                           "zcl.story_focus_test.v1");
+                    zcl_native_handle_story_focus(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    ASSERT(strcmp(json_get_str(json_get(&reply.data, "goal")),
+                                  cases[i].goal) == 0);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "context_status")),
+                                  "PROVED") == 0);
+                    ASSERT(json_get_int(json_get(
+                               &reply.data, "selected_source_count")) > 0);
+                    ASSERT(json_size(json_get(
+                               &reply.data, "selected_sources")) > 0);
+                    ASSERT(json_get(&reply.data, "proved_relations") != NULL);
+                    ASSERT(json_get(&reply.data, "next_action") != NULL);
+                    story_focus_bytes = json_write(&reply.data, NULL, 0);
+                    ASSERT(story_focus_bytes < ZCL_COMMAND_LIST_BUDGET);
+                    zcl_command_reply_free(&reply); json_free(&input);
+
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace",
+                                            roots[cases[i].project]));
+                    ASSERT(json_push_kv_str(&input, "work", work_id));
+                    request.input = &input; request.view = "normal";
                     zcl_command_reply_init(&reply, "zcl.story_show_test.v1");
                     zcl_native_handle_story_show(&request, &reply);
                     ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
@@ -896,7 +920,9 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
         ASSERT(model_context_bytes > selected_bytes);
         ASSERT(context_us > 0);
         ASSERT(story_projection_bytes > 0 && story_full_bytes > 0 &&
-               story_source_status_bytes > 0);
+               story_source_status_bytes > 0 && story_focus_bytes > 0);
+        ASSERT(story_focus_bytes <
+               story_projection_bytes + story_source_status_bytes);
         int64_t benchmark_elapsed =
             platform_time_monotonic_us() - benchmark_started;
         ASSERT(benchmark_elapsed > 0);
@@ -905,6 +931,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                "model_context_bytes=%llu context_us=%llu "
                "story_bytes=%zu story_full_bytes=%zu "
                "story_context_saved_pct=%zu "
+               "story_focus_bytes=%zu story_focus_join_saved_pct=%zu "
                "story_source_status_bytes=%zu "
                "elapsed_us=%llu\n",
                compiling, profile, accepted, refused,
@@ -915,6 +942,10 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                story_projection_bytes, story_full_bytes,
                (story_full_bytes - story_projection_bytes) * 100u /
                    story_full_bytes,
+               story_focus_bytes,
+               (story_projection_bytes + story_source_status_bytes -
+                story_focus_bytes) * 100u /
+                   (story_projection_bytes + story_source_status_bytes),
                story_source_status_bytes,
                (unsigned long long)benchmark_elapsed);
         for (int p = 0; p < 3; p++) {

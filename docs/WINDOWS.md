@@ -47,6 +47,19 @@ already native, so Windows clients no longer stop at an `ENOTSUP` frame stub.
 The inbound file-service server and its manifest/snapshot transaction remain
 explicitly unavailable until their filesystem mutation path is qualified.
 
+The fresh native consensus-store path is also operational. `consensus.db`,
+its WAL, and its shared-memory sibling are opened by the retained-directory
+SQLite VFS, and the live connection is audited against the exact validated
+directory handle before schema or reducer work begins. A fresh isolated
+mainnet datadir has reached RPC readiness, exchanged headers and block bodies
+with public ZClassic peers, and advanced the validated reducer frontier on a
+native `z23.exe`. This is startup and forward-sync evidence, not a completed
+sync-to-tip claim. A copied legacy datadir that has `progress.kv` but no
+`consensus.db` still refuses before mutation because the legacy ATTACH/rename
+migration is not handle-relative. Corrupt-store quarantine likewise refuses
+in place on Windows until its rename transaction is retained-directory
+qualified.
+
 Native execution still requires Windows, but producing a Windows artifact no
 longer does. A Linux host can build the pinned third-party archives into the
 target-qualified `vendor/cross/x86_64-w64-mingw32` tree, then use Clang 20+

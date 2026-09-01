@@ -4,6 +4,7 @@
 #include "base/hex.h"
 #include "ontology/story_graph.h"
 #include "command/native_story_command.h"
+#include "command/native_story_internal.h"
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_dev.h"
 
@@ -198,6 +199,39 @@ static const char *sg_hex(uint8_t value)
         out[i] = digits[(value + (uint8_t)i) & 15u];
     out[64] = '\0';
     return out;
+}
+
+static int sg_context_load_states(void)
+{
+    int failures = 0;
+    TEST("story focus: missing, ambiguous, and unavailable context fail closed") {
+        struct story_loaded_work loaded = {0};
+        struct vcs_zcode_agent_context_v1 context;
+        vcs_zcode_agent_context_init(&context);
+        ASSERT_EQ(story_load_agent_context(".", &loaded, &context),
+                  STORY_CONTEXT_UNKNOWN);
+
+        loaded.agent_context_ambiguous = true;
+        ASSERT_EQ(story_load_agent_context(".", &loaded, &context),
+                  STORY_CONTEXT_AMBIGUOUS);
+
+        loaded.agent_context_ambiguous = false;
+        (void)snprintf(loaded.task_root, sizeof(loaded.task_root), "%s",
+                       sg_hex(1));
+        (void)snprintf(loaded.source_root, sizeof(loaded.source_root), "%s",
+                       sg_hex(2));
+        (void)snprintf(loaded.goal_root, sizeof(loaded.goal_root), "%s",
+                       sg_hex(3));
+        (void)snprintf(loaded.agent_context_root,
+                       sizeof(loaded.agent_context_root), "%s", sg_hex(4));
+        ASSERT_EQ(story_load_agent_context(
+                      "test-tmp/story-context-absent", &loaded, &context),
+                  STORY_CONTEXT_UNAVAILABLE);
+        ASSERT_EQ(context.file_count, 0);
+        vcs_zcode_agent_context_free(&context);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int sg_canonical_work_projection(void)
@@ -430,6 +464,7 @@ int test_story_graph(void)
     failures += sg_why_chain();
     failures += sg_diff();
     failures += sg_refusals();
+    failures += sg_context_load_states();
     failures += sg_canonical_work_projection();
     failures += sg_app_run_observation_codec();
     failures += sg_app_run_projection();

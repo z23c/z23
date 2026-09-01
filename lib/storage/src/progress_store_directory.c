@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Retained directory identity and child-path construction for progress_store. */
 #include "progress_store_directory.h"
+#include "platform/directory_transaction.h"
 #include "platform/fd_path.h"
 #include "platform/private_directory.h"
 #include <fcntl.h>
@@ -25,9 +26,9 @@ static bool progress_directory_wide_to_utf8(const wchar_t *wide, char *out,
 
 /* Derive a canonical path from an open directory handle and prove the path
  * resolves to the same directory object at this instant. This supports
- * identity diagnostics and snapshot activation. It does not capability-bind
- * later SQLite main/WAL/SHM opens; progress_store therefore remains disabled
- * on Windows until its VFS performs retained-handle-relative operations. */
+ * identity diagnostics and snapshot activation. SQLite authority does not
+ * rely on the returned pathname: progress_store binds main/WAL/SHM opens to
+ * the retained handle through sqlite_vfs_dir. */
 static bool progress_directory_canonical_from_handle(HANDLE dir, char *out,
                                                      size_t out_size)
 {
@@ -115,6 +116,44 @@ bool progress_directory_same(uintptr_t left, uintptr_t right)
     return fstat((int)left, &a) == 0 && fstat((int)right, &b) == 0 &&
            a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 #endif
+}
+
+bool progress_directory_child_exists(uintptr_t handle, const char *child,
+                                     bool *exists)
+{
+    if (handle == UINTPTR_MAX || !child || !child[0] || !exists) {
+        fprintf(stderr,
+                "[progress_directory] child_exists: invalid argument\n");
+        return false;
+    }
+
+    struct platform_directory_transaction directory = {.native = handle};
+    struct platform_directory_child opened;
+    platform_directory_child_init(&opened);
+    enum platform_directory_result result =
+        platform_directory_child_open_result(&directory, child, false, false,
+                                             &opened, NULL);
+    if (result == PLATFORM_DIRECTORY_OK) {
+        platform_directory_child_close(&opened);
+        *exists = true;
+        return true;
+    }
+    if (result == PLATFORM_DIRECTORY_MISSING) {
+        *exists = false;
+        return true;
+    }
+    /* Refusal still proves that the retained namespace contains something at
+     * this leaf (for example a legacy file whose inherited ACL is not strict
+     * enough to open as an authority-bearing child). Treat it as occupied so
+     * callers refuse migration instead of mistaking hostile bytes for absence. */
+    if (result == PLATFORM_DIRECTORY_REFUSED) {
+        *exists = true;
+        return true;
+    }
+    fprintf(stderr,
+            "[progress_directory] child_exists: retained open failed "
+            "child=%s result=%d\n", child, (int)result);
+    return false;
 }
 
 bool progress_directory_matches_fd(uintptr_t handle, int fd)

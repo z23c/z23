@@ -996,12 +996,13 @@ REMOTE_COMMAND_CLASS("yardsale.buy", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zses.invite.create", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zses.invite.accept", REMOTE_CLASS_NEVER, "")
 
-/* STORY — 3 never_remote leaves.
+/* STORY — 4 never_remote leaves.
  *
  * StoryGraph is a read-only projection, but its inputs and rooted output are
  * local development-work evidence, not public node-health state. Remote
  * callers use verified source bundles and their own local projection instead
  * of enumerating another operator's work identities and acceptance history. */
+REMOTE_COMMAND_CLASS("story.focus", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("story.show", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("story.why", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("story.diff", REMOTE_CLASS_NEVER, "")
