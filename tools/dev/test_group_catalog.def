@@ -700,6 +700,10 @@ ZCL_TEST_GROUP(retrieval)
  * It can change only a 0..5 prefix scalar and must preserve candidate set and
  * context ceiling without seeing reviewed gold or scope labels. */
 ZCL_TEST_GROUP(retrieval_experiment)
+/* One exact retrieval evaluator observation is rooted, structurally bound to
+ * its heuristic/proposal/batch/evaluator, and used only as attributed input
+ * to the non-authoritative attention frontier. */
+ZCL_TEST_GROUP(retrieval_attention_evidence)
 /* Deterministic composition schedule for the dev retrieval ranker's VCS /
  * code-index generation join. */
 ZCL_TEST_GROUP(retrieval_generation)

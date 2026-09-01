@@ -258,7 +258,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1067
+test_groups: 1068
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52

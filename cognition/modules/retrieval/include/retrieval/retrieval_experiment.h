@@ -21,6 +21,25 @@
 #define ZCL_RETRIEVAL_FEATURE_SNAPSHOT_VERSION 1u
 #define ZCL_RETRIEVAL_FEATURE_SNAPSHOT_DOMAIN \
     "zcl.retrieval_feature_snapshot.v1"
+#define ZCL_RETRIEVAL_EVAL_RESULT_VERSION 1u
+#define ZCL_RETRIEVAL_EVAL_RESULT_WIRE_BYTES 184u
+#define ZCL_RETRIEVAL_EVAL_RESULT_DOMAIN \
+    "zcl.retrieval_experiment_eval_result.v1"
+#define ZCL_RETRIEVAL_EVAL_RESULT_RECALL_5_AVAILABLE (1u << 0)
+#define ZCL_RETRIEVAL_EVAL_RESULT_RECALL_20_AVAILABLE (1u << 1)
+#define ZCL_RETRIEVAL_EVAL_RESULT_MRR_AVAILABLE (1u << 2)
+#define ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE (1u << 3)
+#define ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED (1u << 4)
+#define ZCL_RETRIEVAL_EVAL_RESULT_RETAINED_SET_PRESERVED (1u << 5)
+#define ZCL_RETRIEVAL_EVAL_RESULT_CONTEXT_CEILING_PRESERVED (1u << 6)
+#define ZCL_RETRIEVAL_EVAL_RESULT_FLAGS_ALL \
+    (ZCL_RETRIEVAL_EVAL_RESULT_RECALL_5_AVAILABLE | \
+     ZCL_RETRIEVAL_EVAL_RESULT_RECALL_20_AVAILABLE | \
+     ZCL_RETRIEVAL_EVAL_RESULT_MRR_AVAILABLE | \
+     ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE | \
+     ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED | \
+     ZCL_RETRIEVAL_EVAL_RESULT_RETAINED_SET_PRESERVED | \
+     ZCL_RETRIEVAL_EVAL_RESULT_CONTEXT_CEILING_PRESERVED)
 #define ZCL_RETRIEVAL_PROFILE_WEIGHT_MAX 10000u
 #define ZCL_RETRIEVAL_PROFILE_GRAPH_DEPTH_MAX 2u
 #define ZCL_RETRIEVAL_PROFILE_WINDOW_MAX 20u
@@ -156,6 +175,30 @@ struct zcl_retrieval_experiment_eval_report {
     bool context_ceiling_preserved;
 };
 
+/* Immutable post-proposal observation. `evaluation_input_root` is an opaque
+ * exact batch identity here: this object does not claim that its bytes were
+ * independently replayed, that gold was hidden before proposal, or that a
+ * holdout is independent. A science statement may attribute the observation;
+ * neither the statement nor this root promotes a heuristic or grants work. */
+struct zcl_retrieval_experiment_eval_result_v1 {
+    uint16_t schema_version;
+    uint16_t flags;
+    uint32_t tasks;
+    uint32_t recall_at_5_bp;
+    uint32_t recall_at_20_bp;
+    uint32_t mrr_bp;
+    uint32_t wrong_scope_at_5_bp;
+    uint32_t unique_files_at_5;
+    uint32_t wrong_scope_files_at_5;
+    uint32_t changed_positions_at_5;
+    uint32_t fallback_tasks;
+    uint64_t context_bytes_at_5;
+    uint8_t subject_root[32];
+    uint8_t proposal_input_root[32];
+    uint8_t evaluation_input_root[32];
+    uint8_t evaluator_root[32];
+};
+
 void zcl_retrieval_profile_init(struct zcl_retrieval_profile_v1 *profile);
 enum zcl_retrieval_experiment_error zcl_retrieval_profile_validate(
     const struct zcl_retrieval_profile_v1 *profile);
@@ -210,6 +253,46 @@ enum zcl_retrieval_experiment_error zcl_retrieval_experiment_evaluate(
     const struct zcl_retrieval_experiment_eval_task *tasks,
     size_t task_count, uint8_t bm25_prefix,
     struct zcl_retrieval_experiment_eval_report *report);
+
+/* Convert the maintained evaluator's exact POD observation into a canonical
+ * inert result. The subject is normally a heuristic root. The evaluation
+ * input owner remains responsible for defining, resolving, and replaying its
+ * batch; this constructor merely binds that exact root without interpreting
+ * it. Approximate tokens are checked against ceil(context_bytes/4) and omitted
+ * from the wire because they are derived. */
+enum zcl_retrieval_experiment_error
+zcl_retrieval_experiment_eval_result_init(
+    struct zcl_retrieval_experiment_eval_result_v1 *out,
+    const struct zcl_retrieval_experiment_eval_report *report,
+    const uint8_t subject_root[32],
+    const uint8_t proposal_input_root[32],
+    const uint8_t evaluation_input_root[32],
+    const uint8_t evaluator_root[32]);
+enum zcl_retrieval_experiment_error
+zcl_retrieval_experiment_eval_result_validate(
+    const struct zcl_retrieval_experiment_eval_result_v1 *result);
+enum zcl_retrieval_experiment_error
+zcl_retrieval_experiment_eval_result_serialize(
+    const struct zcl_retrieval_experiment_eval_result_v1 *result,
+    uint8_t out[ZCL_RETRIEVAL_EVAL_RESULT_WIRE_BYTES]);
+enum zcl_retrieval_experiment_error
+zcl_retrieval_experiment_eval_result_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_retrieval_experiment_eval_result_v1 *out);
+enum zcl_retrieval_experiment_error
+zcl_retrieval_experiment_eval_result_root(
+    const struct zcl_retrieval_experiment_eval_result_v1 *result,
+    uint8_t out[32]);
+/* Re-root and compare the four structural bindings. It establishes identity,
+ * not evaluator correctness, chronology, holdout independence, or authority. */
+enum zcl_retrieval_experiment_error
+zcl_retrieval_experiment_eval_result_verify_binding(
+    const struct zcl_retrieval_experiment_eval_result_v1 *result,
+    const uint8_t expected_subject_root[32],
+    const uint8_t expected_proposal_input_root[32],
+    const uint8_t expected_evaluation_input_root[32],
+    const uint8_t expected_evaluator_root[32],
+    const uint8_t expected_result_root[32]);
 
 /* Canonical root used by the observational benchmark's ranked-file rows. */
 bool zcl_retrieval_ranked_files_root(
