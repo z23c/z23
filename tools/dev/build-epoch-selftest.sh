@@ -655,9 +655,13 @@ run_make_recovery()
 if run_make_recovery "$MAKE_RECOVERY_RACE_LOG"; then
     fail 'post-parse unverified marker unexpectedly reached the linker'
 fi
-grep -Fq 'unverified compile epoch appeared after recovery admission; rerun make' \
-    "$MAKE_RECOVERY_RACE_LOG" ||
+if ! grep -Fq \
+        'unverified compile epoch appeared after recovery admission; rerun make' \
+        "$MAKE_RECOVERY_RACE_LOG"; then
+    sed 's/^/build-epoch-selftest: late-marker refusal: /' \
+        "$MAKE_RECOVERY_RACE_LOG" >&2
     fail 'post-parse unverified marker did not produce the named retry refusal'
+fi
 grep -Fq 'stale object that must never reach the linker' \
     "$MAKE_RECOVERY_OBJECT" ||
     fail 'ordinary acquire changed a generation after Make classified it'
