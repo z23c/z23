@@ -42,10 +42,17 @@
 #include <windows.h>
 #endif
 
+bool zpd_real_focus_preedit_acceptance(
+    const char *workspace, const char *work_id,
+    const struct json_value *focus_data,
+    const struct json_value *duplicate_data,
+    uint8_t out_focus_root[32], int64_t *out_observed_us);
 bool zpd_real_focus_handoff_acceptance(
     const char *workspace, const char *work_id,
     const struct json_value *focus_data,
-    const uint8_t source_receipt_root[32]);
+    const uint8_t source_receipt_root[32],
+    const uint8_t preedit_focus_root[32], int64_t preedit_observed_us,
+    int64_t edit_started_us);
 
 static bool zpd_symlink_create(const char *target, const char *link,
                                bool directory)
@@ -759,6 +766,9 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
         size_t story_projection_bytes = 0, story_full_bytes = 0;
         size_t story_source_status_bytes = 0, story_focus_bytes = 0;
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            uint8_t preedit_focus_root[32] = {0};
+            int64_t preedit_observed_us = 0;
+            int64_t edit_started_us = 0;
             struct json_value input;
             json_init(&input); json_set_object(&input);
             ASSERT(json_push_kv_str(&input, "workspace",
@@ -805,6 +815,63 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
             (void)snprintf(candidate, sizeof(candidate), "%s",
                 json_get_str(json_get(&reply.data, "candidate_workspace")));
             zcl_command_reply_free(&reply); json_free(&input);
+            if (i == 0) {
+                struct json_value duplicate_input;
+                json_init(&duplicate_input);
+                json_set_object(&duplicate_input);
+                ASSERT(json_push_kv_str(&duplicate_input, "workspace",
+                                        roots[cases[i].project]));
+                ASSERT(json_push_kv_str(&duplicate_input, "goal",
+                                        cases[i].goal));
+                ASSERT(json_push_kv_str(&duplicate_input, "profile",
+                                        "standard"));
+                struct zcl_command_request duplicate_request = {
+                    .input = &duplicate_input,
+                };
+                struct zcl_command_reply duplicate_reply;
+                zcl_command_reply_init(
+                    &duplicate_reply, "zcl.zcode_benchmark_duplicate.v1");
+                zcl_native_handle_zcode_work_start(
+                    &duplicate_request, &duplicate_reply);
+                ASSERT(duplicate_reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+                ASSERT(strcmp(duplicate_reply.error.code,
+                              "ACTIVE_TASK_CONFLICT") == 0);
+                ASSERT(strcmp(json_get_str(json_get(
+                                  &duplicate_reply.data, "conflict_kind")),
+                              "DUPLICATE_ACTIVE_WORK") == 0);
+
+                struct json_value focus_input;
+                json_init(&focus_input);
+                json_set_object(&focus_input);
+                ASSERT(json_push_kv_str(&focus_input, "workspace",
+                                        roots[cases[i].project]));
+                ASSERT(json_push_kv_str(&focus_input, "work", work_id));
+                struct zcl_command_request focus_request = {
+                    .input = &focus_input,
+                };
+                struct zcl_command_reply focus_reply;
+                zcl_command_reply_init(
+                    &focus_reply, "zcl.zcode_benchmark_preedit_focus.v1");
+                zcl_native_handle_story_focus(&focus_request, &focus_reply);
+                ASSERT(focus_reply.status == ZCL_COMMAND_STATUS_PASSED);
+                ASSERT(strcmp(json_get_str(json_get(
+                                  &focus_reply.data, "focus_schema")),
+                              "focus.v1") == 0);
+                ASSERT(strcmp(json_get_str(json_get(
+                                  &focus_reply.data, "orientation_status")),
+                              "PROVED") == 0);
+                ASSERT(zpd_real_focus_preedit_acceptance(
+                    roots[cases[i].project], work_id, &focus_reply.data,
+                    &duplicate_reply.data, preedit_focus_root,
+                    &preedit_observed_us));
+                zcl_command_reply_free(&focus_reply);
+                json_free(&focus_input);
+                zcl_command_reply_free(&duplicate_reply);
+                json_free(&duplicate_input);
+                edit_started_us = platform_time_monotonic_us();
+                ASSERT(preedit_observed_us > 0 &&
+                       edit_started_us >= preedit_observed_us);
+            }
             char changed[4600], contents[128];
             if (cases[i].refused) {
                 (void)snprintf(changed, sizeof(changed), "%s/LICENSE",
@@ -985,7 +1052,8 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     ASSERT(story_focus_bytes < ZCL_COMMAND_LIST_BUDGET);
                     ASSERT(zpd_real_focus_handoff_acceptance(
                         roots[cases[i].project], work_id, &reply.data,
-                        app_build_receipt_root));
+                        app_build_receipt_root, preedit_focus_root,
+                        preedit_observed_us, edit_started_us));
                     zcl_command_reply_free(&reply); json_free(&input);
 
                     char stale_path[512];
