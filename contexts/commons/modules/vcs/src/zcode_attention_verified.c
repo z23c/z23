@@ -420,3 +420,181 @@ vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
         *report = result;
     return error;
 }
+
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
+    const char *workspace,
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    const struct vcs_zcode_science_statement_v1 *statements,
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle_snapshots,
+    const struct vcs_build_action_v1 *actions,
+    const struct vcs_zcode_heuristic_replication_snapshot_v1
+        *replication_snapshots,
+    const struct vcs_zcode_focus_v1 *focus,
+    const uint8_t priority_policy_root[32],
+    const uint8_t lifecycle_local_policy_root[32],
+    const uint8_t replication_local_policy_root[32],
+    const uint8_t bid_evaluator_root[32],
+    const uint8_t expected_evaluator_signer[32],
+    int64_t now_unix,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_qualified_report *report)
+{
+    if (!workspace || !focus || !priority_policy_root ||
+        !lifecycle_local_policy_root || !replication_local_policy_root ||
+        !bid_evaluator_root || !expected_evaluator_signer || !report ||
+        (bid_count != 0 &&
+         (!bids || !heuristics || !statements || !lifecycle_snapshots ||
+          !actions || !replication_snapshots)) ||
+        (out_capacity != 0 && !out_indices))
+        return VCS_ZCODE_ATTENTION_NULL;
+    if (bid_count > VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS ||
+        parent_total > VCS_ZCODE_ATTENTION_FRONTIER_MAX_PARENT_OBJECTS)
+        return VCS_ZCODE_ATTENTION_COUNT;
+    if ((parent_total != 0 && !parents) ||
+        (parent_total == 0 && parents) ||
+        (bid_count == 0 && (bids || heuristics || statements ||
+                            lifecycle_snapshots || actions ||
+                            replication_snapshots)))
+        return VCS_ZCODE_ATTENTION_COUNT;
+
+    size_t index_span = out_capacity;
+    if (index_span > VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS)
+        index_span = VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS;
+    index_span *= sizeof(*out_indices);
+    size_t parent_span = parent_total * sizeof(*parents);
+    size_t bid_span = bid_count * sizeof(*bids);
+    size_t heuristic_span = bid_count * sizeof(*heuristics);
+    size_t statement_span = bid_count * sizeof(*statements);
+    size_t lifecycle_span = bid_count * sizeof(*lifecycle_snapshots);
+    size_t action_span = bid_count * sizeof(*actions);
+    size_t replication_span = bid_count * sizeof(*replication_snapshots);
+    size_t workspace_span = strlen(workspace) + 1u;
+#define AV_OUTPUT_ALIASES(pointer_, span_)                                  \
+    (av_memory_overlaps(report, sizeof(*report), (pointer_), (span_)) ||    \
+     (out_capacity != 0 && av_memory_overlaps(                             \
+         out_indices, index_span, (pointer_), (span_))))
+    if ((bid_count != 0 &&
+         (AV_OUTPUT_ALIASES(bids, bid_span) ||
+          AV_OUTPUT_ALIASES(heuristics, heuristic_span) ||
+          AV_OUTPUT_ALIASES(statements, statement_span) ||
+          AV_OUTPUT_ALIASES(lifecycle_snapshots, lifecycle_span) ||
+          AV_OUTPUT_ALIASES(actions, action_span) ||
+          AV_OUTPUT_ALIASES(replication_snapshots, replication_span))) ||
+        (parent_total != 0 && AV_OUTPUT_ALIASES(parents, parent_span)) ||
+        AV_OUTPUT_ALIASES(workspace, workspace_span) ||
+        AV_OUTPUT_ALIASES(focus, sizeof(*focus)) ||
+        AV_OUTPUT_ALIASES(priority_policy_root, 32) ||
+        AV_OUTPUT_ALIASES(lifecycle_local_policy_root, 32) ||
+        AV_OUTPUT_ALIASES(replication_local_policy_root, 32) ||
+        AV_OUTPUT_ALIASES(bid_evaluator_root, 32) ||
+        AV_OUTPUT_ALIASES(expected_evaluator_signer, 32) ||
+        (out_capacity != 0 && av_memory_overlaps(
+            out_indices, index_span, report, sizeof(*report)))) {
+#undef AV_OUTPUT_ALIASES
+        return VCS_ZCODE_ATTENTION_ALIAS;
+    }
+#undef AV_OUTPUT_ALIASES
+    if (av_root_is_zero(lifecycle_local_policy_root) ||
+        av_root_is_zero(replication_local_policy_root) || now_unix <= 0)
+        return VCS_ZCODE_ATTENTION_EVIDENCE;
+
+    struct vcs_zcode_attention_frontier_query query;
+    enum vcs_zcode_attention_error error = av_verify_batch(
+        bids, bid_count, heuristics, parents, parent_total, true,
+        statements, focus, priority_policy_root, bid_evaluator_root,
+        expected_evaluator_signer, &query);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+
+    bool retained[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS] = {false};
+    bool eligible[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS] = {false};
+    uint8_t statement_roots[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS][32] = {
+        {0}
+    };
+    struct vcs_zcode_attention_qualified_report result = {
+        .verified_count = bid_count,
+    };
+    for (size_t i = 0; i < bid_count; i++) {
+        uint8_t heuristic_root[32];
+        if (vcs_zcode_heuristic_root(&heuristics[i], heuristic_root) !=
+                VCS_ZCODE_ATTENTION_OK ||
+            vcs_zcode_science_statement_root(
+                &statements[i], statement_roots[i]) !=
+                VCS_ZCODE_SCIENCE_OK)
+            return VCS_ZCODE_ATTENTION_BINDING;
+        for (size_t j = 0; j < i; j++) {
+            if (memcmp(statement_roots[i], statement_roots[j], 32) == 0)
+                return VCS_ZCODE_ATTENTION_DUPLICATE;
+        }
+        if (memcmp(lifecycle_snapshots[i].local_policy_root,
+                   lifecycle_local_policy_root, 32) != 0 ||
+            memcmp(lifecycle_snapshots[i].expected_signer,
+                   expected_evaluator_signer, 32) != 0 ||
+            memcmp(lifecycle_snapshots[i].heuristic_root,
+                   heuristic_root, 32) != 0 ||
+            memcmp(lifecycle_snapshots[i].anchor_statement_root,
+                   statement_roots[i], 32) != 0 ||
+            memcmp(replication_snapshots[i].local_policy_root,
+                   replication_local_policy_root, 32) != 0 ||
+            memcmp(replication_snapshots[i].expected_evaluator_signer,
+                   expected_evaluator_signer, 32) != 0 ||
+            memcmp(replication_snapshots[i].heuristic_root,
+                   heuristic_root, 32) != 0 ||
+            memcmp(replication_snapshots[i].anchor_statement_root,
+                   statement_roots[i], 32) != 0)
+            return VCS_ZCODE_ATTENTION_BINDING;
+
+        struct vcs_zcode_heuristic_lifecycle_report lifecycle;
+        error = vcs_zcode_heuristic_lifecycle_fold(
+            workspace, &lifecycle_snapshots[i], &lifecycle);
+        if (error != VCS_ZCODE_ATTENTION_OK) return error;
+        if (!lifecycle.complete || lifecycle.status ==
+                VCS_ZCODE_HEURISTIC_LIFECYCLE_UNDETERMINED)
+            return VCS_ZCODE_ATTENTION_EVIDENCE;
+        if (lifecycle.status == VCS_ZCODE_HEURISTIC_LIFECYCLE_RETIRED) {
+            result.retired_count++;
+        } else if (lifecycle.status ==
+                   VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED) {
+            retained[i] = true;
+            result.retained_count++;
+        } else {
+            return VCS_ZCODE_ATTENTION_EVIDENCE;
+        }
+    }
+
+    /* A second retained generation cannot be hidden by filtering one of the
+     * two on replication. Resolve lifecycle ambiguity first, then qualify. */
+    size_t retained_indices[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS];
+    struct vcs_zcode_attention_choice_report retained_choice;
+    error = vcs_zcode_attention_frontier_choose_eligible_with_lineage(
+        bids, bid_count, heuristics, parents, parent_total, retained, &query,
+        retained_indices, VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS,
+        &retained_choice);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+
+    for (size_t i = 0; i < bid_count; i++) {
+        struct vcs_zcode_heuristic_replication_report replication;
+        error = vcs_zcode_heuristic_replication_fold(
+            workspace, &heuristics[i], &actions[i],
+            &replication_snapshots[i], now_unix, &replication);
+        if (error != VCS_ZCODE_ATTENTION_OK) return error;
+        if (!replication.complete) return VCS_ZCODE_ATTENTION_EVIDENCE;
+        if (!retained[i]) continue;
+        if (replication.qualified) {
+            eligible[i] = true;
+            result.qualified_count++;
+        } else {
+            result.retained_unqualified_count++;
+        }
+    }
+
+    error = vcs_zcode_attention_frontier_choose_eligible_with_lineage(
+        bids, bid_count, heuristics, parents, parent_total, eligible, &query,
+        out_indices, out_capacity, &result.choice);
+    if (error == VCS_ZCODE_ATTENTION_OK ||
+        error == VCS_ZCODE_ATTENTION_CAPACITY)
+        *report = result;
+    return error;
+}

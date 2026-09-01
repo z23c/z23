@@ -8,11 +8,21 @@
 
 #include "vcs/zcode_attention_bid.h"
 #include "vcs/zcode_heuristic_lifecycle.h"
+#include "vcs/zcode_heuristic_replication.h"
 #include "vcs/zcode_science.h"
 
 struct vcs_zcode_attention_verified_report {
     struct vcs_zcode_attention_choice_report choice;
     size_t verified_count;
+};
+
+struct vcs_zcode_attention_qualified_report {
+    struct vcs_zcode_attention_choice_report choice;
+    size_t verified_count;
+    size_t retained_count;
+    size_t qualified_count;
+    size_t retained_unqualified_count;
+    size_t retired_count;
 };
 
 /* Verify one evaluator-signed RESULT statement against the exact immutable
@@ -101,5 +111,39 @@ vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
     const uint8_t expected_evaluator_signer[32],
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_verified_report *report);
+
+/* Canonical scientific selector: after exact bid, lineage, evaluator, and
+ * lifecycle verification, require every RETAINED heuristic to satisfy its
+ * study's independently signed replication threshold before it may enter the
+ * hard-priority/Pareto frontier. RETIRED rows remain ineligible regardless of
+ * replication. Below-threshold, inconclusive, and contradicted replication
+ * are complete but unqualified observations, not lifecycle transitions.
+ * Every caller-accepted lifecycle and replication snapshot is validated even
+ * for rows that will be filtered; malformed evidence poisons the whole batch
+ * before output changes. Actions are the exact fixed benchmark actions bound
+ * by each study/result. Local policy owns any stronger claim that distinct
+ * signing keys represent independent operators or machines. This is a
+ * read-only proposal projection and grants no task, action, execution,
+ * acceptance, publication, wallet, consensus, or deployment authority. */
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
+    const char *workspace,
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    const struct vcs_zcode_science_statement_v1 *statements,
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle_snapshots,
+    const struct vcs_build_action_v1 *actions,
+    const struct vcs_zcode_heuristic_replication_snapshot_v1
+        *replication_snapshots,
+    const struct vcs_zcode_focus_v1 *focus,
+    const uint8_t priority_policy_root[32],
+    const uint8_t lifecycle_local_policy_root[32],
+    const uint8_t replication_local_policy_root[32],
+    const uint8_t bid_evaluator_root[32],
+    const uint8_t expected_evaluator_signer[32],
+    int64_t now_unix,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_qualified_report *report);
 
 #endif /* ZCL_VCS_ZCODE_ATTENTION_VERIFIED_H */

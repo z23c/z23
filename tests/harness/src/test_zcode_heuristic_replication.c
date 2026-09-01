@@ -4,6 +4,7 @@
 
 #include "crypto/ed25519.h"
 #include "vcs/vcs_object.h"
+#include "vcs/zcode_attention_verified.h"
 #include "vcs/zcode_heuristic_replication.h"
 #include "vcs/zcode_science.h"
 
@@ -27,6 +28,8 @@ struct hr_fixture {
     struct vcs_zcode_candidate_v1 candidate;
     struct vcs_build_action_v1 action;
     struct vcs_zcode_heuristic_v1 heuristic;
+    struct vcs_zcode_focus_v1 focus;
+    struct vcs_zcode_attention_bid_v1 bid;
     struct vcs_zcode_benchmark_result_v1 original;
     struct vcs_zcode_benchmark_result_v1 reproduced[4];
     struct vcs_zcode_reproduction_v1 reproduction[4];
@@ -287,6 +290,58 @@ static void hr_result(struct vcs_zcode_benchmark_result_v1 *result,
     result->finished_unix = finished_unix;
 }
 
+static bool hr_attention(struct hr_fixture *f)
+{
+    memset(&f->focus, 0, sizeof(f->focus));
+    f->focus.schema_version = VCS_ZCODE_FOCUS_VERSION;
+    f->focus.status = ZCL_ONTOLOGY_PROVED;
+    f->focus.capabilities = VCS_ZCODE_TASK_CAP_SOURCE_READ |
+                            VCS_ZCODE_TASK_CAP_CANDIDATE_WRITE;
+    f->focus.max_changed_files = 8;
+    f->focus.max_patch_bytes = 65536;
+    f->focus.max_context_bytes = 65536;
+    f->focus.max_cpu_seconds = 60;
+    f->focus.max_memory_bytes = 16u * 1024u * 1024u;
+    f->focus.max_output_bytes = 1024u * 1024u;
+    memcpy(f->focus.task_root, f->task_root, 32);
+    memcpy(f->focus.goal_root, f->study_root, 32);
+    memcpy(f->focus.source_universe_root, f->study.source_root, 32);
+    memcpy(f->focus.context_root, f->heuristic.agent_context_root, 32);
+    memcpy(f->focus.story_graph_root,
+           f->heuristic.ontology_context_root, 32);
+    if (vcs_zcode_focus_claim_set_root(
+            NULL, 0, f->focus.claim_set_root) != VCS_ZCODE_FOCUS_OK)
+        return false;
+    memcpy(f->focus.required_evidence_root,
+           f->heuristic.preregistration_root, 32);
+    hr_root(f->focus.authority_limits_root, 199);
+
+    vcs_zcode_attention_bid_init(&f->bid);
+    f->bid.priority_class = VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY;
+    if (vcs_zcode_focus_root(&f->focus, f->bid.focus_root) !=
+            VCS_ZCODE_FOCUS_OK)
+        return false;
+    memcpy(f->bid.task_root, f->task_root, 32);
+    memcpy(f->bid.source_root, f->study.source_root, 32);
+    memcpy(f->bid.heuristic_root, f->heuristic_root, 32);
+    hr_root(f->bid.priority_policy_root, 198);
+    memcpy(f->bid.bid_evaluator_root,
+           f->heuristic.evaluator_roots[0], 32);
+    memcpy(f->bid.evidence_root, f->original_root, 32);
+    f->bid.expected_user_value_bp = 7000;
+    f->bid.information_gain_bp = 8000;
+    f->bid.blocker_relief_bp = 6000;
+    f->bid.reuse_potential_bp = 7000;
+    f->bid.evidence_strength_bp = 9000;
+    f->bid.risk_bp = 1000;
+    f->bid.overlap_bp = 500;
+    f->bid.observed_metrics = VCS_ZCODE_ATTENTION_METRIC_REQUIRED;
+    f->bid.expected_latency_us = UINT64_C(1000000);
+    f->bid.expected_cost_milliunits = 10;
+    return vcs_zcode_attention_bid_validate_for_focus(
+        &f->bid, &f->heuristic, &f->focus) == VCS_ZCODE_ATTENTION_OK;
+}
+
 static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
 {
     memset(f, 0, sizeof(*f));
@@ -302,7 +357,8 @@ static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
     if (!hr_store_study(workspace, &f->study, f->study_root) ||
         !hr_store_task(workspace, &f->task, f->task_root) ||
         !hr_store_candidate(workspace, &f->candidate, f->candidate_root) ||
-        !hr_store_result(workspace, &f->original, f->original_root))
+        !hr_store_result(workspace, &f->original, f->original_root) ||
+        !hr_attention(f))
         return false;
 
     struct vcs_zcode_science_relation_set_v1 empty = {
@@ -310,7 +366,11 @@ static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
     };
     hr_statement_base(&f->anchor, VCS_ZCODE_SCIENCE_PROFILE_RESULT,
                       f->heuristic_root, &empty, 90);
+    (void)vcs_zcode_attention_bid_root(
+        &f->bid, f->anchor.predicate_body_root);
     memcpy(f->anchor.provenance_root, f->original_root, 32);
+    memcpy(f->anchor.activity_root, f->bid.bid_evaluator_root, 32);
+    memcpy(f->anchor.input_root, f->bid.focus_root, 32);
     f->anchor.observed_unix = f->original.finished_unix;
     if (vcs_zcode_science_statement_seal(
             &f->anchor, f->evaluator_secret, f->evaluator_pubkey) !=
@@ -401,6 +461,35 @@ static void hr_snapshot(
     for (size_t i = 0; i < count; i++)
         memcpy(snapshot->statement_roots[i], f->statement_root[rows[i]], 32);
     hr_sort(snapshot->statement_roots, count);
+}
+
+static void hr_lifecycle_snapshot(
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshot,
+    const struct hr_fixture *f)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->schema_version =
+        VCS_ZCODE_HEURISTIC_LIFECYCLE_SNAPSHOT_VERSION;
+    snapshot->statement_count = 1;
+    hr_root(snapshot->local_policy_root, 201);
+    memcpy(snapshot->expected_signer, f->evaluator_pubkey, 32);
+    memcpy(snapshot->heuristic_root, f->heuristic_root, 32);
+    memcpy(snapshot->anchor_statement_root, f->anchor_root, 32);
+    memcpy(snapshot->statement_roots[0], f->anchor_root, 32);
+}
+
+static enum vcs_zcode_attention_error hr_select(
+    const char *workspace, const struct hr_fixture *f,
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *lifecycle,
+    const struct vcs_zcode_heuristic_replication_snapshot_v1 *replication,
+    size_t *selected, struct vcs_zcode_attention_qualified_report *report)
+{
+    return vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
+        workspace, &f->bid, 1, &f->heuristic, NULL, 0, &f->anchor,
+        lifecycle, &f->action, replication, &f->focus,
+        f->bid.priority_policy_root, lifecycle->local_policy_root,
+        replication->local_policy_root, f->bid.bid_evaluator_root,
+        f->evaluator_pubkey, 6000, selected, 1, report);
 }
 
 static bool hr_report_unchanged(
@@ -668,6 +757,155 @@ int test_zcode_heuristic_replication(void)
             workspace, &f.heuristic, &f.action, &snapshot, 1499, &report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
         hr_report_unchanged(&report, &sentinel));
+
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 lifecycle;
+    struct vcs_zcode_attention_qualified_report qualified, qualified_before;
+    size_t selected = SIZE_MAX;
+    hr_lifecycle_snapshot(&lifecycle, &f);
+    hr_snapshot(&snapshot, &f, exact, 2);
+    HR_CHECK("retained-and-replicated-enters-attention-frontier",
+        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
+                  &qualified) == VCS_ZCODE_ATTENTION_OK && selected == 0 &&
+        qualified.verified_count == 1 && qualified.retained_count == 1 &&
+        qualified.qualified_count == 1 &&
+        qualified.choice.frontier.input_count == 1);
+
+    hr_snapshot(&snapshot, &f, one, 1);
+    selected = SIZE_MAX;
+    HR_CHECK("retained-below-threshold-is-ineligible-not-retired",
+        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
+                  &qualified) == VCS_ZCODE_ATTENTION_OK &&
+        selected == SIZE_MAX &&
+        qualified.retained_count == 1 && qualified.qualified_count == 0 &&
+        qualified.retained_unqualified_count == 1 &&
+        qualified.retired_count == 0);
+
+    hr_snapshot(&snapshot, &f, contradicted, 3);
+    selected = SIZE_MAX;
+    HR_CHECK("contradiction-blocks-attention-without-retirement",
+        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
+                  &qualified) == VCS_ZCODE_ATTENTION_OK &&
+        selected == SIZE_MAX &&
+        qualified.retained_unqualified_count == 1 &&
+        qualified.retired_count == 0);
+
+    struct vcs_zcode_science_relation_set_v1 retract_relations = {
+        .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
+        .row_count = 1,
+        .rows = {{.type = VCS_ZCODE_SCIENCE_RELATION_RETRACTION}},
+    };
+    memcpy(retract_relations.rows[0].statement_root, f.anchor_root, 32);
+    struct vcs_zcode_science_statement_v1 retraction = f.anchor;
+    retraction.profile = VCS_ZCODE_SCIENCE_PROFILE_RETRACTION;
+    retraction.relation_count = 1;
+    retraction.relation_types = VCS_ZCODE_SCIENCE_RELATION_MASK(
+        VCS_ZCODE_SCIENCE_RELATION_RETRACTION);
+    (void)vcs_zcode_science_relation_set_root(
+        &retract_relations, retraction.relations_root);
+    retraction.observed_unix = 1600;
+    memset(retraction.signature, 0, sizeof(retraction.signature));
+    uint8_t retraction_root[32];
+    bool retraction_built = vcs_zcode_science_statement_seal(
+            &retraction, f.evaluator_secret, f.evaluator_pubkey) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        hr_store_statement(workspace, &retraction, &retract_relations,
+                           retraction_root);
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 retired = lifecycle;
+    retired.statement_count = 2;
+    memcpy(retired.statement_roots[1], retraction_root, 32);
+    hr_sort(retired.statement_roots, 2);
+    hr_snapshot(&snapshot, &f, exact, 2);
+    selected = SIZE_MAX;
+    HR_CHECK("qualified-retracted-row-remains-ineligible",
+        retraction_built &&
+        hr_select(workspace, &f, &retired, &snapshot, &selected,
+                  &qualified) == VCS_ZCODE_ATTENTION_OK &&
+        selected == SIZE_MAX && qualified.retained_count == 0 &&
+        qualified.qualified_count == 0 && qualified.retired_count == 1);
+    memcpy(snapshot.statement_roots[0], missing, 32);
+    hr_sort(snapshot.statement_roots, 2);
+    memset(&qualified, 0x7b, sizeof(qualified));
+    qualified_before = qualified;
+    HR_CHECK("malformed-replication-in-retired-row-poisons-batch",
+        hr_select(workspace, &f, &retired, &snapshot, &selected,
+                  &qualified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+        memcmp(&qualified, &qualified_before, sizeof(qualified)) == 0);
+
+    struct vcs_zcode_attention_bid_v1 generation_bids[2] = {f.bid, f.bid};
+    struct vcs_zcode_heuristic_v1 generation_heuristics[2] = {
+        f.heuristic, f.heuristic
+    };
+    struct vcs_zcode_science_statement_v1 generation_anchors[2] = {
+        f.anchor, f.anchor
+    };
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 generation_lifecycle[2];
+    struct vcs_build_action_v1 generation_actions[2] = {f.action, f.action};
+    struct vcs_zcode_heuristic_replication_snapshot_v1 generation_replication[2];
+    generation_bids[1].expected_user_value_bp++;
+    (void)vcs_zcode_attention_bid_root(
+        &generation_bids[1], generation_anchors[1].predicate_body_root);
+    memset(generation_anchors[1].signature, 0,
+           sizeof(generation_anchors[1].signature));
+    struct vcs_zcode_science_relation_set_v1 no_relations = {
+        .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
+    };
+    bool generation_built = vcs_zcode_science_statement_seal(
+            &generation_anchors[1], f.evaluator_secret,
+            f.evaluator_pubkey) == VCS_ZCODE_SCIENCE_OK;
+    uint8_t second_anchor_root[32];
+    generation_built = generation_built && hr_store_statement(
+        workspace, &generation_anchors[1], &no_relations,
+        second_anchor_root);
+    hr_lifecycle_snapshot(&generation_lifecycle[0], &f);
+    generation_lifecycle[1] = generation_lifecycle[0];
+    memcpy(generation_lifecycle[1].anchor_statement_root,
+           second_anchor_root, 32);
+    memcpy(generation_lifecycle[1].statement_roots[0],
+           second_anchor_root, 32);
+    hr_snapshot(&generation_replication[0], &f, exact, 2);
+    hr_snapshot(&generation_replication[1], &f, NULL, 0);
+    memcpy(generation_replication[1].anchor_statement_root,
+           second_anchor_root, 32);
+    memset(&qualified, 0x7b, sizeof(qualified));
+    qualified_before = qualified;
+    selected = SIZE_MAX;
+    HR_CHECK("unqualified-generation-cannot-hide-retained-duplicate",
+        generation_built &&
+        vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
+            workspace, generation_bids, 2, generation_heuristics, NULL, 0,
+            generation_anchors, generation_lifecycle, generation_actions,
+            generation_replication, &f.focus, f.bid.priority_policy_root,
+            lifecycle.local_policy_root, snapshot.local_policy_root,
+            f.bid.bid_evaluator_root, f.evaluator_pubkey, 6000,
+            &selected, 1, &qualified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
+        selected == SIZE_MAX &&
+        memcmp(&qualified, &qualified_before, sizeof(qualified)) == 0);
+
+    hr_snapshot(&snapshot, &f, exact, 2);
+    memcpy(snapshot.statement_roots[0], missing, 32);
+    hr_sort(snapshot.statement_roots, 2);
+    memset(&qualified, 0x7b, sizeof(qualified));
+    qualified_before = qualified;
+    selected = SIZE_MAX;
+    HR_CHECK("malformed-accepted-replication-poisons-attention-atomically",
+        hr_select(workspace, &f, &lifecycle, &snapshot, &selected,
+                  &qualified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+        selected == SIZE_MAX &&
+        memcmp(&qualified, &qualified_before, sizeof(qualified)) == 0);
+
+    memset(&qualified, 0x7b, sizeof(qualified));
+    HR_CHECK("empty-scientific-frontier-has-exact-zero-counts",
+        vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
+            workspace, NULL, 0, NULL, NULL, 0, NULL, NULL, NULL, NULL,
+            &f.focus, f.bid.priority_policy_root,
+            lifecycle.local_policy_root, snapshot.local_policy_root,
+            f.bid.bid_evaluator_root, f.evaluator_pubkey, 6000,
+            NULL, 0, &qualified) == VCS_ZCODE_ATTENTION_OK &&
+        qualified.verified_count == 0 && qualified.retained_count == 0 &&
+        qualified.qualified_count == 0 &&
+        qualified.retained_unqualified_count == 0 &&
+        qualified.retired_count == 0 &&
+        qualified.choice.frontier.input_count == 0);
 
     test_cleanup_tmpdir(workspace);
     return failures;
