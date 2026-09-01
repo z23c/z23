@@ -17,6 +17,18 @@ expected="$(mktemp "${TMPDIR:-/tmp}/z23-architecture-expected.XXXXXX")"
 trap 'rm -f "$tracked" "$actual" "$expected"' EXIT
 git ls-files > "$tracked"
 
+# The root is the public table of contents, not an overflow namespace.  The
+# current tree needs 24 entries for the five product authorities, developer
+# and distribution surfaces, tool-discovery files, and legal/build metadata.
+# Any 25th entry must first be placed under an existing owner or deliberately
+# replace something here; merely tracking it must not make the root grow.
+root_entries="$(awk -F/ '{ seen[$1] = 1 } END { print length(seen) }' "$tracked")"
+if (( root_entries > 24 )); then
+    echo "check-architecture-tree: root-entry budget exceeded: $root_entries > 24" >&2
+    echo "check-architecture-tree: place the new entry under its owning authority" >&2
+    fail=1
+fi
+
 obsolete=(app lib config adapters ports domain application packages src examples)
 for old in "${obsolete[@]}"; do
     if grep -q "^$old/" "$tracked"; then
