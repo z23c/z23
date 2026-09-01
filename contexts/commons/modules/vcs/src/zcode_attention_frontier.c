@@ -62,6 +62,11 @@ static bool af_bid_subject_equal(
     const struct vcs_zcode_attention_bid_v1 *left,
     const struct vcs_zcode_attention_bid_v1 *right)
 {
+    /* Evidence is an observation of this logical candidate, not part of its
+     * identity.  Two snapshots for one focus/heuristic/evaluator would make
+     * the frontier schedule the same proposed action twice and let stale and
+     * fresh scores coexist without a lifecycle decision.  Refuse that
+     * ambiguity; callers must select one evidence generation first. */
     return memcmp(left->focus_root, right->focus_root, 32) == 0 &&
         memcmp(left->task_root, right->task_root, 32) == 0 &&
         memcmp(left->source_root, right->source_root, 32) == 0 &&
@@ -69,8 +74,7 @@ static bool af_bid_subject_equal(
         memcmp(left->priority_policy_root,
                right->priority_policy_root, 32) == 0 &&
         memcmp(left->bid_evaluator_root,
-               right->bid_evaluator_root, 32) == 0 &&
-        memcmp(left->evidence_root, right->evidence_root, 32) == 0;
+               right->bid_evaluator_root, 32) == 0;
 }
 
 static enum vcs_zcode_attention_error af_frontier_project(

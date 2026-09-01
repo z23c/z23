@@ -258,8 +258,11 @@ enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
  * caller must use vcs_zcode_task_index_conflict() and exclude every result
  * other than CLEAR, and validate each seed candidate with
  * vcs_zcode_attention_bid_validate_for_focus() before presenting a bid as
- * safely takeable. The mixed-lineage variant requires the corresponding
- * focus_with_lineage seam. Output indices are sorted by bid root for display.
+ * safely takeable. One logical candidate is the focus/task/source/heuristic/
+ * policy/evaluator tuple; multiple evidence generations for that tuple are
+ * ambiguous and fail closed instead of scheduling the same action twice.
+ * The mixed-lineage variant requires the corresponding focus_with_lineage
+ * seam. Output indices are sorted by bid root for display.
  * If capacity is too small, no indices are returned and frontier_count still
  * reports the required size. */
 enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(

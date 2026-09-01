@@ -217,6 +217,29 @@ int test_zcode_attention_verified(void)
              report.choice.selected_priority_class ==
                  VCS_ZCODE_ATTENTION_P1_USER_JOURNEY && indices[0] == 1);
 
+    struct vcs_zcode_attention_bid_v1 generation_bids[2] = {
+        bids[0], bids[0]
+    };
+    struct vcs_zcode_heuristic_v1 generation_heuristics[2] = {
+        heuristics[0], heuristics[0]
+    };
+    struct vcs_zcode_science_statement_v1 generation_statements[2] = {
+        statements[0], statements[0]
+    };
+    generation_bids[1].evidence_root[0] ^= 1u;
+    generation_bids[1].expected_user_value_bp++;
+    generation_bids[1].information_gain_bp--;
+    bool generation_statement_ok = av_statement(
+        &generation_statements[1], &generation_bids[1],
+        &generation_heuristics[1], &focus, secret, pubkey);
+    AV_CHECK("signed-evidence-cannot-duplicate-one-logical-candidate",
+             generation_statement_ok &&
+             vcs_zcode_attention_frontier_next_verified(
+                 generation_bids, 2, generation_heuristics,
+                 generation_statements, &focus, policy_root,
+                 evaluator_root, pubkey, indices, 4, &report) ==
+                 VCS_ZCODE_ATTENTION_DUPLICATE);
+
     struct vcs_zcode_attention_bid_v1 changed_bid = bids[3];
     changed_bid.expected_user_value_bp++;
     AV_CHECK("signed-result-commits-every-score",

@@ -810,6 +810,18 @@ int test_zcode_attention_bid(void)
                  selected, 6, &report) ==
                  VCS_ZCODE_ATTENTION_DUPLICATE);
 
+    duplicate[0] = bids[0];
+    duplicate[1] = bids[0];
+    duplicate_heuristics[1] = heuristics[0];
+    duplicate[1].evidence_root[0] ^= 1u;
+    duplicate[1].expected_user_value_bp++;
+    duplicate[1].information_gain_bp--;
+    AB_CHECK("multiple-evidence-generations-for-one-candidate-refuse",
+             vcs_zcode_attention_frontier_project(
+                 duplicate, 2, duplicate_heuristics, &query,
+                 selected, 6, &report) ==
+                 VCS_ZCODE_ATTENTION_DUPLICATE);
+
     struct vcs_zcode_attention_frontier_report empty_report = {0};
     AB_CHECK("empty-frontier",
              vcs_zcode_attention_frontier_project(
