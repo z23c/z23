@@ -3,6 +3,7 @@
 
 #include "presentation/presentation.h"
 
+#include "presentation/canvas.h"
 #include "presentation/model_render.h"
 #include "presentation_canvas_internal.h"
 #include "presentation_focus_internal.h"
@@ -65,6 +66,87 @@ static bool bounded_text(const char *text, size_t max)
     size_t n = 0;
     while (n <= max && text[n]) n++;
     return n <= max;
+}
+
+static bool present_hover_validate(
+    const struct zcl_present_window_v1 *request,
+    const struct zcl_present_window_hover_v1 *hover,
+    char *error, size_t error_cap)
+{
+    if (!hover || hover->struct_size != sizeof(*hover) ||
+        hover->abi_version != ZCL_PRESENT_ABI_V1 || !hover->items ||
+        hover->item_count == 0 ||
+        hover->item_count > ZCL_PRESENT_WINDOW_HOVER_ITEMS_MAX)
+        return present_error(error, error_cap,
+                             "presentation hover ABI/count is invalid");
+    if (hover->plot_left >= hover->plot_right ||
+        hover->plot_top >= hover->plot_bottom ||
+        hover->plot_right > request->width ||
+        hover->plot_bottom > request->height)
+        return present_error(error, error_cap,
+                             "presentation hover plot bounds are invalid");
+    for (uint32_t i = 0; i < hover->item_count; i++) {
+        if (hover->items[i].x < hover->plot_left ||
+            hover->items[i].x > hover->plot_right ||
+            (i > 0 && hover->items[i - 1u].x > hover->items[i].x) ||
+            !hover->items[i].text ||
+            !bounded_text(hover->items[i].text,
+                          ZCL_PRESENT_WINDOW_HOVER_TEXT_MAX))
+            return present_error(error, error_cap,
+                                 "presentation hover item is invalid");
+    }
+    return true;
+}
+
+static void present_hover_draw(
+    uint8_t *pixels, size_t pixels_cap,
+    const struct zcl_present_window_v1 *page,
+    const struct zcl_present_window_hover_v1 *hover, uint32_t item_index)
+{
+    if (!pixels || !page || !hover || item_index >= hover->item_count ||
+        page->pixel_format != ZCL_PRESENT_RGB8)
+        return;
+    struct zcl_present_canvas canvas;
+    if (!zcl_present_canvas_init(&canvas, pixels, pixels_cap,
+                                 page->width, page->height))
+        return;
+    const struct zcl_present_window_hover_item_v1 *item =
+        &hover->items[item_index];
+    const struct zcl_present_color crosshair = {112, 240, 216};
+    const struct zcl_present_color panel = {15, 24, 39};
+    const struct zcl_present_color border = {76, 104, 134};
+    const struct zcl_present_color primary = {242, 247, 255};
+    const struct zcl_present_color secondary = {169, 186, 207};
+    zcl_present_canvas_line(&canvas, (int32_t)item->x,
+                            (int32_t)hover->plot_top,
+                            (int32_t)item->x,
+                            (int32_t)hover->plot_bottom, crosshair);
+    uint32_t panel_width = page->width > 576u ? 560u
+        : (page->width > 16u ? page->width - 16u : page->width);
+    uint32_t panel_height = 72u;
+    int32_t panel_x = (int32_t)item->x + 14;
+    if ((uint32_t)panel_x + panel_width > page->width)
+        panel_x = (int32_t)item->x - (int32_t)panel_width - 14;
+    int32_t minimum_x = hover->plot_left + panel_width <= page->width
+        ? (int32_t)hover->plot_left : 8;
+    if (panel_x < minimum_x) panel_x = minimum_x;
+    if ((uint32_t)panel_x + panel_width > page->width)
+        panel_x = page->width > panel_width + 8u
+            ? (int32_t)(page->width - panel_width - 8u) : 0;
+    int32_t panel_y = (int32_t)hover->plot_top + 12;
+    zcl_present_canvas_fill_rect(&canvas, panel_x, panel_y,
+                                 panel_width, panel_height, panel);
+    zcl_present_canvas_stroke_rect(&canvas, panel_x, panel_y,
+                                   panel_width, panel_height, 1u, border);
+    const char *separator = strchr(item->text, '\n');
+    size_t first_len = separator
+        ? (size_t)(separator - item->text) : strlen(item->text);
+    zcl_present_canvas_text_strong(&canvas, panel_x + 14, panel_y + 10,
+                                   item->text, first_len, 20u, primary);
+    if (separator && separator[1])
+        zcl_present_canvas_text(&canvas, panel_x + 14, panel_y + 39,
+                                separator + 1, strlen(separator + 1),
+                                16u, secondary);
 }
 
 bool zcl_present_window_validate_v1(
@@ -238,14 +320,16 @@ static bool present_replace_surface(
     uint32_t focused_control,
     const struct zcl_present_window_form_v1 *form,
     const struct zcl_present_window_canvas_v1 *canvas,
+    const struct zcl_present_window_hover_v1 *hover,
+    uint32_t hover_index,
     bool required_invalid)
 {
     uint8_t *replacement_pixels = NULL;
     bool scaled = width != (i32)page->width || height != (i32)page->height;
-    bool owned = scaled || action_count > 0 || form || canvas;
+    bool owned = scaled || action_count > 0 || form || canvas || hover;
     uint8_t *overlay_pixels = NULL;
     struct zcl_present_window_v1 overlay_page = *page;
-    if (form || canvas) {
+    if (form || canvas || hover) {
         uint64_t bytes = (uint64_t)page->width * page->height *
                          (uint32_t)page->pixel_format;
         if (bytes == 0 || bytes > SIZE_MAX) return false;
@@ -256,9 +340,12 @@ static bool present_replace_surface(
             zcl_present_form_draw_state_internal(
                 overlay_pixels, (size_t)bytes, form,
                 focused_control, required_invalid);
-        else
+        else if (canvas)
             zcl_present_canvas_draw_state_internal(
                 overlay_pixels, (size_t)bytes, canvas, focused_control);
+        else
+            present_hover_draw(overlay_pixels, (size_t)bytes, page,
+                               hover, hover_index);
         overlay_page.pixels = overlay_pixels;
         page = &overlay_page;
     }
@@ -319,13 +406,16 @@ static bool present_redraw(
     uint32_t action_count, uint32_t focused_control,
     const struct zcl_present_window_form_v1 *form,
     const struct zcl_present_window_canvas_v1 *canvas,
+    const struct zcl_present_window_hover_v1 *hover,
+    uint32_t hover_index,
     bool required_invalid)
 {
     i32 width = 0, height = 0;
     (void)RGFW_window_getSize(window, &width, &height);
     if (!present_replace_surface(
             window, page, width, height, surface, scaled_pixels,
-            action_count, focused_control, form, canvas, required_invalid))
+            action_count, focused_control, form, canvas, hover, hover_index,
+            required_invalid))
         return false;
     RGFW_window_blitSurface(window, *surface);
     return true;
@@ -336,6 +426,7 @@ static bool present_run_pages_actions(
     uint32_t action_count,
     struct zcl_present_window_form_v1 *form,
     struct zcl_present_window_canvas_v1 *canvas,
+    const struct zcl_present_window_hover_v1 *hover,
     zcl_present_window_ready_fn ready,
     void *ready_context,
     struct zcl_present_window_event_v1 *result,
@@ -352,7 +443,7 @@ static bool present_run_pages_actions(
     };
     if (!present_pages_validate(pages, error, error_cap))
         return false;
-    if (form && canvas)
+    if ((form && canvas) || ((form || canvas) && hover))
         return present_error(error, error_cap,
                              "presentation controls are mutually exclusive");
     if (form && (!zcl_present_window_form_validate_v1(
@@ -371,6 +462,12 @@ static bool present_run_pages_actions(
                    pages->pages[0].height != ZCL_PRESENT_MODEL_BITMAP_HEIGHT))
         return present_error(error, error_cap,
                              "presentation canvas geometry/actions are invalid");
+    if (hover && (!present_hover_validate(
+                      &pages->pages[0], hover, error, error_cap) ||
+                  action_count != 0 || pages->page_count != 1u ||
+                  pages->pages[0].pixel_format != ZCL_PRESENT_RGB8))
+        return present_error(error, error_cap,
+                             "presentation hover geometry/actions are invalid");
     uint32_t current_page = 0;
     const struct zcl_present_window_v1 *request = &pages->pages[current_page];
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(__linux__)
@@ -412,6 +509,7 @@ static bool present_run_pages_actions(
     RGFW_surface *surface = NULL;
     uint8_t *scaled_pixels = NULL;
     uint32_t focused_control = 0;
+    uint32_t hover_index = UINT32_MAX;
     bool required_invalid = false;
     if (form) {
         while (focused_control < form->field_count &&
@@ -426,7 +524,8 @@ static bool present_run_pages_actions(
                                  (i32)request->height,
                                  &surface, &scaled_pixels,
                                  action_count, focused_control,
-                                 form, canvas, required_invalid)) {
+                                 form, canvas, hover, hover_index,
+                                 required_invalid)) {
         RGFW_window_close(window);
         return present_error(error, error_cap,
                              "native bitmap surface creation failed");
@@ -448,10 +547,29 @@ static bool present_run_pages_actions(
                 (void)present_replace_surface(
                     window, request, resized_width, resized_height,
                     &surface, &scaled_pixels, action_count,
-                    focused_control, form, canvas, required_invalid);
+                    focused_control, form, canvas, hover, hover_index,
+                    required_invalid);
                 RGFW_window_blitSurface(window, surface);
             } else if (event.type == RGFW_windowRefresh) {
                 RGFW_window_blitSurface(window, surface);
+            }
+            if (hover && event.type == RGFW_mousePosChanged) {
+                i32 window_width = 0, window_height = 0;
+                i32 mouse_x = 0, mouse_y = 0;
+                uint32_t next_hover = UINT32_MAX;
+                (void)RGFW_window_getSize(window, &window_width,
+                                          &window_height);
+                if (RGFW_window_getMouse(window, &mouse_x, &mouse_y))
+                    (void)zcl_present_window_hover_at_v1(
+                        hover, request->width, request->height,
+                        window_width, window_height, mouse_x, mouse_y,
+                        &next_hover);
+                if (next_hover != hover_index &&
+                    present_redraw(
+                        window, request, &surface, &scaled_pixels,
+                        action_count, focused_control, form, canvas,
+                        hover, next_hover, required_invalid))
+                    hover_index = next_hover;
             }
             if (event.type == RGFW_mouseButtonPressed &&
                 event.button.value == RGFW_mouseLeft) {
@@ -472,6 +590,7 @@ static bool present_run_pages_actions(
                         (void)present_redraw(
                             window, request, &surface, &scaled_pixels,
                             action_count, focused_control, form, canvas,
+                            hover, hover_index,
                             required_invalid);
                     } else {
                         result->outcome = ZCL_PRESENT_WINDOW_ACTION;
@@ -492,6 +611,7 @@ static bool present_run_pages_actions(
                         (void)present_redraw(
                             window, request, &surface, &scaled_pixels,
                             action_count, focused_control, form, canvas,
+                            hover, hover_index,
                             required_invalid);
                     }
                 }
@@ -528,7 +648,8 @@ static bool present_run_pages_actions(
                 if (present_replace_surface(
                         window, next, window_width, window_height,
                         &surface, &scaled_pixels, action_count,
-                        focused_control, form, canvas, required_invalid)) {
+                        focused_control, form, canvas, hover, hover_index,
+                        required_invalid)) {
                     current_page = next_page;
                     request = next;
                     RGFW_window_blitSurface(window, surface);
@@ -554,6 +675,7 @@ static bool present_run_pages_actions(
                     if (present_redraw(
                             window, request, &surface, &scaled_pixels,
                             action_count, next_control, form, canvas,
+                            hover, hover_index,
                             required_invalid)) {
                         focused_control = next_control;
                     }
@@ -587,6 +709,7 @@ static bool present_run_pages_actions(
                     (void)present_redraw(
                         window, request, &surface, &scaled_pixels,
                         action_count, focused_control, form, canvas,
+                        hover, hover_index,
                         required_invalid);
                 }
                 continue;
@@ -619,6 +742,7 @@ static bool present_run_pages_actions(
                     (void)present_redraw(
                         window, request, &surface, &scaled_pixels,
                         action_count, focused_control, form, canvas,
+                        hover, hover_index,
                         required_invalid);
                 }
                 continue;
@@ -634,6 +758,7 @@ static bool present_run_pages_actions(
                     (void)present_redraw(
                         window, request, &surface, &scaled_pixels,
                         action_count, focused_control, form, canvas,
+                        hover, hover_index,
                         required_invalid);
                 } else {
                     result->outcome = ZCL_PRESENT_WINDOW_ACTION;
@@ -682,7 +807,7 @@ bool zcl_present_window_run_pages_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, NULL, NULL, ready, ready_context,
+        pages, action_count, NULL, NULL, NULL, ready, ready_context,
         result, error, error_cap);
 }
 
@@ -696,7 +821,7 @@ bool zcl_present_window_run_pages_form_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, form, NULL, ready, ready_context,
+        pages, action_count, form, NULL, NULL, ready, ready_context,
         result, error, error_cap);
 }
 
@@ -710,7 +835,7 @@ bool zcl_present_window_run_pages_canvas_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, NULL, canvas, ready, ready_context,
+        pages, action_count, NULL, canvas, NULL, ready, ready_context,
         result, error, error_cap);
 }
 
@@ -740,4 +865,21 @@ bool zcl_present_window_run_v1(
     struct zcl_present_window_event_v1 event;
     return zcl_present_window_run_actions_v1(
         request, 0, NULL, NULL, &event, error, error_cap);
+}
+
+bool zcl_present_window_run_hover_v1(
+    const struct zcl_present_window_v1 *request,
+    const struct zcl_present_window_hover_v1 *hover,
+    char *error, size_t error_cap)
+{
+    struct zcl_present_window_pages_v1 pages = {
+        .struct_size = sizeof(pages),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .pages = request,
+        .page_count = 1u,
+    };
+    struct zcl_present_window_event_v1 event;
+    return present_run_pages_actions(
+        &pages, 0, NULL, NULL, hover, NULL, NULL,
+        &event, error, error_cap);
 }

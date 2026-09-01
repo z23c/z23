@@ -80,18 +80,20 @@ bool utxo_root_ladder_verify_against_store(
     return !any_divergence;
 }
 
-bool utxo_root_ladder_verify_dense_anchor(struct mmb_leaf_store *store,
-                                          uint8_t out_mismatch_root[32])
+static bool verify_dense_anchor_at(struct mmb_leaf_store *store,
+                                   int32_t height,
+                                   const uint8_t expected_root[32],
+                                   uint8_t out_mismatch_root[32])
 {
     if (out_mismatch_root) memset(out_mismatch_root, 0, 32);
 
-    if (g_utxo_root_ladder_dense_height < 0)
+    if (height < 0)
         return true;  /* dense anchor absent — nothing to check */
 
-    if (!store)
-        LOG_FAIL("utxo_root_ladder", "verify_dense_anchor: NULL store");
+    if (!store || !expected_root)
+        LOG_FAIL("utxo_root_ladder", "verify_dense_anchor: NULL input");
 
-    uint64_t need = (uint64_t)g_utxo_root_ladder_dense_height + 1;
+    uint64_t need = (uint64_t)height + 1;
     if (store->num_leaves < need) {
         /* Not yet reached — same "not a failure" doctrine as the per-rung
          * boundary-root check. */
@@ -117,13 +119,31 @@ bool utxo_root_ladder_verify_dense_anchor(struct mmb_leaf_store *store,
     uint8_t recomputed[32];
     mmb_root(&m, recomputed);
 
-    if (memcmp(recomputed, g_utxo_root_ladder_dense_mmb_root, 32) == 0)
+    if (memcmp(recomputed, expected_root, 32) == 0)
         return true;
 
     if (out_mismatch_root) memcpy(out_mismatch_root, recomputed, 32);
     LOG_WARN("utxo_root_ladder",
             "DIVERGENT dense mmb_root at h=%d: this node's own leaf-store "
             "pipeline no longer reproduces the locked dense anchor",
-            g_utxo_root_ladder_dense_height);
+            height);
     return false;
 }
+
+bool utxo_root_ladder_verify_dense_anchor(struct mmb_leaf_store *store,
+                                          uint8_t out_mismatch_root[32])
+{
+    return verify_dense_anchor_at(
+        store, g_utxo_root_ladder_dense_height,
+        g_utxo_root_ladder_dense_mmb_root, out_mismatch_root);
+}
+
+#ifdef ZCL_TESTING
+bool utxo_root_ladder_verify_dense_anchor_for_test(
+    struct mmb_leaf_store *store, int32_t height,
+    const uint8_t expected_root[32], uint8_t out_mismatch_root[32])
+{
+    return verify_dense_anchor_at(
+        store, height, expected_root, out_mismatch_root);
+}
+#endif

@@ -3471,6 +3471,7 @@ static int test_presentation_leaves_are_display_only(void)
             "app.presentation.show",
             "app.presentation.status",
             "app.presentation.corpus",
+            "app.presentation.code-growth",
             "app.presentation.code-change",
             "app.presentation.reproduction",
             "app.presentation.publication-confirm",

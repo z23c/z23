@@ -75,6 +75,8 @@ struct science_corpus_report {
     uint64_t files_walked;
     uint64_t lines;
     uint64_t bytes;
+    uint64_t non_test_lines;
+    uint64_t test_lines;
 
     /* Read from the generated inventory artifact. All zero and MEANINGLESS
      * when inventory_present is false. */
@@ -93,6 +95,10 @@ struct science_corpus_report {
     /* False when the two halves counted different trees; see the header. */
     bool     scope_agrees;
 };
+
+/* Canonical test-source classification shared by the live census and Git
+ * history reconstruction. `path` is repository-relative. */
+bool science_corpus_is_test_path(const char *path);
 
 /* Walk `root` and read `inventory_path` (may be NULL or absent — then
  * inventory_present is false and the walk half still fills in). Returns false

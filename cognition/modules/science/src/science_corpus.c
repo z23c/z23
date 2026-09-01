@@ -49,9 +49,38 @@ static bool is_c23_source(const char *name)
            (name[n - 1] == 'c' || name[n - 1] == 'h');
 }
 
+static bool corpus_has_segment(const char *path, const char *segment)
+{
+    size_t n = strlen(segment);
+    for (const char *p = path; (p = strstr(p, segment)) != NULL; p++) {
+        bool left = p == path || p[-1] == '/';
+        bool right = p[n] == '\0' || p[n] == '/';
+        if (left && right) return true;
+    }
+    return false;
+}
+
+bool science_corpus_is_test_path(const char *path)
+{
+    if (!path) return false;
+    if (strncmp(path, "tests/harness/", 14) == 0 ||
+        strncmp(path, "lib/test/", 9) == 0)
+        return true;
+    if ((strncmp(path, "contexts/commons/packages/", 26) == 0 ||
+         strncmp(path, "packages/", 9) == 0) &&
+        (corpus_has_segment(path, "tests") ||
+         corpus_has_segment(path, "test")))
+        return true;
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    return strncmp(base, "test_", 5) == 0 ||
+           strstr(path, "/test_") != NULL;
+}
+
 /* Count newlines and bytes. A final line with no terminating newline still
  * counts as a line: it is a line of code either way. */
-static bool count_file(const char *path, uint64_t *lines, uint64_t *bytes)
+static bool count_file(const char *path, uint64_t *lines, uint64_t *bytes,
+                       uint64_t *file_lines)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
@@ -75,6 +104,7 @@ static bool count_file(const char *path, uint64_t *lines, uint64_t *bytes)
         nl++;
     *lines += nl;
     *bytes += total;
+    if (file_lines) *file_lines = nl;
     return true;
 }
 
@@ -98,10 +128,22 @@ static bool walk_dir(const char *root, const char *rel,
                 platform_directory_list_free(&files);
                 LOG_FAIL("science.corpus", "path too long under %s", full);
             }
-            if (!count_file(path, &out->lines, &out->bytes)) {
+            uint64_t file_lines = 0;
+            if (!count_file(path, &out->lines, &out->bytes, &file_lines)) {
                 platform_directory_list_free(&files);
                 LOG_FAIL("science.corpus", "could not read %s", path);
             }
+            char source_path[SCIENCE_CORPUS_PATH_MAX];
+            int source_n = snprintf(source_path, sizeof(source_path),
+                                    "%s/%s", rel, name);
+            if (source_n <= 0 || (size_t)source_n >= sizeof(source_path)) {
+                platform_directory_list_free(&files);
+                LOG_FAIL("science.corpus", "source path too long under %s",
+                         rel);
+            }
+            const bool test_path = science_corpus_is_test_path(source_path);
+            if (test_path) out->test_lines += file_lines;
+            else out->non_test_lines += file_lines;
             out->files_walked++;
         }
     }

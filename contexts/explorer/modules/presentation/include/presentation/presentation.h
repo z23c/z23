@@ -24,6 +24,8 @@ extern "C" {
 #define ZCL_PRESENT_WINDOW_CANVAS_POINTS_MAX 4u
 #define ZCL_PRESENT_WINDOW_CANVAS_COORD_MAX 1000u
 #define ZCL_PRESENT_WINDOW_CANVAS_LABEL_MAX 80u
+#define ZCL_PRESENT_WINDOW_HOVER_ITEMS_MAX 512u
+#define ZCL_PRESENT_WINDOW_HOVER_TEXT_MAX 240u
 
 enum zcl_present_pixel_format {
     ZCL_PRESENT_RGB8 = 3,
@@ -117,6 +119,25 @@ struct zcl_present_window_canvas_v1 {
         points[ZCL_PRESENT_WINDOW_CANVAS_POINTS_MAX];
 };
 
+struct zcl_present_window_hover_item_v1 {
+    uint32_t x;
+    const char *text;
+};
+
+/* Display-only hover columns over a source-space plot rectangle. Items must
+ * be ordered by x. The backend selects the nearest day column, draws a local
+ * crosshair and tooltip, and returns no authority-bearing event. */
+struct zcl_present_window_hover_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t plot_left;
+    uint32_t plot_top;
+    uint32_t plot_right;
+    uint32_t plot_bottom;
+    const struct zcl_present_window_hover_item_v1 *items;
+    uint32_t item_count;
+};
+
 /* Called after the native window and software surface exist and the first
  * bitmap has been blitted. The callback belongs to the reviewed host, never
  * to the inert visual document or fetched code. */
@@ -133,6 +154,13 @@ bool zcl_present_window_validate_v1(
  * copy_text when it is present. */
 bool zcl_present_window_run_v1(
     const struct zcl_present_window_v1 *request,
+    char *error, size_t error_cap);
+
+/* Native bitmap window with exact source-space hover columns. Escape/Q and
+ * window-close dismiss it; moving outside the plot clears the tooltip. */
+bool zcl_present_window_run_hover_v1(
+    const struct zcl_present_window_v1 *request,
+    const struct zcl_present_window_hover_v1 *hover,
     char *error, size_t error_cap);
 
 /* Interactive host variant. Tab/Shift-Tab move one visibly outlined action;
@@ -240,6 +268,13 @@ bool zcl_present_window_action_at_v1(
     int32_t target_width, int32_t target_height,
     int32_t mouse_x, int32_t mouse_y, uint32_t action_count,
     uint32_t *action_index);
+
+/* Pure aspect-fit hit test used by the backend and cross-platform tests. */
+bool zcl_present_window_hover_at_v1(
+    const struct zcl_present_window_hover_v1 *hover,
+    uint32_t source_width, uint32_t source_height,
+    int32_t target_width, int32_t target_height,
+    int32_t mouse_x, int32_t mouse_y, uint32_t *item_index);
 
 /* Stable diagnostic labels; neither string implies graphics acceleration. */
 const char *zcl_present_backend_name(void);

@@ -204,6 +204,29 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_presentation_corpus)
 
 ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.code-growth", "app.presentation", "",
+    "Chart exact daily maintained C23 line growth in a native window",
+    "Reconstructs maintained .c and .h additions and deletions from first-"
+    "parent Git history, groups commits by UTC day, separates test from non-"
+    "test lines, and refuses unless the final totals equal a fresh source-tree "
+    "census. Hover text binds every plot point to its date, commit, totals, "
+    "additions, and deletions. Set output=text for the complete plot-point "
+    "document without opening a window. Git and the current source tree are "
+    "the evidence authorities; the display grants no source or publication "
+    "authority.", 65536,
+    "presentation,native,chart,c23,git,history,loc,exact,agent",
+    "zcl.app_presentation_code_growth.input.v1",
+    "zcl.app_presentation_code_growth.v1", "output", "",
+    "z23 app presentation code-growth",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_code_growth)
+
+ZCL_COMMAND_READY_COMMAND(
     "app.presentation.code-change", "app.presentation", "",
     "Show an exact ZVCS-backed C code change in a native window",
     "Loads and rederives two immutable ZVCS source manifests, verifies the "

@@ -219,6 +219,12 @@ int test_qr(void)
              canvas_pixels[0] == 0xc8 && canvas_pixels[1] == 0x70 &&
              canvas_pixels[2] == 0x35 &&
              canvas_pixels[((size_t)5u * 32u + 5u) * 3u] == 0xff);
+    QR_CHECK("chart scale chooses readable overflow-safe decimal intervals",
+             zcl_present_canvas_chart_scale_maximum(0u) == 1u &&
+             zcl_present_canvas_chart_scale_maximum(1123394u) == 1200000u &&
+             zcl_present_canvas_chart_scale_maximum(100u) == 120u &&
+             zcl_present_canvas_chart_scale_maximum(UINT64_MAX) ==
+                 UINT64_MAX);
     zcl_present_canvas_text(&canvas, 8, 8, "Aa", 2u, 16u, canvas_orange);
     bool saw_antialias = false;
     for (size_t i = 0; i < sizeof(canvas_pixels); i++) {
@@ -235,6 +241,25 @@ int test_qr(void)
              balance_width > 40u && balance_width < 80u &&
              balance_width ==
                  zcl_present_canvas_text_width("balance", 7u, 16u));
+    uint32_t strong_width =
+        zcl_present_canvas_text_width_strong("balance", 7u, 16u);
+    QR_CHECK("embedded Inter SemiBold metrics are deterministic",
+             strong_width > 40u && strong_width < 80u &&
+             strong_width == zcl_present_canvas_text_width_strong(
+                 "balance", 7u, 16u));
+    uint8_t strong_pixels[32u * 32u * 3u];
+    struct zcl_present_canvas strong_canvas;
+    bool strong_canvas_ok = zcl_present_canvas_init(
+        &strong_canvas, strong_pixels, sizeof(strong_pixels), 32u, 32u);
+    if (strong_canvas_ok) {
+        zcl_present_canvas_clear(&strong_canvas, canvas_white);
+        zcl_present_canvas_text_strong(
+            &strong_canvas, 8, 8, "Aa", 2u, 16u, canvas_orange);
+    }
+    QR_CHECK("Inter Medium and SemiBold render distinct exact pixels",
+             strong_canvas_ok &&
+             memcmp(canvas_pixels, strong_pixels,
+                    sizeof(canvas_pixels)) != 0);
 
     struct zcl_present_model_v1 deposit_model;
     QR_CHECK("deposit payload becomes one bounded QR visual model",
@@ -337,6 +362,37 @@ int test_qr(void)
              !zcl_present_window_action_at_v1(
                  720, 720, 1000, 720, 100, 670, 2,
                  &clicked_action));
+    static const struct zcl_present_window_hover_item_v1 hover_items[] = {
+        {.x = 100u, .text = "2026-08-30\n100 lines"},
+        {.x = 300u, .text = "2026-08-31\n200 lines"},
+        {.x = 500u, .text = "2026-09-01\n300 lines"},
+    };
+    const struct zcl_present_window_hover_v1 hover = {
+        .struct_size = sizeof(hover),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .plot_left = 80u,
+        .plot_top = 100u,
+        .plot_right = 520u,
+        .plot_bottom = 600u,
+        .items = hover_items,
+        .item_count = 3u,
+    };
+    uint32_t hover_index = UINT32_MAX;
+    QR_CHECK("native chart hover selects the nearest exact day",
+             zcl_present_window_hover_at_v1(
+                 &hover, 720, 720, 720, 720, 340, 300,
+                 &hover_index) && hover_index == 1u);
+    QR_CHECK("resized chart hover preserves aspect-fit selection",
+             zcl_present_window_hover_at_v1(
+                 &hover, 720, 720, 1440, 1440, 980, 600,
+                 &hover_index) && hover_index == 2u);
+    QR_CHECK("chart hover refuses plot-exterior and letterbox positions",
+             !zcl_present_window_hover_at_v1(
+                 &hover, 720, 720, 720, 720, 40, 300,
+                 &hover_index) &&
+             !zcl_present_window_hover_at_v1(
+                 &hover, 720, 720, 1000, 720, 100, 300,
+                 &hover_index));
     struct zcl_present_model_v1 rejected_qr;
     QR_CHECK("shared QR model rejects an empty payload",
              !zcl_present_model_qr_from_payload_v1(

@@ -28,11 +28,12 @@ static double canvas_sqrt_compat(double value)
 #define STBTT_sqrt(x) canvas_sqrt_compat(x)
 #define STBTT_pow(x, y) pow((x), (y))
 #define STB_TRUETYPE_IMPLEMENTATION
-#include "../../../vendor/typography/stb_truetype.h"
+#include "../../../../../vendor/typography/stb_truetype.h"
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-#include "../../../vendor/typography/noto_sans_ascii.inc"
+#include "../../../../../vendor/typography/inter_medium_ascii.inc"
+#include "../../../../../vendor/typography/inter_semibold_ascii.inc"
 
 static void canvas_pixel(struct zcl_present_canvas *canvas, int32_t x,
                          int32_t y, struct zcl_present_color color)
@@ -158,12 +159,33 @@ void zcl_present_canvas_blit_rgba(struct zcl_present_canvas *canvas,
     }
 }
 
-static bool canvas_font(stbtt_fontinfo *font)
+uint64_t zcl_present_canvas_chart_scale_maximum(uint64_t value)
 {
-    if (!font || g_zcl_noto_sans_ascii_len == 0) return false;
-    int offset = stbtt_GetFontOffsetForIndex(g_zcl_noto_sans_ascii, 0);
+    if (value == 0) return 1;
+    uint64_t rough_step = value / 4u + (value % 4u != 0 ? 1u : 0u);
+    uint64_t magnitude = 1u;
+    while (magnitude <= rough_step / 10u)
+        magnitude *= 10u;
+    uint64_t units = rough_step / magnitude +
+        (rough_step % magnitude != 0 ? 1u : 0u);
+    uint64_t nice_units = units <= 1u ? 1u : units <= 2u ? 2u
+        : units <= 3u ? 3u : units <= 5u ? 5u : 10u;
+    if (nice_units > UINT64_MAX / magnitude)
+        return value;
+    uint64_t step = nice_units * magnitude;
+    return step <= UINT64_MAX / 4u ? step * 4u : value;
+}
+
+static bool canvas_font(stbtt_fontinfo *font, bool strong)
+{
+    if (!font || g_zcl_inter_medium_ascii_len == 0 ||
+        g_zcl_inter_semibold_ascii_len == 0)
+        return false;
+    const unsigned char *bytes = strong ? g_zcl_inter_semibold_ascii
+                                        : g_zcl_inter_medium_ascii;
+    int offset = stbtt_GetFontOffsetForIndex(bytes, 0);
     return offset >= 0 &&
-           stbtt_InitFont(font, g_zcl_noto_sans_ascii, offset) != 0;
+           stbtt_InitFont(font, bytes, offset) != 0;
 }
 
 static int canvas_codepoint(unsigned char ch)
@@ -183,12 +205,12 @@ static int canvas_text_advance(const stbtt_fontinfo *font, int codepoint,
     return pixels > 0.0f ? (int)(pixels + 0.5f) : 0;
 }
 
-uint32_t zcl_present_canvas_text_width(const char *text, size_t text_len,
-                                       uint32_t pixel_height)
+static uint32_t canvas_text_width(
+    const char *text, size_t text_len, uint32_t pixel_height, bool strong)
 {
     if (!text || pixel_height < 8u || pixel_height > 96u) return 0;
     stbtt_fontinfo font;
-    if (!canvas_font(&font)) return 0;
+    if (!canvas_font(&font, strong)) return 0;
     float scale = stbtt_ScaleForPixelHeight(&font, (float)pixel_height);
     uint64_t width = 0;
     for (size_t i = 0; i < text_len; i++) {
@@ -201,15 +223,26 @@ uint32_t zcl_present_canvas_text_width(const char *text, size_t text_len,
     return (uint32_t)width;
 }
 
-void zcl_present_canvas_text(struct zcl_present_canvas *canvas,
-                             int32_t x, int32_t y,
-                             const char *text, size_t text_len,
-                             uint32_t pixel_height,
-                             struct zcl_present_color color)
+uint32_t zcl_present_canvas_text_width(const char *text, size_t text_len,
+                                       uint32_t pixel_height)
+{
+    return canvas_text_width(text, text_len, pixel_height, false);
+}
+
+uint32_t zcl_present_canvas_text_width_strong(
+    const char *text, size_t text_len, uint32_t pixel_height)
+{
+    return canvas_text_width(text, text_len, pixel_height, true);
+}
+
+static void canvas_text(
+    struct zcl_present_canvas *canvas, int32_t x, int32_t y,
+    const char *text, size_t text_len, uint32_t pixel_height,
+    struct zcl_present_color color, bool strong)
 {
     if (!canvas || !text || pixel_height < 8u || pixel_height > 96u) return;
     stbtt_fontinfo font;
-    if (!canvas_font(&font)) return;
+    if (!canvas_font(&font, strong)) return;
     float scale = stbtt_ScaleForPixelHeight(&font, (float)pixel_height);
     int ascent = 0;
     int descent = 0;
@@ -263,4 +296,21 @@ void zcl_present_canvas_text(struct zcl_present_canvas *canvas,
         if (advance > INT32_MAX - pen_x) break;
         pen_x += advance;
     }
+}
+
+void zcl_present_canvas_text(struct zcl_present_canvas *canvas,
+                             int32_t x, int32_t y,
+                             const char *text, size_t text_len,
+                             uint32_t pixel_height,
+                             struct zcl_present_color color)
+{
+    canvas_text(canvas, x, y, text, text_len, pixel_height, color, false);
+}
+
+void zcl_present_canvas_text_strong(
+    struct zcl_present_canvas *canvas, int32_t x, int32_t y,
+    const char *text, size_t text_len, uint32_t pixel_height,
+    struct zcl_present_color color)
+{
+    canvas_text(canvas, x, y, text, text_len, pixel_height, color, true);
 }

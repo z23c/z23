@@ -91,17 +91,50 @@ static bool projection_bytes(struct ci_projection_hash *hash,
            projection_write(hash, bytes, length);
 }
 
-static bool projection_meta(struct ci_store *store,
-                            struct ci_projection_hash *hash,
-                            const char *key, const void *expected,
-                            size_t expected_length, uint8_t tag)
+static bool projection_meta_value_locked(struct ci_store *store,
+                                         const char *key, void *value,
+                                         size_t capacity, size_t *length,
+                                         bool *found)
+{
+    if (length) *length = 0;
+    if (found) *found = false;
+    sqlite3 *db = ci_store_db(store);
+    sqlite3_stmt *statement = NULL;
+    if (!db || !key || !length || !found ||
+        sqlite3_prepare_v2(db, "SELECT v FROM meta WHERE k=?", -1,
+                           &statement, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_bind_text(statement, 1, key, -1, SQLITE_TRANSIENT) ==
+              SQLITE_OK;
+    int rc = ok ? sqlite3_step(statement) : SQLITE_ERROR;  // raw-sql-ok:codeindex-derived
+    if (rc == SQLITE_ROW) {
+        int count = sqlite3_column_bytes(statement, 0);
+        const void *bytes = sqlite3_column_blob(statement, 0);
+        ok = count >= 0 && (size_t)count <= capacity &&
+             (count == 0 || (bytes && value));
+        if (ok) {
+            if (count > 0) memcpy(value, bytes, (size_t)count);
+            *length = (size_t)count;
+            *found = true;
+        }
+    } else if (rc != SQLITE_DONE) {
+        ok = false;
+    }
+    if (sqlite3_finalize(statement) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool projection_meta_locked(struct ci_store *store,
+                                   struct ci_projection_hash *hash,
+                                   const char *key, const void *expected,
+                                   size_t expected_length, uint8_t tag)
 {
     unsigned char value[64];
     if (expected_length > sizeof(value)) return false;
     size_t length = 0;
     bool found = false;
-    if (!ci_store_meta_get(store, key, value, sizeof(value), &length,
-                           &found) ||
+    if (!projection_meta_value_locked(store, key, value, sizeof(value),
+                                      &length, &found) ||
         !found || length != expected_length ||
         (expected && memcmp(value, expected, expected_length) != 0))
         return false;
@@ -181,12 +214,8 @@ static bool projection_table(struct ci_store *store,
            projection_u64(hash, rows);
 }
 
-bool ci_store_retrieval_projection_root(struct ci_store *store,
-                                        uint8_t out[32])
+static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
 {
-    if (!store || !out)
-        LOG_FAIL("codeindex", "null retrieval projection argument");
-
     static const struct ci_projection_column group_columns[] = {
         {CI_PROJECTION_TEXT, sizeof(((struct ci_group *)0)->path)},
         {CI_PROJECTION_TEXT, sizeof(((struct ci_group *)0)->kind)},
@@ -250,17 +279,27 @@ bool ci_store_retrieval_projection_root(struct ci_store *store,
     static const char domain[] = "zcl.codeindex.retrieval_projection.v1";
     sha3_256_init(&hash.sha);
     bool ok = projection_write(&hash, domain, sizeof(domain));
-    ci_store_lock(store);
-    ok = ok && projection_meta(store, &hash, "ci_schema_version",
-                               CI_SCHEMA_VERSION,
-                               sizeof(CI_SCHEMA_VERSION) - 1, 0x01) &&
-         projection_meta(store, &hash, "store_format", CI_STORE_FORMAT,
-                         sizeof(CI_STORE_FORMAT) - 1, 0x02) &&
-         projection_meta(store, &hash, "source_root_sha3", NULL, 32, 0x03);
+    ok = ok && projection_meta_locked(store, &hash, "ci_schema_version",
+                                      CI_SCHEMA_VERSION,
+                                      sizeof(CI_SCHEMA_VERSION) - 1, 0x01) &&
+         projection_meta_locked(store, &hash, "store_format", CI_STORE_FORMAT,
+                                sizeof(CI_STORE_FORMAT) - 1, 0x02) &&
+         projection_meta_locked(store, &hash, "source_root_sha3", NULL, 32,
+                                0x03);
     for (size_t i = 0; ok && i < sizeof(tables) / sizeof(tables[0]); i++)
         ok = projection_table(store, &hash, &tables[i]);
+    if (ok) sha3_256_finalize(&hash.sha, out);
+    return ok;
+}
+
+bool ci_store_retrieval_projection_root(struct ci_store *store,
+                                        uint8_t out[32])
+{
+    if (!store || !out)
+        LOG_FAIL("codeindex", "null retrieval projection argument");
     uint8_t result[32];
-    if (ok) sha3_256_finalize(&hash.sha, result);
+    ci_store_lock(store);
+    bool ok = projection_root_locked(store, result);
     ci_store_unlock(store);
     if (!ok) LOG_FAIL("codeindex", "canonical retrieval projection failed");
     memcpy(out, result, sizeof(result));
@@ -277,10 +316,11 @@ bool ci_store_retrieval_projection_is_valid(struct ci_store *store,
     size_t length = 0;
     bool found = false;
     ci_store_lock(store);
-    bool ok = ci_store_meta_get(store, CI_RETRIEVAL_PROJECTION_META, sealed,
-                                sizeof(sealed), &length, &found);
+    bool ok = projection_meta_value_locked(
+        store, CI_RETRIEVAL_PROJECTION_META, sealed, sizeof(sealed),
+        &length, &found);
     if (ok && found && length == sizeof(sealed)) {
-        bool projected = ci_store_retrieval_projection_root(store, actual);
+        bool projected = projection_root_locked(store, actual);
         if (projected)
             *valid = memcmp(sealed, actual, sizeof(sealed)) == 0;
         /* A malformed logical row is an observed invalid derived generation,
@@ -288,5 +328,6 @@ bool ci_store_retrieval_projection_is_valid(struct ci_store *store,
          * deterministically rebuild from source. */
     }
     ci_store_unlock(store);
-    return ok;
+    if (!ok) LOG_FAIL("codeindex", "read retrieval projection metadata");
+    return true;
 }

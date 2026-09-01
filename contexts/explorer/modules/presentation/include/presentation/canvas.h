@@ -53,16 +53,26 @@ void zcl_present_canvas_blit_rgba(struct zcl_present_canvas *canvas,
                                   const uint8_t *rgba,
                                   uint32_t width, uint32_t height);
 
-/* Basic Latin text uses the embedded Noto Sans subset and antialiased software
- * rasterization. pixel_height is an integer from 8 through 96. Unsupported
- * bytes render as '?'. */
+/* Returns a four-interval decimal ceiling suitable for a readable chart axis.
+ * The result is never below value and cannot overflow. */
+uint64_t zcl_present_canvas_chart_scale_maximum(uint64_t value);
+
+/* Basic Latin text uses embedded Inter Medium and SemiBold subsets with
+ * antialiased software rasterization. pixel_height is an integer from 8
+ * through 96. Unsupported bytes render as '?'. */
 uint32_t zcl_present_canvas_text_width(const char *text, size_t text_len,
                                        uint32_t pixel_height);
+uint32_t zcl_present_canvas_text_width_strong(
+    const char *text, size_t text_len, uint32_t pixel_height);
 void zcl_present_canvas_text(struct zcl_present_canvas *canvas,
                              int32_t x, int32_t y,
                              const char *text, size_t text_len,
                              uint32_t pixel_height,
                              struct zcl_present_color color);
+void zcl_present_canvas_text_strong(
+    struct zcl_present_canvas *canvas, int32_t x, int32_t y,
+    const char *text, size_t text_len, uint32_t pixel_height,
+    struct zcl_present_color color);
 
 #ifdef __cplusplus
 }

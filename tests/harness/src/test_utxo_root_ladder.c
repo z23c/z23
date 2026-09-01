@@ -143,7 +143,7 @@ int test_utxo_root_ladder(void)
      * anchor is absent (height==-1, e.g. a freshly-regenerated placeholder
      * table with no --leaf-store given), the same call must also return
      * true trivially. */
-    printf("utxo_root_ladder: verify_dense_anchor is not-yet-reached-safe... ");
+    printf("utxo_root_ladder: dense anchor matches and detects mismatch... ");
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "utxo_root_ladder_dense", "main");
@@ -166,12 +166,30 @@ int test_utxo_root_ladder(void)
         bool ok = utxo_root_ladder_verify_dense_anchor(&store, mismatch);
         ASSERT(ok);
 
+        struct mmb expected_mmb;
+        mmb_init(&expected_mmb);
+        for (uint64_t i = 0; i < store.num_leaves; i++)
+            ASSERT(mmb_append_hash(
+                &expected_mmb, mmb_leaf_store_get(&store, i)) >= 0);
+        uint8_t expected[32];
+        mmb_root(&expected_mmb, expected);
+        ASSERT(utxo_root_ladder_verify_dense_anchor_for_test(
+            &store, 2, expected, mismatch));
+
+        uint8_t wrong[32];
+        memcpy(wrong, expected, sizeof(wrong));
+        wrong[0] ^= 1u;
+        ASSERT(!utxo_root_ladder_verify_dense_anchor_for_test(
+            &store, 2, wrong, mismatch));
+        ASSERT(memcmp(mismatch, expected, sizeof(expected)) == 0);
+
         mmb_leaf_store_close(&store);
         test_rm_rf_recursive(dir);
         printf("OK\n");
     }
 
-    /* (6) HEAVY: recompute mmb_root() from a REAL mmb_leaves.bin copy
+    /* (6) NIGHTLY ADDITION: recompute mmb_root() from a REAL
+     * mmb_leaves.bin copy
      * (millions of leaves) and confirm it reproduces the locked dense
      * anchor bit-for-bit — opt-in, mirrors test_self_folded_anchor.c's
      * ZCL_SELF_FOLD_ANCHOR_FIXTURE convention.
@@ -188,12 +206,10 @@ int test_utxo_root_ladder(void)
         bool run_heavy = heavy && heavy[0] && strcmp(heavy, "0") != 0;
 
         if (g_utxo_root_ladder_dense_height < 0) {
-            printf("SKIP (no dense anchor compiled in — regenerate with "
-                  "--leaf-store to populate one)\n");
+            printf("not applicable (no compiled dense anchor)\n");
         } else if (!run_heavy || !store_path || !store_path[0]) {
-            printf("SKIP (set ZCL_UTXO_LADDER_HEAVY=1 and "
-                  "ZCL_UTXO_LADDER_LEAF_STORE=<path to a copy of "
-                  "mmb_leaves.bin> to run the real recompute)\n");
+            printf("covered hermetically; simnet-nightly adds the real "
+                  "leaf-store observation\n");
         } else {
             struct mmb_leaf_store store;
             ASSERT(mmb_leaf_store_open(&store, store_path));

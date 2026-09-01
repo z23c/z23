@@ -63,6 +63,8 @@ TX_NONCHAIN_COMMAND("app.presentation.status", "local_presentation",
     "Shows canonical node facts through the display-only presentation boundary; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("app.presentation.corpus", "local_presentation",
     "Shows canonical C23 corpus facts through the display-only presentation boundary; it creates no chain transaction.")
+TX_NONCHAIN_COMMAND("app.presentation.code-growth", "local_presentation",
+    "Shows exact Git-derived C23 growth through the display-only presentation boundary; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("app.presentation.code-change", "local_presentation",
     "Shows an exact inert code-change model through the display-only presentation boundary; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("app.presentation.reproduction", "local_presentation",

@@ -107,4 +107,13 @@ bool utxo_root_ladder_verify_against_store(
 bool utxo_root_ladder_verify_dense_anchor(struct mmb_leaf_store *store,
                                           uint8_t out_mismatch_root[32]);
 
+#ifdef ZCL_TESTING
+/* Outcome-distinguishing seam for the always-on hermetic test. Production
+ * uses the compiled height/root through the public function above; this seam
+ * changes neither value and grants no write authority. */
+bool utxo_root_ladder_verify_dense_anchor_for_test(
+    struct mmb_leaf_store *store, int32_t height,
+    const uint8_t expected_root[32], uint8_t out_mismatch_root[32]);
+#endif
+
 #endif /* ZCL_MODELS_UTXO_ROOT_LADDER_VERIFY_H */
