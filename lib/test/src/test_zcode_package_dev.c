@@ -42,6 +42,11 @@
 #include <windows.h>
 #endif
 
+bool zpd_real_focus_handoff_acceptance(
+    const char *workspace, const char *work_id,
+    const struct json_value *focus_data,
+    const uint8_t source_receipt_root[32]);
+
 static bool zpd_symlink_create(const char *target, const char *link,
                                bool directory)
 {
@@ -508,7 +513,7 @@ static bool zpd_find_build_receipt(
 
 static bool zpd_store_app_run_evidence(
     const char *workspace, const char *candidate_workspace,
-    const struct json_value *expert)
+    const struct json_value *expert, uint8_t out_build_receipt_root[32])
 {
     struct vcs_zcode_work_receipt_v1 build;
     uint8_t build_root[32];
@@ -694,13 +699,16 @@ static bool zpd_store_app_run_evidence(
     memset(secret, 0, sizeof(secret));
     uint8_t receipt_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
     uint8_t receipt_root[32];
-    return ok &&
+    bool stored = ok &&
         vcs_zcode_work_receipt_serialize(&receipt, receipt_wire) ==
             VCS_ZCODE_DEV_OK &&
         vcs_zcode_work_receipt_id(&receipt, receipt_root) ==
             VCS_ZCODE_DEV_OK &&
         vcs_object_put_addressed(workspace, receipt_root, receipt_wire,
                                  sizeof(receipt_wire));
+    if (stored && out_build_receipt_root)
+        memcpy(out_build_receipt_root, build_root, 32);
+    return stored;
 }
 
 struct zpd_benchmark_case {
@@ -834,6 +842,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
             zcl_command_reply_free(&reply); json_free(&input);
 
             if (!cases[i].refused) {
+                uint8_t app_build_receipt_root[32] = {0};
                 if (i == 0) {
                     /* One independently authorized fixture executor records
                      * the exact built artifact and bounded invocation before
@@ -860,7 +869,8 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     ASSERT(platform_environment_set(
                                "ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
                     bool app_evidence = zpd_store_app_run_evidence(
-                        roots[cases[i].project], candidate, expert);
+                        roots[cases[i].project], candidate, expert,
+                        app_build_receipt_root);
                     ASSERT(platform_environment_set(
                                "ZCL_DEVLOOP_TEST_PROCESS",
                                saved_process_env ? saved_process_env : "",
@@ -973,6 +983,9 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     ASSERT(has_package_dev);
                     story_focus_bytes = json_write(&reply.data, NULL, 0);
                     ASSERT(story_focus_bytes < ZCL_COMMAND_LIST_BUDGET);
+                    ASSERT(zpd_real_focus_handoff_acceptance(
+                        roots[cases[i].project], work_id, &reply.data,
+                        app_build_receipt_root));
                     zcl_command_reply_free(&reply); json_free(&input);
 
                     char stale_path[512];
