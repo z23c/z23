@@ -1033,6 +1033,7 @@ ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_focus.c", CAP_FS_W
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_focus_claim.c", CAP_NONE, "pure fixed-width claim codec and existing write-scope comparison")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_focus_handoff.c", CAP_NONE, "pure fixed-width handoff codec and root-chain validation")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_heuristic_lifecycle.c", CAP_FS_WRITE, "read-only accepted-evidence projection over the existing CAS; emits contextual validation failures but grants no storage-write or acceptance authority")
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_heuristic_replication.c", CAP_NONE, "read-only accepted-replication projection over the existing CAS; grants no storage-write or acceptance authority")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_patch.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_patronage_projection.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/modules/vcs/src/zcode_science_index.c", CAP_FS_WRITE|CAP_FS_READ, "")

@@ -76,6 +76,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store.c", CAP_C
 ZCL_MODULE_CAPABILITY("core/modules/core/src/utiltime.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("core/modules/crypto/src/keccak_x4.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("core/modules/crypto/src/sha256.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("core/modules/crypto/src/sha512.c", CAP_NONE, "the Windows arm does not perform the Darwin read-only sysctl feature probe")
 ZCL_MODULE_CAPABILITY("platform/modules/encoding/src/utilstrencodings.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_activate.c", CAP_CLOCK|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_elf_probe.c", CAP_NONE, "")
