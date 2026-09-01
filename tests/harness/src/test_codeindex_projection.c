@@ -143,12 +143,15 @@ int test_codeindex_projection_integrity(void)
 {
     int failures = 0;
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
+    char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
     char first[PATH_MAX], second[PATH_MAX];
     bool ready = platform_temp_directory_create(
         "z23-codeindex-projection-", temporary, sizeof(temporary));
-    int first_n = ready ? snprintf(first, sizeof(first), "%s/first", temporary)
+    ready = ready && platform_directory_canonical_real(
+        temporary, workspace, sizeof(workspace));
+    int first_n = ready ? snprintf(first, sizeof(first), "%s/first", workspace)
                         : -1;
-    int second_n = ready ? snprintf(second, sizeof(second), "%s/second", temporary)
+    int second_n = ready ? snprintf(second, sizeof(second), "%s/second", workspace)
                          : -1;
     ready = ready && first_n > 0 && (size_t)first_n < sizeof(first) &&
             second_n > 0 && (size_t)second_n < sizeof(second) &&
@@ -262,6 +265,9 @@ int test_codeindex_projection_integrity(void)
         codeindex_close(healed);
     }
 
-    if (temporary[0]) dir_remove_tree(temporary);
+    if (workspace[0])
+        dir_remove_tree(workspace);
+    else if (temporary[0])
+        dir_remove_tree(temporary);
     return failures;
 }
