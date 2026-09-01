@@ -42,24 +42,19 @@ SELF_DIR="$(cd "$(dirname "$SELF_SRC")" && pwd)"
 REPO_ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=tools/scripts/lib/service_args.sh
+. "$SELF_DIR/lib/service_args.sh"
+
 TEST_ZCL_BIN="${TEST_ZCL_BIN:-$REPO_ROOT/build/bin/test_zcl}"
 ZCL_RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 ZCL_NODE_UNIT="${ZCL_NODE_UNIT:-zclassic23}"
+ZCL_LAUNCHD_PLIST="${ZCL_LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/org.z23.zclassic.plist}"
 TIP_GAP_OK="${TIP_GAP_OK:-10}"
-
-systemd_exec_arg() {
-    local key="$1"
-    command -v systemctl >/dev/null 2>&1 || return 1
-    systemctl --user show "$ZCL_NODE_UNIT" -p ExecStart --value 2>/dev/null |
-        tr ' ' '\n' |
-        sed -n "s/^-${key}=//p" |
-        head -1
-}
 
 DEFAULT_DATADIR="$HOME/.zclassic-c23"
 LIVE_DATADIR="${ZCL_DATADIR:-$DEFAULT_DATADIR}"
 if [ -z "${ZCL_DATADIR:-}" ]; then
-    SERVICE_DATADIR="$(systemd_exec_arg datadir || true)"
+    SERVICE_DATADIR="$(zcl_service_exec_arg datadir "$ZCL_NODE_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
     if [ -n "$SERVICE_DATADIR" ]; then
         LIVE_DATADIR="$SERVICE_DATADIR"
     fi
@@ -67,7 +62,7 @@ fi
 
 LIVE_RPCPORT="${ZCL_RPCPORT:-18232}"
 if [ -z "${ZCL_RPCPORT:-}" ]; then
-    SERVICE_RPCPORT="$(systemd_exec_arg rpcport || true)"
+    SERVICE_RPCPORT="$(zcl_service_exec_arg rpcport "$ZCL_NODE_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
     if [ -n "$SERVICE_RPCPORT" ]; then
         LIVE_RPCPORT="$SERVICE_RPCPORT"
     fi

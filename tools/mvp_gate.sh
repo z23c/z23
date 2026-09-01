@@ -49,11 +49,14 @@ set -uo pipefail
 MVP_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$MVP_REPO_ROOT/tools/scripts/source_identity_lib.sh"
+# shellcheck source=tools/scripts/lib/service_args.sh
+. "$MVP_REPO_ROOT/tools/scripts/lib/service_args.sh"
 
 ZCL_RPC_BIN="${ZCL_RPC_BIN:-build/bin/zcl-rpc}"
 ZCL_NODE_BIN="${ZCL_NODE_BIN:-build/bin/zclassic23}"
 ZCL_SOAK_UNIT="${ZCL_SOAK_UNIT:-zclassic23}"
 ZCL_NODE_UNIT="${ZCL_NODE_UNIT:-$ZCL_SOAK_UNIT}"
+ZCL_LAUNCHD_PLIST="${ZCL_LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/org.z23.zclassic.plist}"
 ZD_RPCPORT="${ZD_RPCPORT:-8232}"
 ZD_DATADIR="${ZD_DATADIR:-$HOME/.zclassic}"
 TIP_GAP_OK="${TIP_GAP_OK:-10}"
@@ -85,25 +88,16 @@ json_bool() { # <json> <key>   -> true|false or empty
         sed -E 's/.*:[ ]*//'
 }
 
-systemd_exec_arg() {
-    local key="$1"
-    command -v systemctl >/dev/null 2>&1 || return 1
-    systemctl --user show "$ZCL_NODE_UNIT" -p ExecStart --value 2>/dev/null |
-        tr ' ' '\n' |
-        sed -n "s/^-${key}=//p" |
-        head -1
-}
-
 DEFAULT_DATADIR="$HOME/.zclassic-c23"
 LIVE_DATADIR="${ZCL_DATADIR:-$DEFAULT_DATADIR}"
 if [[ -z "${ZCL_DATADIR:-}" ]]; then
-    SERVICE_DATADIR="$(systemd_exec_arg datadir || true)"
+    SERVICE_DATADIR="$(zcl_service_exec_arg datadir "$ZCL_NODE_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
     if [[ -n "$SERVICE_DATADIR" ]]; then LIVE_DATADIR="$SERVICE_DATADIR"; fi
 fi
 
 LIVE_RPCPORT="${ZCL_RPCPORT:-18232}"
 if [[ -z "${ZCL_RPCPORT:-}" ]]; then
-    SERVICE_RPCPORT="$(systemd_exec_arg rpcport || true)"
+    SERVICE_RPCPORT="$(zcl_service_exec_arg rpcport "$ZCL_NODE_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
     if [[ -n "$SERVICE_RPCPORT" ]]; then LIVE_RPCPORT="$SERVICE_RPCPORT"; fi
 fi
 

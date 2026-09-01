@@ -356,28 +356,43 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
     char *scoreboard = NULL;
     char *gate = NULL;
     char *evidence = NULL;
+    char *service_args = NULL;
     TEST("MVP reporters resolve the live service datadir and RPC port") {
         char scoreboard_path[PATH_MAX];
         char gate_path[PATH_MAX];
         char evidence_path[PATH_MAX];
+        char service_args_path[PATH_MAX];
         ASSERT(repo_path(scoreboard_path, sizeof(scoreboard_path),
                          "tools/scripts/mvp_scoreboard.sh") == 0);
         ASSERT(repo_path(gate_path, sizeof(gate_path), "tools/mvp_gate.sh") == 0);
         ASSERT(repo_path(evidence_path, sizeof(evidence_path),
                          "tools/scripts/soak_evidence.sh") == 0);
+        ASSERT(repo_path(service_args_path, sizeof(service_args_path),
+                         "tools/scripts/lib/service_args.sh") == 0);
         ASSERT(read_entire_file(scoreboard_path, &scoreboard) == 0);
         ASSERT(read_entire_file(gate_path, &gate) == 0);
         ASSERT(read_entire_file(evidence_path, &evidence) == 0);
+        ASSERT(read_entire_file(service_args_path, &service_args) == 0);
 
         ASSERT(strstr(scoreboard, "ZCL_NODE_UNIT=\"${ZCL_NODE_UNIT:-zclassic23}\"")
                != NULL);
-        ASSERT(strstr(scoreboard, "systemd_exec_arg()") != NULL);
+        ASSERT(strstr(scoreboard, "lib/service_args.sh") != NULL);
+        ASSERT(strstr(scoreboard, "ZCL_LAUNCHD_PLIST=") != NULL);
         ASSERT(strstr(scoreboard,
-                      "systemctl --user show \"$ZCL_NODE_UNIT\" -p ExecStart --value")
+                      "zcl_service_exec_arg datadir \"$ZCL_NODE_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
                != NULL);
-        ASSERT(strstr(scoreboard, "SERVICE_DATADIR=\"$(systemd_exec_arg datadir || true)\"")
+        ASSERT(strstr(scoreboard,
+                      "zcl_service_exec_arg rpcport \"$ZCL_NODE_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
                != NULL);
-        ASSERT(strstr(scoreboard, "SERVICE_RPCPORT=\"$(systemd_exec_arg rpcport || true)\"")
+        ASSERT(strstr(service_args, "zcl_service_exec_arg()") != NULL);
+        ASSERT(strstr(service_args,
+                      "systemctl --user show \"$unit\" -p ExecStart --value")
+               != NULL);
+        ASSERT(strstr(service_args,
+                      "plutil -extract ProgramArguments raw -o - \"$plist\"")
+               != NULL);
+        ASSERT(strstr(service_args,
+                      "plutil -extract \"ProgramArguments.$i\" raw -o - \"$plist\"")
                != NULL);
         ASSERT(strstr(scoreboard, "ZCL_DATADIR=$LIVE_DATADIR") != NULL);
         ASSERT(strstr(scoreboard, "ZCL_RPCPORT=$LIVE_RPCPORT") != NULL);
@@ -404,13 +419,13 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
 
         ASSERT(strstr(gate, "ZCL_NODE_UNIT=\"${ZCL_NODE_UNIT:-$ZCL_SOAK_UNIT}\"")
                != NULL);
-        ASSERT(strstr(gate, "systemd_exec_arg()") != NULL);
+        ASSERT(strstr(gate, "scripts/lib/service_args.sh") != NULL);
+        ASSERT(strstr(gate, "ZCL_LAUNCHD_PLIST=") != NULL);
         ASSERT(strstr(gate,
-                      "systemctl --user show \"$ZCL_NODE_UNIT\" -p ExecStart --value")
+                      "zcl_service_exec_arg datadir \"$ZCL_NODE_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
                != NULL);
-        ASSERT(strstr(gate, "SERVICE_DATADIR=\"$(systemd_exec_arg datadir || true)\"")
-               != NULL);
-        ASSERT(strstr(gate, "SERVICE_RPCPORT=\"$(systemd_exec_arg rpcport || true)\"")
+        ASSERT(strstr(gate,
+                      "zcl_service_exec_arg rpcport \"$ZCL_NODE_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
                != NULL);
         ASSERT(strstr(gate, "ZCL_DATADIR=\"$LIVE_DATADIR\" ZCL_RPCPORT=\"$LIVE_RPCPORT\"")
                != NULL);
@@ -451,6 +466,7 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
     free(scoreboard);
     free(gate);
     free(evidence);
+    free(service_args);
     return failures;
 }
 
