@@ -108,6 +108,21 @@ int codeindex_files_in_group(struct codeindex *ci, const char *group,
     return ci_store_files_in_group(ci->store, group, out, cap);
 }
 
+int codeindex_file_count(struct codeindex *ci)
+{
+    if (!ci || !ci->store)
+        LOG_ERR("codeindex", "bad arg to codeindex_file_count");
+    return ci_store_file_count(ci->store);
+}
+
+int codeindex_files_page(struct codeindex *ci, int offset,
+                         struct ci_file *out, int cap)
+{
+    if (!ci || !ci->store || offset < 0 || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to codeindex_files_page");
+    return ci_store_files_page(ci->store, offset, out, cap);
+}
+
 int codeindex_count_files_in_group(struct codeindex *ci, const char *group,
                                    bool recursive)
 {

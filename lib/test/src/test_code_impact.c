@@ -26,7 +26,10 @@
  *   6. command feature room — one exact command root joins catalog leaves,
  *                      handler definitions, proof routes, and mixed-file
  *                      coupling without a second feature manifest.
- *   7. budget           — the hub reply fits ZCL_COMMAND_LIST_BUDGET.
+ *   7. generated context map — the real tree has ten contexts, every
+ *                      production file is classified, violations are explicit,
+ *                      and compiler-depfile coupling is measured.
+ *   8. budget           — the hub reply fits ZCL_COMMAND_LIST_BUDGET.
  *
  * All scratch work happens under ./test-tmp/ (project no-/tmp convention). */
 
@@ -105,6 +108,20 @@ static bool write_ci_impact_fixture(void)
     return ok;
 }
 
+static bool write_shape_overflow_fixture(void)
+{
+    for (int i = 0; i <= 20; i++) {
+        char path[128];
+        int n = snprintf(path, sizeof(path),
+                         "app/extra_shape_%02d/src/item.c", i);
+        if (n <= 0 || (size_t)n >= sizeof(path) ||
+            !ci_impact_mk_write(CI_IMPACT_FIX, path,
+                                "int context_shape_item(void) { return 1; }\n"))
+            return false;
+    }
+    return true;
+}
+
 static void ci_impact_call(const char *path, const char *source_root,
                            struct zcl_command_reply *reply)
 {
@@ -136,6 +153,24 @@ static void ci_room_call(const char *path, const char *source_root,
     zcl_native_handle_code_room(&request, reply);
     json_free(&input);
 }
+
+static void ci_context_map_call(const char *source_root,
+                                struct zcl_command_reply *reply)
+{
+    struct zcl_command_context ctx = { .source_root = source_root };
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    struct zcl_command_request request = {
+        .input = &input, .context = &ctx,
+        .view = "normal", .invoked_name = "code.context-map",
+    };
+    zcl_command_reply_init(reply, "zcl.code_context_map.v1");
+    zcl_native_handle_code_context_map(&request, reply);
+    json_free(&input);
+}
+
+static bool json_array_has_string(const struct json_value *array,
+                                  const char *wanted);
 
 /* ── 1: hub fixture — 3 direct callers + 1 transitive, sorted, capped ── */
 static int test_code_impact_hub(void)
@@ -291,12 +326,106 @@ static int test_code_room_route_storage(void)
                 json_get_str(json_get(&reply.data, "summary"));
             char expected[96];
             ASSERT(route && route[0] && summary);
+            ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "context")),
+                          "core");
+            ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "shape")),
+                          "library");
+            ASSERT_STR_EQ(json_get_str(json_get(&reply.data,
+                                                 "context_basis")),
+                          "module");
+            ASSERT(!json_get_bool(json_get(&reply.data, "context_orphan")));
+            ASSERT(!json_get_bool(json_get(&reply.data, "context_overlap")));
             int n = snprintf(expected, sizeof(expected), "tests→`%s`", route);
             ASSERT(n > 0 && (size_t)n < sizeof(expected));
             ASSERT(strstr(summary, expected) != NULL);
             zcl_command_reply_free(&reply);
         }
 
+        system("rm -rf " CI_IMPACT_FIX);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_context_map(void)
+{
+    int failures = 0;
+    TEST("code_context_map: real production tree is fully classified and "
+         "reports exact violations and observed coupling") {
+        struct zcl_command_reply reply;
+        ci_context_map_call(".", &reply);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+
+        const struct json_value *taxonomy =
+            json_get(&reply.data, "taxonomy");
+        ASSERT(taxonomy && taxonomy->type == JSON_ARR &&
+               taxonomy->num_children == 10);
+        ASSERT(json_array_has_string(taxonomy, "wallet"));
+        ASSERT(json_array_has_string(taxonomy, "explorer"));
+        ASSERT(json_array_has_string(taxonomy, "naming"));
+        ASSERT(json_array_has_string(taxonomy, "messaging"));
+        ASSERT(json_array_has_string(taxonomy, "market"));
+        ASSERT(json_array_has_string(taxonomy, "commons"));
+        ASSERT(json_array_has_string(taxonomy, "cognition"));
+        ASSERT(json_array_has_string(taxonomy, "engine"));
+        ASSERT(json_array_has_string(taxonomy, "core"));
+        ASSERT(json_array_has_string(taxonomy, "platform"));
+
+        int production =
+            json_get_int(json_get(&reply.data, "production_files"));
+        ASSERT(production > 0);
+        ASSERT(json_get_int(json_get(&reply.data, "classified_files")) ==
+               production);
+        ASSERT(json_get_int(json_get(&reply.data, "orphan_count")) == 0);
+        const struct json_value *contexts =
+            json_get(&reply.data, "contexts");
+        const struct json_value *shapes = json_get(&reply.data, "shapes");
+        ASSERT(contexts && contexts->type == JSON_ARR);
+        ASSERT(shapes && shapes->type == JSON_ARR);
+        int context_sum = 0, shape_sum = 0;
+        for (size_t i = 0; i < contexts->num_children; i++)
+            context_sum += json_get_int(json_get(&contexts->children[i],
+                                                 "file_count"));
+        for (size_t i = 0; i < shapes->num_children; i++)
+            shape_sum += json_get_int(json_get(&shapes->children[i],
+                                               "file_count"));
+        ASSERT(context_sum == production);
+        ASSERT(shape_sum == production);
+        ASSERT(json_get_int(json_get(&reply.data, "overlap_count")) > 0);
+        ASSERT(json_get_bool(json_get(&reply.data, "coupling_available")));
+        ASSERT(json_get_int(json_get(&reply.data,
+                                     "coupling_pair_count")) > 0);
+        ASSERT(json_get_int(json_get(&reply.data,
+                                     "observed_include_edges")) > 0);
+        ASSERT(json_get_int(json_get(&reply.data,
+                                     "cross_context_include_edges")) > 0);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "coupling_scope")),
+                      "observed compiler-depfile include edges");
+        const char *map_sha3 =
+            json_get_str(json_get(&reply.data, "map_sha3"));
+        ASSERT(map_sha3 && strlen(map_sha3) == 64);
+
+        char buf[ZCL_COMMAND_LIST_BUDGET + 1];
+        size_t n = json_write(&reply.data, buf, sizeof(buf));
+        ASSERT(n > 0 && n <= ZCL_COMMAND_LIST_BUDGET);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_context_map_shape_overflow(void)
+{
+    int failures = 0;
+    TEST("code_context_map: shape overflow fails typed instead of claiming completeness") {
+        system("rm -rf " CI_IMPACT_FIX);
+        ASSERT(write_shape_overflow_fixture());
+        struct zcl_command_reply reply;
+        ci_context_map_call(CI_IMPACT_FIX, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "SHAPE_TAXONOMY_OVERFLOW");
+        ASSERT(reply.error.message[0]);
+        zcl_command_reply_free(&reply);
         system("rm -rf " CI_IMPACT_FIX);
         PASS();
     } _test_next:;
@@ -440,6 +569,8 @@ int test_code_impact(void)
     failures += test_code_impact_unknown_path();
     failures += test_code_room_route_storage();
     failures += test_code_room_command_feature();
+    failures += test_code_context_map();
+    failures += test_code_context_map_shape_overflow();
     failures += test_code_guide();
     return failures;
 }

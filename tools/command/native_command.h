@@ -338,6 +338,11 @@ void zcl_native_handle_code_tests(
 void zcl_native_handle_code_room(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.context-map — generated whole-tree bounded-context and shape coverage,
+ * violations, and observed compiler-include coupling. */
+void zcl_native_handle_code_context_map(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.impact — the blast-radius leaf: the reverse-dependency closure of one
  * changed file (codeindex_impact_closure) plus the downstream focused test
  * groups (the same agent_impact_apply_shared_rules() resolver code.tests

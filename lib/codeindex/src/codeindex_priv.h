@@ -147,6 +147,9 @@ bool ci_store_file_by_path(struct ci_store *s, const char *path,
 int  ci_store_list_groups(struct ci_store *s, struct ci_group *out, int cap);
 int  ci_store_files_in_group(struct ci_store *s, const char *group,
                              struct ci_file *out, int cap);
+int  ci_store_file_count(struct ci_store *s);
+int  ci_store_files_page(struct ci_store *s, int offset,
+                         struct ci_file *out, int cap);
 int  ci_store_count_files_in_group(struct ci_store *s, const char *group,
                                    bool recursive);
 int  ci_store_symbols_in_file(struct ci_store *s, const char *path,

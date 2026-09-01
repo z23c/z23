@@ -202,6 +202,12 @@ int codeindex_groups(struct codeindex *ci, struct ci_group *out, int cap);
 int codeindex_files_in_group(struct codeindex *ci, const char *group,
                              struct ci_file *out, int cap);
 
+/* Every indexed file, sorted by repo-relative path. Pages keep caller memory
+ * bounded independently of corpus size. */
+int codeindex_file_count(struct codeindex *ci);
+int codeindex_files_page(struct codeindex *ci, int offset,
+                         struct ci_file *out, int cap);
+
 /* Count files in `group`. When `recursive` is false, only files stamped with
  * EXACTLY this group; when true, also every descendant group (so "lib" or "app"
  * aggregates its child modules/shapes). Returns the count (>=0), -1 on error. */

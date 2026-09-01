@@ -311,6 +311,59 @@ int ci_store_files_in_group(struct ci_store *s, const char *group,
     return n;
 }
 
+int ci_store_file_count(struct ci_store *s)
+{
+    if (!s) LOG_ERR("codeindex", "bad arg to file_count");
+    pthread_mutex_lock(&s->lock);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, "SELECT COUNT(*) FROM files", -1, &stmt,
+                           NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "prepare file_count");
+    }
+    int n = 0;
+    int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
+    bool ok = rc == SQLITE_ROW;
+    if (ok) n = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&s->lock);
+    if (!ok) LOG_ERR("codeindex", "step file_count");
+    return n;
+}
+
+int ci_store_files_page(struct ci_store *s, int offset,
+                        struct ci_file *out, int cap)
+{
+    if (!s || offset < 0 || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to files_page");
+    pthread_mutex_lock(&s->lock);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+        "SELECT path,\"group\",purpose FROM files ORDER BY path ASC "
+        "LIMIT ?1 OFFSET ?2",
+        -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "prepare files_page");
+    }
+    sqlite3_bind_int(stmt, 1, cap);  // raw-sql-ok:codeindex-derived
+    sqlite3_bind_int(stmt, 2, offset);  // raw-sql-ok:codeindex-derived
+    int n = 0;
+    int rc;
+    while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
+        memset(&out[n], 0, sizeof(out[n]));
+        ci_cpy(out[n].path, sizeof(out[n].path),
+               (const char *)sqlite3_column_text(stmt, 0));
+        ci_cpy(out[n].group, sizeof(out[n].group),
+               (const char *)sqlite3_column_text(stmt, 1));
+        ci_cpy(out[n].purpose, sizeof(out[n].purpose),
+               (const char *)sqlite3_column_text(stmt, 2));
+        n++;
+    }
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&s->lock);
+    return n;
+}
+
 int ci_store_count_files_in_group(struct ci_store *s, const char *group,
                                   bool recursive)
 {

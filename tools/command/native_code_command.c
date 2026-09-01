@@ -19,6 +19,7 @@
 #include "json/json.h"
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "codeindex/codeindex_context.h"
 #include "codeindex/codeindex_merkle.h"
 #include "config/command_catalog.h"
 #include "config/command_handler_index.h"
@@ -1429,20 +1430,25 @@ void zcl_native_handle_code_room(const struct zcl_command_request *request,
     }
     const char *group = ffound ? finfo.group : "";
 
-    /* shape: the second component of an app/<shape> group ("app/jobs" → "jobs").
-     * Non-app groups (lib/<mod>, core, tools, …) have no shape → "". */
-    char shape[64] = "";
-    if (strncmp(group, "app/", 4) == 0) {
-        const char *s = group + 4;
-        size_t j = 0;
-        for (; s[j] && s[j] != '/' && j + 1 < sizeof(shape); j++)
-            shape[j] = s[j];
-        shape[j] = '\0';
-    }
+    struct ci_context_assignment assignment;
+    memset(&assignment, 0, sizeof(assignment));
+    if (ffound) (void)codeindex_context_classify(path, &assignment);
 
     (void)json_push_kv_str(&reply->data, "path", path);
     (void)json_push_kv_bool(&reply->data, "found", ffound);
-    (void)json_push_kv_str(&reply->data, "shape", shape);
+    (void)json_push_kv_str(&reply->data, "context", assignment.context);
+    (void)json_push_kv_str(&reply->data, "shape", assignment.shape);
+    (void)json_push_kv_str(&reply->data, "context_basis", assignment.basis);
+    (void)json_push_kv_bool(&reply->data, "context_orphan",
+                            ffound && assignment.orphan);
+    (void)json_push_kv_bool(&reply->data, "context_overlap",
+                            ffound && assignment.overlap);
+    struct json_value context_matches;
+    json_init(&context_matches); json_set_array(&context_matches);
+    for (size_t i = 0; i < assignment.match_count; i++)
+        code_push_line(&context_matches, assignment.matches[i]);
+    (void)json_push_kv(&reply->data, "context_matches", &context_matches);
+    json_free(&context_matches);
     (void)json_push_kv_str(&reply->data, "purpose", ffound ? finfo.purpose : "");
     (void)json_push_kv_str(&reply->data, "group", group);
 
@@ -1493,8 +1499,11 @@ void zcl_native_handle_code_room(const struct zcl_command_request *request,
 
     char summary[256];
     (void)snprintf(summary, sizeof(summary),
-                   "%s: shape=%s group=%s neighbors=%d tests→`%s`%s", path,
-                   shape[0] ? shape : "-", group[0] ? group : "-", shown, route,
+                   "%s: context=%s shape=%s group=%s neighbors=%d "
+                   "tests→`%s`%s", path,
+                   assignment.context[0] ? assignment.context : "-",
+                   assignment.shape[0] ? assignment.shape : "-",
+                   group[0] ? group : "-", shown, route,
                    crisk ? " (consensus surface)" : "");
     (void)json_push_kv_str(&reply->data, "summary", summary);
 

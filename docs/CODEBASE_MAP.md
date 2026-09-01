@@ -74,6 +74,34 @@ definitions are exact; indirect and unregistered dependencies remain
 `UNKNOWN`. Descend from a returned handler with `code capsule <symbol>` and
 check a candidate edit with `code impact <file>` before changing it.
 
+The whole-tree counterpart is `z23 code context-map`. It derives one primary
+bounded context and one architectural shape for every indexed production file,
+then reports all unclassified paths, every multiple-context overlap (bounded
+examples plus an exact count), and the strongest observed cross-context include
+edges from compiler depfiles. The ten-context target is deliberately small:
+
+| Context | Product meaning |
+|---------|-----------------|
+| `wallet` | keys, custody, balances, transaction creation, wallet workflows |
+| `explorer` | read-only presentation, dashboards, and browsing surfaces |
+| `naming` | names and service-directory behavior |
+| `messaging` | ZMSG and message workflows |
+| `market` | exchange, shop, yard-sale, ZSLP, and ZSwap behavior |
+| `commons` | C23 packages, CAS, source distribution, ZVCS, and preservation |
+| `cognition` | code intelligence, ontology, science, retrieval, and agent-development evidence |
+| `engine` | event/reducer/application orchestration and runtime machinery |
+| `core` | node, chain, validation, cryptography, policy, and consensus-adjacent behavior |
+| `platform` | portable base, encoding, OS seams, generic tools, and composition support |
+
+This taxonomy is executable source metadata in `lib/codeindex`, not a second
+folder tree or ownership ledger. `code context-map` gives the exact map digest
+and completeness totals; `code room <file>` gives that file's `context`,
+`shape`, classification basis, and every competing match. An overlap is a
+navigation/refactor candidate, not proof of a bug. Include coupling is observed
+build evidence, not a claim that every edge is architecturally allowed. Use
+`code file <path>` for its concrete include set and `code impact <path>` for
+the measured reverse blast radius before moving anything.
+
 ### Sealed consensus core — `core/`
 
 `core/{consensus,chainparams,params,math}` — every consensus predicate and

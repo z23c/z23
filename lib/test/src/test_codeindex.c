@@ -25,6 +25,7 @@
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "codeindex/codeindex_context.h"
 #include "platform/time_compat.h"
 
 /* For the routing-link parity invariant (case 7): `code tests <path>`'s route
@@ -661,6 +662,54 @@ static int test_codeindex_platform_arm(void)
 {
     int failures = 0;
 
+    struct ci_context_assignment assignment;
+    size_t context_count = 0;
+    CI_CHECK("context taxonomy has exactly ten target contexts",
+             codeindex_context_names(&context_count) != NULL &&
+             context_count == 10);
+    CI_CHECK("messaging file refines its core library module and exposes overlap",
+             codeindex_context_classify("lib/net/src/zmsg.c", &assignment) &&
+             assignment.production && assignment.overlap && !assignment.orphan &&
+             strcmp(assignment.context, "messaging") == 0 &&
+             strcmp(assignment.shape, "library") == 0);
+    {
+        uint8_t digest_a[32], digest_b[32], digest_again[32];
+        struct ci_context_assignment changed = assignment;
+        (void)snprintf(changed.matches[1], sizeof(changed.matches[1]),
+                       "wallet");
+        CI_CHECK("assignment digest is deterministic and binds competing matches",
+                 codeindex_context_assignment_digest(
+                     "lib/net/src/zmsg.c", &assignment, digest_a) &&
+                 codeindex_context_assignment_digest(
+                     "lib/net/src/zmsg.c", &assignment, digest_again) &&
+                 codeindex_context_assignment_digest(
+                     "lib/net/src/zmsg.c", &changed, digest_b) &&
+                 memcmp(digest_a, digest_again, sizeof(digest_a)) == 0 &&
+                 memcmp(digest_a, digest_b, sizeof(digest_a)) != 0);
+    }
+    CI_CHECK("wallet service has one context and its physical service shape",
+             codeindex_context_classify(
+                 "app/services/src/wallet_backup_service.c", &assignment) &&
+             assignment.production && !assignment.overlap &&
+             strcmp(assignment.context, "wallet") == 0 &&
+             strcmp(assignment.shape, "services") == 0);
+    CI_CHECK("specific market feature wins generic explorer delivery overlap",
+             codeindex_context_classify(
+                 "app/controllers/src/yardsale_site_controller.c",
+                 &assignment) && assignment.production &&
+             assignment.overlap &&
+             strcmp(assignment.context, "market") == 0 &&
+             strcmp(assignment.shape, "controllers") == 0);
+    CI_CHECK("unknown source root is an explicit orphan",
+             codeindex_context_classify("unknown/src/mystery.c", &assignment) &&
+             assignment.orphan && assignment.context[0] == '\0' &&
+             strcmp(assignment.shape, "orphan") == 0);
+    CI_CHECK("tests are excluded from the production context map",
+             !codeindex_path_is_production("lib/test/src/test_codeindex.c") &&
+             !codeindex_path_is_production(
+                 "packages/zbuf/tests/test_zbuf.c") &&
+             codeindex_path_is_production("lib/codeindex/src/codeindex.c"));
+
     system("rm -rf " FIX);
     if (!write_fixture()) {
         printf("  codeindex: write_fixture... FAIL\n");
@@ -671,6 +720,22 @@ static int test_codeindex_platform_arm(void)
     struct codeindex *ci = codeindex_open(FIX);
     CI_CHECK("open builds index", ci != NULL);
     if (!ci) return failures + 1;
+
+    {
+        int total = codeindex_file_count(ci);
+        struct ci_file files[256];
+        int listed = codeindex_files_page(ci, 0, files, 256);
+        bool covered = total > 0 && total < 256 && listed == total;
+        for (int i = 0; covered && i < listed; i++) {
+            if (!codeindex_path_is_production(files[i].path)) continue;
+            if (!codeindex_context_classify(files[i].path, &assignment) ||
+                assignment.orphan || !assignment.context[0] ||
+                !assignment.shape[0])
+                covered = false;
+        }
+        CI_CHECK("every indexed production fixture file has one context and shape",
+                 covered);
+    }
 
     /* ── 2: query correctness ── */
     struct ci_symbol s;
@@ -1335,6 +1400,20 @@ static int test_codeindex_platform_arm(void)
             if (!set_contains(mk, mn, code[j])) all_code_in_mk = false;
         CI_CHECK("lib module list matches the lib/ tree on disk",
                  mn > 0 && (size_t)mn == cn && all_mk_in_code && all_code_in_mk);
+
+        bool modules_classified = true;
+        for (size_t i = 0; i < cn; i++) {
+            char path[128];
+            (void)snprintf(path, sizeof(path), "lib/%s/src/x.c", code[i]);
+            if (!codeindex_context_classify(path, &assignment) ||
+                assignment.orphan || !assignment.context[0] ||
+                strcmp(assignment.shape, "library") != 0) {
+                modules_classified = false;
+                break;
+            }
+        }
+        CI_CHECK("every canonical lib module has one context and library shape",
+                 cn > 0 && modules_classified);
 
         size_t sn = 0;
         const char *const *shapes = ci_app_shapes(&sn);

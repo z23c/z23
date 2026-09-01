@@ -789,7 +789,7 @@ AGENT_IMPACT_RULE("lib/vcs/*|lib/test/src/test_vcs_core.c", "vcs_core event_log 
 AGENT_IMPACT_RULE("lib/codeindex/*|lib/test/src/test_codeindex.c", "codeindex code_capsule make_lint_gates")
 
 /* Code navigator command surface: the `code` branch backed by lib/codeindex. */
-AGENT_IMPACT_RULE("lib/codeindex/*|config/commands/code.def|tools/command/native_code_command.c|tools/command/native_code_guide_command.c|tools/command/native_code_relations_command.c|lib/test/src/test_code_impact.c", "codeindex code_capsule code_impact command_registry_catalog make_lint_gates")
+AGENT_IMPACT_RULE("lib/codeindex/*|config/commands/code.def|tools/command/native_code_command.c|tools/command/native_code_context_command.c|tools/command/native_code_guide_command.c|tools/command/native_code_relations_command.c|lib/test/src/test_code_impact.c", "codeindex code_capsule code_impact command_registry_catalog make_lint_gates")
 
 /* Source-tree SHA3 Merkle identity: the leaf/node hashing rule, its snapshot
  * cache, and the code.merkle surface that projects it. */
