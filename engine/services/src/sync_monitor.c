@@ -492,10 +492,16 @@ static struct zcl_result queue_body_target(
         local_h = active_chain_height(&ms->chain_active);
     zcl_mutex_unlock(&ms->cs_main);
 
-    if (!already_have_data) {
-        msg_processor_clear_seen_block(&target_hash);
-        dl_queue_priority(dm, &target_hash, target_height);
-    }
+    /* Receipt can win the race after a Condition's final witness check but
+     * before this exact identity/status snapshot. In that case there is no
+     * download to recover: leave peer state and block dedup untouched, and
+     * do not manufacture a BODY_FRONTIER_MISSING recovery. The caller's
+     * immediate witness check owns convergence reporting. */
+    if (already_have_data)
+        return ZCL_OK;
+
+    msg_processor_clear_seen_block(&target_hash);
+    dl_queue_priority(dm, &target_hash, target_height);
 
     struct connman *cm = sync_monitor_connman();
     reset_local_addnode_backoff(cm);

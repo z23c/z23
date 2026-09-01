@@ -72,6 +72,8 @@ struct download_manager *sync_monitor_download_manager(void);
 struct main_state *sync_monitor_main_state(void);
 
 void sync_monitor_kick_local_sync(const char *reason);
+/* Both body queue calls are exact-status no-ops when the selected block has
+ * acquired BLOCK_HAVE_DATA before the queue lock is taken. */
 struct zcl_result sync_monitor_queue_active_frontier_body(
     int target_height,
     const char *reason);

@@ -43,6 +43,10 @@ void body_fetch_missing_have_data_test_set_select_idle_stubs(
  * witness recheck, allowing a test to model a concurrent body arrival. */
 void body_fetch_missing_have_data_test_set_before_remedy_recheck(
     void (*fn)(void));
+/* Runs after the final witness recheck and immediately before the shared
+ * queue call, allowing a test to model the remaining receipt race. */
+void body_fetch_missing_have_data_test_set_before_remedy_queue(
+    void (*fn)(void));
 #endif
 
 #endif /* ZCL_CONDITIONS_BODY_FETCH_MISSING_HAVE_DATA_H */

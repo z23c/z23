@@ -50,6 +50,7 @@ static bfmhd_select_idle_is_read_failure_fn g_select_idle_is_read_failure_fn =
 
 #ifdef ZCL_TESTING
 static void (*g_before_remedy_recheck_fn)(void);
+static void (*g_before_remedy_queue_fn)(void);
 #endif
 
 static struct block_index *active_target_index_locked(struct main_state *ms,
@@ -284,6 +285,10 @@ static enum condition_remedy_result remedy_body_fetch_missing_have_data(void)
     if (already_converged)
         return COND_REMEDY_SKIP;
 
+#ifdef ZCL_TESTING
+    if (g_before_remedy_queue_fn)
+        g_before_remedy_queue_fn();
+#endif
     atomic_fetch_add(&g_remedy_calls, 1);
     struct zcl_result r = route == BFMHD_TARGET_BEST_HEADER
         ? sync_monitor_queue_best_header_body(
@@ -364,6 +369,7 @@ void body_fetch_missing_have_data_test_reset(void)
     g_select_idle_height_fn = bfmhd_test_no_select_idle_height;
     g_select_idle_is_read_failure_fn = bfmhd_test_no_select_idle_read_failure;
     g_before_remedy_recheck_fn = NULL;
+    g_before_remedy_queue_fn = NULL;
     condition_reset_state(&c_body_fetch_missing_have_data);
 }
 
@@ -393,5 +399,11 @@ void body_fetch_missing_have_data_test_set_before_remedy_recheck(
     void (*fn)(void))
 {
     g_before_remedy_recheck_fn = fn;
+}
+
+void body_fetch_missing_have_data_test_set_before_remedy_queue(
+    void (*fn)(void))
+{
+    g_before_remedy_queue_fn = fn;
 }
 #endif

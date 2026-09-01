@@ -139,12 +139,20 @@ static bool seed_body_row(sqlite3 *db, int height,
 static int g_bfmhd_arrival_height = -1;
 static struct uint256 g_bfmhd_arrival_hash;
 static bool g_bfmhd_arrival_seeded;
+static struct block_index *g_bfmhd_arrival_index;
 
 static void bfmhd_seed_arrival_before_remedy_recheck(void)
 {
     g_bfmhd_arrival_seeded = seed_body_row(
         progress_store_db(), g_bfmhd_arrival_height,
         &g_bfmhd_arrival_hash);
+}
+
+static void bfmhd_seed_arrival_before_remedy_queue(void)
+{
+    if (g_bfmhd_arrival_index)
+        g_bfmhd_arrival_index->nStatus |= BLOCK_HAVE_DATA;
+    bfmhd_seed_arrival_before_remedy_recheck();
 }
 
 static bool seed_trusted_parent_bfmhd(sqlite3 *db, int height,
@@ -337,6 +345,45 @@ int test_body_fetch_missing_have_data_condition(void)
             "body_fetch_missing_have_data", &snap);
         ok2 = ok2 && snap.cleared_count == 1;
         BFMHD_CHECK("body_fetch success row witnesses clear", ok2);
+        teardown_fixture(&fx);
+    }
+
+    {
+        struct bfmhd_fixture fx;
+        bool ok = setup_fixture(&fx, "arrival_before_queue");
+        g_bfmhd_arrival_height = fx.target;
+        g_bfmhd_arrival_hash = *fx.child->phashBlock;
+        g_bfmhd_arrival_index = fx.child;
+        g_bfmhd_arrival_seeded = false;
+        body_fetch_missing_have_data_test_set_before_remedy_queue(
+            bfmhd_seed_arrival_before_remedy_queue);
+        msgprocessor_test_block_mark_seen(fx.child->phashBlock);
+
+        struct watchdog_stats before;
+        struct watchdog_stats after;
+        struct condition_runtime_snapshot snap_before;
+        ok = ok && condition_engine_get_registered_snapshot(
+            "body_fetch_missing_have_data", &snap_before);
+        sync_monitor_get_stats(&before);
+        condition_engine_tick();
+        sync_monitor_get_stats(&after);
+
+        uint64_t queued = 0;
+        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
+        struct condition_runtime_snapshot snap;
+        ok = ok && g_bfmhd_arrival_seeded;
+        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && queued == 0 && fx.dm.queue_len == 0;
+        ok = ok && after.recoveries_total == before.recoveries_total;
+        ok = ok && msgprocessor_test_block_already_seen(
+            fx.child->phashBlock);
+        ok = ok && condition_engine_get_registered_snapshot(
+            "body_fetch_missing_have_data", &snap);
+        ok = ok && snap.cleared_count == snap_before.cleared_count + 1;
+        BFMHD_CHECK("body arrival after final recheck is an atomic queue "
+                    "no-op without recovery", ok);
+        g_bfmhd_arrival_index = NULL;
         teardown_fixture(&fx);
     }
 
