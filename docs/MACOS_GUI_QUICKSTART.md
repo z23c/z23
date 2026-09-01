@@ -87,7 +87,7 @@ What it does:
 - copies `contexts/commons/packages/zhello` to `contexts/commons/packages/myapp`, renaming `zhello` → `myapp` in
   the sources, the header guard, the log strings, the usage text and the README
   — your app *is* the template under its own name, not a fork of it;
-- appends one registration block to `config/gui_apps.mk`, which the top-level
+- appends one registration block to `contexts/commons/apps/local_gui_apps.mk`, which the top-level
   `Makefile` `-include`s. That file is gitignored on purpose: a scaffolded app
   is your content, not tree content. Registering the app there *is* the whole
   build integration — the Makefile generates the `<name>`, `<name>-selftest`,
@@ -151,7 +151,7 @@ open build/app-bundle/Myapp.app --args --seconds=2
 bundle — `Contents/{MacOS/<exe>,Info.plist,PkgInfo}`, ad-hoc signed with the
 timestamp server off, because arm64 macOS refuses to execute an unsigned binary
 at all. The `.app` display name is the capitalized package name; set
-`<name>_APP_TITLE` in `config/gui_apps.mk` to change it.
+`<name>_APP_TITLE` in `contexts/commons/apps/local_gui_apps.mk` to change it.
 
 Reproducibility is a property you can check, not a claim you have to believe.
 Two runs of the bundler over the same binary must produce byte-identical
@@ -214,7 +214,7 @@ tree being thorough, not the scaffold being slow.
 ## Troubleshooting
 
 **`make myapp` prints `No rule to make target 'myapp'`.** The app is not
-registered. Check that `config/gui_apps.mk` contains `GUI_APPS += myapp` —
+registered. Check that `contexts/commons/apps/local_gui_apps.mk` contains `GUI_APPS += myapp` —
 `make new-app` writes it, a hand-edit or a sync that dropped the gitignored
 file removes it. Re-run `make new-app NAME=myapp`; it refuses to overwrite your
 sources, but it does not re-register either, so add the line by hand or delete
@@ -225,7 +225,7 @@ set, so make is doing the authoritative parse: it captures the whole-tree
 source identity, probes pkg-config, and imports four object depfile graphs.
 Building a GUI app should not do that — check the goal spelling (`myapp`,
 `myapp-selftest`, `myapp-app`, `build/bin/myapp`) and that
-`config/gui_apps.mk` registers the app, which is what puts the generated
+`contexts/commons/apps/local_gui_apps.mk` registers the app, which is what puts the generated
 targets in the lean set.
 
 **A second checkout fails to link, or `make` restarts itself complaining about

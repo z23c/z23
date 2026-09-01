@@ -200,14 +200,14 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # loop, so it has to answer in ~2 s, not ~13 s.
 # GUI packages: zhello is the template of record and is tracked; every app the
 # scaffolder creates (`make new-app NAME=…`) appends itself to
-# config/gui_apps.mk instead. That file is gitignored — a scaffolded app is
+# contexts/commons/apps/local_gui_apps.mk instead. That file is gitignored — a scaffolded app is
 # user-local content, not tree content — so it is `-include`d here, before the
 # goal set below is built, and a missing file costs nothing. Its position is
 # the whole point: an app registered there joins the SAME lean parse zhello
 # gets, instead of paying the authoritative parse for a two-file build.
-# Tracked reference apps.  User-local scaffolded apps append via config/gui_apps.mk.
+# Tracked reference apps.  User-local scaffolded apps append via contexts/commons/apps/local_gui_apps.mk.
 GUI_APPS := zhello ball zdemo
--include config/gui_apps.mk
+-include contexts/commons/apps/local_gui_apps.mk
 # A user-local app can later graduate into the tracked reference set while an
 # older checkout registration remains in the ignored file.  Generate each
 # rule family once so that promotion cannot produce recipe overrides.
@@ -218,7 +218,8 @@ GUI_APPS := $(sort $(GUI_APPS))
 ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 	$(a)-app build/bin/$(a))
 # `new-app` is the front door of that journey and only copies + rewrites files
-# under contexts/commons/packages/ and config/, so it belongs here too: measured on this host,
+# under contexts/commons/packages/ and contexts/commons/apps/, so it belongs
+# here too: measured on this host,
 # the authoritative parse it would otherwise pay turned a 0.5 s scaffold into a
 # ~17 s one. Its selftest runs in a throwaway repo and needs even less.
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
@@ -2144,12 +2145,12 @@ windows-service-remove:
 # Every GUI package has exactly zhello's shape — contexts/commons/packages/zhello is the
 # template of record and `make new-app NAME=…` stamps new ones out of it — so
 # the rules are generated, not copied: GUI_APPS (top of this file, extended by
-# the gitignored config/gui_apps.mk) is the one list, and the template below
+# the gitignored contexts/commons/apps/local_gui_apps.mk) is the one list, and the template below
 # emits the same goals for every entry. Adding an app means appending one line
 # to that file, never editing this Makefile.
 #
 # Per-app variables, keyed by the package name exactly as spelled (the
-# template below has no case conversion), set in config/gui_apps.mk:
+# template below has no case conversion), set in contexts/commons/apps/local_gui_apps.mk:
 #   <name>_APP_TITLE   the .app's display name (default: the package name)
 #   <name>_ARGS        extra argv for `make <app>`; scaffolded apps alias the
 #                      uppercased <APP>_ARGS spelling a reader would guess
@@ -2201,7 +2202,7 @@ $(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o
 # otherwise Esc or the window close button ends it. The lookup key is the
 # lowercase package name (the template has no case-conversion), and every app
 # aliases its uppercased spelling to it — zhello right below, scaffolded apps
-# in config/gui_apps.mk — so the variable a reader would guess, <APP>_ARGS,
+# in contexts/commons/apps/local_gui_apps.mk — so the variable a reader would guess, <APP>_ARGS,
 # is the one that works. The value is read as the template is stamped out: a
 # command-line variable is already set at that point.
 $(1): $(BIN_DIR)/$(1)
@@ -2237,7 +2238,7 @@ $(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
 .PHONY: new-app
 # Scaffold a new GUI package out of contexts/commons/packages/zhello: copies the template,
 # renames zhello→NAME in symbols, header guards and README, registers the app
-# in config/gui_apps.mk, and refuses to touch anything that already exists.
+# in contexts/commons/apps/local_gui_apps.mk, and refuses to touch anything that already exists.
 #
 #   make new-app NAME=myapp      then: make myapp / make myapp-selftest
 #

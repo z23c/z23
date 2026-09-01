@@ -41,9 +41,9 @@ BUILD_DIR := build
 BIN_DIR := $(BUILD_DIR)/bin
 APP_BUNDLE_OUT ?= $(BUILD_DIR)/app-bundle
 
-# Tracked reference apps.  Scaffolded apps are appended via config/gui_apps.mk.
+# Tracked reference apps.  Scaffolded apps are appended via contexts/commons/apps/local_gui_apps.mk.
 GUI_APPS := zhello ball
--include config/gui_apps.mk
+-include contexts/commons/apps/local_gui_apps.mk
 
 define GUI_APP_RULES
 $(BUILD_DIR)/$(1)/$(1).o: contexts/commons/packages/$(1)/src/$(1).c \

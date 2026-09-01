@@ -14,14 +14,14 @@
 #      everywhere it names itself: symbols, header guards, log strings, usage
 #      text and README. The app is not a fork of zhello, it IS zhello under
 #      its own name.
-#   2. One registration block appended to config/gui_apps.mk (gitignored: a
+#   2. One registration block appended to contexts/commons/apps/local_gui_apps.mk (gitignored: a
 #      scaffolded app is user-local content, not tree content). The Makefile
 #      -includes that file and generates the build rules from it, so the new
 #      app's five targets exist with zero manual Makefile edits.
 #
 # The Makefile owns the build rules; this script owns the files. It never
 # edits the top-level Makefile — avoiding that edit is the reason
-# config/gui_apps.mk exists.
+# contexts/commons/apps/local_gui_apps.mk exists.
 #
 # IDEMPOTENCE: refusing, not resuming. Every step fails loudly when its
 # output already exists — the package directory, an existing registry entry,
@@ -67,10 +67,10 @@ selftest() {
     # targets to collide against, nothing else. The script needs `git` to find
     # the root and nothing more.
     git init -q "$tmp/repo"
-    mkdir -p "$tmp/repo/packages"
+    mkdir -p "$tmp/repo/contexts/commons/packages"
     cp -R "$ROOT/contexts/commons/packages/zhello" "$tmp/repo/contexts/commons/packages/zhello"
     printf 'lint:\n\t@true\nclean:\n\t@true\n' > "$tmp/repo/Makefile"
-    mkdir -p "$tmp/repo/config"
+    mkdir -p "$tmp/repo/contexts/commons/apps"
 
     local run="bash $SELF"
     # $0 is relative in the common invocation, and the inner run happens in
@@ -87,9 +87,9 @@ selftest() {
         echo "$0: selftest FAIL — the scaffold still names zhello somewhere" >&2
         return 1
     fi
-    # (config/gui_apps.mk may legitimately name zhello: its one-time header
+    # (contexts/commons/apps/local_gui_apps.mk may legitimately name zhello: its one-time header
     # explains why the template itself is not registered there.)
-    grep -q "^GUI_APPS += zdemo$" "$tmp/repo/config/gui_apps.mk" ||
+    grep -q "^GUI_APPS += zdemo$" "$tmp/repo/contexts/commons/apps/local_gui_apps.mk" ||
         { echo "$0: selftest FAIL — zdemo was not registered" >&2; return 1; }
 
     # 2. Refusals: same name, template name, taken make target, bad name.
@@ -105,19 +105,19 @@ selftest() {
     # 3. A failure mid-run must leave neither package nor registration: once
     #    before the move (a registry the script cannot write) and once after
     #    it (the documented test hook), which is the harder rollback.
-    chmod 444 "$tmp/repo/config/gui_apps.mk"
+    chmod 444 "$tmp/repo/contexts/commons/apps/local_gui_apps.mk"
     if (cd "$tmp/repo" && $run other_app >/dev/null 2>&1); then
         echo "$0: selftest FAIL — an unwritable registry did not fail the run" >&2
         return 1
     fi
-    chmod 644 "$tmp/repo/config/gui_apps.mk"
+    chmod 644 "$tmp/repo/contexts/commons/apps/local_gui_apps.mk"
     if (cd "$tmp/repo" && NEW_APP_FAIL_AFTER_MOVE=1 $run other_app >/dev/null 2>&1); then
         echo "$0: selftest FAIL — a simulated post-move failure did not fail the run" >&2
         return 1
     fi
     [ -d "$tmp/repo/contexts/commons/packages/other_app" ] &&
         { echo "$0: selftest FAIL — a failed run left a package behind" >&2; return 1; }
-    grep -q "other_app" "$tmp/repo/config/gui_apps.mk" &&
+    grep -q "other_app" "$tmp/repo/contexts/commons/apps/local_gui_apps.mk" &&
         { echo "$0: selftest FAIL — a failed run left a registration behind" >&2; return 1; }
 
     rm -rf "$tmp"
@@ -149,7 +149,7 @@ fi
 
 TEMPLATE="contexts/commons/packages/zhello"
 PKG_DIR="contexts/commons/packages/$NAME"
-REGISTRY="config/gui_apps.mk"
+REGISTRY="contexts/commons/apps/local_gui_apps.mk"
 BUILD_OUT="build/app-bundle"
 
 [ -d "$TEMPLATE" ] ||
@@ -262,7 +262,7 @@ fi
 
 if [ ! -s "$REGISTRY" ]; then
     {
-        echo '# config/gui_apps.mk — scaffolded GUI apps, one block per app.'
+        echo '# contexts/commons/apps/local_gui_apps.mk — scaffolded GUI apps, one block per app.'
         echo '#'
         echo '# Gitignored on purpose: an app created by `make new-app` is user-local'
         echo '# content, not tree content. The top-level Makefile -includes this file'

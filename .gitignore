@@ -102,7 +102,7 @@ chaos-output/
 # construction) and registers the app here, which is what puts its targets on
 # the lean parse path; zhello itself stays tracked as the template of record.
 # Delete the line for an app you are contributing; keep this file gitignored.
-config/gui_apps.mk
+contexts/commons/apps/local_gui_apps.mk
 
 # Per-box operator config is local-only, never committed.
 deploy/devfleet/*.env
