@@ -19,8 +19,8 @@
  * enforced structurally — it accepts no exit code and no model claim, so
  * there is no way to write the wrong thing without changing the function.
  *
- * This is not theoretical. tools/dev/grok-unit.sh records THREE measured ways
- * an engine exits 0 having written nothing, all with an empty diff:
+ * This is not theoretical. The predecessor Grok lane measured THREE ways an
+ * engine exits 0 having written nothing, all with an empty diff:
  *
  *   (a) A forced response schema is satisfied on turn ONE by a
  *       {"status":"starting"} object, which ENDS the turn. Measured 3 times
@@ -84,9 +84,8 @@
  *
  * The two non-HTTP dialects are not exceptions to the interface, they are the
  * point of having one. A subscription-backed CLI is often free where the API
- * bills per token, and this tree ALREADY dispatches one
- * (tools/dev/grok-unit.sh). A caller picks an engine; it does not pick a
- * transport. */
+ * bills per token, and this tree dispatches two through tools/engine_unit.c.
+ * A caller picks an engine; it does not pick a transport. */
 enum engine_wire {
     ENGINE_WIRE_OPENAI_CHAT = 0,  /* POST {messages:[...]} -> {choices:[...]} */
     ENGINE_WIRE_LOCAL_CLI,        /* exec an installed agent CLI, no shell */
@@ -157,6 +156,11 @@ struct engine_vendor {
      * because it is always `program`. NULL for a non-CLI vendor. */
     const char *const *cli_argv;
     enum engine_cli_prompt cli_prompt;
+    /* Some installed CLIs reject pipe-backed stdio even in single-turn mode.
+     * This is invocation metadata, not a vendor-name special case: the
+     * standalone dispatcher selects the existing PTY capture transport when
+     * true. It changes no authority and is never used by the node. */
+    bool             cli_needs_tty;
     enum engine_wire wire;
     enum engine_delivery delivery;
     bool             costs_money;    /* false only for the fixture engine */

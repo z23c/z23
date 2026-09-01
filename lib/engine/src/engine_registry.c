@@ -34,6 +34,9 @@ static const char *const k_grok_cli_argv[] = {
     "--cwd",         ENGINE_CLI_WORKDIR_TOKEN,
     "--max-turns",   ENGINE_CLI_TURNS_TOKEN,
     "--always-approve",
+    "--permission-mode", "bypassPermissions",
+    "--no-plan",
+    "--output-format", "plain",
     NULL
 };
 
@@ -99,8 +102,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .max_retries   = 3,
     },
     {
-        /* The subscription-backed agent CLI this tree already dispatches by
-         * hand (tools/dev/grok-unit.sh). It is behind the same interface as
+        /* The subscription-backed agent CLI is behind the same interface as
          * the API engines on purpose: a caller picks an ENGINE, not a
          * transport, and on a host with a subscription but no API key this is
          * the row that costs nothing extra.
@@ -120,6 +122,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .program       = "grok",
         .cli_argv      = k_grok_cli_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_FILE,
+        .cli_needs_tty = true,
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
         .costs_money   = true,

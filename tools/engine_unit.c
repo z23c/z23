@@ -11,8 +11,8 @@
  * from running the unit's test group and reading how many groups actually
  * executed — never from an exit code, never from a report.
  *
- * This is the C23 successor to tools/dev/grok-unit.sh, and it is meant to
- * preserve every lesson in that script's header rather than relearn them.
+ * This is the sole C23 engine-unit path. It preserves the predecessor shell
+ * lane's measured lessons without retaining a second dispatcher.
  *
  * ── SAFETY BOUNDARIES, ALL FAIL-CLOSED ───────────────────────────────────
  *   - Dispatching costs money and writes code, so it requires --yes-dispatch
@@ -286,6 +286,19 @@ static char *read_file(const char *path, size_t cap, size_t *out_len)
 static int run(const char *const argv[], char *buf, size_t cap, int timeout_ms)
 {
     return zcl_spawn_capture(argv, buf, cap, timeout_ms);
+}
+
+/* A CLI row owns its stdio transport choice. Both implementations exec the
+ * exact argv with no shell and preserve the timeout observation; a vendor id
+ * is never consulted here. */
+static int run_cli(const struct engine_vendor *v, const char *const argv[],
+                   char *buf, size_t cap, int timeout_ms, bool *timed_out)
+{
+    if (v->cli_needs_tty)
+        return zcl_spawn_pty_capture_observed(
+            argv, buf, cap, timeout_ms, timed_out);
+    return zcl_spawn_capture_observed(
+        argv, buf, cap, timeout_ms, timed_out);
 }
 
 /* ── the isolated worktree ───────────────────────────────────────────── */
@@ -743,13 +756,20 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override)
         return 1;
     }
     const int64_t t0 = clock_now_monotonic_ns();
-    const int rc = run(argv, log, UNIT_PROBE_LOG_BYTES, UNIT_PROBE_CLI_TIMEOUT_MS);
+    bool timed_out = false;
+    const int rc = run_cli(v, argv, log, UNIT_PROBE_LOG_BYTES,
+                           UNIT_PROBE_CLI_TIMEOUT_MS, &timed_out);
     const int64_t elapsed = (clock_now_monotonic_ns() - t0) / 1000000;
     if (prompt_file[0]) (void)remove(prompt_file);
 
     if (rc < 0) {
         printf("COULD NOT LAUNCH %s in %lldms\n", v->program,
                (long long)elapsed);
+        free(log);
+        return 1;
+    }
+    if (timed_out) {
+        printf("TIMED OUT in %lldms\n", (long long)elapsed);
         free(log);
         return 1;
     }
@@ -889,7 +909,7 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
  * no reply text to decode — its "answer" is the diff, which is measured the
  * same way every other engine's is.
  *
- * The three lessons from tools/dev/grok-unit.sh are preserved deliberately:
+ * The predecessor Grok lane's three measured lessons are preserved here:
  * the output contract is stated IN BAND in the prompt file and never as a
  * forced response schema; the permission mode is the one that actually acts
  * headlessly rather than the one that narrates a plan; and a timeout is
@@ -933,8 +953,8 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         LOG_FAIL("engine_unit", "cannot allocate the CLI transcript buffer");
     }
     bool timed_out = false;
-    const int rc = zcl_spawn_capture_observed(
-        argv, log, UNIT_GATE_LOG_BYTES, timeout_ms, &timed_out);
+    const int rc = run_cli(
+        v, argv, log, UNIT_GATE_LOG_BYTES, timeout_ms, &timed_out);
     free(log);
     if (rc < 0) {
         dr->err = ENGINE_ERR_NETWORK;

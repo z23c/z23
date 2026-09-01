@@ -78,6 +78,10 @@ static int case_registry(void)
              && !engine_by_id("fixture")->costs_money);
     EN_CHECK("a CLI engine is never handed a key",
              !engine_needs_key(engine_by_id("grok-cli")));
+    EN_CHECK("Grok's CLI row asks for a PTY",
+             engine_by_id("grok-cli")->cli_needs_tty);
+    EN_CHECK("a CLI that works over pipes does not inherit Grok's PTY",
+             !engine_by_id("glm-cli")->cli_needs_tty);
     EN_CHECK("an HTTPS engine needs one",
              engine_needs_key(engine_by_id("glm")));
 
@@ -1216,14 +1220,22 @@ static int case_cli_argv(void)
                  n > 0 && strcmp(argv[0], fileq->program) == 0);
         EN_CHECK("which is NULL-terminated", n > 0 && argv[n] == NULL);
         bool carries_prompt = false, carries_workdir = false;
+        bool carries_bypass = false, carries_no_plan = false;
         bool carries_no_placeholders = true;
         for (size_t i = 1; i < n; i++) {
             if (strcmp(argv[i], in.prompt) == 0)  carries_prompt = true;
             if (strcmp(argv[i], in.workdir) == 0) carries_workdir = true;
+            if (strcmp(argv[i], "bypassPermissions") == 0)
+                carries_bypass = true;
+            if (strcmp(argv[i], "--no-plan") == 0) carries_no_plan = true;
             if (argv[i][0] == '{') carries_no_placeholders = false;
         }
         EN_CHECK("and carries the prompt path", carries_prompt);
         EN_CHECK("and the working directory", carries_workdir);
+        EN_CHECK("and selects the measured autonomous permission mode",
+                 carries_bypass);
+        EN_CHECK("and disables the interactive plan approval stop",
+                 carries_no_plan);
         EN_CHECK("and no placeholder survived substitution",
                  carries_no_placeholders);
     }

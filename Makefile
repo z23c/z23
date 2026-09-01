@@ -774,8 +774,7 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary, or the test harness. They must leave the wildcard BEFORE the
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
-DEV_STANDALONE_SRCS = tools/dev/grok_report.c \
-	tools/dev/hotswap_verify_so.c \
+DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/mutation_campaign.c \
 	tools/dev/source_identity_batch.c \
 	tools/dev/windows_headless_run.c \
@@ -10353,22 +10352,6 @@ $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 	    -Ilib/platform/include -Ilib/base/include \
 	    -o $@ $(FILE_SIZE_POLICY_SRCS)
 
-# grok_report reads the JSON report a dispatched unit prints at the end of its
-# transcript (tools/dev/grok-unit.sh). Written in C against the in-tree JSON
-# parser rather than shelling out to jq: a developer tool that only works on a
-# machine with jq installed is a tool a stranger cannot run, and this project
-# does not take a dependency it did not write.
-GROK_REPORT_BIN = $(BIN_DIR)/grok_report
-GROK_REPORT_SRCS = tools/dev/grok_report.c lib/json/src/json.c \
-    lib/base/src/safe_alloc.c
-.PHONY: tools/dev/grok_report
-tools/dev/grok_report: $(GROK_REPORT_BIN)
-$(GROK_REPORT_BIN): $(GROK_REPORT_SRCS)
-	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/json/include -Ilib/base/include \
-	    -o $@ $(GROK_REPORT_SRCS)
-
 # mutation-campaign measures whether a test group would NOTICE if the code it
 # covers were wrong: it enumerates one-token defects in a source file,
 # compiles each, runs ONLY the named group, and reports what survived. It is
@@ -10407,7 +10390,8 @@ $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 # `engine_unit` sends ONE scoped unit of work to a model, applies the result in
 # an isolated worktree, and judges it by running the gate. The law it is built
 # on is in lib/engine/include/engine/engine.h: the model proposes, the gate
-# decides. It is the C23 successor to tools/dev/grok-unit.sh.
+# decides. It is the one C23 engine-unit path; the earlier shell dispatcher
+# and self-report extractor were retired once this lifecycle was proven.
 #
 # Like $(BIN_DIR)/zclassic23-acme above, this is compiled STRAIGHT FROM SOURCE
 # to an executable with no intermediate object files, and for the same reason:

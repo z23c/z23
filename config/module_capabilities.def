@@ -922,7 +922,7 @@ ZCL_MODULE_CAPABILITY("lib/util/src/sd_notify.c", CAP_NETWORK|CAP_FS_WRITE, "tal
 ZCL_MODULE_CAPABILITY("lib/util/src/self_backtrace.c", CAP_FS_WRITE|CAP_CLOCK|CAP_FS_READ|CAP_PRIVILEGE, "the live self-backtrace surface: reaches the kernel directly via syscall() so a crash handler's own rename of the backtrace file does not depend on a libc wrapper that may not be async-signal-safe")
 ZCL_MODULE_CAPABILITY("lib/util/src/shutdown_stagewatch.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("lib/util/src/signal_handler.c", CAP_FS_WRITE|CAP_FS_READ|CAP_PRIVILEGE|CAP_CLOCK, "the async-signal-safe fatal-signal handler: reaches the kernel directly via syscall() so its own file operations do not depend on a libc wrapper that may not be async-signal-safe")
-ZCL_MODULE_CAPABILITY("lib/util/src/spawn.c", CAP_FS_WRITE|CAP_PROCESS|CAP_FS_READ|CAP_NETWORK, "the no-shell process-launch primitives every child-spawning caller in the tree rides, including the socketpair it wires to the child's stdio")
+ZCL_MODULE_CAPABILITY("lib/util/src/spawn.c", CAP_FS_WRITE|CAP_PROCESS|CAP_FS_READ|CAP_NETWORK|CAP_PRIVILEGE, "the no-shell process-launch primitives every child-spawning caller in the tree rides, including socketpair stdio and explicit grantpt/unlockpt/ioctl setup for a caller-authorized local PTY")
 ZCL_MODULE_CAPABILITY("lib/util/src/supervisor.c", CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("lib/util/src/supervisor_backstop.c", CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("lib/util/src/sysinit.c", CAP_FS_READ|CAP_FS_WRITE, "")

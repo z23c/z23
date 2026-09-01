@@ -471,6 +471,10 @@ ZCL_CAPABILITY_SYMBOL("preadv2", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("ptsname_r", CAP_FS_READ,
     "Resolves the filesystem path of the pseudo-terminal slave attached "
     "to a caller-held master descriptor.")
+ZCL_CAPABILITY_SYMBOL("ptsname", CAP_FS_READ,
+    "Resolves the filesystem path of the pseudo-terminal slave attached "
+    "to a caller-held master descriptor; the non-reentrant platform form "
+    "is copied before fork by the single-threaded engine harness.")
 ZCL_CAPABILITY_SYMBOL("read", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("readdir", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("readlink", CAP_FS_READ, "")

@@ -123,6 +123,18 @@ int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
 int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, bool *timed_out);
 
+/* The same bounded, no-shell capture with stdin/stdout/stderr attached to a
+ * fresh controlling PTY. This is for installed local CLIs that explicitly
+ * require terminal-backed stdio even in their single-turn mode. It inherits
+ * the caller's environment and filesystem authority; unlike the separately
+ * confined mesh_terminal_worker, it is NOT a sandbox and must never execute
+ * fetched or otherwise untrusted programs. Output may contain terminal
+ * control bytes and CRLF line endings. Timeout kills the whole child process
+ * group and is preserved separately in `timed_out`. Windows refuses with -1. */
+int zcl_spawn_pty_capture_observed(const char *const argv[], char *buf,
+                                   size_t cap, int timeout_ms,
+                                   bool *timed_out);
+
 /* Cancellable capture for long fixed actions. The parent polls
  * `should_cancel` at most every 100 ms and, when it returns true, kills the
  * child's whole process group so compiler/test/fuzz descendants cannot

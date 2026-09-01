@@ -4,6 +4,8 @@
  * full contract and the SA_NOCLDWAIT / fork-in-threaded-process notes this
  * implementation depends on. */
 
+#define _GNU_SOURCE /* posix_openpt/grantpt/unlockpt/ptsname */
+
 #include "util/spawn.h"
 
 #include "platform/time_compat.h"
@@ -14,13 +16,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -68,6 +73,16 @@ static int spawn_capture_observed_platform(
     if (timed_out) *timed_out = false;
     return zcl_spawn_capture_cancelable(argv, buf, cap, timeout_ms,
                                         NULL, NULL, NULL);
+}
+
+static int spawn_pty_capture_observed_platform(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    bool *timed_out)
+{
+    (void)argv; (void)timeout_ms;
+    if (buf && cap > 0) buf[0] = '\0';
+    if (timed_out) *timed_out = false;
+    return -1;
 }
 
 #else
@@ -268,6 +283,82 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
 
 /* ── zcl_spawn_capture ───────────────────────────────────────────────── */
 
+/* Parent-side bounded drain shared by pipe and PTY capture. A Linux PTY
+ * master reports EIO, rather than zero bytes, when its last slave closes;
+ * `pty_eio_is_eof` preserves that platform contract without weakening real
+ * pipe errors. */
+static int spawn_capture_drain(
+    pid_t pid, int output_fd, char *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    bool *timed_out_out, bool pty_eio_is_eof)
+{
+    size_t used = 0;
+    char discard[4096];
+    int64_t deadline_ms = (timeout_ms > 0)
+                          ? platform_time_monotonic_ms() + timeout_ms : 0;
+    bool timed_out = false;
+    bool was_cancelled = false;
+
+    for (;;) {
+        if (should_cancel && should_cancel(cancel_ctx)) {
+            was_cancelled = true;
+            break;
+        }
+        struct pollfd pfd = { .fd = output_fd, .events = POLLIN };
+        int poll_timeout = -1;
+        if (timeout_ms > 0) {
+            int64_t remain = deadline_ms - platform_time_monotonic_ms();
+            if (remain <= 0) { timed_out = true; break; }
+            poll_timeout = (remain > INT_MAX) ? INT_MAX : (int)remain;
+        }
+        if (should_cancel && (poll_timeout < 0 || poll_timeout > 100))
+            poll_timeout = 100;
+        int pr = poll(&pfd, 1, poll_timeout);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            LOG_WARN("spawn", "poll() failed: %s", strerror(errno));
+            break;
+        }
+        if (pr == 0) {
+            if (should_cancel) continue;
+            timed_out = true;
+            break;
+        }
+
+        char *dst = (used < cap - 1) ? buf + used : discard;
+        size_t dst_cap = (used < cap - 1) ? (cap - 1 - used) : sizeof(discard);
+        ssize_t n = read(output_fd, dst, dst_cap);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (pty_eio_is_eof && errno == EIO) break;
+            LOG_WARN("spawn", "read() failed: %s", strerror(errno));
+            break;
+        }
+        if (n == 0) break;
+        if (used < cap - 1) used += (size_t)n;
+    }
+    buf[used] = '\0';
+
+    /* Kill before closing a PTY master: closing the master first raises
+     * SIGHUP in the slave's foreground group and would erase the exact
+     * timeout observation behind 128+SIGHUP. Pipes do not care about the
+     * order, so one ordering preserves both transports. */
+    if (timed_out || was_cancelled) {
+        if (kill(-pid, SIGKILL) != 0)
+            (void)kill(pid, SIGKILL);
+    }
+    close(output_fd);
+    if (cancelled) *cancelled = was_cancelled;
+    if (timed_out_out) *timed_out_out = timed_out;
+
+    int status = 0;
+    if (!spawn_reap(pid, &status))
+        return 0;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 0;
+}
+
 static int spawn_capture_impl(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
@@ -316,70 +407,9 @@ static int spawn_capture_impl(
     close(outpipe[1]);
     (void)setpgid(pid, pid); /* child also does this; either side may win */
 
-    size_t used = 0;
-    char discard[4096];
-    int64_t deadline_ms = (timeout_ms > 0)
-                          ? platform_time_monotonic_ms() + timeout_ms : 0;
-    bool timed_out = false;
-    bool was_cancelled = false;
-
-    for (;;) {
-        if (should_cancel && should_cancel(cancel_ctx)) {
-            was_cancelled = true;
-            break;
-        }
-        struct pollfd pfd = { .fd = outpipe[0], .events = POLLIN };
-        int poll_timeout = -1;
-        if (timeout_ms > 0) {
-            int64_t remain = deadline_ms - platform_time_monotonic_ms();
-            if (remain <= 0) { timed_out = true; break; }
-            poll_timeout = (remain > INT_MAX) ? INT_MAX : (int)remain;
-        }
-        if (should_cancel && (poll_timeout < 0 || poll_timeout > 100))
-            poll_timeout = 100;
-        int pr = poll(&pfd, 1, poll_timeout);
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            LOG_WARN("spawn", "poll() failed: %s", strerror(errno));
-            break;
-        }
-        if (pr == 0) {
-            if (should_cancel) continue; /* periodic durable-state poll */
-            timed_out = true;
-            break;
-        }
-
-        char *dst = (used < cap - 1) ? buf + used : discard;
-        size_t dst_cap = (used < cap - 1) ? (cap - 1 - used) : sizeof(discard);
-        ssize_t n = read(outpipe[0], dst, dst_cap);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            LOG_WARN("spawn", "read() failed: %s", strerror(errno));
-            break;
-        }
-        if (n == 0) break;   /* EOF: child closed its stdout */
-        if (used < cap - 1) used += (size_t)n;
-    }
-    buf[used] = '\0';
-    close(outpipe[0]);
-
-    if (timed_out || was_cancelled) {
-        if (kill(-pid, SIGKILL) != 0)
-            (void)kill(pid, SIGKILL);
-    }
-    if (cancelled) *cancelled = was_cancelled;
-    if (timed_out_out) *timed_out_out = timed_out;
-
-    int status = 0;
-    if (!spawn_reap(pid, &status)) {
-        /* ECHILD (SA_NOCLDWAIT) or another wait failure: the output
-         * already captured above is still valid; exit status is simply
-         * unknown — documented contract in util/spawn.h. */
-        return 0;
-    }
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return 0;
+    return spawn_capture_drain(
+        pid, outpipe[0], buf, cap, timeout_ms, should_cancel, cancel_ctx,
+        cancelled, timed_out_out, false);
 }
 
 int zcl_spawn_capture_cancelable(
@@ -398,6 +428,83 @@ static int spawn_capture_observed_platform(
                               timed_out);
 }
 
+/* PTY capture is deliberately a transport sibling of pipe capture, not a
+ * shell worker. It inherits the exact argv and environment and grants no new
+ * authority. The child-side sequence mirrors mesh_terminal_worker: a fresh
+ * session, slave as controlling terminal, then stdio and exec. */
+static int spawn_pty_capture_observed_platform(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    bool *timed_out)
+{
+    if (timed_out) *timed_out = false;
+    if (!argv || !argv[0] || !buf || cap == 0)
+        LOG_ERR("spawn", "bad PTY args (argv=%p buf=%p cap=%zu)",
+                (const void *)argv, (void *)buf, cap);
+    buf[0] = '\0';
+
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0)
+        LOG_ERR("spawn", "posix_openpt() failed: %s", strerror(errno));
+    (void)fcntl(master, F_SETFD, FD_CLOEXEC);
+    if (grantpt(master) != 0 || unlockpt(master) != 0) {
+        const int saved = errno;
+        close(master);
+        LOG_ERR("spawn", "grantpt()/unlockpt() failed: %s", strerror(saved));
+    }
+    char slave_path[128];
+#if defined(__linux__)
+    const int name_rc = ptsname_r(master, slave_path, sizeof(slave_path));
+    if (name_rc != 0) {
+        close(master);
+        LOG_ERR("spawn", "ptsname_r() failed: %s", strerror(name_rc));
+    }
+#else
+    /* macOS has the POSIX interface but not ptsname_r. This standalone tool
+     * is single-threaded; copy the libc-owned string before fork. */
+    const char *name = ptsname(master);
+    if (!name || strlen(name) >= sizeof(slave_path)) {
+        const int saved = errno;
+        close(master);
+        LOG_ERR("spawn", "ptsname() failed or returned an over-long path: %s",
+                strerror(saved));
+    }
+    (void)snprintf(slave_path, sizeof(slave_path), "%s", name);
+#endif
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        const int saved = errno;
+        close(master);
+        LOG_ERR("spawn", "PTY fork() failed: %s", strerror(saved));
+    }
+    if (pid == 0) {
+        /* Child: no allocator, logger, or other shared-process state before
+         * exec. Failure stages use conventional 126/127 exit status. */
+        close(master);
+        if (setsid() < 0)
+            _exit(126);
+        int slave = open(slave_path, O_RDWR);
+        if (slave < 0)
+            _exit(126);
+        if (ioctl(slave, TIOCSCTTY, 0) < 0)
+            _exit(126);
+        struct winsize ws = { .ws_col = 80, .ws_row = 24 };
+        if (ioctl(slave, TIOCSWINSZ, &ws) < 0)
+            _exit(126);
+        if (dup2(slave, STDIN_FILENO) < 0 ||
+            dup2(slave, STDOUT_FILENO) < 0 ||
+            dup2(slave, STDERR_FILENO) < 0)
+            _exit(126);
+        if (slave > STDERR_FILENO)
+            close(slave);
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+
+    return spawn_capture_drain(
+        pid, master, buf, cap, timeout_ms, NULL, NULL, NULL, timed_out, true);
+}
+
 int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
                        int timeout_ms)
 {
@@ -410,6 +517,14 @@ int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, bool *timed_out)
 {
     return spawn_capture_observed_platform(
+        argv, buf, cap, timeout_ms, timed_out);
+}
+
+int zcl_spawn_pty_capture_observed(const char *const argv[], char *buf,
+                                   size_t cap, int timeout_ms,
+                                   bool *timed_out)
+{
+    return spawn_pty_capture_observed_platform(
         argv, buf, cap, timeout_ms, timed_out);
 }
 

@@ -285,6 +285,36 @@ static int test_spawn_capture_real_exit_code(void)
     return failures;
 }
 
+/* Case 8: a CLI that refuses pipe-backed stdio observes a real controlling
+ * terminal, while the caller still receives a bounded transcript and exact
+ * timeout evidence.  /usr/bin/tty is the smallest external oracle for the
+ * property: it exits nonzero when stdin is not a terminal. */
+static int test_spawn_pty_capture_observes_terminal(void)
+{
+    int failures = 0;
+    TEST("spawn: PTY capture presents a terminal and preserves timeout") {
+        const char *tty_argv[] = { "/usr/bin/tty", NULL };
+        char buf[256] = {0};
+        bool timed_out = true;
+        int rc = zcl_spawn_pty_capture_observed(
+            tty_argv, buf, sizeof(buf), 3000, &timed_out);
+        ASSERT(rc == 0);
+        ASSERT(!timed_out);
+        ASSERT(spawn_contains(buf, "/dev/"));
+
+        const char *sleep_argv[] = { "/bin/sleep", "5", NULL };
+        int64_t t0 = platform_time_monotonic_ms();
+        rc = zcl_spawn_pty_capture_observed(
+            sleep_argv, buf, sizeof(buf), 200, &timed_out);
+        int64_t elapsed = platform_time_monotonic_ms() - t0;
+        ASSERT(rc == 128 + SIGKILL);
+        ASSERT(timed_out);
+        ASSERT(elapsed < 1500);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_spawn_platform_arm(void);
 
 static int test_spawn_platform_arm(void)
@@ -300,6 +330,7 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_capture_echild_tolerant();
     failures += test_spawn_capture_truncates_oversized();
     failures += test_spawn_capture_real_exit_code();
+    failures += test_spawn_pty_capture_observes_terminal();
 
     printf("Spawn: %d failures\n", failures);
     return failures;
