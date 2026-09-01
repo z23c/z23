@@ -13,8 +13,9 @@
  *   7. file counts + route parity  — recursive vs direct group file counts, and
  *                                    `code tests` route == `dev test plan`
  *                                    proof_group for the same single file.
- *   8. complete source roots       — src/, ports/, and lib/test/ are indexed;
- *                                    license boilerplate is not a purpose.
+ *   8. complete source roots       — package app/include/src/tests, ports/,
+ *                                    and lib/test/ are indexed; license
+ *                                    boilerplate is not a purpose.
  *   9. publication safety          — content freshness, old-reader retention,
  *                                    crash boundaries, and 32-way cold open.
  *
@@ -181,6 +182,24 @@ static const char *ROOT_MAIN_C =
     " * main — fixture top-level node entry.\n"
     " */\n"
     "int fixture_root_main(void) { return 0; }\n";
+
+static const char *PACKAGE_APP_C =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
+    " * package_parse_options — fixture package executable parser.\n"
+    " */\n"
+    "static int package_parse_options(void) { return 0; }\n";
+
+static const char *PACKAGE_HEADER_H =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
+    " * package_api — fixture package public interface.\n"
+    " */\n"
+    "int package_api(void);\n";
+
+static const char *PACKAGE_TEST_C =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
+    " * package_cli_test — fixture package executable test.\n"
+    " */\n"
+    "int package_cli_test(void) { return 0; }\n";
 
 static const char *PORT_H =
     "/* SPDX-License-Identifier: Apache-2.0\n"
@@ -373,7 +392,10 @@ static bool write_fixture(void)
                     PURPOSE_AFTER_LICENSE_C) &&
            mk_write(FIX, "lib/net/src/purpose_license_only.c",
                     PURPOSE_LICENSE_ONLY_C) &&
+           mk_write(FIX, "app/main.c", PACKAGE_APP_C) &&
+           mk_write(FIX, "include/package/api.h", PACKAGE_HEADER_H) &&
            mk_write(FIX, "src/main.c", ROOT_MAIN_C) &&
+           mk_write(FIX, "tests/test_package.c", PACKAGE_TEST_C) &&
            mk_write(FIX, "ports/include/ports/fixture_port.h", PORT_H) &&
            mk_write(FIX, "lib/test/src/test_fixture_indexed.c", TEST_SOURCE_C) &&
            mk_write(FIX, "lib/net/src/saturation.c", SATURATION_C) &&
@@ -912,6 +934,16 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("src/main.c is indexed in root", found &&
              strcmp(cf.group, "root") == 0 &&
              strcmp(cf.purpose, "fixture top-level node entry.") == 0);
+
+    codeindex_symbol(ci, "package_parse_options", &s, &found);
+    CI_CHECK("package app symbol is searchable", found && s.kind == 't' &&
+             strcmp(s.def_path, "app/main.c") == 0);
+    codeindex_symbol(ci, "package_api", &s, &found);
+    CI_CHECK("package public header is searchable", found && s.kind == 'T' &&
+             strcmp(s.decl_path, "include/package/api.h") == 0);
+    codeindex_symbol(ci, "package_cli_test", &s, &found);
+    CI_CHECK("package test symbol is searchable", found && s.kind == 'T' &&
+             strcmp(s.def_path, "tests/test_package.c") == 0);
 
     codeindex_file(ci, "ports/include/ports/fixture_port.h", &cf, &found);
     CI_CHECK("ports header is indexed in ports", found &&

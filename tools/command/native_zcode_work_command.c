@@ -289,16 +289,40 @@ static bool zwork_scope_add(char out[1024], const char *path)
     return true;
 }
 
-static bool zwork_scopes(const struct vcs_package_recipe *recipe,
-                         bool include_package_metadata, char out[1024])
+static bool zwork_c23_path(const char *path)
 {
-    out[0] = '\0';
+    size_t len = path ? strlen(path) : 0;
+    return len >= 2u && path[len - 2u] == '.' &&
+           (path[len - 1u] == 'c' || path[len - 1u] == 'h');
+}
+
+static bool zwork_recipe_path(const struct vcs_package_recipe *recipe,
+                              const char *path)
+{
     const struct vcs_package_recipe_strings *lists[] = {
         &recipe->public_headers, &recipe->sources, &recipe->test_sources,
     };
     for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++)
         for (size_t j = 0; j < lists[i]->count; j++)
+            if (strcmp(lists[i]->items[j], path) == 0) return true;
+    return false;
+}
+
+static bool zwork_scopes(const struct vcs_package_prepared *prepared,
+                         bool include_package_metadata, char out[1024])
+{
+    out[0] = '\0';
+    const struct vcs_package_recipe_strings *lists[] = {
+        &prepared->recipe.public_headers, &prepared->recipe.sources,
+        &prepared->recipe.test_sources,
+    };
+    for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++)
+        for (size_t j = 0; j < lists[i]->count; j++)
             if (!zwork_scope_add(out, lists[i]->items[j])) return false;
+    for (size_t i = 0; i < prepared->manifest.count; i++)
+        if (zwork_c23_path(prepared->manifest.files[i].path) &&
+            !zwork_scope_add(out, prepared->manifest.files[i].path))
+            return false;
     if (include_package_metadata &&
         !zwork_scope_add(out, VCS_PACKAGE_DEPS_META_PATH)) return false;
     return out[0] != '\0';
@@ -308,22 +332,12 @@ static uint64_t zwork_source_bytes(
     const struct vcs_package_prepared *prepared)
 {
     uint64_t total = 0;
-    const struct vcs_package_recipe_strings *lists[] = {
-        &prepared->recipe.public_headers, &prepared->recipe.sources,
-        &prepared->recipe.test_sources,
-    };
-    for (size_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {
-        for (size_t j = 0; j < lists[i]->count; j++) {
-            for (size_t f = 0; f < prepared->manifest.count; f++) {
-                if (strcmp(lists[i]->items[j],
-                           prepared->manifest.files[f].path) != 0)
-                    continue;
-                if (!zcl_u64_add(total, prepared->manifest.files[f].size,
-                                 &total))
-                    return 0;
-                break;
-            }
-        }
+    for (size_t i = 0; i < prepared->manifest.count; i++) {
+        const struct vcs_package_file *file = &prepared->manifest.files[i];
+        if (!zwork_c23_path(file->path) &&
+            !zwork_recipe_path(&prepared->recipe, file->path))
+            continue;
+        if (!zcl_u64_add(total, file->size, &total)) return 0;
     }
     return total;
 }
@@ -1335,7 +1349,7 @@ void zcl_native_handle_zcode_work_start(
     uint64_t expires = 0;
     int64_t now = platform_time_wall_unix();
     bool composed = selected.ok && zwork_scopes(
-        &prepared.recipe, reuse_composed, scopes) &&
+        &prepared, reuse_composed, scopes) &&
         now > 0 && zcl_u64_add((uint64_t)now, 86400u, &expires) &&
         expires <= INT64_MAX;
     if (!composed) {

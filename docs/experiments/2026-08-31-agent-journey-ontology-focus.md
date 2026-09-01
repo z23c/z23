@@ -141,6 +141,83 @@ The rerun still does not establish model-token count or time to first correct
 edit. It does remove three unconditional branches and explicitly forbids using
 the maintainer live-state handoff as an ordinary work queue.
 
+## Real package retrieval and coordination rerun
+
+The next controlled task used the tracked `packages/zdemo` package and the
+user-visible goal “Reject malformed or overflowing `--frames` and `--seconds`
+values without opening a window.” The package source root remained
+`b16fe46f77995f0b088088e0a66f1f0085cee13a55c74b14b9df571e21c4a080`
+through both runs.
+
+The baseline exact-symbol request could not find `zdemo_parse_options`.
+Retrying without the override took 3,786 ms and selected `zdemo_world_step` in
+`src/zdemo.c`. The resulting authority covered `include`, `src`, and `tests`,
+but not the manifest-owned `app/main.c` where argument parsing and window
+creation occur.
+
+Two specialists then inspected disjoint claims under focus root
+`059e7cf79c5a5ef4b2f73cbaa1fca26688e357be2a0329ec75a30e004ef8443f`.
+One inspected `src/zdemo.c`; the other inspected `tests/test_zdemo.c`. Both
+DISPROVED that their claimed path could implement or establish the requested
+behavior. Together they opened two files, consumed 6,233 source bytes, made
+five tool calls, reported one retry, and reported zero duplicate actions. The
+slower report completed in 22,353 ms. These are agent-reported process metrics,
+not scheduler telemetry.
+
+The intervention reuses two existing authorities:
+
+- the code index now includes conventional package-local `app`, `include`,
+  `src`, and `tests` roots on POSIX and Windows;
+- work scope and total-source-byte projections add manifest-owned C23 `.c`
+  and `.h` files while retaining every build-recipe source path.
+
+The fresh isolated rerun used the same tracked package bytes and produced focus
+root `8822303e6653fdd7cf2762e06fb6b95a422a6068b1815c1c6bf0f5e828824dc1`.
+
+| Measurement | Before | After | Change |
+|---|---:|---:|---:|
+| Exact-symbol lookup | failed | passed | failure removed |
+| Work-start retries | 1 | 0 | -100% |
+| Successful work-start elapsed | 3,786 ms | 385 ms | -90% |
+| Selected symbol | `zdemo_world_step` | `zdemo_parse_options` | target corrected |
+| Selected path | `src/zdemo.c` | `app/main.c` | target corrected |
+| Selected context bytes | 4,628 | 10,570 | full owning file exposed |
+| Manifest-owned C23 source bytes reported | incomplete | 18,840 | complete projection |
+| Allowed write scopes | 3 | 4 | `app` added |
+| Duplicate specialist actions | 0 | 0 | unchanged |
+
+The exact override intentionally bypasses fuzzy retrieval, so the successful
+response reports zero BM25 corpus and ranked files. This experiment proves
+exact package-local indexing and manifest-derived authority; it does not prove
+better heuristic ranking.
+
+Three counterexamples remained fail-closed. Reusing one goal with different
+contexts produced `AMBIGUOUS_CONTEXT`. Starting distinct active tasks with
+overlapping scopes produced `WRITE_SCOPE_OVERLAP`. Rerunning the corrected
+goal against the original still-live task produced `DUPLICATE_ACTIVE_WORK`.
+No task history was deleted to obtain the successful result; the fresh rerun
+used an isolated archive of the exact tracked package.
+
+The registered `codeindex` and `zcode_package_dev` groups passed. The latter
+parses the actual adapter packet and requires all four package-local scopes.
+The 24-gate fast lint and the 374-file Windows cross-syntax proof also passed.
+Native Windows and macOS execution remain unobserved in this rerun.
+
+Measured at 2026-08-31T23:07:54-04:00
+(2026-09-01T03:07:54+00:00) from source
+`8f35c9b66e1a6d6981a91b81d314827e92d1de56` plus this change.
+
+- Compiler: `cc (GCC) 16.1.1 20260430`
+- CPU: `AMD Ryzen 7 PRO 8840U w/ Radeon 780M Graphics`
+- Host: Linux x86_64
+
+```bash
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=codeindex
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=zcode_package_dev
+make lint-fast
+make check-windows-cross-syntax
+```
+
 ## Reproduction
 
 Measured at 2026-08-31T19:09:59-04:00

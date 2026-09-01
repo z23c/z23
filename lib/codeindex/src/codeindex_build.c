@@ -186,14 +186,19 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user)
         !collect_dir(root, "domain", &vec) ||
         !collect_dir(root, "adapters", &vec) ||
         !collect_dir(root, "ports", &vec) ||
+        !collect_dir(root, "app", &vec) ||
+        !collect_dir(root, "include", &vec) ||
         !collect_dir(root, "src", &vec))
         goto collect_failed;
 
-    /* Tests are not a production LIB_MODULES entry, but they are source a
-     * developer must be able to navigate.  collect_dir() retains the same
+    /* Tests are not production module entries, but they are source a
+     * developer must be able to navigate. Package-local workspaces also use
+     * the conventional top-level tests/ root. collect_dir() retains the same
      * generated-directory pruning used above; the sorted pass below de-dups
-     * this root if it ever becomes a listed library module. */
-    if (!collect_dir(root, "lib/test", &vec)) goto collect_failed;
+     * a root if it is also reached through a declared module. */
+    if (!collect_dir(root, "lib/test", &vec) ||
+        !collect_dir(root, "tests", &vec))
+        goto collect_failed;
 
     qsort(vec.v, vec.n, sizeof(vec.v[0]), sv_cmp);
 

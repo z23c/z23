@@ -127,6 +127,19 @@ static char *zpd_read_bounded(const char *path, size_t maximum_bytes)
     return text;
 }
 
+static bool zpd_array_has_string(const struct json_value *array,
+                                 const char *expected)
+{
+    if (!array || array->type != JSON_ARR || !expected) return false;
+    for (size_t i = 0; i < json_size(array); i++) {
+        const struct json_value *item = json_at(array, i);
+        if (item && item->type == JSON_STR &&
+            strcmp(json_get_str(item), expected) == 0)
+            return true;
+    }
+    return false;
+}
+
 static bool zpd_next_is(const struct zcl_command_reply *reply,
                         const char *command, const char *workspace,
                         const char *work_id, const char *adapter)
@@ -245,8 +258,8 @@ static void zpd_fixture_cleanup(const char *root)
 {
     static const char *const files[] = {
         "link", "special", "LICENSE", "zcode-package.json", "src/x.c",
-        "src/unused.c", "include/x.h", "tests/test.c", ".zvcs/control",
-        ".codeindex/control", "build/obj.o",
+        "src/unused.c", "app/main.c", "include/x.h", "tests/test.c",
+        ".zvcs/control", ".codeindex/control", "build/obj.o",
     };
     char path[512];
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
@@ -254,7 +267,7 @@ static void zpd_fixture_cleanup(const char *root)
         (void)unlink(path);
     }
     static const char *const dirs[] = {
-        "src", "include", "tests", ".zvcs", ".codeindex", "build",
+        "src", "app", "include", "tests", ".zvcs", ".codeindex", "build",
     };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
@@ -268,7 +281,7 @@ static bool zpd_fixture(const char *root, bool unknown_key)
     char path[512];
     zpd_fixture_cleanup(root);
     if (platform_directory_create(root, 0700) != 0) return false;
-    static const char *const dirs[] = { "src", "include", "tests" };
+    static const char *const dirs[] = { "src", "app", "include", "tests" };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
         if (platform_directory_create(path, 0700) != 0) return false;
@@ -277,6 +290,10 @@ static bool zpd_fixture(const char *root, bool unknown_key)
     if (!zpd_write(path, "MIT\n")) return false;
     (void)snprintf(path, sizeof(path), "%s/src/x.c", root);
     if (!zpd_write(path, "int x(void) { return 1; }\n")) return false;
+    (void)snprintf(path, sizeof(path), "%s/app/main.c", root);
+    if (!zpd_write(path,
+            "static int fixture_parse_options(void) { return 0; }\n"))
+        return false;
     (void)snprintf(path, sizeof(path), "%s/include/x.h", root);
     if (!zpd_write(path, "int x(void);\n")) return false;
     (void)snprintf(path, sizeof(path), "%s/tests/test.c", root);
@@ -2114,6 +2131,8 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(json_push_kv_str(&input, "workspace", root));
         ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
         ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        ASSERT(json_push_kv_str(&input, "context_symbol",
+                                "fixture_parse_options"));
         struct zcl_command_request request = { .input = &input };
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.zcode_work_start_test.v1");
@@ -2137,7 +2156,8 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "stage")),
                       "Creating missing code") == 0);
         ASSERT(context && context->type == JSON_OBJ);
-        ASSERT(strcmp(json_get_str(json_get(context, "symbol")), "x") == 0);
+        ASSERT(strcmp(json_get_str(json_get(context, "symbol")),
+                      "fixture_parse_options") == 0);
         ASSERT(json_get(context, "symbol_id") == NULL);
         ASSERT(reuse && reuse->type == JSON_OBJ);
         ASSERT(strcmp(json_get_str(json_get(reuse, "search_status")),
@@ -2171,10 +2191,15 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(json_push_kv_str(&input, "workspace", root));
         ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
         ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        ASSERT(json_push_kv_str(&input, "context_symbol",
+                                "fixture_parse_options"));
         ASSERT(json_push_kv_bool(&input, "details", true));
         request.input = &input;
         zcl_command_reply_init(&reply, "zcl.zcode_work_start_test.v1");
         zcl_native_handle_zcode_work_start(&request, &reply);
+        if (reply.status != ZCL_COMMAND_STATUS_PASSED)
+            printf("exact app context failed: %s %s\n",
+                   reply.error.code, reply.error.message);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         expert = json_get(&reply.data, "expert");
         context = json_get(&reply.data, "selected_context");
@@ -2185,6 +2210,8 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(detailed_work_id && detailed_task_root &&
                strncmp(detailed_work_id + 5, detailed_task_root, 12) == 0);
         ASSERT(context && json_get(context, "symbol_id") != NULL);
+        ASSERT(strcmp(json_get_str(json_get(context, "symbol")),
+                      "fixture_parse_options") == 0);
         zcl_command_reply_free(&reply);
         json_free(&input);
 
@@ -2280,6 +2307,16 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(strstr(packet_text, "\"package_recipe_root\"") == NULL);
         ASSERT(strstr(packet_text, "\"proof_policy_root\"") == NULL);
         ASSERT(strstr(packet_text, "\"toolchain_capsule_root\"") == NULL);
+        struct json_value packet;
+        json_init(&packet);
+        ASSERT(json_read(&packet, packet_text, strlen(packet_text)));
+        const struct json_value *allowed =
+            json_get(&packet, "allowed_write_scopes");
+        ASSERT(zpd_array_has_string(allowed, "app"));
+        ASSERT(zpd_array_has_string(allowed, "include"));
+        ASSERT(zpd_array_has_string(allowed, "src"));
+        ASSERT(zpd_array_has_string(allowed, "tests"));
+        json_free(&packet);
         free(packet_text);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "authority")),
                       "NONE_MANUAL_HANDOFF") == 0);
