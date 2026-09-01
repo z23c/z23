@@ -206,7 +206,7 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # the whole point: an app registered there joins the SAME lean parse zhello
 # gets, instead of paying the authoritative parse for a two-file build.
 # Tracked reference apps.  User-local scaffolded apps append via config/gui_apps.mk.
-GUI_APPS := zhello ball
+GUI_APPS := zhello ball zdemo
 -include config/gui_apps.mk
 # Five goals per GUI app: run, headless selftest, clean, .app bundle, and the
 # bare binary path. The binary is spelled `build/bin/…` literally because
@@ -2200,6 +2200,8 @@ zhello_ARGS = $(ZHELLO_ARGS)
 zhello_APP_TITLE := Zhello
 ball_ARGS = $(BALL_ARGS)
 ball_APP_TITLE := Ball
+zdemo_ARGS = $(ZDEMO_ARGS)
+zdemo_APP_TITLE := Zdemo
 $(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
 
 .PHONY: new-app

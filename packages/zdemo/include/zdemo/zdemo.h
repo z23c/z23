@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: zdemo — the smallest prompt-to-pixel loop in the Commons.
  *
- * The render half of zdemo lives here, free of any windowing dependency, so
- * the same frame code runs in an RGFW window on a desk and in a headless
- * `--frames=N` self-test in CI. One C23 source file, one header, no node
- * objects: a reader should be able to hold the whole program in mind.
+ * Reusable option validation and rendering live here without a windowing
+ * dependency, so the same checked inputs and frame code run on a desk and in
+ * a headless `--frames=N` self-test. One C23 source file, one header, no node
+ * objects: a reader should be able to hold the whole component in mind.
  */
 
 #ifndef ZDEMO_H
@@ -37,6 +37,14 @@ struct zdemo_world {
 };
 
 #define ZDEMO_SQUARE_SIDE 64u
+
+/* Parse one complete positive decimal frame count. On failure, leave the
+ * caller's output unchanged. */
+bool zdemo_parse_frame_count(const char *text, unsigned *frames);
+
+/* Parse one complete positive decimal duration whose millisecond conversion
+ * remains finite. On failure, leave the caller's output unchanged. */
+bool zdemo_parse_seconds(const char *text, double *seconds);
 
 /* Deterministic starting state for a canvas of the given size. */
 void zdemo_world_init(struct zdemo_world *world, uint32_t width,

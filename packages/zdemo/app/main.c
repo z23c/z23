@@ -19,6 +19,7 @@
 
 #include "zdemo/zdemo.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -109,29 +110,42 @@ struct zdemo_options {
 	int show_help;
 };
 
-static void zdemo_parse_options(int argc, char **argv,
-				 struct zdemo_options *opts)
+static int zdemo_parse_options(int argc, char **argv,
+				struct zdemo_options *opts)
 {
 	memset(opts, 0, sizeof(*opts));
 	opts->print_every_frame = 1;
 	for (int i = 1; i < argc; i++) {
 		const char *arg = argv[i];
 		if (strncmp(arg, "--frames=", 9) == 0) {
-			opts->frames = (unsigned)strtoul(arg + 9, NULL, 10);
+			if (!zdemo_parse_frame_count(arg + 9, &opts->frames)) {
+				(void)fprintf(stderr,
+					      "zdemo: invalid --frames value '%s': "
+					      "expected an integer from 1 to %u\n",
+					      arg + 9, UINT_MAX);
+				return -1;
+			}
 		} else if (strncmp(arg, "--seconds=", 10) == 0) {
-			opts->seconds = strtod(arg + 10, NULL);
+			if (!zdemo_parse_seconds(arg + 10, &opts->seconds)) {
+				(void)fprintf(stderr,
+					      "zdemo: invalid --seconds value '%s': "
+					      "expected a finite positive decimal\n",
+					      arg + 10);
+				return -1;
+			}
 		} else if (strcmp(arg, "--quiet") == 0) {
 			opts->print_every_frame = 0;
 		} else if (strcmp(arg, "--help") == 0) {
 			opts->show_help = 1;
-			return;
+			return 0;
 		} else {
 			(void)fprintf(stderr, "zdemo: unknown option %s\n",
 				      arg);
 			opts->show_help = 1;
-			return;
+			return 0;
 		}
 	}
+	return 0;
 }
 
 /* ── headless self-test ──────────────────────────────────────────────
@@ -323,7 +337,8 @@ static void zdemo_print_usage(void)
 int main(int argc, char **argv)
 {
 	struct zdemo_options opts;
-	zdemo_parse_options(argc, argv, &opts);
+	if (zdemo_parse_options(argc, argv, &opts) != 0)
+		return 2;
 	if (opts.show_help) {
 		zdemo_print_usage();
 		return 2;

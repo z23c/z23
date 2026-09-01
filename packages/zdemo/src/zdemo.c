@@ -1,9 +1,13 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: zdemo's frame painter. No windowing API appears in this file, so
- * the headless self-test exercises exactly what a windowed run draws. */
+ * Purpose: zdemo's reusable option validation and frame painter. No windowing
+ * API appears here, so the headless test exercises the shared component. */
 
 #include "zdemo/zdemo.h"
 
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Two palette stops the background gradient travels between, in the same
@@ -33,6 +37,79 @@ static uint8_t zdemo_clamp_channel(int v)
 	if (v > 255)
 		return 255;
 	return (uint8_t)v;
+}
+
+static bool zdemo_ascii_digit(char c)
+{
+	return c >= '0' && c <= '9';
+}
+
+static bool zdemo_decimal_syntax(const char *text)
+{
+	const char *p = text;
+	bool has_digit = false;
+
+	if (*p == '+' || *p == '-')
+		p++;
+	while (zdemo_ascii_digit(*p)) {
+		has_digit = true;
+		p++;
+	}
+	if (*p == '.') {
+		p++;
+		while (zdemo_ascii_digit(*p)) {
+			has_digit = true;
+			p++;
+		}
+	}
+	if (!has_digit)
+		return false;
+	if (*p == 'e' || *p == 'E') {
+		p++;
+		if (*p == '+' || *p == '-')
+			p++;
+		if (!zdemo_ascii_digit(*p))
+			return false;
+		while (zdemo_ascii_digit(*p))
+			p++;
+	}
+	return *p == '\0';
+}
+
+bool zdemo_parse_frame_count(const char *text, unsigned *frames)
+{
+	unsigned value = 0;
+
+	if (text == NULL || frames == NULL || *text == '\0')
+		return false;
+	for (const char *p = text; *p != '\0'; p++) {
+		if (!zdemo_ascii_digit(*p))
+			return false;
+		const unsigned digit = (unsigned)(*p - '0');
+		if (value > (UINT_MAX - digit) / 10u)
+			return false;
+		value = value * 10u + digit;
+	}
+	if (value == 0u)
+		return false;
+	*frames = value;
+	return true;
+}
+
+bool zdemo_parse_seconds(const char *text, double *seconds)
+{
+	char *end = NULL;
+	double value;
+
+	if (text == NULL || seconds == NULL || !zdemo_decimal_syntax(text))
+		return false;
+	errno = 0;
+	value = strtod(text, &end);
+	if (end == text || *end != '\0' || errno == ERANGE || !isfinite(value) ||
+	    value <= 0.0 || !isfinite(value * 1000.0))
+		return false;
+	*seconds = value;
+	return true;
 }
 
 void zdemo_world_init(struct zdemo_world *world, uint32_t width,

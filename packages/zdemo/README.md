@@ -36,11 +36,16 @@ WindowServer still proves the frame code runs. The run fails if the
 animation does not move (identical digests) or the canvas is not
 opaque.
 
+`N` must be a complete decimal integer in the range `1..UINT_MAX`. `S`
+must be a complete, finite, positive decimal duration whose conversion to
+milliseconds remains finite. Invalid, overflowing, and underflowing values
+exit with status 2 before window creation.
+
 ## Layout
 
-- `include/zdemo/zdemo.h` — canvas, bounce state, painter API
-- `src/zdemo.c` — the painter; no windowing API, deterministic in its
-  inputs
+- `include/zdemo/zdemo.h` — option validation, canvas, bounce state, painter API
+- `src/zdemo.c` — option parsers and painter; no windowing API, deterministic
+  in their inputs
 - `app/main.c` — RGFW driver plus the headless self-test mode
 
 The per-host link inputs (Cocoa frameworks, X11-at-runtime, Win32) live
@@ -54,7 +59,7 @@ whole journey, with this host's measured latencies, is
 On a macOS host nothing but the Apple command-line tools is needed:
 
 ```sh
-cc -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+cc -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror -pedantic \
     -Ipackages/zdemo/include -Ivendor/rgfw \
     packages/zdemo/src/zdemo.c packages/zdemo/app/main.c \
     -framework Cocoa -framework CoreGraphics \

@@ -218,6 +218,70 @@ make lint-fast
 make check-windows-cross-syntax
 ```
 
+## Specialist continuation and application proof
+
+Two specialists continued from focus root
+`8822303e6653fdd7cf2762e06fb6b95a422a6068b1815c1c6bf0f5e828824dc1`.
+The code specialist claimed `app/main.c`, changed only that path in the
+contained candidate, and reported PROVED after a strict build, 16 invalid
+argument cases, and valid headless execution. The proof specialist claimed the
+existing package test surface, changed nothing, and reported INCOMPLETE: the
+declared KAT explicitly excluded the app/window translation unit, so it could
+not observe CLI parsing or window creation. The two specialists produced no
+write collision.
+
+| Measurement | Code specialist | Proof specialist | Combined observation |
+|---|---:|---:|---:|
+| Changed paths | 1 | 0 | 1, no collision |
+| Files opened | 4 | 10 | agent-reported; unique union not measured |
+| Context bytes | 26,944 | 51,847 | 78,791 agent-reported bytes |
+| Tool calls | 10 | 14 | 24 |
+| Duplicate actions | 0 | 2 | 2 |
+| Retries | 0 | 2 | 2 |
+| Elapsed | 179,953 ms | 156,409 ms | wall-clock overlap not instrumented |
+| Result | PROVED | INCOMPLETE | complementary evidence |
+
+The first independent production compile disproved part of the code report:
+strict C23 compilation without `_POSIX_C_SOURCE=200809L` could not see the
+existing POSIX clock declarations. Repeating with that feature-test macro
+passed. This counterexample is retained because the report's compile claim was
+too broad even though its parser behavior was correct.
+
+The retained implementation moved the two bounded numeric parsers into the
+package's reusable source and header instead of leaving them private to the
+application. The existing package-anatomy KAT now tests complete syntax,
+conversion overflow and underflow, the frame-count bound, milliseconds
+overflow, null inputs, unchanged outputs on failure, and valid decimal forms.
+The application calls those exact functions and returns 2 on failure before
+the window dispatch expression.
+
+An instruction check found a separate fresh-checkout failure: the tracked
+package README said `make zdemo`, but the tracked GUI application list omitted
+`zdemo`, so the promised rule did not exist. Registering the existing tracked
+package made the generated two-translation-unit build path real and reused the
+same Linux, macOS, and Windows host seams as the other GUI applications.
+
+The production binary then rejected 19 malformed, overflowing, or
+underflowing argument cases with exit status 2 and no RGFW, window, or frame
+presentation output. `--frames=2 --quiet` completed its moving-frame proof;
+`--seconds=.001 --help` established that a valid duration parsed before the
+help-only exit. The package-anatomy gate compiled and passed all three tracked
+GUI package KATs. Time to first correct edit remains UNKNOWN because neither
+specialist recorded the timestamp of its first edit; elapsed completion time
+is not substituted for that metric.
+
+Measured at 2026-08-31T23:33:49-04:00
+(2026-09-01T03:33:49+00:00).
+
+- Compiler: `cc (GCC) 16.1.1 20260430`
+- CPU: `AMD Ryzen 7 PRO 8840U w/ Radeon 780M Graphics`
+- Host: Linux x86_64
+
+```bash
+make check-package-anatomy
+make -j"$(getconf _NPROCESSORS_ONLN)" build/bin/zdemo
+```
+
 ## Reproduction
 
 Measured at 2026-08-31T19:09:59-04:00
