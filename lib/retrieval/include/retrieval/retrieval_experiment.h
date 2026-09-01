@@ -15,6 +15,40 @@
 #define ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX 128u
 #define ZCL_RETRIEVAL_EXPERIMENT_ALGORITHM \
     "bm25_prefix_graph_fill_context_guard_v1"
+#define ZCL_RETRIEVAL_PROFILE_VERSION 1u
+#define ZCL_RETRIEVAL_PROFILE_WIRE_BYTES 56u
+#define ZCL_RETRIEVAL_PROFILE_DOMAIN "zcl.retrieval_profile.v1"
+#define ZCL_RETRIEVAL_FEATURE_SNAPSHOT_VERSION 1u
+#define ZCL_RETRIEVAL_FEATURE_SNAPSHOT_DOMAIN \
+    "zcl.retrieval_feature_snapshot.v1"
+#define ZCL_RETRIEVAL_PROFILE_WEIGHT_MAX 10000u
+#define ZCL_RETRIEVAL_PROFILE_GRAPH_DEPTH_MAX 2u
+#define ZCL_RETRIEVAL_PROFILE_WINDOW_MAX 20u
+
+enum zcl_retrieval_profile_feature {
+    ZCL_RETRIEVAL_FEATURE_PATH = 0,
+    ZCL_RETRIEVAL_FEATURE_GROUP = 1,
+    ZCL_RETRIEVAL_FEATURE_PURPOSE = 2,
+    ZCL_RETRIEVAL_FEATURE_SYMBOL_NAME = 3,
+    ZCL_RETRIEVAL_FEATURE_SIGNATURE = 4,
+    ZCL_RETRIEVAL_FEATURE_DOC = 5,
+    ZCL_RETRIEVAL_FEATURE_GUARD = 6,
+    /* Rarity is evidence-owner scoped; pool-local DF is not corpus IDF. */
+    ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY = 7,
+    /* A syntactic reverse reference is not a resolved call. */
+    ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY = 8,
+    ZCL_RETRIEVAL_FEATURE_TEST_PROXIMITY = 9,
+    ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES = 10,
+    ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP = 11,
+    ZCL_RETRIEVAL_FEATURE_PLATFORM_COMPATIBILITY = 12,
+    ZCL_RETRIEVAL_FEATURE_ONTOLOGY_RELATION = 13,
+    ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT = 14,
+};
+
+#define ZCL_RETRIEVAL_FEATURE_BIT(feature_) \
+    ((uint16_t)(UINT16_C(1) << (feature_)))
+#define ZCL_RETRIEVAL_FEATURE_MASK_ALL \
+    ((uint16_t)((UINT16_C(1) << ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT) - 1u))
 
 enum zcl_retrieval_experiment_error {
     ZCL_RETRIEVAL_EXPERIMENT_OK = 0,
@@ -27,6 +61,68 @@ enum zcl_retrieval_experiment_error {
     ZCL_RETRIEVAL_EXPERIMENT_ALIAS,
     ZCL_RETRIEVAL_EXPERIMENT_EVALUATION,
     ZCL_RETRIEVAL_EXPERIMENT_ALLOCATION,
+    ZCL_RETRIEVAL_EXPERIMENT_WIRE_SIZE,
+    ZCL_RETRIEVAL_EXPERIMENT_VERSION,
+    ZCL_RETRIEVAL_EXPERIMENT_RESERVED,
+    ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE,
+};
+
+/* Retrieval owns this pure ranking rule. Generic ZCODE heuristic objects own
+ * applicability, lineage, provenance, evaluators and budgets, and may bind
+ * this object's root as proposed_rule_root. Integer weights are canonical;
+ * no float/libm result enters profile or candidate identity. */
+struct zcl_retrieval_profile_v1 {
+    uint16_t schema_version;
+    uint16_t feature_mask;
+    uint16_t weight_bp[ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT];
+    uint16_t identifier_df_max;
+    uint8_t graph_depth;
+    uint8_t rerank_window;
+    uint8_t top_k;
+    uint8_t reserved;
+    uint16_t reserved_tail;
+    uint64_t context_byte_scale;
+};
+
+/* Feature evidence is caller-owned POD. Each owner must derive its facts from
+ * the exact roots named here before setting a row bit. FALSE and UNOBSERVED
+ * are distinct: an absent bit is never silently scored as zero. */
+struct zcl_retrieval_feature_snapshot_v1 {
+    uint16_t schema_version;
+    uint16_t row_count;
+    bool ranking_complete;
+    uint16_t available_features;
+    uint16_t saturated_features;
+    /* Exact extraction scopes for the two parameterized feature owners. */
+    uint16_t identifier_df_max;
+    uint8_t graph_depth;
+    uint8_t reserved;
+    uint8_t source_root[32];
+    uint8_t codeindex_root[32];
+    uint8_t query_root[32];
+    uint8_t baseline_ranking_root[32];
+    uint8_t extractor_root[32];
+};
+
+struct zcl_retrieval_feature_row_v1 {
+    const char *path;
+    uint64_t context_bytes;
+    uint16_t original_bm25_rank;
+    uint16_t observed_features;
+    /* CONTEXT_BYTES is derived from context_bytes and must remain zero here. */
+    uint16_t feature_bp[ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT];
+};
+
+struct zcl_retrieval_profile_report {
+    size_t ranked_count;
+    size_t changed_positions_at_top;
+    uint64_t baseline_context_bytes_at_top;
+    uint64_t candidate_context_bytes_at_top;
+    bool used_baseline_fallback;
+    bool retained_set_preserved;
+    uint8_t profile_root[32];
+    uint8_t feature_snapshot_root[32];
+    uint8_t candidate_ranking_root[32];
 };
 
 struct zcl_retrieval_experiment_report {
@@ -59,6 +155,32 @@ struct zcl_retrieval_experiment_eval_report {
     bool full_retained_set_preserved;
     bool context_ceiling_preserved;
 };
+
+void zcl_retrieval_profile_init(struct zcl_retrieval_profile_v1 *profile);
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_validate(
+    const struct zcl_retrieval_profile_v1 *profile);
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_serialize(
+    const struct zcl_retrieval_profile_v1 *profile,
+    uint8_t out[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES]);
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_retrieval_profile_v1 *out);
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_root(
+    const struct zcl_retrieval_profile_v1 *profile, uint8_t out[32]);
+
+/* Root and project are relevance-free. They accept no gold, evaluator score,
+ * scope label or acceptance input. Rows are in exact baseline-rank order;
+ * the root commits declared identities and observation bytes but does not
+ * verify that the caller derived them from the declared source. */
+enum zcl_retrieval_experiment_error zcl_retrieval_feature_snapshot_root(
+    const struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    const struct zcl_retrieval_feature_row_v1 *rows, uint8_t out[32]);
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_project(
+    const struct zcl_retrieval_profile_v1 *profile,
+    const struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    const struct zcl_retrieval_feature_row_v1 *rows,
+    size_t *out_indices, size_t out_capacity,
+    struct zcl_retrieval_profile_report *report);
 
 /* Project one candidate ranking from two already-sealed rankings. The only
  * experimental parameter is bm25_prefix (0..5). The first prefix rows are

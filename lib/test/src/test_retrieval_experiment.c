@@ -273,6 +273,405 @@ static int case_post_proposal_evaluation(void)
     return failures;
 }
 
+static void rx_tag_root(uint8_t root[32], uint8_t tag)
+{
+    memset(root, tag, 32u);
+}
+
+static void rx_profile_fixture(struct zcl_retrieval_profile_v1 *profile)
+{
+    zcl_retrieval_profile_init(profile);
+    profile->feature_mask =
+        ZCL_RETRIEVAL_FEATURE_BIT(
+            ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY) |
+        ZCL_RETRIEVAL_FEATURE_BIT(
+            ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY) |
+        ZCL_RETRIEVAL_FEATURE_BIT(ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES);
+    profile->weight_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY] = 100u;
+    profile->weight_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY] = 100u;
+    profile->weight_bp[ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES] = 1u;
+    profile->identifier_df_max = 16u;
+    profile->graph_depth = 1u;
+    profile->rerank_window = 4u;
+    profile->top_k = 2u;
+    profile->context_byte_scale = 100u;
+}
+
+static bool rx_feature_fixture(
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    struct zcl_retrieval_feature_row_v1 rows[4])
+{
+    static const char *const paths[] = {
+        "lib/a.c", "lib/b.c", "lib/c.c", "lib/d.c",
+    };
+    const uint16_t available =
+        ZCL_RETRIEVAL_FEATURE_BIT(
+            ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY) |
+        ZCL_RETRIEVAL_FEATURE_BIT(
+            ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY) |
+        ZCL_RETRIEVAL_FEATURE_BIT(ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES);
+    memset(snapshot, 0, sizeof(*snapshot));
+    memset(rows, 0, 4u * sizeof(*rows));
+    snapshot->schema_version = ZCL_RETRIEVAL_FEATURE_SNAPSHOT_VERSION;
+    snapshot->row_count = 4u;
+    snapshot->ranking_complete = true;
+    snapshot->available_features = available;
+    snapshot->identifier_df_max = 16u;
+    snapshot->graph_depth = 1u;
+    rx_tag_root(snapshot->source_root, 1u);
+    rx_tag_root(snapshot->codeindex_root, 2u);
+    rx_tag_root(snapshot->query_root, 3u);
+    rx_tag_root(snapshot->extractor_root, 4u);
+    struct zcl_retrieval_ranked_file baseline[4];
+    for (size_t i = 0; i < 4u; i++) {
+        rows[i].path = paths[i];
+        rows[i].context_bytes = 100u;
+        rows[i].original_bm25_rank = (uint16_t)i + 1u;
+        rows[i].observed_features = available;
+        baseline[i] = (struct zcl_retrieval_ranked_file){
+            .path = paths[i], .context_bytes = 100u,
+        };
+    }
+    rows[0].feature_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY] = 1000u;
+    rows[1].feature_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY] = 9000u;
+    rows[2].feature_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY] = 8000u;
+    rows[3].feature_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY] = 500u;
+    rows[2].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY] = 500u;
+    return zcl_retrieval_ranked_files_root(
+        baseline, 4u, true, snapshot->baseline_ranking_root);
+}
+
+static bool rx_rebind_baseline(
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    const struct zcl_retrieval_feature_row_v1 rows[4])
+{
+    struct zcl_retrieval_ranked_file baseline[4];
+    for (size_t i = 0; i < 4u; i++)
+        baseline[i] = (struct zcl_retrieval_ranked_file){
+            .path = rows[i].path,
+            .context_bytes = rows[i].context_bytes,
+        };
+    return zcl_retrieval_ranked_files_root(
+        baseline, 4u, snapshot->ranking_complete,
+        snapshot->baseline_ranking_root);
+}
+
+static int case_integer_profile_identity(void)
+{
+    int failures = 0;
+    static const uint8_t expected_root[32] = {
+        0x2d, 0x62, 0xcc, 0x11, 0x71, 0xe1, 0x75, 0xcd,
+        0xf6, 0x29, 0x16, 0x01, 0xf7, 0x49, 0x35, 0xd0,
+        0x8c, 0x69, 0x9d, 0xcc, 0x01, 0xf2, 0xaa, 0xfa,
+        0xc0, 0x19, 0xba, 0xaa, 0xc0, 0x0a, 0x48, 0x3f,
+    };
+    struct zcl_retrieval_profile_v1 profile, parsed;
+    rx_profile_fixture(&profile);
+    uint8_t wire[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES];
+    uint8_t root[32], changed[32];
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_serialize(&profile, wire);
+    RX_CHECK("integer profile has exact fixed wire",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             memcmp(wire, "ZCRPRO1\n", 8u) == 0 &&
+             wire[8] == 1u && wire[9] == 0u &&
+             wire[43] == 4u && wire[44] == 2u &&
+             zcl_retrieval_profile_parse(wire, sizeof(wire), &parsed) ==
+                 ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             memcmp(&profile, &parsed, sizeof(profile)) == 0);
+    bool rooted = zcl_retrieval_profile_root(&profile, root) ==
+        ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("profile root matches fixed canonical SHA3 vector",
+             rooted && memcmp(root, expected_root, sizeof(root)) == 0);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY]++;
+    rooted = rooted && zcl_retrieval_profile_root(&profile, changed) ==
+        ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("active weight changes canonical profile root",
+             rooted && memcmp(root, changed, 32u) != 0);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY]--;
+    profile.identifier_df_max++;
+    rooted = zcl_retrieval_profile_root(&profile, changed) ==
+        ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("rarity scope is root-bound",
+             rooted && memcmp(root, changed, 32u) != 0);
+    profile.identifier_df_max--;
+    profile.graph_depth++;
+    rooted = zcl_retrieval_profile_root(&profile, changed) ==
+        ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("graph depth is root-bound",
+             rooted && memcmp(root, changed, 32u) != 0);
+    profile.graph_depth--;
+    profile.context_byte_scale++;
+    rooted = zcl_retrieval_profile_root(&profile, changed) ==
+        ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("context scale is root-bound",
+             rooted && memcmp(root, changed, 32u) != 0);
+    profile.context_byte_scale--;
+    profile.reserved = 1u;
+    RX_CHECK("reserved profile state is refused",
+             zcl_retrieval_profile_validate(&profile) ==
+                 ZCL_RETRIEVAL_EXPERIMENT_RESERVED);
+    profile.reserved = 0u;
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 1u;
+    RX_CHECK("inactive nonzero weight is refused",
+             zcl_retrieval_profile_validate(&profile) ==
+                 ZCL_RETRIEVAL_EXPERIMENT_PARAMETER);
+    wire[0] ^= 1u;
+    memset(&parsed, 0xa5, sizeof(parsed));
+    RX_CHECK("bad profile magic clears parsed output",
+             zcl_retrieval_profile_parse(wire, sizeof(wire), &parsed) ==
+                 ZCL_RETRIEVAL_EXPERIMENT_WIRE_SIZE &&
+             parsed.schema_version == 0u);
+    return failures;
+}
+
+static int case_feature_snapshot_and_projection(void)
+{
+    int failures = 0;
+    static const uint8_t expected_root[32] = {
+        0x68, 0x99, 0x7d, 0x7d, 0x83, 0xdd, 0x00, 0x45,
+        0x75, 0x55, 0xd4, 0x12, 0x9a, 0xe7, 0xfd, 0xd2,
+        0x63, 0x0f, 0x8f, 0x43, 0x98, 0x65, 0xde, 0x78,
+        0x5c, 0x6e, 0x7f, 0xfb, 0x33, 0x7b, 0x24, 0xba,
+    };
+    struct zcl_retrieval_profile_v1 profile;
+    struct zcl_retrieval_feature_snapshot_v1 snapshot;
+    struct zcl_retrieval_feature_row_v1 rows[4];
+    bool fixture = rx_feature_fixture(&snapshot, rows);
+    rx_profile_fixture(&profile);
+    uint8_t root[32], changed[32];
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_feature_snapshot_root(&snapshot, rows, root);
+    RX_CHECK("snapshot root matches fixed canonical SHA3 vector",
+             fixture && error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             memcmp(root, expected_root, sizeof(root)) == 0);
+    rows[2].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY]++;
+    bool rerooted = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("feature observation changes snapshot root",
+             fixture && error == ZCL_RETRIEVAL_EXPERIMENT_OK && rerooted &&
+             memcmp(root, changed, 32u) != 0);
+    rows[2].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY]--;
+    size_t indices[4] = {99u, 99u, 99u, 99u};
+    struct zcl_retrieval_profile_report report;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    RX_CHECK("integer profile deterministically reranks the bounded window",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             indices[0] == 1u && indices[1] == 2u &&
+             report.changed_positions_at_top == 2u &&
+             report.baseline_context_bytes_at_top == 200u &&
+             report.candidate_context_bytes_at_top == 200u &&
+             report.retained_set_preserved &&
+             !report.used_baseline_fallback);
+
+    const uint16_t package = ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP);
+    profile.feature_mask |= package;
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 7u;
+    snapshot.available_features |= package;
+    for (size_t i = 0; i < 4u; i++) rows[i].observed_features |= package;
+    rows[3].feature_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 10000u;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    RX_CHECK("benefit after context penalty uses checked signed arithmetic",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK && indices[0] == 1u);
+    profile.feature_mask &= (uint16_t)~package;
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 0u;
+    snapshot.available_features &= (uint16_t)~package;
+    for (size_t i = 0; i < 4u; i++) {
+        rows[i].observed_features &= (uint16_t)~package;
+        rows[i].feature_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 0u;
+    }
+
+    struct zcl_retrieval_profile_report sentinel;
+    memset(&sentinel, 0x6d, sizeof(sentinel));
+    report = sentinel;
+    size_t untouched[4] = {91u, 92u, 93u, 94u};
+    const uint16_t graph = ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY);
+    for (size_t i = 0; i < 4u; i++) {
+        rows[i].observed_features &= (uint16_t)~graph;
+        rows[i].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY] = 0;
+    }
+    snapshot.available_features &= (uint16_t)~graph;
+    snapshot.saturated_features = graph;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, untouched, 4u, &report);
+    RX_CHECK("saturated required evidence is incomplete and atomic",
+             error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
+             untouched[0] == 91u &&
+             memcmp(&report, &sentinel, sizeof(report)) == 0);
+
+    (void)rx_feature_fixture(&snapshot, rows);
+    rows[2].context_bytes = 150u;
+    rows[3].context_bytes = 150u;
+    (void)rx_rebind_baseline(&snapshot, rows);
+    rows[2].feature_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY] = 10000u;
+    rows[3].feature_bp[ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY] = 9000u;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    RX_CHECK("byte-ceiling dead end falls back to exact baseline",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             report.used_baseline_fallback &&
+             indices[0] == 0u && indices[1] == 1u);
+    rows[0].path = "../escape.c";
+    RX_CHECK("noncanonical feature path is refused",
+             zcl_retrieval_feature_snapshot_root(&snapshot, rows, changed) ==
+                 ZCL_RETRIEVAL_EXPERIMENT_BINDING);
+    return failures;
+}
+
+static int case_feature_refusals_and_aliases(void)
+{
+    int failures = 0;
+    struct zcl_retrieval_profile_v1 profile;
+    struct zcl_retrieval_feature_snapshot_v1 snapshot;
+    struct zcl_retrieval_feature_row_v1 rows[4];
+    rx_profile_fixture(&profile);
+    bool fixture = rx_feature_fixture(&snapshot, rows);
+    uint8_t root[32], changed[32];
+    bool rooted = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+
+    snapshot.identifier_df_max++;
+    bool rerooted = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    size_t indices[4] = {81u, 82u, 83u, 84u};
+    struct zcl_retrieval_profile_report report, sentinel;
+    memset(&sentinel, 0x6d, sizeof(sentinel));
+    report = sentinel;
+    enum zcl_retrieval_experiment_error error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    RX_CHECK("rarity extraction scope is rooted and must match profile",
+             fixture && rooted && rerooted &&
+             memcmp(root, changed, sizeof(root)) != 0 &&
+             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
+             indices[0] == 81u &&
+             memcmp(&report, &sentinel, sizeof(report)) == 0);
+
+    snapshot.identifier_df_max--;
+    snapshot.graph_depth++;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    RX_CHECK("graph extraction scope must match profile",
+             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
+             indices[0] == 81u &&
+             memcmp(&report, &sentinel, sizeof(report)) == 0);
+
+    (void)rx_feature_fixture(&snapshot, rows);
+    rows[2].original_bm25_rank++;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    RX_CHECK("declared rank must equal exact baseline row order",
+             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
+             indices[0] == 81u &&
+             memcmp(&report, &sentinel, sizeof(report)) == 0);
+
+    (void)rx_feature_fixture(&snapshot, rows);
+    bool complete_rooted = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    snapshot.ranking_complete = false;
+    bool rebound = rx_rebind_baseline(&snapshot, rows);
+    bool incomplete_rooted = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("ranking truth state changes snapshot identity",
+             complete_rooted && rebound && incomplete_rooted &&
+             memcmp(root, changed, sizeof(root)) != 0);
+
+    (void)rx_feature_fixture(&snapshot, rows);
+    const uint16_t graph = ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY);
+    snapshot.available_features &= (uint16_t)~graph;
+    snapshot.graph_depth = 0u;
+    for (size_t i = 0; i < 4u; i++) {
+        rows[i].observed_features &= (uint16_t)~graph;
+        rows[i].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY] = 0u;
+    }
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    bool missing_rooted = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("missing required evidence remains incomplete and atomic",
+             missing_rooted && error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
+             indices[0] == 81u &&
+             memcmp(&report, &sentinel, sizeof(report)) == 0);
+    snapshot.saturated_features = graph;
+    snapshot.graph_depth = 1u;
+    bool saturated_rooted = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report);
+    RX_CHECK("missing and saturated evidence have distinct identities",
+             saturated_rooted && error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
+             memcmp(root, changed, sizeof(root)) != 0 &&
+             indices[0] == 81u &&
+             memcmp(&report, &sentinel, sizeof(report)) == 0);
+
+    (void)rx_feature_fixture(&snapshot, rows);
+    rows[1].path = rows[0].path;
+    RX_CHECK("duplicate snapshot paths are refused",
+             zcl_retrieval_feature_snapshot_root(
+                 &snapshot, rows, changed) ==
+                 ZCL_RETRIEVAL_EXPERIMENT_BINDING);
+    (void)rx_feature_fixture(&snapshot, rows);
+    snapshot.baseline_ranking_root[0] ^= 1u;
+    RX_CHECK("baseline root mismatch is refused",
+             zcl_retrieval_feature_snapshot_root(
+                 &snapshot, rows, changed) ==
+                 ZCL_RETRIEVAL_EXPERIMENT_BINDING);
+
+    union {
+        max_align_t align;
+        char path[64];
+        size_t indices[8];
+    } index_alias;
+    (void)rx_feature_fixture(&snapshot, rows);
+    (void)snprintf(index_alias.path, sizeof(index_alias.path), "lib/a.c");
+    rows[0].path = index_alias.path;
+    rebound = rx_rebind_baseline(&snapshot, rows);
+    report = sentinel;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, index_alias.indices, 4u, &report);
+    RX_CHECK("index output cannot overwrite indirect path storage",
+             rebound && error == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+             strcmp(index_alias.path, "lib/a.c") == 0 &&
+             memcmp(&report, &sentinel, sizeof(report)) == 0);
+
+    union {
+        max_align_t align;
+        char path[256];
+        struct zcl_retrieval_profile_report report;
+    } report_alias;
+    (void)rx_feature_fixture(&snapshot, rows);
+    (void)snprintf(report_alias.path, sizeof(report_alias.path), "lib/a.c");
+    rows[0].path = report_alias.path;
+    rebound = rx_rebind_baseline(&snapshot, rows);
+    indices[0] = 81u;
+    error = zcl_retrieval_profile_project(
+        &profile, &snapshot, rows, indices, 4u, &report_alias.report);
+    RX_CHECK("report output cannot overwrite indirect path storage",
+             rebound && error == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+             strcmp(report_alias.path, "lib/a.c") == 0 &&
+             indices[0] == 81u);
+
+    union {
+        max_align_t align;
+        char path[64];
+        uint8_t root[32];
+    } root_alias;
+    (void)rx_feature_fixture(&snapshot, rows);
+    (void)snprintf(root_alias.path, sizeof(root_alias.path), "lib/a.c");
+    rows[0].path = root_alias.path;
+    rebound = rx_rebind_baseline(&snapshot, rows);
+    error = zcl_retrieval_feature_snapshot_root(
+        &snapshot, rows, root_alias.root);
+    RX_CHECK("snapshot root cannot overwrite indirect path storage",
+             rebound && error == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+             strcmp(root_alias.path, "lib/a.c") == 0);
+    return failures;
+}
+
 int test_retrieval_experiment(void)
 {
     int failures = 0;
@@ -280,5 +679,8 @@ int test_retrieval_experiment(void)
     failures += case_guard_and_refusals();
     failures += case_roots_exclude_gold();
     failures += case_post_proposal_evaluation();
+    failures += case_integer_profile_identity();
+    failures += case_feature_snapshot_and_projection();
+    failures += case_feature_refusals_and_aliases();
     return failures;
 }

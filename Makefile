@@ -6613,6 +6613,7 @@ retrieval-eval: $(RETRIEVAL_EVAL_BIN)
 $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     lib/retrieval/src/retrieval_eval.c \
     lib/retrieval/src/retrieval_experiment.c \
+    lib/retrieval/src/retrieval_profile.c \
     lib/retrieval/include/retrieval/retrieval_experiment.h \
     lib/base/src/safe_alloc.c lib/base/include/base/safe_alloc.h \
     lib/retrieval/include/retrieval/retrieval.h \
@@ -6623,6 +6624,7 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 	    -Ilib/retrieval/include -Ilib/base/include -Ilib/sha3/include -o $@ \
 	    tools/retrieval_eval.c lib/retrieval/src/retrieval_eval.c \
 	    lib/retrieval/src/retrieval_experiment.c \
+	    lib/retrieval/src/retrieval_profile.c \
 	    lib/base/src/safe_alloc.c lib/sha3/src/sha3.c
 
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \

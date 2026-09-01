@@ -3,6 +3,7 @@
 #include "retrieval/retrieval_experiment.h"
 
 #include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 #include "sha3/sha3.h"
 
 #include <limits.h>
@@ -45,6 +46,139 @@ static bool rx_bounded_text(const char *text, size_t maximum,
     if (length == 0 || length > maximum) return false;
     *length_out = length;
     return true;
+}
+
+void zcl_retrieval_profile_init(struct zcl_retrieval_profile_v1 *profile)
+{
+    if (!profile) return;
+    memset(profile, 0, sizeof(*profile));
+    profile->schema_version = ZCL_RETRIEVAL_PROFILE_VERSION;
+}
+
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_validate(
+    const struct zcl_retrieval_profile_v1 *profile)
+{
+    if (!profile) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (profile->schema_version != ZCL_RETRIEVAL_PROFILE_VERSION)
+        return ZCL_RETRIEVAL_EXPERIMENT_VERSION;
+    if (profile->feature_mask == 0 ||
+        (profile->feature_mask & ~ZCL_RETRIEVAL_FEATURE_MASK_ALL) != 0)
+        return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
+    for (size_t i = 0; i < ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT; i++) {
+        bool active = (profile->feature_mask &
+                       ZCL_RETRIEVAL_FEATURE_BIT(i)) != 0;
+        if (active != (profile->weight_bp[i] != 0) ||
+            profile->weight_bp[i] > ZCL_RETRIEVAL_PROFILE_WEIGHT_MAX)
+            return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
+    }
+    bool rarity = (profile->feature_mask & ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY)) != 0;
+    bool graph = (profile->feature_mask & ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY)) != 0;
+    bool context = (profile->feature_mask & ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES)) != 0;
+    if ((rarity && (profile->identifier_df_max == 0 ||
+                    profile->identifier_df_max >
+                        ZCL_RETRIEVAL_EVAL_RANK_MAX)) ||
+        (!rarity && profile->identifier_df_max != 0) ||
+        (graph && (profile->graph_depth == 0 ||
+                   profile->graph_depth >
+                       ZCL_RETRIEVAL_PROFILE_GRAPH_DEPTH_MAX)) ||
+        (!graph && profile->graph_depth != 0) ||
+        (context != (profile->context_byte_scale != 0)) ||
+        profile->rerank_window == 0 ||
+        profile->rerank_window > ZCL_RETRIEVAL_PROFILE_WINDOW_MAX ||
+        profile->top_k == 0 || profile->top_k > ZCL_RETRIEVAL_EXPERIMENT_TOP ||
+        profile->top_k > profile->rerank_window)
+        return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
+    if (profile->reserved != 0 || profile->reserved_tail != 0)
+        return ZCL_RETRIEVAL_EXPERIMENT_RESERVED;
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_serialize(
+    const struct zcl_retrieval_profile_v1 *profile,
+    uint8_t out[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES])
+{
+    static const uint8_t magic[8] = {'Z','C','R','P','R','O','1','\n'};
+    if (!profile || !out) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (rx_memory_overlaps(profile, sizeof(*profile), out,
+                           ZCL_RETRIEVAL_PROFILE_WIRE_BYTES))
+        return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_validate(profile);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    uint8_t wire[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES] = {0};
+    memcpy(wire, magic, sizeof(magic));
+    zcl_write_u16_le(wire + 8u, profile->schema_version);
+    zcl_write_u16_le(wire + 10u, profile->feature_mask);
+    for (size_t i = 0; i < ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT; i++)
+        zcl_write_u16_le(wire + 12u + i * 2u, profile->weight_bp[i]);
+    zcl_write_u16_le(wire + 40u, profile->identifier_df_max);
+    wire[42] = profile->graph_depth;
+    wire[43] = profile->rerank_window;
+    wire[44] = profile->top_k;
+    wire[45] = profile->reserved;
+    zcl_write_u16_le(wire + 46u, profile->reserved_tail);
+    zcl_write_u64_le(wire + 48u, profile->context_byte_scale);
+    memcpy(out, wire, sizeof(wire));
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_retrieval_profile_v1 *out)
+{
+    static const uint8_t magic[8] = {'Z','C','R','P','R','O','1','\n'};
+    if (!wire || !out) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (rx_memory_overlaps(wire, wire_len, out, sizeof(*out)))
+        return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    if (wire_len != ZCL_RETRIEVAL_PROFILE_WIRE_BYTES) {
+        memset(out, 0, sizeof(*out));
+        return ZCL_RETRIEVAL_EXPERIMENT_WIRE_SIZE;
+    }
+    struct zcl_retrieval_profile_v1 profile = {0};
+    if (memcmp(wire, magic, sizeof(magic)) != 0) {
+        memset(out, 0, sizeof(*out));
+        return ZCL_RETRIEVAL_EXPERIMENT_WIRE_SIZE;
+    }
+    profile.schema_version = zcl_read_u16_le(wire + 8u);
+    profile.feature_mask = zcl_read_u16_le(wire + 10u);
+    for (size_t i = 0; i < ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT; i++)
+        profile.weight_bp[i] = zcl_read_u16_le(wire + 12u + i * 2u);
+    profile.identifier_df_max = zcl_read_u16_le(wire + 40u);
+    profile.graph_depth = wire[42];
+    profile.rerank_window = wire[43];
+    profile.top_k = wire[44];
+    profile.reserved = wire[45];
+    profile.reserved_tail = zcl_read_u16_le(wire + 46u);
+    profile.context_byte_scale = zcl_read_u64_le(wire + 48u);
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_validate(&profile);
+    if (error == ZCL_RETRIEVAL_EXPERIMENT_OK) *out = profile;
+    else memset(out, 0, sizeof(*out));
+    return error;
+}
+
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_root(
+    const struct zcl_retrieval_profile_v1 *profile, uint8_t out[32])
+{
+    if (!profile || !out) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (rx_memory_overlaps(profile, sizeof(*profile), out, 32u))
+        return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    uint8_t wire[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES];
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_serialize(profile, wire);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    struct sha3_256_ctx sha;
+    static const char domain[] = ZCL_RETRIEVAL_PROFILE_DOMAIN;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, wire, sizeof(wire));
+    uint8_t root[32];
+    sha3_256_finalize(&sha, root);
+    memcpy(out, root, sizeof(root));
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
 static bool rx_sum_top(const struct zcl_retrieval_ranked_file *rows,
@@ -388,6 +522,14 @@ const char *zcl_retrieval_experiment_error_string(
         return "maintained evaluator refused projected tasks";
     case ZCL_RETRIEVAL_EXPERIMENT_ALLOCATION:
         return "candidate workspace allocation failed";
+    case ZCL_RETRIEVAL_EXPERIMENT_WIRE_SIZE:
+        return "profile wire size or magic mismatch";
+    case ZCL_RETRIEVAL_EXPERIMENT_VERSION:
+        return "profile or feature snapshot version mismatch";
+    case ZCL_RETRIEVAL_EXPERIMENT_RESERVED:
+        return "reserved profile field is nonzero";
+    case ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE:
+        return "required feature evidence is unavailable or saturated";
     }
     return "unknown retrieval experiment error";
 }

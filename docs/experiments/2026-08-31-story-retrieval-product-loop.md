@@ -201,3 +201,40 @@ while slightly reducing projected five-file context. The representative
 product request selects one reusable symbol in 252 milliseconds. Exact-parent
 batch latency, incomplete baseline rankings, absent wrong-scope labels, and
 unmeasured compiler/cache behavior remain explicit constraints on acceptance.
+
+## Bounded heuristic continuation
+
+The maintained retrieval experiment now defines a canonical integer
+`retrieval_profile.v1` rule and a caller-supplied feature snapshot that commits
+a declared source root. The profile can weight fourteen named dimensions
+without placing floating-point scores in object or ranking identity. It
+reorders only a bounded baseline window,
+preserves the retained candidate set, and falls back to the exact baseline if
+its chosen top rows cannot satisfy the baseline context-byte ceiling.
+The current baseline is still produced by floating-point BM25. Cross-host
+baseline and candidate-root equality therefore remain `UNOBSERVED`; the
+integer profile does not promote the existing scorer into canonical evidence.
+
+Feature availability is a caller-owned, root-committed observation, not
+verified evidence at this seam and not a default. The initial public seam can
+represent path, group, purpose, symbol-name, signature, documentation, guard,
+evidence-owner-scoped identifier rarity, bounded syntactic graph proximity,
+test proximity, context cost, package ownership, platform compatibility, and
+ontology relations. A missing or saturated required dimension makes the
+projection `INCOMPLETE`; it is never imputed as zero. The current BM25 story
+document still flattens its seven lexical fields, and the present graph arm
+observes only pool-local rarity and one-hop syntactic reverse references.
+Package, platform, test-proximity, and ontology owners do not yet emit exact
+rows for this experiment. Those dimensions therefore remain unobserved until
+their owners provide source-generation-bound evidence that a later evaluator
+actually verifies.
+
+This profile is only a relevance-free proposed rule. The existing generic
+ZCODE heuristic object owns applicability, lineage, evaluator, provenance,
+and budget roots and may bind the profile root; neither the profile nor its
+feature snapshot can score itself, admit evidence, select work, retain a
+heuristic, change production retrieval, or authorize acceptance. The known
+nine-task corpus remains exploratory because it informed the existing graph
+arm. Any retained profile still requires a preregistered chronological
+holdout and independent replication. This projection API neither validates
+that chronology nor enforces or observes replication.
