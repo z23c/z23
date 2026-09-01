@@ -208,6 +208,10 @@ ZCL_ZERO_SHA256 = 00000000000000000000000000000000000000000000000000000000000000
 # Tracked reference apps.  User-local scaffolded apps append via config/gui_apps.mk.
 GUI_APPS := zhello ball zdemo
 -include config/gui_apps.mk
+# A user-local app can later graduate into the tracked reference set while an
+# older checkout registration remains in the ignored file.  Generate each
+# rule family once so that promotion cannot produce recipe overrides.
+GUI_APPS := $(sort $(GUI_APPS))
 # Five goals per GUI app: run, headless selftest, clean, .app bundle, and the
 # bare binary path. The binary is spelled `build/bin/…` literally because
 # BIN_DIR is defined further down, after this list is consulted.
