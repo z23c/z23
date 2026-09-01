@@ -88,6 +88,14 @@
  * exhausted and is disabled outright by ZCL_RPC_TIMEOUT_MS=0. */
 #define RPC_HTTP_SOCKET_TIMEOUT_SEC 5
 
+/* A listening socket is not a cancellation primitive on Windows.  In
+ * particular, closesocket() in the shutdown thread is not guaranteed to wake
+ * a blocking accept() already running in another thread.  Keep accept behind
+ * a short readiness wait so g_running is the cross-platform cancellation
+ * authority and an idle listener leaves promptly even when Winsock does not
+ * interrupt that accept. */
+#define RPC_HTTP_ACCEPT_POLL_MS 250
+
 static platform_socket_t g_listen_fd = PLATFORM_SOCKET_INVALID;
 static const struct rpc_table *g_table = NULL;
 static pthread_t g_listen_thread;
@@ -920,14 +928,46 @@ static void *rpc_worker_thread_fn(void *arg)
     return NULL;
 }
 
+static bool rpc_listener_ready(platform_socket_t listener,
+                               const char *label)
+{
+    platform_socket_pollfd pfd = {
+        .fd = listener,
+        .events = PLATFORM_SOCKET_POLL_READ,
+        .revents = 0,
+    };
+    int ready = platform_socket_poll(&pfd, 1, RPC_HTTP_ACCEPT_POLL_MS);
+    if (ready > 0 && (pfd.revents & PLATFORM_SOCKET_POLL_READ) != 0)
+        return true;
+    if (ready < 0 && g_running &&
+        !platform_socket_error_interrupted(platform_socket_last_error())) {
+        fprintf(stderr, "RPC %s listener poll failed: socket_error=%d\n",
+                label, platform_socket_last_error());
+    } else if (ready > 0 && g_running &&
+               (pfd.revents & (PLATFORM_SOCKET_POLL_ERROR |
+                                PLATFORM_SOCKET_POLL_HANGUP)) != 0) {
+        fprintf(stderr, "RPC %s listener poll failed: revents=0x%x\n",
+                label, (unsigned int)(unsigned short)pfd.revents);
+    }
+    return false;
+}
+
 static void *listen_thread_fn(void *arg)
 {
     (void)arg;
+    /* Captured before start returns and never rewritten.  Shutdown may close
+     * the underlying socket, but it does not race this thread on the global
+     * descriptor variable. */
+    const platform_socket_t listener = g_listen_fd;
     while (g_running) {
+        if (!rpc_listener_ready(listener, "plain"))
+            continue;
+        if (!g_running)
+            break;
         struct sockaddr_in client_addr;
         size_t addr_len = sizeof(client_addr);
         platform_socket_t client_fd = platform_socket_accept(
-            g_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
+            listener, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_rpc_listen_liveness, -1);
         if (client_fd == PLATFORM_SOCKET_INVALID) {
             if (g_running)
@@ -957,11 +997,16 @@ static void *listen_thread_fn(void *arg)
 static void *tls_listen_thread_fn(void *arg)
 {
     (void)arg;
+    const platform_socket_t listener = g_tls_listen_fd;
     while (g_running) {
+        if (!rpc_listener_ready(listener, "TLS"))
+            continue;
+        if (!g_running)
+            break;
         struct sockaddr_in client_addr;
         size_t addr_len = sizeof(client_addr);
         platform_socket_t client_fd = platform_socket_accept(
-            g_tls_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
+            listener, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_rpc_tls_liveness, -1);
         if (client_fd == PLATFORM_SOCKET_INVALID) {
             if (g_running)

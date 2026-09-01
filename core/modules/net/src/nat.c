@@ -19,6 +19,7 @@
 #endif
 #include "net/nat.h"
 #include "platform/socket_compat.h"
+#include "platform/time_compat.h"
 #include "util/log_json.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,10 @@
 #endif
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+
+#define NAT_PMP_WAIT_MS  2000
+#define NAT_SSDP_WAIT_MS 3000
+#define NAT_HTTP_BUDGET_MS 3000
 
 static int nat_send_datagram(platform_socket_t socket, const void *data,
                              size_t size, const struct sockaddr *address,
@@ -173,9 +178,6 @@ static bool natpmp_send_recv(const uint8_t gw[4], const void *req, size_t req_le
     if (sock == PLATFORM_SOCKET_INVALID)
         LOG_FAIL("nat", "UDP socket creation failed");
 
-    /* Non-blocking with timeout */
-    (void)platform_socket_set_receive_timeout(sock, 2000);
-
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -188,7 +190,12 @@ static bool natpmp_send_recv(const uint8_t gw[4], const void *req, size_t req_le
         LOG_FAIL("nat", "NAT-PMP sendto gateway failed");
     }
 
-    int n = nat_receive_datagram(sock, resp, resp_max);
+    /* SO_RCVTIMEO is not a portable operation deadline: Winsock may leave a
+     * blocking recvfrom live during shutdown even after another thread has
+     * requested stop.  Readiness wait first, then consume the already-ready
+     * datagram. */
+    int ready = platform_socket_wait_readable(sock, NAT_PMP_WAIT_MS);
+    int n = ready > 0 ? nat_receive_datagram(sock, resp, resp_max) : -1;
     platform_socket_close(sock);
 
     if (n < 8) return false;
@@ -280,8 +287,7 @@ static char *http_request(const char *host, uint16_t port, const char *method,
     if (sock == PLATFORM_SOCKET_INVALID)
         LOG_NULL("nat", "TCP socket creation failed");
 
-    (void)platform_socket_set_receive_timeout(sock, 3000);
-    (void)platform_socket_set_send_timeout(sock, 3000);
+    (void)platform_socket_set_send_timeout(sock, NAT_HTTP_BUDGET_MS);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -292,8 +298,28 @@ static char *http_request(const char *host, uint16_t port, const char *method,
         LOG_NULL("nat", "HTTP host is not a numeric IPv4 address");
     }
 
-    if (platform_socket_connect(sock, (struct sockaddr *)&addr,
-                                sizeof(addr)) != 0) {
+    /* A blocking connect is not bounded by SO_SNDTIMEO on Winsock.  Drive it
+     * nonblocking and accept success only after the socket becomes writable
+     * with SO_ERROR=0 inside the same explicit budget. */
+    bool connected = platform_socket_set_nonblocking(sock, true);
+    if (connected) {
+        int rc = platform_socket_connect(sock, (struct sockaddr *)&addr,
+                                         sizeof(addr));
+        if (rc != 0) {
+            int error = platform_socket_last_error();
+            connected = platform_socket_error_in_progress(error) &&
+                        platform_socket_wait_writable(
+                            sock, NAT_HTTP_BUDGET_MS) > 0;
+            if (connected) {
+                int pending = 0;
+                connected = platform_socket_pending_error(sock, &pending) == 0 &&
+                            pending == 0;
+            }
+        }
+    }
+    if (connected)
+        connected = platform_socket_set_nonblocking(sock, false);
+    if (!connected) {
         platform_socket_close(sock);
         LOG_NULL("nat", "HTTP connect to %s:%u failed", host, port);
     }
@@ -328,7 +354,16 @@ static char *http_request(const char *host, uint16_t port, const char *method,
     size_t cap = 8192, len = 0;
     char *buf = zcl_malloc(cap, "nat_recv_buf");
     if (!buf) { platform_socket_close(sock); LOG_NULL("nat", "malloc failed for HTTP recv buffer: %zu bytes", cap); }
+    const int64_t receive_deadline_ms =
+        platform_time_monotonic_ms() + NAT_HTTP_BUDGET_MS;
     for (;;) {
+        int64_t remaining_ms =
+            receive_deadline_ms - platform_time_monotonic_ms();
+        if (remaining_ms <= 0)
+            break;
+        int wait_ms = remaining_ms > INT_MAX ? INT_MAX : (int)remaining_ms;
+        if (platform_socket_wait_readable(sock, wait_ms) <= 0)
+            break;
         int n = platform_socket_receive(sock, buf + len, cap - len - 1);
         if (n <= 0) break;
         len += (size_t)n;
@@ -505,8 +540,6 @@ static bool upnp_discover_and_map(uint16_t external, uint16_t internal,
     if (sock == PLATFORM_SOCKET_INVALID)
         LOG_FAIL("nat", "SSDP socket creation failed");
 
-    (void)platform_socket_set_receive_timeout(sock, 3000);
-
     struct sockaddr_in mcast;
     memset(&mcast, 0, sizeof(mcast));
     mcast.sin_family = AF_INET;
@@ -518,7 +551,8 @@ static bool upnp_discover_and_map(uint16_t external, uint16_t internal,
                             (struct sockaddr *)&mcast, sizeof(mcast));
 
     char buf[4096];
-    int n = nat_receive_datagram(sock, buf, sizeof(buf) - 1);
+    int ready = platform_socket_wait_readable(sock, NAT_SSDP_WAIT_MS);
+    int n = ready > 0 ? nat_receive_datagram(sock, buf, sizeof(buf) - 1) : -1;
     platform_socket_close(sock);
     if (n <= 0) LOG_FAIL("nat", "SSDP M-SEARCH got no response");
     buf[n] = 0;

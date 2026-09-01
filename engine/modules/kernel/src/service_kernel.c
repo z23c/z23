@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "kernel/service_kernel.h"
+#include <stdio.h>
 #include <string.h>
 
 static bool service_spec_valid(const struct zcl_service_spec *spec)
@@ -118,8 +119,18 @@ void zcl_service_kernel_stop_all(struct zcl_service_kernel *kernel)
     for (size_t i = kernel->count; i > 0; i--) {
         struct zcl_service_entry *entry = &kernel->services[i - 1];
         if (entry->state == ZCL_SERVICE_STARTED) {
+            /* Stop hooks may join threads or wait on a subsystem lock.  Name
+             * the hook before entering it and after it returns so a shutdown
+             * watchdog report identifies the exact service that held the
+             * stage, rather than only the kernel-wide stage name.  stderr is
+             * intentional: it remains visible when stdout is block-buffered
+             * by a Windows service or redirected sync lane. */
+            fprintf(stderr, "[service-kernel] stopping service=%s\n",
+                    entry->spec.name);
             entry->spec.stop(entry->spec.ctx);
             entry->state = ZCL_SERVICE_STOPPED;
+            fprintf(stderr, "[service-kernel] stopped service=%s\n",
+                    entry->spec.name);
         }
     }
 
@@ -163,4 +174,3 @@ bool zcl_service_kernel_status(const struct zcl_service_kernel *kernel,
         return entry->spec.status(entry->spec.ctx, out);
     return true;
 }
-

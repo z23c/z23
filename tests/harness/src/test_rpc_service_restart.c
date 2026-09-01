@@ -38,6 +38,7 @@
 
 #include "test/test_core.h"
 #include "platform/socket_compat.h"
+#include "platform/time_compat.h"
 #include "config/boot.h"
 #include "config/boot_internal.h"
 #include "kernel/service_kernel.h"
@@ -264,7 +265,18 @@ int test_rpc_service_restart(void)
 
     /* The stop edge. Without the re-arm the node would come back up still
      * claiming ready while it re-initialises. */
+    int64_t stop_started_ms = platform_time_monotonic_ms();
     zcl_service_kernel_stop_all(&kernel);
+    int64_t stop_elapsed_ms =
+        platform_time_monotonic_ms() - stop_started_ms;
+
+    printf("rpc_service_restart: idle listener stop is bounded... ");
+    if (stop_elapsed_ms >= 0 && stop_elapsed_ms < 3000) {
+        printf("OK (%lldms)\n", (long long)stop_elapsed_ms);
+    } else {
+        printf("FAIL (%lldms)\n", (long long)stop_elapsed_ms);
+        failures++;
+    }
 
     printf("rpc_service_restart: stop removes cookie and port authority... ");
     if (access(cookie_path, F_OK) != 0 && access(rpcport_path, F_OK) != 0) {

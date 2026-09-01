@@ -22,10 +22,10 @@
  *
  * Shutdown is stop() + join(): the renewal wait is a condition variable,
  * so a waiting worker wakes instantly. An in-flight probe cannot be
- * cancelled — nat.c has no cancel seam — but every socket operation in it
- * carries a 2-3 s timeout, bounding a full probe at roughly 25 s worst
- * case; the join waits that out rather than detaching (this tree never
- * abandons an owned thread).
+ * cancelled — nat.c has no cancel seam — but every socket operation uses an
+ * explicit readiness/connect deadline and each HTTP exchange has one total
+ * budget (not a per-read timeout that a trickling gateway can renew). This
+ * bounds the full probe below the join budget; the worker is never detached.
  *
  * Test seams: probe_fn / regtest_fn are injectable; run_once() performs a
  * single probe + publish + schedule step synchronously, and
@@ -46,8 +46,8 @@
 #define PSW_RENEW_SECS         3600   /* half-life re-arm */
 #define PSW_BACKOFF_INIT_SECS  60
 #define PSW_BACKOFF_MAX_SECS   900
-/* Documented join bound: exceeds the ~25 s worst-case in-flight probe
- * (every nat.c socket op carries a 2-3 s timeout). On expiry the join
+/* Documented join bound: exceeds the bounded in-flight probe (every nat.c
+ * network step carries a 2-3 s absolute wait budget). On expiry the join
  * logs the straggler and waits it out — ownership is never abandoned. */
 #define PSW_JOIN_TIMEOUT_SECS  30
 
