@@ -634,6 +634,7 @@ void syncsvc_collect_needed_blocks(struct sync_needed_blocks *result,
 bool syncsvc_should_disconnect_stale_header_peer(const struct p2p_node *node,
                                                   int our_height,
                                                   int best_header_height,
+                                                  int64_t last_body_time,
                                                   int64_t now_seconds)
 {
     if (!node) return false;
@@ -658,6 +659,19 @@ bool syncsvc_should_disconnect_stale_header_peer(const struct p2p_node *node,
      * per-stall-cycle rotation, and the peer-floor conditions. */
     if (node->starting_height > 0 &&
         best_header_height >= node->starting_height - 144)
+        return false;
+
+    /* Header and body usefulness are independent during deep IBD. A peer
+     * can have no new header for HEADER_STALL_TIMEOUT_SECS while steadily
+     * serving the millions of already-known block bodies below that header
+     * frontier. Rule A used to disconnect exactly those productive peers
+     * every two minutes, collapsing the body pipeline back to handshake and
+     * request-window warm-up. Keep recent body sources here; Rules C and D
+     * still evict never-serving or delivered-then-dark peers on the body
+     * evidence they own. A future timestamp is treated as recent rather than
+     * turning clock skew into peer churn. */
+    if (last_body_time > 0 &&
+        now_seconds - last_body_time < SYNC_BODY_STALL_TIMEOUT_SECS)
         return false;
 
     /* If peer has never delivered useful headers, use connection time. */

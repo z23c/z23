@@ -177,6 +177,8 @@ bool vcs_zcode_work_request_seal(
     const uint8_t secret[32], const uint8_t pubkey[32]);
 bool vcs_zcode_work_request_verify(
     const struct vcs_zcode_work_request_v1 *request);
+bool vcs_zcode_work_request_id(
+    const struct vcs_zcode_work_request_v1 *request, uint8_t out[32]);
 bool vcs_zcode_work_cancel_seal(
     struct vcs_zcode_work_cancel_v1 *cancel,
     const uint8_t secret[32], const uint8_t pubkey[32]);

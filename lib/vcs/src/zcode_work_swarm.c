@@ -345,6 +345,13 @@ bool vcs_zcode_work_request_verify(const struct vcs_zcode_work_request_v1 *r)
                id, r->signature, r->requester_pubkey, r->requester_pubkey);
 }
 
+bool vcs_zcode_work_request_id(
+    const struct vcs_zcode_work_request_v1 *request, uint8_t out[32])
+{
+    return request && out && vcs_zcode_work_request_verify(request) &&
+           zcws_signed_id(VCS_ZCODE_WORK_SWARM_REQUEST, request, out);
+}
+
 bool vcs_zcode_work_cancel_seal(
     struct vcs_zcode_work_cancel_v1 *c,
     const uint8_t secret[32], const uint8_t pubkey[32])
