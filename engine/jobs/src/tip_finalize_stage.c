@@ -746,7 +746,11 @@ job_result_t tip_finalize_stage_step_once(void)
      * the honest 0 (unchanged served value) and the advance path takes over. */
     if (!reducer_frontier_provable_tip_is_published())
         tf_refresh_provable_tip(db);
-    tip_finalize_reconcile_visible_cursor_body(db, g_stage, g_ms);
+    int64_t tf_visible_t0 = platform_time_monotonic_us();
+    if (tip_finalize_reconcile_visible_cursor_body(db, g_stage, g_ms))
+        reducer_stage_profile_observe_us(
+            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_POST_FINALIZE_US,
+            (uint64_t)(platform_time_monotonic_us() - tf_visible_t0));
     job_result_t r = stage_run_once(g_stage, db);
     progress_store_tx_unlock();
     return r;

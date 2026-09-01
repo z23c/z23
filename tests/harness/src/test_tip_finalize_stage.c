@@ -7,6 +7,7 @@
 #include "json/json.h"
 #include "jobs/tip_finalize_stage.h"
 #include "jobs/reducer_frontier.h"
+#include "platform/private_directory.h"
 #include "util/boot_scan.h"
 /* src-private: the current-tip-missing observe helper under test (Task A #11). */
 #include "../../../engine/jobs/src/tip_finalize_stage_observe.h"
@@ -64,9 +65,13 @@ struct synth_chain_tf {
 
 static int mkdir_p_tf(const char *p)
 {
+#if defined(_WIN32)
+    return platform_private_directory_ensure(p) ? 0 : -1;
+#else
     if (mkdir(p, 0700) == 0) return 0;
     if (errno == EEXIST) return 0;
     return -1;
+#endif
 }
 
 static void synthetic_hash(struct uint256 *out, int h)

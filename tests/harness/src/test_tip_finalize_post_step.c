@@ -29,6 +29,7 @@
 #include "chain/chain.h"
 #include "config/runtime.h"
 #include "controllers/blockchain_controller.h"
+#include "platform/private_directory.h"
 #include "validation/process_block.h" /* g_body_pull_active */
 
 #include <errno.h>
@@ -42,6 +43,8 @@
 extern void tip_finalize_run_post_finalize(struct block_index *pindex_new);
 extern bool tip_finalize_run_mempool_reconcile(struct block_index *pindex_new);
 extern bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new);
+extern bool tip_finalize_run_wallet_mempool_reconcile(
+    struct block_index *pindex_new);
 
 static uint64_t tp_mmr_leaves(void)
 {
@@ -65,9 +68,13 @@ static uint64_t tp_mmb_leaves(void)
 
 static int tp_mkdir_p(const char *p)
 {
+#if defined(_WIN32)
+    return platform_private_directory_ensure(p) ? 0 : -1;
+#else
     if (mkdir(p, 0700) == 0) return 0;
     if (errno == EEXIST) return 0;
     return -1;
+#endif
 }
 
 /* Two-tx block: a minimal coinbase plus a Sapling-v4 tx that carries one
@@ -145,9 +152,7 @@ int test_tip_finalize_post_step(void)
     printf("\n=== tip_finalize_post_step tests ===\n");
 
     char dir[256];
-    test_fmt_tmpdir(dir, sizeof(dir), "tip_post", "main");
-    tp_mkdir_p("./test-tmp");
-    tp_mkdir_p(dir);
+    test_make_tmpdir(dir, sizeof(dir), "tip_post", "main");
     SetDataDir(dir); /* post step resolves the body via GetDataDir() */
     char netdir[512];
     GetDataDir(true, netdir, sizeof(netdir));
@@ -279,6 +284,26 @@ int test_tip_finalize_post_step(void)
              w->best_block_height == 1);
     TP_CHECK("wallet-only: MMR unchanged", tp_mmr_leaves() == mmr0);
     TP_CHECK("wallet-only: MMB unchanged", tp_mmb_leaves() == mmb0);
+
+    /* Ordinary late-visible catch-up needs both idempotent subsets. Pin the
+     * combined one-body-view entry point so the IBD optimization cannot omit
+     * either effect or accidentally replay append-only commitments. */
+    w->sapling_notes[0].spent = false;
+    w->best_block_height = 0;
+    TP_CHECK("combined: re-arm confirmed transaction",
+             tp_pool_add(&blk.vtx[1]));
+    mmr0 = tp_mmr_leaves();
+    mmb0 = tp_mmb_leaves();
+    TP_CHECK("combined: body reconcile succeeded",
+             tip_finalize_run_wallet_mempool_reconcile(&bi));
+    TP_CHECK("combined: confirmed tx removed",
+             !tx_mempool_exists(&g_tp_pool, &blk.vtx[1].hash));
+    TP_CHECK("combined: nullifier marked spent",
+             w->sapling_notes[0].spent == true);
+    TP_CHECK("combined: wallet height advanced",
+             w->best_block_height == 1);
+    TP_CHECK("combined: MMR unchanged", tp_mmr_leaves() == mmr0);
+    TP_CHECK("combined: MMB unchanged", tp_mmb_leaves() == mmb0);
 
     /* ── Negative: HAVE_DATA absent → diagnosed skip, zero effects ── */
     w->sapling_notes[0].spent = false;

@@ -4,6 +4,8 @@
 #ifndef ZCL_JOBS_TIP_FINALIZE_VISIBLE_BODY_H
 #define ZCL_JOBS_TIP_FINALIZE_VISIBLE_BODY_H
 
+#include <stdbool.h>
+
 struct block_index;
 struct main_state;
 struct sqlite3;
@@ -11,7 +13,7 @@ struct stage;
 
 const char *tip_finalize_precondition_block_reason(
     const struct block_index *bi);
-void tip_finalize_reconcile_visible_cursor_body(
+bool tip_finalize_reconcile_visible_cursor_body(
     struct sqlite3 *db, struct stage *stage, struct main_state *ms);
 void tip_finalize_visible_body_reset(void);
 

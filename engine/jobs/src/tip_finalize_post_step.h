@@ -41,6 +41,13 @@ bool tip_finalize_run_mempool_reconcile(struct block_index *pindex_new);
  * block. Used by late-visible-body reconciliation; never appends MMR/MMB. */
 bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new);
 
+/* Apply the idempotent wallet plus coins-cache/mempool effects while holding
+ * one acquired body view. Late-visible-body catch-up needs both subsets; doing
+ * two independent acquisitions made the ordinary IBD path parse/read the same
+ * block twice on a cache miss. Never appends MMR/MMB. */
+bool tip_finalize_run_wallet_mempool_reconcile(
+    struct block_index *pindex_new);
+
 /* ── SHA3 golden-window corroboration tripwire (OBSERVE-ONLY) ─────────────
  *
  * At every 1000-block window boundary the post-finalize step recomputes the

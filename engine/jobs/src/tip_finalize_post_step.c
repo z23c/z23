@@ -345,6 +345,37 @@ bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new)
     return true;
 }
 
+bool tip_finalize_run_wallet_mempool_reconcile(
+    struct block_index *pindex_new)
+{
+    if (!pindex_new)
+        return false;
+    char datadir[2048];
+    GetDataDir(true, datadir, sizeof(datadir));
+    struct block owned;
+    struct block_parse_handle handle;
+    const struct block *blk = NULL;
+    bool borrowed = false;
+    if (!stage_acquire_block_view(&owned, &handle, &blk, &borrowed,
+                                  pindex_new, pindex_new->nHeight, datadir,
+                                  NULL, NULL)) {
+        LOG_WARN("tip_finalize",
+                 "wallet/mempool reconcile skipped h=%d have_data=%d: "
+                 "body unreadable",
+                 pindex_new->nHeight,
+                 (pindex_new->nStatus & BLOCK_HAVE_DATA) ? 1 : 0);
+        block_free(&owned);
+        return false;
+    }
+
+    /* Preserve the established late-visible ordering: invalidate the coins
+     * cache/remove confirmed mempool entries before publishing wallet state. */
+    tip_finalize_reconcile_block(pindex_new, blk);
+    tip_finalize_reconcile_wallet_body(pindex_new, blk);
+    stage_release_block_view(&owned, &handle, borrowed);
+    return true;
+}
+
 void tip_finalize_run_post_finalize(struct block_index *pindex_new)
 {
     if (!pindex_new)
