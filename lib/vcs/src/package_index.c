@@ -19,6 +19,7 @@
 struct vcs_package_index {
     struct vcs_package_index_entry *entries;
     size_t count;
+    size_t skipped_count;
 };
 
 /* Project one parsed manifest wire (read from <zcode_dir>/manifests/<root>)
@@ -119,6 +120,7 @@ struct vcs_package_index *vcs_package_index_build(const char *zcode_dir)
     }
     index->entries = NULL;
     index->count = 0;
+    index->skipped_count = skipped;
     if (count > 0) {
         index->entries = zcl_malloc(sizeof(*index->entries) * count,
                                     "index_entries");
@@ -177,6 +179,11 @@ void vcs_package_index_free(struct vcs_package_index *index)
 size_t vcs_package_index_count(const struct vcs_package_index *index)
 {
     return index ? index->count : 0;
+}
+
+size_t vcs_package_index_skipped_count(const struct vcs_package_index *index)
+{
+    return index ? index->skipped_count : 0;
 }
 
 const struct vcs_package_index_entry *vcs_package_index_at(

@@ -726,7 +726,8 @@ static bool zwork_compose_selected_lock(
     return true;
 }
 
-static bool zwork_reuse_render_unavailable(struct json_value *plan,
+static bool zwork_reuse_render_unavailable(const char *license,
+                                           struct json_value *plan,
                                            struct json_value *expert)
 {
     json_init(plan); json_set_object(plan);
@@ -738,6 +739,11 @@ static bool zwork_reuse_render_unavailable(struct json_value *plan,
     bool ok = json_push_kv_str(plan, "stage", "Finding reusable software") &&
         json_push_kv_str(plan, "search_status", "datadir_not_provided") &&
         json_push_kv_str(plan, "network_discovery", "not_requested") &&
+        json_push_kv_str(plan, "license_filter", license ? license : "") &&
+        json_push_kv_bool(plan, "license_filter_applied", false) &&
+        json_push_kv_str(plan, "license_filter_scope", "not_applied") &&
+        json_push_kv_bool(plan, "dependency_closure_filtered", false) &&
+        json_push_kv_bool(plan, "new_source_license_constrained", false) &&
         json_push_kv(plan, "reused", &selected) &&
         json_push_kv(plan, "available_after_use", &pending) &&
         json_push_kv_int(plan, "packages_scanned", 0) &&
@@ -747,26 +753,87 @@ static bool zwork_reuse_render_unavailable(struct json_value *plan,
     json_free(&roots); json_free(&pending); json_free(&selected); return ok;
 }
 
+/* The package lifecycle resolves a root to the highest-sequence release;
+ * equal sequences use its deterministic publisher/release ordering.  Reuse
+ * may hand that root to zcode.use only when the displayed index row is the
+ * exact envelope that the lifecycle will resolve again. */
+static bool zwork_reuse_is_lifecycle_release(
+    const struct vcs_package_index *index,
+    const struct vcs_package_index_entry *candidate)
+{
+    const struct vcs_package_index_entry *best = NULL;
+    size_t count = vcs_package_index_count(index);
+    for (size_t i = 0; i < count; i++) {
+        const struct vcs_package_index_entry *entry =
+            vcs_package_index_at(index, i);
+        if (strcmp(entry->package_root_hex,
+                   candidate->package_root_hex) != 0)
+            continue;
+        if (!best || entry->publisher_sequence > best->publisher_sequence ||
+            (entry->publisher_sequence == best->publisher_sequence &&
+             (strcmp(entry->publisher_hex, best->publisher_hex) < 0 ||
+              (strcmp(entry->publisher_hex, best->publisher_hex) == 0 &&
+               strcmp(entry->release_id_hex, best->release_id_hex) < 0))))
+            best = entry;
+    }
+    return best && strcmp(best->release_id_hex,
+                          candidate->release_id_hex) == 0;
+}
+
 static bool zwork_reuse_render(
     const struct zcl_command_request *request, const char *goal,
+    const char *license,
     struct vcs_package_prepared *prepared, struct json_value *plan_json,
     struct json_value *expert_json, bool *complete_out, bool *composed_out,
+    bool *filter_truncated_out, bool *filter_incomplete_out,
+    size_t *indexed_out, size_t *matched_out, size_t *skipped_out,
+    char selected_root[65],
     char prepare_ref[VCS_PACKAGE_RELEASE_NAME_MAX +
                      VCS_PACKAGE_RELEASE_SEMVER_MAX + 2u])
 {
     *complete_out = false;
     *composed_out = false;
+    *filter_truncated_out = false;
+    *filter_incomplete_out = false;
+    *indexed_out = 0;
+    *matched_out = 0;
+    *skipped_out = 0;
+    selected_root[0] = '\0';
     prepare_ref[0] = '\0';
     const char *datadir = zwork_reuse_datadir(request);
-    if (!datadir) return zwork_reuse_render_unavailable(plan_json, expert_json);
+    if (!datadir)
+        return zwork_reuse_render_unavailable(license, plan_json, expert_json);
     char zcode_dir[ZWORK_PATH_MAX];
     int n = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
     if (n <= 0 || (size_t)n >= sizeof(zcode_dir)) return false;
     struct vcs_package_index *index = vcs_package_index_build(zcode_dir);
     if (!index) return false;
     size_t indexed = vcs_package_index_count(index);
-    size_t count = indexed < VCS_PACKAGE_REUSE_MAX_INPUTS
-        ? indexed : VCS_PACKAGE_REUSE_MAX_INPUTS;
+    size_t skipped = vcs_package_index_skipped_count(index);
+    *indexed_out = indexed;
+    *skipped_out = skipped;
+    if (license && skipped > 0) {
+        *filter_incomplete_out = true;
+        vcs_package_index_free(index);
+        return false;
+    }
+    const struct vcs_package_index_entry
+        *filtered[VCS_PACKAGE_REUSE_MAX_INPUTS];
+    size_t matched = indexed;
+    if (license) {
+        const struct vcs_package_search search = {.license = license};
+        matched = vcs_package_index_search(
+            index, &search, filtered, VCS_PACKAGE_REUSE_MAX_INPUTS);
+        *matched_out = matched;
+        if (matched > VCS_PACKAGE_REUSE_MAX_INPUTS) {
+            *filter_truncated_out = true;
+            vcs_package_index_free(index);
+            return false;
+        }
+    }
+    if (!license) *matched_out = matched;
+    size_t count = matched < VCS_PACKAGE_REUSE_MAX_INPUTS
+        ? matched : VCS_PACKAGE_REUSE_MAX_INPUTS;
     struct zwork_reuse_candidate *candidates = zcl_calloc(
         count ? count : 1u, sizeof(*candidates), "zcode.work.reuse_candidates");
     struct vcs_package_recipe *recipes = zcl_calloc(
@@ -778,15 +845,19 @@ static bool zwork_reuse_render(
         vcs_package_index_free(index); return false;
     }
     size_t invalid_installs = 0;
+    size_t superseded_releases = 0;
     for (size_t i = 0; i < count; i++) {
         const struct vcs_package_index_entry *entry =
-            vcs_package_index_at(index, i);
+            license ? filtered[i] : vcs_package_index_at(index, i);
         candidates[i].input.package = entry;
         candidates[i].input.locked = zwork_lock_has_root(
             &prepared->lock, entry->package_root_hex);
         vcs_package_recipe_init(&recipes[i]);
-        bool recipe_ok = zwork_reuse_load_facts(zcode_dir, entry,
-                                                 &recipes[i]);
+        bool lifecycle_release = zwork_reuse_is_lifecycle_release(
+            index, entry);
+        if (!lifecycle_release) superseded_releases++;
+        bool recipe_ok = lifecycle_release && zwork_reuse_load_facts(
+            zcode_dir, entry, &recipes[i]);
         candidates[i].input.compatible = recipe_ok;
         if (recipe_ok) {
             for (size_t h = 0; h < recipes[i].public_headers.count &&
@@ -822,6 +893,7 @@ static bool zwork_reuse_render(
         json_init(&root); json_set_object(&root);
         ok = json_push_kv_str(&row, "name", input->package->name) &&
             json_push_kv_str(&row, "semver", input->package->semver) &&
+            json_push_kv_str(&row, "license", input->package->license) &&
             json_push_kv_bool(&row, "installed", input->installed) &&
             json_push_kv_str(
                 &row, "composition",
@@ -847,12 +919,15 @@ static bool zwork_reuse_render(
             json_push_kv_int(&root, "score", reuse.selected[i].score) &&
             json_push_back(&roots, &root);
         if (ok && usable_now) ready_count++;
+        if (ok && selected_root[0] == '\0')
+            (void)snprintf(selected_root, 65, "%s",
+                           input->package->package_root_hex);
         if (ok && !usable_now && prepare_ref[0] == '\0') {
             int rn = snprintf(
                 prepare_ref,
                 VCS_PACKAGE_RELEASE_NAME_MAX +
                     VCS_PACKAGE_RELEASE_SEMVER_MAX + 2u,
-                "%s@%s", input->package->name, input->package->semver);
+                "%s", input->package->package_root_hex);
             if (rn <= 0 ||
                 rn >= (int)(VCS_PACKAGE_RELEASE_NAME_MAX +
                             VCS_PACKAGE_RELEASE_SEMVER_MAX + 2u))
@@ -864,8 +939,21 @@ static bool zwork_reuse_render(
         prepare_ref[0] = '\0';
     if (ok) {
         ok = json_push_kv_str(plan_json, "stage", "Finding reusable software") &&
-            json_push_kv_str(plan_json, "search_status", "complete") &&
+            json_push_kv_str(
+                plan_json, "search_status",
+                skipped ? "bounded_projection_incomplete" : "complete") &&
             json_push_kv_str(plan_json, "network_discovery", "not_requested") &&
+            json_push_kv_str(plan_json, "license_filter",
+                             license ? license : "") &&
+            json_push_kv_bool(plan_json, "license_filter_applied",
+                              license != NULL) &&
+            json_push_kv_str(
+                plan_json, "license_filter_scope",
+                license ? "selected_top_level_release_only" : "none") &&
+            json_push_kv_bool(plan_json, "dependency_closure_filtered",
+                              false) &&
+            json_push_kv_bool(plan_json, "new_source_license_constrained",
+                              false) &&
             json_push_kv_str(plan_json, "disposition",
                 vcs_package_reuse_disposition_string(reuse.disposition)) &&
             json_push_kv(plan_json, "reused", &selected) &&
@@ -878,16 +966,29 @@ static bool zwork_reuse_render(
                     : reuse.new_code_required ? goal : "none") &&
             json_push_kv_str(expert_json, "search_order",
                              "installed_then_local_metadata") &&
+            json_push_kv_str(expert_json, "license_filter",
+                             license ? license : "") &&
+            json_push_kv_str(expert_json, "license_filter_basis",
+                             "persisted_release_exact_spdx") &&
+            json_push_kv_int(expert_json, "packages_indexed",
+                             (int64_t)indexed) &&
+            json_push_kv_int(expert_json, "package_release_rows_skipped",
+                             (int64_t)skipped) &&
+            json_push_kv_int(expert_json, "packages_filter_matched",
+                             (int64_t)matched) &&
             json_push_kv_int(expert_json, "packages_scanned",
                              (int64_t)reuse.packages_scanned) &&
             json_push_kv_bool(expert_json, "packages_truncated",
-                              indexed > count) &&
+                              matched > count) &&
             json_push_kv_int(expert_json, "compatible_matches",
                              (int64_t)reuse.compatible_matches) &&
             json_push_kv_int(expert_json, "incompatible_matches",
                              (int64_t)reuse.incompatible_matches) &&
             json_push_kv_int(expert_json, "invalid_installs",
                              (int64_t)invalid_installs) &&
+            json_push_kv_int(expert_json,
+                             "lifecycle_nonselected_release_rows",
+                             (int64_t)superseded_releases) &&
             json_push_kv_int(expert_json, "composed_dependency_roots",
                              (int64_t)composed_packages) &&
             json_push_kv(expert_json, "selected_roots", &roots);
@@ -1051,6 +1152,9 @@ void zcl_native_handle_zcode_work_start(
     bool details = zwork_bool(request->input, "details");
     const char *profile_name = zwork_str(request->input, "profile");
     const char *exact_symbol = zwork_str(request->input, "context_symbol");
+    const struct json_value *license_value = request->input
+        ? json_get(request->input, "license") : NULL;
+    const char *license = zwork_str(request->input, "license");
     int64_t max_cpu_seconds = zwork_int(
         request->input, "max_cpu_seconds", 600);
     if (!profile_name || !profile_name[0]) profile_name = "standard";
@@ -1058,6 +1162,14 @@ void zcl_native_handle_zcode_work_start(
         max_cpu_seconds <= 0 || max_cpu_seconds > 600) {
         zwork_fail(reply, "MISSING_INPUT", "validate",
                    "work start requires workspace/goal and max_cpu_seconds in 1..600",
+                   false, false);
+        return;
+    }
+    if (license_value &&
+        (!license || !license[0] ||
+         !vcs_package_release_license_allowed(license))) {
+        zwork_fail(reply, "BAD_LICENSE_FILTER", "validate",
+                   "license must be one exact allowlisted SPDX identifier",
                    false, false);
         return;
     }
@@ -1114,13 +1226,45 @@ void zcl_native_handle_zcode_work_start(
     struct json_value reuse_plan, reuse_expert;
     bool reuse_complete = false;
     bool reuse_composed = false;
+    bool reuse_filter_truncated = false;
+    bool reuse_filter_incomplete = false;
+    size_t reuse_packages_indexed = 0;
+    size_t reuse_packages_matched = 0;
+    size_t reuse_packages_skipped = 0;
+    char reuse_selected_root[65];
     char reuse_prepare_ref[VCS_PACKAGE_RELEASE_NAME_MAX +
                            VCS_PACKAGE_RELEASE_SEMVER_MAX + 2u];
-    if (!zwork_reuse_render(request, goal, &prepared, &reuse_plan,
+    if (!zwork_reuse_render(request, goal, license, &prepared, &reuse_plan,
                             &reuse_expert, &reuse_complete,
-                            &reuse_composed, reuse_prepare_ref)) {
-        zwork_fail(reply, "REUSE_PLAN_FAILED", "reuse",
-                   "local package facts could not be ranked", false, false);
+                            &reuse_composed, &reuse_filter_truncated,
+                            &reuse_filter_incomplete,
+                            &reuse_packages_indexed, &reuse_packages_matched,
+                            &reuse_packages_skipped,
+                            reuse_selected_root, reuse_prepare_ref)) {
+        if (reuse_filter_truncated || reuse_filter_incomplete) {
+            (void)json_push_kv_str(&reply->data, "license_filter", license);
+            (void)json_push_kv_int(&reply->data, "packages_indexed",
+                                   (int64_t)reuse_packages_indexed);
+            (void)json_push_kv_int(&reply->data, "packages_filter_matched",
+                                   (int64_t)reuse_packages_matched);
+            (void)json_push_kv_int(&reply->data,
+                                   "package_release_rows_skipped",
+                                   (int64_t)reuse_packages_skipped);
+            (void)json_push_kv_int(&reply->data, "maximum_results",
+                                   VCS_PACKAGE_REUSE_MAX_INPUTS);
+        }
+        zwork_fail(
+            reply,
+            reuse_filter_truncated ? "REUSE_SEARCH_TRUNCATED"
+                : reuse_filter_incomplete ? "REUSE_INDEX_INCOMPLETE"
+                                   : "REUSE_PLAN_FAILED",
+            "reuse",
+            reuse_filter_truncated
+                ? "exact license search exceeded the bounded local result set"
+                : reuse_filter_incomplete
+                    ? "exact license search refused an incomplete local index"
+                : "local package facts could not be ranked",
+            false, false);
         vcs_package_prepared_free(&prepared);
         return;
     }
@@ -1156,20 +1300,10 @@ void zcl_native_handle_zcode_work_start(
         return;
     }
     if (reuse_complete) {
-        const struct json_value *reused = json_get(&reuse_plan, "reused");
-        const struct json_value *selected = reused ? json_at(reused, 0) : NULL;
-        const char *name = selected ? zwork_str(selected, "name") : NULL;
-        const char *semver = selected ? zwork_str(selected, "semver") : NULL;
-        char package_ref[VCS_PACKAGE_RELEASE_NAME_MAX +
-                         VCS_PACKAGE_RELEASE_SEMVER_MAX + 2u];
-        int package_ref_len = name && semver
-            ? snprintf(package_ref, sizeof(package_ref), "%s@%s", name,
-                       semver) : -1;
         struct json_value next_input;
         json_init(&next_input);
-        bool rendered = package_ref_len > 0 &&
-            (size_t)package_ref_len < sizeof(package_ref) &&
-            zwork_use_next_input(request, package_ref, &next_input) &&
+        bool rendered = reuse_selected_root[0] &&
+            zwork_use_next_input(request, reuse_selected_root, &next_input) &&
             json_push_kv_str(&reply->data, "work_id", "") &&
             json_push_kv_str(&reply->data, "goal", goal) &&
             json_push_kv_str(&reply->data, "state", "REUSE_READY") &&

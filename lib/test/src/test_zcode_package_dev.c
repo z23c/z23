@@ -97,6 +97,16 @@ static bool zpd_write(const char *path, const char *text)
     return ok;
 }
 
+static bool zpd_write_bytes(const char *path, const uint8_t *bytes,
+                            size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(bytes, 1, len, f) == len;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
 static char *zpd_read_bounded(const char *path, size_t maximum_bytes)
 {
     struct stat st;
@@ -275,6 +285,69 @@ static bool zpd_fixture(const char *root, bool unknown_key)
     return zpd_write(path, unknown_key
         ? "{\"schema\":1,\"name\":\"zclassic23/fixture\",\"semver\":\"0.1.0-dev.1\",\"language\":\"c23\",\"license\":\"MIT\",\"include_dir\":\"include\",\"source_dir\":\"src\",\"dependencies\":[],\"smuggled\":true}\n"
         : "{\"schema\":1,\"name\":\"zclassic23/fixture\",\"semver\":\"0.1.0-dev.1\",\"language\":\"c23\",\"license\":\"MIT\",\"include_dir\":\"include\",\"source_dir\":\"src\",\"dependencies\":[]}\n");
+}
+
+static bool zpd_reuse_package_fixture(const char *root, const char *license,
+                                      const char *license_text)
+{
+    char path[512], metadata[512];
+    if (!zpd_fixture(root, false)) return false;
+    (void)snprintf(path, sizeof(path), "%s/LICENSE", root);
+    if (!zpd_write(path, license_text)) return false;
+    int n = snprintf(
+        metadata, sizeof(metadata),
+        "{\"schema\":1,\"name\":\"zclassic23/license-choice\","
+        "\"semver\":\"1.0.0\",\"language\":\"c23\",\"license\":\"%s\","
+        "\"include_dir\":\"include\",\"source_dir\":\"src\","
+        "\"dependencies\":[]}\n",
+        license);
+    if (n <= 0 || (size_t)n >= sizeof(metadata)) return false;
+    (void)snprintf(path, sizeof(path), "%s/zcode-package.json", root);
+    return zpd_write(path, metadata);
+}
+
+static bool zpd_store_reuse_release(
+    const char *zcode_dir, secp256k1_context *ctx, const uint8_t secret[32],
+    struct vcs_package_release *release,
+    const struct vcs_package_prepared *prepared)
+{
+    uint8_t release_id[32], signature[64];
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    char hex[65], path[512];
+    if (memcmp(release->package_root, prepared->package_root, 32) != 0 ||
+        memcmp(release->recipe_root, prepared->recipe_root, 32) != 0 ||
+        vcs_package_release_id(release, release_id) != VCS_PACKAGE_RELEASE_OK ||
+        !zpd_signature(ctx, secret, release_id, signature))
+        return false;
+    memcpy(release->signature, signature, sizeof(signature));
+    if (vcs_package_release_verify(release) != VCS_PACKAGE_RELEASE_OK ||
+        vcs_package_release_serialize(release, &wire, &wire_len) !=
+            VCS_PACKAGE_RELEASE_OK)
+        return false;
+    zcl_hex_encode(release_id, sizeof(release_id), hex);
+    int n = snprintf(path, sizeof(path), "%s/releases/%s", zcode_dir, hex);
+    bool ok = n > 0 && (size_t)n < sizeof(path) &&
+        zpd_write_bytes(path, wire, wire_len);
+    free(wire);
+    zcl_hex_encode(prepared->package_root, 32, hex);
+    n = snprintf(path, sizeof(path), "%s/manifests/%s", zcode_dir, hex);
+    ok = ok && n > 0 && (size_t)n < sizeof(path) &&
+        zpd_write_bytes(path, prepared->manifest_wire,
+                        prepared->manifest_wire_len);
+    zcl_hex_encode(prepared->recipe_root, 32, hex);
+    n = snprintf(path, sizeof(path), "%s/recipes/%s", zcode_dir, hex);
+    return ok && n > 0 && (size_t)n < sizeof(path) &&
+        zpd_write_bytes(path, prepared->recipe_wire,
+                        prepared->recipe_wire_len);
+}
+
+static bool zpd_store_reuse_package(
+    const char *zcode_dir, secp256k1_context *ctx, const uint8_t secret[32],
+    struct vcs_package_prepared *prepared)
+{
+    return zpd_store_reuse_release(zcode_dir, ctx, secret,
+                                   &prepared->release, prepared);
 }
 
 static bool zpd_benchmark_project(const char *root, const char *name,
@@ -1581,6 +1654,322 @@ static int zpd_test_reuse_plan(void)
     return failures;
 }
 
+static int zpd_test_work_start_license_filter(
+    secp256k1_context *ctx, const uint8_t secret[32],
+    const uint8_t pubkey[33])
+{
+    int failures = 0;
+    TEST("zcode work start: exact SPDX filter selects one root-bound reuse") {
+        char base[256], zcode_dir[320], path[512];
+        char workspace[256], mit_dir[256], apache_dir[256];
+        (void)snprintf(base, sizeof(base),
+                       "test-tmp/zcode-work-license-%ld", (long)getpid());
+        (void)snprintf(workspace, sizeof(workspace),
+                       "test-tmp/zcode-work-license-target-%ld",
+                       (long)getpid());
+        (void)snprintf(mit_dir, sizeof(mit_dir),
+                       "test-tmp/zcode-work-license-mit-%ld", (long)getpid());
+        (void)snprintf(apache_dir, sizeof(apache_dir),
+                       "test-tmp/zcode-work-license-apache-%ld",
+                       (long)getpid());
+        ZCL_IGNORE_RESULT(zcl_tree_remove(base), "license fixture reset");
+        zpd_fixture_cleanup(workspace);
+        zpd_fixture_cleanup(mit_dir);
+        zpd_fixture_cleanup(apache_dir);
+        ASSERT(platform_directory_create(base, 0700) == 0);
+        (void)snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", base);
+        ASSERT(platform_directory_create(zcode_dir, 0700) == 0);
+        static const char *const store_dirs[] = {
+            "releases", "manifests", "recipes",
+        };
+        for (size_t i = 0; i < sizeof(store_dirs) / sizeof(store_dirs[0]); i++) {
+            (void)snprintf(path, sizeof(path), "%s/%s", zcode_dir,
+                           store_dirs[i]);
+            ASSERT(platform_directory_create(path, 0700) == 0);
+        }
+        ASSERT(zpd_fixture(workspace, false));
+        ASSERT(zpd_reuse_package_fixture(
+            mit_dir, "MIT",
+            "Permission is hereby granted, free of charge\n"));
+        ASSERT(zpd_reuse_package_fixture(
+            apache_dir, "Apache-2.0",
+            "Apache License\nVersion 2.0\n"));
+
+        struct vcs_package_prepare_options options = {
+            .dir = mit_dir, .publisher_sequence = 1,
+            .reward_address = "", .chain_id = "zclassic-main",
+        };
+        memcpy(options.publisher_pubkey, pubkey, 33);
+        struct vcs_package_prepared mit, apache;
+        char detail[256];
+        ASSERT(vcs_package_prepare(&options, &mit, detail,
+                                   sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
+        options.dir = apache_dir;
+        options.publisher_sequence = 2;
+        ASSERT(vcs_package_prepare(&options, &apache, detail,
+                                   sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
+        ASSERT(memcmp(mit.package_root, apache.package_root, 32) != 0);
+        ASSERT(zpd_store_reuse_package(zcode_dir, ctx, secret, &mit));
+        ASSERT(zpd_store_reuse_package(zcode_dir, ctx, secret, &apache));
+        char mit_root[65], apache_root[65];
+        zcl_hex_encode(mit.package_root, 32, mit_root);
+        zcl_hex_encode(apache.package_root, 32, apache_root);
+
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", workspace));
+        ASSERT(json_push_kv_str(
+            &input, "goal", "use zclassic23/license-choice@1.0.0"));
+        ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        ASSERT(json_push_kv_str(&input, "license", "MIT"));
+        ASSERT(json_push_kv_str(&input, "datadir", base));
+        ASSERT(json_push_kv_bool(&input, "details", true));
+        struct zcl_command_request request = {.input = &input};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply,
+                               "zcl.zcode_work_license_filter_test.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "state")),
+                      "REUSE_READY") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "work_id")), "") ==
+               0);
+        const struct json_value *reuse = json_get(&reply.data, "reuse_plan");
+        ASSERT(reuse && strcmp(json_get_str(json_get(
+                          reuse, "license_filter")), "MIT") == 0);
+        ASSERT(json_get_bool(json_get(reuse, "license_filter_applied")));
+        const struct json_value *reused = json_get(reuse, "reused");
+        const struct json_value *selected = reused ? json_at(reused, 0) : NULL;
+        ASSERT(reused && json_size(reused) == 1u && selected);
+        ASSERT(strcmp(json_get_str(json_get(selected, "name")),
+                      "zclassic23/license-choice") == 0);
+        ASSERT(strcmp(json_get_str(json_get(selected, "semver")),
+                      "1.0.0") == 0);
+        ASSERT(strcmp(json_get_str(json_get(selected, "license")), "MIT") ==
+               0);
+        const struct json_value *expert = json_get(&reply.data, "expert");
+        ASSERT(expert);
+        ASSERT(json_get_int(json_get(expert, "packages_indexed")) == 2);
+        ASSERT(json_get_int(json_get(
+                   expert, "packages_filter_matched")) == 1);
+        ASSERT(json_get_int(json_get(expert, "packages_scanned")) == 1);
+        ASSERT(!json_get_bool(json_get(expert, "packages_truncated")));
+        const struct json_value *selected_roots =
+            json_get(expert, "selected_roots");
+        const struct json_value *selected_root = selected_roots
+            ? json_at(selected_roots, 0) : NULL;
+        ASSERT(selected_roots && json_size(selected_roots) == 1u &&
+               selected_root);
+        ASSERT(strcmp(json_get_str(json_get(selected_root, "package_root")),
+                      mit_root) == 0);
+        ASSERT(strcmp(mit_root, apache_root) != 0);
+
+        ASSERT(reply.next_count == 1);
+        ASSERT(strcmp(reply.next[0].command, "zcode.use") == 0);
+        struct json_value next_input;
+        json_init(&next_input);
+        ASSERT(json_read(&next_input, reply.next[0].input_json,
+                         strlen(reply.next[0].input_json)));
+        const char *next_root = json_get_str(json_get(
+            &next_input, "name_or_root"));
+        uint8_t checked_root[32];
+        ASSERT(next_root && strlen(next_root) == 64u &&
+               zcl_hex_decode_lower(next_root, checked_root, 32));
+        ASSERT(strcmp(next_root, mit_root) == 0);
+        ASSERT(strcmp(next_root, apache_root) != 0);
+        ASSERT(strcmp(json_get_str(json_get(&next_input, "datadir")), base) ==
+               0);
+        const struct zcl_command_spec *next_spec =
+            zcl_command_registry_find(zcl_command_catalog(), "zcode.use",
+                                      NULL);
+        char why[160] = {0};
+        ASSERT(next_spec && zcl_command_registry_input_validate(
+            next_spec, &next_input, why, sizeof(why)));
+        (void)snprintf(path, sizeof(path), "%s/.zvcs", workspace);
+        ASSERT(access(path, F_OK) != 0);
+
+        json_free(&next_input);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        vcs_package_prepared_free(&apache);
+        vcs_package_prepared_free(&mit);
+        ASSERT(zcl_tree_remove(base).ok);
+        zpd_fixture_cleanup(apache_dir);
+        zpd_fixture_cleanup(mit_dir);
+        zpd_fixture_cleanup(workspace);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int zpd_test_work_start_license_lifecycle(
+    secp256k1_context *ctx, const uint8_t secret[32],
+    const uint8_t pubkey[33])
+{
+    int failures = 0;
+    TEST("zcode work start: license filter cannot hand off a superseded root") {
+        char base[256], zcode_dir[320], path[512];
+        char package_dir[256], mit_workspace[256], apache_workspace[256];
+        (void)snprintf(base, sizeof(base),
+                       "test-tmp/zcode-work-license-life-%ld",
+                       (long)getpid());
+        (void)snprintf(package_dir, sizeof(package_dir),
+                       "test-tmp/zcode-work-license-life-pkg-%ld",
+                       (long)getpid());
+        (void)snprintf(mit_workspace, sizeof(mit_workspace),
+                       "test-tmp/zcode-work-license-life-mit-%ld",
+                       (long)getpid());
+        (void)snprintf(apache_workspace, sizeof(apache_workspace),
+                       "test-tmp/zcode-work-license-life-apache-%ld",
+                       (long)getpid());
+        ZCL_IGNORE_RESULT(zcl_tree_remove(base), "license lifecycle reset");
+        ZCL_IGNORE_RESULT(zcl_tree_remove(mit_workspace),
+                          "MIT workspace reset");
+        ZCL_IGNORE_RESULT(zcl_tree_remove(apache_workspace),
+                          "Apache workspace reset");
+        zpd_fixture_cleanup(package_dir);
+        ASSERT(platform_directory_create(base, 0700) == 0);
+        (void)snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", base);
+        ASSERT(platform_directory_create(zcode_dir, 0700) == 0);
+        static const char *const store_dirs[] = {
+            "releases", "manifests", "recipes",
+        };
+        for (size_t i = 0; i < sizeof(store_dirs) / sizeof(store_dirs[0]); i++) {
+            (void)snprintf(path, sizeof(path), "%s/%s", zcode_dir,
+                           store_dirs[i]);
+            ASSERT(platform_directory_create(path, 0700) == 0);
+        }
+        ASSERT(zpd_fixture(mit_workspace, false));
+        ASSERT(zpd_fixture(apache_workspace, false));
+        ASSERT(zpd_reuse_package_fixture(
+            package_dir, "MIT",
+            "Permission is hereby granted, free of charge\n"));
+
+        struct vcs_package_prepare_options options = {
+            .dir = package_dir, .publisher_sequence = 1,
+            .reward_address = "", .chain_id = "zclassic-main",
+        };
+        memcpy(options.publisher_pubkey, pubkey, 33);
+        struct vcs_package_prepared prepared;
+        char detail[256];
+        ASSERT(vcs_package_prepare(&options, &prepared, detail,
+                                   sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
+        ASSERT(zpd_store_reuse_package(zcode_dir, ctx, secret, &prepared));
+        struct vcs_package_release apache = prepared.release;
+        apache.publisher_sequence = 2;
+        ASSERT(snprintf(apache.license, sizeof(apache.license),
+                        "Apache-2.0") == 10);
+        memset(apache.signature, 0, sizeof(apache.signature));
+        ASSERT(zpd_store_reuse_release(zcode_dir, ctx, secret, &apache,
+                                       &prepared));
+        char package_root[65];
+        zcl_hex_encode(prepared.package_root, 32, package_root);
+
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", mit_workspace));
+        ASSERT(json_push_kv_str(
+            &input, "goal", "use zclassic23/license-choice@1.0.0"));
+        ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        ASSERT(json_push_kv_str(&input, "license", "MIT"));
+        ASSERT(json_push_kv_str(&input, "datadir", base));
+        ASSERT(json_push_kv_bool(&input, "details", true));
+        struct zcl_command_request request = {.input = &input};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply,
+                               "zcl.zcode_work_license_lifecycle_mit.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const char *state = json_get_str(json_get(&reply.data, "state"));
+        ASSERT(state && strcmp(state, "REUSE_READY") != 0);
+        const struct json_value *reuse = json_get(&reply.data, "reuse_plan");
+        ASSERT(reuse);
+        ASSERT(strcmp(json_get_str(json_get(reuse, "license_filter_scope")),
+                      "selected_top_level_release_only") == 0);
+        ASSERT(!json_get_bool(json_get(
+            reuse, "dependency_closure_filtered")));
+        ASSERT(!json_get_bool(json_get(
+            reuse, "new_source_license_constrained")));
+        const struct json_value *reused = json_get(reuse, "reused");
+        ASSERT(reused && json_size(reused) == 0u);
+        const struct json_value *expert = json_get(&reply.data, "expert");
+        const struct json_value *reuse_expert = expert
+            ? json_get(expert, "reuse") : NULL;
+        const struct json_value *selected_roots = reuse_expert
+            ? json_get(reuse_expert, "selected_roots") : NULL;
+        ASSERT(reuse_expert && selected_roots &&
+               json_size(selected_roots) == 0u);
+        ASSERT(json_get_int(json_get(
+                   reuse_expert,
+                   "lifecycle_nonselected_release_rows")) == 1);
+        for (size_t i = 0; i < reply.next_count; i++) {
+            ASSERT(strcmp(reply.next[i].command, "zcode.use") != 0);
+            ASSERT(!reply.next[i].input_json ||
+                   strstr(reply.next[i].input_json, package_root) == NULL);
+        }
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", apache_workspace));
+        ASSERT(json_push_kv_str(
+            &input, "goal", "use zclassic23/license-choice@1.0.0"));
+        ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        ASSERT(json_push_kv_str(&input, "license", "Apache-2.0"));
+        ASSERT(json_push_kv_str(&input, "datadir", base));
+        ASSERT(json_push_kv_bool(&input, "details", true));
+        request.input = &input;
+        zcl_command_reply_init(
+            &reply, "zcl.zcode_work_license_lifecycle_apache.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strcmp(json_get_str(json_get(&reply.data, "state")),
+                      "REUSE_READY") == 0);
+        reuse = json_get(&reply.data, "reuse_plan");
+        ASSERT(reuse);
+        ASSERT(strcmp(json_get_str(json_get(reuse, "license_filter_scope")),
+                      "selected_top_level_release_only") == 0);
+        ASSERT(!json_get_bool(json_get(
+            reuse, "dependency_closure_filtered")));
+        ASSERT(!json_get_bool(json_get(
+            reuse, "new_source_license_constrained")));
+        reused = json_get(reuse, "reused");
+        const struct json_value *selected = reused ? json_at(reused, 0) : NULL;
+        ASSERT(reused && json_size(reused) == 1u && selected);
+        ASSERT(strcmp(json_get_str(json_get(selected, "license")),
+                      "Apache-2.0") == 0);
+        expert = json_get(&reply.data, "expert");
+        selected_roots = expert ? json_get(expert, "selected_roots") : NULL;
+        const struct json_value *selected_root = selected_roots
+            ? json_at(selected_roots, 0) : NULL;
+        ASSERT(expert && selected_roots && json_size(selected_roots) == 1u &&
+               selected_root);
+        ASSERT(json_get_int(json_get(
+                   expert, "lifecycle_nonselected_release_rows")) == 0);
+        ASSERT(strcmp(json_get_str(json_get(selected_root, "package_root")),
+                      package_root) == 0);
+        ASSERT(reply.next_count == 1u);
+        ASSERT(strcmp(reply.next[0].command, "zcode.use") == 0);
+        struct json_value next_input;
+        json_init(&next_input);
+        ASSERT(json_read(&next_input, reply.next[0].input_json,
+                         strlen(reply.next[0].input_json)));
+        ASSERT(strcmp(json_get_str(json_get(&next_input, "name_or_root")),
+                      package_root) == 0);
+
+        json_free(&next_input);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        vcs_package_prepared_free(&prepared);
+        ASSERT(zcl_tree_remove(base).ok);
+        ASSERT(zcl_tree_remove(mit_workspace).ok);
+        ASSERT(zcl_tree_remove(apache_workspace).ok);
+        zpd_fixture_cleanup(package_dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int zpd_test_work_start_package_bounds(void)
 {
     int failures = 0;
@@ -1636,6 +2025,7 @@ static int zpd_test_work_start_package_bounds(void)
         ASSERT(json_push_kv_str(&input, "workspace", root));
         ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
         ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        ASSERT(json_push_kv_str(&input, "license", "MIT"));
         request.input = &input;
         zcl_command_reply_init(&reply, "zcl.zcode_work_start_build_test.v1");
         zcl_native_handle_zcode_work_start(&request, &reply);
@@ -1644,6 +2034,41 @@ static int zpd_test_work_start_package_bounds(void)
                       "AWAITING_CANDIDATE") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "next_safe_command")),
                       "zcode work run") == 0);
+        const struct json_value *reuse = json_get(&reply.data, "reuse_plan");
+        ASSERT(reuse && strcmp(json_get_str(json_get(
+                          reuse, "license_filter")), "MIT") == 0);
+        ASSERT(!json_get_bool(json_get(reuse, "license_filter_applied")));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        static const char *const invalid_licenses[] = {"", "mit"};
+        for (size_t i = 0;
+             i < sizeof(invalid_licenses) / sizeof(invalid_licenses[0]); i++) {
+            json_init(&input); json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, "workspace", root));
+            ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
+            ASSERT(json_push_kv_str(&input, "license", invalid_licenses[i]));
+            request.input = &input;
+            zcl_command_reply_init(
+                &reply, "zcl.zcode_work_start_bad_license_test.v1");
+            zcl_native_handle_zcode_work_start(&request, &reply);
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+            ASSERT(strcmp(reply.error.code, "BAD_LICENSE_FILTER") == 0);
+            ASSERT(!reply.error.mutated);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", root));
+        ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
+        ASSERT(json_push_kv_int(&input, "license", 1));
+        request.input = &input;
+        zcl_command_reply_init(
+            &reply, "zcl.zcode_work_start_bad_license_type_test.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(strcmp(reply.error.code, "BAD_LICENSE_FILTER") == 0);
+        ASSERT(!reply.error.mutated);
         zcl_command_reply_free(&reply);
         json_free(&input);
         zpd_fixture_cleanup(root);
@@ -3319,6 +3744,9 @@ int test_zcode_package_dev(void)
                    zpd_test_project_inspect() +
                    zpd_test_project_init() +
                    zpd_test_reuse_plan() +
+                   zpd_test_work_start_license_filter(ctx, secret, pubkey) +
+                   zpd_test_work_start_license_lifecycle(ctx, secret,
+                                                         pubkey) +
                    zpd_test_work_start_package_bounds() +
                    zpd_test_work_toolchain() +
                    zpd_test_commons_join_front_doors() +
