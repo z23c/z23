@@ -159,7 +159,7 @@ hot-swap activation, and consensus snapshot export that requires `O_TMPFILE`.
 The directory watcher now uses kqueue on macOS. `make macos-acceptance`
 validates the closed matrix in `engine/composition/platform/macos_capabilities.def`, unions
 its capability evidence with the eight declarative required baseline groups,
-and executes the resulting 38 exact registered groups. It refuses any
+and executes the resulting 39 exact registered groups. It refuses any
 self-skip or unobserved eligible environment. After that verdict it uses the
 canonical release cutter to create a temporary four-member `darwin-arm64`
 runtime, verifies the macOS 14 floor, Mach-O dependency boundary and closed

@@ -113,14 +113,19 @@ done
 
 # Reducer support shapes are nested beneath the one-writer room. A reducer
 # source appearing in a generic engine shape would create an ambiguous home.
-if awk -F/ '
-    $1=="engine" && $2!="reducer" && ($0 ~ /(^|\/)reducer([^/]*)(\/|\.)/) {
+reducer_scan_rc=0
+awk -F/ '
+    $1=="engine" && $2!="reducer" && ($0 ~ /(^|\/)reducer([^\/]*)(\/|\.)/) {
         print; bad=1
     }
     END {exit bad ? 0 : 1}
-' "$tracked" > "$actual"; then
+' "$tracked" > "$actual" || reducer_scan_rc=$?
+if (( reducer_scan_rc == 0 )); then
     echo "check-architecture-tree: reducer-owned path escaped engine/reducer/:" >&2
     cat "$actual" >&2
+    fail=1
+elif (( reducer_scan_rc != 1 )); then
+    echo "check-architecture-tree: reducer ownership scan failed (rc=$reducer_scan_rc)" >&2
     fail=1
 fi
 

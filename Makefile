@@ -8502,7 +8502,7 @@ $(BIN_DIR)/bench_fresh_sync: tools/bench_fresh_sync.c \
 # chain split, not a win.
 SIMD_BENCH_SRCS = tools/simd_bench.c \
 	core/modules/crypto/src/chacha20poly1305.c \
-	core/modules/crypto/src/sha256.c platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c \
+	core/modules/crypto/src/sha256.c core/modules/crypto/src/sha512.c platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c \
 	core/modules/crypto/src/sha3_avx512.c core/modules/crypto/src/sha3_256_x4.c \
 	core/modules/crypto/src/blake2b.c core/modules/crypto/src/blake2b_avx2.c \
 	core/modules/sapling/src/bn254_accel.c core/modules/sapling/src/fr_avx512.c \

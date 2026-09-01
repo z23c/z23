@@ -69,7 +69,7 @@ mapfile -t ZCL_MODULE_DIRS < <(
          "$ZCL_REPO_SHAPE_ROOT/contexts" \
          -type d -path '*/modules/*' -mindepth 2 -maxdepth 4 2>/dev/null |
     awk -v root="$ZCL_REPO_SHAPE_ROOT/" '
-        { sub("^" root, ""); if ($0 ~ /\/modules\/[^/]+$/) print }
+        { sub("^" root, ""); if ($0 ~ /\/modules\/[^\/]+$/) print }
     ' | LC_ALL=C sort -u
 )
 gate_require_scanned "${#ZCL_MODULE_DIRS[@]}" "${#ZCL_LIB_MODULES[@]}" repo-shape \

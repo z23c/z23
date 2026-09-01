@@ -54,6 +54,7 @@
 #include "crypto/blake2b.h"
 #include "crypto/chacha20poly1305.h"
 #include "crypto/sha256.h"
+#include "crypto/sha512.h"
 #include "crypto/sha3.h"
 #include "base/serialize_le.h"
 #include "sapling/bn254_accel.h"
@@ -413,6 +414,62 @@ static void bench_sha256(unsigned char *msg)
         time_tier(&b.tier[i], &b, sha256_body, &ctx);
     }
     sha256_select_impl(SHA256_IMPL_AUTO);
+    report(&b);
+}
+
+/* SHA-512 drives Ed25519 and the wallet's HMAC/PBKDF2/HD-key work. Apple
+ * arm64 exposes the dedicated FEAT_SHA512 two-round and schedule operations;
+ * the portable tier remains the reference on every architecture. */
+static void sha512_body(long inner, void *vctx)
+{
+    struct sha256_ctx_bench *c = vctx;
+    unsigned char out[SHA512_OUTPUT_SIZE];
+    for (long i = 0; i < inner; ++i) {
+        struct sha512_ctx s;
+        sha512_init(&s);
+        sha512_write(&s, c->msg, SHA_MSG_BYTES);
+        sha512_finalize(&s, out);
+        g_sink += out[0];
+    }
+}
+
+static void bench_sha512(unsigned char *msg)
+{
+    struct bench b = {
+        .primitive = "SHA-512 (1 KiB message)",
+        .unit = "hashes",
+        .inner = 20000,
+        .bytes_per_op = SHA_MSG_BYTES,
+        .ntiers = 2,
+    };
+    b.tier[0].name = "generic (portable C)";
+    b.tier[1].name = "ARMv8.2 SHA-512";
+
+    struct sha256_ctx_bench ctx = { .msg = msg };
+    unsigned char digest[2][SHA512_OUTPUT_SIZE];
+    const enum sha512_impl want[2] = {
+        SHA512_IMPL_PORTABLE, SHA512_IMPL_ARM
+    };
+
+    for (int i = 0; i < 2; ++i) {
+        int got = sha512_select_impl(want[i]);
+        b.tier[i].available = (i == 0) || (got == SHA512_IMPL_ARM);
+        if (!b.tier[i].available)
+            continue;
+
+        struct sha512_ctx s;
+        sha512_init(&s);
+        sha512_write(&s, msg, SHA_MSG_BYTES);
+        sha512_finalize(&s, digest[i]);
+        if (i > 0 && memcmp(digest[i], digest[0], sizeof(digest[0])) != 0) {
+            parity_fail(b.primitive, b.tier[i].name,
+                        digest[i], digest[0], sizeof(digest[0]));
+            continue;
+        }
+        b.tier[i].verified = true;
+        time_tier(&b.tier[i], &b, sha512_body, &ctx);
+    }
+    sha512_select_impl(SHA512_IMPL_AUTO);
     report(&b);
 }
 
@@ -1289,6 +1346,7 @@ int main(int argc, char **argv)
 
     if (!g_chacha_only) {
         bench_sha256(buf);
+        bench_sha512(buf);
         bench_sha3_256_x4(buf);
         bench_sha3_512_x4(buf);
         bench_equihash_blake2b();

@@ -31,6 +31,7 @@
 # fails on a stale row too.
 
 core/modules/crypto/src/sha256.c          tests/harness/src/test_sha256_isa_parity.c      sha256_isa_parity
+core/modules/crypto/src/sha512.c          tests/harness/src/test_sha512_isa_parity.c      sha512_isa_parity
 core/modules/crypto/src/chacha20poly1305.c tests/harness/src/test_chacha20_isa_parity.c   chacha20_isa_parity
 core/modules/crypto/src/blake2b_avx2.c    tests/harness/src/test_blake2b_batch_parity.c   blake2b_batch_parity
 core/modules/crypto/src/sha3_256_x4.c     tests/harness/src/test_sha3_256_x4.c            sha3_256_x4

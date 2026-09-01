@@ -6,6 +6,11 @@
 #include "chain/chainparams.h"
 #include <signal.h>
 
+/* This ISA oracle is registered as its own proof group.  Keep its serial-runner
+ * declaration local so adding the oracle does not invalidate every translation
+ * unit that includes the shared test catalog. */
+extern int test_sha512_isa_parity(void);
+
 /* Required by process_block.c (normally in main.c) */
 volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -1443,6 +1448,7 @@ int main(int argc, char **argv)
     failures += test_pbkdf2_sha512_high_iterations();
     failures += test_pbkdf2_sha512_empty_inputs();
     failures += test_pbkdf2_sha512_one_byte_output();
+    failures += test_sha512_isa_parity();
     /* Drive 4 finish-drive: sapling/script/wallet pedantic regression tests. */
     failures += test_sapling_address_hash_fields();
     failures += test_sprout_address_hash_fields();
