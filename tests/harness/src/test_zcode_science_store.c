@@ -705,9 +705,9 @@ static int test_zstore_evidence(void)
                                           sizeof(tampered_wire), &action,
                                           true, 1500, &commit3).ok);
         /* Contradictory reproductions: REPLICATED and CONTRADICTED over
-         * the same pair both store. The hardened cross-validator
-         * re-derives V1 roots, so reproductions bind v1 result wires —
-         * both are stored in CAS directly (committed evidence). */
+         * the same pair both store. The hardened cross-validator consumes
+         * v1 results, so both must enter through the same plan/commit path
+         * as v2 rather than an alternate direct-CAS write. */
         struct vcs_zcode_benchmark_result_v1 orig_v1, repro_v1;
         for (int i = 0; i < 2; i++) {
             struct vcs_zcode_benchmark_result_v1 *r =
@@ -738,16 +738,44 @@ static int test_zstore_evidence(void)
                   VCS_ZCODE_SCIENCE_OK);
         ASSERT_EQ(vcs_zcode_benchmark_result_root(&orig_v1, original_root),
                   VCS_ZCODE_SCIENCE_OK);
-        ASSERT(zstore_cas_put(dir, original_root, result_wire,
-                              sizeof(result_wire)));
+        struct zcode_science_plan_out original_plan;
+        struct zcode_science_commit_out original_commit;
+        ASSERT(!zcode_science_work_plan(
+            &ndb, dir, result_wire, sizeof(result_wire), NULL, 0, NULL, 0,
+            NULL, 1500, &original_plan).ok);
+        ASSERT(!zcode_science_work_plan(
+            &ndb, dir, result_wire, sizeof(result_wire), mwire,
+            sizeof(mwire), NULL, 0, &action, 1500, &original_plan).ok);
+        ASSERT(zcode_science_work_plan(
+            &ndb, dir, result_wire, sizeof(result_wire), NULL, 0, NULL, 0,
+            &action, 1500, &original_plan).ok);
+        ASSERT(zcode_science_work_commit(
+            &ndb, dir, result_wire, sizeof(result_wire), &action, true,
+            1500, &original_commit).ok);
+        char original_hex[65];
+        zcl_hex_encode(original_root, 32, original_hex);
+        ASSERT_STR_EQ(original_commit.result_root, original_hex);
+        ASSERT(zcode_science_work_receipt(
+            &ndb, dir, original_hex, &row, &kind).ok);
         ASSERT_EQ(vcs_zcode_benchmark_result_serialize(&repro_v1,
                                                        result_wire),
                   VCS_ZCODE_SCIENCE_OK);
         ASSERT_EQ(vcs_zcode_benchmark_result_root(&repro_v1,
                                                   reproduced_root),
                   VCS_ZCODE_SCIENCE_OK);
-        ASSERT(zstore_cas_put(dir, reproduced_root, result_wire,
-                              sizeof(result_wire)));
+        struct zcode_science_plan_out reproduced_plan;
+        struct zcode_science_commit_out reproduced_commit;
+        ASSERT(zcode_science_work_plan(
+            &ndb, dir, result_wire, sizeof(result_wire), NULL, 0, NULL, 0,
+            &action, 1500, &reproduced_plan).ok);
+        ASSERT(zcode_science_work_commit(
+            &ndb, dir, result_wire, sizeof(result_wire), &action, true,
+            1500, &reproduced_commit).ok);
+        char reproduced_hex[65];
+        zcl_hex_encode(reproduced_root, 32, reproduced_hex);
+        ASSERT_STR_EQ(reproduced_commit.result_root, reproduced_hex);
+        ASSERT(zcode_science_work_receipt(
+            &ndb, dir, reproduced_hex, &row, &kind).ok);
         struct vcs_zcode_reproduction_v1 rep_a, rep_b;
         for (int i = 0; i < 2; i++) {
             struct vcs_zcode_reproduction_v1 *r = i == 0 ? &rep_a : &rep_b;
@@ -791,7 +819,13 @@ static int test_zstore_evidence(void)
         struct vcs_zcode_science_index *index =
             vcs_zcode_science_index_build(dir, 1500);
         ASSERT(index != NULL);
+        ASSERT_EQ(vcs_zcode_science_index_result_count(index), 4);
         ASSERT_EQ(vcs_zcode_science_index_reproduction_count(index), 2);
+        const struct vcs_zcode_science_index_result_entry *v1_entry =
+            vcs_zcode_science_index_find_result(index, original_root);
+        ASSERT(v1_entry != NULL);
+        ASSERT_STR_EQ(v1_entry->method_root_hex, "");
+        ASSERT_STR_EQ(v1_entry->hardware_profile_root_hex, "");
         bool saw_replicated = false, saw_contradicted = false;
         for (size_t i = 0; i < 2; i++) {
             const struct vcs_zcode_science_index_reproduction_entry *e =
@@ -809,14 +843,14 @@ static int test_zstore_evidence(void)
         const struct vcs_zcode_science_index_study_entry *se =
             vcs_zcode_science_index_find_study(index, study_root);
         ASSERT(se != NULL);
-        ASSERT_EQ(se->result_count, 2);
+        ASSERT_EQ(se->result_count, 4);
         ASSERT_EQ(se->reproduction_count, 2);
         vcs_zcode_science_index_free(index);
         /* Rebuild equivalence over the whole evidence set. */
         struct zcode_science_rebuild_out rebuilt;
         ASSERT(zcode_science_rebuild(&ndb, dir, 1500, &rebuilt).ok);
         ASSERT_EQ(rebuilt.studies, 1);
-        ASSERT_EQ(rebuilt.results, 2);
+        ASSERT_EQ(rebuilt.results, 4);
         ASSERT_EQ(rebuilt.reproductions, 2);
         zstore_teardown(&ndb, dir);
         PASS();

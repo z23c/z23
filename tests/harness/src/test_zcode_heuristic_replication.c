@@ -390,7 +390,8 @@ static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
         memcpy(r->study_root, f->study_root, 32);
         memcpy(r->original_result_root, f->original_root, 32);
         memcpy(r->reproduced_result_root, f->reproduced_root[i], 32);
-        hr_root(r->comparison_policy_root, (uint8_t)(120u + i));
+        memcpy(r->comparison_policy_root,
+               f->study.preregistration_policy_root, 32);
         memcpy(r->original_environment_root,
                f->original.achieved_environment_root, 32);
         memcpy(r->reproduced_environment_root,
@@ -430,6 +431,61 @@ static bool hr_fixture_build(const char *workspace, struct hr_fixture *f)
             return false;
     }
     return true;
+}
+
+static bool hr_rewrite_anchor_status(
+    const char *workspace, struct hr_fixture *f, uint8_t status)
+{
+    struct vcs_zcode_science_relation_set_v1 empty = {
+        .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
+    };
+    f->original.status = status;
+    if (!hr_store_result(workspace, &f->original, f->original_root))
+        return false;
+    memcpy(f->anchor.provenance_root, f->original_root, 32);
+    memset(f->anchor.signature, 0, sizeof(f->anchor.signature));
+    return vcs_zcode_science_statement_seal(
+               &f->anchor, f->evaluator_secret, f->evaluator_pubkey) ==
+               VCS_ZCODE_SCIENCE_OK &&
+        hr_store_statement(
+            workspace, &f->anchor, &empty, f->anchor_root);
+}
+
+static bool hr_rewrite_reproduced_status(
+    const char *workspace, struct hr_fixture *f, size_t row,
+    uint8_t status, uint8_t verdict)
+{
+    if (row >= 4u) return false;
+    f->reproduced[row].status = status;
+    if (!hr_store_result(
+            workspace, &f->reproduced[row], f->reproduced_root[row]))
+        return false;
+    memcpy(f->reproduction[row].reproduced_result_root,
+           f->reproduced_root[row], 32);
+    memcpy(f->reproduction[row].reproduced_environment_root,
+           f->reproduced[row].achieved_environment_root, 32);
+    f->reproduction[row].verdict = verdict;
+    if (!hr_store_reproduction(
+            workspace, &f->reproduction[row], f->reproduction_root[row]))
+        return false;
+    memcpy(f->statement[row].predicate_body_root,
+           f->reproduction_root[row], 32);
+    memcpy(f->statement[row].provenance_root,
+           f->reproduced_root[row], 32);
+    memset(f->statement[row].signature, 0,
+           sizeof(f->statement[row].signature));
+    if (vcs_zcode_science_statement_seal(
+            &f->statement[row], f->secret[row], f->pubkey[row]) !=
+            VCS_ZCODE_SCIENCE_OK)
+        return false;
+    struct vcs_zcode_science_relation_set_v1 support = {
+        .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
+        .row_count = 1,
+        .rows = {{.type = VCS_ZCODE_SCIENCE_RELATION_SUPPORT}},
+    };
+    memcpy(support.rows[0].statement_root, f->anchor_root, 32);
+    return hr_store_statement(
+        workspace, &f->statement[row], &support, f->statement_root[row]);
 }
 
 static void hr_sort(uint8_t roots[][32], size_t count)
@@ -686,6 +742,123 @@ int test_zcode_heuristic_replication(void)
             workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
             VCS_ZCODE_ATTENTION_EVIDENCE &&
         hr_report_unchanged(&report, &sentinel));
+
+    struct hr_fixture post_hoc_policy = f;
+    post_hoc_policy.statement[0] = f.statement[0];
+    hr_root(post_hoc_policy.reproduction[0].comparison_policy_root, 251);
+    bool post_hoc_policy_built = hr_store_reproduction(
+        workspace, &post_hoc_policy.reproduction[0],
+        post_hoc_policy.reproduction_root[0]);
+    memcpy(post_hoc_policy.statement[0].predicate_body_root,
+           post_hoc_policy.reproduction_root[0], 32);
+    memcpy(post_hoc_policy.statement[0].activity_root,
+           post_hoc_policy.reproduction[0].comparison_policy_root, 32);
+    memset(post_hoc_policy.statement[0].signature, 0, 64);
+    post_hoc_policy_built = post_hoc_policy_built &&
+        vcs_zcode_science_statement_seal(
+            &post_hoc_policy.statement[0], f.secret[0], f.pubkey[0]) ==
+            VCS_ZCODE_SCIENCE_OK && hr_store_statement(
+                workspace, &post_hoc_policy.statement[0], &support,
+                post_hoc_policy.statement_root[0]);
+    HR_CHECK("post-hoc-comparison-policy-fixture-builds",
+             post_hoc_policy_built);
+    hr_snapshot(&snapshot, &post_hoc_policy, one, 1);
+    report = sentinel;
+    HR_CHECK("signed-post-hoc-comparison-policy-refuses-atomically",
+        vcs_zcode_heuristic_replication_fold(
+            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            VCS_ZCODE_ATTENTION_EVIDENCE &&
+        hr_report_unchanged(&report, &sentinel));
+
+    const struct {
+        uint8_t status;
+        const char *fixture_name;
+        const char *refusal_name;
+    } ineligible_anchors[] = {
+        {VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT,
+         "negative-anchor-fixture-builds",
+         "negative-anchor-cannot-qualify"},
+        {VCS_ZCODE_BENCHMARK_NULL_RESULT,
+         "null-anchor-fixture-builds",
+         "null-anchor-cannot-qualify"},
+        {VCS_ZCODE_BENCHMARK_EXECUTION_FAILED,
+         "failed-anchor-fixture-builds",
+         "failed-anchor-cannot-qualify"},
+    };
+    for (size_t i = 0;
+         i < sizeof(ineligible_anchors) / sizeof(ineligible_anchors[0]); i++) {
+        struct hr_fixture ineligible_anchor = f;
+        bool ineligible_anchor_built = hr_rewrite_anchor_status(
+            workspace, &ineligible_anchor, ineligible_anchors[i].status);
+        HR_CHECK(ineligible_anchors[i].fixture_name,
+                 ineligible_anchor_built);
+        hr_snapshot(&snapshot, &ineligible_anchor, NULL, 0);
+        report = sentinel;
+        HR_CHECK(ineligible_anchors[i].refusal_name,
+            vcs_zcode_heuristic_replication_fold(
+                workspace, &f.heuristic, &f.action, &snapshot, 6000,
+                &report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+            hr_report_unchanged(&report, &sentinel));
+    }
+
+    const struct {
+        uint8_t status;
+        uint8_t verdict;
+        const char *fixture_name;
+        const char *refusal_name;
+    } inconsistent_rows[] = {
+        {VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT,
+         VCS_ZCODE_REPRODUCTION_REPLICATED,
+         "negative-replicated-fixture-builds",
+         "negative-result-cannot-be-declared-replicated"},
+        {VCS_ZCODE_BENCHMARK_NULL_RESULT,
+         VCS_ZCODE_REPRODUCTION_REPLICATED,
+         "null-replicated-fixture-builds",
+         "null-result-cannot-be-declared-replicated"},
+        {VCS_ZCODE_BENCHMARK_EXECUTION_FAILED,
+         VCS_ZCODE_REPRODUCTION_REPLICATED,
+         "failed-replicated-fixture-builds",
+         "failed-result-cannot-be-declared-replicated"},
+        {VCS_ZCODE_BENCHMARK_NULL_RESULT,
+         VCS_ZCODE_REPRODUCTION_CONTRADICTED,
+         "null-contradicted-fixture-builds",
+         "null-result-cannot-be-declared-contradicted"},
+        {VCS_ZCODE_BENCHMARK_EXECUTION_FAILED,
+         VCS_ZCODE_REPRODUCTION_CONTRADICTED,
+         "failed-contradicted-fixture-builds",
+         "failed-result-cannot-be-declared-contradicted"},
+    };
+    for (size_t i = 0;
+         i < sizeof(inconsistent_rows) / sizeof(inconsistent_rows[0]); i++) {
+        struct hr_fixture inconsistent = f;
+        bool inconsistent_built = hr_rewrite_reproduced_status(
+            workspace, &inconsistent, 0, inconsistent_rows[i].status,
+            inconsistent_rows[i].verdict);
+        HR_CHECK(inconsistent_rows[i].fixture_name, inconsistent_built);
+        hr_snapshot(&snapshot, &inconsistent, one, 1);
+        report = sentinel;
+        HR_CHECK(inconsistent_rows[i].refusal_name,
+            vcs_zcode_heuristic_replication_fold(
+                workspace, &f.heuristic, &f.action, &snapshot, 6000,
+                &report) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+            hr_report_unchanged(&report, &sentinel));
+    }
+
+    struct hr_fixture negative_contradiction = f;
+    bool negative_contradiction_built = hr_rewrite_reproduced_status(
+        workspace, &negative_contradiction, 1,
+        VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT,
+        VCS_ZCODE_REPRODUCTION_CONTRADICTED);
+    HR_CHECK("negative-contradiction-fixture-builds",
+             negative_contradiction_built);
+    hr_snapshot(&snapshot, &negative_contradiction, exact, 2);
+    HR_CHECK("negative-result-is-an-honest-contradiction",
+        vcs_zcode_heuristic_replication_fold(
+            workspace, &f.heuristic, &f.action, &snapshot, 6000, &report) ==
+            VCS_ZCODE_ATTENTION_OK && !report.qualified &&
+        report.replicated_count == 1 && report.contradicted_count == 1 &&
+        report.reason ==
+            VCS_ZCODE_HEURISTIC_REPLICATION_REASON_CONTRADICTED);
 
     struct hr_fixture replayed_result = f;
     replayed_result.statement[1] = f.statement[1];

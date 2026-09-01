@@ -62,11 +62,13 @@ struct zcl_result zcode_science_study_list(
     struct node_db *ndb, struct db_zcode_science_entry *out, int max,
     int *count);
 
-/* work.plan/commit: the wire is benchmark_result.v2 (magic "ZCBEN2") or
- * reproduction.v1 (magic "ZCREPR"). For a v2 result the caller also
- * supplies the method/profile wires (stored to CAS at plan, addressed by
- * their canonical roots) and the executed fixed action; commit re-runs the
- * hardened S1 cross-validator incl. the canonical action binding. */
+/* work.plan/commit: the wire is benchmark_result.v1 (magic "ZCBENC"),
+ * benchmark_result.v2 (magic "ZCBEN2"), or reproduction.v1 (magic
+ * "ZCREPR"). Both result versions require the executed fixed action. A v2
+ * result additionally requires method/profile wires (stored to CAS at plan,
+ * addressed by their canonical roots); v1 has no auxiliary wires. Commit
+ * re-runs the version-appropriate hardened S1 cross-validator, including the
+ * canonical action binding. */
 struct zcl_result zcode_science_work_plan(
     struct node_db *ndb, const char *workspace,
     const uint8_t *wire, size_t wire_len,

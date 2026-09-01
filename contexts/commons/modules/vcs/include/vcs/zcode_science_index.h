@@ -3,7 +3,7 @@
  * zcode_science_index — the local ZCODE scientific-study/evidence search
  * index. This is a REBUILDABLE PROJECTION over the workspace CAS
  * (<repo_root>/.zvcs/objects): the persisted study_spec.v1,
- * benchmark_result.v2, reproduction.v1, science_findings.v1,
+ * benchmark_result.v1/v2, reproduction.v1, science_findings.v1,
  * curation_vote.v1, and review.v1 wires stay authoritative and this index
  * holds no truth of its own — like zcode_task_index, it is rebuilt from the
  * canonical objects on every build and may be discarded at any time.
@@ -59,6 +59,7 @@ struct vcs_zcode_science_index_result_entry {
     char task_root_hex[65];
     char candidate_root_hex[65];
     char action_root_hex[65];
+    /* Empty for benchmark_result.v1, which predates these two bindings. */
     char method_root_hex[65];
     char hardware_profile_root_hex[65];
     uint8_t status; /* enum vcs_zcode_benchmark_status */

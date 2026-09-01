@@ -24,6 +24,7 @@
 /* Wire magics from zcode_science.c / zcode_dev.c — the first 8 bytes decide
  * whether an object of the right size is even a candidate for projection. */
 static const uint8_t study_magic[8] = {'Z','C','S','T','U','D','\r','\n'};
+static const uint8_t result_v1_magic[8] = {'Z','C','B','E','N','C','\r','\n'};
 static const uint8_t result_v2_magic[8] = {'Z','C','B','E','N','2','\r','\n'};
 static const uint8_t reproduction_magic[8] =
     {'Z','C','R','E','P','R','\r','\n'};
@@ -60,6 +61,41 @@ static bool index_root_agrees(const uint8_t rederived[32],
                               const uint8_t address[32])
 {
     return memcmp(rederived, address, 32) == 0;
+}
+
+static void index_add_result(
+    struct vcs_zcode_science_index *index, bool *cap_logged,
+    const uint8_t address[32], const uint8_t study_root[32],
+    const uint8_t task_root[32], const uint8_t candidate_root[32],
+    const uint8_t action_root[32], const uint8_t *method_root,
+    const uint8_t *hardware_profile_root, uint8_t status, uint64_t sequence,
+    int64_t started_unix, int64_t finished_unix)
+{
+    if (index->result_count >= VCS_ZCODE_SCIENCE_INDEX_MAX_RESULTS) {
+        if (!*cap_logged) {
+            LOG_ERROR(INDEX_LOG, "result index cap %u reached",
+                      VCS_ZCODE_SCIENCE_INDEX_MAX_RESULTS);
+            *cap_logged = true;
+        }
+        return;
+    }
+    struct vcs_zcode_science_index_result_entry *entry =
+        &index->results[index->result_count++];
+    memset(entry, 0, sizeof(*entry));
+    zcl_hex_encode(address, 32, entry->result_root_hex);
+    zcl_hex_encode(study_root, 32, entry->study_root_hex);
+    zcl_hex_encode(task_root, 32, entry->task_root_hex);
+    zcl_hex_encode(candidate_root, 32, entry->candidate_root_hex);
+    zcl_hex_encode(action_root, 32, entry->action_root_hex);
+    if (method_root)
+        zcl_hex_encode(method_root, 32, entry->method_root_hex);
+    if (hardware_profile_root)
+        zcl_hex_encode(hardware_profile_root, 32,
+                       entry->hardware_profile_root_hex);
+    entry->status = status;
+    entry->sequence = sequence;
+    entry->started_unix = started_unix;
+    entry->finished_unix = finished_unix;
 }
 
 /* Wrong size or wrong magic means the object is another CAS citizen and is
@@ -112,6 +148,27 @@ static void index_consider_object(const char *repo_root, const char *hex64,
             e->created_unix = study.created_unix;
             e->expires_unix = study.expires_unix;
         }
+    } else if (len == VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES &&
+               memcmp(wire, result_v1_magic, sizeof(result_v1_magic)) == 0) {
+        struct vcs_zcode_benchmark_result_v1 result;
+        uint8_t root[32];
+        bool ok = vcs_zcode_benchmark_result_parse(wire, len, &result) ==
+                VCS_ZCODE_SCIENCE_OK &&
+            vcs_zcode_benchmark_result_validate(&result) ==
+                VCS_ZCODE_SCIENCE_OK &&
+            vcs_zcode_benchmark_result_root(&result, root) ==
+                VCS_ZCODE_SCIENCE_OK &&
+            index_root_agrees(root, address);
+        if (!ok) {
+            LOG_ERROR(INDEX_LOG, "skipping result-v1-magic object %.8s: "
+                      "parse, validation, or root agreement failed", hex64);
+        } else {
+            index_add_result(
+                index, cap_logged, address, result.study_root,
+                result.task_root, result.candidate_root, result.action_root,
+                NULL, NULL, result.status, result.sequence,
+                result.started_unix, result.finished_unix);
+        }
     } else if (len == VCS_ZCODE_BENCHMARK_RESULT_V2_WIRE_BYTES &&
                memcmp(wire, result_v2_magic, sizeof(result_v2_magic)) == 0) {
         struct vcs_zcode_benchmark_result_v2 result;
@@ -126,29 +183,13 @@ static void index_consider_object(const char *repo_root, const char *hex64,
         if (!ok) {
             LOG_ERROR(INDEX_LOG, "skipping result-v2-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
-        } else if (index->result_count >=
-                   VCS_ZCODE_SCIENCE_INDEX_MAX_RESULTS) {
-            if (!*cap_logged) {
-                LOG_ERROR(INDEX_LOG, "result index cap %u reached",
-                          VCS_ZCODE_SCIENCE_INDEX_MAX_RESULTS);
-                *cap_logged = true;
-            }
         } else {
-            struct vcs_zcode_science_index_result_entry *e =
-                &index->results[index->result_count++];
-            memset(e, 0, sizeof(*e));
-            zcl_hex_encode(address, 32, e->result_root_hex);
-            zcl_hex_encode(result.study_root, 32, e->study_root_hex);
-            zcl_hex_encode(result.task_root, 32, e->task_root_hex);
-            zcl_hex_encode(result.candidate_root, 32, e->candidate_root_hex);
-            zcl_hex_encode(result.action_root, 32, e->action_root_hex);
-            zcl_hex_encode(result.method_root, 32, e->method_root_hex);
-            zcl_hex_encode(result.hardware_profile_root, 32,
-                           e->hardware_profile_root_hex);
-            e->status = result.status;
-            e->sequence = result.sequence;
-            e->started_unix = result.started_unix;
-            e->finished_unix = result.finished_unix;
+            index_add_result(
+                index, cap_logged, address, result.study_root,
+                result.task_root, result.candidate_root, result.action_root,
+                result.method_root, result.hardware_profile_root,
+                result.status, result.sequence, result.started_unix,
+                result.finished_unix);
         }
     } else if (len == VCS_ZCODE_REPRODUCTION_WIRE_BYTES &&
                memcmp(wire, reproduction_magic,

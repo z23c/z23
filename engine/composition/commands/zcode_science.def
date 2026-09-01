@@ -169,9 +169,10 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_COMMAND(
     "zcode.science.work.plan", "zcode.science.work", "",
     "Plan benchmark evidence",
-    "Validates a benchmark_result.v2 wire (with its method and hardware "
-    "profile wires, stored to CAS addressed by their canonical roots) or a "
-    "reproduction.v1 wire, plus the executed fixed action, and persists an "
+    "Validates a benchmark_result.v1 wire, a benchmark_result.v2 wire "
+    "(with its method and hardware profile wires, stored to CAS addressed "
+    "by their canonical roots), or a reproduction.v1 wire. Results also "
+    "require the executed fixed action. The command persists an "
     "exact expiring (600s) plan. No evidence is committed; re-planning the "
     "same request returns the same plan_root.", 0,
     "zcode,science,work,benchmark,reproduction,plan",
@@ -179,7 +180,7 @@ ZCL_COMMAND_READY_COMMAND(
     "wire_hex,method_hex,profile_hex,action_kind,action_sequence,"
     "action_source_cas_sha3,action_input_root_sha3,"
     "action_toolchain_capsule_sha3,now_unix,datadir,workspace", "wire_hex",
-    "z23 zcode.science.work.plan --input='{\"wire_hex\":\"<726hex>\",\"method_hex\":\"<242hex>\",\"profile_hex\":\"<444hex>\"}'",
+    "z23 zcode.science.work.plan --input='{\"wire_hex\":\"<726hex>\",\"method_hex\":\"<242hex>\",\"profile_hex\":\"<444hex>\",\"action_kind\":1,\"action_sequence\":1,\"action_source_cas_sha3\":\"<64hex>\",\"action_input_root_sha3\":\"<64hex>\",\"action_toolchain_capsule_sha3\":\"<64hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
@@ -195,7 +196,8 @@ ZCL_COMMAND_READY_COMMAND(
     "With confirm:true and an unexpired plan, re-runs the hardened "
     "cross-validators (validate_for_study incl. the canonical fixed-action "
     "binding, or validate_for_results for reproductions) against the study, "
-    "task, candidate, method, and profile wires loaded from CAS, then stores "
+    "task, candidate, and, for v2, method/profile wires loaded from CAS, "
+    "then stores "
     "the evidence wire addressed by root and updates the projection. Null "
     "and negative results are accepted observations; contradictory "
     "reproductions are both storable. Idempotent by request identity.", 0,
@@ -204,7 +206,7 @@ ZCL_COMMAND_READY_COMMAND(
     "wire_hex,confirm,action_kind,action_sequence,"
     "action_source_cas_sha3,action_input_root_sha3,"
     "action_toolchain_capsule_sha3,now_unix,datadir,workspace", "wire_hex,confirm",
-    "z23 zcode.science.work.commit --input='{\"wire_hex\":\"<726hex>\",\"confirm\":true}'",
+    "z23 zcode.science.work.commit --input='{\"wire_hex\":\"<726hex>\",\"confirm\":true,\"action_kind\":1,\"action_sequence\":1,\"action_source_cas_sha3\":\"<64hex>\",\"action_input_root_sha3\":\"<64hex>\",\"action_toolchain_capsule_sha3\":\"<64hex>\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,

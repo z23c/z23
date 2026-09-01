@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+static const uint8_t result_v1_magic[8] = {'Z','C','B','E','N','C','\r','\n'};
 static const uint8_t result_v2_magic[8] = {'Z','C','B','E','N','2','\r','\n'};
 static const uint8_t reproduction_magic[8] =
     {'Z','C','R','E','P','R','\r','\n'};
@@ -304,6 +305,12 @@ static bool science_wire_is_result_v2(const uint8_t *wire, size_t len)
            memcmp(wire, result_v2_magic, sizeof(result_v2_magic)) == 0;
 }
 
+static bool science_wire_is_result_v1(const uint8_t *wire, size_t len)
+{
+    return wire && len == VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES &&
+           memcmp(wire, result_v1_magic, sizeof(result_v1_magic)) == 0;
+}
+
 static bool science_wire_is_reproduction(const uint8_t *wire, size_t len)
 {
     return wire && len == VCS_ZCODE_REPRODUCTION_WIRE_BYTES &&
@@ -369,6 +376,17 @@ struct zcl_result zcode_science_work_plan(
             !vcs_object_put_addressed(workspace, aux + 32, profile_wire,
                                       profile_len))
             return ZCL_ERR(-1, "science-work-aux-cas-store-failed");
+    } else if (science_wire_is_result_v1(wire, wire_len)) {
+        struct vcs_zcode_benchmark_result_v1 result;
+        if (vcs_zcode_benchmark_result_parse(wire, wire_len, &result) !=
+                VCS_ZCODE_SCIENCE_OK ||
+            vcs_zcode_benchmark_result_validate(&result) !=
+                VCS_ZCODE_SCIENCE_OK)
+            return ZCL_ERR(-1, "science-work-result-invalid");
+        if (!action)
+            return ZCL_ERR(-1, "science-work-action-required");
+        if (method_len != 0 || profile_len != 0)
+            return ZCL_ERR(-1, "science-work-v1-aux-forbidden");
     } else if (science_wire_is_reproduction(wire, wire_len)) {
         struct vcs_zcode_reproduction_v1 reproduction;
         if (vcs_zcode_reproduction_parse(wire, wire_len, &reproduction) !=
@@ -383,7 +401,94 @@ struct zcl_result zcode_science_work_plan(
                              out);
 }
 
-static struct zcl_result science_work_commit_result(
+static struct zcl_result science_load_task_candidate(
+    const char *workspace, const uint8_t task_root[32],
+    const uint8_t candidate_root[32],
+    struct vcs_zcode_task_v1 *task, struct vcs_zcode_candidate_v1 *candidate)
+{
+    uint8_t *twire = NULL, *cwire = NULL, checked[32];
+    size_t tlen = 0, clen = 0;
+    bool ok = science_cas_load(workspace, task_root, &twire, &tlen) &&
+        vcs_zcode_task_parse(twire, tlen, task) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_task_root(task, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(checked, task_root, 32) == 0 &&
+        science_cas_load(workspace, candidate_root, &cwire, &clen) &&
+        vcs_zcode_candidate_parse(cwire, clen, candidate) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(candidate, checked) == VCS_ZCODE_DEV_OK &&
+        memcmp(checked, candidate_root, 32) == 0;
+    free(twire);
+    free(cwire);
+    if (!ok)
+        return ZCL_ERR(-1, "science-work-task-candidate-not-in-cas");
+    return ZCL_OK;
+}
+
+static struct zcl_result science_work_store_result(
+    struct node_db *ndb, const char *workspace,
+    const uint8_t study_root[32], const uint8_t task_root[32],
+    const uint8_t candidate_root[32], uint8_t status, uint64_t sequence,
+    int64_t started_unix, int64_t finished_unix,
+    const uint8_t root[32], const uint8_t *wire, size_t wire_len,
+    struct db_zcode_science_plan *plan,
+    struct zcode_science_commit_out *out)
+{
+    char root_hex[65];
+    zcl_hex_encode(root, 32, root_hex);
+    if (!vcs_object_put_addressed(workspace, root, wire, wire_len))
+        return ZCL_ERR(-1, "science-work-cas-store-failed");
+    struct db_zcode_science_entry row;
+    memset(&row, 0, sizeof(row));
+    (void)snprintf(row.root, sizeof(row.root), "%s", root_hex);
+    zcl_hex_encode(study_root, 32, row.study_root);
+    zcl_hex_encode(task_root, 32, row.link_root);
+    zcl_hex_encode(candidate_root, 32, row.aux_root);
+    row.code = status;
+    row.sequence = (int64_t)sequence;
+    row.created_at = started_unix;
+    row.expires_at = finished_unix;
+    if (!db_zcode_science_result_save(ndb, &row))
+        return ZCL_ERR(-1, "science-work-projection-save-failed");
+    ZCL_CHECK(science_plan_mark_committed(ndb, plan, root_hex));
+    (void)snprintf(out->result_root, sizeof(out->result_root), "%s", root_hex);
+    return ZCL_OK;
+}
+
+static struct zcl_result science_work_commit_result_v1(
+    struct node_db *ndb, const char *workspace,
+    const struct vcs_zcode_benchmark_result_v1 *result,
+    const struct vcs_build_action_v1 *action, int64_t now,
+    const uint8_t *wire, size_t wire_len, struct db_zcode_science_plan *plan,
+    struct zcode_science_commit_out *out)
+{
+    if (!action)
+        return ZCL_ERR(-1, "science-work-action-required");
+    struct vcs_zcode_study_spec_v1 study;
+    if (!science_load_study(workspace, result->study_root, &study))
+        return ZCL_ERR(-1, "science-work-study-not-in-cas");
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_candidate_v1 candidate;
+    ZCL_CHECK(science_load_task_candidate(
+        workspace, result->task_root, result->candidate_root, &task,
+        &candidate));
+    enum vcs_zcode_science_error verr =
+        vcs_zcode_benchmark_result_validate_for_study(
+            &study, &task, &candidate, action, result, now);
+    if (verr != VCS_ZCODE_SCIENCE_OK)
+        return ZCL_ERR(-1, "science-work-cross-validation-failed: %s",
+                       vcs_zcode_science_error_string(verr));
+    uint8_t root[32];
+    if (vcs_zcode_benchmark_result_root(result, root) !=
+        VCS_ZCODE_SCIENCE_OK)
+        return ZCL_ERR(-1, "science-work-root-failed");
+    return science_work_store_result(
+        ndb, workspace, result->study_root, result->task_root,
+        result->candidate_root, result->status, result->sequence,
+        result->started_unix, result->finished_unix, root, wire, wire_len,
+        plan, out);
+}
+
+static struct zcl_result science_work_commit_result_v2(
     struct node_db *ndb, const char *workspace,
     const struct vcs_zcode_benchmark_result_v2 *result,
     const struct vcs_build_action_v1 *action, int64_t now,
@@ -397,26 +502,9 @@ static struct zcl_result science_work_commit_result(
         return ZCL_ERR(-1, "science-work-study-not-in-cas");
     struct vcs_zcode_task_v1 task;
     struct vcs_zcode_candidate_v1 candidate;
-    {
-        uint8_t *twire = NULL, *cwire = NULL, checked[32];
-        size_t tlen = 0, clen = 0;
-        bool ok = science_cas_load(workspace, result->task_root, &twire,
-                                   &tlen) &&
-            vcs_zcode_task_parse(twire, tlen, &task) == VCS_ZCODE_DEV_OK &&
-            vcs_zcode_task_root(&task, checked) == VCS_ZCODE_DEV_OK &&
-            memcmp(checked, result->task_root, 32) == 0 &&
-            science_cas_load(workspace, result->candidate_root, &cwire,
-                             &clen) &&
-            vcs_zcode_candidate_parse(cwire, clen, &candidate) ==
-                VCS_ZCODE_DEV_OK &&
-            vcs_zcode_candidate_root(&candidate, checked) ==
-                VCS_ZCODE_DEV_OK &&
-            memcmp(checked, result->candidate_root, 32) == 0;
-        free(twire);
-        free(cwire);
-        if (!ok)
-            return ZCL_ERR(-1, "science-work-task-candidate-not-in-cas");
-    }
+    ZCL_CHECK(science_load_task_candidate(
+        workspace, result->task_root, result->candidate_root, &task,
+        &candidate));
     struct vcs_zcode_benchmark_method_v1 method;
     struct vcs_zcode_hardware_profile_v1 profile;
     {
@@ -452,25 +540,11 @@ static struct zcl_result science_work_commit_result(
     if (vcs_zcode_benchmark_result_v2_root(result, root) !=
         VCS_ZCODE_SCIENCE_OK)
         return ZCL_ERR(-1, "science-work-root-failed");
-    char root_hex[65];
-    zcl_hex_encode(root, 32, root_hex);
-    if (!vcs_object_put_addressed(workspace, root, wire, wire_len))
-        return ZCL_ERR(-1, "science-work-cas-store-failed");
-    struct db_zcode_science_entry row;
-    memset(&row, 0, sizeof(row));
-    (void)snprintf(row.root, sizeof(row.root), "%s", root_hex);
-    zcl_hex_encode(result->study_root, 32, row.study_root);
-    zcl_hex_encode(result->task_root, 32, row.link_root);
-    zcl_hex_encode(result->candidate_root, 32, row.aux_root);
-    row.code = result->status;
-    row.sequence = (int64_t)result->sequence;
-    row.created_at = result->started_unix;
-    row.expires_at = result->finished_unix;
-    if (!db_zcode_science_result_save(ndb, &row))
-        return ZCL_ERR(-1, "science-work-projection-save-failed");
-    ZCL_CHECK(science_plan_mark_committed(ndb, plan, root_hex));
-    (void)snprintf(out->result_root, sizeof(out->result_root), "%s", root_hex);
-    return ZCL_OK;
+    return science_work_store_result(
+        ndb, workspace, result->study_root, result->task_root,
+        result->candidate_root, result->status, result->sequence,
+        result->started_unix, result->finished_unix, root, wire, wire_len,
+        plan, out);
 }
 
 static struct zcl_result science_work_commit_reproduction(
@@ -530,11 +604,12 @@ struct zcl_result zcode_science_work_commit(
         return ZCL_ERR(-1, "science-work-input-invalid");
     uint8_t aux[64];
     size_t aux_len = 0;
-    bool is_result = science_wire_is_result_v2(wire, wire_len);
+    bool is_result_v1 = science_wire_is_result_v1(wire, wire_len);
+    bool is_result_v2 = science_wire_is_result_v2(wire, wire_len);
     bool is_reproduction = science_wire_is_reproduction(wire, wire_len);
-    if (!is_result && !is_reproduction)
+    if (!is_result_v1 && !is_result_v2 && !is_reproduction)
         return ZCL_ERR(-1, "science-work-wire-kind-unknown");
-    if (is_result) {
+    if (is_result_v2) {
         /* The aux identity is the method/profile roots carried by the
          * result itself — plan hashed the same pair. */
         struct vcs_zcode_benchmark_result_v2 probe;
@@ -552,13 +627,21 @@ struct zcl_result zcode_science_work_commit(
                                      out));
     if (done)
         return ZCL_OK;
-    if (is_result) {
+    if (is_result_v2) {
         struct vcs_zcode_benchmark_result_v2 result;
         if (vcs_zcode_benchmark_result_v2_parse(wire, wire_len, &result) !=
             VCS_ZCODE_SCIENCE_OK)
             return ZCL_ERR(-1, "science-work-result-invalid");
-        return science_work_commit_result(ndb, workspace, &result, action,
-                                          now, wire, wire_len, &plan, out);
+        return science_work_commit_result_v2(ndb, workspace, &result, action,
+                                             now, wire, wire_len, &plan, out);
+    }
+    if (is_result_v1) {
+        struct vcs_zcode_benchmark_result_v1 result;
+        if (vcs_zcode_benchmark_result_parse(wire, wire_len, &result) !=
+            VCS_ZCODE_SCIENCE_OK)
+            return ZCL_ERR(-1, "science-work-result-invalid");
+        return science_work_commit_result_v1(ndb, workspace, &result, action,
+                                             now, wire, wire_len, &plan, out);
     }
     struct vcs_zcode_reproduction_v1 reproduction;
     if (vcs_zcode_reproduction_parse(wire, wire_len, &reproduction) !=
@@ -609,15 +692,28 @@ struct zcl_result zcode_science_work_receipt(
      * projection row alone is never the proof. */
     bool ok = false;
     if (strcmp(*kind, "result") == 0) {
-        struct vcs_zcode_benchmark_result_v2 result;
-        uint8_t checked[32];
-        ok = vcs_zcode_benchmark_result_v2_parse(wire, wire_len, &result) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_benchmark_result_v2_validate(&result) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_benchmark_result_v2_root(&result, checked) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            memcmp(checked, root, 32) == 0;
+        if (science_wire_is_result_v2(wire, wire_len)) {
+            struct vcs_zcode_benchmark_result_v2 result;
+            uint8_t checked[32];
+            ok = vcs_zcode_benchmark_result_v2_parse(wire, wire_len,
+                                                     &result) ==
+                    VCS_ZCODE_SCIENCE_OK &&
+                vcs_zcode_benchmark_result_v2_validate(&result) ==
+                    VCS_ZCODE_SCIENCE_OK &&
+                vcs_zcode_benchmark_result_v2_root(&result, checked) ==
+                    VCS_ZCODE_SCIENCE_OK &&
+                memcmp(checked, root, 32) == 0;
+        } else if (science_wire_is_result_v1(wire, wire_len)) {
+            struct vcs_zcode_benchmark_result_v1 result;
+            uint8_t checked[32];
+            ok = vcs_zcode_benchmark_result_parse(wire, wire_len, &result) ==
+                    VCS_ZCODE_SCIENCE_OK &&
+                vcs_zcode_benchmark_result_validate(&result) ==
+                    VCS_ZCODE_SCIENCE_OK &&
+                vcs_zcode_benchmark_result_root(&result, checked) ==
+                    VCS_ZCODE_SCIENCE_OK &&
+                memcmp(checked, root, 32) == 0;
+        }
     } else {
         struct vcs_zcode_reproduction_v1 reproduction;
         uint8_t checked[32];

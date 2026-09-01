@@ -189,6 +189,7 @@ static bool hr_replication_row(
     const uint8_t heuristic_root[32], const uint8_t anchor_root[32],
     const uint8_t evaluator[32], const uint8_t study_root[32],
     const uint8_t original_root[32],
+    const uint8_t expected_comparison_policy_root[32],
     const struct vcs_zcode_study_spec_v1 *study,
     const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
@@ -225,13 +226,20 @@ static bool hr_replication_row(
                statement.provenance_root, 32) != 0 ||
         memcmp(reproduction.comparison_policy_root,
                statement.activity_root, 32) != 0 ||
+        memcmp(reproduction.comparison_policy_root,
+               expected_comparison_policy_root, 32) != 0 ||
         reproduction.created_unix != statement.observed_unix ||
         vcs_zcode_benchmark_result_validate_for_study(
             study, task, candidate, action, &reproduced, now_unix) !=
                 VCS_ZCODE_SCIENCE_OK ||
         vcs_zcode_reproduction_validate_for_results(
             study, original, &reproduced, &reproduction, now_unix) !=
-                VCS_ZCODE_SCIENCE_OK)
+                VCS_ZCODE_SCIENCE_OK ||
+        (reproduced.status == VCS_ZCODE_BENCHMARK_NEGATIVE_RESULT &&
+         reproduction.verdict != VCS_ZCODE_REPRODUCTION_CONTRADICTED) ||
+        ((reproduced.status == VCS_ZCODE_BENCHMARK_NULL_RESULT ||
+          reproduced.status == VCS_ZCODE_BENCHMARK_EXECUTION_FAILED) &&
+         reproduction.verdict != VCS_ZCODE_REPRODUCTION_INCONCLUSIVE))
         return false;
     memcpy(signers[used], statement.signer_pubkey, 32);
     memcpy(reproduction_roots[used], statement.predicate_body_root, 32);
@@ -288,7 +296,8 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_replication_fold(
                           heuristic->study_root, heuristic->task_root) ||
         vcs_zcode_benchmark_result_validate_for_study(
             &study, &task, &candidate, action, &original, now_unix) !=
-                VCS_ZCODE_SCIENCE_OK)
+                VCS_ZCODE_SCIENCE_OK ||
+        original.status != VCS_ZCODE_BENCHMARK_OBSERVED)
         return VCS_ZCODE_ATTENTION_EVIDENCE;
 
     struct vcs_zcode_heuristic_replication_report result = {0};
@@ -309,9 +318,9 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_replication_fold(
                 workspace, snapshot->statement_roots[i], heuristic_root,
                 snapshot->anchor_statement_root,
                 snapshot->expected_evaluator_signer, heuristic->study_root,
-                anchor.provenance_root, &study, &task, &candidate, action,
-                &original, now_unix, signers, reproduction_roots,
-                result_roots, i, &verdict))
+                anchor.provenance_root, heuristic->preregistration_root,
+                &study, &task, &candidate, action, &original, now_unix,
+                signers, reproduction_roots, result_roots, i, &verdict))
             return VCS_ZCODE_ATTENTION_EVIDENCE;
         result.validated_count++;
         if (verdict == VCS_ZCODE_REPRODUCTION_REPLICATED)

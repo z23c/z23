@@ -20,6 +20,7 @@
 #include "vcs/package_store.h"
 #include "vcs/package_swarm_node.h"
 #include "vcs/zcode_dht_service.h"
+#include "vcs/zcode_science.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -263,7 +264,22 @@ static bool zsci_action(const struct json_value *input,
 static bool zsci_wire_is_reproduction(const uint8_t *wire, size_t len)
 {
     static const uint8_t magic[8] = {'Z','C','R','E','P','R','\r','\n'};
-    return wire && len == 251u && memcmp(wire, magic, sizeof(magic)) == 0;
+    return wire && len == VCS_ZCODE_REPRODUCTION_WIRE_BYTES &&
+           memcmp(wire, magic, sizeof(magic)) == 0;
+}
+
+static bool zsci_wire_is_result_v1(const uint8_t *wire, size_t len)
+{
+    static const uint8_t magic[8] = {'Z','C','B','E','N','C','\r','\n'};
+    return wire && len == VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES &&
+           memcmp(wire, magic, sizeof(magic)) == 0;
+}
+
+static bool zsci_wire_is_result_v2(const uint8_t *wire, size_t len)
+{
+    static const uint8_t magic[8] = {'Z','C','B','E','N','2','\r','\n'};
+    return wire && len == VCS_ZCODE_BENCHMARK_RESULT_V2_WIRE_BYTES &&
+           memcmp(wire, magic, sizeof(magic)) == 0;
 }
 
 void zcl_native_handle_zcode_science_study_plan(
@@ -501,9 +517,13 @@ void zcl_native_handle_zcode_science_work_plan(
     if (!request || !reply) return;
     size_t wire_len = 0, method_len = 0, profile_len = 0;
     uint8_t *wire = zsci_wire(request->input, "wire_hex", &wire_len);
-    if (!wire) {
+    if (!wire || (!zsci_wire_is_result_v1(wire, wire_len) &&
+                  !zsci_wire_is_result_v2(wire, wire_len) &&
+                  !zsci_wire_is_reproduction(wire, wire_len))) {
+        free(wire);
         zsci_fail(reply, "BAD_WIRE",
-                  "wire_hex must be a benchmark_result.v2 or reproduction.v1 wire",
+                  "wire_hex must be a benchmark_result.v1, "
+                  "benchmark_result.v2, or reproduction.v1 wire",
                   "zcode.science.work.plan");
         return;
     }
@@ -517,14 +537,25 @@ void zcl_native_handle_zcode_science_work_plan(
             return;
         }
         action_p = &action;
-        method = zsci_wire(request->input, "method_hex", &method_len);
-        profile = zsci_wire(request->input, "profile_hex", &profile_len);
-        if (!method || !profile) {
-            free(profile);
-            free(method);
+        if (zsci_wire_is_result_v2(wire, wire_len)) {
+            method = zsci_wire(request->input, "method_hex", &method_len);
+            profile = zsci_wire(request->input, "profile_hex", &profile_len);
+            if (!method || !profile) {
+                free(profile);
+                free(method);
+                free(wire);
+                zsci_fail(reply, "BAD_AUX_WIRES",
+                          "a benchmark_result.v2 plan requires method_hex "
+                          "and profile_hex wires",
+                          "zcode.science.work.plan");
+                return;
+            }
+        } else if (json_get(request->input, "method_hex") ||
+                   json_get(request->input, "profile_hex")) {
             free(wire);
             zsci_fail(reply, "BAD_AUX_WIRES",
-                      "a result plan requires method_hex and profile_hex wires",
+                      "a benchmark_result.v1 plan forbids method_hex and "
+                      "profile_hex; those roots exist only in v2",
                       "zcode.science.work.plan");
             return;
         }
