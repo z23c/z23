@@ -108,4 +108,40 @@ if printf '1 10 x.c\n' | "$evaluator" --rank-root 1 >/dev/null 2>&1; then
     fail "non-tab rank-root row was accepted"
 fi
 
-printf 'retrieval-eval-selftest: PASS mutations=13\n'
+experiment="$tmp/experiment.batch"
+printf '%s\n' \
+    'zcl.retrieval_eval_batch.v3 tasks=1 eligible_relevance_judgments=1' \
+    'task task_a 1' \
+    'query find a' \
+    'relevant a.c' \
+    'literal observed 1 6' \
+    'rank 10 1 1 b.c' \
+    'rank 20 1 1 c.c' \
+    'rank 30 1 1 d.c' \
+    'rank 40 1 1 e.c' \
+    'rank 50 1 1 f.c' \
+    'rank 10 1 1 a.c' \
+    'bm25 observed 1 6' \
+    'rank 10 1 1 a.c' \
+    'rank 10 1 1 b.c' \
+    'rank 20 1 1 c.c' \
+    'rank 30 1 1 d.c' \
+    'rank 40 1 1 e.c' \
+    'rank 50 1 1 f.c' \
+    'end' >"$experiment"
+parent=$($evaluator --experiment-prefix 0 <"$experiment") ||
+    fail "parent experiment fixture was refused"
+base=$($evaluator --experiment-prefix 5 <"$experiment") ||
+    fail "BM25 experiment fixture was refused"
+[[ $(printf '%s\n' "$parent" | "$jsonq" get schema) = zcl.retrieval_experiment_eval_result.v1 &&
+   $(printf '%s\n' "$parent" | "$jsonq" get candidate.recall_at_5.basis_points) = 10000 &&
+   $(printf '%s\n' "$base" | "$jsonq" get candidate.recall_at_5.basis_points) = 0 &&
+   $(printf '%s\n' "$parent" | "$jsonq" get candidate.wrong_scope_at_5.available) = false &&
+   $(printf '%s\n' "$parent" | "$jsonq" get projector_gold_input) = none &&
+   $(printf '%s\n' "$parent" | "$jsonq" get promotion_authorized) = false ]] ||
+    fail "experiment evaluation boundary or metric differs"
+if "$evaluator" --experiment-prefix 6 <"$experiment" >/dev/null 2>&1; then
+    fail "out-of-range experiment prefix was accepted"
+fi
+
+printf 'retrieval-eval-selftest: PASS mutations=14 experiment_prefixes=2\n'

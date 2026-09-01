@@ -168,22 +168,19 @@ decode_base64() {
 decode_sealed_batch() {
     local document=$1 prefix=$2 expected_bytes=$3 expected_root=$4 output=$5
     local encoded="$tmp/$prefix.base64" reencoded="$tmp/$prefix.reencoded"
-    local bytes encoded_chars
+    local bytes encoded_chars raw_encoded encoded_value
     [[ $(field "$document" "${prefix}_encoding") = base64_rfc4648 ]] ||
         fail "unknown $prefix encoding"
     bytes=$(uint_field "$document" "${prefix}_bytes" 1048576)
     [[ $bytes -eq $expected_bytes ]] || fail "$prefix byte count differs"
-    case "$prefix" in
-        evaluator_batch)
-            printf '%s\n' "$document" | sed -n \
-                's|^.*"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"\([A-Za-z0-9+/]*=\{0,2\}\)","evaluator_batch_root_sha3":"[0-9a-f]\{64\}","identifier_graph_evaluator_batch_bytes":.*$|\1|p' \
-                >"$encoded" ;;
-        identifier_graph_evaluator_batch)
-            printf '%s\n' "$document" | sed -n \
-                's|^.*"identifier_graph_evaluator_batch_encoding":"base64_rfc4648","identifier_graph_evaluator_batch_base64":"\([A-Za-z0-9+/]*=\{0,2\}\)","identifier_graph_evaluator_batch_root_sha3":"[0-9a-f]\{64\}"}$|\1|p' \
-                >"$encoded" ;;
-        *) fail "unknown sealed batch prefix: $prefix" ;;
-    esac
+    raw_encoded=$(printf '%s\n' "$document" | "$jsonq" raw "${prefix}_base64") ||
+        fail "cannot read $prefix base64"
+    [[ $raw_encoded == \"*\" && $raw_encoded == *\" ]] ||
+        fail "$prefix base64 is not one JSON string"
+    encoded_value=${raw_encoded:1:${#raw_encoded}-2}
+    [[ $encoded_value =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
+        fail "$prefix base64 alphabet is noncanonical"
+    printf '%s\n' "$encoded_value" >"$encoded"
     [[ -s $encoded && $(wc -l <"$encoded" | tr -d '[:space:]') -eq 1 ]] ||
         fail "$prefix base64 is noncanonical"
     encoded_chars=$(wc -c <"$encoded"); encoded_chars=${encoded_chars//[[:space:]]/}
@@ -604,7 +601,8 @@ validate_semantics() {
     validate_batch_scope "$batch" "$scope_counts"
     IFS=$'\t' read -r _ literal_scope_files literal_wrong_files <"$scope_counts" ||
         fail "literal scope counts are unavailable"
-    IFS=$'\t' read -r _ bm25_scope_files bm25_wrong_files < <(sed -n '2p' "$scope_counts") ||
+    IFS=$'\t' read -r _ bm25_scope_files bm25_wrong_files \
+        < <(awk 'NR == 2 { print; exit }' "$scope_counts") ||
         fail "bm25 scope counts are unavailable"
     [[ $literal_scope_files -eq $literal_files && $bm25_scope_files -eq $bm25_files ]] ||
         fail "scope denominator differs from task-unique file selections"
@@ -618,7 +616,7 @@ validate_semantics() {
     IFS=$'\t' read -r _ graph_literal_scope_files graph_literal_wrong_files \
         <"$graph_scope_counts" || fail "graph-batch literal scope counts are unavailable"
     IFS=$'\t' read -r _ graph_scope_files graph_wrong_files \
-        < <(sed -n '2p' "$graph_scope_counts") ||
+        < <(awk 'NR == 2 { print; exit }' "$graph_scope_counts") ||
         fail "identifier-graph scope counts are unavailable"
     [[ $graph_literal_scope_files -eq $literal_files &&
        $graph_literal_wrong_files -eq $literal_wrong_files &&
@@ -770,13 +768,28 @@ expect_semantic_refusal() {
     fi
 }
 
+mutate_first_literal() {
+    local input=$1 output=$2 from=$3 to=$4 wanted_line=${5:-0}
+    awk -v from="$from" -v to="$to" -v wanted="$wanted_line" '
+        !done && (wanted == 0 || NR == wanted) {
+            at = index($0, from)
+            if (at) {
+                $0 = substr($0, 1, at - 1) to substr($0, at + length(from))
+                done = 1
+            }
+        }
+        { print }
+        END { if (!done) exit 2 }
+    ' "$input" >"$output" || fail "selftest mutation source text is absent"
+}
+
 selftest() {
     local bad bad_replay benchmark replay i bytes available in_scope path mutations=0
     local base_tsv="$tmp/graph-contract-base.tsv"
     local graph_tsv="$tmp/graph-contract-graph.tsv"
     local groups="$tmp/graph-contract.groups"
     "$0" --semantic-fixture "$receipt" >/dev/null
-    benchmark=$(sed -n '1p' "$receipt")
+    benchmark=$(head -n 1 "$receipt")
     decode_sealed_batch "$benchmark" evaluator_batch 73408 \
         abd5b8845eaa99ab67966d0050e962df1c44598e8c35e6613a397818ff21c250 \
         "$tmp/evaluator.batch"
@@ -785,7 +798,10 @@ selftest() {
         "$tmp/graph.batch"
     for sealed in "$tmp/evaluator.batch" "$tmp/graph.batch"; do
         bad="$tmp/top-five-scope-$mutations.batch"
-        sed '0,/^rank \([0-9][0-9]*\) 1 [01] /s//rank \1 0 0 /' "$sealed" >"$bad"
+        awk '!done && $1 == "rank" && $3 == 1 && ($4 == 0 || $4 == 1) {
+                $3=0; $4=0; done=1
+            } { print } END { if (!done) exit 2 }' "$sealed" >"$bad" ||
+            fail "top-five scope mutation source is absent"
         if (validate_batch_scope "$bad" "$tmp/scope.counts" >/dev/null 2>&1); then
             fail "top-five missing-scope mutation was accepted"
         fi
@@ -880,37 +896,53 @@ selftest() {
         mutations=$((mutations + 1))
     done
 
-    bad="$tmp/publishable.jsonl"; sed 's/"publishable":true/"publishable":false/' "$receipt" >"$bad"
+    bad="$tmp/publishable.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"publishable":true' '"publishable":false'
     expect_semantic_refusal publishable "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/benchmark-schema.jsonl"; sed '1s/zcl.retrieval_gold_benchmark.v2/zcl.retrieval_gold_benchmark.v1/' "$receipt" >"$bad"
+    bad="$tmp/benchmark-schema.jsonl"
+    mutate_first_literal "$receipt" "$bad" zcl.retrieval_gold_benchmark.v2 zcl.retrieval_gold_benchmark.v1 1
     expect_semantic_refusal benchmark-schema "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/task-schema.jsonl"; sed '2s/zcl.retrieval_gold_benchmark_task.v4/zcl.retrieval_gold_benchmark_task.v3/' "$receipt" >"$bad"
+    bad="$tmp/task-schema.jsonl"
+    mutate_first_literal "$receipt" "$bad" zcl.retrieval_gold_benchmark_task.v4 zcl.retrieval_gold_benchmark_task.v3 2
     expect_semantic_refusal task-schema "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/driver.jsonl"; sed 's/25fe3e353288d2f52e7f5fc07b7b722b27e71f1a/25fe3e353288d2f52e7f5fc07b7b722b27e71f1b/' "$receipt" >"$bad"
+    bad="$tmp/driver.jsonl"
+    mutate_first_literal "$receipt" "$bad" 25fe3e353288d2f52e7f5fc07b7b722b27e71f1a 25fe3e353288d2f52e7f5fc07b7b722b27e71f1b
     expect_semantic_refusal driver "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/graph-bytes.jsonl"; sed 's/"identifier_graph_evaluator_batch_bytes":73408/"identifier_graph_evaluator_batch_bytes":73409/' "$receipt" >"$bad"
+    bad="$tmp/graph-bytes.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"identifier_graph_evaluator_batch_bytes":73408' '"identifier_graph_evaluator_batch_bytes":73409'
     expect_semantic_refusal graph-bytes "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/graph-base64.jsonl"; sed 's/"identifier_graph_evaluator_batch_base64":"e/"identifier_graph_evaluator_batch_base64":"!/' "$receipt" >"$bad"
+    bad="$tmp/graph-base64.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"identifier_graph_evaluator_batch_base64":"e' '"identifier_graph_evaluator_batch_base64":"!'
     expect_semantic_refusal graph-base64 "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/graph-root.jsonl"; sed 's/1bf1809102bc4534b3dfb34be6f407992d86e536989bdf2e21a44fc5574c0f1c/0bf1809102bc4534b3dfb34be6f407992d86e536989bdf2e21a44fc5574c0f1c/' "$receipt" >"$bad"
+    bad="$tmp/graph-root.jsonl"
+    mutate_first_literal "$receipt" "$bad" 1bf1809102bc4534b3dfb34be6f407992d86e536989bdf2e21a44fc5574c0f1c 0bf1809102bc4534b3dfb34be6f407992d86e536989bdf2e21a44fc5574c0f1c
     expect_semantic_refusal graph-root "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/unsupported-graph.jsonl"; sed '0,/"identifier_graph":null/s//"identifier_graph":{}/' "$receipt" >"$bad"
+    bad="$tmp/unsupported-graph.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"identifier_graph":null' '"identifier_graph":{}'
     expect_semantic_refusal unsupported-graph "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/basis.jsonl"; sed '2s/bm25_top20_rare_identifier_atom_df16_observed_reverse_refs_context_guard_v1/bm25_top20_identifier_v0/' "$receipt" >"$bad"
+    bad="$tmp/basis.jsonl"
+    mutate_first_literal "$receipt" "$bad" bm25_top20_rare_identifier_atom_df16_observed_reverse_refs_context_guard_v1 bm25_top20_identifier_v0 2
     expect_semantic_refusal basis "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/vector.jsonl"; sed '2s/"vector_evidence":"not_used"/"vector_evidence":"proof"/' "$receipt" >"$bad"
+    bad="$tmp/vector.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"vector_evidence":"not_used"' '"vector_evidence":"proof"' 2
     expect_semantic_refusal vector "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/saturation.jsonl"; sed '2s/"query_lookup_saturated":false/"query_lookup_saturated":true/' "$receipt" >"$bad"
+    bad="$tmp/saturation.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"query_lookup_saturated":false' '"query_lookup_saturated":true' 2
     expect_semantic_refusal saturation "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/evidence.jsonl"; sed '2s/"evidence_available":true/"evidence_available":false/' "$receipt" >"$bad"
+    bad="$tmp/evidence.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"evidence_available":true' '"evidence_available":false' 2
     expect_semantic_refusal evidence "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/fallback.jsonl"; sed '2s/"fallback_reason":"none"/"fallback_reason":"mystery"/' "$receipt" >"$bad"
+    bad="$tmp/fallback.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"fallback_reason":"none"' '"fallback_reason":"mystery"' 2
     expect_semantic_refusal fallback "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/aggregate-schema.jsonl"; sed '$s/zcl.retrieval_gold_benchmark_aggregate.v3/zcl.retrieval_gold_benchmark_aggregate.v2/' "$receipt" >"$bad"
+    bad="$tmp/aggregate-schema.jsonl"
+    mutate_first_literal "$receipt" "$bad" zcl.retrieval_gold_benchmark_aggregate.v3 zcl.retrieval_gold_benchmark_aggregate.v2 12
     expect_semantic_refusal aggregate-schema "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/aggregate-graph.jsonl"; sed '$s/"basis_points":1243/"basis_points":1244/' "$receipt" >"$bad"
+    bad="$tmp/aggregate-graph.jsonl"
+    mutate_first_literal "$receipt" "$bad" '"basis_points":1243' '"basis_points":1244' 12
     expect_semantic_refusal aggregate-graph "$bad"; mutations=$((mutations + 1))
-    bad="$tmp/delete.jsonl"; sed '2d' "$receipt" >"$bad"
+    bad="$tmp/delete.jsonl"
+    awk 'NR != 2 { print }' "$receipt" >"$bad"
     expect_semantic_refusal record-deletion "$bad"; mutations=$((mutations + 1))
     printf 'retrieval-gold-identifier-graph-receipt-check: SELFTEST PASS mutations=%s\n' \
         "$mutations"
@@ -935,7 +967,18 @@ case ${1:---check} in
     --semantic-fixture)
         [[ $# -eq 2 ]] || fail "--semantic-fixture requires one path"
         validate_semantics "$2" ;;
+    --emit-evaluator-batches)
+        [[ $# -eq 2 && -d $2 ]] ||
+            fail "--emit-evaluator-batches requires one existing directory"
+        validate_canonical
+        benchmark=$(head -n 1 "$receipt") || fail "cannot read benchmark row"
+        decode_sealed_batch "$benchmark" evaluator_batch 73408 \
+            abd5b8845eaa99ab67966d0050e962df1c44598e8c35e6613a397818ff21c250 \
+            "$2/evaluator.batch"
+        decode_sealed_batch "$benchmark" identifier_graph_evaluator_batch 73408 \
+            1bf1809102bc4534b3dfb34be6f407992d86e536989bdf2e21a44fc5574c0f1c \
+            "$2/identifier-graph-evaluator.batch" ;;
     *)
-        printf 'usage: %s [--check|--selftest]\n' "$0" >&2
+        printf 'usage: %s [--check|--selftest|--emit-evaluator-batches DIR]\n' "$0" >&2
         exit 64 ;;
 esac

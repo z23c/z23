@@ -1,6 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: bounded, relevance-free retrieval experiment projection. */
 #include "retrieval/retrieval_experiment.h"
 
+#include "base/safe_alloc.h"
 #include "sha3/sha3.h"
 
 #include <limits.h>
@@ -194,6 +196,100 @@ enum zcl_retrieval_experiment_error zcl_retrieval_experiment_project(
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
+enum zcl_retrieval_experiment_error zcl_retrieval_experiment_evaluate(
+    const struct zcl_retrieval_experiment_eval_task *tasks,
+    size_t task_count, uint8_t bm25_prefix,
+    struct zcl_retrieval_experiment_eval_report *report)
+{
+    if (!tasks || !report) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (task_count == 0 || task_count > ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX)
+        return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
+    if (bm25_prefix > ZCL_RETRIEVAL_EXPERIMENT_TOP)
+        return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
+    if (rx_memory_overlaps(report, sizeof(*report), tasks,
+                           task_count * sizeof(*tasks)))
+        return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    for (size_t i = 0; i < task_count; i++) {
+        if (tasks[i].relevant_count == 0 ||
+            tasks[i].relevant_count >
+                ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX ||
+            tasks[i].bm25_count > ZCL_RETRIEVAL_EVAL_RANK_MAX ||
+            tasks[i].parent_count > ZCL_RETRIEVAL_EVAL_RANK_MAX)
+            return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
+        if ((tasks[i].bm25_count && rx_memory_overlaps(
+                report, sizeof(*report), tasks[i].bm25,
+                tasks[i].bm25_count * sizeof(*tasks[i].bm25))) ||
+            (tasks[i].parent_count && rx_memory_overlaps(
+                report, sizeof(*report), tasks[i].parent,
+                tasks[i].parent_count * sizeof(*tasks[i].parent))) ||
+            (tasks[i].relevant_paths && rx_memory_overlaps(
+                report, sizeof(*report), tasks[i].relevant_paths,
+                tasks[i].relevant_count * sizeof(*tasks[i].relevant_paths))))
+            return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    }
+    struct zcl_retrieval_experiment_eval_report result = {
+        .top20_membership_preserved = true,
+        .full_retained_set_preserved = true,
+        .context_ceiling_preserved = true,
+    };
+    struct zcl_retrieval_ranked_file (*candidate)
+        [ZCL_RETRIEVAL_EVAL_RANK_MAX] = zcl_calloc(
+            task_count, sizeof(*candidate), "retrieval experiment candidates");
+    if (!candidate) {
+        memset(report, 0, sizeof(*report));
+        return ZCL_RETRIEVAL_EXPERIMENT_ALLOCATION;
+    }
+    struct zcl_retrieval_gold_task
+        evaluated[ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX] = {0};
+    for (size_t i = 0; i < task_count; i++) {
+        struct zcl_retrieval_experiment_report projected;
+        enum zcl_retrieval_experiment_error error =
+            zcl_retrieval_experiment_project(
+                tasks[i].bm25, tasks[i].bm25_count,
+                tasks[i].bm25_complete, tasks[i].parent,
+                tasks[i].parent_count, tasks[i].parent_complete,
+                bm25_prefix, candidate[i], ZCL_RETRIEVAL_EVAL_RANK_MAX,
+                &projected);
+        if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) {
+            free(candidate);
+            memset(report, 0, sizeof(*report));
+            return error;
+        }
+        if (SIZE_MAX - result.changed_positions_at_5 <
+            projected.changed_positions_at_5) {
+            free(candidate);
+            memset(report, 0, sizeof(*report));
+            return ZCL_RETRIEVAL_EXPERIMENT_OVERFLOW;
+        }
+        result.changed_positions_at_5 += projected.changed_positions_at_5;
+        if (projected.used_bm25_fallback) result.fallback_tasks++;
+        result.top20_membership_preserved =
+            result.top20_membership_preserved &&
+            projected.top20_membership_preserved;
+        result.context_ceiling_preserved =
+            result.context_ceiling_preserved &&
+            projected.candidate_context_bytes_at_5 <=
+                projected.bm25_context_bytes_at_5;
+        evaluated[i] = (struct zcl_retrieval_gold_task){
+            .task_id = tasks[i].task_id,
+            .query = tasks[i].query,
+            .relevant_paths = tasks[i].relevant_paths,
+            .relevant_count = tasks[i].relevant_count,
+            .ranked = candidate[i],
+            .ranked_count = projected.ranked_count,
+            .ranking_complete = tasks[i].bm25_complete,
+        };
+    }
+    if (!zcl_retrieval_evaluate(evaluated, task_count, &result.metrics)) {
+        free(candidate);
+        memset(report, 0, sizeof(*report));
+        return ZCL_RETRIEVAL_EXPERIMENT_EVALUATION;
+    }
+    free(candidate);
+    *report = result;
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
 bool zcl_retrieval_ranked_files_root(
     const struct zcl_retrieval_ranked_file *ranked, size_t ranked_count,
     bool ranking_complete, uint8_t out[32])
@@ -288,6 +384,10 @@ const char *zcl_retrieval_experiment_error_string(
     case ZCL_RETRIEVAL_EXPERIMENT_BINDING: return "ranking binding mismatch";
     case ZCL_RETRIEVAL_EXPERIMENT_OVERFLOW: return "context byte overflow";
     case ZCL_RETRIEVAL_EXPERIMENT_ALIAS: return "input/output alias";
+    case ZCL_RETRIEVAL_EXPERIMENT_EVALUATION:
+        return "maintained evaluator refused projected tasks";
+    case ZCL_RETRIEVAL_EXPERIMENT_ALLOCATION:
+        return "candidate workspace allocation failed";
     }
     return "unknown retrieval experiment error";
 }

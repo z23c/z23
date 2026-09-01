@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
 #include "retrieval/retrieval_experiment.h"
 
 #include <stdio.h>
@@ -197,11 +198,87 @@ static int case_roots_exclude_gold(void)
     return failures;
 }
 
+static int case_post_proposal_evaluation(void)
+{
+    int failures = 0;
+    char paths[6][8];
+    struct zcl_retrieval_ranked_file bm25[6], parent[6];
+    rx_rows(bm25, paths, 6u);
+    const size_t order[6] = {5, 0, 1, 2, 3, 4};
+    for (size_t i = 0; i < 6u; i++) parent[i] = bm25[order[i]];
+    bm25[5].context_bytes = 50u;
+    parent[0].context_bytes = 50u;
+    const char *relevant[] = {"f05.c"};
+    struct zcl_retrieval_experiment_eval_task task = {
+        .task_id = "task",
+        .query = "find f05",
+        .relevant_paths = relevant,
+        .relevant_count = 1u,
+        .bm25 = bm25,
+        .bm25_count = 6u,
+        .bm25_complete = true,
+        .parent = parent,
+        .parent_count = 6u,
+        .parent_complete = true,
+    };
+    struct zcl_retrieval_experiment_eval_report report;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_experiment_evaluate(&task, 1u, 0u, &report);
+    RX_CHECK("post-proposal gold evaluates the unchanged parent",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             report.metrics.recall_at_5_available &&
+             report.metrics.recall_at_5_bp == 10000u &&
+             !report.metrics.wrong_scope_at_5_available &&
+             report.context_ceiling_preserved);
+    error = zcl_retrieval_experiment_evaluate(&task, 1u, 5u, &report);
+    RX_CHECK("prefix-five evaluation restores the BM25 observation",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             report.metrics.recall_at_5_available &&
+             report.metrics.recall_at_5_bp == 0u);
+    const char *bad_relevant[] = {"f05.c", "f05.c"};
+    task.relevant_paths = bad_relevant;
+    task.relevant_count = 2u;
+    memset(&report, 0xa5, sizeof(report));
+    error = zcl_retrieval_experiment_evaluate(&task, 1u, 0u, &report);
+    RX_CHECK("malformed independent gold is refused without stale metrics",
+             error == ZCL_RETRIEVAL_EXPERIMENT_EVALUATION &&
+             report.metrics.tasks == 0u &&
+             !report.top20_membership_preserved);
+    error = zcl_retrieval_experiment_evaluate(&task, 1u, 6u, &report);
+    RX_CHECK("evaluation cannot widen the registered parameter range",
+             error == ZCL_RETRIEVAL_EXPERIMENT_PARAMETER);
+    task.relevant_paths = relevant;
+    task.relevant_count =
+        ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX + 1u;
+    error = zcl_retrieval_experiment_evaluate(&task, 1u, 0u, &report);
+    RX_CHECK("direct callers cannot create unbounded relevance work",
+             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE);
+    task.relevant_count = 1u;
+    union {
+        struct zcl_retrieval_experiment_eval_task task;
+        struct zcl_retrieval_experiment_eval_report report;
+    } alias = {.task = task};
+    error = zcl_retrieval_experiment_evaluate(
+        &alias.task, 1u, 0u, &alias.report);
+    RX_CHECK("evaluation report cannot overwrite its task input",
+             error == ZCL_RETRIEVAL_EXPERIMENT_ALIAS);
+    zcl_alloc_fault_fail_next("retrieval experiment candidates");
+    memset(&report, 0xa5, sizeof(report));
+    error = zcl_retrieval_experiment_evaluate(&task, 1u, 0u, &report);
+    RX_CHECK("candidate allocation failure is observed and clears output",
+             error == ZCL_RETRIEVAL_EXPERIMENT_ALLOCATION &&
+             report.metrics.tasks == 0u &&
+             !report.context_ceiling_preserved);
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
 int test_retrieval_experiment(void)
 {
     int failures = 0;
     failures += case_projection();
     failures += case_guard_and_refusals();
     failures += case_roots_exclude_gold();
+    failures += case_post_proposal_evaluation();
     return failures;
 }
