@@ -696,9 +696,11 @@ ZCL_TEST_GROUP(territory)
  * common one; and an index that failed an insertion answers nothing at all
  * rather than answering from a corpus with holes in it. */
 ZCL_TEST_GROUP(retrieval)
-/* One relevance-free retrieval experiment over a sealed BM25/graph parent.
- * It can change only a 0..5 prefix scalar and must preserve candidate set and
- * context ceiling without seeing reviewed gold or scope labels. */
+/* One relevance-free retrieval experiment over a sealed BM25 baseline.
+ * An immutable profile can use only features observed by the exact snapshot;
+ * the first live extractor exposes context bytes and refuses all other
+ * features as INCOMPLETE. Candidate set and configured top-k byte ceiling are
+ * preserved without seeing reviewed gold or scope labels. */
 ZCL_TEST_GROUP(retrieval_experiment)
 /* One exact retrieval evaluator observation is rooted, structurally bound to
  * its heuristic/proposal/batch/evaluator, and used only as attributed input

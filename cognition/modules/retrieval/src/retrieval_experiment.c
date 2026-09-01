@@ -509,6 +509,59 @@ bool zcl_retrieval_experiment_proposal_input_root(
     return true;
 }
 
+bool zcl_retrieval_profile_proposal_input_root(
+    const uint8_t source_root[32],
+    const uint8_t codeindex_source_root[32],
+    const uint8_t retrieval_projection_root[32],
+    const char *task_id, const char *query,
+    const uint8_t baseline_ranking_root[32],
+    const uint8_t profile_root[32],
+    const uint8_t feature_snapshot_root[32],
+    const uint8_t candidate_ranking_root[32],
+    const uint8_t study_root[32], const uint8_t preregistration_root[32],
+    const uint8_t evaluator_root[32], uint8_t out[32])
+{
+    static const char domain[] =
+        "zcl.retrieval_profile_proposal_input.v1";
+    if (!out) return false;
+    size_t task_id_length = 0, query_length = 0;
+    if (!source_root || !codeindex_source_root ||
+        !retrieval_projection_root || !task_id || !query ||
+        !baseline_ranking_root || !profile_root || !feature_snapshot_root ||
+        !candidate_ranking_root || !study_root || !preregistration_root ||
+        !evaluator_root || !rx_root_any(source_root) ||
+        !rx_root_any(codeindex_source_root) ||
+        !rx_root_any(retrieval_projection_root) ||
+        !rx_root_any(baseline_ranking_root) || !rx_root_any(profile_root) ||
+        !rx_root_any(feature_snapshot_root) ||
+        !rx_root_any(candidate_ranking_root) || !rx_root_any(study_root) ||
+        !rx_root_any(preregistration_root) || !rx_root_any(evaluator_root) ||
+        !rx_bounded_text(task_id, 128u, &task_id_length) ||
+        !rx_bounded_text(query, 4096u, &query_length))
+        return false;
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, source_root, 32u);
+    sha3_256_write(&sha, codeindex_source_root, 32u);
+    sha3_256_write(&sha, retrieval_projection_root, 32u);
+    rx_write_text(&sha, task_id, task_id_length);
+    rx_write_text(&sha, query, query_length);
+    sha3_256_write(&sha, baseline_ranking_root, 32u);
+    sha3_256_write(&sha, profile_root, 32u);
+    sha3_256_write(&sha, feature_snapshot_root, 32u);
+    sha3_256_write(&sha, candidate_ranking_root, 32u);
+    sha3_256_write(&sha, study_root, 32u);
+    sha3_256_write(&sha, preregistration_root, 32u);
+    sha3_256_write(&sha, evaluator_root, 32u);
+    rx_write_text(&sha, ZCL_RETRIEVAL_PROFILE_ALGORITHM,
+                  strlen(ZCL_RETRIEVAL_PROFILE_ALGORITHM));
+    uint8_t root[32];
+    sha3_256_finalize(&sha, root);
+    memcpy(out, root, sizeof(root));
+    return true;
+}
+
 const char *zcl_retrieval_experiment_error_string(
     enum zcl_retrieval_experiment_error error)
 {

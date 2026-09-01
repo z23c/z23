@@ -188,6 +188,107 @@ enum zcl_retrieval_experiment_error zcl_retrieval_feature_snapshot_root(
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
+enum zcl_retrieval_experiment_error
+zcl_retrieval_context_feature_snapshot(
+    const uint8_t codeindex_source_root[32],
+    const uint8_t retrieval_projection_root[32], const char *query,
+    const struct zcl_retrieval_ranked_file *baseline, size_t baseline_count,
+    bool baseline_complete,
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot_out,
+    struct zcl_retrieval_feature_row_v1 *rows_out, size_t rows_capacity)
+{
+    if (!codeindex_source_root || !retrieval_projection_root || !query ||
+        !baseline || !snapshot_out || !rows_out)
+        return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (baseline_count == 0 ||
+        baseline_count > ZCL_RETRIEVAL_EVAL_RANK_MAX)
+        return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
+    if (rows_capacity < baseline_count)
+        return ZCL_RETRIEVAL_EXPERIMENT_CAPACITY;
+    size_t query_length = 0;
+    while (query_length <= 4096u && query[query_length]) query_length++;
+    if (query_length == 0 || query_length > 4096u ||
+        !rx_root_any(codeindex_source_root) ||
+        !rx_root_any(retrieval_projection_root))
+        return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
+    size_t rows_bytes = baseline_count * sizeof(*rows_out);
+    size_t baseline_bytes = baseline_count * sizeof(*baseline);
+    if (rx_memory_overlaps(snapshot_out, sizeof(*snapshot_out), baseline,
+                           baseline_bytes) ||
+        rx_memory_overlaps(rows_out, rows_bytes, baseline, baseline_bytes) ||
+        rx_memory_overlaps(snapshot_out, sizeof(*snapshot_out), rows_out,
+                           rows_bytes) ||
+        rx_memory_overlaps(snapshot_out, sizeof(*snapshot_out),
+                           codeindex_source_root, 32u) ||
+        rx_memory_overlaps(rows_out, rows_bytes, codeindex_source_root, 32u) ||
+        rx_memory_overlaps(snapshot_out, sizeof(*snapshot_out),
+                           retrieval_projection_root, 32u) ||
+        rx_memory_overlaps(rows_out, rows_bytes,
+                           retrieval_projection_root, 32u) ||
+        rx_memory_overlaps(snapshot_out, sizeof(*snapshot_out), query,
+                           query_length + 1u) ||
+        rx_memory_overlaps(rows_out, rows_bytes, query,
+                           query_length + 1u))
+        return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    size_t path_lengths[ZCL_RETRIEVAL_EVAL_RANK_MAX];
+    for (size_t i = 0; i < baseline_count; i++) {
+        if (!rx_canonical_path(baseline[i].path, &path_lengths[i]))
+            return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
+        if (rx_memory_overlaps(snapshot_out, sizeof(*snapshot_out),
+                               baseline[i].path, path_lengths[i] + 1u) ||
+            rx_memory_overlaps(rows_out, rows_bytes, baseline[i].path,
+                               path_lengths[i] + 1u))
+            return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    }
+
+    struct zcl_retrieval_feature_snapshot_v1 snapshot = {
+        .schema_version = ZCL_RETRIEVAL_FEATURE_SNAPSHOT_VERSION,
+        .row_count = (uint16_t)baseline_count,
+        .ranking_complete = baseline_complete,
+        .available_features = ZCL_RETRIEVAL_FEATURE_BIT(
+            ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES),
+    };
+    struct zcl_retrieval_feature_row_v1
+        rows[ZCL_RETRIEVAL_EVAL_RANK_MAX] = {{0}};
+    memcpy(snapshot.source_root, codeindex_source_root, 32u);
+    memcpy(snapshot.codeindex_root, retrieval_projection_root, 32u);
+    if (!zcl_retrieval_ranked_files_root(
+            baseline, baseline_count, baseline_complete,
+            snapshot.baseline_ranking_root))
+        return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
+    struct sha3_256_ctx sha;
+    static const char query_domain[] = "zcl.retrieval_query.v1";
+    uint8_t encoded[8];
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)query_domain,
+                   sizeof(query_domain));
+    zcl_write_u64_le(encoded, query_length);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    sha3_256_write(&sha, (const uint8_t *)query, query_length);
+    sha3_256_finalize(&sha, snapshot.query_root);
+    static const char extractor_domain[] =
+        "zcl.retrieval_context_feature_extractor.v1";
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)extractor_domain,
+                   sizeof(extractor_domain));
+    sha3_256_finalize(&sha, snapshot.extractor_root);
+    for (size_t i = 0; i < baseline_count; i++) {
+        rows[i].path = baseline[i].path;
+        rows[i].context_bytes = baseline[i].context_bytes;
+        rows[i].original_bm25_rank = (uint16_t)(i + 1u);
+        rows[i].observed_features = ZCL_RETRIEVAL_FEATURE_BIT(
+            ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES);
+    }
+    uint8_t snapshot_root[32];
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_feature_snapshot_root(
+            &snapshot, rows, snapshot_root);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    *snapshot_out = snapshot;
+    memcpy(rows_out, rows, baseline_count * sizeof(*rows));
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
 struct rx_profile_candidate {
     size_t index;
     int64_t utility;

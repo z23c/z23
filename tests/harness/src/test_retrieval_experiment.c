@@ -679,6 +679,84 @@ static int case_feature_refusals_and_aliases(void)
     return failures;
 }
 
+static int case_context_snapshot_and_profile_proposal(void)
+{
+    int failures = 0;
+    uint8_t roots[10][32];
+    for (size_t i = 0; i < 10u; i++) rx_tag_root(roots[i], (uint8_t)i + 1u);
+    char paths[2][8];
+    struct zcl_retrieval_ranked_file baseline[2];
+    rx_rows(baseline, paths, 2u);
+    struct zcl_retrieval_feature_snapshot_v1 snapshot, sentinel;
+    struct zcl_retrieval_feature_row_v1 rows[2], rows_sentinel[2];
+    memset(&sentinel, 0xa5, sizeof(sentinel));
+    memset(rows_sentinel, 0x5a, sizeof(rows_sentinel));
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_context_feature_snapshot(
+            roots[1], roots[2], "query", baseline, 2u, true,
+            &snapshot, rows, 2u);
+    RX_CHECK("context extractor seals only exact context-byte observations",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             snapshot.available_features == ZCL_RETRIEVAL_FEATURE_BIT(
+                 ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES) &&
+             rows[0].context_bytes == baseline[0].context_bytes &&
+             rows[0].observed_features == snapshot.available_features);
+
+    snapshot = sentinel;
+    memcpy(rows, rows_sentinel, sizeof(rows));
+    error = zcl_retrieval_context_feature_snapshot(
+        roots[1], roots[2], "query", baseline, 2u, true,
+        &snapshot, rows, 1u);
+    RX_CHECK("context extractor capacity refusal is atomic",
+             error == ZCL_RETRIEVAL_EXPERIMENT_CAPACITY &&
+             memcmp(&snapshot, &sentinel, sizeof(snapshot)) == 0 &&
+             memcmp(rows, rows_sentinel, sizeof(rows)) == 0);
+
+    union {
+        max_align_t align;
+        char path[128];
+        struct zcl_retrieval_feature_row_v1 rows[2];
+    } alias;
+    (void)snprintf(alias.path, sizeof(alias.path), "lib/a.c");
+    baseline[0].path = alias.path;
+    snapshot = sentinel;
+    error = zcl_retrieval_context_feature_snapshot(
+        roots[1], roots[2], "query", baseline, 2u, true,
+        &snapshot, alias.rows, 2u);
+    RX_CHECK("context extractor cannot overwrite indirect path storage",
+             error == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+             strcmp(alias.path, "lib/a.c") == 0 &&
+             memcmp(&snapshot, &sentinel, sizeof(snapshot)) == 0);
+
+    uint8_t first[32], changed[32];
+    bool ok = zcl_retrieval_profile_proposal_input_root(
+        roots[0], roots[1], roots[2], "task", "query", roots[3], roots[4],
+        roots[5], roots[6], roots[7], roots[8], roots[9], first);
+    bool all_bound = ok;
+    for (size_t i = 0; i < 10u; i++) {
+        roots[i][0] ^= 0x80u;
+        all_bound = all_bound && zcl_retrieval_profile_proposal_input_root(
+            roots[0], roots[1], roots[2], "task", "query", roots[3],
+            roots[4], roots[5], roots[6], roots[7], roots[8], roots[9],
+            changed) && memcmp(first, changed, 32u) != 0;
+        roots[i][0] ^= 0x80u;
+    }
+    RX_CHECK("profile proposal binds every supplied evidence root", all_bound);
+    ok = zcl_retrieval_profile_proposal_input_root(
+        roots[0], roots[1], roots[2], "task-2", "query", roots[3], roots[4],
+        roots[5], roots[6], roots[7], roots[8], roots[9], changed);
+    RX_CHECK("profile proposal binds task identity",
+             ok && memcmp(first, changed, 32u) != 0);
+    memset(changed, 0xa5, sizeof(changed));
+    memset(roots[0], 0, sizeof(roots[0]));
+    RX_CHECK("profile proposal refuses zero roots atomically",
+             !zcl_retrieval_profile_proposal_input_root(
+                 roots[0], roots[1], roots[2], "task", "query", roots[3],
+                 roots[4], roots[5], roots[6], roots[7], roots[8], roots[9],
+                 changed) && changed[0] == 0xa5);
+    return failures;
+}
+
 int test_retrieval_experiment(void)
 {
     int failures = 0;
@@ -689,5 +767,6 @@ int test_retrieval_experiment(void)
     failures += case_integer_profile_identity();
     failures += case_feature_snapshot_and_projection();
     failures += case_feature_refusals_and_aliases();
+    failures += case_context_snapshot_and_profile_proposal();
     return failures;
 }

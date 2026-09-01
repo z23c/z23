@@ -127,33 +127,72 @@ static int case_projection_binding(void)
              memcmp(snapshot.retrieval_projection_root,
                     projection_root, 32u) == 0);
 
+    struct zcl_retrieval_profile_v1 profile;
+    zcl_retrieval_profile_init(&profile);
+    profile.feature_mask = ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES] = 100u;
+    profile.rerank_window = ZCL_RETRIEVAL_PROFILE_WINDOW_MAX;
+    profile.top_k = ZCL_RETRIEVAL_EXPERIMENT_TOP;
+    profile.context_byte_scale = 1u;
+    uint8_t profile_wire[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES];
+    uint8_t profile_root[32] = {0}, feature_root[32] = {0};
+    uint8_t candidate_root[32] = {0};
     uint8_t study[32] = {5}, preregistration[32] = {6};
     uint8_t evaluator[32] = {7}, proposal[32] = {0};
-    char parent_hex[65], study_hex[65], preregistration_hex[65];
-    char evaluator_hex[65], source_hex[65], projection_hex[65];
-    char proposal_hex[65];
-    zcl_hex_encode(snapshot.identifier_graph_ranking_root, 32u, parent_hex);
+    char profile_wire_hex[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES * 2u + 1u];
+    char study_hex[65], preregistration_hex[65], evaluator_hex[65];
+    char source_hex[65], projection_hex[65], proposal_hex[65];
+    enum zcl_retrieval_experiment_error profile_status =
+        zcl_retrieval_profile_serialize(&profile, profile_wire);
+    if (profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK)
+        zcl_hex_encode(profile_wire, sizeof(profile_wire), profile_wire_hex);
     zcl_hex_encode(study, 32u, study_hex);
     zcl_hex_encode(preregistration, 32u, preregistration_hex);
     zcl_hex_encode(evaluator, 32u, evaluator_hex);
     zcl_hex_encode(snapshot.codeindex_source_root, 32u, source_hex);
     zcl_hex_encode(snapshot.retrieval_projection_root, 32u, projection_hex);
+    struct zcl_retrieval_feature_snapshot_v1 feature_snapshot;
+    struct zcl_retrieval_feature_row_v1
+        feature_rows[ZCL_RETRIEVAL_EVAL_RANK_MAX];
+    size_t indices[ZCL_RETRIEVAL_EVAL_RANK_MAX];
+    struct zcl_retrieval_profile_report profile_report;
     bool experiment_ready = rooted &&
-        json_push_kv_str(&input, "parent_ranking_root", parent_hex) &&
-        json_push_kv_int(&input, "bm25_prefix", 3) &&
+        profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_context_feature_snapshot(
+            snapshot.codeindex_source_root,
+            snapshot.retrieval_projection_root, snapshot.query,
+            snapshot.bm25.rows, snapshot.bm25.count, snapshot.bm25.complete,
+            &feature_snapshot, feature_rows,
+            ZCL_RETRIEVAL_EVAL_RANK_MAX) == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_profile_project(
+            &profile, &feature_snapshot, feature_rows, indices,
+            ZCL_RETRIEVAL_EVAL_RANK_MAX, &profile_report) ==
+                ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_profile_root(&profile, profile_root) ==
+            ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        zcl_retrieval_feature_snapshot_root(
+            &feature_snapshot, feature_rows, feature_root) ==
+                ZCL_RETRIEVAL_EXPERIMENT_OK;
+    if (experiment_ready)
+        memcpy(candidate_root, profile_report.candidate_ranking_root,
+               sizeof(candidate_root));
+    experiment_ready = experiment_ready &&
+        json_push_kv_str(&input, "profile_hex", profile_wire_hex) &&
         json_push_kv_str(&input, "study_root", study_hex) &&
         json_push_kv_str(&input, "preregistration_root",
                          preregistration_hex) &&
         json_push_kv_str(&input, "evaluator_root", evaluator_hex) &&
-        zcl_retrieval_experiment_proposal_input_root(
-            snapshot.source_root, snapshot.retrieval_projection_root,
-            snapshot.task_id, snapshot.query, snapshot.bm25_ranking_root,
-            snapshot.identifier_graph_ranking_root, 3u, study,
-            preregistration, evaluator, proposal);
+        zcl_retrieval_profile_proposal_input_root(
+            snapshot.source_root, snapshot.codeindex_source_root,
+            snapshot.retrieval_projection_root, snapshot.task_id,
+            snapshot.query, snapshot.bm25_ranking_root, profile_root,
+            feature_root, candidate_root, study, preregistration, evaluator,
+            proposal);
     zcl_hex_encode(proposal, 32u, proposal_hex);
     struct zcl_command_request request = {.input = &input};
     struct zcl_command_reply reply;
-    zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v2");
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
     if (experiment_ready)
         zcl_native_handle_dev_retrieval_experiment(&request, &reply);
     const char *schema = json_get_str(json_get(&reply.data, "schema"));
@@ -163,14 +202,103 @@ static int case_projection_binding(void)
         json_get(&reply.data, "retrieval_projection_root"));
     const char *observed_proposal = json_get_str(
         json_get(&reply.data, "proposal_input_root"));
-    RG_CHECK("experiment v2 exposes and binds the two index identities",
+    const char *observed_profile = json_get_str(
+        json_get(&reply.data, "profile_root"));
+    const char *observed_feature = json_get_str(
+        json_get(&reply.data, "feature_snapshot_root"));
+    const char *observed_candidate = json_get_str(
+        json_get(&reply.data, "candidate_ranking_root"));
+    char profile_root_hex[65], feature_root_hex[65], first_candidate[65];
+    zcl_hex_encode(profile_root, 32u, profile_root_hex);
+    zcl_hex_encode(feature_root, 32u, feature_root_hex);
+    zcl_hex_encode(candidate_root, 32u, first_candidate);
+    RG_CHECK("experiment v3 binds profile and exact feature evidence",
              experiment_ready && reply.exit_code == ZCL_COMMAND_EXIT_OK &&
-             schema && strcmp(schema, "zcl.dev_retrieval_experiment.v2") == 0 &&
+             schema && strcmp(schema, "zcl.dev_retrieval_experiment.v3") == 0 &&
              observed_source && strcmp(observed_source, source_hex) == 0 &&
              observed_projection &&
              strcmp(observed_projection, projection_hex) == 0 &&
              observed_proposal &&
-             strcmp(observed_proposal, proposal_hex) == 0);
+             strcmp(observed_proposal, proposal_hex) == 0 &&
+             observed_profile && strcmp(observed_profile, profile_root_hex) == 0 &&
+             observed_feature && strcmp(observed_feature, feature_root_hex) == 0 &&
+             observed_candidate && strcmp(observed_candidate,
+                                           first_candidate) == 0 &&
+             !json_get_bool(json_get(&reply.data,
+                                     "quality_claim_available")) &&
+             !json_get_bool(json_get(&reply.data, "promotion_authorized")));
+    char first_proposal[65], first_feature[65];
+    snprintf(first_proposal, sizeof(first_proposal), "%s",
+             observed_proposal ? observed_proposal : "");
+    snprintf(first_feature, sizeof(first_feature), "%s",
+             observed_feature ? observed_feature : "");
+    zcl_command_reply_free(&reply);
+
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
+    if (experiment_ready)
+        zcl_native_handle_dev_retrieval_experiment(&request, &reply);
+    const char *second_proposal = json_get_str(
+        json_get(&reply.data, "proposal_input_root"));
+    const char *second_feature = json_get_str(
+        json_get(&reply.data, "feature_snapshot_root"));
+    const char *second_candidate = json_get_str(
+        json_get(&reply.data, "candidate_ranking_root"));
+    RG_CHECK("identical profile experiment is root-deterministic",
+             reply.exit_code == ZCL_COMMAND_EXIT_OK && second_proposal &&
+             strcmp(second_proposal, first_proposal) == 0 && second_feature &&
+             strcmp(second_feature, first_feature) == 0 && second_candidate &&
+             strcmp(second_candidate, first_candidate) == 0);
+    zcl_command_reply_free(&reply);
+
+    profile.feature_mask |= ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_PATH);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 100u;
+    profile_status = zcl_retrieval_profile_serialize(&profile, profile_wire);
+    if (profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK) {
+        zcl_hex_encode(profile_wire, sizeof(profile_wire), profile_wire_hex);
+        for (size_t i = 0; i < input.num_children; i++)
+            if (strcmp(input.keys[i], "profile_hex") == 0)
+                json_set_str(&input.children[i], profile_wire_hex);
+    }
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
+    if (profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK)
+        zcl_native_handle_dev_retrieval_experiment(&request, &reply);
+    RG_CHECK("unobserved profile feature fails incomplete without candidate",
+             reply.exit_code != ZCL_COMMAND_EXIT_OK &&
+             strcmp(reply.error.code, "PROJECTION_REFUSED") == 0 &&
+             strstr(reply.error.message, "unavailable") != NULL &&
+             json_get(&reply.data, "candidate_ranking_root") == NULL &&
+             json_get(&reply.data, "proposal_input_root") == NULL);
+    zcl_command_reply_free(&reply);
+
+    profile.feature_mask &= (uint16_t)~ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_PATH);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 0u;
+    profile_status = zcl_retrieval_profile_serialize(&profile, profile_wire);
+    if (profile_status == ZCL_RETRIEVAL_EXPERIMENT_OK) {
+        zcl_hex_encode(profile_wire, sizeof(profile_wire), profile_wire_hex);
+        profile_wire_hex[1] = 'A';
+        for (size_t i = 0; i < input.num_children; i++)
+            if (strcmp(input.keys[i], "profile_hex") == 0)
+                json_set_str(&input.children[i], profile_wire_hex);
+    }
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
+    zcl_native_handle_dev_retrieval_experiment(&request, &reply);
+    RG_CHECK("noncanonical uppercase profile wire is refused before ranking",
+             reply.exit_code != ZCL_COMMAND_EXIT_OK &&
+             strcmp(reply.error.code, "INVALID_PROFILE") == 0 &&
+             json_get(&reply.data, "source_root") == NULL);
+    zcl_command_reply_free(&reply);
+
+    for (size_t i = 0; i < input.num_children; i++)
+        if (strcmp(input.keys[i], "profile_hex") == 0)
+            json_set_str(&input.children[i], "00");
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_experiment.v3");
+    zcl_native_handle_dev_retrieval_experiment(&request, &reply);
+    RG_CHECK("wrong-size profile wire is refused before ranking",
+             reply.exit_code != ZCL_COMMAND_EXIT_OK &&
+             strcmp(reply.error.code, "INVALID_PROFILE") == 0 &&
+             json_get(&reply.data, "source_root") == NULL);
     zcl_command_reply_free(&reply);
     codeindex_close(index);
     json_free(&input);

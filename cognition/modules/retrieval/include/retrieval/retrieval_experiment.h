@@ -15,6 +15,7 @@
 #define ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX 128u
 #define ZCL_RETRIEVAL_EXPERIMENT_ALGORITHM \
     "bm25_prefix_graph_fill_context_guard_v1"
+#define ZCL_RETRIEVAL_PROFILE_ALGORITHM "context_bytes_profile_v1"
 #define ZCL_RETRIEVAL_PROFILE_VERSION 1u
 #define ZCL_RETRIEVAL_PROFILE_WIRE_BYTES 56u
 #define ZCL_RETRIEVAL_PROFILE_DOMAIN "zcl.retrieval_profile.v1"
@@ -116,6 +117,8 @@ struct zcl_retrieval_feature_snapshot_v1 {
     uint16_t identifier_df_max;
     uint8_t graph_depth;
     uint8_t reserved;
+    /* Exact logical-row source identity and retrieval projection identity.
+     * These are distinct from an enclosing workspace/VCS manifest root. */
     uint8_t source_root[32];
     uint8_t codeindex_root[32];
     uint8_t query_root[32];
@@ -225,6 +228,21 @@ enum zcl_retrieval_experiment_error zcl_retrieval_profile_project(
     size_t *out_indices, size_t out_capacity,
     struct zcl_retrieval_profile_report *report);
 
+/* The first command-owned feature extractor intentionally exposes only exact
+ * full-file context bytes. `codeindex_source_root` and
+ * `retrieval_projection_root` must come from the same already generation-
+ * joined snapshot as `baseline`; this pure function binds but cannot
+ * authenticate that caller claim. Every other feature remains unavailable,
+ * so profiles requesting it fail INCOMPLETE in profile_project(). */
+enum zcl_retrieval_experiment_error
+zcl_retrieval_context_feature_snapshot(
+    const uint8_t codeindex_source_root[32],
+    const uint8_t retrieval_projection_root[32], const char *query,
+    const struct zcl_retrieval_ranked_file *baseline, size_t baseline_count,
+    bool baseline_complete,
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot_out,
+    struct zcl_retrieval_feature_row_v1 *rows_out, size_t rows_capacity);
+
 /* Project one candidate ranking from two already-sealed rankings. The only
  * experimental parameter is bm25_prefix (0..5). The first prefix rows are
  * retained in BM25 order; remaining top-five slots are taken in parent order
@@ -312,6 +330,24 @@ bool zcl_retrieval_experiment_proposal_input_root(
     const char *task_id, const char *query,
     const uint8_t bm25_ranking_root[32],
     const uint8_t parent_ranking_root[32], uint8_t bm25_prefix,
+    const uint8_t study_root[32], const uint8_t preregistration_root[32],
+    const uint8_t evaluator_root[32], uint8_t out[32]);
+
+/* Profile counterpart of the legacy prefix proposal. It binds the workspace
+ * source generation, logical codeindex identities, supplied baseline/profile/
+ * feature/candidate roots and opaque science roots. This pure binder checks
+ * shape and nonzero roots; it does not resolve objects or authenticate their
+ * relationships. It accepts no gold, relevance, scope, score, promotion, or
+ * acceptance input. */
+bool zcl_retrieval_profile_proposal_input_root(
+    const uint8_t source_root[32],
+    const uint8_t codeindex_source_root[32],
+    const uint8_t retrieval_projection_root[32],
+    const char *task_id, const char *query,
+    const uint8_t baseline_ranking_root[32],
+    const uint8_t profile_root[32],
+    const uint8_t feature_snapshot_root[32],
+    const uint8_t candidate_ranking_root[32],
     const uint8_t study_root[32], const uint8_t preregistration_root[32],
     const uint8_t evaluator_root[32], uint8_t out[32]);
 

@@ -2937,7 +2937,7 @@ AGENT_IMPACT_RULE("engine/modules/receipt/src/*.c|engine/modules/receipt/include
  * consumes retrieval-shaped candidates, so changes anywhere in this small
  * module run both exact groups. `code have` still answers by substring match;
  * when that call site lands, the codeindex group joins this rule. */
-AGENT_IMPACT_RULE("cognition/modules/retrieval/src/*.c|cognition/modules/retrieval/include/retrieval/*.h|tests/harness/src/test_retrieval.c|tests/harness/src/test_retrieval_experiment.c|tests/harness/src/test_retrieval_attention_evidence.c", "retrieval retrieval_experiment retrieval_attention_evidence make_lint_gates")
+AGENT_IMPACT_RULE("cognition/modules/retrieval/src/*.c|cognition/modules/retrieval/include/retrieval/*.h|tools/command/native_dev_retrieval_experiment_command.c|tests/harness/src/test_retrieval.c|tests/harness/src/test_retrieval_experiment.c|tests/harness/src/test_retrieval_attention_evidence.c|tests/harness/src/test_retrieval_generation.c", "retrieval retrieval_experiment retrieval_attention_evidence retrieval_generation command_registry_catalog native_api_contract make_lint_gates")
 /* The durable hash-chained log. Rides its own group and the platform group:
  * every byte it reads or writes goes through the platform/modules/platform file seam, so a
  * change to that seam's locking, truncation or fsync behaviour changes what
