@@ -22,6 +22,10 @@
 #include "base/serialize_le.h"
 #include "storage/projection_store.h"
 #include "storage/progress_store.h"
+#include "progress_store_directory.h"
+#ifdef _WIN32
+#include "storage/sqlite_vfs_dir.h"
+#endif
 
 #include "sqlite_integrity_gate.h"
 #include "event/event.h"
@@ -52,7 +56,8 @@ static _Atomic(sqlite3 *) g_db = NULL;
 static char g_path[PROJECTION_STORE_PATH_MAX];
 static char g_display_path[PROJECTION_STORE_PATH_MAX];
 #ifdef _WIN32
-static uintptr_t g_dir_handle;
+static uintptr_t g_dir_handle = UINTPTR_MAX;
+static char g_vfs_name[SQLITE_VFS_DIR_NAME_MAX];
 #else
 static int g_dir_fd = -1;
 #endif
@@ -74,6 +79,7 @@ static int64_t wall_now_s(void)
     return (int64_t)ts.tv_sec;
 }
 
+#ifndef _WIN32
 struct projection_file_identity {
     unsigned long long dev;
     unsigned long long ino;
@@ -133,6 +139,7 @@ static bool projection_wal_absent(const char *path)
     return result == PLATFORM_FILE_METADATA_MISSING ||
            (result == PLATFORM_FILE_METADATA_OK && metadata.size == 0);
 }
+#endif
 
 static long long projection_file_size_or_neg1(const char *path)
 {
@@ -142,6 +149,7 @@ static long long projection_file_size_or_neg1(const char *path)
         ? (long long)metadata.size : -1;
 }
 
+#ifndef _WIN32
 static bool projection_receipt_path(char *out, size_t out_n,
                                     const char *path)
 {
@@ -246,6 +254,7 @@ static bool projection_clean_receipt_write(const char *path)
     if (!ok) (void)platform_private_file_unlink_missing_ok(receipt);
     return ok;
 }
+#endif
 
 /* The projection handle is a SECONDARY connection: it shares the WAL the
  * kernel connection scaled, so it takes modest fixed page-cache / mmap
@@ -321,7 +330,8 @@ bool projection_store_open(const char *datadir)
 
     if (atomic_load_explicit(&g_db, memory_order_relaxed) != NULL) {
 #ifdef _WIN32
-        bool same = strcmp(g_display_path, display_path) == 0;
+        bool same = progress_directory_same(g_dir_handle,
+                                            opened_dir_handle);
         platform_private_directory_close(opened_dir_handle);
 #else
         struct stat have;
@@ -348,14 +358,31 @@ bool projection_store_open(const char *datadir)
      * a KERNEL table written through the consensus.db handle, not here — see
      * consensus_db.c's projection-stay exclusion list). */
     sqlite3 *db = NULL;
-    int rc = sqlite3_open_v2(path, &db,
-        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
+#ifdef _WIN32
+    char opened_vfs_name[SQLITE_VFS_DIR_NAME_MAX] = {0};
+    if (!sqlite_vfs_dir_register(opened_dir_handle,
+                                 PROJECTION_STORE_FILENAME,
+                                 opened_vfs_name)) {
+        platform_private_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
+    const char *sqlite_path = PROJECTION_STORE_FILENAME;
+    const char *sqlite_vfs = opened_vfs_name;
+#else
+    const char *sqlite_path = path;
+    const char *sqlite_vfs = NULL;
+#endif
+    int rc = sqlite3_open_v2(sqlite_path, &db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        sqlite_vfs);
     if (rc != SQLITE_OK) {
         fprintf(stderr,  // obs-ok:projection-store-open-failure
                 "[projection_store] sqlite3_open_v2(%s) failed: %s\n",
                 path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
         if (db) sqlite3_close(db);
 #ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
         platform_private_directory_close(opened_dir_handle);
 #else
         (void)close(opened_dir_fd);
@@ -364,10 +391,39 @@ bool projection_store_open(const char *datadir)
         return false;
     }
 
+#ifdef _WIN32
+    /* Prove the connection actually opened progress.kv through the VFS bound
+     * to this exact retained directory object.  Registration alone is not
+     * evidence: an accidental NULL zVfs would silently restore pathname
+     * authority and inherited ACLs. */
+    uint64_t volume_serial = 0;
+    uint64_t file_index = 0;
+    uint64_t file_size = 0;
+    if (!sqlite_vfs_dir_main_file_info(
+            db, opened_dir_handle, PROJECTION_STORE_FILENAME,
+            &volume_serial, &file_index, &file_size)) {
+        fprintf(stderr,  // obs-ok:projection-store-open-failure
+                "[projection_store] retained-directory main-file audit "
+                "failed for %s\n", display_path);
+        sqlite3_close(db);
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+        platform_private_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
+#endif
+
+#ifdef _WIN32
+    /* The clean receipt implementation is pathname-based.  The projection is
+     * small enough that a full quick_check is preferable to letting an
+     * observational path regain authority on native Windows. */
+    bool verified_clean = false;
+#else
     bool verified_clean = projection_clean_receipt_consume(display_path);
+#endif
 
     /* Integrity gate. progress.kv's projection tables (address_index / txindex
-     * / created_outputs and kin) are fully rebuildable, but a corrupt file
+     * and their state rows) are fully rebuildable, but a corrupt file
      * left in place would otherwise surface as a mid-fold SQLITE_CORRUPT deep
      * inside a projection job — a JOB_FATAL with no named blocker. On a
      * non-"ok" quick_check, quarantine the file aside and reopen a FRESH one;
@@ -388,6 +444,17 @@ bool projection_store_open(const char *datadir)
     }
     if (!verified_clean &&
         !sqlite_integrity_quick_check_ok(db, "projection_store")) {
+#ifdef _WIN32
+        fprintf(stderr,  // obs-ok:projection-store-open-failure
+                "[projection_store] %s failed integrity quick_check; native "
+                "Windows retained-directory quarantine is unavailable, "
+                "refusing without mutation\n", display_path);
+        sqlite3_close(db);
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+        platform_private_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+#else
         fprintf(stderr,  // obs-ok:projection-store-open-failure
                 "[projection_store] %s failed integrity quick_check; "
                 "quarantining + re-deriving\n", path);
@@ -438,6 +505,7 @@ bool projection_store_open(const char *datadir)
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
                 "[projection_store] fresh %s opened after quarantine "
                 "(projections re-derive on next fold)\n", path);
+#endif
     }
     if (!verified_clean) {
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
@@ -449,6 +517,7 @@ bool projection_store_open(const char *datadir)
     if (!apply_pragmas(db)) {
         sqlite3_close(db);
 #ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
         platform_private_directory_close(opened_dir_handle);
 #else
         (void)close(opened_dir_fd);
@@ -461,6 +530,7 @@ bool projection_store_open(const char *datadir)
     snprintf(g_display_path, sizeof(g_display_path), "%s", display_path);
 #ifdef _WIN32
     g_dir_handle = opened_dir_handle;
+    snprintf(g_vfs_name, sizeof(g_vfs_name), "%s", opened_vfs_name);
 #else
     g_dir_fd = opened_dir_fd;
 #endif
@@ -525,6 +595,9 @@ void projection_store_close(void)
     }
 
     if (checkpoint_rc == SQLITE_OK && rc == SQLITE_OK) {
+#ifdef _WIN32
+        /* No pathname receipt on Windows; see the open-side authority note. */
+#else
         /* Private publication requires the retained absolute capability path;
          * g_display_path may be relative and is observational only. */
         if (!projection_clean_receipt_write(g_path))
@@ -532,10 +605,13 @@ void projection_store_close(void)
                     "[projection_store] clean-close receipt unavailable; "
                     "next boot will run full quick_check path=%s\n",
                     g_display_path);
+#endif
     } else {
+#ifndef _WIN32
         char receipt[PROJECTION_STORE_PATH_MAX + 16];
         if (projection_receipt_path(receipt, sizeof(receipt), g_display_path))
             (void)unlink(receipt);
+#endif
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
                 "[projection_store] dirty close checkpoint_rc=%d close_rc=%d "
                 "log_frames=%d checkpointed_frames=%d; no receipt\n",
@@ -543,9 +619,13 @@ void projection_store_close(void)
     }
 
 #ifdef _WIN32
-    if (g_dir_handle != 0)
+    if (g_vfs_name[0] != '\0') {
+        (void)sqlite_vfs_dir_unregister(g_vfs_name);
+        g_vfs_name[0] = '\0';
+    }
+    if (g_dir_handle != UINTPTR_MAX)
         platform_private_directory_close(g_dir_handle);
-    g_dir_handle = 0;
+    g_dir_handle = UINTPTR_MAX;
 #else
     if (g_dir_fd >= 0)
         (void)close(g_dir_fd);

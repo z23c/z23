@@ -88,8 +88,9 @@ bool gap_fill_compute_window(int active_tip_h, int best_header_h,
                              uint64_t floor_cursor,
                              struct gap_fill_window *out);
 
-/* Return the pprev node that starts the connectable bottom window, falling
- * back to `best` on broken ancestry so the worker preserves legacy behavior. */
+/* Return the indexed ancestor that starts the connectable bottom window.
+ * Returns NULL when ancestry cannot resolve the exact requested height; the
+ * worker refuses that pass rather than scheduling a far-ahead top window. */
 struct block_index *gap_fill_window_walk_start(
     struct block_index *best, const struct gap_fill_window *window);
 

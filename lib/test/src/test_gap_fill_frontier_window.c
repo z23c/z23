@@ -136,6 +136,35 @@ int test_gap_fill_frontier_window(void)
     free(blocks);
     free(hashes);
 
+    /* Regression: during initial sync the validated-header lead exceeds the
+     * old 131072-step pprev cap.  The production index has skip pointers, so
+     * positioning must use them instead of falling back to the far-ahead
+     * best header.  These two sparse nodes model one valid skip hop spanning
+     * twice the old cap without allocating a giant fixture chain. */
+    {
+        struct block_index far_best;
+        struct block_index bottom;
+        block_index_init(&far_best);
+        block_index_init(&bottom);
+        far_best.nHeight = 786432;
+        bottom.nHeight = 524288;
+        far_best.pskip = &bottom;
+
+        struct gap_fill_window far_window = {
+            .hi = bottom.nHeight,
+            .has_work = true,
+        };
+        struct block_index *start =
+            gap_fill_window_walk_start(&far_best, &far_window);
+        GF_CHECK("large header lead uses skip ancestor for bottom window",
+                 start == &bottom);
+
+        far_best.pskip = NULL;
+        start = gap_fill_window_walk_start(&far_best, &far_window);
+        GF_CHECK("broken ancestry refuses instead of using far-ahead best",
+                 start == NULL);
+    }
+
     /* Smoke-test the diagnostics dumper (`z23 dumpstate gap_fill`):
      * the service was never started in this test, so it must still report
      * a well-formed, not-running snapshot instead of crashing. */

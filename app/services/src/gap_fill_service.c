@@ -219,14 +219,19 @@ struct block_index *gap_fill_window_walk_start(
     if (best->nHeight <= window->hi)
         return best;
 
-    struct block_index *walk_start = best;
-    int steps = 0;
-    while (walk_start && walk_start->nHeight > window->hi &&
-           steps++ < GAPFILL_WALK_CAP) {
-        walk_start = walk_start->pprev;
-    }
+    /* The validated-header lead can be millions of blocks during initial
+     * sync.  A capped pprev walk used to give up after GAPFILL_WALK_CAP and
+     * fall back to `best`, silently turning the connectable bottom window
+     * into the far-ahead top window.  That filled the bounded download queue
+     * with bodies the reducer could not consume while tip+1 went missing.
+     *
+     * The block index already maintains Bitcoin-style skip pointers for this
+     * exact lookup.  Refuse a broken ancestry result instead of returning a
+     * different height and scheduling the wrong work. */
+    struct block_index *walk_start =
+        block_index_get_ancestor(best, window->hi);
     if (!walk_start || walk_start->nHeight != window->hi)
-        return best;
+        return NULL;
     return walk_start;
 }
 
@@ -482,6 +487,11 @@ static int gap_fill_pass(void)
     int window = gf_window.count;
     struct block_index *walk_start =
         gap_fill_window_walk_start(best, &gf_window);
+
+    if (!walk_start) {
+        zcl_mutex_unlock(&ms->cs_main);
+        return -1; // raw-return-ok:sentinel
+    }
 
     struct block_index **bis = zcl_malloc((size_t)window * sizeof(*bis),
                                           "gap_fill_window");

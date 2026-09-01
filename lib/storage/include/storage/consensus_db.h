@@ -86,6 +86,11 @@ bool consensus_db_kernel_stats_match(const struct consensus_db_kernel_stats *a,
  * explicit MOVE list) makes the migration completeness-safe: it CANNOT silently
  * miss a kernel table, because "move = every source table not in STAY". */
 #define CONSENSUS_DB_PROJECTION_STAY_COUNT 4
+#define CONSENSUS_DB_PROJECTION_STAY_NAMES \
+    "address_index",                         \
+    "address_index_state",                   \
+    "txindex",                               \
+    "txindex_state"
 extern const char *const consensus_db_projection_stay[
     CONSENSUS_DB_PROJECTION_STAY_COUNT];
 

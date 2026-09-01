@@ -98,12 +98,79 @@ static bool windows_temp_path(char out[32768]) {
     return utf8 > 0 && written > 0 && (size_t)written < 32768u - (size_t)utf8;
 }
 
-static bool windows_inspect_snapshot(const char *path, char *reason, size_t reason_size) {
+enum windows_preflight_family_kind {
+    WINDOWS_PREFLIGHT_KERNEL,
+    WINDOWS_PREFLIGHT_PROJECTION,
+};
+
+static bool windows_projection_table_allowed(const char *name) {
+    static const char *const allowed[CONSENSUS_DB_PROJECTION_STAY_COUNT] = {
+        CONSENSUS_DB_PROJECTION_STAY_NAMES,
+    };
+    if (!name)
+        return false;
+    for (size_t i = 0; i < CONSENSUS_DB_PROJECTION_STAY_COUNT; ++i)
+        if (strcmp(name, allowed[i]) == 0)
+            return true;
+    return false;
+}
+
+static bool windows_projection_snapshot_allowed(sqlite3 *db, char *reason,
+                                                 size_t reason_size) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(
+        db,
+        "SELECT type,name,tbl_name FROM sqlite_schema "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size,
+                     "projection schema enumeration failed: %s",
+                     sqlite3_errmsg(db));
+        return false;
+    }
+    bool ok = true;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:boot-readonly-preflight
+        const char *type = (const char *)sqlite3_column_text(stmt, 0);
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        const char *table = (const char *)sqlite3_column_text(stmt, 2);
+        bool table_object = type && strcmp(type, "table") == 0 && name &&
+                            table && strcmp(name, table) == 0 &&
+                            windows_projection_table_allowed(name);
+        bool index_object = type && strcmp(type, "index") == 0 &&
+                            windows_projection_table_allowed(table);
+        if (!table_object && !index_object) {
+            if (reason && reason_size)
+                snprintf(reason, reason_size,
+                         "progress.kv is not projection-only: "
+                         "type=%s name=%s table=%s",
+                         type ? type : "(null)", name ? name : "(null)",
+                         table ? table : "(null)");
+            ok = false;
+            break;
+        }
+    }
+    if (ok && rc != SQLITE_DONE) {
+        if (reason && reason_size)
+            snprintf(reason, reason_size,
+                     "projection schema read failed: %s", sqlite3_errmsg(db));
+        ok = false;
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool windows_inspect_snapshot(const char *path,
+                                     enum windows_preflight_family_kind kind,
+                                     char *reason, size_t reason_size) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL);
     bool ok = rc == SQLITE_OK && sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK;
-    if (ok)
+    if (ok && kind == WINDOWS_PREFLIGHT_KERNEL)
         ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
+    if (ok && kind == WINDOWS_PREFLIGHT_PROJECTION)
+        ok = windows_projection_snapshot_allowed(db, reason, reason_size);
     if (db && sqlite3_close(db) != SQLITE_OK)
         ok = false;
     return ok;
@@ -115,19 +182,35 @@ static void windows_sources_close(struct windows_preflight_source files[3]) {
 }
 
 static bool windows_family_preflight(struct platform_directory_transaction *source_dir, const char *datadir, const char *base,
+                                     enum windows_preflight_family_kind kind,
                                      bool *present) {
     char wal[80], shm[80];
     int nw = snprintf(wal, sizeof(wal), "%s-wal", base);
     int ns = snprintf(shm, sizeof(shm), "%s-shm", base);
-    if (nw <= 0 || (size_t)nw >= sizeof(wal) || ns <= 0 || (size_t)ns >= sizeof(shm))
+    if (nw <= 0 || (size_t)nw >= sizeof(wal) || ns <= 0 || (size_t)ns >= sizeof(shm)) {
+        fprintf(stderr, "FATAL: normal node boot preflight failed "
+                        "stage=family_names family=%s\n", base);
         return false;
+    }
     struct windows_preflight_source files[3] = {{.leaf = base}, {.leaf = wal}, {.leaf = shm}};
     bool ok = true;
-    for (size_t i = 0; ok && i < 3; ++i)
+    for (size_t i = 0; ok && i < 3; ++i) {
         ok = windows_source_open(source_dir, &files[i]);
+        if (!ok)
+            fprintf(stderr, "FATAL: normal node boot preflight failed "
+                            "stage=source_open family=%s leaf=%s "
+                            "windows_error=%lu\n", base, files[i].leaf,
+                    (unsigned long)GetLastError());
+    }
     *present = ok && files[0].exists;
-    if (ok && !files[0].exists)
+    if (ok && !files[0].exists) {
         ok = !files[1].exists && !files[2].exists;
+        if (!ok)
+            fprintf(stderr, "FATAL: normal node boot preflight failed "
+                            "stage=orphan_sidecar family=%s wal=%s shm=%s\n",
+                    base, files[1].exists ? "present" : "missing",
+                    files[2].exists ? "present" : "missing");
+    }
     if (!ok || !*present) {
         windows_sources_close(files);
         return ok;
@@ -140,26 +223,60 @@ static bool windows_family_preflight(struct platform_directory_transaction *sour
             break;
         created = platform_private_directory_create(temp);
     }
+    if (!created)
+        fprintf(stderr, "FATAL: normal node boot preflight failed "
+                        "stage=temp_create family=%s windows_error=%lu\n",
+                base, (unsigned long)GetLastError());
     struct platform_directory_transaction copy;
     platform_directory_transaction_init(&copy);
     ok = created && platform_directory_transaction_open(&copy, temp);
-    for (size_t i = 0; ok && i < 2; ++i)
+    if (created && !ok)
+        fprintf(stderr, "FATAL: normal node boot preflight failed "
+                        "stage=temp_open family=%s windows_error=%lu\n",
+                base, (unsigned long)GetLastError());
+    for (size_t i = 0; ok && i < 2; ++i) {
         ok = windows_copy_source(&copy, &files[i]);
-    if (ok)
+        if (!ok)
+            fprintf(stderr, "FATAL: normal node boot preflight failed "
+                            "stage=snapshot_copy family=%s leaf=%s "
+                            "windows_error=%lu\n", base, files[i].leaf,
+                    (unsigned long)GetLastError());
+    }
+    if (ok) {
         ok = platform_directory_transaction_flush(&copy);
-    for (size_t i = 0; ok && i < 3; ++i)
+        if (!ok)
+            fprintf(stderr, "FATAL: normal node boot preflight failed "
+                            "stage=snapshot_flush family=%s "
+                            "windows_error=%lu\n", base,
+                    (unsigned long)GetLastError());
+    }
+    for (size_t i = 0; ok && i < 3; ++i) {
         ok = windows_source_unchanged(source_dir, &files[i]);
+        if (!ok)
+            fprintf(stderr, "FATAL: normal node boot preflight failed "
+                            "stage=source_changed_before_inspect family=%s "
+                            "leaf=%s windows_error=%lu\n", base,
+                    files[i].leaf, (unsigned long)GetLastError());
+    }
 
     char snapshot[32768];
     int n = snprintf(snapshot, sizeof(snapshot), "%s\\%s", temp, base);
     char reason[512] = {0};
-    if (ok && (n <= 0 || (size_t)n >= sizeof(snapshot) || !windows_inspect_snapshot(snapshot, reason, sizeof(reason)))) {
+    if (ok && (n <= 0 || (size_t)n >= sizeof(snapshot) ||
+               !windows_inspect_snapshot(snapshot, kind, reason,
+                                         sizeof(reason)))) {
         fprintf(stderr, "FATAL: normal node boot refused before datadir mutation: %s\n",
                 reason[0] ? reason : "kernel snapshot inspection failed");
         ok = false;
     }
-    for (size_t i = 0; ok && i < 3; ++i)
+    for (size_t i = 0; ok && i < 3; ++i) {
         ok = windows_source_unchanged(source_dir, &files[i]);
+        if (!ok)
+            fprintf(stderr, "FATAL: normal node boot preflight failed "
+                            "stage=source_changed_after_inspect family=%s "
+                            "leaf=%s windows_error=%lu\n", base,
+                    files[i].leaf, (unsigned long)GetLastError());
+    }
     windows_sources_close(files);
 
     static const char *const suffixes[] = {"", "-wal", "-shm", "-journal"};
@@ -168,12 +285,20 @@ static bool windows_family_preflight(struct platform_directory_transaction *sour
         int nl = snprintf(leaf, sizeof(leaf), "%s%s", base, suffixes[i]);
         enum platform_directory_result removed =
             nl > 0 && (size_t)nl < sizeof(leaf) ? platform_directory_child_unlink_result(&copy, leaf) : PLATFORM_DIRECTORY_INVALID;
-        if (removed != PLATFORM_DIRECTORY_OK && removed != PLATFORM_DIRECTORY_MISSING)
+        if (removed != PLATFORM_DIRECTORY_OK && removed != PLATFORM_DIRECTORY_MISSING) {
+            fprintf(stderr, "FATAL: normal node boot preflight failed "
+                            "stage=temp_unlink family=%s leaf=%s result=%d\n",
+                    base, leaf, (int)removed);
             ok = false;
+        }
     }
     platform_directory_transaction_close(&copy);
-    if (created && !platform_private_directory_remove_empty(temp))
+    if (created && !platform_private_directory_remove_empty(temp)) {
+        fprintf(stderr, "FATAL: normal node boot preflight failed "
+                        "stage=temp_remove family=%s windows_error=%lu\n",
+                base, (unsigned long)GetLastError());
         ok = false;
+    }
     (void)datadir;
     return ok;
 }
@@ -181,15 +306,23 @@ static bool windows_family_preflight(struct platform_directory_transaction *sour
 bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
     struct platform_directory_transaction source;
     platform_directory_transaction_init(&source);
-    if (!datadir || !datadir[0] || !platform_directory_transaction_open(&source, datadir))
+    if (!datadir || !datadir[0] || !platform_directory_transaction_open(&source, datadir)) {
+        fprintf(stderr, "FATAL: normal node boot preflight failed "
+                        "stage=datadir_open datadir=%s windows_error=%lu\n",
+                datadir ? datadir : "(null)",
+                (unsigned long)GetLastError());
         return false;
-    bool consensus_present = false, legacy_present = false;
-    bool ok = windows_family_preflight(&source, datadir, "consensus.db", &consensus_present) &&
-              windows_family_preflight(&source, datadir, "progress.kv", &legacy_present) && !(consensus_present && legacy_present);
+    }
+    bool consensus_present = false, projection_present = false;
+    bool ok = windows_family_preflight(
+                  &source, datadir, CONSENSUS_DB_FILENAME,
+                  WINDOWS_PREFLIGHT_KERNEL, &consensus_present) &&
+              windows_family_preflight(
+                  &source, datadir, CONSENSUS_DB_LEGACY_KERNEL_FILENAME,
+                  WINDOWS_PREFLIGHT_PROJECTION, &projection_present);
     platform_directory_transaction_close(&source);
-    if (!ok && consensus_present && legacy_present)
-        fprintf(stderr, "FATAL: normal node boot refused: both consensus.db and "
-                        "progress.kv kernel families exist\n");
+    (void)consensus_present;
+    (void)projection_present;
     return ok;
 }
 bool boot_mint_anchor_preflight_run_all(const char *datadir, struct json_value *report) {

@@ -68,10 +68,7 @@ static const char *const KERNEL_TABLES[CONSENSUS_DB_KERNEL_TABLE_COUNT] = {
  * through projection_store. */
 const char *const consensus_db_projection_stay[
     CONSENSUS_DB_PROJECTION_STAY_COUNT] = {
-    "address_index",
-    "address_index_state",
-    "txindex",
-    "txindex_state",
+    CONSENSUS_DB_PROJECTION_STAY_NAMES,
 };
 
 /* Class B + D — the non-fingerprinted tables written INSIDE kernel txs (Class B:
