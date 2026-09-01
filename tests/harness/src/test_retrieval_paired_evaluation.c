@@ -96,6 +96,43 @@ static enum zcl_retrieval_experiment_error pe_evaluate(
         fixture->projection_root, report);
 }
 
+static void pe_workload_tasks(
+    const struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 tasks[2])
+{
+    for (size_t i = 0; i < 2u; i++)
+        tasks[i] = (struct zcl_retrieval_evaluation_workload_task_v1){
+            .task_id = fixture->tasks[i].task_id,
+            .query = fixture->tasks[i].query,
+            .relevant_paths = fixture->tasks[i].relevant_paths,
+            .relevant_count = fixture->tasks[i].relevant_count,
+        };
+}
+
+static enum zcl_retrieval_experiment_error pe_workload_root(
+    const struct pe_fixture *fixture,
+    const struct zcl_retrieval_evaluation_workload_task_v1 *tasks,
+    size_t task_count, uint8_t out[32])
+{
+    return zcl_retrieval_evaluation_workload_root(
+        tasks, task_count, fixture->task_root, fixture->source_root,
+        fixture->projection_root, out);
+}
+
+static bool pe_workload_refused(
+    const struct zcl_retrieval_evaluation_workload_task_v1 *tasks,
+    size_t task_count, const uint8_t task_root[32],
+    const uint8_t source_root[32], const uint8_t projection_root[32])
+{
+    uint8_t out[32], before[32];
+    memset(out, 0xa5, sizeof(out));
+    memcpy(before, out, sizeof(before));
+    return zcl_retrieval_evaluation_workload_root(
+               tasks, task_count, task_root, source_root, projection_root,
+               out) != ZCL_RETRIEVAL_EXPERIMENT_OK &&
+           memcmp(out, before, sizeof(out)) == 0;
+}
+
 static bool pe_metrics_equal(const struct zcl_retrieval_eval_metrics *left,
                              const struct zcl_retrieval_eval_metrics *right)
 {
@@ -311,6 +348,171 @@ static int case_workload_mutations(void)
              pe_metrics_equal(&baseline.parent_metrics,
                               &stale.parent_metrics) &&
              pe_metrics_equal(&baseline.child_metrics, &stale.child_metrics));
+    return failures;
+}
+
+static int case_root_only_workload(void)
+{
+    int failures = 0;
+    struct pe_fixture fixture, changed;
+    pe_fixture_init(&fixture);
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2], tasks[2];
+    pe_workload_tasks(&fixture, base);
+    uint8_t root[32], repeated[32];
+    struct zcl_retrieval_paired_evaluation_report_v1 paired;
+    const uint8_t kat[32] = {
+        0xbc, 0xb4, 0x79, 0xe1, 0x80, 0x2d, 0xa3, 0x4b,
+        0x61, 0x05, 0x5e, 0x5c, 0x32, 0xd3, 0xb2, 0x1a,
+        0xf0, 0xa5, 0x7f, 0x0f, 0xff, 0xf2, 0x8b, 0x42,
+        0xb6, 0x72, 0xdd, 0xa7, 0x22, 0xbb, 0xa5, 0xbd,
+    };
+    bool ready = pe_workload_root(&fixture, base, 2u, root) ==
+            ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        pe_workload_root(&fixture, base, 2u, repeated) ==
+            ZCL_RETRIEVAL_EXPERIMENT_OK &&
+        pe_evaluate(&fixture, fixture.tasks, 2u, &paired) ==
+            ZCL_RETRIEVAL_EXPERIMENT_OK;
+    PE_CHECK("root-only workload matches KAT and paired evaluation",
+             ready && memcmp(root, kat, 32u) == 0 &&
+             memcmp(root, repeated, 32u) == 0 &&
+             memcmp(root, paired.workload_root, 32u) == 0);
+
+#define PE_WORKLOAD_MUTATION(name_, mutation_) do {                         \
+    memcpy(tasks, base, sizeof(tasks));                                     \
+    mutation_;                                                              \
+    uint8_t mutated[32];                                                    \
+    bool changed_root = pe_workload_root(&fixture, tasks, 2u, mutated) ==   \
+            ZCL_RETRIEVAL_EXPERIMENT_OK &&                                 \
+        memcmp(root, mutated, 32u) != 0;                                    \
+    PE_CHECK((name_), ready && changed_root);                               \
+} while (0)
+    PE_WORKLOAD_MUTATION("root-only task id binds", tasks[0].task_id = "a2");
+    PE_WORKLOAD_MUTATION("root-only query binds", tasks[0].query = "q2");
+    const char *other_relevance[2] = {"src/a.c", "src/new.c"};
+    PE_WORKLOAD_MUTATION("root-only relevance binds",
+                         tasks[0].relevant_paths = other_relevance);
+    const char *reordered[2] = {"src/shared.c", "src/a.c"};
+    PE_WORKLOAD_MUTATION("root-only relevance order binds",
+                         tasks[0].relevant_paths = reordered);
+    PE_WORKLOAD_MUTATION("root-only task order binds",
+                         tasks[0] = base[1]; tasks[1] = base[0]);
+#undef PE_WORKLOAD_MUTATION
+
+    bool external_roots = true;
+    for (size_t which = 0; which < 3u; which++) {
+        changed = fixture;
+        uint8_t *roots[] = {
+            changed.task_root, changed.source_root, changed.projection_root};
+        roots[which][0] ^= 1u;
+        uint8_t mutated[32];
+        external_roots = external_roots &&
+            pe_workload_root(&changed, base, 2u, mutated) ==
+                ZCL_RETRIEVAL_EXPERIMENT_OK &&
+            memcmp(root, mutated, 32u) != 0;
+    }
+    PE_CHECK("root-only task source and projection roots bind",
+             ready && external_roots);
+
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[1].task_id = tasks[0].task_id;
+    bool duplicate_task = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    const char *duplicate_relevance[2] = {"src/a.c", "src/a.c"};
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_paths = duplicate_relevance;
+    bool duplicate_relevant = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    PE_CHECK("root-only duplicates refuse atomically",
+             duplicate_task && duplicate_relevant);
+
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_count = 0u;
+    bool empty_relevance = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = "";
+    bool empty_id = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].query = "";
+    bool empty_query = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    bool empty_batch = pe_workload_refused(
+        base, 0u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    PE_CHECK("root-only empty fields and batch refuse atomically",
+             empty_relevance && empty_id && empty_query && empty_batch);
+
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_count = ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX + 1u;
+    bool relevance_limit = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    bool task_limit = pe_workload_refused(
+        base, ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX + 1u, fixture.task_root,
+        fixture.source_root, fixture.projection_root);
+    char long_query[ZCL_RETRIEVAL_PAIRED_EVALUATION_QUERY_MAX + 2u];
+    memset(long_query, 'q', sizeof(long_query));
+    long_query[sizeof(long_query) - 1u] = 0;
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].query = long_query;
+    bool query_limit = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    char long_id[ZCL_RETRIEVAL_PAIRED_EVALUATION_TASK_ID_MAX + 2u];
+    memset(long_id, 'i', sizeof(long_id));
+    long_id[sizeof(long_id) - 1u] = 0;
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = long_id;
+    bool id_limit = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    char long_path[ZCL_RETRIEVAL_PAIRED_EVALUATION_PATH_MAX + 2u];
+    memset(long_path, 'p', sizeof(long_path));
+    long_path[sizeof(long_path) - 1u] = 0;
+    const char *long_relevance[2] = {long_path, "src/shared.c"};
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_paths = long_relevance;
+    bool path_limit = pe_workload_refused(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root);
+    PE_CHECK("root-only count and text limits refuse atomically",
+             relevance_limit && task_limit && query_limit && id_limit &&
+             path_limit);
+
+    uint8_t zero[32] = {0};
+    bool zero_task = pe_workload_refused(
+        base, 2u, zero, fixture.source_root, fixture.projection_root);
+    bool zero_source = pe_workload_refused(
+        base, 2u, fixture.task_root, zero, fixture.projection_root);
+    bool zero_projection = pe_workload_refused(
+        base, 2u, fixture.task_root, fixture.source_root, zero);
+    PE_CHECK("root-only zero roots refuse atomically",
+             zero_task && zero_source && zero_projection);
+
+    union pe_workload_direct_alias {
+        uint8_t out[32];
+        struct zcl_retrieval_evaluation_workload_task_v1 task;
+    } direct, direct_before;
+    direct.task = base[0]; direct_before = direct;
+    bool direct_alias = zcl_retrieval_evaluation_workload_root(
+        &direct.task, 1u, fixture.task_root, fixture.source_root,
+        fixture.projection_root, direct.out) == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+        memcmp(&direct, &direct_before, sizeof(direct)) == 0;
+    union pe_workload_reachable_alias { uint8_t out[32]; char text[32]; }
+        reachable, reachable_before;
+    memset(&reachable, 0, sizeof(reachable));
+    memcpy(reachable.text, "reachable-workload", 19u);
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = reachable.text;
+    reachable_before = reachable;
+    bool reachable_alias = zcl_retrieval_evaluation_workload_root(
+        tasks, 2u, fixture.task_root, fixture.source_root,
+        fixture.projection_root, reachable.out) ==
+            ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+        memcmp(&reachable, &reachable_before, sizeof(reachable)) == 0;
+    PE_CHECK("root-only direct and reachable aliases refuse atomically",
+             direct_alias && reachable_alias);
     return failures;
 }
 
@@ -539,6 +741,7 @@ int test_retrieval_paired_evaluation(void)
     int failures = 0;
     failures += case_kat_and_metrics();
     failures += case_workload_mutations();
+    failures += case_root_only_workload();
     failures += case_arm_mutations();
     failures += case_malformed_refusals();
     failures += case_alias_refusals();

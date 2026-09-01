@@ -70,22 +70,21 @@ static void peb_write_text(struct sha3_256_ctx *sha, const char *text,
 }
 
 static enum zcl_retrieval_experiment_error peb_alias_text(
-    const struct zcl_retrieval_paired_evaluation_report_v1 *out,
-    const char *text, size_t length)
+    const void *output, size_t output_size, const char *text, size_t length)
 {
-    if (peb_memory_overlaps(out, sizeof(*out), text, length + 1u))
+    if (peb_memory_overlaps(output, output_size, text, length + 1u))
         return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
 static enum zcl_retrieval_experiment_error peb_validate_workload(
-    const struct zcl_retrieval_paired_evaluation_task_v1 *tasks,
-    size_t task_count,
-    const struct zcl_retrieval_paired_evaluation_report_v1 *out,
+    const struct zcl_retrieval_evaluation_workload_task_v1 *tasks,
+    size_t task_count, const void *output, size_t output_size,
     struct sha3_256_ctx *sha)
 {
     for (size_t i = 0; i < task_count; i++) {
-        const struct zcl_retrieval_paired_evaluation_task_v1 *task = &tasks[i];
+        const struct zcl_retrieval_evaluation_workload_task_v1 *task =
+            &tasks[i];
         size_t task_id_length = 0, query_length = 0;
         enum zcl_retrieval_experiment_error error = peb_text_length(
             task->task_id, ZCL_RETRIEVAL_PAIRED_EVALUATION_TASK_ID_MAX,
@@ -95,9 +94,10 @@ static enum zcl_retrieval_experiment_error peb_validate_workload(
             task->query, ZCL_RETRIEVAL_PAIRED_EVALUATION_QUERY_MAX,
             &query_length);
         if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
-        if (peb_alias_text(out, task->task_id, task_id_length) !=
+        if (peb_alias_text(output, output_size, task->task_id,
+                           task_id_length) !=
                 ZCL_RETRIEVAL_EXPERIMENT_OK ||
-            peb_alias_text(out, task->query, query_length) !=
+            peb_alias_text(output, output_size, task->query, query_length) !=
                 ZCL_RETRIEVAL_EXPERIMENT_OK)
             return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
         for (size_t prior = 0; prior < i; prior++)
@@ -107,29 +107,75 @@ static enum zcl_retrieval_experiment_error peb_validate_workload(
             return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
         if (task->relevant_count > ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX)
             return ZCL_RETRIEVAL_EXPERIMENT_CAPACITY;
-        if (peb_memory_overlaps(out, sizeof(*out), task->relevant_paths,
+        if (peb_memory_overlaps(output, output_size, task->relevant_paths,
                 task->relevant_count * sizeof(task->relevant_paths[0])))
             return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
-        peb_write_text(sha, task->task_id, task_id_length);
-        peb_write_text(sha, task->query, query_length);
-        peb_write_u32(sha, (uint32_t)task->relevant_count);
+        if (sha) {
+            peb_write_text(sha, task->task_id, task_id_length);
+            peb_write_text(sha, task->query, query_length);
+            peb_write_u32(sha, (uint32_t)task->relevant_count);
+        }
         for (size_t relevant = 0; relevant < task->relevant_count;
              relevant++) {
             size_t path_length = 0;
             error = peb_text_length(task->relevant_paths[relevant],
                 ZCL_RETRIEVAL_PAIRED_EVALUATION_PATH_MAX, &path_length);
             if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
-            if (peb_alias_text(out, task->relevant_paths[relevant],
-                               path_length) !=
+            if (peb_alias_text(output, output_size,
+                               task->relevant_paths[relevant], path_length) !=
                     ZCL_RETRIEVAL_EXPERIMENT_OK)
                 return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
             for (size_t prior = 0; prior < relevant; prior++)
                 if (strcmp(task->relevant_paths[relevant],
                            task->relevant_paths[prior]) == 0)
                     return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
-            peb_write_text(sha, task->relevant_paths[relevant], path_length);
+            if (sha)
+                peb_write_text(sha, task->relevant_paths[relevant],
+                               path_length);
         }
     }
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+enum zcl_retrieval_experiment_error zcl_retrieval_evaluation_workload_root(
+    const struct zcl_retrieval_evaluation_workload_task_v1 *tasks,
+    size_t task_count,
+    const uint8_t expected_task_root[32],
+    const uint8_t source_root[32],
+    const uint8_t retrieval_projection_root[32],
+    uint8_t out[32])
+{
+    static const char domain[] = ZCL_RETRIEVAL_EVALUATION_WORKLOAD_DOMAIN;
+    if (!tasks || !expected_task_root || !source_root ||
+        !retrieval_projection_root || !out)
+        return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (task_count == 0) return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
+    if (task_count > ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX)
+        return ZCL_RETRIEVAL_EXPERIMENT_CAPACITY;
+    if (!peb_root_any(expected_task_root) || !peb_root_any(source_root) ||
+        !peb_root_any(retrieval_projection_root))
+        return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
+    if (peb_memory_overlaps(out, 32u, tasks,
+                            task_count * sizeof(tasks[0])) ||
+        peb_memory_overlaps(out, 32u, expected_task_root, 32u) ||
+        peb_memory_overlaps(out, 32u, source_root, 32u) ||
+        peb_memory_overlaps(out, 32u, retrieval_projection_root, 32u))
+        return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    peb_write_u16(&sha, ZCL_RETRIEVAL_PAIRED_EVALUATION_VERSION);
+    sha3_256_write(&sha, expected_task_root, 32u);
+    sha3_256_write(&sha, source_root, 32u);
+    sha3_256_write(&sha, retrieval_projection_root, 32u);
+    peb_write_u32(&sha, (uint32_t)task_count);
+    enum zcl_retrieval_experiment_error error = peb_validate_workload(
+        tasks, task_count, out, 32u, &sha);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    uint8_t root[32];
+    sha3_256_finalize(&sha, root);
+    memcpy(out, root, sizeof(root));
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
@@ -173,7 +219,8 @@ static enum zcl_retrieval_experiment_error peb_arm_root(
             error = peb_text_length(ranked[row].path,
                 ZCL_RETRIEVAL_PAIRED_EVALUATION_PATH_MAX, &path_length);
             if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
-            if (peb_alias_text(out, ranked[row].path, path_length) !=
+            if (peb_alias_text(out, sizeof(*out), ranked[row].path,
+                               path_length) !=
                     ZCL_RETRIEVAL_EXPERIMENT_OK)
                 return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
             if (!ranked[row].in_scope_available && ranked[row].in_scope)
@@ -201,8 +248,6 @@ enum zcl_retrieval_experiment_error zcl_retrieval_paired_evaluate(
     const uint8_t retrieval_projection_root[32],
     struct zcl_retrieval_paired_evaluation_report_v1 *out)
 {
-    static const char workload_domain[] =
-        ZCL_RETRIEVAL_EVALUATION_WORKLOAD_DOMAIN;
     static const char input_domain[] =
         ZCL_RETRIEVAL_PAIRED_EVALUATION_INPUT_DOMAIN;
     if (!tasks || !expected_task_root || !source_root ||
@@ -229,20 +274,23 @@ enum zcl_retrieval_experiment_error zcl_retrieval_paired_evaluate(
     memcpy(result.source_root, source_root, 32u);
     memcpy(result.retrieval_projection_root, retrieval_projection_root, 32u);
 
-    struct sha3_256_ctx workload_sha;
-    sha3_256_init(&workload_sha);
-    sha3_256_write(&workload_sha, (const uint8_t *)workload_domain,
-                   sizeof(workload_domain));
-    peb_write_u16(&workload_sha,
-                  ZCL_RETRIEVAL_PAIRED_EVALUATION_VERSION);
-    sha3_256_write(&workload_sha, expected_task_root, 32u);
-    sha3_256_write(&workload_sha, source_root, 32u);
-    sha3_256_write(&workload_sha, retrieval_projection_root, 32u);
-    peb_write_u32(&workload_sha, (uint32_t)task_count);
+    struct zcl_retrieval_evaluation_workload_task_v1
+        workload[ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX];
+    for (size_t i = 0; i < task_count; i++) {
+        workload[i] = (struct zcl_retrieval_evaluation_workload_task_v1){
+            .task_id = tasks[i].task_id,
+            .query = tasks[i].query,
+            .relevant_paths = tasks[i].relevant_paths,
+            .relevant_count = tasks[i].relevant_count,
+        };
+    }
     enum zcl_retrieval_experiment_error error = peb_validate_workload(
-        tasks, task_count, out, &workload_sha);
+        workload, task_count, out, sizeof(*out), NULL);
     if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
-    sha3_256_finalize(&workload_sha, result.workload_root);
+    error = zcl_retrieval_evaluation_workload_root(
+        workload, task_count, expected_task_root, source_root,
+        retrieval_projection_root, result.workload_root);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
 
     error = peb_arm_root(tasks, task_count, false, result.workload_root, out,
                          result.parent_arm_root);

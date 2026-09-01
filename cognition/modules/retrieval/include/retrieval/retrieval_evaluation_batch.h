@@ -20,6 +20,31 @@
 #define ZCL_RETRIEVAL_PAIRED_EVALUATION_INPUT_DOMAIN \
     "zcl.retrieval_paired_evaluation_input.v1"
 
+/* Exact preregisterable workload rows. Caller order is semantic; task ids and
+ * relevant paths within each task must be unique. No ranking, outcome, arm,
+ * evaluator result, or authority enters this carrier. */
+struct zcl_retrieval_evaluation_workload_task_v1 {
+    const char *task_id;
+    const char *query;
+    const char *const *relevant_paths;
+    size_t relevant_count;
+};
+
+/* Construct the same workload root consumed by paired evaluation without
+ * requiring either future arm. This binds the exact nonzero task, source, and
+ * retrieval-projection roots plus ordered task/query/relevance bytes. The
+ * external roots are caller assertions: the constructor authenticates no
+ * provenance, preregistration chronology, hidden-gold property, independence,
+ * evaluator correctness, outcome, or authority. out is unchanged on every
+ * error and may not overlap any reachable input. */
+enum zcl_retrieval_experiment_error zcl_retrieval_evaluation_workload_root(
+    const struct zcl_retrieval_evaluation_workload_task_v1 *tasks,
+    size_t task_count,
+    const uint8_t expected_task_root[32],
+    const uint8_t source_root[32],
+    const uint8_t retrieval_projection_root[32],
+    uint8_t out[32]);
+
 /* Caller order is exact identity for tasks, relevant paths, and rankings.
  * Task ids, relevant paths within a task, and ranked paths within an arm must
  * each be unique; no sorting, deduplication, or normalization is performed. */
