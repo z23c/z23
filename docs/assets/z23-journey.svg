@@ -1,52 +1,77 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="620" viewBox="0 0 960 620" role="img" aria-labelledby="journey-title journey-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" role="img" aria-labelledby="journey-title journey-desc">
   <title id="journey-title">Describe, reuse, create, see, keep, share</title>
-  <desc id="journey-desc">The Z23 product journey flows from describing desired behavior through reuse and creation into a large central SEE stage, where the user observes the real result before keeping and sharing an exact version.</desc>
+  <desc id="journey-desc">A continuous path carries a user's description through reuse and creation into a dominant live viewport. The viewport shows a real prompt-to-pixel result before the path continues to keeping an exact version and sharing it for independent reproduction.</desc>
   <defs>
-    <marker id="journey-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0 L10 5 L0 10 z" fill="#69748a"/>
+    <linearGradient id="journey-path" x1="0" x2="1">
+      <stop offset="0" stop-color="#5ea8ff"/>
+      <stop offset="0.42" stop-color="#a78bfa"/>
+      <stop offset="0.58" stop-color="#f0b44c"/>
+      <stop offset="1" stop-color="#3ddc97"/>
+    </linearGradient>
+    <pattern id="journey-pixels" width="18" height="18" patternUnits="userSpaceOnUse">
+      <rect width="18" height="18" fill="#0d1219"/>
+      <path d="M18 0H0V18" fill="none" stroke="#1d2633" stroke-width="1"/>
+    </pattern>
+    <marker id="journey-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#3ddc97"/>
     </marker>
   </defs>
-  <rect width="960" height="620" fill="#0a0d12"/>
+  <rect width="960" height="600" fill="#090c11"/>
   <g font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <text x="480" y="54" text-anchor="middle" font-size="30" font-weight="750" fill="#e9eef6">From intent to owned software</text>
-    <text x="480" y="84" text-anchor="middle" font-size="17" fill="#97a3b6">The user sees the consequence before choosing what to keep.</text>
+    <text x="54" y="61" font-size="17" font-weight="750" letter-spacing="2.2" fill="#f0b44c">THE PRODUCT JOURNEY</text>
+    <text x="54" y="105" font-size="36" font-weight="780" fill="#e9eef6">See the consequence before you keep it.</text>
 
-    <path d="M292 171 H337" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
-    <path d="M623 171 H668" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
-    <path d="M788 239 C788 276 699 292 655 313" fill="none" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
-    <path d="M376 444 C331 466 273 480 250 502" fill="none" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
-    <path d="M402 548 H548" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
+    <path d="M76 293C134 293 132 193 202 193S240 387 309 387H666C735 387 728 227 798 227S830 365 898 365" fill="none" stroke="#1c2431" stroke-width="13" stroke-linecap="round"/>
+    <path d="M76 293C134 293 132 193 202 193S240 387 309 387H666C735 387 728 227 798 227S830 365 898 365" fill="none" stroke="url(#journey-path)" stroke-width="4" stroke-linecap="round" marker-end="url(#journey-arrow)"/>
 
-    <rect x="45" y="116" width="247" height="123" rx="16" fill="#121722" stroke="#5ea8ff" stroke-width="2"/>
-    <text x="69" y="149" font-size="15" font-weight="750" letter-spacing="1.4" fill="#5ea8ff">01</text>
-    <text x="168.5" y="183" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">DESCRIBE</text>
-    <text x="168.5" y="214" text-anchor="middle" font-size="16" fill="#c3ccd9">Say what should happen.</text>
+    <g font-size="14" font-weight="780" letter-spacing="1.3">
+      <circle cx="76" cy="293" r="8" fill="#5ea8ff"/>
+      <text x="57" y="267" fill="#b9d9ff">01 · DESCRIBE</text>
+      <text x="57" y="323" font-size="13" font-weight="500" letter-spacing="0" fill="#97a3b6">what should happen</text>
 
-    <rect x="337" y="116" width="286" height="123" rx="16" fill="#121722" stroke="#3ddc97" stroke-width="2"/>
-    <text x="361" y="149" font-size="15" font-weight="750" letter-spacing="1.4" fill="#3ddc97">02</text>
-    <text x="480" y="183" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">REUSE</text>
-    <text x="480" y="214" text-anchor="middle" font-size="16" fill="#c3ccd9">Find useful C23 first.</text>
+      <circle cx="202" cy="193" r="8" fill="#3ddc97"/>
+      <text x="202" y="164" text-anchor="middle" fill="#86edbd">02 · REUSE</text>
+      <text x="202" y="224" text-anchor="middle" font-size="13" font-weight="500" letter-spacing="0" fill="#97a3b6">existing C23 first</text>
 
-    <rect x="668" y="116" width="247" height="123" rx="16" fill="#121722" stroke="#a78bfa" stroke-width="2"/>
-    <text x="692" y="149" font-size="15" font-weight="750" letter-spacing="1.4" fill="#a78bfa">03</text>
-    <text x="791.5" y="183" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">CREATE</text>
-    <text x="791.5" y="214" text-anchor="middle" font-size="16" fill="#c3ccd9">Write only what is missing.</text>
+      <circle cx="279" cy="357" r="8" fill="#a78bfa"/>
+      <text x="255" y="443" text-anchor="middle" fill="#d8cdfd">03 · CREATE</text>
+      <text x="255" y="466" text-anchor="middle" font-size="13" font-weight="500" letter-spacing="0" fill="#97a3b6">only what is missing</text>
 
-    <rect x="244" y="294" width="472" height="160" rx="24" fill="#171d2a" stroke="#f0b44c" stroke-width="4"/>
-    <rect x="266" y="312" width="136" height="32" rx="16" fill="#f0b44c"/>
-    <text x="334" y="334" text-anchor="middle" font-size="14" font-weight="800" fill="#0a0d12">DECISION POINT</text>
-    <text x="480" y="383" text-anchor="middle" font-size="48" font-weight="800" fill="#e9eef6">SEE</text>
-    <text x="480" y="416" text-anchor="middle" font-size="19" fill="#f7d28a">Run the real result. Watch what changed.</text>
-    <text x="684" y="329" text-anchor="end" font-size="15" font-weight="750" letter-spacing="1.4" fill="#f0b44c">04</text>
+      <circle cx="798" cy="227" r="8" fill="#f2708a"/>
+      <text x="798" y="198" text-anchor="middle" fill="#fac0cc">05 · KEEP</text>
+      <text x="798" y="259" text-anchor="middle" font-size="13" font-weight="500" letter-spacing="0" fill="#97a3b6">one exact version</text>
 
-    <rect x="78" y="502" width="324" height="90" rx="16" fill="#121722" stroke="#f2708a" stroke-width="2"/>
-    <text x="102" y="535" font-size="15" font-weight="750" letter-spacing="1.4" fill="#f2708a">05</text>
-    <text x="240" y="543" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">KEEP</text>
-    <text x="240" y="572" text-anchor="middle" font-size="15" fill="#c3ccd9">Accept one exact version locally.</text>
+      <circle cx="898" cy="365" r="8" fill="#3ddc97"/>
+      <text x="898" y="412" text-anchor="end" fill="#86edbd">06 · SHARE</text>
+      <text x="898" y="435" text-anchor="end" font-size="13" font-weight="500" letter-spacing="0" fill="#97a3b6">peers reproduce</text>
+    </g>
 
-    <rect x="548" y="502" width="334" height="90" rx="16" fill="#121722" stroke="#3ddc97" stroke-width="2"/>
-    <text x="572" y="535" font-size="15" font-weight="750" letter-spacing="1.4" fill="#3ddc97">06</text>
-    <text x="715" y="543" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">SHARE</text>
-    <text x="715" y="572" text-anchor="middle" font-size="15" fill="#c3ccd9">Let peers verify and reproduce it.</text>
+    <rect x="308" y="145" width="359" height="289" rx="8" fill="#111722" stroke="#f0b44c" stroke-width="4"/>
+    <rect x="321" y="158" width="333" height="42" fill="#171f2c"/>
+    <circle cx="341" cy="179" r="5" fill="#f2708a"/>
+    <circle cx="359" cy="179" r="5" fill="#f0b44c"/>
+    <circle cx="377" cy="179" r="5" fill="#3ddc97"/>
+    <text x="635" y="184" text-anchor="end" font-size="12" font-weight="720" letter-spacing="1.2" fill="#97a3b6">REAL OUTPUT</text>
+    <rect x="321" y="200" width="333" height="221" fill="url(#journey-pixels)"/>
+
+    <text x="344" y="235" font-size="13" font-weight="720" fill="#5ea8ff">PROMPT</text>
+    <text x="344" y="261" font-size="15" fill="#c3ccd9">make a window that says hello</text>
+    <rect x="598" y="246" width="3" height="18" fill="#5ea8ff"/>
+
+    <g transform="translate(361 289)">
+      <rect width="254" height="104" rx="5" fill="#e9eef6"/>
+      <rect width="254" height="24" rx="5" fill="#5ea8ff"/>
+      <circle cx="236" cy="12" r="4" fill="#e9eef6" opacity="0.9"/>
+      <rect x="18" y="42" width="44" height="44" fill="#f0b44c"/>
+      <rect x="27" y="51" width="9" height="9" fill="#090c11"/>
+      <rect x="44" y="51" width="9" height="9" fill="#090c11"/>
+      <rect x="27" y="68" width="26" height="7" fill="#090c11"/>
+      <text x="78" y="69" font-size="21" font-weight="760" fill="#111722">hello, you.</text>
+    </g>
+    <rect x="443" y="407" width="89" height="27" fill="#f0b44c"/>
+    <text x="487.5" y="426" text-anchor="middle" font-size="13" font-weight="850" letter-spacing="1.4" fill="#090c11">04 · SEE</text>
+
+    <text x="480" y="526" text-anchor="middle" font-size="20" font-weight="700" fill="#e9eef6">Describe → reuse → create → <tspan fill="#f0b44c">see</tspan> → keep → share</text>
+    <text x="480" y="557" text-anchor="middle" font-size="15" fill="#97a3b6">The visible result—not the worker's confidence—is the decision point.</text>
   </g>
 </svg>

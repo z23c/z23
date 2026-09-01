@@ -1,61 +1,85 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720" role="img" aria-labelledby="hero-title hero-desc">
-  <title id="hero-title">Z23: one user-owned node, two sovereign systems</title>
-  <desc id="hero-desc">A local-authority boundary contains a ZClassic full node, an optional C23 Commons, local policy, and five conceptual product layers. The user controls the boundary while replaceable AI workers remain outside and may only propose work.</desc>
-  <rect width="960" height="720" fill="#0a0d12"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="680" viewBox="0 0 960 680" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Z23: local authority over two sovereign systems</title>
+  <desc id="hero-desc">A user-held key crosses a green local-authority boundary into one Z23 node. Inside, a blue ZClassic full node and a violet optional C23 Commons share a locally controlled policy gate and rest on five conceptual product layers. Replaceable AI workers remain outside the boundary and can only propose changes.</desc>
+  <defs>
+    <linearGradient id="hero-node" x1="0" x2="1">
+      <stop offset="0" stop-color="#10243b"/>
+      <stop offset="0.5" stop-color="#111923"/>
+      <stop offset="1" stop-color="#241a3d"/>
+    </linearGradient>
+    <radialGradient id="hero-gate">
+      <stop offset="0" stop-color="#f7d28a"/>
+      <stop offset="0.22" stop-color="#f0b44c"/>
+      <stop offset="0.24" stop-color="#332817"/>
+      <stop offset="1" stop-color="#111923"/>
+    </radialGradient>
+    <pattern id="hero-grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#202836" stroke-width="1"/>
+    </pattern>
+    <marker id="hero-proposal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#69748a"/>
+    </marker>
+  </defs>
+  <rect width="960" height="680" fill="#090c11"/>
+  <rect width="960" height="680" fill="url(#hero-grid)" opacity="0.34"/>
   <g font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <text x="480" y="60" text-anchor="middle" font-size="42" font-weight="750" fill="#e9eef6">Z23</text>
-    <text x="480" y="96" text-anchor="middle" font-size="22" fill="#c3ccd9">Software made for you, not imposed on you.</text>
+    <text x="56" y="66" font-size="17" font-weight="750" letter-spacing="2.4" fill="#3ddc97">Z23 · LOCAL AUTHORITY</text>
+    <text x="56" y="112" font-size="38" font-weight="780" fill="#e9eef6">One node. Two sovereign systems.</text>
 
-    <circle cx="106" cy="137" r="34" fill="#121722" stroke="#3ddc97" stroke-width="3"/>
-    <text x="106" y="144" text-anchor="middle" font-size="19" font-weight="700" fill="#e9eef6">YOU</text>
-    <path d="M142 137 H205" stroke="#3ddc97" stroke-width="3"/>
-    <path d="M205 137 l-12 -7 v14 z" fill="#3ddc97"/>
-    <text x="218" y="130" font-size="15" font-weight="650" fill="#3ddc97">OWNER AUTHORITY</text>
+    <circle cx="91" cy="311" r="38" fill="#0d1419" stroke="#3ddc97" stroke-width="3"/>
+    <circle cx="91" cy="311" r="13" fill="none" stroke="#e9eef6" stroke-width="5"/>
+    <path d="M104 311H218M181 311v18M201 311v12" fill="none" stroke="#e9eef6" stroke-width="5"/>
+    <text x="91" y="373" text-anchor="middle" font-size="15" font-weight="750" fill="#86edbd">YOUR KEY</text>
 
-    <rect x="675" y="108" width="225" height="58" rx="29" fill="#171d2a" stroke="#69748a" stroke-width="2" stroke-dasharray="7 6"/>
-    <text x="787.5" y="133" text-anchor="middle" font-size="16" font-weight="700" fill="#c3ccd9">REPLACEABLE AI</text>
-    <text x="787.5" y="153" text-anchor="middle" font-size="14" fill="#97a3b6">proposals, never authority</text>
-    <path d="M745 166 L696 214" stroke="#69748a" stroke-width="2" stroke-dasharray="7 6"/>
-    <path d="M696 214 l3 -13 10 10 z" fill="#69748a"/>
+    <path d="M218 184C218 154 242 130 272 130H826C856 130 880 154 880 184V524C880 554 856 578 826 578H272C242 578 218 554 218 524Z" fill="#0c1118" stroke="#3ddc97" stroke-width="3"/>
+    <path d="M249 185C249 164 266 147 287 147H811C832 147 849 164 849 185V408H249Z" fill="url(#hero-node)" stroke="#303a4b" stroke-width="1.5"/>
+    <path d="M549 147V408" stroke="#3b465a" stroke-width="1.5" stroke-dasharray="5 7"/>
 
-    <rect x="48" y="184" width="864" height="486" rx="24" fill="#0e1219" stroke="#3ddc97" stroke-width="3"/>
-    <rect x="72" y="168" width="305" height="34" rx="17" fill="#0a0d12"/>
-    <text x="224.5" y="191" text-anchor="middle" font-size="16" font-weight="700" letter-spacing="1.4" fill="#3ddc97">YOUR DEVICE · LOCAL AUTHORITY</text>
+    <text x="287" y="187" font-size="13" font-weight="760" letter-spacing="2" fill="#5ea8ff">SYSTEM 01</text>
+    <text x="287" y="235" font-size="30" font-weight="780" fill="#e9eef6">ZCLASSIC</text>
+    <text x="287" y="270" font-size="30" font-weight="780" fill="#e9eef6">FULL NODE</text>
+    <path d="M288 307H441" stroke="#5ea8ff" stroke-width="4"/>
+    <text x="287" y="343" font-size="16" fill="#b9d9ff">P2P · WALLET · RPC</text>
+    <text x="287" y="369" font-size="15" fill="#97a3b6">consensus comes first</text>
 
-    <text x="480" y="238" text-anchor="middle" font-size="18" font-weight="700" letter-spacing="2" fill="#97a3b6">ONE BINARY · TWO SOVEREIGN SYSTEMS</text>
+    <text x="588" y="187" font-size="13" font-weight="760" letter-spacing="2" fill="#a78bfa">SYSTEM 02 · OPTIONAL</text>
+    <text x="588" y="235" font-size="30" font-weight="780" fill="#e9eef6">C23</text>
+    <text x="588" y="270" font-size="30" font-weight="780" fill="#e9eef6">COMMONS</text>
+    <path d="M589 307H742" stroke="#a78bfa" stroke-width="4"/>
+    <text x="588" y="343" font-size="16" fill="#d8cdfd">SOURCE · EVIDENCE</text>
+    <text x="588" y="369" font-size="15" fill="#97a3b6">locally admitted</text>
 
-    <rect x="92" y="270" width="354" height="188" rx="18" fill="#121722" stroke="#5ea8ff" stroke-width="2"/>
-    <rect x="92" y="270" width="354" height="8" rx="4" fill="#5ea8ff"/>
-    <text x="269" y="321" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">ZCLASSIC FULL NODE</text>
-    <text x="269" y="354" text-anchor="middle" font-size="17" fill="#b9d9ff">consensus comes first</text>
-    <line x1="128" y1="377" x2="410" y2="377" stroke="#313b4e"/>
-    <text x="269" y="408" text-anchor="middle" font-size="18" fill="#c3ccd9">P2P · WALLET · RPC · EXPLORER</text>
-    <text x="269" y="435" text-anchor="middle" font-size="15" fill="#97a3b6">optional embedded Tor at build time</text>
+    <circle cx="549" cy="309" r="54" fill="url(#hero-gate)" stroke="#f0b44c" stroke-width="2"/>
+    <circle cx="549" cy="309" r="34" fill="#0d1219" stroke="#f0b44c" stroke-width="2"/>
+    <circle cx="549" cy="298" r="7" fill="#f0b44c"/>
+    <path d="M549 305V326" stroke="#f0b44c" stroke-width="7" stroke-linecap="round"/>
+    <text x="549" y="386" text-anchor="middle" font-size="13" font-weight="780" letter-spacing="1.4" fill="#f7d28a">LOCAL POLICY</text>
 
-    <rect x="514" y="270" width="354" height="188" rx="18" fill="#121722" stroke="#a78bfa" stroke-width="2"/>
-    <rect x="514" y="270" width="354" height="8" rx="4" fill="#a78bfa"/>
-    <text x="691" y="321" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">C23 COMMONS</text>
-    <text x="691" y="354" text-anchor="middle" font-size="17" fill="#d8cdfd">optional and locally admitted</text>
-    <line x1="550" y1="377" x2="832" y2="377" stroke="#313b4e"/>
-    <text x="691" y="408" text-anchor="middle" font-size="18" fill="#c3ccd9">SOURCE · PACKAGES · EVIDENCE</text>
-    <text x="691" y="435" text-anchor="middle" font-size="15" fill="#97a3b6">fetch · verify · reproduce · preserve</text>
-
-    <rect x="300" y="486" width="360" height="72" rx="36" fill="#171d2a" stroke="#f0b44c" stroke-width="2"/>
-    <text x="480" y="516" text-anchor="middle" font-size="19" font-weight="750" fill="#f0b44c">LOCAL POLICY</text>
-    <text x="480" y="541" text-anchor="middle" font-size="15" fill="#c3ccd9">accept or refuse every exact version here</text>
-
-    <text x="480" y="592" text-anchor="middle" font-size="14" font-weight="700" letter-spacing="1.2" fill="#69748a">CONCEPTUAL PRODUCT MAP · NOT FILESYSTEM LAYOUT</text>
-    <g font-size="15" font-weight="700" text-anchor="middle">
-      <rect x="78" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#5ea8ff"/>
-      <text x="152" y="637" fill="#b9d9ff">CORE</text>
-      <rect x="242" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#3ddc97"/>
-      <text x="316" y="637" fill="#86edbd">ENGINE</text>
-      <rect x="406" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#a78bfa"/>
-      <text x="480" y="637" fill="#d8cdfd">CONTEXTS</text>
-      <rect x="570" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#f0b44c"/>
-      <text x="644" y="637" fill="#f7d28a">COGNITION</text>
-      <rect x="734" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#f2708a"/>
-      <text x="808" y="637" fill="#fac0cc">PLATFORM</text>
+    <g font-size="13" font-weight="760" letter-spacing="1.1">
+      <path d="M249 423H849V449H249Z" fill="#14243a"/>
+      <text x="274" y="441" fill="#b9d9ff">CORE</text>
+      <path d="M249 452H849V478H249Z" fill="#123027"/>
+      <text x="318" y="470" fill="#86edbd">ENGINE</text>
+      <path d="M249 481H849V507H249Z" fill="#27203c"/>
+      <text x="418" y="499" fill="#d8cdfd">CONTEXTS</text>
+      <path d="M249 510H849V536H249Z" fill="#352918"/>
+      <text x="548" y="528" fill="#f7d28a">COGNITION</text>
+      <path d="M249 539H849V565H249Z" fill="#35202a"/>
+      <text x="690" y="557" fill="#fac0cc">PLATFORM</text>
     </g>
+    <text x="827" y="441" text-anchor="end" font-size="12" letter-spacing="1" fill="#69748a">CONCEPTUAL PRODUCT LAYERS</text>
+
+    <text x="90" y="427" text-anchor="middle" font-size="14" font-weight="750" fill="#e9eef6">ACCEPT</text>
+    <text x="90" y="449" text-anchor="middle" font-size="14" font-weight="750" fill="#e9eef6">OR REFUSE</text>
+    <path d="M127 436H218" stroke="#3ddc97" stroke-width="2"/>
+
+    <path d="M805 91L826 127" fill="none" stroke="#69748a" stroke-width="2" stroke-dasharray="5 7" marker-end="url(#hero-proposal)"/>
+    <circle cx="775" cy="64" r="20" fill="#10151e" stroke="#69748a" stroke-width="2" stroke-dasharray="4 4"/>
+    <circle cx="729" cy="77" r="12" fill="#10151e" stroke="#69748a" stroke-width="2" stroke-dasharray="4 4"/>
+    <circle cx="814" cy="89" r="10" fill="#10151e" stroke="#69748a" stroke-width="2" stroke-dasharray="4 4"/>
+    <text x="902" y="42" text-anchor="end" font-size="13" font-weight="760" letter-spacing="1.2" fill="#97a3b6">AI WORKERS</text>
+    <text x="902" y="62" text-anchor="end" font-size="13" fill="#69748a">propose from outside</text>
+
+    <text x="549" y="628" text-anchor="middle" font-size="21" font-weight="700" fill="#e9eef6">Software made for you, not imposed on you.</text>
   </g>
 </svg>

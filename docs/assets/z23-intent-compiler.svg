@@ -1,70 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="680" viewBox="0 0 960 680" role="img" aria-labelledby="compiler-title compiler-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="660" viewBox="0 0 960 660" role="img" aria-labelledby="compiler-title compiler-desc">
   <title id="compiler-title">The intent compilation model Z23 is building</title>
-  <desc id="compiler-desc">Seven stages form a loop: stories, ontology, predicates, focus, heuristics, evidence, and experience. Experience feeds the user's observed result into the next story. The diagram explicitly labels this as a model being built, not a finished monolithic compiler.</desc>
+  <desc id="compiler-desc">A single continuous signal travels through seven named stations: stories, ontology, predicates, focus, heuristics, evidence, and experience. Experience is shown as a large visible aperture and feeds back into the next story. This is explicitly a model being built, not a finished monolithic compiler.</desc>
   <defs>
-    <marker id="compiler-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0 L10 5 L0 10 z" fill="#69748a"/>
+    <linearGradient id="compiler-signal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5ea8ff"/>
+      <stop offset="0.3" stop-color="#a78bfa"/>
+      <stop offset="0.58" stop-color="#f0b44c"/>
+      <stop offset="0.82" stop-color="#3ddc97"/>
+      <stop offset="1" stop-color="#5ea8ff"/>
+    </linearGradient>
+    <radialGradient id="compiler-aperture">
+      <stop offset="0" stop-color="#e9eef6"/>
+      <stop offset="0.13" stop-color="#5ea8ff"/>
+      <stop offset="0.16" stop-color="#14243a"/>
+      <stop offset="0.55" stop-color="#0e1621"/>
+      <stop offset="1" stop-color="#090c11"/>
+    </radialGradient>
+    <marker id="compiler-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#5ea8ff"/>
     </marker>
   </defs>
-  <rect width="960" height="680" fill="#0a0d12"/>
+  <rect width="960" height="660" fill="#090c11"/>
   <g font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <text x="480" y="52" text-anchor="middle" font-size="30" font-weight="750" fill="#e9eef6">Compiling intent into experience</text>
-    <rect x="258" y="72" width="444" height="34" rx="17" fill="#171d2a" stroke="#f0b44c"/>
-    <text x="480" y="95" text-anchor="middle" font-size="14" font-weight="750" letter-spacing="1" fill="#f7d28a">MODEL BEING BUILT · NOT A FINISHED MONOLITHIC COMPILER</text>
+    <text x="54" y="61" font-size="17" font-weight="750" letter-spacing="2.2" fill="#a78bfa">AN INTENT COMPILATION MODEL</text>
+    <text x="54" y="105" font-size="36" font-weight="780" fill="#e9eef6">Turn a story into something you can see.</text>
+    <text x="906" y="61" text-anchor="end" font-size="13" font-weight="720" letter-spacing="1.1" fill="#f7d28a">BEING BUILT · NOT A MONOLITH</text>
 
-    <path d="M224 206 H260" stroke="#69748a" stroke-width="3" marker-end="url(#compiler-arrow)"/>
-    <path d="M454 206 H490" stroke="#69748a" stroke-width="3" marker-end="url(#compiler-arrow)"/>
-    <path d="M684 206 H720" stroke="#69748a" stroke-width="3" marker-end="url(#compiler-arrow)"/>
-    <path d="M817 284 V344" stroke="#69748a" stroke-width="3" marker-end="url(#compiler-arrow)"/>
-    <path d="M720 432 H684" stroke="#69748a" stroke-width="3" marker-end="url(#compiler-arrow)"/>
-    <path d="M490 432 H454" stroke="#69748a" stroke-width="3" marker-end="url(#compiler-arrow)"/>
+    <path d="M102 221C177 133 284 144 340 218C401 298 339 397 422 462C494 519 575 476 617 414C670 336 644 220 733 177C793 148 858 190 867 252C879 337 792 381 730 420C662 463 625 568 492 570C350 573 278 470 228 394C184 327 109 307 102 221Z" fill="none" stroke="#1c2431" stroke-width="15" stroke-linecap="round"/>
+    <path d="M102 221C177 133 284 144 340 218C401 298 339 397 422 462C494 519 575 476 617 414C670 336 644 220 733 177C793 148 858 190 867 252C879 337 792 381 730 420C662 463 625 568 492 570C350 573 278 470 228 394C184 327 109 307 102 221Z" fill="none" stroke="url(#compiler-signal)" stroke-width="4" stroke-linecap="round" marker-end="url(#compiler-arrow)"/>
 
-    <rect x="30" y="132" width="194" height="152" rx="18" fill="#121722" stroke="#5ea8ff" stroke-width="2"/>
-    <text x="54" y="163" font-size="14" font-weight="800" fill="#5ea8ff">01</text>
-    <text x="127" y="202" text-anchor="middle" font-size="24" font-weight="750" fill="#e9eef6">STORIES</text>
-    <text x="127" y="235" text-anchor="middle" font-size="16" fill="#c3ccd9">desired behavior</text>
-    <text x="127" y="260" text-anchor="middle" font-size="14" fill="#97a3b6">in the user's words</text>
+    <g font-weight="780">
+      <circle cx="102" cy="221" r="11" fill="#090c11" stroke="#5ea8ff" stroke-width="4"/>
+      <text x="72" y="185" font-size="14" letter-spacing="1.2" fill="#b9d9ff">01</text>
+      <text x="72" y="210" font-size="20" fill="#e9eef6">STORIES</text>
+      <text x="72" y="248" font-size="13" font-weight="500" fill="#97a3b6">desired behavior</text>
 
-    <rect x="260" y="132" width="194" height="152" rx="18" fill="#121722" stroke="#a78bfa" stroke-width="2"/>
-    <text x="284" y="163" font-size="14" font-weight="800" fill="#a78bfa">02</text>
-    <text x="357" y="202" text-anchor="middle" font-size="24" font-weight="750" fill="#e9eef6">ONTOLOGY</text>
-    <text x="357" y="235" text-anchor="middle" font-size="16" fill="#c3ccd9">stable domain names</text>
-    <text x="357" y="260" text-anchor="middle" font-size="14" fill="#97a3b6">and relationships</text>
+      <circle cx="300" cy="181" r="11" fill="#090c11" stroke="#a78bfa" stroke-width="4"/>
+      <text x="300" y="138" text-anchor="middle" font-size="14" letter-spacing="1.2" fill="#d8cdfd">02</text>
+      <text x="300" y="163" text-anchor="middle" font-size="20" fill="#e9eef6">ONTOLOGY</text>
 
-    <rect x="490" y="132" width="194" height="152" rx="18" fill="#121722" stroke="#3ddc97" stroke-width="2"/>
-    <text x="514" y="163" font-size="14" font-weight="800" fill="#3ddc97">03</text>
-    <text x="587" y="202" text-anchor="middle" font-size="22" font-weight="750" fill="#e9eef6">PREDICATES</text>
-    <text x="587" y="235" text-anchor="middle" font-size="16" fill="#c3ccd9">checkable conditions</text>
-    <text x="587" y="260" text-anchor="middle" font-size="14" fill="#97a3b6">for success or refusal</text>
+      <circle cx="354" cy="343" r="11" fill="#090c11" stroke="#3ddc97" stroke-width="4"/>
+      <text x="315" y="321" text-anchor="end" font-size="14" letter-spacing="1.2" fill="#86edbd">03</text>
+      <text x="315" y="347" text-anchor="end" font-size="20" fill="#e9eef6">PREDICATES</text>
+      <text x="315" y="371" text-anchor="end" font-size="13" font-weight="500" fill="#97a3b6">checkable conditions</text>
 
-    <rect x="720" y="132" width="194" height="152" rx="18" fill="#121722" stroke="#f0b44c" stroke-width="2"/>
-    <text x="744" y="163" font-size="14" font-weight="800" fill="#f0b44c">04</text>
-    <text x="817" y="202" text-anchor="middle" font-size="24" font-weight="750" fill="#e9eef6">FOCUS</text>
-    <text x="817" y="235" text-anchor="middle" font-size="16" fill="#c3ccd9">bounded context</text>
-    <text x="817" y="260" text-anchor="middle" font-size="14" fill="#97a3b6">for the work at hand</text>
+      <circle cx="495" cy="494" r="11" fill="#090c11" stroke="#f0b44c" stroke-width="4"/>
+      <text x="495" y="526" text-anchor="middle" font-size="14" letter-spacing="1.2" fill="#f7d28a">04 · FOCUS</text>
+      <text x="495" y="549" text-anchor="middle" font-size="13" font-weight="500" fill="#97a3b6">one bounded context</text>
 
-    <rect x="720" y="356" width="194" height="152" rx="18" fill="#121722" stroke="#f2708a" stroke-width="2"/>
-    <text x="744" y="387" font-size="14" font-weight="800" fill="#f2708a">05</text>
-    <text x="817" y="426" text-anchor="middle" font-size="22" font-weight="750" fill="#e9eef6">HEURISTICS</text>
-    <text x="817" y="459" text-anchor="middle" font-size="16" fill="#c3ccd9">replaceable workers</text>
-    <text x="817" y="484" text-anchor="middle" font-size="14" fill="#97a3b6">propose a change</text>
+      <circle cx="641" cy="369" r="11" fill="#090c11" stroke="#f2708a" stroke-width="4"/>
+      <text x="608" y="338" text-anchor="end" font-size="14" letter-spacing="1.2" fill="#fac0cc">05</text>
+      <text x="608" y="364" text-anchor="end" font-size="20" fill="#e9eef6">HEURISTICS</text>
+      <text x="608" y="388" text-anchor="end" font-size="13" font-weight="500" fill="#97a3b6">replaceable proposals</text>
 
-    <rect x="490" y="356" width="194" height="152" rx="18" fill="#121722" stroke="#3ddc97" stroke-width="2"/>
-    <text x="514" y="387" font-size="14" font-weight="800" fill="#3ddc97">06</text>
-    <text x="587" y="426" text-anchor="middle" font-size="24" font-weight="750" fill="#e9eef6">EVIDENCE</text>
-    <text x="587" y="459" text-anchor="middle" font-size="16" fill="#c3ccd9">exact observations</text>
-    <text x="587" y="484" text-anchor="middle" font-size="14" fill="#97a3b6">bound to roots</text>
+      <circle cx="733" cy="177" r="11" fill="#090c11" stroke="#3ddc97" stroke-width="4"/>
+      <text x="733" y="135" text-anchor="middle" font-size="14" letter-spacing="1.2" fill="#86edbd">06</text>
+      <text x="733" y="160" text-anchor="middle" font-size="20" fill="#e9eef6">EVIDENCE</text>
+    </g>
 
-    <rect x="260" y="356" width="194" height="152" rx="18" fill="#171d2a" stroke="#5ea8ff" stroke-width="3"/>
-    <text x="284" y="387" font-size="14" font-weight="800" fill="#5ea8ff">07</text>
-    <text x="357" y="426" text-anchor="middle" font-size="22" font-weight="750" fill="#e9eef6">EXPERIENCE</text>
-    <text x="357" y="459" text-anchor="middle" font-size="16" fill="#b9d9ff">the real consequence</text>
-    <text x="357" y="484" text-anchor="middle" font-size="14" fill="#97a3b6">the user can see</text>
+    <circle cx="774" cy="293" r="84" fill="url(#compiler-aperture)" stroke="#5ea8ff" stroke-width="3"/>
+    <circle cx="774" cy="293" r="62" fill="none" stroke="#5ea8ff" stroke-width="1.5" opacity="0.65"/>
+    <circle cx="774" cy="293" r="31" fill="#090c11" stroke="#b9d9ff" stroke-width="2"/>
+    <circle cx="774" cy="293" r="10" fill="#e9eef6"/>
+    <text x="774" y="411" text-anchor="middle" font-size="14" font-weight="780" letter-spacing="1.2" fill="#5ea8ff">07 · EXPERIENCE</text>
+    <text x="774" y="435" text-anchor="middle" font-size="13" fill="#97a3b6">the real consequence</text>
 
-    <path d="M357 508 V570 H127 V304" fill="none" stroke="#5ea8ff" stroke-width="3" marker-end="url(#compiler-arrow)"/>
-    <rect x="180" y="548" width="220" height="44" rx="22" fill="#171d2a" stroke="#5ea8ff"/>
-    <text x="290" y="576" text-anchor="middle" font-size="15" font-weight="750" fill="#b9d9ff">EXPERIENCE FEEDS THE NEXT STORY</text>
-
-    <text x="480" y="637" text-anchor="middle" font-size="17" fill="#97a3b6">Present primitives are becoming one inspectable, evidence-bound journey.</text>
+    <path d="M730 420C661 465 623 568 492 570C337 573 278 469 228 394C184 327 109 307 102 221" fill="none" stroke="#5ea8ff" stroke-width="2" stroke-dasharray="5 8" marker-end="url(#compiler-arrow)"/>
+    <text x="239" y="597" font-size="14" font-weight="740" letter-spacing="1.1" fill="#b9d9ff">EXPERIENCE FEEDS THE NEXT STORY</text>
+    <text x="906" y="617" text-anchor="end" font-size="15" fill="#97a3b6">stories → ontology → predicates → focus → heuristics → evidence → experience</text>
   </g>
 </svg>
