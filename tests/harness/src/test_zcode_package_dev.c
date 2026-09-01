@@ -53,6 +53,7 @@ bool zpd_real_focus_handoff_acceptance(
     const uint8_t source_receipt_root[32],
     const uint8_t preedit_focus_root[32], int64_t preedit_observed_us,
     int64_t edit_started_us);
+int zpd_focus_worker_role(const char *role);
 
 static bool zpd_symlink_create(const char *target, const char *link,
                                bool directory)
@@ -4080,6 +4081,9 @@ static int zpd_test_commons_join_front_doors(void)
 
 int test_zcode_package_dev(void)
 {
+    const char *fork_role = getenv("ZCL_TEST_FORK_ROLE");
+    if (fork_role && fork_role[0])
+        return zpd_focus_worker_role(fork_role);
     secp256k1_context *ctx = secp256k1_context_create(
         SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     uint8_t secret[32] = {0}; secret[31] = 1;

@@ -6,6 +6,8 @@
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
+#include "platform/environment_compat.h"
+#include "platform/os_proc.h"
 #include "platform/time_compat.h"
 #include "vcs/package_recipe.h"
 #include "vcs/vcs.h"
@@ -22,7 +24,9 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 struct zpf_metrics {
@@ -31,6 +35,13 @@ struct zpf_metrics {
     uint32_t retries;
     uint32_t conflicts;
 };
+
+#define ZPF_ENV_WORKSPACE "ZCL_TEST_FOCUS_WORKSPACE"
+#define ZPF_ENV_FOCUS_ROOT "ZCL_TEST_FOCUS_ROOT"
+#define ZPF_ENV_HANDOFF_ROOT "ZCL_TEST_FOCUS_HANDOFF_ROOT"
+#define ZPF_ENV_ADMISSION_A_ROOT "ZCL_TEST_FOCUS_ADMISSION_A_ROOT"
+#define ZPF_ENV_ADMISSION_B_ROOT "ZCL_TEST_FOCUS_ADMISSION_B_ROOT"
+#define ZPF_ENV_RESUME_UNIX "ZCL_TEST_FOCUS_RESUME_UNIX"
 
 static bool zpf_json_root(const struct json_value *object, const char *key,
                           uint8_t out[32])
@@ -611,9 +622,108 @@ static bool zpf_wait_child(pid_t pid, int *status)
     } while (waited < 0 && errno == EINTR);
     return waited == pid;
 }
+
+static bool zpf_silence_exec_output(void)
+{
+    int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd < 0)
+        return false;
+    bool ok =
+        (null_fd == STDOUT_FILENO || dup2(null_fd, STDOUT_FILENO) >= 0) &&
+        (null_fd == STDERR_FILENO || dup2(null_fd, STDERR_FILENO) >= 0);
+    if (null_fd != STDOUT_FILENO && null_fd != STDERR_FILENO &&
+        close(null_fd) != 0)
+        ok = false;
+    return ok;
+}
+
+static pid_t zpf_spawn_exec_agent(
+    const char *role, const char *workspace,
+    const uint8_t focus_root[32], const uint8_t *handoff_root,
+    const uint8_t *admission_a_root, const uint8_t *admission_b_root,
+    int64_t resume_unix)
+{
+    if (!role || !workspace || !focus_root)
+        return -1;
+    char executable[4096];
+    if (!os_proc_exe_path(executable, sizeof(executable)))
+        return -1;
+    char focus_hex[65], handoff_hex[65] = "";
+    char admission_a_hex[65] = "", admission_b_hex[65] = "";
+    char resume_text[32];
+    zcl_hex_encode(focus_root, 32, focus_hex);
+    if (handoff_root) zcl_hex_encode(handoff_root, 32, handoff_hex);
+    if (admission_a_root)
+        zcl_hex_encode(admission_a_root, 32, admission_a_hex);
+    if (admission_b_root)
+        zcl_hex_encode(admission_b_root, 32, admission_b_hex);
+    int n = snprintf(resume_text, sizeof(resume_text), "%" PRId64,
+                     resume_unix);
+    if (n < 0 || (size_t)n >= sizeof(resume_text))
+        return -1;
+
+    pid_t child = fork();
+    if (child != 0)
+        return child;
+    bool env_ok =
+        platform_environment_set("ZCL_TEST_FORK_GROUP",
+                                 "test_zcode_package_dev", 1) == 0 &&
+        platform_environment_set("ZCL_TEST_FORK_ROLE", role, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_WORKSPACE, workspace, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_FOCUS_ROOT, focus_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_HANDOFF_ROOT, handoff_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_ADMISSION_A_ROOT,
+                                 admission_a_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_ADMISSION_B_ROOT,
+                                 admission_b_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_RESUME_UNIX, resume_text, 1) == 0;
+    if (env_ok && zpf_silence_exec_output())
+        execl(executable, executable,
+              "--exact=test_zcode_package_dev", (char *)NULL);
+    _exit(127);
+}
 #endif
 
-static size_t zpf_independent_process_acceptance(
+int zpd_focus_worker_role(const char *role)
+{
+#if defined(_WIN32)
+    (void)role;
+    return 1;
+#else
+    const char *workspace = getenv(ZPF_ENV_WORKSPACE);
+    const char *focus_text = getenv(ZPF_ENV_FOCUS_ROOT);
+    bool successor = role && strcmp(role, "shared-focus-successor") == 0;
+    bool source = role && strcmp(role, "shared-focus-source") == 0;
+    uint8_t focus_root[32], handoff_root[32];
+    uint8_t admission_a_root[32], admission_b_root[32];
+    if ((!source && !successor) || !workspace || !workspace[0] ||
+        !focus_text || !zcl_hex_decode_lower(focus_text, focus_root, 32))
+        return 1;
+    if (source)
+        return zpf_process_reload_focus(
+            workspace, focus_root, NULL, NULL, NULL, 0) ? 0 : 1;
+
+    const char *handoff_text = getenv(ZPF_ENV_HANDOFF_ROOT);
+    const char *admission_a_text = getenv(ZPF_ENV_ADMISSION_A_ROOT);
+    const char *admission_b_text = getenv(ZPF_ENV_ADMISSION_B_ROOT);
+    const char *resume_text = getenv(ZPF_ENV_RESUME_UNIX);
+    char *end = NULL;
+    errno = 0;
+    int64_t resume_unix = resume_text ? strtoll(resume_text, &end, 10) : 0;
+    if (!handoff_text || !admission_a_text || !admission_b_text ||
+        !resume_text || errno != 0 || !end || *end != '\0' ||
+        resume_unix <= 0 ||
+        !zcl_hex_decode_lower(handoff_text, handoff_root, 32) ||
+        !zcl_hex_decode_lower(admission_a_text, admission_a_root, 32) ||
+        !zcl_hex_decode_lower(admission_b_text, admission_b_root, 32))
+        return 1;
+    return zpf_process_reload_focus(
+        workspace, focus_root, handoff_root, admission_a_root,
+        admission_b_root, resume_unix) ? 0 : 1;
+#endif
+}
+
+static size_t zpf_exec_clean_agent_acceptance(
     const char *worker_a, const char *worker_b,
     const uint8_t focus_root[32], const uint8_t handoff_root[32],
     const uint8_t admission_a_root[32],
@@ -632,22 +742,13 @@ static size_t zpf_independent_process_acceptance(
     if (!worker_a || !worker_b || !focus_root || !handoff_root ||
         !admission_a_root || !admission_b_root || resume_unix <= 0)
         return 0;
-    fflush(stdout);
-    fflush(stderr);
-    pid_t worker_a_pid = fork();
-    if (worker_a_pid == 0) {
-        bool ok = zpf_process_reload_focus(
-            worker_a, focus_root, NULL, NULL, NULL, 0);
-        _exit(ok ? 0 : 1);
-    }
+    pid_t worker_a_pid = zpf_spawn_exec_agent(
+        "shared-focus-source", worker_a, focus_root,
+        NULL, NULL, NULL, 0);
     if (worker_a_pid < 0) return 0;
-    pid_t worker_b_pid = fork();
-    if (worker_b_pid == 0) {
-        bool ok = zpf_process_reload_focus(
-            worker_b, focus_root, handoff_root, admission_a_root,
-            admission_b_root, resume_unix);
-        _exit(ok ? 0 : 1);
-    }
+    pid_t worker_b_pid = zpf_spawn_exec_agent(
+        "shared-focus-successor", worker_b, focus_root,
+        handoff_root, admission_a_root, admission_b_root, resume_unix);
     int worker_a_status = -1, worker_b_status = -1;
     if (worker_b_pid < 0) {
         (void)zpf_wait_child(worker_a_pid, &worker_a_status);
@@ -1309,7 +1410,7 @@ bool zpd_real_focus_handoff_acceptance(
                                   handoff_root, &metrics));
     ZPF_REQUIRE(zpf_transfer(worker_a, worker_b, handoff_root,
                              VCS_ZCODE_FOCUS_HANDOFF_WIRE_BYTES, &metrics));
-    size_t independent_processes = zpf_independent_process_acceptance(
+    size_t independent_processes = zpf_exec_clean_agent_acceptance(
         worker_a, worker_b, focus_a_root, handoff_root,
         admission_a_carrier, admission_b_carrier, resume_unix);
 #if defined(_WIN32)
@@ -1391,6 +1492,7 @@ bool zpd_real_focus_handoff_acceptance(
            "\"status\":\"passed\",\"work_id\":\"%s\","
            "\"topology\":\"%s\","
            "\"independent_processes\":\"%s\","
+           "\"exec_clean_agent_programs\":\"%s\","
            "\"binding_validation\":\"PROVED\","
            "\"real_receipt_reuse\":\"PROVED\","
            "\"preedit_observation\":\"PROVED\","
@@ -1415,8 +1517,9 @@ bool zpd_real_focus_handoff_acceptance(
            "\"focus_root\":\"%s\",\"handoff_root\":\"%s\","
            "\"work_receipt_root\":\"%s\"}\n",
            work_id, independent_processes == 2
-               ? "two_processes_two_independent_cas"
+               ? "two_exec_clean_agent_programs_two_independent_cas"
                : "in_process_two_independent_cas",
+           independent_processes == 2 ? "PROVED" : "INCOMPLETE",
            independent_processes == 2 ? "PROVED" : "INCOMPLETE",
            metrics.conflicts, metrics.retries, duplicate_actions,
            context_wire_bytes, fixture_cas_tool_calls,
