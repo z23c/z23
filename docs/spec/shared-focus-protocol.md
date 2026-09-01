@@ -84,6 +84,26 @@ claims add a bounded disjoint-scope observation for workers already examining
 the same situation; they do not replace task collision checks, action
 deduplication, leases, signed receipts, or local acceptance.
 
+## Existing work authority
+
+Focus composes the existing signed work objects instead of defining another
+assignment or evidence ledger. For a claim about admitted work,
+`intent_root` is the exact signed `work_request.v1` identity and
+`evidence_plan_root` is that request's proof-policy root. A `PROVED` active-work
+relation requires the claim root to occur in the focus's complete canonical
+claim set, a current `GRANTED` or `ATTACHED` admission signed by the claimant,
+and task, policy, toolchain, budget, and deadline agreement. Missing set
+evidence is `INCOMPLETE`; an absent claim, expired admission, refusal, or
+contradictory binding is `DISPROVED`.
+
+For a completed observation, a specialist report's `evidence_root` is the
+exact signed `work_receipt.v1` identity and its `result_root` is the receipt's
+output root. Cross-object validation requires the supplied claim to belong to
+the focus's committed claim set and binds the receipt's task, candidate,
+action, input, work kind, policy, toolchain, signer, and output back to the
+request, claim, and report. Receipt status maps to ontology status; it does
+not grant acceptance, installation, execution, or deployment authority.
+
 ## Required pre-edit observation
 
 Before a write, a worker must have reverified:

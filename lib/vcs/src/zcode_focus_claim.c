@@ -234,3 +234,74 @@ enum zcl_ontology_status vcs_zcode_focus_claim_set_status(
                 return ZCL_ONTOLOGY_DISPROVED;
     return ZCL_ONTOLOGY_PROVED;
 }
+
+enum zcl_ontology_status vcs_zcode_focus_claim_membership_status(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const uint8_t (*claim_roots)[32], size_t claim_count)
+{
+    if (vcs_zcode_focus_validate(focus) != VCS_ZCODE_FOCUS_OK ||
+        !claim || claim_count != focus->claim_count ||
+        claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
+        (claim_count > 0 && !claim_roots))
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    uint8_t claim_root[32], set_root[32];
+    if (vcs_zcode_focus_claim_root(claim, claim_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_claim_set_root(claim_roots, claim_count, set_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        memcmp(set_root, focus->claim_set_root, 32) != 0)
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    for (size_t i = 0; i < claim_count; i++)
+        if (memcmp(claim_root, claim_roots[i], 32) == 0)
+            return ZCL_ONTOLOGY_PROVED;
+    return ZCL_ONTOLOGY_DISPROVED;
+}
+
+enum zcl_ontology_status vcs_zcode_focus_claim_work_status(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_write_scope_v1 *claim_scope,
+    const uint8_t (*claim_roots)[32], size_t claim_count,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_admission_v1 *admission,
+    int64_t now_unix)
+{
+    enum zcl_ontology_status authority =
+        vcs_zcode_focus_claim_authority_status(
+            focus, task, task_scope, claim, claim_scope, now_unix);
+    if (authority != ZCL_ONTOLOGY_PROVED) return authority;
+    enum zcl_ontology_status membership =
+        vcs_zcode_focus_claim_membership_status(
+            focus, claim, claim_roots, claim_count);
+    if (membership != ZCL_ONTOLOGY_PROVED) return membership;
+    if (!request || !admission ||
+        !vcs_zcode_work_request_verify(request) ||
+        !vcs_zcode_work_admission_verify_for_request(
+            request, admission, claim->claimant_root))
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    if (admission->disposition != VCS_ZCODE_WORK_ADMISSION_GRANTED &&
+        admission->disposition != VCS_ZCODE_WORK_ADMISSION_ATTACHED)
+        return ZCL_ONTOLOGY_DISPROVED;
+    uint8_t request_root[32];
+    if (!vcs_zcode_work_request_id(request, request_root))
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    bool bound = memcmp(request_root, claim->intent_root, 32) == 0 &&
+        memcmp(request->task_root, focus->task_root, 32) == 0 &&
+        memcmp(request->proof_policy_root,
+               claim->evidence_plan_root, 32) == 0 &&
+        memcmp(request->proof_policy_root, task->proof_policy_root, 32) == 0 &&
+        memcmp(request->toolchain_capsule_root,
+               task->toolchain_capsule_root, 32) == 0 &&
+        request->max_cpu_seconds <= task->max_cpu_seconds &&
+        request->max_memory_bytes <= task->max_memory_bytes &&
+        request->max_output_bytes <= task->max_output_bytes &&
+        request->deadline_unix <= task->expires_unix &&
+        claim->expires_unix <= request->deadline_unix &&
+        now_unix < admission->deadline_unix &&
+        claim->expires_unix <= admission->deadline_unix &&
+        admission->deadline_unix <= request->deadline_unix;
+    return bound ? ZCL_ONTOLOGY_PROVED : ZCL_ONTOLOGY_DISPROVED;
+}

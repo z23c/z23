@@ -140,3 +140,69 @@ enum vcs_zcode_focus_error vcs_zcode_specialist_report_root(
     sha3_256_finalize(&sha, out);
     return VCS_ZCODE_FOCUS_OK;
 }
+
+enum vcs_zcode_focus_error vcs_zcode_specialist_report_validate_for_work(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const uint8_t (*claim_roots)[32], size_t claim_count,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct vcs_zcode_specialist_report_v1 *report)
+{
+    if (!focus || !claim || !task || !request || !receipt || !report)
+        return VCS_ZCODE_FOCUS_NULL;
+    if (vcs_zcode_focus_validate(focus) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_specialist_report_validate(report) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_task_validate(task) != VCS_ZCODE_DEV_OK ||
+        !vcs_zcode_work_request_verify(request) ||
+        vcs_zcode_work_receipt_verify(
+            receipt, receipt->signer_pubkey) != VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_FOCUS_SHAPE;
+    if (vcs_zcode_focus_claim_membership_status(
+            focus, claim, claim_roots, claim_count) !=
+            ZCL_ONTOLOGY_PROVED)
+        return VCS_ZCODE_FOCUS_BINDING;
+    uint8_t focus_root[32], situation_root[32], claim_root[32];
+    uint8_t task_root[32], request_root[32], receipt_root[32];
+    if (vcs_zcode_focus_root(focus, focus_root) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_situation_root(focus, situation_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_claim_root(claim, claim_root) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
+        !vcs_zcode_work_request_id(request, request_root) ||
+        vcs_zcode_work_receipt_id(receipt, receipt_root) !=
+            VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_FOCUS_SHAPE;
+    uint8_t expected_status = receipt->status == VCS_ZCODE_WORK_PASS
+        ? ZCL_ONTOLOGY_PROVED
+        : receipt->status == VCS_ZCODE_WORK_FAIL
+        ? ZCL_ONTOLOGY_DISPROVED : ZCL_ONTOLOGY_INCOMPLETE;
+    bool bound = report->status == expected_status &&
+        memcmp(focus->task_root, task_root, 32) == 0 &&
+        memcmp(claim->situation_root, situation_root, 32) == 0 &&
+        memcmp(claim->intent_root, request_root, 32) == 0 &&
+        memcmp(claim->evidence_plan_root,
+               request->proof_policy_root, 32) == 0 &&
+        memcmp(request->task_root, task_root, 32) == 0 &&
+        memcmp(request->proof_policy_root, task->proof_policy_root, 32) == 0 &&
+        memcmp(request->toolchain_capsule_root,
+               task->toolchain_capsule_root, 32) == 0 &&
+        memcmp(receipt->task_root, request->task_root, 32) == 0 &&
+        memcmp(receipt->candidate_root, request->candidate_root, 32) == 0 &&
+        memcmp(receipt->action_root, request->action_root, 32) == 0 &&
+        memcmp(receipt->input_root, request->input_root, 32) == 0 &&
+        receipt->work_kind == request->work_kind &&
+        memcmp(receipt->proof_policy_root,
+               request->proof_policy_root, 32) == 0 &&
+        memcmp(receipt->toolchain_capsule_root,
+               request->toolchain_capsule_root, 32) == 0 &&
+        memcmp(receipt->signer_pubkey, claim->claimant_root, 32) == 0 &&
+        memcmp(report->focus_root, focus_root, 32) == 0 &&
+        memcmp(report->claim_root, claim_root, 32) == 0 &&
+        memcmp(report->specialist_root, receipt->signer_pubkey, 32) == 0 &&
+        memcmp(report->evidence_root, receipt_root, 32) == 0 &&
+        memcmp(report->result_root, receipt->output_root, 32) == 0;
+    return bound ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_BINDING;
+}

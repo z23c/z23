@@ -5,6 +5,7 @@
 
 #include "ontology/ontology.h"
 #include "vcs/zcode_dev.h"
+#include "vcs/zcode_work_swarm.h"
 #include "vcs/zcode_write_scope.h"
 
 #include <stdbool.h>
@@ -182,6 +183,20 @@ enum zcl_ontology_status vcs_zcode_focus_claim_set_status(
     const struct vcs_zcode_focus_claim_v1 *claims,
     const struct vcs_zcode_write_scope_v1 *scopes,
     size_t claim_count, int64_t now_unix);
+enum zcl_ontology_status vcs_zcode_focus_claim_membership_status(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const uint8_t (*claim_roots)[32], size_t claim_count);
+enum zcl_ontology_status vcs_zcode_focus_claim_work_status(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const struct vcs_zcode_write_scope_v1 *claim_scope,
+    const uint8_t (*claim_roots)[32], size_t claim_count,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_admission_v1 *admission,
+    int64_t now_unix);
 
 enum vcs_zcode_focus_error vcs_zcode_specialist_report_validate(
     const struct vcs_zcode_specialist_report_v1 *report);
@@ -193,6 +208,14 @@ enum vcs_zcode_focus_error vcs_zcode_specialist_report_parse(
     struct vcs_zcode_specialist_report_v1 *out);
 enum vcs_zcode_focus_error vcs_zcode_specialist_report_root(
     const struct vcs_zcode_specialist_report_v1 *report, uint8_t out[32]);
+enum vcs_zcode_focus_error vcs_zcode_specialist_report_validate_for_work(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_focus_claim_v1 *claim,
+    const uint8_t (*claim_roots)[32], size_t claim_count,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct vcs_zcode_specialist_report_v1 *report);
 
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate(
     const struct vcs_zcode_focus_handoff_v1 *handoff);

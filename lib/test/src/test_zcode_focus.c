@@ -2,6 +2,7 @@
  * Purpose: Prove rooted shared focus, disjoint claims, reports, and handoff. */
 #include "test/test_core.h"
 
+#include "crypto/ed25519.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_focus.h"
 
@@ -397,11 +398,207 @@ static int zf_status_and_refusals(void)
     return failures;
 }
 
+static int zf_existing_work_evidence(void)
+{
+    int failures = 0;
+    TEST("zcode focus: claims and reports bind existing signed work evidence") {
+        struct vcs_zcode_write_scope_v1 task_scope, claim_scope;
+        vcs_zcode_write_scope_init(&task_scope);
+        vcs_zcode_write_scope_init(&claim_scope);
+        ASSERT_EQ(vcs_zcode_write_scope_add(&task_scope, "lib/vcs"),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT_EQ(vcs_zcode_write_scope_add(
+                      &claim_scope, "lib/vcs/src/zcode_focus_claim.c"),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        uint8_t task_scope_root[32], claim_scope_root[32];
+        ASSERT_EQ(vcs_zcode_write_scope_root(
+                      &task_scope, task_scope_root),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT_EQ(vcs_zcode_write_scope_root(
+                      &claim_scope, claim_scope_root),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        struct vcs_zcode_task_v1 task;
+        zf_task(&task, task_scope_root);
+        uint8_t task_root[32], context_root[32], story_root[32];
+        ASSERT_EQ(vcs_zcode_task_root(&task, task_root), VCS_ZCODE_DEV_OK);
+        zf_root(context_root, 90); zf_root(story_root, 91);
+        struct vcs_zcode_focus_v1 basis;
+        ASSERT_EQ(vcs_zcode_focus_compose(
+                      &task, task_root, context_root, story_root,
+                      ZCL_ONTOLOGY_UNKNOWN, 0, NULL, 0, &basis),
+                  VCS_ZCODE_FOCUS_OK);
+        uint8_t situation_root[32];
+        ASSERT_EQ(vcs_zcode_focus_situation_root(
+                      &basis, situation_root), VCS_ZCODE_FOCUS_OK);
+
+        uint8_t requester_seed[32], requester_secret[32], requester_key[32];
+        uint8_t worker_seed[32], worker_secret[32], worker_key[32];
+        zf_root(requester_seed, 92); zf_root(worker_seed, 93);
+        ed25519_keypair(requester_key, requester_secret, requester_seed);
+        ed25519_keypair(worker_key, worker_secret, worker_seed);
+        struct vcs_zcode_work_request_v1 request;
+        memset(&request, 0, sizeof(request));
+        request.request_id = 77;
+        memcpy(request.task_root, task_root, 32);
+        zf_root(request.candidate_root, 94);
+        zf_root(request.action_root, 95);
+        zf_root(request.input_root, 96);
+        zf_root(request.context_root, 97);
+        memcpy(request.proof_policy_root, task.proof_policy_root, 32);
+        memcpy(request.toolchain_capsule_root,
+               task.toolchain_capsule_root, 32);
+        request.work_kind = VCS_ZCODE_WORK_BUILD;
+        request.target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3;
+        request.max_cpu_seconds = 30;
+        request.max_memory_bytes = UINT64_C(128) * 1024u * 1024u;
+        request.max_output_bytes = UINT64_C(4) * 1024u * 1024u;
+        request.deadline_unix = 1800;
+        ASSERT(vcs_zcode_work_request_seal(
+            &request, requester_secret, requester_key));
+        uint8_t request_root[32];
+        ASSERT(vcs_zcode_work_request_id(&request, request_root));
+
+        struct vcs_zcode_work_admission_v1 admission;
+        memset(&admission, 0, sizeof(admission));
+        admission.request_id = request.request_id;
+        memcpy(admission.requester_pubkey, request.requester_pubkey, 32);
+        memcpy(admission.action_root, request.action_root, 32);
+        admission.lease_generation = 1;
+        admission.deadline_unix = request.deadline_unix;
+        admission.slot = 0;
+        admission.disposition = VCS_ZCODE_WORK_ADMISSION_GRANTED;
+        ASSERT(vcs_zcode_work_admission_seal(
+            &admission, worker_secret, worker_key));
+
+        struct vcs_zcode_focus_claim_v1 claim;
+        memset(&claim, 0, sizeof(claim));
+        claim.schema_version = VCS_ZCODE_FOCUS_VERSION;
+        claim.created_unix = 1000;
+        claim.expires_unix = 1700;
+        memcpy(claim.situation_root, situation_root, 32);
+        memcpy(claim.claimant_root, worker_key, 32);
+        memcpy(claim.write_scope_root, claim_scope_root, 32);
+        memcpy(claim.intent_root, request_root, 32);
+        memcpy(claim.evidence_plan_root, request.proof_policy_root, 32);
+        uint8_t claim_root[32];
+        ASSERT_EQ(vcs_zcode_focus_claim_root(&claim, claim_root),
+                  VCS_ZCODE_FOCUS_OK);
+        struct vcs_zcode_focus_v1 focus;
+        ASSERT_EQ(vcs_zcode_focus_compose(
+                      &task, task_root, context_root, story_root,
+                      ZCL_ONTOLOGY_UNKNOWN, 0,
+                      (const uint8_t (*)[32])&claim_root, 1, &focus),
+                  VCS_ZCODE_FOCUS_OK);
+        const uint8_t (*claim_roots)[32] =
+            (const uint8_t (*)[32])&claim_root;
+        ASSERT_EQ(vcs_zcode_focus_claim_work_status(
+                      &focus, &task, &task_scope, &claim, &claim_scope,
+                      claim_roots, 1, &request, &admission, 1500),
+                  ZCL_ONTOLOGY_PROVED);
+
+        struct vcs_zcode_work_admission_v1 expired = admission;
+        expired.deadline_unix = 1500;
+        ASSERT(vcs_zcode_work_admission_seal(
+            &expired, worker_secret, worker_key));
+        ASSERT_EQ(vcs_zcode_focus_claim_work_status(
+                      &focus, &task, &task_scope, &claim, &claim_scope,
+                      claim_roots, 1, &request, &expired, 1500),
+                  ZCL_ONTOLOGY_DISPROVED);
+
+        struct vcs_zcode_focus_claim_v1 absent_claim = claim;
+        absent_claim.expires_unix = 1600;
+        ASSERT_EQ(vcs_zcode_focus_claim_work_status(
+                      &focus, &task, &task_scope, &absent_claim, &claim_scope,
+                      claim_roots, 1, &request, &admission, 1500),
+                  ZCL_ONTOLOGY_DISPROVED);
+
+        struct vcs_zcode_work_admission_v1 busy = admission;
+        busy.lease_generation = 0;
+        busy.deadline_unix = 0;
+        busy.slot = UINT16_MAX;
+        busy.disposition = VCS_ZCODE_WORK_ADMISSION_BUSY;
+        busy.reason = VCS_ZCODE_WORK_ADMISSION_REASON_NO_SLOT;
+        ASSERT(vcs_zcode_work_admission_seal(
+            &busy, worker_secret, worker_key));
+        ASSERT(vcs_zcode_work_admission_verify_for_request(
+            &request, &busy, worker_key));
+        ASSERT_EQ(vcs_zcode_focus_claim_work_status(
+                      &focus, &task, &task_scope, &claim, &claim_scope,
+                      claim_roots, 1, &request, &busy, 1500),
+                  ZCL_ONTOLOGY_DISPROVED);
+
+        struct vcs_zcode_work_receipt_v1 receipt;
+        memset(&receipt, 0, sizeof(receipt));
+        receipt.schema_version = VCS_ZCODE_DEV_VERSION;
+        memcpy(receipt.task_root, request.task_root, 32);
+        memcpy(receipt.candidate_root, request.candidate_root, 32);
+        memcpy(receipt.action_root, request.action_root, 32);
+        memcpy(receipt.input_root, request.input_root, 32);
+        zf_root(receipt.output_root, 98);
+        memcpy(receipt.proof_policy_root, request.proof_policy_root, 32);
+        memcpy(receipt.toolchain_capsule_root,
+               request.toolchain_capsule_root, 32);
+        zf_root(receipt.lease_id, 99); zf_root(receipt.evidence_root, 100);
+        zf_root(receipt.confinement_root, 101);
+        receipt.work_kind = request.work_kind;
+        receipt.status = VCS_ZCODE_WORK_PASS;
+        receipt.started_unix = 1200;
+        receipt.finished_unix = 1300;
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(
+                      &receipt, worker_secret, worker_key),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t receipt_root[32], focus_root[32];
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&receipt, receipt_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_focus_root(&focus, focus_root),
+                  VCS_ZCODE_FOCUS_OK);
+        struct vcs_zcode_specialist_report_v1 report;
+        zf_report(&report, focus_root, claim_root, 93,
+                  VCS_ZCODE_SPECIALIST_PROOF, 102);
+        memcpy(report.specialist_root, worker_key, 32);
+        memcpy(report.evidence_root, receipt_root, 32);
+        memcpy(report.result_root, receipt.output_root, 32);
+        ASSERT_EQ(vcs_zcode_specialist_report_validate_for_work(
+                      &focus, &claim, claim_roots, 1,
+                      &task, &request, &receipt, &report),
+                  VCS_ZCODE_FOCUS_OK);
+        uint8_t absent_root[32];
+        ASSERT_EQ(vcs_zcode_focus_claim_root(&absent_claim, absent_root),
+                  VCS_ZCODE_FOCUS_OK);
+        struct vcs_zcode_specialist_report_v1 absent_report = report;
+        memcpy(absent_report.claim_root, absent_root, 32);
+        ASSERT_EQ(vcs_zcode_specialist_report_validate_for_work(
+                      &focus, &absent_claim, claim_roots, 1,
+                      &task, &request, &receipt, &absent_report),
+                  VCS_ZCODE_FOCUS_BINDING);
+        for (size_t variant = 0; variant < 3; variant++) {
+            struct vcs_zcode_work_receipt_v1 mismatch = receipt;
+            if (variant == 0) mismatch.candidate_root[0] ^= 1u;
+            else if (variant == 1) mismatch.input_root[0] ^= 1u;
+            else mismatch.work_kind = VCS_ZCODE_WORK_TEST;
+            ASSERT_EQ(vcs_zcode_work_receipt_seal(
+                          &mismatch, worker_secret, worker_key),
+                      VCS_ZCODE_DEV_OK);
+            struct vcs_zcode_specialist_report_v1 mismatch_report = report;
+            ASSERT_EQ(vcs_zcode_work_receipt_id(
+                          &mismatch, mismatch_report.evidence_root),
+                      VCS_ZCODE_DEV_OK);
+            ASSERT_EQ(vcs_zcode_specialist_report_validate_for_work(
+                          &focus, &claim, claim_roots, 1, &task, &request,
+                          &mismatch, &mismatch_report),
+                      VCS_ZCODE_FOCUS_BINDING);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_zcode_focus(void)
 {
     int failures = 0;
     failures += zf_protocol_roundtrip();
     failures += zf_status_and_refusals();
+    failures += zf_existing_work_evidence();
     printf("=== zcode_focus: %d failures ===\n", failures);
     return failures;
 }
