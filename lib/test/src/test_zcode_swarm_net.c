@@ -5022,6 +5022,26 @@ static void zwn_focus_task(struct vcs_zcode_task_v1 *task,
     task->expires_unix = 5000;
 }
 
+static void zwn_focus_context(
+    struct vcs_zcode_agent_context_v1 *context,
+    const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
+    uint8_t *content, size_t content_len)
+{
+    vcs_zcode_agent_context_init(context);
+    memcpy(context->task_root, task_root, 32);
+    memcpy(context->source_root, task->source_root, 32);
+    memcpy(context->goal_root, task->goal_root, 32);
+    zwn_focus_fill_root(context->source_tree_root, 0x89);
+    strcpy(context->query, "shared focus context over existing carrier");
+    context->file_count = 1;
+    strcpy(context->files[0].path, "lib/vcs/src/zcode_focus.c");
+    context->files[0].start_line = 1;
+    context->files[0].full_file_bytes = content_len;
+    context->files[0].content = content;
+    context->files[0].content_len = content_len;
+    sha3_256(content, content_len, context->files[0].content_root);
+}
+
 static bool zwn_focus_request(
     struct vcs_zcode_work_request_v1 *request,
     const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
@@ -5194,7 +5214,13 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
         zwn_focus_task(&task, task_scope_root);
         uint8_t task_root[32], context_root[32], story_root[32];
         ASSERT_EQ(vcs_zcode_task_root(&task, task_root), VCS_ZCODE_DEV_OK);
-        zwn_focus_fill_root(context_root, 0x89);
+        uint8_t context_content[] = "exact reusable C23 context\n";
+        struct vcs_zcode_agent_context_v1 context;
+        zwn_focus_context(&context, &task, task_root, context_content,
+                          sizeof(context_content) - 1u);
+        ASSERT_EQ(vcs_zcode_agent_context_root(
+                      &context, task.max_context_bytes, context_root),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
         zwn_focus_fill_root(story_root, 0x8a);
         struct vcs_zcode_focus_v1 basis;
         ASSERT_EQ(vcs_zcode_focus_compose(
@@ -5261,6 +5287,27 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
         ASSERT_EQ(vcs_zcode_task_root(&task_at_b, task_root_at_b),
                   VCS_ZCODE_DEV_OK);
         ASSERT(memcmp(task_root_at_b, task_root, 32) == 0);
+
+        uint8_t *context_wire = NULL;
+        size_t context_wire_len = 0;
+        ASSERT_EQ(vcs_zcode_agent_context_serialize(
+                      &context, task.max_context_bytes,
+                      &context_wire, &context_wire_len),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            context_wire, context_wire_len, received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_agent_context_v1 context_at_b;
+        vcs_zcode_agent_context_init(&context_at_b);
+        ASSERT_EQ(vcs_zcode_agent_context_parse(
+                      received, context_wire_len, task_at_b.max_context_bytes,
+                      &context_at_b),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
+        ASSERT_EQ(vcs_zcode_agent_context_validate_for_task(
+                      &context_at_b, &task_at_b, task_root_at_b,
+                      context_root, true),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
 
         struct vcs_zcode_write_scope_v1 task_scope_at_b;
         struct vcs_zcode_write_scope_v1 scope_a_at_b, scope_b_at_b;
@@ -5572,7 +5619,8 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
                   VCS_ZCODE_FOCUS_OK);
         ASSERT(memcmp(derived_root, handoff_root, 32) == 0);
         ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
-                      &focus_at_b, &task_at_b, &task_scope_at_b,
+                      &focus_at_b, &task_at_b, &context_at_b,
+                      &task_scope_at_b,
                       ordered_claims, ordered_scopes, 2,
                       from_index, next_index,
                       &request_a_at_b, &admission_a_at_b,
@@ -5580,7 +5628,8 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
                       &report_a_at_b, &handoff_at_b, 1500),
                   VCS_ZCODE_FOCUS_OK);
         ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
-                      &focus_at_b, &task_at_b, &task_scope_at_b,
+                      &focus_at_b, &task_at_b, &context_at_b,
+                      &task_scope_at_b,
                       ordered_claims, ordered_scopes, 2,
                       from_index, next_index,
                       &request_a_at_b, &admission_a_at_b,
@@ -5598,13 +5647,61 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
         ASSERT(vcs_zcode_work_admission_verify_for_request(
             &request_b, &refused_b, worker_b_key));
         ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
-                      &focus_at_b, &task_at_b, &task_scope_at_b,
+                      &focus_at_b, &task_at_b, &context_at_b,
+                      &task_scope_at_b,
                       ordered_claims, ordered_scopes, 2,
                       from_index, next_index,
                       &request_a_at_b, &admission_a_at_b,
                       &request_b, &refused_b, &receipt_a_at_b,
                       &report_a_at_b, &handoff_at_b, 1500),
                   VCS_ZCODE_FOCUS_BINDING);
+        struct vcs_zcode_agent_context_v1 incomplete_context = context_at_b;
+        incomplete_context.flags |= VCS_ZCODE_AGENT_CONTEXT_TRUNCATED;
+        ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
+                      &focus_at_b, &task_at_b, &incomplete_context,
+                      &task_scope_at_b, ordered_claims, ordered_scopes, 2,
+                      from_index, next_index,
+                      &request_a_at_b, &admission_a_at_b,
+                      &request_b, &admission_b, &receipt_a_at_b,
+                      &report_a_at_b, &handoff_at_b, 1500),
+                  VCS_ZCODE_FOCUS_BINDING);
+        uint8_t *incomplete_wire = NULL;
+        size_t incomplete_wire_len = 0;
+        uint8_t incomplete_root[32];
+        ASSERT_EQ(vcs_zcode_agent_context_root(
+                      &incomplete_context, task_at_b.max_context_bytes,
+                      incomplete_root),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
+        ASSERT_EQ(vcs_zcode_agent_context_serialize(
+                      &incomplete_context, task_at_b.max_context_bytes,
+                      &incomplete_wire, &incomplete_wire_len),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            incomplete_wire, incomplete_wire_len, received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_agent_context_v1 incomplete_at_b;
+        vcs_zcode_agent_context_init(&incomplete_at_b);
+        ASSERT_EQ(vcs_zcode_agent_context_parse(
+                      received, incomplete_wire_len,
+                      task_at_b.max_context_bytes, &incomplete_at_b),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
+        struct vcs_zcode_focus_v1 incomplete_focus;
+        ASSERT_EQ(vcs_zcode_focus_compose(
+                      &task_at_b, task_root_at_b, incomplete_root, story_root,
+                      ZCL_ONTOLOGY_PROVED,
+                      VCS_ZCODE_FOCUS_CONTEXT_TRUNCATED,
+                      received_claim_roots, received_claim_count,
+                      &incomplete_focus),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
+                      &incomplete_focus, &task_at_b, &incomplete_at_b,
+                      &task_scope_at_b, ordered_claims, ordered_scopes, 2,
+                      from_index, next_index,
+                      &request_a_at_b, &admission_a_at_b,
+                      &request_b, &admission_b, &receipt_a_at_b,
+                      &report_a_at_b, &handoff_at_b, 1500),
+                  VCS_ZCODE_FOCUS_INCOMPLETE);
 
         char focus_hex[65], handoff_hex[65], receipt_hex[65];
         zcl_hex_encode(focus_root_a, 32, focus_hex);
@@ -5614,16 +5711,24 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
                "\"status\":\"passed\","
                "\"topology\":\"in_process_two_node_engines\","
                "\"signer_identities\":2,\"claims\":2,"
-               "\"reports\":2,\"carrier_transfers\":17,"
+               "\"reports\":2,\"carrier_transfers\":19,"
                "\"signed_requests\":2,\"signed_admissions\":2,"
                "\"signed_receipts\":2,"
+               "\"context_wire_bytes\":%zu,\"warm_context_transfers\":0,"
+               "\"negative_context_transfers\":1,"
                "\"retries\":%u,\"expiry_refused\":true,"
+               "\"incomplete_context_refused\":true,"
                "\"scope_overlap\":\"DISPROVED\",\"prose_bytes\":0,"
                "\"focus_root\":\"%s\",\"handoff_root\":\"%s\","
                "\"work_receipt_root\":\"%s\"}\n",
-               retries, focus_hex, handoff_hex, receipt_hex);
+               context_wire_len + incomplete_wire_len, retries,
+               focus_hex, handoff_hex, receipt_hex);
         ASSERT(retries == 0);
 
+        free(context_wire);
+        free(incomplete_wire);
+        vcs_zcode_agent_context_free(&context_at_b);
+        vcs_zcode_agent_context_free(&incomplete_at_b);
         free(claim_set_wire);
         claim_set_wire = NULL;
         zwn_fixture_cleanup(&fixture);

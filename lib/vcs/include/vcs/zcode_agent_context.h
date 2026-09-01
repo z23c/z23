@@ -6,6 +6,7 @@
 
 #include "vcs/zcode_dev.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -26,6 +27,8 @@ enum vcs_zcode_agent_context_result {
     VCS_ZCODE_AGENT_CONTEXT_LIMIT,
     VCS_ZCODE_AGENT_CONTEXT_ROOT,
     VCS_ZCODE_AGENT_CONTEXT_ALLOC,
+    VCS_ZCODE_AGENT_CONTEXT_BINDING,
+    VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE,
 };
 
 struct vcs_zcode_agent_context_entry_v1 {
@@ -64,5 +67,12 @@ enum vcs_zcode_agent_context_result vcs_zcode_agent_context_parse(
 enum vcs_zcode_agent_context_result vcs_zcode_agent_context_root(
     const struct vcs_zcode_agent_context_v1 *context, size_t maximum_bytes,
     uint8_t out[32]);
+/* Receiver-side semantic admission. Structural validity or a matching CAS
+ * address alone does not authorize use under a different task. */
+enum vcs_zcode_agent_context_result vcs_zcode_agent_context_validate_for_task(
+    const struct vcs_zcode_agent_context_v1 *context,
+    const struct vcs_zcode_task_v1 *task,
+    const uint8_t expected_task_root[32],
+    const uint8_t expected_context_root[32], bool require_complete);
 
 #endif /* ZCL_VCS_ZCODE_AGENT_CONTEXT_H */

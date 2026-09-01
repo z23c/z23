@@ -238,10 +238,11 @@ enum story_context_status story_load_agent_context(
     if (loaded->agent_context_ambiguous) return STORY_CONTEXT_AMBIGUOUS;
     if (!loaded->agent_context_root[0]) return STORY_CONTEXT_UNKNOWN;
     struct vcs_zcode_task_v1 task;
-    uint8_t root[32], check[32], *wire = NULL;
+    uint8_t root[32], task_root[32], *wire = NULL;
     size_t len = 0;
     bool ok = story_load_task(workspace, loaded, &task) &&
         zcl_hex_decode_lower(loaded->agent_context_root, root, 32) &&
+        zcl_hex_decode_lower(loaded->task_root, task_root, 32) &&
         vcs_object_load_raw_bounded(workspace, root,
                                     (size_t)task.max_context_bytes,
                                     &wire, &len) == 0 &&
@@ -249,21 +250,11 @@ enum story_context_status story_load_agent_context(
                                       (size_t)task.max_context_bytes,
                                       context) ==
             VCS_ZCODE_AGENT_CONTEXT_OK &&
-        vcs_zcode_agent_context_root(context,
-                                     (size_t)task.max_context_bytes, check) ==
-            VCS_ZCODE_AGENT_CONTEXT_OK &&
-        memcmp(root, check, 32) == 0;
+        vcs_zcode_agent_context_validate_for_task(
+            context, &task, task_root, root, false) ==
+            VCS_ZCODE_AGENT_CONTEXT_OK;
     free(wire);
     if (!ok) {
-        vcs_zcode_agent_context_free(context);
-        vcs_zcode_agent_context_init(context);
-        return STORY_CONTEXT_UNAVAILABLE;
-    }
-    uint8_t task_root[32];
-    if (!zcl_hex_decode_lower(loaded->task_root, task_root, 32) ||
-        memcmp(context->task_root, task_root, 32) != 0 ||
-        memcmp(context->source_root, task.source_root, 32) != 0 ||
-        memcmp(context->goal_root, task.goal_root, 32) != 0) {
         vcs_zcode_agent_context_free(context);
         vcs_zcode_agent_context_init(context);
         return STORY_CONTEXT_UNAVAILABLE;

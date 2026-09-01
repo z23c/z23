@@ -52,6 +52,7 @@ const char *vcs_zcode_focus_error_string(enum vcs_zcode_focus_error error)
     case VCS_ZCODE_FOCUS_ORDER: return "focus-order-invalid";
     case VCS_ZCODE_FOCUS_DUPLICATE: return "focus-duplicate-root";
     case VCS_ZCODE_FOCUS_BINDING: return "focus-binding-mismatch";
+    case VCS_ZCODE_FOCUS_INCOMPLETE: return "focus-context-incomplete";
     case VCS_ZCODE_FOCUS_EXPIRED: return "focus-claim-expired";
     case VCS_ZCODE_FOCUS_ALLOC: return "focus-allocation-failed";
     }
@@ -351,4 +352,43 @@ enum vcs_zcode_focus_error vcs_zcode_focus_compose(
     focus_derived_root("zcl.focus.authority_limits.v1", authority,
                        sizeof(authority), out->authority_limits_root);
     return error == VCS_ZCODE_FOCUS_OK ? vcs_zcode_focus_validate(out) : error;
+}
+
+enum vcs_zcode_focus_error vcs_zcode_focus_validate_for_context(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_agent_context_v1 *context,
+    const uint8_t (*claim_roots)[32], size_t claim_count,
+    bool require_complete)
+{
+    if (!focus || !task || !context)
+        return VCS_ZCODE_FOCUS_NULL;
+    uint8_t task_root[32], context_root[32];
+    if (vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_agent_context_root(
+            context, task->max_context_bytes, context_root) !=
+            VCS_ZCODE_AGENT_CONTEXT_OK)
+        return VCS_ZCODE_FOCUS_BINDING;
+    enum vcs_zcode_agent_context_result context_result =
+        vcs_zcode_agent_context_validate_for_task(
+            context, task, task_root, focus->context_root, require_complete);
+    if (context_result == VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE)
+        return VCS_ZCODE_FOCUS_INCOMPLETE;
+    if (context_result != VCS_ZCODE_AGENT_CONTEXT_OK ||
+        memcmp(context_root, focus->context_root, 32) != 0)
+        return VCS_ZCODE_FOCUS_BINDING;
+    uint8_t flags = (context->flags & VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0
+        ? VCS_ZCODE_FOCUS_CONTEXT_TRUNCATED : 0;
+    struct vcs_zcode_focus_v1 expected;
+    enum vcs_zcode_focus_error error = vcs_zcode_focus_compose(
+        task, task_root, context_root, focus->story_graph_root,
+        (enum zcl_ontology_status)focus->status, flags,
+        claim_roots, claim_count, &expected);
+    if (error != VCS_ZCODE_FOCUS_OK) return error;
+    uint8_t received_root[32], expected_root[32];
+    if (vcs_zcode_focus_root(focus, received_root) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_root(&expected, expected_root) != VCS_ZCODE_FOCUS_OK)
+        return VCS_ZCODE_FOCUS_SHAPE;
+    return memcmp(received_root, expected_root, 32) == 0
+        ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_BINDING;
 }

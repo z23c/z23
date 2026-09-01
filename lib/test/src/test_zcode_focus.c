@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 
 #include "crypto/ed25519.h"
+#include "crypto/sha3.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_focus.h"
 
@@ -60,6 +61,26 @@ static void zf_task(struct vcs_zcode_task_v1 *task,
     task->max_memory_bytes = UINT64_C(256) * 1024u * 1024u;
     task->max_output_bytes = UINT64_C(8) * 1024u * 1024u;
     task->expires_unix = 5000;
+}
+
+static void zf_context(struct vcs_zcode_agent_context_v1 *context,
+                       const struct vcs_zcode_task_v1 *task,
+                       const uint8_t task_root[32], uint8_t *content,
+                       size_t content_len)
+{
+    vcs_zcode_agent_context_init(context);
+    memcpy(context->task_root, task_root, 32);
+    memcpy(context->source_root, task->source_root, 32);
+    memcpy(context->goal_root, task->goal_root, 32);
+    zf_root(context->source_tree_root, 9);
+    strcpy(context->query, "shared focus receiver admission");
+    context->file_count = 1;
+    strcpy(context->files[0].path, "lib/vcs/src/zcode_focus.c");
+    context->files[0].start_line = 1;
+    context->files[0].full_file_bytes = content_len;
+    context->files[0].content = content;
+    context->files[0].content_len = content_len;
+    sha3_256(content, content_len, context->files[0].content_root);
 }
 
 static void zf_claim(struct vcs_zcode_focus_claim_v1 *claim,
@@ -129,7 +150,14 @@ static int zf_protocol_roundtrip(void)
         zf_task(&task, task_scope_root);
         uint8_t task_root[32], context_root[32], story_root[32];
         ASSERT_EQ(vcs_zcode_task_root(&task, task_root), VCS_ZCODE_DEV_OK);
-        zf_root(context_root, 10); zf_root(story_root, 11);
+        uint8_t context_content[] = "exact context bytes\n";
+        struct vcs_zcode_agent_context_v1 context;
+        zf_context(&context, &task, task_root, context_content,
+                   sizeof(context_content) - 1u);
+        ASSERT_EQ(vcs_zcode_agent_context_root(
+                      &context, task.max_context_bytes, context_root),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
+        zf_root(story_root, 11);
         struct vcs_zcode_focus_v1 basis;
         ASSERT_EQ(vcs_zcode_focus_compose(
                       &task, task_root, context_root, story_root,
@@ -166,6 +194,50 @@ static int zf_protocol_roundtrip(void)
                       &task, task_root, context_root, story_root,
                       ZCL_ONTOLOGY_PROVED, 0, claim_roots, 2, &focus),
                   VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_validate_for_context(
+                      &focus, &task, &context, claim_roots, 2, true),
+                  VCS_ZCODE_FOCUS_OK);
+        struct vcs_zcode_focus_v1 altered_focus = focus;
+        altered_focus.max_patch_bytes--;
+        ASSERT_EQ(vcs_zcode_focus_validate_for_context(
+                      &altered_focus, &task, &context, claim_roots, 2, true),
+                  VCS_ZCODE_FOCUS_BINDING);
+        struct vcs_zcode_agent_context_v1 wrong_context = context;
+        wrong_context.source_root[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_focus_validate_for_context(
+                      &focus, &task, &wrong_context, claim_roots, 2, true),
+                  VCS_ZCODE_FOCUS_BINDING);
+        struct vcs_zcode_agent_context_v1 incomplete_context = context;
+        incomplete_context.flags = VCS_ZCODE_AGENT_CONTEXT_TRUNCATED;
+        ASSERT_EQ(vcs_zcode_focus_validate_for_context(
+                      &focus, &task, &incomplete_context,
+                      claim_roots, 2, true),
+                  VCS_ZCODE_FOCUS_BINDING);
+        uint8_t incomplete_root[32];
+        ASSERT_EQ(vcs_zcode_agent_context_root(
+                      &incomplete_context, task.max_context_bytes,
+                      incomplete_root),
+                  VCS_ZCODE_AGENT_CONTEXT_OK);
+        struct vcs_zcode_focus_v1 incomplete_focus;
+        ASSERT_EQ(vcs_zcode_focus_compose(
+                      &task, task_root, incomplete_root, story_root,
+                      ZCL_ONTOLOGY_PROVED,
+                      VCS_ZCODE_FOCUS_CONTEXT_TRUNCATED,
+                      claim_roots, 2, &incomplete_focus),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_validate_for_context(
+                      &incomplete_focus, &task, &incomplete_context,
+                      claim_roots, 2, true),
+                  VCS_ZCODE_FOCUS_INCOMPLETE);
+        struct vcs_zcode_task_v1 other_task = task;
+        other_task.max_patch_bytes--;
+        uint8_t other_task_root[32];
+        ASSERT_EQ(vcs_zcode_task_root(&other_task, other_task_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_agent_context_validate_for_task(
+                      &context, &other_task, other_task_root,
+                      context_root, true),
+                  VCS_ZCODE_AGENT_CONTEXT_BINDING);
         ASSERT_EQ(vcs_zcode_focus_claim_set_status(
                       &focus, claims, scopes, 2, 1500),
                   ZCL_ONTOLOGY_PROVED);

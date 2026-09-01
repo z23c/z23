@@ -4,6 +4,7 @@
 #define ZCL_VCS_ZCODE_FOCUS_H
 
 #include "ontology/ontology.h"
+#include "vcs/zcode_agent_context.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_work_swarm.h"
 #include "vcs/zcode_write_scope.h"
@@ -42,6 +43,7 @@ enum vcs_zcode_focus_error {
     VCS_ZCODE_FOCUS_BINDING,
     VCS_ZCODE_FOCUS_EXPIRED,
     VCS_ZCODE_FOCUS_ALLOC,
+    VCS_ZCODE_FOCUS_INCOMPLETE,
 };
 
 enum vcs_zcode_specialist_role {
@@ -147,6 +149,12 @@ enum vcs_zcode_focus_error vcs_zcode_focus_situation_root(
     const struct vcs_zcode_focus_v1 *focus, uint8_t out[32]);
 enum vcs_zcode_focus_error vcs_zcode_focus_root(
     const struct vcs_zcode_focus_v1 *focus, uint8_t out[32]);
+enum vcs_zcode_focus_error vcs_zcode_focus_validate_for_context(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_agent_context_v1 *context,
+    const uint8_t (*claim_roots)[32], size_t claim_count,
+    bool require_complete);
 
 enum vcs_zcode_focus_error vcs_zcode_focus_claim_set_serialize(
     const uint8_t (*claim_roots)[32], size_t claim_count,
@@ -242,6 +250,7 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_chain(
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
     const struct vcs_zcode_focus_v1 *focus,
     const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_agent_context_v1 *context,
     const struct vcs_zcode_write_scope_v1 *task_scope,
     const struct vcs_zcode_focus_claim_v1 *claims,
     const struct vcs_zcode_write_scope_v1 *scopes,
