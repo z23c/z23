@@ -7,6 +7,7 @@ set -euo pipefail
 export LC_ALL=C
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+. "$repo_root/tools/scripts/source_identity_lib.sh" # zcl_is_sha256
 readonly driver=476e6666152337f2419236601dceee793d6a980a
 readonly receipt_name=retrieval-gold-benchmark-476e66661523.jsonl
 readonly receipt="$repo_root/docs/work/retrieval-gold-evidence/$receipt_name"
@@ -89,7 +90,7 @@ root_field() {
     local value
     [[ $(field_type "$1" "$2") = string ]] || fail "not a root string: $2"
     value=$(field "$1" "$2")
-    [[ $value =~ ^[0-9a-f]{64}$ ]] || fail "invalid SHA3 root: $2"
+    zcl_is_sha256 "$value" || fail "invalid SHA3 root: $2"
     printf '%s' "$value"
 }
 
@@ -97,7 +98,7 @@ hash_file() {
     local output root
     output=$("$sha3" "$1") || fail "cannot hash file: $1"
     root=${output%% *}
-    [[ $root =~ ^[0-9a-f]{64}$ ]] || fail "malformed file hash: $1"
+    zcl_is_sha256 "$root" || fail "malformed file hash: $1"
     printf '%s' "$root"
 }
 

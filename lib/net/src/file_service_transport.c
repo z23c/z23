@@ -5,6 +5,7 @@
 #include "net/file_service.h"
 
 #include "base/log_macros.h"
+#include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
@@ -229,14 +230,8 @@ static bool encrypt_frame(const struct fs_session *session, uint8_t type,
                  payload_len);
 
     uint8_t plain[FS_FRAME_SIZE - FS_MAC_SIZE] = {0};
-    plain[0] = type;
-    plain[1] = (uint8_t)(type >> 8);
-    plain[2] = (uint8_t)(type >> 16);
-    plain[3] = (uint8_t)(type >> 24);
-    plain[4] = (uint8_t)payload_len;
-    plain[5] = (uint8_t)(payload_len >> 8);
-    plain[6] = (uint8_t)(payload_len >> 16);
-    plain[7] = (uint8_t)(payload_len >> 24);
+    zcl_write_u32_le(plain, type);
+    zcl_write_u32_le(plain + 4, payload_len);
     if (payload_len > 0)
         memcpy(plain + FS_HEADER_SIZE, payload, payload_len);
 
@@ -313,9 +308,7 @@ static bool decrypt_frame(const struct fs_session *session,
     }
 
     *type_out = plain[0];
-    uint32_t payload_len = (uint32_t)plain[4] |
-        ((uint32_t)plain[5] << 8) | ((uint32_t)plain[6] << 16) |
-        ((uint32_t)plain[7] << 24);
+    uint32_t payload_len = zcl_read_u32_le(plain + 4);
     if (payload_len > FS_MAX_PAYLOAD) {
         memory_cleanse(plain, sizeof(plain));
         LOG_FAIL("filesvc", "decrypted payload_len %u exceeds maximum",
@@ -406,9 +399,8 @@ bool fs_send_chunk_fast(struct fs_session *session, const uint8_t *data,
     int64_t deadline_ms = 0;
     if (!send_io_deadline(4u + (size_t)size + 32u, &deadline_ms))
         return false;
-    uint8_t header[4] = {
-        (uint8_t)size, (uint8_t)(size >> 8),
-        (uint8_t)(size >> 16), (uint8_t)(size >> 24)};
+    uint8_t header[4];
+    zcl_write_u32_le(header, size);
     if (!send_all_until(session->fd, header, sizeof(header), deadline_ms) ||
         !send_all_until(session->fd, data, size, deadline_ms))
         return false;
@@ -441,9 +433,8 @@ bool fs_send_chunk_refusal(struct fs_session *session, uint8_t reason)
     if (!send_io_deadline(0, &deadline_ms))
         return false;
     uint32_t sentinel = FS_ROM_REFUSAL_SENTINEL;
-    uint8_t header[4] = {
-        (uint8_t)sentinel, (uint8_t)(sentinel >> 8),
-        (uint8_t)(sentinel >> 16), (uint8_t)(sentinel >> 24)};
+    uint8_t header[4];
+    zcl_write_u32_le(header, sentinel);
     if (!send_all_until(session->fd, header, sizeof(header), deadline_ms) ||
         !send_all_until(session->fd, &reason, 1, deadline_ms))
         return false;
@@ -484,8 +475,7 @@ bool fs_recv_chunk_fast(struct fs_session *session, uint8_t **out,
     uint8_t header[4];
     if (!recv_all_until(session->fd, header, sizeof(header), deadline_ms))
         return false;
-    uint32_t size = (uint32_t)header[0] | ((uint32_t)header[1] << 8) |
-        ((uint32_t)header[2] << 16) | ((uint32_t)header[3] << 24);
+    uint32_t size = zcl_read_u32_le(header);
     if (size == 0 || size > FS_FAST_CHUNK_MAX)
         LOG_FAIL("filesvc", "recv_chunk_fast invalid chunk size=%u", size);
     if (!public_io_deadline_from(start_ms, 4u + (size_t)size + 32u,

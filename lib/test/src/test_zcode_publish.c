@@ -1306,15 +1306,15 @@ static int t_search(void)
     size_t name_tiny_cap = dd_len + strlen("/src-") + 3u;
     ZP_CHECK("search: truncated scratch prefix fails closed",
              !zp_scratch_path(prefix_tiny, sizeof(prefix_tiny), dd,
-                              "rhett/ring-buffer"));
+                              "alice/ring-buffer"));
     ZP_CHECK("search: truncated scratch name fails closed",
              name_tiny_cap <= sizeof(name_tiny) &&
              !zp_scratch_path(name_tiny, name_tiny_cap, dd,
-                              "rhett/ring-buffer"));
+                              "alice/ring-buffer"));
     char observed_tiny[8];
     ZP_CHECK("search: truncated observed path fails before mkdir",
              !zp_commit_one_observed(dd, 0xaa, 1u,
-                                     "rhett/ring-buffer", "MIT", 0,
+                                     "alice/ring-buffer", "MIT", 0,
                                      observed_tiny,
                                      sizeof(observed_tiny)));
 

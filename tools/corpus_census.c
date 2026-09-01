@@ -631,9 +631,9 @@ done:
 static bool def_parse_line(struct scope_def *def, const char *line,
                            size_t line_no)
 {
+    memset(def, 0, sizeof(*def));
     if (strncmp(line, "package ", 8) == 0)
         return def_parse_package_line(def, line, line_no);
-    memset(def, 0, sizeof(*def));
     def->def_line = dup_str(line, "corpus.defline");
     char *work = dup_str(line, "corpus.defwork");
     if (!def->def_line || !work) {
@@ -1728,11 +1728,13 @@ static bool dep_closure_bind(struct scope_measure *m, const uint8_t *bytes,
     struct buf cwire = {0};
     struct json_value doc;
     json_init(&doc);
-    m->deps = zcl_malloc(sizeof(*m->deps), "corpus.deps");
-    if (!m->deps)
+    if (!m || m->deps)
+        LOG_FAIL(CENSUS_LOG, "dependency closure output is invalid");
+    struct json_value *deps = zcl_malloc(sizeof(*deps), "corpus.deps");
+    if (!deps)
         LOG_FAIL(CENSUS_LOG, "deps json alloc");
-    json_init(m->deps);
-    json_set_array(m->deps);
+    json_init(deps);
+    json_set_array(deps);
     bool ok = true;
     if (!json_read(&doc, (const char *)bytes, blen)) {
         LOG_ERROR(CENSUS_LOG, "scope %s: %s is not valid JSON",
@@ -1765,7 +1767,7 @@ static bool dep_closure_bind(struct scope_measure *m, const uint8_t *bytes,
             (void)json_push_kv_str(&row, "name", dname);
             (void)json_push_kv_str(&row, "root", droot);
             (void)json_push_kv_str(&row, "semver", dsemver);
-            (void)json_push_back(m->deps, &row);
+            (void)json_push_back(deps, &row);
             json_free(&row);
             ok = buf_put(&cwire, dname, strlen(dname) + 1u) &&
                  buf_put(&cwire, droot, strlen(droot) + 1u) &&
@@ -1777,6 +1779,14 @@ static bool dep_closure_bind(struct scope_measure *m, const uint8_t *bytes,
         ok = evidence_root(k_domain_dep_closure, cwire.p, cwire.len,
                            m->dep_closure_root);
     buf_free(&cwire);
+    if (ok) {
+        m->deps = deps;
+        deps = NULL;
+    }
+    if (deps) {
+        json_free(deps);
+        free(deps);
+    }
     return ok;
 }
 

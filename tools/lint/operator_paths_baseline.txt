@@ -172,7 +172,6 @@ A deploy/zclassic23-standby.env.example 1
 A docs/API_REFERENCE.md 6
 A docs/NATIVE_COMMAND_INTERFACE.md 2
 A docs/work/parity-audit-round2-findings.md 1
-A .github/verification-coverage.txt 1
 A lib/test/src/test_tip_agreement_watch.c 1
 A tools/lint/check_live_datadir_isolation.sh 1
 A tools/scripts/byte_exact_utxo_check.sh 2
