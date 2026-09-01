@@ -50,6 +50,46 @@ static void ab_valid_heuristic(struct vcs_zcode_heuristic_v1 *heuristic,
     heuristic->requested_output_bytes = 1024u * 1024u;
 }
 
+static void ab_derived_heuristic(
+    struct vcs_zcode_heuristic_v1 *child,
+    const struct vcs_zcode_heuristic_v1 *parent, uint8_t tag)
+{
+    *child = *parent;
+    child->derivation = VCS_ZCODE_HEURISTIC_SPECIALIZE;
+    child->parent_count = 1;
+    ab_root(child->proposed_rule_root, tag);
+    ab_root(child->proposal_input_root, (uint8_t)(tag + 1u));
+    ab_root(child->provenance_root, (uint8_t)(tag + 2u));
+    (void)vcs_zcode_heuristic_root(parent, child->parent_roots[0]);
+}
+
+static void ab_order_two_parents(
+    struct vcs_zcode_heuristic_v1 parents[2])
+{
+    uint8_t roots[2][32];
+    (void)vcs_zcode_heuristic_root(&parents[0], roots[0]);
+    (void)vcs_zcode_heuristic_root(&parents[1], roots[1]);
+    if (memcmp(roots[0], roots[1], 32) > 0) {
+        struct vcs_zcode_heuristic_v1 swap = parents[0];
+        parents[0] = parents[1];
+        parents[1] = swap;
+    }
+}
+
+static void ab_composed_heuristic(
+    struct vcs_zcode_heuristic_v1 *child,
+    const struct vcs_zcode_heuristic_v1 parents[2], uint8_t tag)
+{
+    *child = parents[0];
+    child->derivation = VCS_ZCODE_HEURISTIC_COMPOSE;
+    child->parent_count = 2;
+    ab_root(child->proposed_rule_root, tag);
+    ab_root(child->proposal_input_root, (uint8_t)(tag + 1u));
+    ab_root(child->provenance_root, (uint8_t)(tag + 2u));
+    (void)vcs_zcode_heuristic_root(&parents[0], child->parent_roots[0]);
+    (void)vcs_zcode_heuristic_root(&parents[1], child->parent_roots[1]);
+}
+
 static void ab_valid_focus(struct vcs_zcode_focus_v1 *focus)
 {
     memset(focus, 0, sizeof(*focus));
@@ -223,6 +263,100 @@ int test_zcode_attention_bid(void)
     AB_CHECK("compose-valid",
              vcs_zcode_heuristic_validate(&invalid) ==
                  VCS_ZCODE_ATTENTION_OK);
+
+    struct vcs_zcode_heuristic_v1 derived;
+    ab_derived_heuristic(&derived, &heuristic, 30);
+    AB_CHECK("seed-lineage-has-no-parents",
+             vcs_zcode_heuristic_validate_derivation(
+                 &heuristic, NULL, 0) == VCS_ZCODE_ATTENTION_OK);
+    AB_CHECK("derived-lineage-resolves-exact-parent",
+             vcs_zcode_heuristic_validate_derivation(
+                 &derived, &heuristic, 1) == VCS_ZCODE_ATTENTION_OK);
+    struct vcs_zcode_attention_bid_v1 derived_bid;
+    ab_valid_bid(&derived_bid, &derived);
+    AB_CHECK("unresolved-derived-bid-refuses-seed-seam",
+             vcs_zcode_attention_bid_validate_for_heuristic(
+                 &derived_bid, &derived) ==
+                 VCS_ZCODE_ATTENTION_DERIVATION);
+    AB_CHECK("derived-bid-requires-exact-lineage-seam",
+             vcs_zcode_attention_bid_validate_for_derivation(
+                 &derived_bid, &derived, &heuristic, 1) ==
+                 VCS_ZCODE_ATTENTION_OK);
+    struct vcs_zcode_attention_frontier_query derived_query;
+    struct vcs_zcode_attention_frontier_report derived_report;
+    size_t derived_selected = 777;
+    ab_query(&derived_query, VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY);
+    AB_CHECK("frontier-refuses-unresolved-derived-heuristic",
+             vcs_zcode_attention_frontier_project(
+                 &derived_bid, 1, &derived, &derived_query,
+                 &derived_selected, 1, &derived_report) ==
+                 VCS_ZCODE_ATTENTION_DERIVATION &&
+             derived_selected == 777);
+    AB_CHECK("derived-lineage-requires-parent-object",
+             vcs_zcode_heuristic_validate_derivation(
+                 &derived, NULL, 1) == VCS_ZCODE_ATTENTION_NULL);
+    AB_CHECK("derived-lineage-count-refusal",
+             vcs_zcode_heuristic_validate_derivation(
+                 &derived, &heuristic, 0) == VCS_ZCODE_ATTENTION_COUNT);
+    struct vcs_zcode_heuristic_v1 changed_derived = derived;
+    changed_derived.parent_roots[0][0] ^= 1u;
+    AB_CHECK("derived-lineage-root-mismatch-refusal",
+             vcs_zcode_heuristic_validate_derivation(
+                 &changed_derived, &heuristic, 1) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+
+    uint8_t *const frozen_lineage_roots[] = {
+        derived.task_root, derived.source_root,
+        derived.agent_context_root, derived.ontology_context_root,
+        derived.study_root, derived.preregistration_root,
+        derived.evaluator_roots[1],
+    };
+    bool all_lineage_mutations_refused = true;
+    for (size_t i = 0;
+         i < sizeof(frozen_lineage_roots) /
+             sizeof(frozen_lineage_roots[0]); i++) {
+        frozen_lineage_roots[i][0] ^= 1u;
+        if (vcs_zcode_heuristic_validate_derivation(
+                &derived, &heuristic, 1) !=
+            VCS_ZCODE_ATTENTION_BINDING)
+            all_lineage_mutations_refused = false;
+        frozen_lineage_roots[i][0] ^= 1u;
+    }
+    AB_CHECK("derived-lineage-freezes-evaluation-boundary",
+             all_lineage_mutations_refused);
+
+    struct vcs_zcode_heuristic_v1 compose_parents[2], composed;
+    ab_valid_heuristic(&compose_parents[0], 40);
+    ab_valid_heuristic(&compose_parents[1], 41);
+    ab_order_two_parents(compose_parents);
+    ab_composed_heuristic(&composed, compose_parents, 42);
+    AB_CHECK("compose-lineage-resolves-canonical-parent-set",
+             vcs_zcode_heuristic_validate_derivation(
+                 &composed, compose_parents, 2) ==
+                 VCS_ZCODE_ATTENTION_OK);
+    struct vcs_zcode_heuristic_v1 reversed_parents[2] = {
+        compose_parents[1], compose_parents[0]
+    };
+    AB_CHECK("compose-lineage-parent-order-refusal",
+             vcs_zcode_heuristic_validate_derivation(
+                 &composed, reversed_parents, 2) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    compose_parents[1].study_root[0] ^= 1u;
+    ab_order_two_parents(compose_parents);
+    ab_composed_heuristic(&composed, compose_parents, 43);
+    AB_CHECK("compose-lineage-policy-disagreement-refusal",
+             vcs_zcode_heuristic_validate_derivation(
+                 &composed, compose_parents, 2) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    invalid = heuristic;
+    invalid.derivation = VCS_ZCODE_HEURISTIC_REPAIR;
+    invalid.parent_count = 2;
+    ab_root(invalid.parent_roots[0], 20);
+    ab_root(invalid.parent_roots[1], 21);
+    AB_CHECK("non-compose-derivation-has-one-parent",
+             vcs_zcode_heuristic_validate(&invalid) ==
+                 VCS_ZCODE_ATTENTION_DERIVATION);
+
     invalid = heuristic;
     invalid.requested_context_bytes =
         VCS_ZCODE_HEURISTIC_MAX_CONTEXT_BYTES + 1u;
@@ -460,6 +594,50 @@ int test_zcode_attention_bid(void)
              memcmp(stored_heuristic_root, first_heuristic_root, 32) == 0 &&
              memcmp(stored_bid_root, first_bid_root, 32) == 0);
 
+    ab_derived_heuristic(&derived, &heuristic, 50);
+    ab_valid_bid(&bid, &derived);
+    memset(stored_heuristic_root, 0xa5, sizeof(stored_heuristic_root));
+    memset(stored_bid_root, 0xa5, sizeof(stored_bid_root));
+    AB_CHECK("store-pair-derived-resolves-cas-parent",
+             vcs_zcode_attention_store_pair(
+                 store_workspace, &derived, &bid,
+                 stored_heuristic_root, stored_bid_root) ==
+                     VCS_ZCODE_ATTENTION_OK &&
+             !ab_all_zero(stored_heuristic_root,
+                          sizeof(stored_heuristic_root)) &&
+             !ab_all_zero(stored_bid_root, sizeof(stored_bid_root)));
+
+    char missing_parent_workspace[512];
+    test_make_tmpdir(missing_parent_workspace,
+                     sizeof(missing_parent_workspace),
+                     "zcode_attention", "missing_parent");
+    memset(stored_heuristic_root, 0xa5, sizeof(stored_heuristic_root));
+    memset(stored_bid_root, 0xa5, sizeof(stored_bid_root));
+    AB_CHECK("store-pair-derived-missing-parent-refusal",
+             vcs_zcode_attention_store_pair(
+                 missing_parent_workspace, &derived, &bid,
+                 stored_heuristic_root, stored_bid_root) ==
+                     VCS_ZCODE_ATTENTION_CAS &&
+             ab_all_zero(stored_heuristic_root,
+                         sizeof(stored_heuristic_root)) &&
+             ab_all_zero(stored_bid_root, sizeof(stored_bid_root)));
+    (void)test_rm_rf_recursive(missing_parent_workspace);
+
+    struct vcs_zcode_heuristic_v1 changed_evaluator = derived;
+    changed_evaluator.evaluator_roots[1][0]++;
+    ab_valid_bid(&bid, &changed_evaluator);
+    memset(stored_heuristic_root, 0xa5, sizeof(stored_heuristic_root));
+    memset(stored_bid_root, 0xa5, sizeof(stored_bid_root));
+    AB_CHECK("store-pair-derived-evaluator-change-refusal",
+             vcs_zcode_attention_store_pair(
+                 store_workspace, &changed_evaluator, &bid,
+                 stored_heuristic_root, stored_bid_root) ==
+                     VCS_ZCODE_ATTENTION_BINDING &&
+             ab_all_zero(stored_heuristic_root,
+                         sizeof(stored_heuristic_root)) &&
+             ab_all_zero(stored_bid_root, sizeof(stored_bid_root)));
+
+    ab_valid_bid(&bid, &heuristic);
     struct vcs_zcode_attention_bid_v1 mismatched_store_bid = bid;
     mismatched_store_bid.source_root[0]++;
     memset(stored_heuristic_root, 0xa5, sizeof(stored_heuristic_root));

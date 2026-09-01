@@ -176,6 +176,28 @@ int test_zcode_attention_verified(void)
                      pubkey) == VCS_ZCODE_ATTENTION_OK);
     }
 
+    struct vcs_zcode_heuristic_v1 unresolved_derived = heuristics[0];
+    unresolved_derived.derivation = VCS_ZCODE_HEURISTIC_REPAIR;
+    unresolved_derived.parent_count = 1;
+    av_root(unresolved_derived.proposed_rule_root, 70);
+    av_root(unresolved_derived.proposal_input_root, 71);
+    av_root(unresolved_derived.provenance_root, 72);
+    (void)vcs_zcode_heuristic_root(
+        &heuristics[0], unresolved_derived.parent_roots[0]);
+    struct vcs_zcode_attention_bid_v1 unresolved_bid;
+    struct vcs_zcode_science_statement_v1 unresolved_statement;
+    av_bid(&unresolved_bid, &unresolved_derived, &focus,
+           VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY, 73);
+    bool unresolved_statement_ok = av_statement(
+        &unresolved_statement, &unresolved_bid, &unresolved_derived,
+        &focus, secret, pubkey);
+    AV_CHECK("verified-seam-refuses-unresolved-derived-heuristic",
+             unresolved_statement_ok &&
+             vcs_zcode_attention_bid_verify_statement(
+                 &unresolved_bid, &unresolved_derived, &focus,
+                 &unresolved_statement, pubkey) ==
+                 VCS_ZCODE_ATTENTION_DERIVATION);
+
     size_t indices[4] = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX};
     struct vcs_zcode_attention_verified_report report;
     AV_CHECK("hard-p0-before-superior-lower-priority",

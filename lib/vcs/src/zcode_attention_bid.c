@@ -112,7 +112,7 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
          heuristic->parent_count < 2) ||
         (heuristic->derivation != VCS_ZCODE_HEURISTIC_SEED &&
          heuristic->derivation != VCS_ZCODE_HEURISTIC_COMPOSE &&
-         heuristic->parent_count == 0))
+         heuristic->parent_count != 1))
         return VCS_ZCODE_ATTENTION_DERIVATION;
     const uint8_t *const roots[] = {
         heuristic->task_root, heuristic->source_root,
@@ -161,6 +161,51 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
         heuristic->requested_output_bytes >
             VCS_ZCODE_HEURISTIC_MAX_OUTPUT_BYTES)
         return VCS_ZCODE_ATTENTION_BUDGET;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static bool heuristic_lineage_boundary_equal(
+    const struct vcs_zcode_heuristic_v1 *left,
+    const struct vcs_zcode_heuristic_v1 *right)
+{
+    return memcmp(left->task_root, right->task_root, 32) == 0 &&
+        memcmp(left->source_root, right->source_root, 32) == 0 &&
+        memcmp(left->agent_context_root,
+               right->agent_context_root, 32) == 0 &&
+        memcmp(left->ontology_context_root,
+               right->ontology_context_root, 32) == 0 &&
+        memcmp(left->study_root, right->study_root, 32) == 0 &&
+        memcmp(left->preregistration_root,
+               right->preregistration_root, 32) == 0 &&
+        left->evaluator_count == right->evaluator_count &&
+        memcmp(left->evaluator_roots, right->evaluator_roots,
+               sizeof(left->evaluator_roots)) == 0;
+}
+
+enum vcs_zcode_attention_error vcs_zcode_heuristic_validate_derivation(
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_count)
+{
+    enum vcs_zcode_attention_error error =
+        vcs_zcode_heuristic_validate(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    if (parent_count != heuristic->parent_count)
+        return VCS_ZCODE_ATTENTION_COUNT;
+    if (parent_count == 0)
+        return heuristic->derivation == VCS_ZCODE_HEURISTIC_SEED
+            ? VCS_ZCODE_ATTENTION_OK : VCS_ZCODE_ATTENTION_DERIVATION;
+    if (!parents) return VCS_ZCODE_ATTENTION_NULL;
+
+    for (size_t i = 0; i < parent_count; i++) {
+        uint8_t parent_root[32];
+        error = vcs_zcode_heuristic_validate(&parents[i]);
+        if (error != VCS_ZCODE_ATTENTION_OK) return error;
+        error = vcs_zcode_heuristic_root(&parents[i], parent_root);
+        if (error != VCS_ZCODE_ATTENTION_OK) return error;
+        if (memcmp(parent_root, heuristic->parent_roots[i], 32) != 0 ||
+            !heuristic_lineage_boundary_equal(heuristic, &parents[i]))
+            return VCS_ZCODE_ATTENTION_BINDING;
+    }
     return VCS_ZCODE_ATTENTION_OK;
 }
 
@@ -352,7 +397,7 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate(
     return VCS_ZCODE_ATTENTION_OK;
 }
 
-enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_heuristic(
+static enum vcs_zcode_attention_error attention_bid_validate_binding(
     const struct vcs_zcode_attention_bid_v1 *bid,
     const struct vcs_zcode_heuristic_v1 *heuristic)
 {
@@ -374,6 +419,33 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_heuristic(
             return VCS_ZCODE_ATTENTION_OK;
     }
     return VCS_ZCODE_ATTENTION_BINDING;
+}
+
+enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_heuristic(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
+    enum vcs_zcode_attention_error error =
+        vcs_zcode_heuristic_validate(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    if (heuristic->derivation != VCS_ZCODE_HEURISTIC_SEED)
+        return VCS_ZCODE_ATTENTION_DERIVATION;
+    return attention_bid_validate_binding(bid, heuristic);
+}
+
+enum vcs_zcode_attention_error
+vcs_zcode_attention_bid_validate_for_derivation(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_count)
+{
+    enum vcs_zcode_attention_error error =
+        vcs_zcode_heuristic_validate_derivation(
+            heuristic, parents, parent_count);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    if (heuristic->derivation == VCS_ZCODE_HEURISTIC_SEED)
+        return VCS_ZCODE_ATTENTION_DERIVATION;
+    return attention_bid_validate_binding(bid, heuristic);
 }
 
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_focus(
@@ -561,6 +633,27 @@ static bool heuristic_readback_exact(
     return ok;
 }
 
+static bool heuristic_load_exact(
+    const char *workspace, const uint8_t expected_root[32],
+    struct vcs_zcode_heuristic_v1 *out)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t checked_root[32];
+    bool ok = vcs_object_load_raw_bounded(
+            workspace, expected_root, VCS_ZCODE_HEURISTIC_WIRE_BYTES,
+            &wire, &wire_len) == 0 &&
+        wire_len == VCS_ZCODE_HEURISTIC_WIRE_BYTES &&
+        vcs_zcode_heuristic_parse(wire, wire_len, out) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        vcs_zcode_heuristic_root(out, checked_root) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        memcmp(checked_root, expected_root, 32) == 0;
+    free(wire);
+    if (!ok) memset(out, 0, sizeof(*out));
+    return ok;
+}
+
 static bool bid_readback_exact(
     const char *workspace, const uint8_t expected_root[32],
     const uint8_t expected_wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES],
@@ -619,8 +712,24 @@ enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
     memset(heuristic_root_out, 0, 32);
     memset(bid_root_out, 0, 32);
 
-    enum vcs_zcode_attention_error error =
-        vcs_zcode_attention_bid_validate_for_heuristic(bid, heuristic);
+    enum vcs_zcode_attention_error error = vcs_zcode_heuristic_validate(
+        heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    struct vcs_zcode_heuristic_v1
+        parents[VCS_ZCODE_HEURISTIC_MAX_PARENTS];
+    memset(parents, 0, sizeof(parents));
+    for (size_t i = 0; i < heuristic->parent_count; i++) {
+        if (!heuristic_load_exact(
+                workspace, heuristic->parent_roots[i], &parents[i]))
+            return VCS_ZCODE_ATTENTION_CAS;
+    }
+    if (heuristic->derivation == VCS_ZCODE_HEURISTIC_SEED) {
+        error = vcs_zcode_attention_bid_validate_for_heuristic(
+            bid, heuristic);
+    } else {
+        error = vcs_zcode_attention_bid_validate_for_derivation(
+            bid, heuristic, parents, heuristic->parent_count);
+    }
     if (error != VCS_ZCODE_ATTENTION_OK) return error;
 
     uint8_t heuristic_wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES];
@@ -649,10 +758,17 @@ enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
             workspace, bid_root, bid_wire, sizeof(bid_wire)))
         return VCS_ZCODE_ATTENTION_CAS;
     struct vcs_zcode_attention_bid_v1 checked_bid;
-    if (!bid_readback_exact(workspace, bid_root, bid_wire, &checked_bid) ||
-        vcs_zcode_attention_bid_validate_for_heuristic(
-            &checked_bid, &checked_heuristic) != VCS_ZCODE_ATTENTION_OK)
+    if (!bid_readback_exact(workspace, bid_root, bid_wire, &checked_bid))
         return VCS_ZCODE_ATTENTION_CAS;
+    if (checked_heuristic.derivation == VCS_ZCODE_HEURISTIC_SEED) {
+        error = vcs_zcode_attention_bid_validate_for_heuristic(
+            &checked_bid, &checked_heuristic);
+    } else {
+        error = vcs_zcode_attention_bid_validate_for_derivation(
+            &checked_bid, &checked_heuristic, parents,
+            checked_heuristic.parent_count);
+    }
+    if (error != VCS_ZCODE_ATTENTION_OK) return VCS_ZCODE_ATTENTION_CAS;
 
     memcpy(heuristic_root_out, heuristic_root, 32);
     memcpy(bid_root_out, bid_root, 32);

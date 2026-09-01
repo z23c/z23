@@ -168,6 +168,17 @@ const char *vcs_zcode_attention_error_string(
 void vcs_zcode_heuristic_init(struct vcs_zcode_heuristic_v1 *heuristic);
 enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
     const struct vcs_zcode_heuristic_v1 *heuristic);
+/* Bind a generation to its immediate parent objects. Parents must be supplied
+ * in the same root order sealed by parent_roots. Derivation may change
+ * generation-specific proposal content, provenance, and bounded resource
+ * requests, but cannot silently replace the task/source/context,
+ * study/preregistration, or evaluator set that defines how evidence will be
+ * judged. This does not resolve earlier ancestry or grant evidence, task, or
+ * execution authority.
+ */
+enum vcs_zcode_attention_error vcs_zcode_heuristic_validate_derivation(
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_count);
 enum vcs_zcode_attention_error vcs_zcode_heuristic_serialize(
     const struct vcs_zcode_heuristic_v1 *heuristic,
     uint8_t out[VCS_ZCODE_HEURISTIC_WIRE_BYTES]);
@@ -180,13 +191,23 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_root(
 void vcs_zcode_attention_bid_init(struct vcs_zcode_attention_bid_v1 *bid);
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate(
     const struct vcs_zcode_attention_bid_v1 *bid);
-/* Cross-object structural admission: re-roots the heuristic, binds task and
- * source, and requires the bid evaluator among its sealed evaluator roots.
- * Referenced CAS objects and evidence remain untrusted until their owning
- * subsystems load, re-root, and validate them. */
+/* Cross-object structural admission for a seed heuristic: re-roots the
+ * heuristic, binds task and source, and requires the bid evaluator among its
+ * sealed evaluator roots. Unresolved derived heuristics fail closed; callers
+ * holding exact immediate parents use validate_for_derivation(). Referenced
+ * CAS objects and evidence remain untrusted until their owning subsystems
+ * load, re-root, and validate them. */
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_heuristic(
     const struct vcs_zcode_attention_bid_v1 *bid,
     const struct vcs_zcode_heuristic_v1 *heuristic);
+/* The derived counterpart proves immediate-parent lineage before applying
+ * the same bid/heuristic binding. It remains a structural check, not ancestry
+ * admission, evidence verification, or task authority. */
+enum vcs_zcode_attention_error
+vcs_zcode_attention_bid_validate_for_derivation(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_count);
 /* Re-roots the immutable focus and proves that the situation-specific bid,
  * reusable heuristic, exact task/source/context/StoryGraph, and budgets all
  * describe the same bounded observation. */
@@ -208,7 +229,12 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_root(
  * re-rooted, address-checked, and cross-bound before success is returned.
  * Admission is atomic and idempotent per object but grants no task,
  * assignment, action, execution, evidence, or acceptance authority. The
- * output roots are zero on every ordinary failure. */
+ * Derived heuristics additionally require every immediate parent to already
+ * exist as a canonical heuristic object in the workspace CAS; their sealed
+ * immediate-parent boundaries are checked before the child is written. Bare
+ * CAS presence is not ancestry admission. A later bid-write failure may leave
+ * the already-verified heuristic object inert in CAS. The output roots are
+ * zero on every ordinary failure. */
 enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
     const char *workspace,
     const struct vcs_zcode_heuristic_v1 *heuristic,
