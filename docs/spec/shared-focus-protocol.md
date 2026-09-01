@@ -63,10 +63,15 @@ successor identity, successor claim, required evidence, continuation root, and
 ontology status. A receiver resumes only after re-rooting every supplied wire
 and validating the complete chain. The structural root-chain check is not a
 resume gate by itself. The admitted-work gate additionally requires the full
-canonical claim snapshot and scopes, proves every claim remains active and
-disjoint and within task authority, proves both named claims have current
-signed admissions, and binds the source report to its signed request and work
-receipt. A handoff does not accept results or permit execution.
+canonical claim snapshot and scopes, proves every claim was simultaneously
+active, disjoint, and within task authority at the deterministic snapshot
+witness, proves the source claim and signed admission at its authenticated
+receipt-completion time, proves the successor claim and signed admission at
+the current resume time, and binds the source report to its signed request and
+work receipt. The witness is the later of source completion and every
+immutable claim's creation time. Expired historical authority never becomes
+current successor authority. A handoff does not accept results or permit
+execution.
 
 `attention_bid.v1` binds one final `focus_root`, so changing the active claim
 snapshot changes the bid's identity even when a reusable heuristic is
@@ -115,6 +120,13 @@ the focus's committed claim set and binds the receipt's task, candidate,
 action, input, work kind, policy, toolchain, signer, and output back to the
 request, claim, and report. Receipt status maps to ontology status; it does
 not grant acceptance, installation, execution, or deployment authority.
+
+At handoff, the authenticated source receipt is a historical observation. Its
+claim and admission therefore need to cover the signed receipt-completion
+time, not remain live forever. The successor's claim and admission are a
+different relation: they must remain live at the current resume time before
+new work can proceed. The receiver authenticates and binds the source receipt
+before using its timestamp.
 
 ## Required pre-edit observation
 
