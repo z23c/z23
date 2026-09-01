@@ -195,32 +195,47 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
         vcs_zcode_focus_validate_for_context(
             focus, task, context, claim_roots, claim_count, true);
     if (context_error != VCS_ZCODE_FOCUS_OK) return context_error;
+
+    /* A completed source lease is historical evidence, while the successor
+     * lease is current execution authority. First authenticate and bind the
+     * signed completion before using its timestamp. The earliest instant at
+     * which every immutable claim existed after that completion is a
+     * deterministic witness for the focus's active-claim snapshot. */
+    if (vcs_zcode_specialist_report_validate_for_work(
+            focus, &claims[from_index], claim_roots, claim_count,
+            task, from_request, from_receipt, report) !=
+            VCS_ZCODE_FOCUS_OK ||
+        from_receipt->finished_unix <= 0 ||
+        from_receipt->finished_unix > now_unix)
+        return VCS_ZCODE_FOCUS_BINDING;
+    int64_t snapshot_unix = from_receipt->finished_unix;
+    for (size_t i = 0; i < claim_count; i++)
+        if (claims[i].created_unix > snapshot_unix)
+            snapshot_unix = claims[i].created_unix;
+    if (snapshot_unix > now_unix)
+        return VCS_ZCODE_FOCUS_BINDING;
     if (vcs_zcode_focus_claim_set_status(
-            focus, claims, scopes, claim_count, now_unix) !=
+            focus, claims, scopes, claim_count, snapshot_unix) !=
             ZCL_ONTOLOGY_PROVED)
         return VCS_ZCODE_FOCUS_BINDING;
 
     for (size_t i = 0; i < claim_count; i++)
         if (vcs_zcode_focus_claim_authority_status(
                 focus, task, task_scope, &claims[i], &scopes[i],
-                now_unix) != ZCL_ONTOLOGY_PROVED)
+                snapshot_unix) != ZCL_ONTOLOGY_PROVED)
             return VCS_ZCODE_FOCUS_BINDING;
 
     if (vcs_zcode_focus_claim_work_status(
             focus, task, task_scope, &claims[from_index],
             &scopes[from_index], claim_roots, claim_count,
-            from_request, from_admission, now_unix) !=
+            from_request, from_admission,
+            from_receipt->finished_unix) !=
             ZCL_ONTOLOGY_PROVED ||
         vcs_zcode_focus_claim_work_status(
             focus, task, task_scope, &claims[next_index],
             &scopes[next_index], claim_roots, claim_count,
             next_request, next_admission, now_unix) !=
             ZCL_ONTOLOGY_PROVED)
-        return VCS_ZCODE_FOCUS_BINDING;
-    if (vcs_zcode_specialist_report_validate_for_work(
-            focus, &claims[from_index], claim_roots, claim_count,
-            task, from_request, from_receipt, report) !=
-            VCS_ZCODE_FOCUS_OK)
         return VCS_ZCODE_FOCUS_BINDING;
     return vcs_zcode_focus_handoff_validate_chain(
         focus, &claims[from_index], report, handoff, &claims[next_index]);

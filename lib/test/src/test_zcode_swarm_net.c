@@ -5257,6 +5257,11 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
             &admission_a, &request_a, worker_a_secret, worker_a_key));
         ASSERT(zwn_focus_admission(
             &admission_b, &request_b, worker_b_secret, worker_b_key));
+        /* Source authority must cover the signed completion observation,
+         * not remain live forever after completed evidence is handed off. */
+        admission_a.deadline_unix = 1600;
+        ASSERT(vcs_zcode_work_admission_seal(
+            &admission_a, worker_a_secret, worker_a_key));
         ASSERT(zwn_focus_receipt(
             &receipt_a, &request_a, 0xc1, worker_a_secret, worker_a_key));
         ASSERT(zwn_focus_receipt(
@@ -5387,6 +5392,9 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
         struct vcs_zcode_focus_claim_v1 claim_a, claim_b;
         zwn_focus_claim(&claim_a, situation_root, scope_a_root, 0xa1, 0xb1);
         zwn_focus_claim(&claim_b, situation_root, scope_b_root, 0xa2, 0xb2);
+        claim_a.expires_unix = 1600;
+        claim_b.created_unix = 1400;
+        claim_b.expires_unix = 2100;
         memcpy(claim_a.claimant_root, worker_a_key, 32);
         memcpy(claim_a.intent_root, request_a_root, 32);
         memcpy(claim_a.evidence_plan_root, request_a.proof_policy_root, 32);
@@ -5635,6 +5643,29 @@ static int zwn_t_shared_focus_flight(const struct chain_params *params)
                       &request_a_at_b, &admission_a_at_b,
                       &request_b, &admission_b, &receipt_a_at_b,
                       &report_a_at_b, &handoff_at_b, 2000),
+                  VCS_ZCODE_FOCUS_OK);
+        struct vcs_zcode_work_admission_v1 late_admission_a =
+            admission_a_at_b;
+        late_admission_a.deadline_unix = receipt_a_at_b.finished_unix;
+        ASSERT(vcs_zcode_work_admission_seal(
+            &late_admission_a, worker_a_secret, worker_a_key));
+        ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
+                      &focus_at_b, &task_at_b, &context_at_b,
+                      &task_scope_at_b,
+                      ordered_claims, ordered_scopes, 2,
+                      from_index, next_index,
+                      &request_a_at_b, &late_admission_a,
+                      &request_b, &admission_b, &receipt_a_at_b,
+                      &report_a_at_b, &handoff_at_b, 2000),
+                  VCS_ZCODE_FOCUS_BINDING);
+        ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
+                      &focus_at_b, &task_at_b, &context_at_b,
+                      &task_scope_at_b,
+                      ordered_claims, ordered_scopes, 2,
+                      from_index, next_index,
+                      &request_a_at_b, &admission_a_at_b,
+                      &request_b, &admission_b, &receipt_a_at_b,
+                      &report_a_at_b, &handoff_at_b, 2100),
                   VCS_ZCODE_FOCUS_BINDING);
         struct vcs_zcode_work_admission_v1 refused_b = admission_b;
         refused_b.lease_generation = 0;

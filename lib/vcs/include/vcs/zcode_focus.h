@@ -244,9 +244,11 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_chain(
 
 /* Receiver-side resume gate for admitted work. Unlike the structural chain
  * check above, this requires the complete canonical claim snapshot, proves
- * every active scope is disjoint and within task authority, proves both named
- * claims are backed by signed admissions, and binds the source report to its
- * signed work receipt. No object is accepted, executed, or deployed. */
+ * every scope was simultaneously active, disjoint, and within task authority,
+ * proves the source claim/admission at its signed receipt completion time,
+ * proves the successor claim/admission at now_unix, and binds the source
+ * report to that receipt. Expired historical authority never becomes current
+ * authority. No object is accepted, executed, or deployed. */
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
     const struct vcs_zcode_focus_v1 *focus,
     const struct vcs_zcode_task_v1 *task,
