@@ -568,18 +568,38 @@ MAKE_RECOVERY_SOURCE="$MAKE_RECOVERY/probe.c"
 MAKE_RECOVERY_RSP="$MAKE_RECOVERY/link.rsp"
 MAKE_RECOVERY_BINARY="$MAKE_RECOVERY/probe"
 MAKE_RECOVERY_ACTIONS="$MAKE_RECOVERY/actions.log"
+MAKE_RECOVERY_SESSION_CALLS="$MAKE_RECOVERY/session-calls.log"
 MAKE_RECOVERY_MK="$MAKE_RECOVERY/probe.mk"
+MAKE_RECOVERY_SESSION_TOOL="$MAKE_RECOVERY/session-tool.sh"
 MAKE_RECOVERY_VIEW_READY="$MAKE_RECOVERY/view-ready.mk"
 MAKE_RECOVERY_RACE_ARM="$MAKE_RECOVERY/race-armed"
 MAKE_RECOVERY_RACE_LOG="$MAKE_RECOVERY/race.log"
 MAKE_RECOVERY_FIRST_LOG="$MAKE_RECOVERY/first.log"
 MAKE_RECOVERY_WARM_LOG="$MAKE_RECOVERY/warm.log"
-MAKE_SOURCE_RECORD="$("$ROOT/tools/dev/source-identity.sh" capture-record)" ||
-    fail 'Make recovery fixture could not capture repository source identity'
-read -r MAKE_SOURCE_ID MAKE_SOURCE_COMPLETE MAKE_SOURCE_MUTATION \
-    <<< "$MAKE_SOURCE_RECORD"
-[ "$MAKE_SOURCE_COMPLETE" = 1 ] ||
-    fail 'Make recovery fixture source identity is incomplete'
+MAKE_SOURCE_ID="$SOURCE_A"
+MAKE_SOURCE_COMPLETE=1
+MAKE_SOURCE_MUTATION="$MUTATION_A2"
+MAKE_SOURCE_RECORD="$MAKE_SOURCE_ID $MAKE_SOURCE_COMPLETE $MAKE_SOURCE_MUTATION"
+set_state "$MAKE_SOURCE_ID" "$MAKE_SOURCE_MUTATION"
+
+# This fixture grades a precise late-marker state transition.  Route only its
+# session calls through the deterministic verifier already used above, so an
+# unrelated checkout generation change cannot preempt the marker refusal that
+# this section is meant to observe.  Production Make continues to use the
+# repository source-identity verifier directly.
+mkdir -p "$MAKE_RECOVERY"
+cat > "$MAKE_RECOVERY_SESSION_TOOL" <<'SESSION_WRAPPER_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 17 ] || exit 2
+[ -x "$Z23_EPOCH_REAL_SESSION_TOOL" ] || exit 2
+[ -x "$Z23_EPOCH_FIXTURE_VERIFY_TOOL" ] || exit 2
+printf '%s\n' "$1" >> "$Z23_EPOCH_FIXTURE_SESSION_CALLS"
+export STATE_FILE="$Z23_EPOCH_FIXTURE_STATE"
+exec "$Z23_EPOCH_REAL_SESSION_TOOL" "$@" \
+    "$Z23_EPOCH_FIXTURE_VERIFY_TOOL"
+SESSION_WRAPPER_EOF
+chmod +x "$MAKE_RECOVERY_SESSION_TOOL"
 
 mkdir -p "$MAKE_RECOVERY_EPOCH_DIR/.leases" \
     "$MAKE_RECOVERY/bin/test-fast/epochs/$EPOCH_MAIN"
@@ -632,6 +652,10 @@ run_make_recovery()
     local log="$1"
     (
         cd "$ROOT"
+        Z23_EPOCH_REAL_SESSION_TOOL="$SESSION_TOOL" \
+        Z23_EPOCH_FIXTURE_VERIFY_TOOL="$VERIFY" \
+        Z23_EPOCH_FIXTURE_STATE="$STATE" \
+        Z23_EPOCH_FIXTURE_SESSION_CALLS="$MAKE_RECOVERY_SESSION_CALLS" \
         make -f "$MAKE_RECOVERY_MK" --no-print-directory \
             ZCL_EPOCH_PROFILES=test-fast ZCL_DEPFILE_PROFILES= \
             BUILD_DIR="$MAKE_RECOVERY" BIN_DIR="$MAKE_RECOVERY/bin" \
@@ -648,6 +672,7 @@ run_make_recovery()
             TEST_FAST_SESSION="$MAKE_RECOVERY_SESSION" \
             TEST_FAST_LEASE="$MAKE_RECOVERY_LEASE" \
             BUILD_EPOCH_RECOVERY_READY="$MAKE_RECOVERY_READY" \
+            BUILD_EPOCH_SESSION_TOOL="$MAKE_RECOVERY_SESSION_TOOL" \
             CC="$CC_COMMAND" CXX="$CC_COMMAND" epoch-recovery-probe
     ) > "$log" 2>&1
 }
@@ -662,6 +687,9 @@ if ! grep -Fq \
         "$MAKE_RECOVERY_RACE_LOG" >&2
     fail 'post-parse unverified marker did not produce the named retry refusal'
 fi
+[ -s "$MAKE_RECOVERY_SESSION_CALLS" ] &&
+grep -Fqx acquire "$MAKE_RECOVERY_SESSION_CALLS" ||
+    fail 'Make recovery fixture did not traverse the verifier wrapper'
 grep -Fq 'stale object that must never reach the linker' \
     "$MAKE_RECOVERY_OBJECT" ||
     fail 'ordinary acquire changed a generation after Make classified it'
