@@ -710,6 +710,15 @@ ZCL_TEST_GROUP(retrieval_experiment)
  * binds both outcomes into immutable immediate-parent heuristic lineage. It
  * grants no evaluation, attention, lifecycle, or activation authority. */
 ZCL_TEST_GROUP(retrieval_profile_evolution)
+/* A preregistered retrieval comparison is a pure observation over two exact
+ * existing result roots.  Threshold boundaries, missing metrics, and failed
+ * preservation guards remain distinct; the verdict grants no lifecycle,
+ * replication, attention, or activation authority. */
+ZCL_TEST_GROUP(retrieval_comparison)
+/* The profile-comparison service joins that arithmetic to one exact immediate
+ * SPECIALIZE edge, frozen task/source/study/preregistration/evaluator roots,
+ * and each heuristic's exact proposal and observation roots. */
+ZCL_TEST_GROUP(retrieval_profile_comparison)
 /* One exact retrieval evaluator observation is rooted, structurally bound to
  * its heuristic/proposal/batch/evaluator, and used only as attributed input
  * to the non-authoritative attention frontier. */
