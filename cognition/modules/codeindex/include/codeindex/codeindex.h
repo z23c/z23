@@ -140,6 +140,11 @@ struct codeindex *codeindex_open(const char *root);
  * queries must use codeindex_open(). A missing store or any source/schema
  * change still triggers the normal deterministic full rebuild. */
 struct codeindex *codeindex_open_source_view(const char *root);
+/* Open a source-only view whose retrieval projection has also been verified
+ * against its sealed logical root. A mismatched projection is fully rebuilt
+ * from source before return; unrelated code navigation avoids this bounded
+ * full-projection cost. */
+struct codeindex *codeindex_open_retrieval_view(const char *root);
 /* Open only an already-built, verify-on-read store. This never rebuilds and
  * therefore may describe the immediately preceding source generation. It is
  * for bounded resident overlay queries which scan changed files themselves;
@@ -153,6 +158,20 @@ void codeindex_close(struct codeindex *ci);
  * caches. Returns false if the sealed 32-byte metadata record is absent or
  * malformed; it never fabricates an all-zero generation. */
 bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32]);
+
+/* Exact logical root of the groups/files/symbols/refs projection consumed by
+ * retrieval. Unlike source_root_sha3, this binds scanner output as well as
+ * source identity. A retrieval view verifies it before adoption; snapshot
+ * handles may call the current-check below. Because the checksum is stored
+ * beside the derived rows, it detects divergence but is not authenticity,
+ * evaluator, or acceptance authority against an owner who deliberately
+ * rewrites both rows and root. */
+bool codeindex_retrieval_projection_root_sha3(struct codeindex *ci,
+                                              uint8_t out[32]);
+/* Recompute and compare the retrieval projection on this exact bound handle.
+ * A successful false result is evidence of logical cache divergence. */
+bool codeindex_retrieval_projection_is_current(struct codeindex *ci,
+                                               bool *current);
 
 /* Recheck that a source-only reader still describes the checkout generation
  * now present at its root. This never rebuilds or advances the handle. A

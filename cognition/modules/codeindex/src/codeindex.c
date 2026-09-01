@@ -86,6 +86,26 @@ struct codeindex *codeindex_open_source_view(const char *root)
     return ci;
 }
 
+struct codeindex *codeindex_open_retrieval_view(const char *root)
+{
+    struct codeindex *ci = codeindex_open_source_view(root);
+    if (!ci) return NULL;
+    bool valid = false;
+    if (!ci_store_retrieval_projection_is_valid(ci->store, &valid)) {
+        codeindex_close(ci);
+        return NULL;
+    }
+    if (!valid) {
+        if (!codeindex_rebuild(ci) ||
+            !ci_store_retrieval_projection_is_valid(ci->store, &valid) ||
+            !valid) {
+            codeindex_close(ci);
+            LOG_NULL("codeindex", "retrieval projection rebuild failed");
+        }
+    }
+    return ci;
+}
+
 void codeindex_close(struct codeindex *ci)
 {
     if (!ci) return;
@@ -105,4 +125,30 @@ bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32])
     if (!found || len != 32)
         LOG_FAIL("codeindex", "invalid source_root_sha3 metadata");
     return true;
+}
+
+bool codeindex_retrieval_projection_root_sha3(struct codeindex *ci,
+                                              uint8_t out[32])
+{
+    if (!ci || !ci->store || !out)
+        LOG_FAIL("codeindex", "null arg to retrieval_projection_root_sha3");
+    uint8_t root[32];
+    size_t len = 0;
+    bool found = false;
+    if (!ci_store_meta_get(ci->store, CI_RETRIEVAL_PROJECTION_META, root,
+                           sizeof(root), &len, &found))
+        LOG_FAIL("codeindex", "read retrieval projection root");
+    if (!found || len != sizeof(root))
+        LOG_FAIL("codeindex", "invalid retrieval projection root metadata");
+    memcpy(out, root, sizeof(root));
+    return true;
+}
+
+bool codeindex_retrieval_projection_is_current(struct codeindex *ci,
+                                               bool *current)
+{
+    if (current) *current = false;
+    if (!ci || !ci->store || !current)
+        LOG_FAIL("codeindex", "null arg to retrieval_projection_is_current");
+    return ci_store_retrieval_projection_is_valid(ci->store, current);
 }

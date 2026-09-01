@@ -41,8 +41,12 @@
  * built by "rev1" holds purposes that were truncated mid-sentence. The bytes
  * are still valid text, which is exactly why this needs a version bump rather
  * than a lazy repair — a capability search ranks on that text, and a stale
- * generation would rank on the cut version without any signal that it had. */
-#define CI_SCHEMA_VERSION "cap1"
+ * generation would rank on the cut version without any signal that it had.
+ * "ret1" = the retrieval-integrity generation: every consumer-visible group,
+ * file, symbol, and reference row is sealed by one canonical logical root. */
+#define CI_SCHEMA_VERSION "ret1"
+#define CI_STORE_FORMAT "zcl.codeindex.store.v4"
+#define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 
 /* ── the public handle (defined here so every TU can reach the store) ── */
 typedef struct sqlite3 sqlite3;
@@ -169,6 +173,13 @@ int64_t ci_store_include_edge_count(struct ci_store *s);
 /* Canonical per-symbol row hash used for verify-on-read. Deterministic over
  * all card fields. */
 void ci_symbol_row_hash(const struct ci_symbol *sym, uint8_t out[32]);
+/* Canonical logical root over every source-derived row consumed by retrieval.
+ * The projector holds the immutable store handle's lock for one exact SQL
+ * snapshot, rejects malformed types/widths, and touches out only on success. */
+bool ci_store_retrieval_projection_root(struct ci_store *s, uint8_t out[32]);
+/* Compare the recomputed logical root with the sealed meta record. Missing or
+ * malformed records are valid observations of an invalid generation. */
+bool ci_store_retrieval_projection_is_valid(struct ci_store *s, bool *valid);
 bool ci_store_apply_pragmas(sqlite3 *db);
 bool ci_store_ensure_schema(sqlite3 *db);
 

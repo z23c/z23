@@ -8,8 +8,6 @@
 
 #include <string.h>
 
-static const char ci_store_format[] = "zcl.codeindex.store.v4";
-
 static bool store_is_stale_profile(const char *root, struct ci_store *store,
                                    bool check_depfiles, bool *stale)
 {
@@ -37,19 +35,19 @@ static bool store_is_stale_profile(const char *root, struct ci_store *store,
         !ci_store_meta_get(store, "ci_schema_version", stored_schema,
                            sizeof(stored_schema), &schema_len, &schema_found))
         LOG_FAIL("codeindex", "read freshness metadata");
-    if (stale)
-        *stale = !(stat_found && stat_len == 32 &&
-                   memcmp(cur_stats, stored_stats, 32) == 0 &&
-                   (!check_depfiles ||
-                    (dep_found && dep_len == 32 &&
-                     memcmp(cur_dep_stats, stored_dep_stats, 32) == 0)) &&
-                   format_found && format_len == sizeof(ci_store_format) - 1 &&
-                   memcmp(stored_format, ci_store_format,
-                          sizeof(ci_store_format) - 1) == 0 &&
-                   schema_found &&
-                   schema_len == sizeof(CI_SCHEMA_VERSION) - 1 &&
-                   memcmp(stored_schema, CI_SCHEMA_VERSION,
-                          sizeof(CI_SCHEMA_VERSION) - 1) == 0);
+    bool metadata_current =
+        stat_found && stat_len == 32 &&
+        memcmp(cur_stats, stored_stats, 32) == 0 &&
+        (!check_depfiles ||
+         (dep_found && dep_len == 32 &&
+          memcmp(cur_dep_stats, stored_dep_stats, 32) == 0)) &&
+        format_found && format_len == sizeof(CI_STORE_FORMAT) - 1 &&
+        memcmp(stored_format, CI_STORE_FORMAT,
+               sizeof(CI_STORE_FORMAT) - 1) == 0 &&
+        schema_found && schema_len == sizeof(CI_SCHEMA_VERSION) - 1 &&
+        memcmp(stored_schema, CI_SCHEMA_VERSION,
+               sizeof(CI_SCHEMA_VERSION) - 1) == 0;
+    if (stale) *stale = !metadata_current;
     return true;
 }
 

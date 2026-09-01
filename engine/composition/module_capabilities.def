@@ -644,6 +644,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan_doc.c", CA
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_scan_file.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_search.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_hash.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_identity.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_read.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_schema.c", CAP_FS_WRITE, "")

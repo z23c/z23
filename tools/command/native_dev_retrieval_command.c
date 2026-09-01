@@ -62,6 +62,7 @@ struct rb_computation {
     char pre_hex[65];
     char post_hex[65];
     char codeindex_hex[65];
+    char retrieval_projection_hex[65];
     size_t corpus_files;
     struct rb_rank literal;
     struct rb_rank bm25;
@@ -774,7 +775,8 @@ static bool rb_cursor(const struct zcl_command_request *request, size_t *out)
 static bool rb_render_data(
     struct zcl_command_reply *reply, const char *task_id, const char *query,
     const char *expected_hex, const char *pre_hex, const char *post_hex,
-    const char *codeindex_hex, size_t rank_offset, size_t corpus_files,
+    const char *codeindex_hex, const char *retrieval_projection_hex,
+    size_t rank_offset, size_t corpus_files,
     const struct rb_rank *literal, const struct rb_rank *bm25,
     const struct rb_rank *identifier_graph, size_t identifier_seed_symbols,
     size_t graph_files, bool query_lookup_saturated,
@@ -791,7 +793,7 @@ static bool rb_render_data(
     json_set_object(&reply->data);
     bool ok = corpus_files <= INT64_MAX &&
         json_push_kv_str(&reply->data, "schema",
-                         "zcl.dev_retrieval_benchmark.v2") &&
+                         "zcl.dev_retrieval_benchmark.v3") &&
         json_push_kv_bool(&reply->data, "observational", true) &&
         json_push_kv_bool(&reply->data, "production_ordering_changed", true) &&
         json_push_kv_bool(&reply->data, "promotion_authorized", false) &&
@@ -804,6 +806,8 @@ static bool rb_render_data(
         json_push_kv_str(&reply->data, "observed_vcs_root_post", post_hex) &&
         json_push_kv_str(&reply->data, "shared_codeindex_source_root_sha3",
                          codeindex_hex) &&
+        json_push_kv_str(&reply->data, "retrieval_projection_root_sha3",
+                         retrieval_projection_hex) &&
         json_push_kv_int(&reply->data, "rank_offset",
                          (int64_t)rank_offset) &&
         json_push_kv_int(&reply->data, "page_limit", (int64_t)page_limit) &&
@@ -936,9 +940,11 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
         return false;
     }
 #endif
-    struct codeindex *ci = codeindex_open_source_view(workspace);
-    uint8_t codeindex_root[32];
+    struct codeindex *ci = codeindex_open_retrieval_view(workspace);
+    uint8_t codeindex_root[32], retrieval_projection_root[32];
     bool ranked = ci && codeindex_source_root_sha3(ci, codeindex_root) &&
+        codeindex_retrieval_projection_root_sha3(
+            ci, retrieval_projection_root) &&
         rb_literal_rank(ci, query, &pre, &computed->literal) &&
         rb_bm25_rank(ci, query, &pre, &computed->bm25,
                      &computed->corpus_files) &&
@@ -1002,6 +1008,9 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
     zcl_hex_encode(post_root, sizeof(post_root), computed->post_hex);
     zcl_hex_encode(codeindex_root, sizeof(codeindex_root),
                    computed->codeindex_hex);
+    zcl_hex_encode(retrieval_projection_root,
+                   sizeof(retrieval_projection_root),
+                   computed->retrieval_projection_hex);
     return true;
 }
 
@@ -1017,6 +1026,7 @@ static bool rb_render_fitted(struct zcl_command_reply *reply,
         output_ok = rb_render_data(
             reply, computed->task_id, computed->query, computed->expected_hex,
             computed->pre_hex, computed->post_hex, computed->codeindex_hex,
+            computed->retrieval_projection_hex,
             rank_offset, computed->corpus_files, &computed->literal,
             &computed->bm25, &computed->identifier_graph,
             computed->identifier_seed_symbols, computed->graph_files,
@@ -1141,7 +1151,7 @@ int zcl_native_dev_retrieval_snapshot_compute(
         return ZCL_COMMAND_EXIT_INVALID;
     }
     struct zcl_command_reply reply;
-    zcl_command_reply_init(&reply, "zcl.dev_retrieval_benchmark.v2");
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_benchmark.v3");
     struct rb_computation computed;
     if (!rb_compute(input, workspace, &computed, &reply)) {
         rb_stream_error(error_code, error_code_cap, error_message,
@@ -1160,7 +1170,9 @@ int zcl_native_dev_retrieval_snapshot_compute(
         query_n > 0 && (size_t)query_n < sizeof(snapshot->query) &&
         zcl_hex_decode_lower(computed.pre_hex, snapshot->source_root, 32u) &&
         zcl_hex_decode_lower(computed.codeindex_hex,
-                             snapshot->codeindex_root, 32u) &&
+                             snapshot->codeindex_source_root, 32u) &&
+        zcl_hex_decode_lower(computed.retrieval_projection_hex,
+                             snapshot->retrieval_projection_root, 32u) &&
         rb_snapshot_rank_copy(&computed.bm25, &snapshot->bm25) &&
         rb_snapshot_rank_copy(&computed.identifier_graph,
                               &snapshot->identifier_graph);
@@ -1214,7 +1226,7 @@ int zcl_native_dev_retrieval_stream_jsonl(
         contract_bytes = ZCL_COMMAND_LIST_BUDGET;
 
     struct zcl_command_reply reply;
-    zcl_command_reply_init(&reply, "zcl.dev_retrieval_benchmark.v2");
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_benchmark.v3");
     struct rb_computation computed;
     int64_t started_us = platform_time_monotonic_us();
     if (!rb_compute(input, workspace, &computed, &reply)) {
@@ -1266,7 +1278,7 @@ int zcl_native_dev_retrieval_stream_jsonl(
             json_push_kv_bool(&line, "ranking_budget_exceeded",
                               budget_exceeded) &&
             json_push_kv_str(&line, "data_schema",
-                             "zcl.dev_retrieval_benchmark.v2") &&
+                             "zcl.dev_retrieval_benchmark.v3") &&
             json_push_kv(&line, "data", &reply.data);
         char encoded[ZCL_COMMAND_LIST_BUDGET + 1];
         size_t encoded_len = ok

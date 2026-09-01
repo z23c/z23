@@ -133,7 +133,7 @@ static bool write_context_paging_fixture(void)
     if (!depfile) return false;
     int wrote = snprintf(depfile, depfile_cap,
                          "build/obj/context_page.o: "
-                         "lib/vcs/src/context_page.c");
+                         "contexts/commons/modules/vcs/src/context_page.c");
     if (wrote <= 0 || (size_t)wrote >= depfile_cap) {
         free(depfile);
         return false;
@@ -142,7 +142,7 @@ static bool write_context_paging_fixture(void)
     bool ok = true;
     for (int i = 0; i < CI_CONTEXT_PAGE_EDGES; i++) {
         wrote = snprintf(depfile + used, depfile_cap - used,
-                         " lib/net/include/net/page_%03d.h", i);
+                         " core/modules/net/include/net/page_%03d.h", i);
         if (wrote <= 0 || (size_t)wrote >= depfile_cap - used) {
             ok = false;
             break;
@@ -153,7 +153,8 @@ static bool write_context_paging_fixture(void)
         depfile[used++] = '\n';
         depfile[used] = '\0';
         ok = ci_impact_mk_write(
-                 CI_IMPACT_FIX, "lib/vcs/src/context_page.c",
+                 CI_IMPACT_FIX,
+                 "contexts/commons/modules/vcs/src/context_page.c",
                  "int context_page_fixture(void) { return 1; }\n") &&
              ci_impact_mk_write(CI_IMPACT_FIX,
                                 "build/obj/context_page.d", depfile);
@@ -469,16 +470,19 @@ static int test_code_context_map_complete_pages(void)
         ASSERT(index != NULL);
         static char page[256][256];
         int first = codeindex_includes_of_file_page(
-            index, "lib/vcs/src/context_page.c", 0, page, 256);
+            index, "contexts/commons/modules/vcs/src/context_page.c",
+            0, page, 256);
         ASSERT(first == 256);
-        ASSERT_STR_EQ(page[0], "lib/net/include/net/page_000.h");
-        ASSERT_STR_EQ(page[255], "lib/net/include/net/page_255.h");
+        ASSERT_STR_EQ(page[0], "core/modules/net/include/net/page_000.h");
+        ASSERT_STR_EQ(page[255], "core/modules/net/include/net/page_255.h");
         int second = codeindex_includes_of_file_page(
-            index, "lib/vcs/src/context_page.c", 256, page, 256);
+            index, "contexts/commons/modules/vcs/src/context_page.c",
+            256, page, 256);
         ASSERT(second == 1);
-        ASSERT_STR_EQ(page[0], "lib/net/include/net/page_256.h");
+        ASSERT_STR_EQ(page[0], "core/modules/net/include/net/page_256.h");
         int end = codeindex_includes_of_file_page(
-            index, "lib/vcs/src/context_page.c", 257, page, 256);
+            index, "contexts/commons/modules/vcs/src/context_page.c",
+            257, page, 256);
         ASSERT(end == 0);
         codeindex_close(index);
 

@@ -168,7 +168,8 @@ static void rxc_run(const struct zcl_command_request *request,
             candidate, report.ranked_count, snapshot.bm25.complete,
             candidate_root) ||
         !zcl_retrieval_experiment_proposal_input_root(
-            snapshot.source_root, snapshot.codeindex_root, snapshot.task_id,
+            snapshot.source_root, snapshot.retrieval_projection_root,
+            snapshot.task_id,
             snapshot.query, recomputed_bm25, recomputed_parent, prefix,
             study_root, preregistration_root, evaluator_root, proposal_root)) {
         rxc_fail(reply, "PROPOSAL_ROOT_FAILED", "seal",
@@ -177,11 +178,15 @@ static void rxc_run(const struct zcl_command_request *request,
         return;
     }
 
-    char source_hex[65], codeindex_hex[65], bm25_hex[65], parent_hex[65];
+    char source_hex[65], codeindex_source_hex[65], projection_hex[65];
+    char bm25_hex[65], parent_hex[65];
     char candidate_hex[65], proposal_hex[65], study_hex[65], prereg_hex[65];
     char evaluator_hex[65];
     zcl_hex_encode(snapshot.source_root, 32u, source_hex);
-    zcl_hex_encode(snapshot.codeindex_root, 32u, codeindex_hex);
+    zcl_hex_encode(snapshot.codeindex_source_root, 32u,
+                   codeindex_source_hex);
+    zcl_hex_encode(snapshot.retrieval_projection_root, 32u,
+                   projection_hex);
     zcl_hex_encode(recomputed_bm25, 32u, bm25_hex);
     zcl_hex_encode(recomputed_parent, 32u, parent_hex);
     zcl_hex_encode(candidate_root, 32u, candidate_hex);
@@ -190,14 +195,17 @@ static void rxc_run(const struct zcl_command_request *request,
     zcl_hex_encode(preregistration_root, 32u, prereg_hex);
     zcl_hex_encode(evaluator_root, 32u, evaluator_hex);
     bool ok = json_push_kv_str(&reply->data, "schema",
-                               "zcl.dev_retrieval_experiment.v1") &&
+                               "zcl.dev_retrieval_experiment.v2") &&
         json_push_kv_str(&reply->data, "algorithm",
                          ZCL_RETRIEVAL_EXPERIMENT_ALGORITHM) &&
         json_push_kv_str(&reply->data, "task_id", snapshot.task_id) &&
         json_push_kv_str(&reply->data, "query", snapshot.query) &&
         json_push_kv_int(&reply->data, "bm25_prefix", prefix) &&
         json_push_kv_str(&reply->data, "source_root", source_hex) &&
-        json_push_kv_str(&reply->data, "codeindex_root", codeindex_hex) &&
+        json_push_kv_str(&reply->data, "codeindex_source_root",
+                         codeindex_source_hex) &&
+        json_push_kv_str(&reply->data, "retrieval_projection_root",
+                         projection_hex) &&
         json_push_kv_str(&reply->data, "bm25_ranking_root", bm25_hex) &&
         json_push_kv_str(&reply->data, "parent_ranking_root", parent_hex) &&
         json_push_kv_str(&reply->data, "candidate_ranking_root",

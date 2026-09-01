@@ -55,6 +55,67 @@ cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 source tools/lint/gate_lib.sh
 
+extract_canonical_includes() {
+    local output="$1" dest_name="$2"
+    local -n dest="$dest_name"
+    local line token candidate_count=0
+    local -a fields=() candidate=()
+    local all_include_flags
+
+    dest=()
+    while IFS= read -r line; do
+        read -r -a fields <<< "$line"
+        ((${#fields[@]} > 0)) || continue
+        all_include_flags=1
+        for token in "${fields[@]}"; do
+            if [[ "$token" != -I?* ]]; then
+                all_include_flags=0
+                break
+            fi
+        done
+        ((all_include_flags == 1)) || continue
+        candidate=("${fields[@]}")
+        candidate_count=$((candidate_count + 1))
+    done <<< "$output"
+
+    ((candidate_count == 1)) || return 2
+    dest=("${candidate[@]}")
+}
+
+run_selftest() {
+    local fixture
+    local -a got=()
+
+    fixture=$'gen_templates: 49 inputs -> generated.h (unchanged)\n-Icore/a/include -Iengine/b/include -Iplatform/c/include'
+    extract_canonical_includes "$fixture" got
+    [[ "${got[*]}" == "-Icore/a/include -Iengine/b/include -Iplatform/c/include" ]]
+
+    fixture=$'make[1]: Entering directory /checkout\n-Ione -Itwo\ngen_templates: done'
+    extract_canonical_includes "$fixture" got
+    [[ "${#got[@]}" -eq 2 && "${got[0]}" == "-Ione" && "${got[1]}" == "-Itwo" ]]
+
+    fixture=$'-Ione -Itwo\n-Ithree -Ifour'
+    if extract_canonical_includes "$fixture" got; then
+        echo "check_no_adx_overclaim: selftest FAILED — ambiguous include records were accepted" >&2
+        return 1
+    fi
+    if extract_canonical_includes 'gen_templates: no canonical record' got; then
+        echo "check_no_adx_overclaim: selftest FAILED — hollow include output was accepted" >&2
+        return 1
+    fi
+
+    echo "check_no_adx_overclaim: selftest PASS — generator chatter ignored; ambiguous and hollow include records refused"
+}
+
+if [[ "${1:-}" == "--selftest" ]]; then
+    run_selftest
+    exit 0
+fi
+if (($# != 0)); then
+    echo "usage: $0 [--selftest]" >&2
+    exit 2
+fi
+
 CC="${CC:-cc}"
 command -v "$CC" >/dev/null 2>&1 || {
     echo "check_no_adx_overclaim: FATAL — no C compiler ('$CC') to measure with." >&2
@@ -80,9 +141,17 @@ scanned=${#adx_files[@]}
 gate_require_scanned "$scanned" 2 "check_no_adx_overclaim" \
     "expected at least core/modules/sapling/src/bn254_accel.c and core/modules/sapling/src/fr_avx512.c"
 
-# Include path: every lib/*/include plus the shared roots, so a standalone
-# -c of one file resolves its headers without the full Makefile.
-read -r -a incs <<< "$(make -s print-includes)"
+# Include path: every authority-owned module/include plus the shared roots, so
+# a standalone -c of one file resolves its headers without the full Makefile.
+# Make may first rebuild generated headers, whose progress records share
+# stdout with print-includes. Select the one record made entirely of -I flags;
+# accepting the first line silently graded five words of generator chatter.
+include_output="$(make --no-print-directory -s print-includes)"
+declare -a incs=()
+if ! extract_canonical_includes "$include_output" incs; then
+    echo "check_no_adx_overclaim: FATAL — print-includes did not emit exactly one canonical -I record." >&2
+    exit 2
+fi
 gate_require_scanned "${#incs[@]}" 20 "check_no_adx_overclaim" \
     "canonical build include set came back hollow"
 

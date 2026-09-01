@@ -184,7 +184,7 @@ validate_stream_page() {
        $(field "$document" command) = dev.retrieval.benchmark &&
        $(bool_field "$document" shared_computation) = true &&
        $(uint_field "$document" ranking_computations 1) -eq 1 &&
-       $(field "$document" data_schema) = zcl.dev_retrieval_benchmark.v2 &&
+       $(field "$document" data_schema) = zcl.dev_retrieval_benchmark.v3 &&
        $(field_type "$document" data) = object ]] ||
         fail "invalid retrieval benchmark stream page"
     elapsed_us=$(uint_field "$document" ranking_elapsed_us 9223372036854775807)
@@ -546,11 +546,12 @@ run_scope_selftest() {
     unset invariant_membership_tree_root
     membership_check "$row" c23_codeindex "$groups_file"
     sort -u -o "$groups_file" "$groups_file"
-    [[ $(paste -sd, "$groups_file") = core/modules/net,lib/test ]] ||
+    [[ $(paste -sd, "$groups_file") = core/modules/net,tests ]] ||
         fail "scope selftest relevant directory-group union changed"
     room=$(code_room_document "$outside_path")
     group=$(validated_room_group "$room" "$outside_path")
-    [[ $group = config ]] || fail "scope selftest outside directory group changed"
+    [[ $group = engine/composition ]] ||
+        fail "scope selftest outside directory group changed"
     printf '1\t1\t%s\n2\t1\t%s\n' "$test_path" "$outside_path" >"$literal_file"
     cp -- "$literal_file" "$bm25_file"
     batch=$body; graph_batch=$graph_body; : >"$batch"; : >"$graph_batch"
@@ -588,7 +589,7 @@ run_scope_selftest() {
     if (validated_room_group "$bad" "$test_path" >/dev/null 2>&1); then
         fail "scope selftest accepted missing membership"
     fi
-    bad=${room/\"group\":\"lib\/test\"/\"group\":\"\"}
+    bad=${room/\"group\":\"tests\"/\"group\":\"\"}
     [[ $bad != "$room" ]] || fail "scope selftest empty-group mutation was hollow"
     if (validated_room_group "$bad" "$test_path" >/dev/null 2>&1); then
         fail "scope selftest accepted an empty group"
@@ -673,6 +674,7 @@ run_eligible_task() {
     : >"$literal_file"; : >"$bm25_file"; : >"$graph_file"; : >"$scope_groups"
     unset invariant_task_id invariant_query invariant_expected_root \
         invariant_pre_root invariant_post_root invariant_codeindex_root \
+        invariant_retrieval_projection_root \
         invariant_corpus_files invariant_document_profile \
         invariant_literal_count invariant_literal_complete invariant_literal_root \
         invariant_literal_context invariant_literal_tokens invariant_bm25_count \
@@ -707,7 +709,7 @@ run_eligible_task() {
         validate_stream_page "$output" 900
         [[ $(uint_field "$output" page_index 127) -eq $((pages - 1)) ]] ||
             fail "stream page index is not contiguous for $id"
-        [[ $(field "$output" data.schema) = zcl.dev_retrieval_benchmark.v2 &&
+        [[ $(field "$output" data.schema) = zcl.dev_retrieval_benchmark.v3 &&
            $(bool_field "$output" data.observational) = true &&
            $(bool_field "$output" data.production_ordering_changed) = true &&
            $(bool_field "$output" data.promotion_authorized) = false &&
@@ -735,6 +737,8 @@ run_eligible_task() {
         record_invariant "$output" pre_root data.observed_vcs_root_pre root
         record_invariant "$output" post_root data.observed_vcs_root_post root
         record_invariant "$output" codeindex_root data.shared_codeindex_source_root_sha3 root
+        record_invariant "$output" retrieval_projection_root \
+            data.retrieval_projection_root_sha3 root
         record_invariant "$output" corpus_files data.corpus_files uint
         record_invariant "$output" document_profile data.document_profile string
         record_invariant "$output" identifier_seed_symbols data.identifier_seed_symbols uint
@@ -843,8 +847,9 @@ run_eligible_task() {
         "$scope_groups"
     verify_checkout "$(field "$row" parent_commit)"
     [[ $(capture_root) = "$expected_root" ]] || fail "post-task source root changed for $id"
-    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v4","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"ranking_compute":{"elapsed_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"wall_us":%s,"single_process":true,"buffered_before_write":true},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"identifier_graph":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s,"basis":"bm25_top20_rare_identifier_atom_df16_observed_reverse_refs_context_guard_v1","identifier_seed_symbols":%s,"observed_reverse_ref_files":%s,"query_lookup_saturated":%s,"index_scan_completeness":"unobserved","graph_evidence_kind":"observed_reverse_refs_not_resolved_calls","evidence_available":%s,"fallback_reason":"%s","vector_evidence":"not_used","candidate_set":"strict_bm25_retained_permutation"},"scope_available":true,"scope_basis":"reviewed_relevant_codeindex_group_membership_v1","scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","scope_classifier_epoch":"current_driver_over_exact_parent_source","files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
+    printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v5","id":"%s","status":"observed","expected_vcs_root":"%s","shared_codeindex_source_root_sha3":"%s","retrieval_projection_root_sha3":"%s","membership_tree_root_sha3":"%s","membership_join_basis":"source_stability_backed_separate_indexes","pages":%d,"ranking_compute":{"elapsed_us":%s,"budget_ms":%s,"budget_exceeded":%s},"all_pages":{"wall_us":%s,"single_process":true,"buffered_before_write":true},"literal":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"bm25":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s},"identifier_graph":{"retained_files":%s,"ranking_complete":%s,"ranking_root_sha3":"%s","projected_context_bytes_at_5":%s,"approximate_tokens_at_5":%s,"basis":"bm25_top20_rare_identifier_atom_df16_observed_reverse_refs_context_guard_v1","identifier_seed_symbols":%s,"observed_reverse_ref_files":%s,"query_lookup_saturated":%s,"index_scan_completeness":"unobserved","graph_evidence_kind":"observed_reverse_refs_not_resolved_calls","evidence_available":%s,"fallback_reason":"%s","vector_evidence":"not_used","candidate_set":"strict_bm25_retained_permutation"},"scope_available":true,"scope_basis":"reviewed_relevant_codeindex_group_membership_v1","scope_interpretation":"directory_taxonomy_proxy_not_semantic_scope","scope_classifier_epoch":"current_driver_over_exact_parent_source","files_read_observed":false,"reuse_success_available":false,"unique_loc_avoided_available":false}\n' \
         "$(json_escape "$id")" "$expected_root" "$invariant_codeindex_root" \
+        "$invariant_retrieval_projection_root" \
         "$invariant_membership_tree_root" "$pages" "$total_elapsed" \
         "$invariant_stream_budget_ms" "$any_budget_exceeded" "$total_wall" \
         "$invariant_literal_count" "$invariant_literal_complete" \
@@ -925,7 +930,7 @@ while IFS= read -r row || [[ -n $row ]]; do
         [[ $(capture_root) = "$expected_root" ]] ||
             fail "post-membership source root changed for $id"
         unsupported=$((unsupported + 1))
-        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v4","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null,"identifier_graph":null}\n' \
+        printf '{"record":"task","schema":"zcl.retrieval_gold_benchmark_task.v5","id":"%s","status":"unsupported","reason":"outside_c23_codeindex","expected_vcs_root":"%s","membership_tree_root_sha3":"%s","membership_absence_observed":true,"literal":null,"bm25":null,"identifier_graph":null}\n' \
             "$(json_escape "$id")" "$expected_root" \
             "$invariant_membership_tree_root" >>"$task_rows"
     else
@@ -1021,7 +1026,7 @@ keys_exact "$metrics" . "$eval_result_keys"
    $(hash_text "$(git -C "$repo_root" status --porcelain --untracked-files=all)") = "$driver_status_sha3" ]] ||
     fail "benchmark implementation identity changed during the run"
 
-printf -v benchmark_record '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v2","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":%s,"tasks_evaluated":%s,"tasks_unsupported":%s,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"evaluated_query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","jsonq_binary_sha3":"%s","sha3_helper_binary_sha3":"%s","corpus_checker_script_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_bytes":%s,"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"%s","evaluator_batch_root_sha3":"%s","identifier_graph_evaluator_batch_bytes":%s,"identifier_graph_evaluator_batch_encoding":"base64_rfc4648","identifier_graph_evaluator_batch_base64":"%s","identifier_graph_evaluator_batch_root_sha3":"%s"}' \
+printf -v benchmark_record '{"record":"benchmark","schema":"zcl.retrieval_gold_benchmark.v3","corpus_id":"z23-historical-agent-tasks-v1","mode":"%s","publishable":%s,"publication_admission":"%s","promotion_authorized":false,"driver_commit":"%s","driver_commit_semantics":"display_only_github_trace_metadata","observed_origin_main":"%s","driver_clean":%s,"driver_status_sha3":"%s","tasks_declared":%s,"tasks_evaluated":%s,"tasks_unsupported":%s,"source_epoch_kind":"git_parent_commit","source_root_basis":"vcs_manifest_v1_nonignored_filesystem","relevance_judgment":"landed_changed_path_present_in_parent","query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"evaluated_query_strata":{"commit_subject_only":%s,"same_commit_unordered":%s},"original_prompts_available":false,"canonical_task_roots_available":false,"ranking_may_read_relevance":false,"rank_binary_sha3":"%s","capture_binary_sha3":"%s","evaluator_binary_sha3":"%s","jsonq_binary_sha3":"%s","sha3_helper_binary_sha3":"%s","corpus_checker_script_sha3":"%s","corpus_sha3":"%s","runner_sha3":"%s","evaluator_batch_bytes":%s,"evaluator_batch_encoding":"base64_rfc4648","evaluator_batch_base64":"%s","evaluator_batch_root_sha3":"%s","identifier_graph_evaluator_batch_bytes":%s,"identifier_graph_evaluator_batch_encoding":"base64_rfc4648","identifier_graph_evaluator_batch_base64":"%s","identifier_graph_evaluator_batch_root_sha3":"%s"}' \
     "${mode#--}" "$publishable" "$publication_admission" "$driver_commit" \
     "$remote_commit" "$driver_clean" "$driver_status_sha3" "$declared_tasks" \
     "$eligible" "$unsupported" \

@@ -687,6 +687,7 @@ ZCL_TEST_GROUP(zcode_benchmark_exec)
 ZCL_TEST_GROUP(zcode_discovery_projection)
 ZCL_TEST_GROUP(vcs_devloop)
 ZCL_TEST_GROUP(codeindex)
+ZCL_TEST_GROUP(codeindex_projection_integrity)
 ZCL_TEST_GROUP(fingerprint)
 ZCL_TEST_GROUP(territory)
 /* BM25 ranked retrieval. The group exists for the properties a ranking has

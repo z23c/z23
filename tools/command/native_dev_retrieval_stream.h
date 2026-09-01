@@ -40,7 +40,8 @@ struct zcl_native_dev_retrieval_snapshot {
     char task_id[129];
     char query[4097];
     uint8_t source_root[32];
-    uint8_t codeindex_root[32];
+    uint8_t codeindex_source_root[32];
+    uint8_t retrieval_projection_root[32];
     uint8_t bm25_ranking_root[32];
     uint8_t identifier_graph_ranking_root[32];
     struct zcl_native_dev_retrieval_snapshot_rank bm25;

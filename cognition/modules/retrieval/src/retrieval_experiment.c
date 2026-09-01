@@ -464,21 +464,24 @@ static void rx_write_text(struct sha3_256_ctx *sha, const char *text,
 }
 
 bool zcl_retrieval_experiment_proposal_input_root(
-    const uint8_t source_root[32], const uint8_t codeindex_root[32],
+    const uint8_t source_root[32],
+    const uint8_t retrieval_projection_root[32],
     const char *task_id, const char *query,
     const uint8_t bm25_ranking_root[32],
     const uint8_t parent_ranking_root[32], uint8_t bm25_prefix,
     const uint8_t study_root[32], const uint8_t preregistration_root[32],
     const uint8_t evaluator_root[32], uint8_t out[32])
 {
-    static const char domain[] = "zcl.retrieval_experiment_proposal_input.v1";
+    static const char domain[] = "zcl.retrieval_experiment_proposal_input.v2";
     if (!out) return false;
     size_t task_id_length = 0, query_length = 0;
-    if (!source_root || !codeindex_root || !task_id || !task_id[0] ||
+    if (!source_root || !retrieval_projection_root || !task_id ||
+        !task_id[0] ||
         !query || !query[0] || !bm25_ranking_root || !parent_ranking_root ||
         bm25_prefix > ZCL_RETRIEVAL_EXPERIMENT_TOP || !study_root ||
         !preregistration_root || !evaluator_root ||
-        !rx_root_any(source_root) || !rx_root_any(codeindex_root) ||
+        !rx_root_any(source_root) ||
+        !rx_root_any(retrieval_projection_root) ||
         !rx_root_any(bm25_ranking_root) ||
         !rx_root_any(parent_ranking_root) || !rx_root_any(study_root) ||
         !rx_root_any(preregistration_root) || !rx_root_any(evaluator_root) ||
@@ -489,7 +492,7 @@ bool zcl_retrieval_experiment_proposal_input_root(
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
     sha3_256_write(&sha, source_root, 32u);
-    sha3_256_write(&sha, codeindex_root, 32u);
+    sha3_256_write(&sha, retrieval_projection_root, 32u);
     rx_write_text(&sha, task_id, task_id_length);
     rx_write_text(&sha, query, query_length);
     sha3_256_write(&sha, bm25_ranking_root, 32u);

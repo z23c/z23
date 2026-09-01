@@ -162,7 +162,7 @@ gate_command() {
         check-core-seal)                   echo '__core_seal__' ;;
         check-core-seal-root-mirror)       echo './tools/lint/check_core_seal_root_mirror.sh' ;;
         check-accel-oracle-pinned)         echo './tools/lint/check_accel_oracle_pinned.sh' ;;
-        check-no-adx-overclaim)            echo './tools/lint/check_no_adx_overclaim.sh && ./tools/lint/check_asan_adx_exception.sh --selftest && ./tools/lint/check_asan_adx_exception.sh' ;;
+        check-no-adx-overclaim)            echo './tools/lint/check_no_adx_overclaim.sh --selftest && ./tools/lint/check_no_adx_overclaim.sh && ./tools/lint/check_asan_adx_exception.sh --selftest && ./tools/lint/check_asan_adx_exception.sh' ;;
         check-simd-os-support)             echo './tools/lint/check_simd_os_support.sh' ;;
         check-supervisor-registration)     echo './tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh' ;;
         check-test-registration)           echo './tools/scripts/check_test_registration.sh' ;;

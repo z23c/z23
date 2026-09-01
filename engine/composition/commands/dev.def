@@ -87,7 +87,7 @@ ZCL_COMMAND_DEV_READ(
     ZCL_COMMAND_LIST_BUDGET,
     "dev,retrieval,benchmark,bm25,recall,mrr,context",
     "zcl.dev_retrieval_benchmark_input.v1",
-    "zcl.dev_retrieval_benchmark.v2",
+    "zcl.dev_retrieval_benchmark.v3",
     "workspace,expected_vcs_root,task_id,query,cursor", "",
     "z23-dev dev retrieval benchmark --input='"
     "{\"workspace\":\"<canonical-absolute-checkout>\","
@@ -115,7 +115,7 @@ ZCL_COMMAND_DEV_READ(
     ZCL_COMMAND_LIST_BUDGET,
     "dev,retrieval,experiment,heuristic,preregistration,ranking",
     "zcl.dev_retrieval_experiment_input.v1",
-    "zcl.dev_retrieval_experiment.v1",
+    "zcl.dev_retrieval_experiment.v2",
     "workspace,expected_vcs_root,task_id,query,parent_ranking_root,bm25_prefix,"
     "study_root,preregistration_root,evaluator_root", "",
     "z23-dev dev retrieval experiment --input='"

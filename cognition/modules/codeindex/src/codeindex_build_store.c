@@ -11,8 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char ci_store_format[] = "zcl.codeindex.store.v4";
-
 void ci_source_root_init(struct sha3_256_ctx *sha)
 {
     /* v4 admits *.def registries into the exact indexed source universe. */
@@ -198,10 +196,18 @@ bool ci_build_store_memory(const char *root, struct ci_store **out_store,
         ok = ci_store_meta_set(store, "source_stat_root_sha3",
                                source_stat_out, 32) &&
              ci_store_meta_set(store, "dep_stat_root_sha3", dep_stat_out, 32) &&
-             ci_store_meta_set(store, "store_format", ci_store_format,
-                               sizeof(ci_store_format) - 1) &&
+             ci_store_meta_set(store, "store_format", CI_STORE_FORMAT,
+                               sizeof(CI_STORE_FORMAT) - 1) &&
              ci_store_meta_set(store, "ci_schema_version", CI_SCHEMA_VERSION,
                                sizeof(CI_SCHEMA_VERSION) - 1);
+
+    uint8_t retrieval_projection_root[32];
+    if (ok)
+        ok = ci_store_retrieval_projection_root(
+                 store, retrieval_projection_root) &&
+             ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META,
+                               retrieval_projection_root,
+                               sizeof(retrieval_projection_root));
 
     if (!ok) {
         if (tx_open) (void)ci_store_rollback(store);

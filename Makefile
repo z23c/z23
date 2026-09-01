@@ -10640,6 +10640,7 @@ check-accel-oracle-pinned:
 # disassembly.
 check-no-adx-overclaim:
 	@echo "══ LINT: no ADCX/ADOX carry-chain overclaim ══"
+	@./tools/lint/check_no_adx_overclaim.sh --selftest
 	@./tools/lint/check_no_adx_overclaim.sh
 	@./tools/lint/check_asan_adx_exception.sh --selftest
 	@./tools/lint/check_asan_adx_exception.sh

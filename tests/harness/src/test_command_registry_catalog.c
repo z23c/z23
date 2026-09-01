@@ -297,6 +297,8 @@ static int test_retrieval_experiment_prefix_input(void)
         const struct zcl_command_spec *spec =
             find_spec(reg, "dev.retrieval.experiment");
         ASSERT(spec != NULL);
+        ASSERT(strcmp(spec->output_schema,
+                      "zcl.dev_retrieval_experiment.v2") == 0);
         char why[160];
         struct json_value input;
         json_init(&input);

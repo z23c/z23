@@ -166,6 +166,13 @@ static int case_roots_exclude_gold(void)
         prereg, evaluator, changed);
     RX_CHECK("the sole scalar parameter is root-bound",
              ok && memcmp(first, changed, 32u) != 0);
+    codeindex[0]++;
+    ok = zcl_retrieval_experiment_proposal_input_root(
+        source, codeindex, "task", "query", bm25, parent, 3u, study,
+        prereg, evaluator, changed);
+    RX_CHECK("retrieval projection root is proposal-bound",
+             ok && memcmp(first, changed, 32u) != 0);
+    codeindex[0]--;
     study[0]++;
     ok = zcl_retrieval_experiment_proposal_input_root(
         source, codeindex, "task", "query", bm25, parent, 3u, study,

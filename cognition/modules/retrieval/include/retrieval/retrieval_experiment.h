@@ -221,9 +221,11 @@ bool zcl_retrieval_ranked_files_root(
  * preregistration and evaluator roots are opaque bindings only: this API does
  * not verify their objects, types, ordering, or protocol validity. A later,
  * separate evaluator may resolve and validate them before observing the
- * proposal. */
+ * proposal. `retrieval_projection_root` binds the verified logical rows read
+ * by the rankers; the source root remains a separate source-byte identity. */
 bool zcl_retrieval_experiment_proposal_input_root(
-    const uint8_t source_root[32], const uint8_t codeindex_root[32],
+    const uint8_t source_root[32],
+    const uint8_t retrieval_projection_root[32],
     const char *task_id, const char *query,
     const uint8_t bm25_ranking_root[32],
     const uint8_t parent_ranking_root[32], uint8_t bm25_prefix,
