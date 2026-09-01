@@ -494,6 +494,8 @@ cj_build_peer_helper() {
         "$REPO_ROOT/lib/base/src/cleanse.c" \
         "$REPO_ROOT/lib/platform/src/clock.c" \
         "$REPO_ROOT/lib/platform/src/rng.c" \
+        "$REPO_ROOT/lib/platform/src/positioned_file.c" \
+        "$REPO_ROOT/lib/platform/src/private_directory.c" \
         "$REPO_ROOT/lib/util/src/write_all.c" \
         "$REPO_ROOT/lib/json/src/json.c" \
         "$REPO_ROOT/lib/util/src/hw_profile.c" \
