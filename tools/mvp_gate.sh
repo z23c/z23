@@ -15,7 +15,8 @@
 # THE CONTRACT (why this exists and how it cannot false-green):
 #   * This is a STATUS PROBE, not a build gate. It is 100% READ-ONLY
 #     against every node: it NEVER restarts, mines, sends, or mutates a
-#     datadir/unit. It only calls read RPCs and reads systemd/proc state.
+#     datadir/service. It only calls read RPCs and reads systemd or launchd
+#     runtime state.
 #   * PASS is earned ONLY when the live node mechanically demonstrates the
 #     measurable part of the criterion right now.
 #   * A criterion whose FULL operator claim needs a resource that is ABSENT
@@ -39,7 +40,7 @@
 # Env overrides:
 #   ZCL_RPC_BIN       path to the c23 zcl-rpc client (default build/bin/zcl-rpc)
 #   ZCL_NODE_BIN      path to the native command binary (default build/bin/zclassic23)
-#   ZCL_SOAK_UNIT     systemd --user unit to read soak uptime from (default zclassic23)
+#   ZCL_SOAK_UNIT     service unit/job used for runtime evidence (default zclassic23)
 #   ZD_RPCPORT        zclassicd oracle RPC port for the parity probe (default 8232)
 #   TIP_GAP_OK        max blocks-behind-peer still counted "at tip" (default 10)
 #                     == ZCL_FINALITY_DEPTH; below this the chain is frozen.
@@ -274,13 +275,14 @@ fi
 # C7 — recover from kill -9 <2min. Cannot be exercised live (guardrails
 # forbid touching the node). Proven by make test-crash-bootstrap +
 # make test-two-node-peer-tip. Live verdict = BLOCKED to those full
-# binary proofs. We DO surface one supporting live signal: the unit is
-# Restart=always-supervised and currently active (auto-recovery armed).
+# binary proofs. We DO surface one supporting live signal: the service is
+# supervised for failure recovery and currently active (auto-recovery armed).
 # ────────────────────────────────────────────────────────────────────
-RESTART_POLICY="$(systemctl --user show "$ZCL_SOAK_UNIT" -p Restart --value 2>/dev/null)"
-ACTIVE_STATE="$(systemctl --user show "$ZCL_SOAK_UNIT" -p ActiveState --value 2>/dev/null)"
-if [[ "$RESTART_POLICY" == "always" && "$ACTIVE_STATE" == "active" ]]; then
-    set_v 7 "BLOCKED" "auto-recovery armed (unit $ZCL_SOAK_UNIT Restart=always, active); full kill-9 proof via make test-crash-bootstrap + make test-two-node-peer-tip" 0
+RESTART_POLICY="$(zcl_service_restart_policy "$ZCL_SOAK_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
+ACTIVE_STATE="$(zcl_service_active_state "$ZCL_SOAK_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
+if [[ ( "$RESTART_POLICY" == "always" || "$RESTART_POLICY" == "on-failure" ) &&
+      "$ACTIVE_STATE" == "active" ]]; then
+    set_v 7 "BLOCKED" "auto-recovery armed (service $ZCL_SOAK_UNIT policy=$RESTART_POLICY, active); full kill-9 proof via make test-crash-bootstrap + make test-two-node-peer-tip" 0
 else
     set_v 7 "BLOCKED" "kill-9 recovery proven only by make test-crash-bootstrap (live kill forbidden by guardrails)" 0
 fi
@@ -338,19 +340,36 @@ A_SRC="$C_SRC"; A_ARTIFACT="$C_ARTIFACT"
 # qualify the currently running node.
 LIVE_SOURCE_ID=""; LIVE_ARTIFACT=""; LIVE_ID_DETAIL="running binary identity unavailable"
 capture_running_identity() {
-    local pid exe before after
-    pid="$(systemctl --user show "$ZCL_NODE_UNIT" -p MainPID --value 2>/dev/null)"
+    local pid exe before after snapshot_pid snapshot_schema snapshot_source
+    pid="$(zcl_service_pid "$ZCL_NODE_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     exe="/proc/$pid/exe"
-    [[ -x "$exe" ]] || return 1
-    before="$(sha256sum -- "$exe" 2>/dev/null | awk '{print $1}')"
-    [[ "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
-    LIVE_SOURCE_ID="$(zcl_binary_source_id "$exe")"
-    after="$(sha256sum -- "$exe" 2>/dev/null | awk '{print $1}')"
-    [[ "$before" == "$after" ]] || return 1
-    zcl_is_sha256 "$LIVE_SOURCE_ID" || return 1
-    LIVE_ARTIFACT="$before"
-    LIVE_ID_DETAIL="running source=$LIVE_SOURCE_ID artifact=$LIVE_ARTIFACT"
+    if [[ -x "$exe" ]]; then
+        before="$(sha256sum -- "$exe" 2>/dev/null | awk '{print $1}')"
+        [[ "$before" =~ ^[0-9a-f]{64}$ ]] || return 1
+        LIVE_SOURCE_ID="$(zcl_binary_source_id "$exe")"
+        after="$(sha256sum -- "$exe" 2>/dev/null | awk '{print $1}')"
+        [[ "$before" == "$after" ]] || return 1
+        zcl_is_sha256 "$LIVE_SOURCE_ID" || return 1
+        LIVE_ARTIFACT="$before"
+        LIVE_ID_DETAIL="running source=$LIVE_SOURCE_ID artifact=$LIVE_ARTIFACT"
+        return 0
+    fi
+
+    # macOS has no /proc/<pid>/exe handle whose bytes can be hashed without
+    # racing the pathname. Bind the node-reported source identity to this PID
+    # for visibility, but leave LIVE_ARTIFACT empty so exact C8 qualification
+    # remains fail-closed.
+    snapshot_schema="$(json_str "$SECURITY_SNAPSHOT" schema)"
+    snapshot_pid="$(json_num "$SECURITY_SNAPSHOT" process_id)"
+    snapshot_source="$(zcl_json_first_sha256 "$SECURITY_SNAPSHOT" source_id_sha256)"
+    if [[ "$snapshot_schema" == "zcl.operator_snapshot.v3" &&
+          "$snapshot_pid" == "$pid" ]] && zcl_is_sha256 "$snapshot_source"; then
+        LIVE_SOURCE_ID="$snapshot_source"
+        LIVE_ID_DETAIL="running PID=$pid reports source=$LIVE_SOURCE_ID; exact running artifact unavailable on this platform"
+        return 0
+    fi
+    return 1
 }
 capture_running_identity || true
 
@@ -408,15 +427,14 @@ fi
 
 # ════════════════════════════════════════════════════════════════════
 # SOAK ACCRUAL CHECK — continuous-uptime + at-tip duration (toward C6).
-# READ-ONLY: systemd ActiveEnterTimestamp + NRestarts, no mutation.
+# READ-ONLY: service start time + trustworthy restart counter when available.
 # ════════════════════════════════════════════════════════════════════
-NRESTARTS="$(systemctl --user show "$ZCL_SOAK_UNIT" -p NRestarts --value 2>/dev/null)"
-AET="$(systemctl --user show "$ZCL_SOAK_UNIT" -p ActiveEnterTimestamp --value 2>/dev/null)"
+NRESTARTS="$(zcl_service_restart_count "$ZCL_SOAK_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
+START_EPOCH="$(zcl_service_started_epoch "$ZCL_SOAK_UNIT" "$ZCL_LAUNCHD_PLIST" || true)"
 NOW="$(date +%s)"
 UPTIME_S=""
-if [[ -n "$AET" && "$AET" != "n/a" ]]; then
-    AET_EPOCH="$(date -d "$AET" +%s 2>/dev/null || true)"
-    if [[ -n "$AET_EPOCH" ]]; then UPTIME_S=$(( NOW - AET_EPOCH )); fi
+if [[ "$START_EPOCH" =~ ^[0-9]+$ && "$START_EPOCH" -le "$NOW" ]]; then
+    UPTIME_S=$(( NOW - START_EPOCH ))
 fi
 SOAK_WINDOW_S=$(( 168 * 3600 ))
 SOAK_PCT=""
@@ -424,15 +442,18 @@ SOAK_VERDICT="INSUFFICIENT"
 SOAK_REASON="no uptime read"
 if [[ -n "$UPTIME_S" ]]; then
     SOAK_PCT=$(( UPTIME_S * 100 / SOAK_WINDOW_S ))
-    if [[ "${NRESTARTS:-0}" != "0" ]]; then
+    if [[ -n "$NRESTARTS" && "$NRESTARTS" != "0" ]]; then
         SOAK_VERDICT="NOT_MET"
-        SOAK_REASON="unit restarted NRestarts=${NRESTARTS} (operator/crash event) — clean window broken"
+        SOAK_REASON="service restarted NRestarts=${NRESTARTS} (operator/crash event) — clean window broken"
     elif [[ "$SECURITY_POSTURE_OK" != 1 ]]; then
         SOAK_VERDICT="NOT_MET"
         SOAK_REASON="security posture is ${SECURITY_REVIEW_REQUIRED:-unknown} — soak time does not accrue while review is required or unknown"
     elif [[ "$AT_TIP" != 1 ]]; then
         SOAK_VERDICT="NOT_MET"
         SOAK_REASON="node not at tip (gap=$GAP) — soak time does not accrue while behind tip"
+    elif [[ -z "$NRESTARTS" ]]; then
+        SOAK_VERDICT="INSUFFICIENT"
+        SOAK_REASON="service manager exposes no trustworthy restart counter — zero-intervention window is unproven"
     elif [[ "$UPTIME_S" -ge "$SOAK_WINDOW_S" ]]; then
         SOAK_VERDICT="WINDOW_LONG_ENOUGH"
         SOAK_REASON="continuous uptime >=168h at tip with 0 restarts — judge MET via make soak-evidence-report"

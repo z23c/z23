@@ -65,7 +65,8 @@ C8 FAIL, shielded-receive surface down => C4 FAIL, node unreachable).
 - **C6** — BLOCKED to the soak window; the **soak-accrual** line reports
   how far the current continuous uptime has gotten (see below).
 - **C7** — BLOCKED (live kill forbidden by guardrails); surfaces the
-  supporting signal that the unit is `Restart=always` + active
+  supporting signal that the systemd or launchd service is supervised for
+  failure recovery and active
   (auto-recovery armed). Full proof: `make test-crash-bootstrap` +
   `make test-two-node-peer-tip`.
 - **C8** — coarse height compare vs the zclassicd oracle. Within
@@ -75,11 +76,12 @@ C8 FAIL, shielded-receive surface down => C4 FAIL, node unreachable).
 
 ## Soak-accrual check (toward C6)
 
-Read-only from systemd `ActiveEnterTimestamp` + `NRestarts` and the
-live at-tip flag:
+Read-only from the systemd or launchd process start time, a trustworthy
+restart counter when the service manager exposes one, and the live at-tip
+flag:
 
 ```
-soak-accrual: VERDICT=<v> uptime_s=<n> pct=<n> restarts=<n> at_tip=<0|1> reason="..."
+soak-accrual: VERDICT=<v> uptime_s=<n> pct=<n> restarts=<n|null> at_tip=<0|1> reason="..."
 ```
 
 - `NOT_MET` — `NRestarts>0` (intervention/crash broke the window) **or**
@@ -88,7 +90,9 @@ soak-accrual: VERDICT=<v> uptime_s=<n> pct=<n> restarts=<n> at_tip=<0|1> reason=
   fraction of the 168h window covered.
 - `WINDOW_LONG_ENOUGH` — `>= 168h` continuous at tip, 0 restarts ⇒ judge
   MET via `make soak-evidence-report` (the authoritative JSONL verdict).
-- `INSUFFICIENT` — no uptime read.
+- `INSUFFICIENT` — no uptime read, or no trustworthy restart counter. launchd's
+  `runs` value is deliberately not treated as a restart count because it also
+  includes initial and manual launches.
 
 This is an *instantaneous* accrual signal; the authoritative 168h verdict
 is the JSONL judge in `tools/scripts/soak_evidence.sh`

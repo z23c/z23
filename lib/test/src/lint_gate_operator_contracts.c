@@ -394,6 +394,19 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
         ASSERT(strstr(service_args,
                       "plutil -extract \"ProgramArguments.$i\" raw -o - \"$plist\"")
                != NULL);
+        ASSERT(strstr(service_args, "zcl_service_pid()") != NULL);
+        ASSERT(strstr(service_args, "zcl_service_active_state()") != NULL);
+        ASSERT(strstr(service_args, "zcl_service_restart_policy()") != NULL);
+        ASSERT(strstr(service_args, "zcl_service_started_epoch()") != NULL);
+        ASSERT(strstr(service_args, "zcl_service_restart_count()") != NULL);
+        ASSERT(strstr(service_args,
+                      "launchctl print \"gui/$(id -u)/$label\"") != NULL);
+        ASSERT(strstr(service_args,
+                      "plutil -extract KeepAlive.Crashed raw -o - \"$plist\"")
+               != NULL);
+        ASSERT(strstr(service_args,
+                      "launchd's `runs` includes initial and manual launches")
+               != NULL);
         ASSERT(strstr(scoreboard, "ZCL_DATADIR=$LIVE_DATADIR") != NULL);
         ASSERT(strstr(scoreboard, "ZCL_RPCPORT=$LIVE_RPCPORT") != NULL);
         ASSERT(strstr(scoreboard, "TIP_GAP_OK") != NULL);
@@ -448,6 +461,24 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
         ASSERT(strstr(gate, "SECURITY_POSTURE_OK") != NULL);
         ASSERT(strstr(gate,
                       "elif [[ \"$SECURITY_POSTURE_OK\" != 1 ]]") != NULL);
+        ASSERT(strstr(gate,
+                      "zcl_service_restart_policy \"$ZCL_SOAK_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
+               != NULL);
+        ASSERT(strstr(gate,
+                      "zcl_service_active_state \"$ZCL_SOAK_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
+               != NULL);
+        ASSERT(strstr(gate,
+                      "zcl_service_pid \"$ZCL_NODE_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
+               != NULL);
+        ASSERT(strstr(gate,
+                      "zcl_service_restart_count \"$ZCL_SOAK_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
+               != NULL);
+        ASSERT(strstr(gate,
+                      "zcl_service_started_epoch \"$ZCL_SOAK_UNIT\" \"$ZCL_LAUNCHD_PLIST\"")
+               != NULL);
+        ASSERT(strstr(gate,
+                      "exact running artifact unavailable on this platform")
+               != NULL);
 
         ASSERT(strstr(evidence, "ZCL_SOAK_SECURITY_CMD") != NULL);
         ASSERT(strstr(evidence, "security_review_required") != NULL);
