@@ -46,6 +46,9 @@
      VCS_ZCODE_ATTENTION_METRIC_LATENCY | \
      VCS_ZCODE_ATTENTION_METRIC_COST)
 #define VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS 64u
+#define VCS_ZCODE_ATTENTION_FRONTIER_MAX_PARENT_OBJECTS \
+    (VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS * \
+     VCS_ZCODE_HEURISTIC_MAX_PARENTS)
 #define VCS_ZCODE_ATTENTION_PRIORITY_AUTO 0u
 
 enum vcs_zcode_heuristic_derivation {
@@ -210,10 +213,19 @@ vcs_zcode_attention_bid_validate_for_derivation(
     const struct vcs_zcode_heuristic_v1 *parents, size_t parent_count);
 /* Re-roots the immutable focus and proves that the situation-specific bid,
  * reusable heuristic, exact task/source/context/StoryGraph, and budgets all
- * describe the same bounded observation. */
+ * describe the same bounded observation. This legacy seam remains seed-only.
+ */
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_focus(
     const struct vcs_zcode_attention_bid_v1 *bid,
     const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_focus_v1 *focus);
+/* Positive mixed-lineage focus binding. Lineage is validated before any
+ * focus or budget claim is considered. */
+enum vcs_zcode_attention_error
+vcs_zcode_attention_bid_validate_for_focus_with_lineage(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_count,
     const struct vcs_zcode_focus_v1 *focus);
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_serialize(
     const struct vcs_zcode_attention_bid_v1 *bid,
@@ -228,8 +240,8 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_root(
  * in the existing workspace CAS. Both fixed wires are reloaded, parsed,
  * re-rooted, address-checked, and cross-bound before success is returned.
  * Admission is atomic and idempotent per object but grants no task,
- * assignment, action, execution, evidence, or acceptance authority. The
- * Derived heuristics additionally require every immediate parent to already
+ * assignment, action, execution, evidence, or acceptance authority. Derived
+ * heuristics additionally require every immediate parent to already
  * exist as a canonical heuristic object in the workspace CAS; their sealed
  * immediate-parent boundaries are checked before the child is written. Bare
  * CAS presence is not ancestry admission. A later bid-write failure may leave
@@ -244,14 +256,29 @@ enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
 /* This is a pure, class-isolated projection of untrusted proposals. It does
  * not perform task-conflict admission, admit work, or change ownership. A
  * caller must use vcs_zcode_task_index_conflict() and exclude every result
- * other than CLEAR, and validate each candidate with
- * vcs_zcode_attention_bid_validate_for_focus(), before presenting a bid as
- * safely takeable. Output indices are sorted by bid root for display only.
+ * other than CLEAR, and validate each seed candidate with
+ * vcs_zcode_attention_bid_validate_for_focus() before presenting a bid as
+ * safely takeable. The mixed-lineage variant requires the corresponding
+ * focus_with_lineage seam. Output indices are sorted by bid root for display.
  * If capacity is too small, no indices are returned and frontier_count still
  * reports the required size. */
 enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
     const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
     const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_frontier_report *report);
+
+/* Mixed seed/derived projection with immediate-parent binding only. Parents
+ * are packed by input-row order, and each row consumes its sealed
+ * parent_count. Every row is validated before priority filtering, including
+ * dominated and lower-priority rows. This proposal view grants no task,
+ * assignment, action, execution, evidence, or acceptance authority. */
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_project_with_lineage(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
     const struct vcs_zcode_attention_frontier_query *query,
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_frontier_report *report);
@@ -264,6 +291,17 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
 enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
     const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
     const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_choice_report *report);
+
+/* Automatic hard-priority counterpart of project_with_lineage(); it has the
+ * same immediate-parent-only and non-authoritative boundary. */
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_choose_with_lineage(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
     const struct vcs_zcode_attention_frontier_query *query,
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_choice_report *report);

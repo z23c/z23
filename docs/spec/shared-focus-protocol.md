@@ -80,6 +80,16 @@ their task, source, context, and StoryGraph identities to agree, and refuses a
 heuristic whose requested CPU, memory, context, or output budget exceeds the
 focus. Priority classes and Pareto projection remain non-authoritative.
 
+Seed heuristics use the original seed-only selection seams. Derived heuristics
+use the lineage-aware seams and supply their exact immediate-parent objects in
+canonical packed row order: each row consumes its sealed `parent_count`, and
+the supplied total must equal the sum of all row counts. Structural projection
+validates every row's lineage and bid binding before priority or Pareto
+projection. Verified selection additionally validates every row's focus and
+evaluator evidence first. This is one-hop binding, not ancestry admission.
+Selection grants no task or execution authority, and a signed evaluator
+statement proves attribution and binding rather than the truth of its scores.
+
 ## Storage and transport
 
 All protocol wires are inert content-addressed objects in the existing ZVCS

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: hard-priority, Pareto-diverse projection of attention bids. */
-#include "vcs/zcode_attention_bid.h"
+#include "zcode_attention_internal.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -73,9 +73,11 @@ static bool af_bid_subject_equal(
         memcmp(left->evidence_root, right->evidence_root, 32) == 0;
 }
 
-enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
+static enum vcs_zcode_attention_error af_frontier_project(
     const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
     const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    bool with_lineage,
     const struct vcs_zcode_attention_frontier_query *query,
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_frontier_report *report)
@@ -86,10 +88,19 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
         return VCS_ZCODE_ATTENTION_NULL;
     if (bid_count > VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS)
         return VCS_ZCODE_ATTENTION_COUNT;
+    if (with_lineage &&
+        parent_total > VCS_ZCODE_ATTENTION_FRONTIER_MAX_PARENT_OBJECTS)
+        return VCS_ZCODE_ATTENTION_COUNT;
+    if (with_lineage && parent_total != 0 && !parents)
+        return VCS_ZCODE_ATTENTION_NULL;
+    if (with_lineage && parent_total == 0 && parents)
+        return VCS_ZCODE_ATTENTION_COUNT;
     size_t index_span = out_capacity;
     if (index_span > VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS)
         index_span = VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS;
     index_span *= sizeof(*out_indices);
+    size_t parent_span = with_lineage
+        ? parent_total * sizeof(*parents) : 0;
     if ((bid_count != 0 &&
          (af_memory_overlaps(report, sizeof(*report), bids,
                              bid_count * sizeof(*bids)) ||
@@ -100,6 +111,12 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
                                bid_count * sizeof(*bids)) ||
             af_memory_overlaps(out_indices, index_span, heuristics,
                                bid_count * sizeof(*heuristics)))))) ||
+        (with_lineage && parent_total != 0 &&
+         (af_memory_overlaps(report, sizeof(*report), parents,
+                             parent_span) ||
+          (out_capacity != 0 &&
+           af_memory_overlaps(out_indices, index_span, parents,
+                              parent_span)))) ||
         af_memory_overlaps(report, sizeof(*report), query, sizeof(*query)) ||
         (out_capacity != 0 &&
          (af_memory_overlaps(out_indices, index_span, query,
@@ -107,6 +124,13 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
           af_memory_overlaps(out_indices, index_span, report,
                              sizeof(*report)))))
         return VCS_ZCODE_ATTENTION_ALIAS;
+    if (with_lineage) {
+        enum vcs_zcode_attention_error lineage_error =
+            vcs_zcode_attention_lineage_validate_batch_layout(
+                heuristics, bid_count, parents, parent_total);
+        if (lineage_error != VCS_ZCODE_ATTENTION_OK)
+            return lineage_error;
+    }
     if (!af_priority_valid(query->priority_class))
         return VCS_ZCODE_ATTENTION_PRIORITY;
     const uint8_t *const query_roots[] = {
@@ -125,11 +149,19 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
     uint8_t roots[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS][32] = {{0}};
     bool in_class[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS] = {false};
     bool dominated[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS] = {false};
+    size_t parent_cursor = 0;
     for (size_t i = 0; i < bid_count; i++) {
-        enum vcs_zcode_attention_error error =
-            vcs_zcode_attention_bid_validate_for_heuristic(
+        size_t row_parent_count = with_lineage
+            ? heuristics[i].parent_count : 0;
+        const struct vcs_zcode_heuristic_v1 *row_parents =
+            row_parent_count != 0 ? &parents[parent_cursor] : NULL;
+        enum vcs_zcode_attention_error error = with_lineage
+            ? vcs_zcode_attention_bid_validate_with_lineage(
+                &bids[i], &heuristics[i], row_parents, row_parent_count)
+            : vcs_zcode_attention_bid_validate_for_heuristic(
                 &bids[i], &heuristics[i]);
         if (error != VCS_ZCODE_ATTENTION_OK) return error;
+        parent_cursor += row_parent_count;
         if (memcmp(bids[i].focus_root, query->focus_root, 32) != 0 ||
             memcmp(bids[i].task_root, query->task_root, 32) != 0 ||
             memcmp(bids[i].source_root, query->source_root, 32) != 0 ||
@@ -178,9 +210,37 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
     return VCS_ZCODE_ATTENTION_OK;
 }
 
-enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
+enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
     const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
     const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_frontier_report *report)
+{
+    return af_frontier_project(
+        bids, bid_count, heuristics, NULL, 0, false, query,
+        out_indices, out_capacity, report);
+}
+
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_project_with_lineage(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_frontier_report *report)
+{
+    return af_frontier_project(
+        bids, bid_count, heuristics, parents, parent_total, true, query,
+        out_indices, out_capacity, report);
+}
+
+static enum vcs_zcode_attention_error af_frontier_choose(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    bool with_lineage,
     const struct vcs_zcode_attention_frontier_query *query,
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_choice_report *report)
@@ -193,15 +253,30 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
         return VCS_ZCODE_ATTENTION_PRIORITY;
     if (bid_count > VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS)
         return VCS_ZCODE_ATTENTION_COUNT;
+    if (with_lineage &&
+        parent_total > VCS_ZCODE_ATTENTION_FRONTIER_MAX_PARENT_OBJECTS)
+        return VCS_ZCODE_ATTENTION_COUNT;
+    if (with_lineage && parent_total != 0 && !parents)
+        return VCS_ZCODE_ATTENTION_NULL;
+    if (with_lineage && parent_total == 0 && parents)
+        return VCS_ZCODE_ATTENTION_COUNT;
     size_t index_span = out_capacity;
     if (index_span > VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS)
         index_span = VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS;
     index_span *= sizeof(*out_indices);
+    size_t parent_span = with_lineage
+        ? parent_total * sizeof(*parents) : 0;
     if ((bid_count != 0 &&
          (af_memory_overlaps(report, sizeof(*report), bids,
                              bid_count * sizeof(*bids)) ||
           af_memory_overlaps(report, sizeof(*report), heuristics,
                              bid_count * sizeof(*heuristics)))) ||
+        (with_lineage && parent_total != 0 &&
+         (af_memory_overlaps(report, sizeof(*report), parents,
+                             parent_span) ||
+          (out_capacity != 0 && out_indices &&
+           af_memory_overlaps(out_indices, index_span, parents,
+                              parent_span)))) ||
         af_memory_overlaps(report, sizeof(*report), query, sizeof(*query)) ||
         (out_capacity != 0 && out_indices &&
          (af_memory_overlaps(out_indices, index_span, query, sizeof(*query)) ||
@@ -214,9 +289,10 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
     if (bid_count == 0) {
         exact.priority_class = VCS_ZCODE_ATTENTION_P0_SECURITY;
         enum vcs_zcode_attention_error error =
-            vcs_zcode_attention_frontier_project(
-                bids, bid_count, heuristics, &exact, out_indices,
-                out_capacity, &result.frontier);
+            af_frontier_project(
+                bids, bid_count, heuristics, parents, parent_total,
+                with_lineage, &exact, out_indices, out_capacity,
+                &result.frontier);
         if (error == VCS_ZCODE_ATTENTION_OK) *report = result;
         return error;
     }
@@ -227,11 +303,37 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
     }
     exact.priority_class = selected;
     result.selected_priority_class = selected;
-    enum vcs_zcode_attention_error error = vcs_zcode_attention_frontier_project(
-        bids, bid_count, heuristics, &exact, out_indices, out_capacity,
-        &result.frontier);
+    enum vcs_zcode_attention_error error = af_frontier_project(
+        bids, bid_count, heuristics, parents, parent_total, with_lineage,
+        &exact, out_indices, out_capacity, &result.frontier);
     if (error == VCS_ZCODE_ATTENTION_OK ||
         error == VCS_ZCODE_ATTENTION_CAPACITY)
         *report = result;
     return error;
+}
+
+enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_choice_report *report)
+{
+    return af_frontier_choose(
+        bids, bid_count, heuristics, NULL, 0, false, query,
+        out_indices, out_capacity, report);
+}
+
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_choose_with_lineage(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_choice_report *report)
+{
+    return af_frontier_choose(
+        bids, bid_count, heuristics, parents, parent_total, true, query,
+        out_indices, out_capacity, report);
 }

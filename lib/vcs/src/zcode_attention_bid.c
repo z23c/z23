@@ -2,6 +2,8 @@
  * Purpose: immutable heuristic proposals and non-authoritative attention bids. */
 #include "vcs/zcode_attention_bid.h"
 
+#include "zcode_attention_internal.h"
+
 #include "base/bytes.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
@@ -456,13 +458,25 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_focus(
     enum vcs_zcode_attention_error error =
         vcs_zcode_attention_bid_validate_for_heuristic(bid, heuristic);
     if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    return vcs_zcode_attention_bid_validate_focus_binding(
+        bid, heuristic, focus);
+}
+
+enum vcs_zcode_attention_error
+vcs_zcode_attention_bid_validate_focus_binding(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_focus_v1 *focus)
+{
     uint8_t focus_root[32];
     if (vcs_zcode_focus_root(focus, focus_root) != VCS_ZCODE_FOCUS_OK)
         return VCS_ZCODE_ATTENTION_BINDING;
     if (memcmp(bid->focus_root, focus_root, 32) != 0 ||
         memcmp(focus->task_root, heuristic->task_root, 32) != 0 ||
-        memcmp(focus->source_universe_root, heuristic->source_root, 32) != 0 ||
-        memcmp(focus->context_root, heuristic->agent_context_root, 32) != 0 ||
+        memcmp(focus->source_universe_root,
+               heuristic->source_root, 32) != 0 ||
+        memcmp(focus->context_root,
+               heuristic->agent_context_root, 32) != 0 ||
         memcmp(focus->story_graph_root,
                heuristic->ontology_context_root, 32) != 0 ||
         heuristic->requested_cpu_seconds > focus->max_cpu_seconds ||
