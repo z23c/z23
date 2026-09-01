@@ -81,7 +81,7 @@ static enum vcs_zcode_attention_error af_frontier_project(
     const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
     const struct vcs_zcode_heuristic_v1 *heuristics,
     const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
-    bool with_lineage,
+    bool with_lineage, const bool *eligible,
     const struct vcs_zcode_attention_frontier_query *query,
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_frontier_report *report)
@@ -147,9 +147,13 @@ static enum vcs_zcode_attention_error af_frontier_project(
             return VCS_ZCODE_ATTENTION_ROOT;
     }
 
-    struct vcs_zcode_attention_frontier_report result = {
-        .input_count = bid_count,
-    };
+    struct vcs_zcode_attention_frontier_report result = {0};
+    if (!eligible) {
+        result.input_count = bid_count;
+    } else {
+        for (size_t i = 0; i < bid_count; i++)
+            if (eligible[i]) result.input_count++;
+    }
     uint8_t roots[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS][32] = {{0}};
     bool in_class[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS] = {false};
     bool dominated[VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS] = {false};
@@ -176,12 +180,21 @@ static enum vcs_zcode_attention_error af_frontier_project(
             return VCS_ZCODE_ATTENTION_BINDING;
         error = vcs_zcode_attention_bid_root(&bids[i], roots[i]);
         if (error != VCS_ZCODE_ATTENTION_OK) return error;
-        for (size_t j = 0; j < i; j++) {
-            if (memcmp(roots[i], roots[j], 32) == 0 ||
-                af_bid_subject_equal(&bids[i], &bids[j]))
+        for (size_t j = 0; eligible && eligible[i] && j < i; j++) {
+            if (eligible[j] &&
+                (memcmp(roots[i], roots[j], 32) == 0 ||
+                 af_bid_subject_equal(&bids[i], &bids[j])))
                 return VCS_ZCODE_ATTENTION_DUPLICATE;
         }
-        in_class[i] = bids[i].priority_class == query->priority_class;
+        if (!eligible) {
+            for (size_t j = 0; j < i; j++) {
+                if (memcmp(roots[i], roots[j], 32) == 0 ||
+                    af_bid_subject_equal(&bids[i], &bids[j]))
+                    return VCS_ZCODE_ATTENTION_DUPLICATE;
+            }
+        }
+        in_class[i] = (!eligible || eligible[i]) &&
+            bids[i].priority_class == query->priority_class;
         if (in_class[i]) result.class_candidate_count++;
     }
     for (size_t i = 0; i < bid_count; i++) {
@@ -222,7 +235,7 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
     struct vcs_zcode_attention_frontier_report *report)
 {
     return af_frontier_project(
-        bids, bid_count, heuristics, NULL, 0, false, query,
+        bids, bid_count, heuristics, NULL, 0, false, NULL, query,
         out_indices, out_capacity, report);
 }
 
@@ -236,7 +249,7 @@ vcs_zcode_attention_frontier_project_with_lineage(
     struct vcs_zcode_attention_frontier_report *report)
 {
     return af_frontier_project(
-        bids, bid_count, heuristics, parents, parent_total, true, query,
+        bids, bid_count, heuristics, parents, parent_total, true, NULL, query,
         out_indices, out_capacity, report);
 }
 
@@ -244,7 +257,7 @@ static enum vcs_zcode_attention_error af_frontier_choose(
     const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
     const struct vcs_zcode_heuristic_v1 *heuristics,
     const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
-    bool with_lineage,
+    bool with_lineage, const bool *eligible,
     const struct vcs_zcode_attention_frontier_query *query,
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_choice_report *report)
@@ -290,25 +303,29 @@ static enum vcs_zcode_attention_error af_frontier_choose(
 
     struct vcs_zcode_attention_frontier_query exact = *query;
     struct vcs_zcode_attention_choice_report result = {0};
-    if (bid_count == 0) {
+    size_t first_eligible = 0;
+    while (first_eligible < bid_count && eligible && !eligible[first_eligible])
+        first_eligible++;
+    if (first_eligible == bid_count) {
         exact.priority_class = VCS_ZCODE_ATTENTION_P0_SECURITY;
         enum vcs_zcode_attention_error error =
             af_frontier_project(
                 bids, bid_count, heuristics, parents, parent_total,
-                with_lineage, &exact, out_indices, out_capacity,
+                with_lineage, eligible, &exact, out_indices, out_capacity,
                 &result.frontier);
         if (error == VCS_ZCODE_ATTENTION_OK) *report = result;
         return error;
     }
-    uint8_t selected = bids[0].priority_class;
-    for (size_t i = 1; i < bid_count; i++) {
-        if (bids[i].priority_class < selected)
+    uint8_t selected = bids[first_eligible].priority_class;
+    for (size_t i = first_eligible + 1u; i < bid_count; i++) {
+        if ((!eligible || eligible[i]) && bids[i].priority_class < selected)
             selected = bids[i].priority_class;
     }
     exact.priority_class = selected;
     result.selected_priority_class = selected;
     enum vcs_zcode_attention_error error = af_frontier_project(
         bids, bid_count, heuristics, parents, parent_total, with_lineage,
+        eligible,
         &exact, out_indices, out_capacity, &result.frontier);
     if (error == VCS_ZCODE_ATTENTION_OK ||
         error == VCS_ZCODE_ATTENTION_CAPACITY)
@@ -324,7 +341,7 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
     struct vcs_zcode_attention_choice_report *report)
 {
     return af_frontier_choose(
-        bids, bid_count, heuristics, NULL, 0, false, query,
+        bids, bid_count, heuristics, NULL, 0, false, NULL, query,
         out_indices, out_capacity, report);
 }
 
@@ -338,6 +355,22 @@ vcs_zcode_attention_frontier_choose_with_lineage(
     struct vcs_zcode_attention_choice_report *report)
 {
     return af_frontier_choose(
-        bids, bid_count, heuristics, parents, parent_total, true, query,
+        bids, bid_count, heuristics, parents, parent_total, true, NULL, query,
         out_indices, out_capacity, report);
+}
+
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_choose_eligible_with_lineage(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    const bool *eligible,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_choice_report *report)
+{
+    if (bid_count != 0 && !eligible) return VCS_ZCODE_ATTENTION_NULL;
+    return af_frontier_choose(
+        bids, bid_count, heuristics, parents, parent_total, true, eligible,
+        query, out_indices, out_capacity, report);
 }

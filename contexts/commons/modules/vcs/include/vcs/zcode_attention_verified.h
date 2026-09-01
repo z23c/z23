@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "vcs/zcode_attention_bid.h"
+#include "vcs/zcode_heuristic_lifecycle.h"
 #include "vcs/zcode_science.h"
 
 struct vcs_zcode_attention_verified_report {
@@ -65,6 +66,37 @@ vcs_zcode_attention_frontier_next_verified_with_lineage(
     const struct vcs_zcode_science_statement_v1 *statements,
     const struct vcs_zcode_focus_v1 *focus,
     const uint8_t priority_policy_root[32],
+    const uint8_t bid_evaluator_root[32],
+    const uint8_t expected_evaluator_signer[32],
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_verified_report *report);
+
+/* Join exact signed RESULT evidence to caller-accepted lifecycle snapshots
+ * before automatic choice. Every row is verified and folded from the
+ * existing workspace CAS. Empty or ambiguous lifecycle is incomplete and
+ * fails the whole batch; explicit RETRACTION makes only that row ineligible.
+ * Snapshot policy, signer, heuristic, and anchor must bind the exact row.
+ * Repeating one exact RESULT anchor is malformed duplicate input. Among
+ * distinct evidence generations, retained rows alone participate in logical-
+ * candidate duplicate, hard-priority, and Pareto decisions. Output indices
+ * preserve original input identity.
+ * This remains a read-only proposal projection and grants no work, action,
+ * execution, acceptance, wallet, consensus, or deployment authority. */
+/* The mixed-lineage seam also accepts seed rows with zero parents. Parents
+ * retain their original packed-row layout; retired rows are still fully
+ * validated before filtering. Retained count is choice.frontier.input_count;
+ * retired count is verified_count minus that value. */
+enum vcs_zcode_attention_error
+vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+    const char *workspace,
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_total,
+    const struct vcs_zcode_science_statement_v1 *statements,
+    const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *snapshots,
+    const struct vcs_zcode_focus_v1 *focus,
+    const uint8_t priority_policy_root[32],
+    const uint8_t lifecycle_local_policy_root[32],
     const uint8_t bid_evaluator_root[32],
     const uint8_t expected_evaluator_signer[32],
     size_t *out_indices, size_t out_capacity,

@@ -376,19 +376,16 @@ static enum vcs_zcode_attention_error hlt_select_retained(
     const struct vcs_zcode_science_statement_v1 *statement,
     const struct vcs_zcode_focus_v1 *focus, const uint8_t signer[32])
 {
-    struct vcs_zcode_heuristic_lifecycle_report lifecycle;
-    enum vcs_zcode_attention_error error = vcs_zcode_heuristic_lifecycle_fold(
-        workspace, snapshot, &lifecycle);
-    if (error != VCS_ZCODE_ATTENTION_OK) return error;
-    if (!lifecycle.complete || lifecycle.status !=
-            VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED)
-        return VCS_ZCODE_ATTENTION_EVIDENCE;
     size_t selected = SIZE_MAX;
     struct vcs_zcode_attention_verified_report verified;
-    return vcs_zcode_attention_frontier_next_verified_with_lineage(
-        bid, 1u, heuristic, parent, 1u, statement, focus,
-        bid->priority_policy_root, bid->bid_evaluator_root, signer,
-        &selected, 1u, &verified);
+    enum vcs_zcode_attention_error error =
+        vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+            workspace, bid, 1u, heuristic, parent, 1u, statement, snapshot,
+            focus, bid->priority_policy_root, snapshot->local_policy_root,
+            bid->bid_evaluator_root, signer, &selected, 1u, &verified);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    return verified.choice.frontier.input_count == 1u && selected == 0u
+        ? VCS_ZCODE_ATTENTION_OK : VCS_ZCODE_ATTENTION_EVIDENCE;
 }
 
 static bool hlt_statement(
@@ -995,11 +992,11 @@ static int hlt_experience_episode(const char *workspace)
     memcpy(accepted_roots[0], malformed_root, 32);
     hlt_snapshot(&lesson_snapshot, heuristic_roots[2], pubkey,
                  malformed_root, accepted_roots, 1u);
-    HL_CHECK("episode-malformed-lesson-fails-closed-atomically",
+    HL_CHECK("episode-malformed-wrong-anchor-fails-binding",
              malformed_stored && hlt_select_retained(
                  workspace, &lesson_snapshot, &episode_bids[2],
                  &heuristics[2], &heuristics[1], &lesson_statements[0],
-                 &focus, pubkey) == VCS_ZCODE_ATTENTION_EVIDENCE);
+                 &focus, pubkey) == VCS_ZCODE_ATTENTION_BINDING);
 
     struct vcs_zcode_attention_bid_v1 generation_bids[2] = {
         episode_bids[2], episode_bids[2]
@@ -1010,24 +1007,259 @@ static int hlt_experience_episode(const char *workspace)
     struct vcs_zcode_heuristic_v1 generation_parents[2] = {
         heuristics[1], heuristics[1]
     };
-    struct vcs_zcode_science_statement_v1 generation_statements[2] = {
-        lesson_statements[0], lesson_statements[0]
-    };
+    struct vcs_zcode_science_statement_v1 generation_statements[5] = {{0}};
+    struct vcs_zcode_science_relation_set_v1 generation_relations[5] = {{0}};
+    uint8_t generation_roots[5][32] = {{0}};
+    generation_bids[0].priority_class = VCS_ZCODE_ATTENTION_P0_SECURITY;
+    generation_bids[1].priority_class =
+        VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
     memcpy(generation_bids[1].evidence_root, receipt_roots[3], 32);
     generation_bids[1].information_gain_bp--;
     bool generation_ok = hlt_bound_result(
-        &generation_statements[1], &lesson_relations[1],
-        &generation_bids[1], &generation_heuristics[1], &focus,
-        secret, pubkey);
+            &generation_statements[0], &generation_relations[0],
+            &generation_bids[0], &generation_heuristics[0], &focus,
+            secret, pubkey) &&
+        hlt_store(workspace, &generation_statements[0],
+                  &generation_relations[0], generation_roots[0]) &&
+        hlt_bound_result(
+            &generation_statements[1], &generation_relations[1],
+            &generation_bids[1], &generation_heuristics[1], &focus,
+            secret, pubkey) &&
+        hlt_store(workspace, &generation_statements[1],
+                  &generation_relations[1], generation_roots[1]) &&
+        hlt_transition(
+            &generation_statements[2], &generation_relations[2],
+            &generation_statements[0], generation_roots[0],
+            VCS_ZCODE_SCIENCE_PROFILE_RETRACTION,
+            VCS_ZCODE_SCIENCE_RELATION_RETRACTION, receipt_roots[0], 5,
+            secret, pubkey) &&
+        hlt_store(workspace, &generation_statements[2],
+                  &generation_relations[2], generation_roots[2]) &&
+        hlt_transition(
+            &generation_statements[3], &generation_relations[3],
+            &generation_statements[1], generation_roots[1],
+            VCS_ZCODE_SCIENCE_PROFILE_RETRACTION,
+            VCS_ZCODE_SCIENCE_RELATION_RETRACTION, receipt_roots[1], 6,
+            secret, pubkey) &&
+        hlt_store(workspace, &generation_statements[3],
+                  &generation_relations[3], generation_roots[3]) &&
+        hlt_transition(
+            &generation_statements[4], &generation_relations[4],
+            &generation_statements[1], generation_roots[1],
+            VCS_ZCODE_SCIENCE_PROFILE_SUPERSESSION,
+            VCS_ZCODE_SCIENCE_RELATION_SUPERSESSION, receipt_roots[2], 7,
+            secret, pubkey) &&
+        hlt_store(workspace, &generation_statements[4],
+                  &generation_relations[4], generation_roots[4]);
+    HL_CHECK("episode-generation-lifecycles-store", generation_ok);
+    if (!generation_ok) return failures;
+
+    uint8_t lifecycle_policy_root[32];
+    hlt_root(lifecycle_policy_root, 253u);
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 generation_snapshots[2];
+    uint8_t old_retired[2][32], new_retained[1][32];
+    memcpy(old_retired[0], generation_roots[0], 32);
+    memcpy(old_retired[1], generation_roots[2], 32);
+    memcpy(new_retained[0], generation_roots[1], 32);
+    hlt_snapshot(&generation_snapshots[0], heuristic_roots[2], pubkey,
+                 generation_roots[0], old_retired, 2u);
+    hlt_snapshot(&generation_snapshots[1], heuristic_roots[2], pubkey,
+                 generation_roots[1], new_retained, 1u);
+    memcpy(generation_snapshots[0].local_policy_root,
+           lifecycle_policy_root, 32);
+    memcpy(generation_snapshots[1].local_policy_root,
+           lifecycle_policy_root, 32);
     size_t selected[2] = {SIZE_MAX, SIZE_MAX};
     struct vcs_zcode_attention_verified_report verified;
-    HL_CHECK("episode-wrong-evidence-generation-fails-closed",
+    HL_CHECK("episode-retired-p0-yields-to-retained-p1-original-index",
              generation_ok &&
-             vcs_zcode_attention_frontier_next_verified_with_lineage(
-                 generation_bids, 2u, generation_heuristics,
-                 generation_parents, 2u, generation_statements, &focus,
-                 task.proof_policy_root, task.toolchain_capsule_root, pubkey,
-                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_DUPLICATE);
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, generation_bids, 2u, generation_heuristics,
+                 generation_parents, 2u, generation_statements,
+                 generation_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_OK &&
+             verified.verified_count == 2u &&
+             verified.choice.frontier.input_count == 1u &&
+             verified.choice.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+             verified.choice.frontier.frontier_count == 1u &&
+             selected[0] == 1u);
+
+    uint8_t old_retained[1][32];
+    memcpy(old_retained[0], generation_roots[0], 32);
+    hlt_snapshot(&generation_snapshots[0], heuristic_roots[2], pubkey,
+                 generation_roots[0], old_retained, 1u);
+    memcpy(generation_snapshots[0].local_policy_root,
+           lifecycle_policy_root, 32);
+    memset(&verified, 0xa5, sizeof(verified));
+    struct vcs_zcode_attention_verified_report verified_before = verified;
+    selected[0] = SIZE_MAX;
+    HL_CHECK("episode-two-retained-generations-refuse-atomically",
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, generation_bids, 2u, generation_heuristics,
+                 generation_parents, 2u, generation_statements,
+                 generation_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
+             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
+             selected[0] == SIZE_MAX);
+
+    uint8_t new_retired[2][32];
+    memcpy(new_retired[0], generation_roots[1], 32);
+    memcpy(new_retired[1], generation_roots[3], 32);
+    hlt_snapshot(&generation_snapshots[0], heuristic_roots[2], pubkey,
+                 generation_roots[0], old_retired, 2u);
+    hlt_snapshot(&generation_snapshots[1], heuristic_roots[2], pubkey,
+                 generation_roots[1], new_retired, 2u);
+    for (size_t i = 0; i < 2u; i++)
+        memcpy(generation_snapshots[i].local_policy_root,
+               lifecycle_policy_root, 32);
+    selected[0] = SIZE_MAX;
+    HL_CHECK("episode-all-retired-is-explicit-empty-choice",
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, generation_bids, 2u, generation_heuristics,
+                 generation_parents, 2u, generation_statements,
+                 generation_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_OK &&
+             verified.verified_count == 2u &&
+             verified.choice.frontier.input_count == 0u &&
+             verified.choice.frontier.frontier_count == 0u &&
+             verified.choice.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_PRIORITY_AUTO &&
+             selected[0] == SIZE_MAX);
+
+    struct vcs_zcode_attention_bid_v1 repeated_bids[2] = {
+        generation_bids[0], generation_bids[0]
+    };
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 repeated_snapshots[2] = {
+        generation_snapshots[0], generation_snapshots[0]
+    };
+    struct vcs_zcode_science_statement_v1 repeated_statements[2] = {
+        generation_statements[0], generation_statements[0]
+    };
+    verified = verified_before;
+    selected[0] = SIZE_MAX;
+    HL_CHECK("episode-repeated-result-anchor-is-malformed-duplicate",
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, repeated_bids, 2u, generation_heuristics,
+                 generation_parents, 2u, repeated_statements,
+                 repeated_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_DUPLICATE &&
+             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
+             selected[0] == SIZE_MAX);
+
+    struct vcs_zcode_attention_bid_v1 capacity_bids[3] = {
+        episode_bids[0], generation_bids[0], generation_bids[1]
+    };
+    capacity_bids[0].priority_class =
+        VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
+    capacity_bids[0].expected_user_value_bp = 9000u;
+    capacity_bids[0].expected_cost_milliunits = 50u;
+    struct vcs_zcode_heuristic_v1 capacity_heuristics[3] = {
+        heuristics[0], heuristics[2], heuristics[2]
+    };
+    struct vcs_zcode_heuristic_v1 capacity_parents[2] = {
+        heuristics[1], heuristics[1]
+    };
+    struct vcs_zcode_science_statement_v1 capacity_statements[3] = {
+        {0}, generation_statements[0], generation_statements[1]
+    };
+    struct vcs_zcode_science_relation_set_v1 capacity_relations = {0};
+    uint8_t capacity_root[32];
+    bool capacity_ok = hlt_bound_result(
+            &capacity_statements[0], &capacity_relations, &capacity_bids[0],
+            &capacity_heuristics[0], &focus, secret, pubkey) &&
+        hlt_store(workspace, &capacity_statements[0], &capacity_relations,
+                  capacity_root);
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 capacity_snapshots[3];
+    uint8_t capacity_accepted[1][32];
+    memcpy(capacity_accepted[0], capacity_root, 32);
+    hlt_snapshot(&capacity_snapshots[0], heuristic_roots[0], pubkey,
+                 capacity_root, capacity_accepted, 1u);
+    capacity_snapshots[1] = generation_snapshots[0];
+    hlt_snapshot(&capacity_snapshots[2], heuristic_roots[2], pubkey,
+                 generation_roots[1], new_retained, 1u);
+    for (size_t i = 0; i < 3u; i++)
+        memcpy(capacity_snapshots[i].local_policy_root,
+               lifecycle_policy_root, 32);
+    size_t capacity_selected[2] = {SIZE_MAX, SIZE_MAX};
+    HL_CHECK("episode-retired-dominator-cannot-hide-retained-frontier",
+             capacity_ok &&
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, capacity_bids, 3u, capacity_heuristics,
+                 capacity_parents, 2u, capacity_statements,
+                 capacity_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 capacity_selected, 2u, &verified) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             verified.verified_count == 3u &&
+             verified.choice.frontier.input_count == 2u &&
+             verified.choice.frontier.frontier_count == 2u &&
+             verified.choice.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+             capacity_selected[0] != capacity_selected[1] &&
+             (capacity_selected[0] == 0u || capacity_selected[0] == 2u) &&
+             (capacity_selected[1] == 0u || capacity_selected[1] == 2u));
+
+    verified = verified_before;
+    capacity_selected[0] = SIZE_MAX;
+    HL_CHECK("episode-lifecycle-frontier-capacity-is-atomic",
+             capacity_ok &&
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, capacity_bids, 3u, capacity_heuristics,
+                 capacity_parents, 2u, capacity_statements,
+                 capacity_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 capacity_selected, 1u, &verified) ==
+                 VCS_ZCODE_ATTENTION_CAPACITY &&
+             verified.verified_count == 3u &&
+             verified.choice.frontier.input_count == 2u &&
+             verified.choice.frontier.frontier_count == 2u &&
+             verified.choice.frontier.returned_count == 0u &&
+             capacity_selected[0] == SIZE_MAX);
+
+    uint8_t forked_new[3][32];
+    memcpy(forked_new[0], generation_roots[1], 32);
+    memcpy(forked_new[1], generation_roots[3], 32);
+    memcpy(forked_new[2], generation_roots[4], 32);
+    hlt_snapshot(&generation_snapshots[1], heuristic_roots[2], pubkey,
+                 generation_roots[1], forked_new, 3u);
+    memcpy(generation_snapshots[1].local_policy_root,
+           lifecycle_policy_root, 32);
+    verified = verified_before;
+    selected[0] = SIZE_MAX;
+    HL_CHECK("episode-forked-lifecycle-poisons-whole-batch",
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, generation_bids, 2u, generation_heuristics,
+                 generation_parents, 2u, generation_statements,
+                 generation_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
+             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
+             selected[0] == SIZE_MAX);
+
+    hlt_snapshot(&generation_snapshots[1], heuristic_roots[2], pubkey,
+                 generation_roots[1], new_retained, 1u);
+    memcpy(generation_snapshots[1].local_policy_root,
+           lifecycle_policy_root, 32);
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 swapped =
+        generation_snapshots[0];
+    generation_snapshots[0] = generation_snapshots[1];
+    generation_snapshots[1] = swapped;
+    verified = verified_before;
+    selected[0] = SIZE_MAX;
+    HL_CHECK("episode-valid-wrong-anchor-refuses-atomically",
+             vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
+                 workspace, generation_bids, 2u, generation_heuristics,
+                 generation_parents, 2u, generation_statements,
+                 generation_snapshots, &focus, task.proof_policy_root,
+                 lifecycle_policy_root, task.toolchain_capsule_root, pubkey,
+                 selected, 2u, &verified) == VCS_ZCODE_ATTENTION_BINDING &&
+             memcmp(&verified, &verified_before, sizeof(verified)) == 0 &&
+             selected[0] == SIZE_MAX);
 
     HL_CHECK("episode-lesson-beats-both-no-lesson-controls",
              episode_reports[2].files_opened < episode_reports[0].files_opened &&
