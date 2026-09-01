@@ -40,7 +40,11 @@ struct eval_task_storage {
 };
 
 static struct eval_task_storage g_tasks[EVAL_TASK_MAX];
+static struct zcl_retrieval_profile_replay_candidate_v1
+    g_profile_candidates[EVAL_TASK_MAX];
 static size_t g_line_no;
+static bool g_hash_input;
+static struct sha3_256_ctx g_input_sha;
 
 static bool fail(const char *message)
 {
@@ -53,6 +57,8 @@ static bool read_line(char out[EVAL_LINE_MAX])
     if (!fgets(out, EVAL_LINE_MAX, stdin)) return false;
     g_line_no++;
     size_t n = strlen(out);
+    if (g_hash_input)
+        sha3_256_write(&g_input_sha, (const uint8_t *)out, n);
     if (n == 0 || out[n - 1] != '\n') return fail("overlong or unterminated line");
     out[--n] = '\0';
     if (n > 0 && out[n - 1] == '\r') return fail("carriage return is not canonical");
@@ -355,12 +361,162 @@ static void print_arm(const struct zcl_retrieval_eval_metrics *m)
     putchar('}');
 }
 
+static int profile_replay_mode(
+    const struct zcl_retrieval_profile_v1 *profile,
+    const uint8_t evaluator_root[32], size_t task_count,
+    size_t observed_relevance_judgments, const uint8_t raw_batch_root[32])
+{
+    struct zcl_retrieval_profile_replay_task_v1
+        replay_tasks[EVAL_TASK_MAX] = {0};
+    for (size_t t = 0; t < task_count; t++)
+        replay_tasks[t] =
+            (struct zcl_retrieval_profile_replay_task_v1){
+                .task_id = g_tasks[t].id,
+                .query = g_tasks[t].query,
+                .baseline = g_tasks[t].bm25.ranked,
+                .baseline_count = g_tasks[t].bm25.count,
+                .baseline_complete = g_tasks[t].bm25.complete,
+            };
+    struct zcl_retrieval_profile_replay_report_v1 replay_report;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_replay_project(
+            profile, replay_tasks, task_count, g_profile_candidates,
+            EVAL_TASK_MAX, &replay_report);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) {
+        fprintf(stderr, "retrieval-eval: profile replay refused: %s\n",
+                zcl_retrieval_experiment_error_string(error));
+        return 1;
+    }
+    struct zcl_retrieval_gold_task evaluation_tasks[EVAL_TASK_MAX] = {0};
+    for (size_t t = 0; t < task_count; t++)
+        evaluation_tasks[t] = (struct zcl_retrieval_gold_task){
+            .task_id = g_tasks[t].id,
+            .query = g_tasks[t].query,
+            .relevant_paths = g_tasks[t].relevant_ptrs,
+            .relevant_count = g_tasks[t].relevant_count,
+            .ranked = g_profile_candidates[t].ranked,
+            .ranked_count = g_profile_candidates[t].ranked_count,
+            .ranking_complete = g_profile_candidates[t].ranking_complete,
+        };
+    struct zcl_retrieval_experiment_eval_report evaluation = {
+        .changed_positions_at_5 = replay_report.changed_positions_at_5,
+        .fallback_tasks = replay_report.fallback_tasks,
+        .top20_membership_preserved =
+            replay_report.top20_membership_preserved,
+        .full_retained_set_preserved =
+            replay_report.full_retained_set_preserved,
+        .context_ceiling_preserved =
+            replay_report.context_ceiling_preserved,
+    };
+    if (!zcl_retrieval_evaluate(
+            evaluation_tasks, task_count, &evaluation.metrics)) {
+        (void)fail("maintained evaluator refused profile candidates");
+        return 1;
+    }
+    static const char evaluation_domain[] =
+        "zcl.retrieval_profile_frozen_ranking_replay_evaluation_input.v1";
+    struct sha3_256_ctx evaluation_sha;
+    uint8_t evaluation_input_root[32];
+    sha3_256_init(&evaluation_sha);
+    sha3_256_write(&evaluation_sha, (const uint8_t *)evaluation_domain,
+                   sizeof(evaluation_domain));
+    sha3_256_write(&evaluation_sha, raw_batch_root, 32u);
+    sha3_256_write(&evaluation_sha,
+                   replay_report.replay_hypothesis_root, 32u);
+    sha3_256_write(&evaluation_sha,
+                   replay_report.candidate_batch_root, 32u);
+    sha3_256_finalize(&evaluation_sha, evaluation_input_root);
+    struct zcl_retrieval_experiment_eval_result_v1 result;
+    error = zcl_retrieval_experiment_eval_result_init(
+        &result, &evaluation, replay_report.profile_root,
+        replay_report.replay_hypothesis_root, evaluation_input_root,
+        evaluator_root);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) {
+        fprintf(stderr, "retrieval-eval: result refused: %s\n",
+                zcl_retrieval_experiment_error_string(error));
+        return 1;
+    }
+    uint8_t result_wire[ZCL_RETRIEVAL_EVAL_RESULT_WIRE_BYTES];
+    uint8_t result_root[32];
+    error = zcl_retrieval_experiment_eval_result_serialize(
+        &result, result_wire);
+    if (error == ZCL_RETRIEVAL_EXPERIMENT_OK)
+        error = zcl_retrieval_experiment_eval_result_root(
+            &result, result_root);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) {
+        fprintf(stderr, "retrieval-eval: result serialization refused: %s\n",
+                zcl_retrieval_experiment_error_string(error));
+        return 1;
+    }
+    char profile_hex[65], hypothesis_hex[65], candidates_hex[65];
+    char raw_batch_hex[65], evaluation_hex[65], evaluator_hex[65];
+    char result_root_hex[65];
+    char result_wire_hex[ZCL_RETRIEVAL_EVAL_RESULT_WIRE_BYTES * 2u + 1u];
+    zcl_hex_encode(replay_report.profile_root, 32u, profile_hex);
+    zcl_hex_encode(replay_report.replay_hypothesis_root, 32u,
+                   hypothesis_hex);
+    zcl_hex_encode(replay_report.candidate_batch_root, 32u, candidates_hex);
+    zcl_hex_encode(raw_batch_root, 32u, raw_batch_hex);
+    zcl_hex_encode(evaluation_input_root, 32u, evaluation_hex);
+    zcl_hex_encode(evaluator_root, 32u, evaluator_hex);
+    zcl_hex_encode(result_root, 32u, result_root_hex);
+    zcl_hex_encode(result_wire, sizeof(result_wire), result_wire_hex);
+    printf("{\"schema\":\"zcl.retrieval_context_profile_replay.v1\","
+           "\"algorithm\":\"%s\",\"input_batch_schema\":"
+           "\"zcl.retrieval_eval_batch.v3\",\"input_arm_binding\":"
+           "\"bm25_is_profile_baseline\",\"tasks_evaluated\":%zu,"
+           "\"aggregation_kind\":\"macro_equal_task_weight\","
+           "\"eligible_relevance_judgments\":%zu,"
+           "\"requested_top_k\":5,\"effective_top_k\":5,"
+           "\"feature_evidence\":\"context_bytes_only\","
+           "\"projector_relevance_input_channel\":\"none\","
+           "\"gold_separation\":\"api_surface_only_same_process\","
+           "\"baseline_scope_fields\":"
+           "\"present_but_ignored_erased_and_unrooted\","
+           "\"context_cost_kind\":\"projected_not_read\","
+           "\"token_basis\":\"ceil(context_bytes/4)\","
+           "\"scope_basis\":\"unavailable_labels_erased_before_eval\","
+           "\"generation_binding\":\"unavailable_in_frozen_v3\","
+           "\"profile_root_sha3\":\"%s\","
+           "\"replay_hypothesis_root_sha3\":\"%s\","
+           "\"candidate_batch_root_sha3\":\"%s\","
+           "\"raw_batch_root_sha3\":\"%s\","
+           "\"evaluation_input_root_sha3\":\"%s\","
+           "\"caller_supplied_evaluator_root_sha3\":\"%s\","
+           "\"candidate\":",
+           ZCL_RETRIEVAL_PROFILE_ALGORITHM, task_count,
+           observed_relevance_judgments, profile_hex, hypothesis_hex,
+           candidates_hex, raw_batch_hex, evaluation_hex, evaluator_hex);
+    print_arm(&evaluation.metrics);
+    printf(",\"changed_positions_at_5\":%zu,\"fallback_tasks\":%zu,"
+           "\"top20_membership_preserved\":%s,"
+           "\"full_retained_set_preserved\":%s,"
+           "\"context_ceiling_preserved\":%s,"
+           "\"evaluation_result_wire_hex\":\"%s\","
+           "\"evaluation_result_root_sha3\":\"%s\","
+           "\"evaluation_status\":\"observed_exploratory\","
+           "\"chronology_status\":\"unverified\","
+           "\"holdout_independence_status\":\"unverified\","
+           "\"replication_status\":\"not_run\","
+           "\"quality_claim_available\":false,"
+           "\"promotion_authorized\":false}\n",
+           evaluation.changed_positions_at_5, evaluation.fallback_tasks,
+           evaluation.top20_membership_preserved ? "true" : "false",
+           evaluation.full_retained_set_preserved ? "true" : "false",
+           evaluation.context_ceiling_preserved ? "true" : "false",
+           result_wire_hex, result_root_hex);
+    return ferror(stdout) ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--rank-root") == 0)
         return rank_root_mode(argv[2]);
     bool experiment_mode = false;
+    bool profile_mode = false;
     size_t experiment_prefix = 0;
+    struct zcl_retrieval_profile_v1 profile;
+    uint8_t evaluator_root[32] = {0};
     if (argc == 3 && strcmp(argv[1], "--experiment-prefix") == 0) {
         if (!parse_size(argv[2], ZCL_RETRIEVAL_EXPERIMENT_TOP,
                         &experiment_prefix)) {
@@ -368,12 +524,30 @@ int main(int argc, char **argv)
             return 64;
         }
         experiment_mode = true;
+    } else if (argc == 5 && strcmp(argv[1], "--profile-hex") == 0 &&
+               strcmp(argv[3], "--evaluator-root") == 0) {
+        uint8_t wire[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES];
+        if (!zcl_hex_decode_lower(argv[2], wire, sizeof(wire)) ||
+            zcl_retrieval_profile_parse(wire, sizeof(wire), &profile) !=
+                ZCL_RETRIEVAL_EXPERIMENT_OK ||
+            !zcl_hex_decode_lower(argv[4], evaluator_root,
+                                  sizeof(evaluator_root))) {
+            (void)fail("profile or evaluator root is not canonical");
+            return 64;
+        }
+        profile_mode = true;
     } else if (argc != 1) {
         fputs("usage: retrieval-eval < batch.txt\n"
               "       retrieval-eval --rank-root 0|1 < ranks.tsv\n"
-              "       retrieval-eval --experiment-prefix 0..5 < batch.txt\n",
+              "       retrieval-eval --experiment-prefix 0..5 < batch.txt\n"
+              "       retrieval-eval --profile-hex HEX "
+              "--evaluator-root ROOT < batch.txt\n",
               stderr);
         return 64;
+    }
+    if (profile_mode) {
+        g_hash_input = true;
+        sha3_256_init(&g_input_sha);
     }
     char line[EVAL_LINE_MAX];
     size_t task_count, declared_relevance_judgments;
@@ -413,6 +587,8 @@ int main(int argc, char **argv)
         (void)fail("missing canonical end or trailing input");
         return 1;
     }
+    uint8_t raw_batch_root[32] = {0};
+    if (profile_mode) sha3_256_finalize(&g_input_sha, raw_batch_root);
     struct zcl_retrieval_gold_task literal[EVAL_TASK_MAX] = {0};
     struct zcl_retrieval_gold_task bm25[EVAL_TASK_MAX] = {0};
     for (size_t t = 0; t < task_count; t++) {
@@ -430,6 +606,10 @@ int main(int argc, char **argv)
         bm25[t].ranked_count = g_tasks[t].bm25.count;
         bm25[t].ranking_complete = g_tasks[t].bm25.complete;
     }
+    if (profile_mode)
+        return profile_replay_mode(
+            &profile, evaluator_root, task_count,
+            observed_relevance_judgments, raw_batch_root);
     if (experiment_mode) {
         struct zcl_retrieval_experiment_eval_task
             tasks[EVAL_TASK_MAX] = {0};

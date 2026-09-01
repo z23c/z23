@@ -757,6 +757,128 @@ static int case_context_snapshot_and_profile_proposal(void)
     return failures;
 }
 
+static int case_frozen_profile_replay(void)
+{
+    int failures = 0;
+    char paths[6][8];
+    struct zcl_retrieval_ranked_file baseline[6];
+    rx_rows(baseline, paths, 6u);
+    const uint64_t bytes[6] = {30u, 40u, 50u, 60u, 70u, 5u};
+    for (size_t i = 0; i < 6u; i++) baseline[i].context_bytes = bytes[i];
+    struct zcl_retrieval_profile_v1 profile;
+    zcl_retrieval_profile_init(&profile);
+    profile.feature_mask = ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES] = 1u;
+    profile.rerank_window = 6u;
+    profile.top_k = 5u;
+    profile.context_byte_scale = 1u;
+    struct zcl_retrieval_profile_replay_task_v1 task = {
+        .task_id = "task",
+        .query = "find smallest context",
+        .baseline = baseline,
+        .baseline_count = 6u,
+        .baseline_complete = true,
+    };
+    struct zcl_retrieval_profile_replay_candidate_v1 first, second;
+    struct zcl_retrieval_profile_replay_report_v1 report, repeated;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_replay_project(
+            &profile, &task, 1u, &first, 1u, &report);
+    RX_CHECK("frozen replay reranks only the sealed BM25 rows",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             report.schema_version == ZCL_RETRIEVAL_PROFILE_REPLAY_VERSION &&
+             report.task_count == 1u &&
+             strcmp(first.ranked[0].path, "f05.c") == 0 &&
+             report.changed_positions_at_5 == 5u &&
+             report.fallback_tasks == 0u &&
+             report.top20_membership_preserved &&
+             report.full_retained_set_preserved &&
+             report.context_ceiling_preserved);
+    RX_CHECK("frozen replay erases proposer scope labels",
+             !first.ranked[0].in_scope_available &&
+             !first.ranked[1].in_scope_available);
+    error = zcl_retrieval_profile_replay_project(
+        &profile, &task, 1u, &second, 1u, &repeated);
+    RX_CHECK("frozen replay roots and ranking are deterministic",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             memcmp(report.replay_hypothesis_root,
+                    repeated.replay_hypothesis_root, 32u) == 0 &&
+             memcmp(report.candidate_batch_root,
+                    repeated.candidate_batch_root, 32u) == 0 &&
+             same_order(first.ranked, second.ranked, 6u));
+
+    uint8_t original_hypothesis[32];
+    memcpy(original_hypothesis, report.replay_hypothesis_root, 32u);
+    baseline[5].context_bytes++;
+    error = zcl_retrieval_profile_replay_project(
+        &profile, &task, 1u, &second, 1u, &repeated);
+    RX_CHECK("baseline evidence mutation moves replay hypothesis",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             memcmp(original_hypothesis,
+                    repeated.replay_hypothesis_root, 32u) != 0);
+    baseline[5].context_bytes--;
+
+    struct zcl_retrieval_profile_replay_candidate_v1 candidate_sentinel;
+    struct zcl_retrieval_profile_replay_report_v1 report_sentinel;
+    memset(&candidate_sentinel, 0xa5, sizeof(candidate_sentinel));
+    memset(&report_sentinel, 0x5a, sizeof(report_sentinel));
+    first = candidate_sentinel;
+    report = report_sentinel;
+    profile.top_k = 4u;
+    error = zcl_retrieval_profile_replay_project(
+        &profile, &task, 1u, &first, 1u, &report);
+    RX_CHECK("fixed at-five evidence refuses another top-k atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_PARAMETER &&
+             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
+             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
+    profile.top_k = 5u;
+    profile.feature_mask |= ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_PATH);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 1u;
+    error = zcl_retrieval_profile_replay_project(
+        &profile, &task, 1u, &first, 1u, &report);
+    RX_CHECK("unavailable frozen feature evidence refuses atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
+             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
+             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
+    profile.feature_mask &= (uint16_t)~ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_PATH);
+    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 0u;
+    task.baseline_count = 4u;
+    error = zcl_retrieval_profile_replay_project(
+        &profile, &task, 1u, &first, 1u, &report);
+    RX_CHECK("fewer than five replay rows cannot claim at-five evidence",
+             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
+             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
+             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
+    task.baseline_count = 6u;
+    task.task_id = "_hidden";
+    error = zcl_retrieval_profile_replay_project(
+        &profile, &task, 1u, &first, 1u, &report);
+    RX_CHECK("noncanonical replay task identity is refused atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
+             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
+             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
+
+    struct zcl_retrieval_profile_replay_task_v1 pair[2] = {task, task};
+    pair[0].task_id = "first";
+    pair[1].task_id = "_late_invalid";
+    struct zcl_retrieval_profile_replay_candidate_v1 pair_candidates[2];
+    struct zcl_retrieval_profile_replay_candidate_v1 pair_sentinel[2];
+    memset(pair_sentinel, 0x3c, sizeof(pair_sentinel));
+    memcpy(pair_candidates, pair_sentinel, sizeof(pair_candidates));
+    report = report_sentinel;
+    error = zcl_retrieval_profile_replay_project(
+        &profile, pair, 2u, pair_candidates, 2u, &report);
+    RX_CHECK("late second-task refusal preserves every output atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
+             memcmp(pair_candidates, pair_sentinel,
+                    sizeof(pair_candidates)) == 0 &&
+             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
+    return failures;
+}
+
 int test_retrieval_experiment(void)
 {
     int failures = 0;
@@ -768,5 +890,6 @@ int test_retrieval_experiment(void)
     failures += case_feature_snapshot_and_projection();
     failures += case_feature_refusals_and_aliases();
     failures += case_context_snapshot_and_profile_proposal();
+    failures += case_frozen_profile_replay();
     return failures;
 }

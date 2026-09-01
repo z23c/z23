@@ -144,4 +144,100 @@ if "$evaluator" --experiment-prefix 6 <"$experiment" >/dev/null 2>&1; then
     fail "out-of-range experiment prefix was accepted"
 fi
 
-printf 'retrieval-eval-selftest: PASS mutations=14 experiment_prefixes=2\n'
+profile=5a435250524f310a010000040000000000000000000000000000000000000000010000000000000000000006050000000100000000000000
+evaluator_root=1111111111111111111111111111111111111111111111111111111111111111
+profile_output=$("$evaluator" --profile-hex "$profile" \
+    --evaluator-root "$evaluator_root" <"$experiment") ||
+    fail "context-only profile replay was refused"
+[[ $(printf '%s\n' "$profile_output" | "$jsonq" get schema) = zcl.retrieval_context_profile_replay.v1 &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get input_arm_binding) = bm25_is_profile_baseline &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get generation_binding) = unavailable_in_frozen_v3 &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get projector_relevance_input_channel) = none &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get gold_separation) = api_surface_only_same_process &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get candidate.recall_at_5.basis_points) = 10000 &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get candidate.wrong_scope_at_5.available) = false &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get replay_hypothesis_root_sha3) = 863e3921f6e6375d0f6354629334723cb18ef6b14c01be3502244b56605e2354 &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get candidate_batch_root_sha3) = a6d5b8d292ed781c7ef7b5fd272c850a34bedf0b481144ee9b5207e684e460f5 &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get evaluation_result_root_sha3) = 35faf9e287186608513df3c43f7f0ffb6ad28f21751f3cd4f1b4ad785b1b4bef &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get chronology_status) = unverified &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get holdout_independence_status) = unverified &&
+   $(printf '%s\n' "$profile_output" | "$jsonq" get promotion_authorized) = false ]] ||
+    fail "profile replay identity or evidence boundary differs"
+[[ $("$evaluator" --profile-hex "$profile" \
+       --evaluator-root "$evaluator_root" <"$experiment") = "$profile_output" ]] ||
+    fail "profile replay is not deterministic"
+
+gold_mutation="$tmp/profile-gold-mutation.batch"
+sed 's/relevant a.c/relevant f.c/' "$experiment" >"$gold_mutation"
+gold_output=$("$evaluator" --profile-hex "$profile" \
+    --evaluator-root "$evaluator_root" <"$gold_mutation") ||
+    fail "valid gold mutation was refused"
+[[ $(printf '%s\n' "$gold_output" | "$jsonq" get replay_hypothesis_root_sha3) = \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get replay_hypothesis_root_sha3) &&
+   $(printf '%s\n' "$gold_output" | "$jsonq" get candidate_batch_root_sha3) = \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get candidate_batch_root_sha3) &&
+   $(printf '%s\n' "$gold_output" | "$jsonq" get evaluation_input_root_sha3) != \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get evaluation_input_root_sha3) &&
+   $(printf '%s\n' "$gold_output" | "$jsonq" get evaluation_result_root_sha3) != \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get evaluation_result_root_sha3) ]] ||
+    fail "gold mutation crossed the proposal/evaluation boundary"
+
+literal_mutation="$tmp/profile-literal-mutation.batch"
+sed '0,/rank 10 1 1 b.c/s//rank 11 1 1 b.c/' \
+    "$experiment" >"$literal_mutation"
+literal_output=$("$evaluator" --profile-hex "$profile" \
+    --evaluator-root "$evaluator_root" <"$literal_mutation") ||
+    fail "valid irrelevant-arm mutation was refused"
+[[ $(printf '%s\n' "$literal_output" | "$jsonq" get replay_hypothesis_root_sha3) = \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get replay_hypothesis_root_sha3) &&
+   $(printf '%s\n' "$literal_output" | "$jsonq" get candidate_batch_root_sha3) = \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get candidate_batch_root_sha3) &&
+   $(printf '%s\n' "$literal_output" | "$jsonq" get evaluation_input_root_sha3) != \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get evaluation_input_root_sha3) ]] ||
+    fail "literal arm mutation crossed the profile proposal boundary"
+
+scope_mutation="$tmp/profile-scope-mutation.batch"
+sed '0,/rank 10 1 1 a.c/! s/rank 10 1 1 a.c/rank 10 0 0 a.c/' \
+    "$experiment" >"$scope_mutation"
+scope_output=$("$evaluator" --profile-hex "$profile" \
+    --evaluator-root "$evaluator_root" <"$scope_mutation") ||
+    fail "valid ignored-scope mutation was refused"
+[[ $(printf '%s\n' "$scope_output" | "$jsonq" get replay_hypothesis_root_sha3) = \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get replay_hypothesis_root_sha3) &&
+   $(printf '%s\n' "$scope_output" | "$jsonq" get candidate_batch_root_sha3) = \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get candidate_batch_root_sha3) &&
+   $(printf '%s\n' "$scope_output" | "$jsonq" get raw_batch_root_sha3) != \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get raw_batch_root_sha3) &&
+   $(printf '%s\n' "$scope_output" | "$jsonq" get evaluation_result_root_sha3) != \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get evaluation_result_root_sha3) ]] ||
+    fail "scope mutation entered proposal identity or missed evaluation identity"
+
+bm25_mutation="$tmp/profile-bm25-mutation.batch"
+sed '0,/rank 10 1 1 a.c/! s/rank 10 1 1 a.c/rank 11 1 1 a.c/' \
+    "$experiment" >"$bm25_mutation"
+bm25_output=$("$evaluator" --profile-hex "$profile" \
+    --evaluator-root "$evaluator_root" <"$bm25_mutation") ||
+    fail "valid baseline mutation was refused"
+[[ $(printf '%s\n' "$bm25_output" | "$jsonq" get replay_hypothesis_root_sha3) != \
+       $(printf '%s\n' "$profile_output" | "$jsonq" get replay_hypothesis_root_sha3) ]] ||
+    fail "BM25 baseline mutation did not move the replay hypothesis"
+
+uppercase_profile=${profile/a/A}
+if "$evaluator" --profile-hex "$uppercase_profile" \
+    --evaluator-root "$evaluator_root" <"$experiment" >"$tmp/refused.out" 2>/dev/null; then
+    fail "uppercase profile wire was accepted"
+fi
+[[ ! -s $tmp/refused.out ]] || fail "profile refusal emitted partial evidence"
+top_four=${profile/06050000/06040000}
+if "$evaluator" --profile-hex "$top_four" \
+    --evaluator-root "$evaluator_root" <"$experiment" >"$tmp/refused.out" 2>/dev/null; then
+    fail "top-four profile was presented as at-five evidence"
+fi
+[[ ! -s $tmp/refused.out ]] || fail "top-k refusal emitted partial evidence"
+if "$evaluator" --profile-hex "$profile" \
+    --evaluator-root "$evaluator_root" <"$fixture" >"$tmp/refused.out" 2>/dev/null; then
+    fail "short baseline was presented as at-five evidence"
+fi
+[[ ! -s $tmp/refused.out ]] || fail "short-baseline refusal emitted partial evidence"
+
+printf 'retrieval-eval-selftest: PASS mutations=21 experiment_prefixes=2 profile_replays=6\n'

@@ -6643,6 +6643,7 @@ RETRIEVAL_EVAL_BIN = $(BIN_DIR)/retrieval-eval
 retrieval-eval: $(RETRIEVAL_EVAL_BIN)
 $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     cognition/modules/retrieval/src/retrieval_eval.c \
+    cognition/modules/retrieval/src/retrieval_eval_result.c \
     cognition/modules/retrieval/src/retrieval_experiment.c \
     cognition/modules/retrieval/src/retrieval_profile.c \
     cognition/modules/retrieval/include/retrieval/retrieval_experiment.h \
@@ -6654,6 +6655,7 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Icognition/modules/retrieval/include -Iplatform/modules/base/include -Iplatform/modules/sha3/include -o $@ \
 	    tools/retrieval_eval.c cognition/modules/retrieval/src/retrieval_eval.c \
+	    cognition/modules/retrieval/src/retrieval_eval_result.c \
 	    cognition/modules/retrieval/src/retrieval_experiment.c \
 	    cognition/modules/retrieval/src/retrieval_profile.c \
 	    platform/modules/base/src/safe_alloc.c platform/modules/sha3/src/sha3.c
@@ -6663,18 +6665,23 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
     retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check \
     retrieval-gold-current-receipt-check retrieval-gold-scope-receipt-check \
-    retrieval-gold-identifier-graph-receipt-check retrieval-prefix-sweep-check
+    retrieval-gold-identifier-graph-receipt-check retrieval-prefix-sweep-check \
+    retrieval-profile-sweep-check
 
 # Frozen retrieval evidence names paths in its exact historical source epoch.
 # Replaying both joins prevents a present-tree relocation from rewriting those
 # coordinates or the historical classifier that interprets them.
 .PHONY: check-retrieval-historical-evidence
-check-retrieval-historical-evidence: jsonq agent-sha3 retrieval-eval
+check-retrieval-historical-evidence: jsonq agent-sha3 retrieval-eval \
+    retrieval-profile-sweep-check
 	@./tools/dev/retrieval-gold-corpus-check.sh --check
 	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check
 
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
+
+retrieval-profile-sweep-check: retrieval-eval jsonq agent-sha3
+	@./tools/dev/retrieval-profile-sweep.sh --check
 
 retrieval-gold-corpus-check: jsonq agent-sha3
 	@./tools/dev/retrieval-gold-corpus-check.sh --selftest

@@ -211,7 +211,7 @@ gate_command() {
         check-file-purpose)                echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh' ;;
         check-group-purpose)               echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_group_purpose.sh' ;;
         check-architecture-tree)           echo './tools/lint/check_architecture_tree.sh' ;;
-        check-retrieval-historical-evidence) echo './tools/dev/retrieval-gold-corpus-check.sh --check && ./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check' ;;
+        check-retrieval-historical-evidence) echo './tools/dev/retrieval-gold-corpus-check.sh --check && ./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check && ./tools/dev/retrieval-profile-sweep.sh --check' ;;
         check-no-orphan-placement)         echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_orphan_placement.sh' ;;
         check-file-size-ceiling)           echo '"$ZCL_LINT_BIN_DIR/file_size_policy"' ;;
         check-operator-needed-sink)        echo './tools/scripts/check_operator_needed_sink.sh' ;;

@@ -19,6 +19,11 @@
 #define ZCL_RETRIEVAL_PROFILE_VERSION 1u
 #define ZCL_RETRIEVAL_PROFILE_WIRE_BYTES 56u
 #define ZCL_RETRIEVAL_PROFILE_DOMAIN "zcl.retrieval_profile.v1"
+#define ZCL_RETRIEVAL_PROFILE_REPLAY_VERSION 1u
+#define ZCL_RETRIEVAL_PROFILE_REPLAY_HYPOTHESIS_DOMAIN \
+    "zcl.retrieval_profile_frozen_ranking_replay_hypothesis.v1"
+#define ZCL_RETRIEVAL_PROFILE_REPLAY_CANDIDATES_DOMAIN \
+    "zcl.retrieval_profile_frozen_ranking_replay_candidates.v1"
 #define ZCL_RETRIEVAL_FEATURE_SNAPSHOT_VERSION 1u
 #define ZCL_RETRIEVAL_FEATURE_SNAPSHOT_DOMAIN \
     "zcl.retrieval_feature_snapshot.v1"
@@ -147,6 +152,42 @@ struct zcl_retrieval_profile_report {
     uint8_t candidate_ranking_root[32];
 };
 
+/* A deliberately weaker profile experiment over an already-frozen ranking.
+ * Unlike a feature snapshot, this input does not claim a current source,
+ * codeindex, or retrieval-projection generation. It is useful for historical
+ * counterfactual replay only. Relevance paths, evaluator scores, and
+ * promotion state have no channel into this proposal surface. Baseline scope
+ * fields may be present in the shared ranked-file carrier but are ignored,
+ * erased, and excluded from replay identity. */
+struct zcl_retrieval_profile_replay_task_v1 {
+    const char *task_id;
+    const char *query;
+    const struct zcl_retrieval_ranked_file *baseline;
+    size_t baseline_count;
+    bool baseline_complete;
+};
+
+struct zcl_retrieval_profile_replay_candidate_v1 {
+    struct zcl_retrieval_ranked_file
+        ranked[ZCL_RETRIEVAL_EVAL_RANK_MAX];
+    size_t ranked_count;
+    bool ranking_complete;
+    uint8_t ranking_root[32];
+};
+
+struct zcl_retrieval_profile_replay_report_v1 {
+    uint16_t schema_version;
+    size_t task_count;
+    size_t changed_positions_at_5;
+    size_t fallback_tasks;
+    bool top20_membership_preserved;
+    bool full_retained_set_preserved;
+    bool context_ceiling_preserved;
+    uint8_t profile_root[32];
+    uint8_t replay_hypothesis_root[32];
+    uint8_t candidate_batch_root[32];
+};
+
 struct zcl_retrieval_experiment_report {
     size_t ranked_count;
     uint64_t bm25_context_bytes_at_5;
@@ -227,6 +268,20 @@ enum zcl_retrieval_experiment_error zcl_retrieval_profile_project(
     const struct zcl_retrieval_feature_row_v1 *rows,
     size_t *out_indices, size_t out_capacity,
     struct zcl_retrieval_profile_report *report);
+
+/* Re-run the context-byte profile over ordered frozen baseline rows. This is
+ * relevance-free and roots exactly that weaker historical hypothesis; it
+ * never manufactures the source/codeindex/projection roots required by the
+ * live generation-joined proposal API. The current v1 report is fixed at
+ * top-five semantics, so profiles with top_k != 5 or tasks with fewer than
+ * five baseline rows fail closed. */
+enum zcl_retrieval_experiment_error zcl_retrieval_profile_replay_project(
+    const struct zcl_retrieval_profile_v1 *profile,
+    const struct zcl_retrieval_profile_replay_task_v1 *tasks,
+    size_t task_count,
+    struct zcl_retrieval_profile_replay_candidate_v1 *candidates,
+    size_t candidate_capacity,
+    struct zcl_retrieval_profile_replay_report_v1 *report);
 
 /* The first command-owned feature extractor intentionally exposes only exact
  * full-file context bytes. `codeindex_source_root` and
