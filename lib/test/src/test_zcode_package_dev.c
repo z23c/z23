@@ -2015,7 +2015,7 @@ static int zpd_test_work_start_license_lifecycle(
                    "lifecycle_nonselected_release_rows")) == 1);
         for (size_t i = 0; i < reply.next_count; i++) {
             ASSERT(strcmp(reply.next[i].command, "zcode.use") != 0);
-            ASSERT(!reply.next[i].input_json ||
+            ASSERT(reply.next[i].input_json[0] == '\0' ||
                    strstr(reply.next[i].input_json, package_root) == NULL);
         }
         zcl_command_reply_free(&reply);

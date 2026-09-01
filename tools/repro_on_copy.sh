@@ -21,7 +21,11 @@
 #   - runs the copy node with an isolated HOME plus isolated --rpcport /
 #     --p2p-port / --fs-port / --https-port. It forces -connect to a dead sink,
 #     -nolegacyimport, and -nofilesync unless the peer is explicitly overridden
-#     with --connect. It never uses live ports or reads ~/.zclassic.
+#     with --connect. It preserves the copied wallet's persisted operator lane;
+#     path/port isolation makes that safe without forging a lane reassignment.
+#     It never binds live ports or reads ~/.zclassic. A remote peer may use the
+#     network's standard destination port; loopback connections to a protected
+#     live port remain refused.
 #   - leaves the copy on disk afterwards for further analysis (print its path).
 #
 # Usage:
@@ -41,17 +45,17 @@
 #                     (consensus.db, or the legacy progress.kv on a pre-flip
 #                     datadir) + block_index + projections; skips the 14G
 #                     blocks/ + 2.3G snapshot)
-#   --like-live       DEPLOY GATE mode. Reconstruct the effective live systemd
-#                     ExecStart on the COPY: read the merged drop-in ExecStart +
-#                     Environment from the running `zclassic23` user unit
-#                     (READ-ONLY), strip only network/port identity
+#   --like-live       DEPLOY GATE mode. Reconstruct the effective live service
+#                     argv on the COPY: read the merged systemd ExecStart +
+#                     Environment on Linux or the installed launchd plist on
+#                     macOS (READ-ONLY), strip only network/port identity
 #                     (-port/-rpcport/-externalip/-addnode/-connect and the
 #                     $ZCL_EXTERNALIP_FLAG/$ZCL_ADDNODE_FLAGS refs), rewrite
 #                     -datadir and -load-snapshot-at-own-height onto the COPY,
 #                     and pass EVERYTHING else verbatim (-txindex -tor
 #                     -nobgvalidation -nolegacyimport -showmetrics=0 …). Forces
 #                     --full so the snapshot-loader path is reachable, replicates
-#                     the service Environment=/EnvironmentFile vars (net-identity
+#                     the service environment vars (net-identity
 #                     stripped, live-datadir paths rewritten onto the COPY,
 #                     ZCL_AGENT_EXPECT_SOURCE_ID set to the candidate binary's
 #                     exact baked source SHA-256; build_commit is copied only
@@ -133,6 +137,7 @@ REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/scripts/source_identity_lib.sh"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
+HOST_OS="${ZCL_REPRO_HOST_OS:-$(uname -s)}"
 
 # ── --json / --status-file support (additive; default text mode is
 # untouched byte-for-byte — see json_escape()/emit_*_json() below, only
@@ -316,10 +321,19 @@ refuse_live_port() {
     p="$1"
     label="$2"
     case "$p" in
-        8023|8033|8034|8232|8233|8443|18034|18232)
+        8023|8033|8034|8232|8233|8443|18034|18232|18233)
             echo "repro_on_copy: refusing live $label port $p" >&2
             exit 1
             ;;
+    esac
+}
+
+refuse_live_connect() {
+    _addr="$1"
+    _host="${_addr%:*}"
+    _port="${_addr##*:}"
+    case "$_host" in
+        localhost|127.*|::1|\[::1\]) refuse_live_port "$_port" "connect" ;;
     esac
 }
 
@@ -327,9 +341,7 @@ refuse_live_port "$RPCPORT" "rpc"
 refuse_live_port "$P2PPORT" "p2p"
 refuse_live_port "$FSPORT" "file-service"
 refuse_live_port "$HTTPSPORT" "https"
-case "$CONNECT" in
-    *:*) refuse_live_port "${CONNECT##*:}" "connect" ;;
-esac
+case "$CONNECT" in *:*) refuse_live_connect "$CONNECT" ;; esac
 
 case " $PASS " in
     *" -addnode="*|*" -connect="*|*" -rpcport="*|*" -port="*|*" -fsport="*|*" -httpsport="*|*" -install-consensus-bundle="*)
@@ -368,7 +380,8 @@ process_env_kv() {
     _kv="$1"; _key="${_kv%%=*}"; _val="${_kv#*=}"
     [ -n "$_key" ] || return 0
     case "$_key" in
-        ZCL_EXTERNALIP_FLAG|ZCL_ADDNODE_FLAGS) return 0 ;;           # net identity
+        ZCL_EXTERNALIP_FLAG|ZCL_ADDNODE_FLAGS|ZCL_DEPLOY_ALLOW_CANONICAL)
+            return 0 ;;                                              # net/deploy authority
         ZCL_AGENT_EXPECT_SOURCE_ID|ZCL_AGENT_EXPECT_BUILD_COMMIT|ZCL_AGENT_EXPECT_BUILD_SOURCE)
             return 0 ;;                                              # set to candidate below
         HOME|ZCL_MIRROR_SYNC) return 0 ;;                            # owned by the harness
@@ -380,7 +393,22 @@ process_env_kv() {
     esac
     LIKE_LIVE_ENV="$LIKE_LIVE_ENV $_key=$_val"
 }
-derive_like_live_flags() {
+
+process_like_live_arg() {
+    _tok="$1"
+    case "$_tok" in
+        -datadir=*|-port=*|-rpcport=*|-fsport=*|-httpsport=*)
+            return 0 ;;
+        -externalip=*|-addnode=*|-connect=*) return 0 ;;
+        \$*) return 0 ;;                                             # unexpanded net-identity env refs
+        -load-snapshot-at-own-height=*)
+            LIKE_LIVE_SNAP="$(basename "${_tok#-load-snapshot-at-own-height=}")"
+            return 0 ;;
+        *) LIKE_LIVE_FLAGS="$LIKE_LIVE_FLAGS $_tok" ;;
+    esac
+}
+
+derive_like_live_systemd() {
     _exec="$(systemctl --user show zclassic23 -p ExecStart --value 2>/dev/null || true)"
     [ -n "$_exec" ] || { echo "repro_on_copy: --like-live: cannot read ExecStart for zclassic23 (unit installed?)" >&2; exit 1; }
     _argv="$(printf '%s\n' "$_exec" | sed -n 's/.*argv\[\]=\(.*\) ; ignore_errors=.*/\1/p')"
@@ -389,27 +417,8 @@ derive_like_live_flags() {
     # shellcheck disable=SC2086
     for _tok in $_argv; do
         if [ "$_first" = 1 ]; then _first=0; continue; fi            # drop argv[0] (binary path)
-        case "$_tok" in
-            -datadir=*|-port=*|-rpcport=*|-fsport=*|-httpsport=*) continue ;;
-            -externalip=*|-addnode=*|-connect=*)                  continue ;;
-            \$*)                                                  continue ;; # unexpanded net-identity env refs
-            -load-snapshot-at-own-height=*)
-                LIKE_LIVE_SNAP="$(basename "${_tok#-load-snapshot-at-own-height=}")"
-                continue ;;
-            *) LIKE_LIVE_FLAGS="$LIKE_LIVE_FLAGS $_tok" ;;
-        esac
+        process_like_live_arg "$_tok"
     done
-    # Defensive: the harness OWNS ports/peers/datadir — a passthrough flag must never carry them.
-    case " $LIKE_LIVE_FLAGS " in
-        *" -port="*|*" -rpcport="*|*" -addnode="*|*" -connect="*|*" -externalip="*|*" -datadir="*)
-            echo "repro_on_copy: --like-live: refused to pass a network/port/datadir flag through" >&2
-            exit 1 ;;
-    esac
-}
-if [ "$LIKE_LIVE" = "1" ]; then
-    LIGHT=0                                                          # snapshot-loader path must be reachable
-    derive_like_live_flags
-    # Replicate Environment= (via systemctl show) + EnvironmentFile vars.
     for _kv in $(systemctl --user show zclassic23 -p Environment --value 2>/dev/null); do
         process_env_kv "$_kv"
     done
@@ -420,6 +429,56 @@ if [ "$LIKE_LIVE" = "1" ]; then
             process_env_kv "$_line"
         done < "$_envfile"
     fi
+}
+
+derive_like_live_launchd() {
+    _plist="${ZCL_REPRO_LIVE_PLIST:-$HOME/Library/LaunchAgents/org.z23.zclassic.plist}"
+    [ -f "$_plist" ] || {
+        echo "repro_on_copy: --like-live: launchd plist not found: $_plist" >&2
+        exit 1
+    }
+    command -v plutil >/dev/null 2>&1 || {
+        echo "repro_on_copy: --like-live: plutil is required to read $_plist" >&2
+        exit 1
+    }
+    _argc="$(plutil -extract ProgramArguments raw -o - "$_plist" 2>/dev/null || true)"
+    case "$_argc" in
+        ''|*[!0-9]*|0|1)
+            echo "repro_on_copy: --like-live: invalid ProgramArguments in $_plist" >&2
+            exit 1 ;;
+    esac
+    _i=1                                                              # drop argv[0]
+    while [ "$_i" -lt "$_argc" ]; do
+        _tok="$(plutil -extract "ProgramArguments.$_i" raw -o - "$_plist" 2>/dev/null || true)"
+        [ -n "$_tok" ] || {
+            echo "repro_on_copy: --like-live: empty ProgramArguments[$_i] in $_plist" >&2
+            exit 1
+        }
+        process_like_live_arg "$_tok"
+        _i=$((_i + 1))
+    done
+    _env_keys="$(plutil -extract EnvironmentVariables raw -o - "$_plist" 2>/dev/null || true)"
+    for _key in $_env_keys; do
+        _val="$(plutil -extract "EnvironmentVariables.$_key" raw -o - "$_plist" 2>/dev/null || true)"
+        [ -n "$_val" ] && process_env_kv "$_key=$_val"
+    done
+}
+
+derive_like_live_flags() {
+    case "$HOST_OS" in
+        Darwin) derive_like_live_launchd ;;
+        *) derive_like_live_systemd ;;
+    esac
+    # Defensive: the harness OWNS ports/peers/datadir — a passthrough flag must never carry them.
+    case " $LIKE_LIVE_FLAGS " in
+        *" -port="*|*" -rpcport="*|*" -addnode="*|*" -connect="*|*" -externalip="*|*" -datadir="*)
+            echo "repro_on_copy: --like-live: refused to pass a network/port/datadir flag through" >&2
+            exit 1 ;;
+    esac
+}
+if [ "$LIKE_LIVE" = "1" ]; then
+    LIGHT=0                                                          # snapshot-loader path must be reachable
+    derive_like_live_flags
     if command -v timeout >/dev/null 2>&1; then
         _identity="$(timeout 10 "$NODE_BIN" agentbuild 2>/dev/null || true)"
     else

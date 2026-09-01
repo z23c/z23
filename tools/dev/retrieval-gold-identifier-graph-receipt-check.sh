@@ -830,7 +830,8 @@ selftest() {
     validate_scope_rank_contract "$base_tsv" "$groups" selftest bm25
     validate_graph_rank_contract "$base_tsv" "$graph_tsv" selftest \
         false false 21 21 50 50 1 0 false none true
-    bad="$tmp/graph-byte.tsv"; cp -- "$graph_tsv" "$bad"; sed -i '21s/10/11/' "$bad"
+    bad="$tmp/graph-byte.tsv"; cp -- "$graph_tsv" "$bad"
+    sed '21s/10/11/' "$bad" >"$bad.next" && mv -- "$bad.next" "$bad"
     if (validate_graph_rank_contract "$base_tsv" "$bad" byte \
         false false 21 21 50 50 1 0 false none true >/dev/null 2>&1); then
         fail "graph path/context mutation was accepted"

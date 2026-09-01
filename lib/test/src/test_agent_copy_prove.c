@@ -71,6 +71,22 @@ static bool acp_write_file(const char *path, const char *content)
     return true;
 }
 
+static bool acp_read_file(const char *path, char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        out[0] = '\0';
+        return false;
+    }
+    size_t used = fread(out, 1, out_len - 1, f);
+    out[used] = '\0';
+    bool ok = !ferror(f);
+    fclose(f);
+    return ok;
+}
+
 static void acp_push_str(struct json_value *arr, const char *s)
 {
     struct json_value v;
@@ -303,6 +319,122 @@ static int test_acp_script_no_run_json(void)
                                           "expect_static_spend_ready")));
         ACP_CHECK("static spend readiness not claimed on no-run",
                   !json_get_bool(json_get(&parsed, "static_spend_ready")));
+    }
+    json_free(&parsed);
+
+    /* A remote mainnet peer's destination port is not a local bind. The
+     * harness must allow the standard ZClassic 8033 peer port while still
+     * refusing the same port on loopback and every protected local RPC bind. */
+    snprintf(cmd, sizeof(cmd),
+        "env HOME=%s tools/repro_on_copy.sh acp-remote-peer --src=%s "
+        "--connect=198.51.100.7:8033 --no-run --json 2>%s/remote.stderr",
+        home, src, work);
+    p = popen(cmd, "r");
+    ACP_CHECK("popen remote-standard-port proof", p != NULL);
+    used = p ? fread(out, 1, sizeof(out) - 1, p) : 0;
+    out[used] = '\0';
+    rc = p ? pclose(p) : -1;
+    ACP_CHECK("remote standard P2P destination port is admitted", rc == 0);
+
+    snprintf(cmd, sizeof(cmd),
+        "env HOME=%s tools/repro_on_copy.sh acp-loopback-peer --src=%s "
+        "--connect=127.0.0.1:8033 --no-run >/dev/null 2>&1",
+        home, src);
+    ACP_CHECK("loopback protected P2P destination is refused",
+              system(cmd) != 0);
+
+    snprintf(cmd, sizeof(cmd),
+        "env HOME=%s tools/repro_on_copy.sh acp-mac-rpc --src=%s "
+        "--port=18233 --no-run >/dev/null 2>&1",
+        home, src);
+    ACP_CHECK("macOS canonical RPC bind port is refused", system(cmd) != 0);
+
+    test_rm_rf_recursive(work);
+    return failures;
+}
+
+static int test_acp_launchd_like_live(void)
+{
+    int failures = 0;
+    printf("[test_agent_copy_prove] launchd --like-live parity\n");
+
+    char work[512], home[560], src[600], fakebin[600], plist[700];
+    char plutil[700], marker[700], stderr_path[700];
+    test_make_tmpdir(work, sizeof(work), "acp_script", "launchd");
+    snprintf(home, sizeof(home), "%s/home", work);
+    snprintf(src, sizeof(src), "%s/src", work);
+    snprintf(fakebin, sizeof(fakebin), "%s/bin", work);
+    platform_directory_create(home, 0700);
+    platform_directory_create(src, 0700);
+    platform_directory_create(fakebin, 0700);
+    snprintf(marker, sizeof(marker), "%s/progress.kv", src);
+    ACP_CHECK("wrote launchd source fixture", acp_write_file(marker, "fixture\n"));
+    snprintf(plist, sizeof(plist), "%s/live.plist", work);
+    ACP_CHECK("wrote launchd plist fixture", acp_write_file(plist, "fixture\n"));
+    snprintf(plutil, sizeof(plutil), "%s/plutil", fakebin);
+    const char *plutil_body =
+        "#!/bin/sh\n"
+        "[ \"$1\" = -extract ] || exit 2\n"
+        "case \"$2\" in\n"
+        "  ProgramArguments) echo 8 ;;\n"
+        "  ProgramArguments.0) echo /fixture/z23 ;;\n"
+        "  ProgramArguments.1) echo -datadir=/fixture/live ;;\n"
+        "  ProgramArguments.2) echo -operator-lane=canonical ;;\n"
+        "  ProgramArguments.3) echo -listen ;;\n"
+        "  ProgramArguments.4) echo -txindex ;;\n"
+        "  ProgramArguments.5) echo -rpcport=18233 ;;\n"
+        "  ProgramArguments.6) echo -addnode=198.51.100.7:8033 ;;\n"
+        "  ProgramArguments.7) echo -allow-clearnet-snapshot-fetch ;;\n"
+        "  EnvironmentVariables) printf 'ZCL_DEPLOY_ALLOW_CANONICAL\\nOSLogRateLimit\\n' ;;\n"
+        "  EnvironmentVariables.ZCL_DEPLOY_ALLOW_CANONICAL) echo 1 ;;\n"
+        "  EnvironmentVariables.OSLogRateLimit) echo 64 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n";
+    ACP_CHECK("wrote launchd plutil fixture", acp_write_file(plutil, plutil_body));
+    chmod(plutil, 0755);
+    snprintf(stderr_path, sizeof(stderr_path), "%s/launchd.stderr", work);
+
+    char cmd[3000];
+    snprintf(cmd, sizeof(cmd),
+        "env HOME=%s PATH=%s:/usr/bin:/bin ZCL_REPRO_HOST_OS=Darwin "
+        "ZCL_REPRO_LIVE_PLIST=%s tools/repro_on_copy.sh acp-launchd "
+        "--src=%s --like-live --no-run --json 2>%s",
+        home, fakebin, plist, src, stderr_path);
+    FILE *p = popen(cmd, "r");
+    ACP_CHECK("popen launchd like-live proof", p != NULL);
+    char out[4096];
+    size_t used = p ? fread(out, 1, sizeof(out) - 1, p) : 0;
+    out[used] = '\0';
+    int rc = p ? pclose(p) : -1;
+    ACP_CHECK("launchd like-live proof exited 0", rc == 0);
+
+    struct json_value parsed;
+    json_init(&parsed);
+    bool read_ok = json_read(&parsed, out, used);
+    ACP_CHECK("launchd like-live result parses", read_ok);
+    if (read_ok) {
+        const char *copy_path = json_get_str(json_get(&parsed, "copy_path"));
+        char manifest_path[1200], manifest[8192];
+        snprintf(manifest_path, sizeof(manifest_path),
+                 "%s/REPRO_MANIFEST.txt", copy_path);
+        bool manifest_ok = acp_read_file(manifest_path, manifest,
+                                         sizeof(manifest));
+        ACP_CHECK("launchd like-live manifest readable", manifest_ok);
+        if (manifest_ok) {
+            ACP_CHECK("safe launchd behavior flags are preserved",
+                      strstr(manifest, "-listen") != NULL &&
+                      strstr(manifest, "-txindex") != NULL &&
+                      strstr(manifest, "-allow-clearnet-snapshot-fetch") != NULL);
+            ACP_CHECK("launchd network identity is stripped",
+                      strstr(manifest, "-rpcport=18233") == NULL &&
+                      strstr(manifest, "-addnode=") == NULL);
+            ACP_CHECK("copied wallet operator lane is preserved",
+                      strstr(manifest, "-operator-lane=canonical") != NULL);
+            ACP_CHECK("non-authority launchd environment is preserved",
+                      strstr(manifest, "OSLogRateLimit=64") != NULL);
+            ACP_CHECK("canonical deployment authority is never copied",
+                      strstr(manifest, "ZCL_DEPLOY_ALLOW_CANONICAL") == NULL);
+        }
     }
     json_free(&parsed);
     test_rm_rf_recursive(work);
@@ -581,6 +713,7 @@ int test_agent_copy_prove(void)
     printf("[test_agent_copy_prove] starting\n");
     failures += test_acp_agentbuild_identity_parser();
     failures += test_acp_script_no_run_json();
+    failures += test_acp_launchd_like_live();
     failures += test_acp_rpc_refusals();
     failures += test_acp_rpc_launch_and_poll();
     failures += test_acp_dumper_safety_invariant();

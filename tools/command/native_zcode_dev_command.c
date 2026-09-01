@@ -993,17 +993,17 @@ static void zdev_task_safe_next(struct json_value *parent,
                                 const char *task_root)
 {
     struct json_value next;
-    struct json_value input;
+    struct json_value next_args;
     json_init(&next);
-    json_init(&input);
+    json_init(&next_args);
     json_set_object(&next);
-    json_set_object(&input);
+    json_set_object(&next_args);
     (void)json_push_kv_str(&next, "command", "zcode.work.status");
-    (void)json_push_kv_str(&input, "workspace", workspace);
-    (void)json_push_kv_str(&input, "work", task_root);
-    (void)json_push_kv(&next, "input", &input);
+    (void)json_push_kv_str(&next_args, "workspace", workspace);
+    (void)json_push_kv_str(&next_args, "work", task_root);
+    (void)json_push_kv(&next, "input", &next_args);
     (void)json_push_kv(parent, "safe_next", &next);
-    json_free(&input);
+    json_free(&next_args);
     json_free(&next);
 }
 

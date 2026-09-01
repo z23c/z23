@@ -104,6 +104,7 @@
 #include "vcs/zcode_commons.h"
 #include "vcs/zcode_dht_identity.h"
 #include "vcs/zcode_dht_service.h"
+#include "vcs/zcode_focus.h"
 #include "vcs/zcode_task_context.h"
 #include "vcs/zcode_lane.h"
 #include "sha3/sha3.h"
@@ -4881,6 +4882,758 @@ static bool zwn_task_offer(struct zwn_node *z, const char *goal,
                VCS_PACKAGE_STORE_OK;
 }
 
+/* Shared-focus wires remain semantic ZVCS objects. This fixture wraps each
+ * exact canonical wire in the already-frozen one-chunk content.v2 blob shape,
+ * carries it through two independent swarm engines, then returns the received
+ * bytes for semantic parse + re-root. The blob root is transport identity
+ * only; it grants no focus, work, evidence, or execution authority. */
+static bool zwn_focus_wire_transfer(
+    struct zwn_node *from, struct zwn_node *to,
+    struct zwn_link *from_to, struct zwn_link *to_from,
+    const unsigned char msgstart[MESSAGE_START_SIZE],
+    const uint8_t *wire, size_t wire_len,
+    uint8_t *received, size_t received_cap,
+    uint8_t carrier_root[32], uint32_t *retries)
+{
+    if (!from || !to || !from_to || !to_from || !msgstart || !wire ||
+        wire_len == 0 || !received || received_cap < wire_len ||
+        !carrier_root || !retries ||
+        vcs_blob_put_to(from->store, wire, wire_len, carrier_root) !=
+            VCS_BLOB_OK ||
+        vcs_package_store_pin(from->store, carrier_root, true) !=
+            VCS_PACKAGE_STORE_OK ||
+        vcs_swarm_engine_announce_to(
+            from->engine, (uint64_t)from_to->node->id) == 0 ||
+        !zwn_round(from_to, to_from, msgstart))
+        return false;
+
+    uint32_t replies_before = from->chunk_data_replies[0];
+    if (!zwn_fetch_package_from_provider(to, carrier_root, from_to, to_from,
+                                         msgstart) ||
+        from->chunk_data_replies[0] <= replies_before)
+        return false;
+
+    size_t received_len = 0;
+    struct vcs_swarm_download_status status;
+    memset(&status, 0, sizeof(status));
+    if (vcs_blob_get_from(to->store, carrier_root, received, received_cap,
+                          &received_len) != VCS_BLOB_OK ||
+        received_len != wire_len ||
+        !vcs_swarm_engine_download_status(to->engine, carrier_root, &status) ||
+        status.state != VCS_SWARM_DL_COMPLETE ||
+        status.requested_objects < status.transferred_objects)
+        return false;
+    *retries += status.requested_objects - status.transferred_objects;
+    return memcmp(received, wire, wire_len) == 0;
+}
+
+static bool zwn_focus_work_transfer(
+    struct zwn_node *from, struct zwn_node *to,
+    struct zwn_link *from_to, struct zwn_link *to_from,
+    const unsigned char msgstart[MESSAGE_START_SIZE],
+    const struct vcs_zcode_work_swarm_message *sent,
+    struct vcs_zcode_work_swarm_message *received,
+    uint8_t carrier_root[32], uint32_t *retries)
+{
+    uint8_t wire[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
+    uint8_t delivered[VCS_ZCODE_WORK_SWARM_MAX_WIRE_BYTES];
+    size_t wire_len = 0;
+    if (!sent || !received ||
+        !vcs_zcode_work_swarm_serialize(
+            sent, wire, sizeof(wire), &wire_len) ||
+        wire_len == 0 ||
+        !zwn_focus_wire_transfer(
+            from, to, from_to, to_from, msgstart, wire, wire_len,
+            delivered, sizeof(delivered), carrier_root, retries))
+        return false;
+    return vcs_zcode_work_swarm_parse(delivered, wire_len, received);
+}
+
+static bool zwn_focus_receipt_transfer(
+    struct zwn_node *from, struct zwn_node *to,
+    struct zwn_link *from_to, struct zwn_link *to_from,
+    const unsigned char msgstart[MESSAGE_START_SIZE],
+    const struct vcs_zcode_work_receipt_v1 *sent,
+    struct vcs_zcode_work_receipt_v1 *received,
+    uint8_t carrier_root[32], uint32_t *retries)
+{
+    uint8_t wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    uint8_t delivered[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    if (!sent || !received ||
+        vcs_zcode_work_receipt_serialize(sent, wire) != VCS_ZCODE_DEV_OK ||
+        !zwn_focus_wire_transfer(
+            from, to, from_to, to_from, msgstart, wire, sizeof(wire),
+            delivered, sizeof(delivered), carrier_root, retries))
+        return false;
+    return vcs_zcode_work_receipt_parse(
+               delivered, sizeof(delivered), received) == VCS_ZCODE_DEV_OK;
+}
+
+static bool zwn_focus_scope_transfer(
+    struct zwn_node *from, struct zwn_node *to,
+    struct zwn_link *from_to, struct zwn_link *to_from,
+    const unsigned char msgstart[MESSAGE_START_SIZE],
+    const struct vcs_zcode_write_scope_v1 *sent,
+    struct vcs_zcode_write_scope_v1 *received,
+    uint8_t carrier_root[32], uint32_t *retries)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t delivered[VCS_ZCODE_WRITE_SCOPE_WIRE_MAX];
+    bool ok = sent && received &&
+        vcs_zcode_write_scope_serialize(sent, &wire, &wire_len) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        wire_len > 0 && wire_len <= sizeof(delivered) &&
+        zwn_focus_wire_transfer(
+            from, to, from_to, to_from, msgstart, wire, wire_len,
+            delivered, sizeof(delivered), carrier_root, retries) &&
+        vcs_zcode_write_scope_parse(delivered, wire_len, received) ==
+            VCS_ZCODE_WRITE_SCOPE_OK;
+    free(wire);
+    return ok;
+}
+
+static void zwn_focus_fill_root(uint8_t out[32], uint8_t value)
+{
+    memset(out, value, 32);
+}
+
+static void zwn_focus_task(struct vcs_zcode_task_v1 *task,
+                           const uint8_t write_scope_root[32])
+{
+    memset(task, 0, sizeof(*task));
+    task->schema_version = VCS_ZCODE_DEV_VERSION;
+    zwn_focus_fill_root(task->source_root, 0x81);
+    zwn_focus_fill_root(task->dependency_lock_root, 0x82);
+    zwn_focus_fill_root(task->toolchain_capsule_root, 0x83);
+    memcpy(task->write_scope_root, write_scope_root, 32);
+    zwn_focus_fill_root(task->acceptance_tests_root, 0x85);
+    zwn_focus_fill_root(task->proof_policy_root, 0x86);
+    zwn_focus_fill_root(task->model_policy_root, 0x87);
+    zwn_focus_fill_root(task->goal_root, 0x88);
+    task->capabilities = VCS_ZCODE_TASK_CAP_SOURCE_READ |
+                         VCS_ZCODE_TASK_CAP_CANDIDATE_WRITE;
+    task->max_changed_files = 8;
+    task->max_patch_bytes = 65536;
+    task->max_context_bytes = 8192;
+    task->max_cpu_seconds = 60;
+    task->max_memory_bytes = UINT64_C(256) * 1024u * 1024u;
+    task->max_output_bytes = UINT64_C(8) * 1024u * 1024u;
+    task->expires_unix = 5000;
+}
+
+static bool zwn_focus_request(
+    struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
+    uint64_t request_id, uint8_t root_seed,
+    const uint8_t requester_secret[32], const uint8_t requester_key[32])
+{
+    if (!request || !task || !task_root || !requester_secret ||
+        !requester_key)
+        return false;
+    memset(request, 0, sizeof(*request));
+    request->request_id = request_id;
+    memcpy(request->task_root, task_root, 32);
+    zwn_focus_fill_root(request->candidate_root, root_seed);
+    zwn_focus_fill_root(request->action_root, (uint8_t)(root_seed + 1u));
+    zwn_focus_fill_root(request->input_root, (uint8_t)(root_seed + 2u));
+    zwn_focus_fill_root(request->context_root, (uint8_t)(root_seed + 3u));
+    memcpy(request->proof_policy_root, task->proof_policy_root, 32);
+    memcpy(request->toolchain_capsule_root,
+           task->toolchain_capsule_root, 32);
+    request->work_kind = VCS_ZCODE_WORK_BUILD;
+    request->target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3;
+    request->max_cpu_seconds = 30;
+    request->max_memory_bytes = UINT64_C(128) * 1024u * 1024u;
+    request->max_output_bytes = UINT64_C(4) * 1024u * 1024u;
+    request->deadline_unix = 2200;
+    return vcs_zcode_work_request_seal(
+        request, requester_secret, requester_key);
+}
+
+static bool zwn_focus_admission(
+    struct vcs_zcode_work_admission_v1 *admission,
+    const struct vcs_zcode_work_request_v1 *request,
+    const uint8_t worker_secret[32], const uint8_t worker_key[32])
+{
+    if (!admission || !request || !worker_secret || !worker_key)
+        return false;
+    memset(admission, 0, sizeof(*admission));
+    admission->request_id = request->request_id;
+    memcpy(admission->requester_pubkey, request->requester_pubkey, 32);
+    memcpy(admission->action_root, request->action_root, 32);
+    admission->lease_generation = 1;
+    admission->deadline_unix = request->deadline_unix;
+    admission->slot = 0;
+    admission->disposition = VCS_ZCODE_WORK_ADMISSION_GRANTED;
+    return vcs_zcode_work_admission_seal(
+        admission, worker_secret, worker_key);
+}
+
+static bool zwn_focus_receipt(
+    struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct vcs_zcode_work_request_v1 *request, uint8_t root_seed,
+    const uint8_t worker_secret[32], const uint8_t worker_key[32])
+{
+    if (!receipt || !request || !worker_secret || !worker_key)
+        return false;
+    memset(receipt, 0, sizeof(*receipt));
+    receipt->schema_version = VCS_ZCODE_DEV_VERSION;
+    memcpy(receipt->task_root, request->task_root, 32);
+    memcpy(receipt->candidate_root, request->candidate_root, 32);
+    memcpy(receipt->action_root, request->action_root, 32);
+    memcpy(receipt->input_root, request->input_root, 32);
+    zwn_focus_fill_root(receipt->output_root, root_seed);
+    memcpy(receipt->proof_policy_root, request->proof_policy_root, 32);
+    memcpy(receipt->toolchain_capsule_root,
+           request->toolchain_capsule_root, 32);
+    zwn_focus_fill_root(receipt->lease_id, (uint8_t)(root_seed + 1u));
+    zwn_focus_fill_root(receipt->evidence_root, (uint8_t)(root_seed + 2u));
+    zwn_focus_fill_root(receipt->confinement_root,
+                        (uint8_t)(root_seed + 3u));
+    receipt->work_kind = request->work_kind;
+    receipt->status = VCS_ZCODE_WORK_PASS;
+    receipt->started_unix = 1200;
+    receipt->finished_unix = 1300;
+    return vcs_zcode_work_receipt_seal(
+               receipt, worker_secret, worker_key) == VCS_ZCODE_DEV_OK;
+}
+
+static void zwn_focus_claim(struct vcs_zcode_focus_claim_v1 *claim,
+                            const uint8_t situation_root[32],
+                            const uint8_t write_scope_root[32],
+                            uint8_t worker, uint8_t intent)
+{
+    memset(claim, 0, sizeof(*claim));
+    claim->schema_version = VCS_ZCODE_FOCUS_VERSION;
+    claim->created_unix = 1000;
+    claim->expires_unix = 2000;
+    memcpy(claim->situation_root, situation_root, 32);
+    zwn_focus_fill_root(claim->claimant_root, worker);
+    memcpy(claim->write_scope_root, write_scope_root, 32);
+    zwn_focus_fill_root(claim->intent_root, intent);
+    zwn_focus_fill_root(claim->evidence_plan_root,
+                        (uint8_t)(intent + 20u));
+}
+
+static void zwn_focus_report(
+    struct vcs_zcode_specialist_report_v1 *report,
+    const uint8_t focus_root[32], const uint8_t claim_root[32],
+    uint8_t worker, uint8_t role, uint8_t evidence)
+{
+    memset(report, 0, sizeof(*report));
+    report->schema_version = VCS_ZCODE_FOCUS_VERSION;
+    report->role = role;
+    report->status = ZCL_ONTOLOGY_PROVED;
+    report->context_bytes = 1265;
+    report->latency_us = 250000;
+    report->files_opened = 3;
+    report->tool_calls = 5;
+    report->duplicate_actions = 0;
+    report->proof_reuse_count = 1;
+    memcpy(report->focus_root, focus_root, 32);
+    memcpy(report->claim_root, claim_root, 32);
+    zwn_focus_fill_root(report->specialist_root, worker);
+    zwn_focus_fill_root(report->evidence_root, evidence);
+    zwn_focus_fill_root(report->result_root, (uint8_t)(evidence + 1u));
+    zwn_focus_fill_root(report->next_experiment_root,
+                        (uint8_t)(evidence + 2u));
+    zwn_focus_fill_root(report->evaluator_root,
+                        (uint8_t)(evidence + 3u));
+}
+
+static int zwn_t_shared_focus_flight(const struct chain_params *params)
+{
+    int failures = 0;
+    struct zwn_fixture fixture = {0};
+    uint8_t *claim_set_wire = NULL;
+    TEST("shared focus flight: two node engines derive one focus, exchange "
+         "disjoint claims and rooted reports over real zpkgswm frames, "
+         "then the successor validates the handoff without prose") {
+        struct zwn_node a, b;
+        const struct zwn_node_spec nodes[] = {
+            {&a, "focus-a"}, {&b, "focus-b"},
+        };
+        ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
+                                 sizeof(nodes) / sizeof(nodes[0])));
+        struct zwn_link a_b, b_a;
+        const struct zwn_link_spec links[] = {
+            {&a, &a_b, {10, 7, 0, 1}, "focus-peer-b"},
+            {&b, &b_a, {10, 7, 0, 2}, "focus-peer-a"},
+        };
+        ASSERT(zwn_fixture_links(&fixture, links,
+                                 sizeof(links) / sizeof(links[0])));
+        ASSERT(zwn_meet_side_quiet(&a, &a_b));
+        ASSERT(zwn_meet_side_quiet(&b, &b_a));
+
+        /* The authority roots are deterministic fixture values. The scope
+         * semantics use tracked platform paths so the overlap/containment
+         * predicates exercise the actual focus component boundary. This is
+         * not evidence of a physical host or completed C23 edit. */
+        struct vcs_zcode_write_scope_v1 task_scope, scope_a, scope_b;
+        vcs_zcode_write_scope_init(&task_scope);
+        vcs_zcode_write_scope_init(&scope_a);
+        vcs_zcode_write_scope_init(&scope_b);
+        ASSERT_EQ(vcs_zcode_write_scope_add(&task_scope, "lib/vcs/src"),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT_EQ(vcs_zcode_write_scope_add(
+                      &scope_a, "lib/vcs/src/zcode_focus.c"),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT_EQ(vcs_zcode_write_scope_add(
+                      &scope_b, "lib/vcs/src/zcode_focus_claim.c"),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        uint8_t task_scope_root[32], scope_a_root[32], scope_b_root[32];
+        ASSERT_EQ(vcs_zcode_write_scope_root(&task_scope, task_scope_root),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT_EQ(vcs_zcode_write_scope_root(&scope_a, scope_a_root),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT_EQ(vcs_zcode_write_scope_root(&scope_b, scope_b_root),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+
+        struct vcs_zcode_task_v1 task;
+        zwn_focus_task(&task, task_scope_root);
+        uint8_t task_root[32], context_root[32], story_root[32];
+        ASSERT_EQ(vcs_zcode_task_root(&task, task_root), VCS_ZCODE_DEV_OK);
+        zwn_focus_fill_root(context_root, 0x89);
+        zwn_focus_fill_root(story_root, 0x8a);
+        struct vcs_zcode_focus_v1 basis;
+        ASSERT_EQ(vcs_zcode_focus_compose(
+                      &task, task_root, context_root, story_root,
+                      ZCL_ONTOLOGY_PROVED, 0, NULL, 0, &basis),
+                  VCS_ZCODE_FOCUS_OK);
+        uint8_t situation_root[32];
+        ASSERT_EQ(vcs_zcode_focus_situation_root(&basis, situation_root),
+                  VCS_ZCODE_FOCUS_OK);
+
+        /* Existing work authority crosses first: signed requests from the
+         * task owner, signed admissions by each worker, and signed receipts
+         * for the exact task/candidate/action/input tuple. */
+        uint8_t requester_seed[32], requester_secret[32], requester_key[32];
+        uint8_t worker_a_seed[32], worker_a_secret[32], worker_a_key[32];
+        uint8_t worker_b_seed[32], worker_b_secret[32], worker_b_key[32];
+        zwn_focus_fill_root(requester_seed, 0x91);
+        zwn_focus_fill_root(worker_a_seed, 0x92);
+        zwn_focus_fill_root(worker_b_seed, 0x93);
+        ed25519_keypair(requester_key, requester_secret, requester_seed);
+        ed25519_keypair(worker_a_key, worker_a_secret, worker_a_seed);
+        ed25519_keypair(worker_b_key, worker_b_secret, worker_b_seed);
+
+        struct vcs_zcode_work_request_v1 request_a, request_b;
+        struct vcs_zcode_work_admission_v1 admission_a, admission_b;
+        struct vcs_zcode_work_receipt_v1 receipt_a, receipt_b;
+        ASSERT(zwn_focus_request(
+            &request_a, &task, task_root, 101, 0xa1,
+            requester_secret, requester_key));
+        ASSERT(zwn_focus_request(
+            &request_b, &task, task_root, 102, 0xb1,
+            requester_secret, requester_key));
+        ASSERT(zwn_focus_admission(
+            &admission_a, &request_a, worker_a_secret, worker_a_key));
+        ASSERT(zwn_focus_admission(
+            &admission_b, &request_b, worker_b_secret, worker_b_key));
+        ASSERT(zwn_focus_receipt(
+            &receipt_a, &request_a, 0xc1, worker_a_secret, worker_a_key));
+        ASSERT(zwn_focus_receipt(
+            &receipt_b, &request_b, 0xd1, worker_b_secret, worker_b_key));
+        uint8_t request_a_root[32], request_b_root[32];
+        uint8_t receipt_a_root[32], receipt_b_root[32];
+        ASSERT(vcs_zcode_work_request_id(&request_a, request_a_root));
+        ASSERT(vcs_zcode_work_request_id(&request_b, request_b_root));
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&receipt_a, receipt_a_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&receipt_b, receipt_b_root),
+                  VCS_ZCODE_DEV_OK);
+
+        uint8_t received[VCS_BLOB_MAX_BYTES], carrier_root[32];
+        uint32_t retries = 0;
+        uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_task_serialize(&task, task_wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            task_wire, sizeof(task_wire), received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_task_v1 task_at_b;
+        ASSERT_EQ(vcs_zcode_task_parse(
+                      received, sizeof(task_wire), &task_at_b),
+                  VCS_ZCODE_DEV_OK);
+        uint8_t task_root_at_b[32];
+        ASSERT_EQ(vcs_zcode_task_root(&task_at_b, task_root_at_b),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(task_root_at_b, task_root, 32) == 0);
+
+        struct vcs_zcode_write_scope_v1 task_scope_at_b;
+        struct vcs_zcode_write_scope_v1 scope_a_at_b, scope_b_at_b;
+        ASSERT(zwn_focus_scope_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            &task_scope, &task_scope_at_b, carrier_root, &retries));
+        ASSERT(zwn_focus_scope_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            &scope_a, &scope_a_at_b, carrier_root, &retries));
+        ASSERT(zwn_focus_scope_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            &scope_b, &scope_b_at_b, carrier_root, &retries));
+        uint8_t scope_root_at_b[32];
+        ASSERT_EQ(vcs_zcode_write_scope_root(
+                      &task_scope_at_b, scope_root_at_b),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT(memcmp(scope_root_at_b, task_scope_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_write_scope_root(
+                      &scope_a_at_b, scope_root_at_b),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT(memcmp(scope_root_at_b, scope_a_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_write_scope_root(
+                      &scope_b_at_b, scope_root_at_b),
+                  VCS_ZCODE_WRITE_SCOPE_OK);
+        ASSERT(memcmp(scope_root_at_b, scope_b_root, 32) == 0);
+
+        struct vcs_zcode_work_swarm_message sent_work, received_work;
+        memset(&sent_work, 0, sizeof(sent_work));
+        sent_work.type = VCS_ZCODE_WORK_SWARM_REQUEST;
+        sent_work.body.request = request_a;
+        ASSERT(zwn_focus_work_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            &sent_work, &received_work, carrier_root, &retries));
+        ASSERT_EQ(received_work.type, VCS_ZCODE_WORK_SWARM_REQUEST);
+        struct vcs_zcode_work_request_v1 request_a_at_b =
+            received_work.body.request;
+        memset(&sent_work, 0, sizeof(sent_work));
+        sent_work.type = VCS_ZCODE_WORK_SWARM_ADMISSION;
+        sent_work.body.admission = admission_a;
+        ASSERT(zwn_focus_work_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            &sent_work, &received_work, carrier_root, &retries));
+        ASSERT_EQ(received_work.type, VCS_ZCODE_WORK_SWARM_ADMISSION);
+        struct vcs_zcode_work_admission_v1 admission_a_at_b =
+            received_work.body.admission;
+        struct vcs_zcode_work_receipt_v1 receipt_a_at_b;
+        ASSERT(zwn_focus_receipt_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            &receipt_a, &receipt_a_at_b, carrier_root, &retries));
+
+        memset(&sent_work, 0, sizeof(sent_work));
+        sent_work.type = VCS_ZCODE_WORK_SWARM_REQUEST;
+        sent_work.body.request = request_b;
+        ASSERT(zwn_focus_work_transfer(
+            &b, &a, &b_a, &a_b, params->pchMessageStart,
+            &sent_work, &received_work, carrier_root, &retries));
+        ASSERT_EQ(received_work.type, VCS_ZCODE_WORK_SWARM_REQUEST);
+        struct vcs_zcode_work_request_v1 request_b_at_a =
+            received_work.body.request;
+        memset(&sent_work, 0, sizeof(sent_work));
+        sent_work.type = VCS_ZCODE_WORK_SWARM_ADMISSION;
+        sent_work.body.admission = admission_b;
+        ASSERT(zwn_focus_work_transfer(
+            &b, &a, &b_a, &a_b, params->pchMessageStart,
+            &sent_work, &received_work, carrier_root, &retries));
+        ASSERT_EQ(received_work.type, VCS_ZCODE_WORK_SWARM_ADMISSION);
+        struct vcs_zcode_work_admission_v1 admission_b_at_a =
+            received_work.body.admission;
+        struct vcs_zcode_work_receipt_v1 receipt_b_at_a;
+        ASSERT(zwn_focus_receipt_transfer(
+            &b, &a, &b_a, &a_b, params->pchMessageStart,
+            &receipt_b, &receipt_b_at_a, carrier_root, &retries));
+
+        /* Each node creates one claim. The opposite node receives the exact
+         * canonical wire through content.v2 before either final focus is
+         * composed. */
+        struct vcs_zcode_focus_claim_v1 claim_a, claim_b;
+        zwn_focus_claim(&claim_a, situation_root, scope_a_root, 0xa1, 0xb1);
+        zwn_focus_claim(&claim_b, situation_root, scope_b_root, 0xa2, 0xb2);
+        memcpy(claim_a.claimant_root, worker_a_key, 32);
+        memcpy(claim_a.intent_root, request_a_root, 32);
+        memcpy(claim_a.evidence_plan_root, request_a.proof_policy_root, 32);
+        memcpy(claim_b.claimant_root, worker_b_key, 32);
+        memcpy(claim_b.intent_root, request_b_root, 32);
+        memcpy(claim_b.evidence_plan_root, request_b.proof_policy_root, 32);
+        uint8_t claim_a_root[32], claim_b_root[32];
+        uint8_t claim_a_wire[VCS_ZCODE_FOCUS_CLAIM_WIRE_BYTES];
+        uint8_t claim_b_wire[VCS_ZCODE_FOCUS_CLAIM_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_focus_claim_root(&claim_a, claim_a_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_claim_root(&claim_b, claim_b_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_claim_serialize(&claim_a, claim_a_wire),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_claim_serialize(&claim_b, claim_b_wire),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            claim_a_wire, sizeof(claim_a_wire), received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_focus_claim_v1 claim_a_at_b;
+        ASSERT_EQ(vcs_zcode_focus_claim_parse(
+                      received, sizeof(claim_a_wire), &claim_a_at_b),
+                  VCS_ZCODE_FOCUS_OK);
+        uint8_t derived_root[32];
+        ASSERT_EQ(vcs_zcode_focus_claim_root(&claim_a_at_b, derived_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(memcmp(derived_root, claim_a_root, 32) == 0);
+
+        ASSERT(zwn_focus_wire_transfer(
+            &b, &a, &b_a, &a_b, params->pchMessageStart,
+            claim_b_wire, sizeof(claim_b_wire), received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_focus_claim_v1 claim_b_at_a;
+        ASSERT_EQ(vcs_zcode_focus_claim_parse(
+                      received, sizeof(claim_b_wire), &claim_b_at_a),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_claim_root(&claim_b_at_a, derived_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(memcmp(derived_root, claim_b_root, 32) == 0);
+
+        uint8_t claim_roots[2][32];
+        struct vcs_zcode_focus_claim_v1 ordered_claims[2] = {
+            claim_a_at_b, claim_b,
+        };
+        struct vcs_zcode_write_scope_v1 ordered_scopes[2] = {
+            scope_a_at_b, scope_b_at_b,
+        };
+        size_t from_index = 0;
+        size_t next_index = 1;
+        memcpy(claim_roots[0], claim_a_root, 32);
+        memcpy(claim_roots[1], claim_b_root, 32);
+        if (memcmp(claim_roots[0], claim_roots[1], 32) > 0) {
+            uint8_t swap[32];
+            struct vcs_zcode_focus_claim_v1 claim_swap = ordered_claims[0];
+            struct vcs_zcode_write_scope_v1 scope_swap = ordered_scopes[0];
+            memcpy(swap, claim_roots[0], 32);
+            memcpy(claim_roots[0], claim_roots[1], 32);
+            memcpy(claim_roots[1], swap, 32);
+            ordered_claims[0] = ordered_claims[1];
+            ordered_claims[1] = claim_swap;
+            ordered_scopes[0] = ordered_scopes[1];
+            ordered_scopes[1] = scope_swap;
+            from_index = 1;
+            next_index = 0;
+        }
+        size_t claim_set_len = 0;
+        ASSERT_EQ(vcs_zcode_focus_claim_set_serialize(
+                      claim_roots, 2, &claim_set_wire, &claim_set_len),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(claim_set_wire != NULL && claim_set_len > 0);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            claim_set_wire, claim_set_len, received, sizeof(received),
+            carrier_root, &retries));
+        uint8_t received_claim_roots[2][32];
+        size_t received_claim_count = 0;
+        ASSERT_EQ(vcs_zcode_focus_claim_set_parse(
+                      received, claim_set_len, received_claim_roots, 2,
+                      &received_claim_count),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(received_claim_count, 2);
+        uint8_t received_claim_set_root[32];
+        ASSERT_EQ(vcs_zcode_focus_claim_set_root(
+                      received_claim_roots, received_claim_count,
+                      received_claim_set_root),
+                  VCS_ZCODE_FOCUS_OK);
+
+        struct vcs_zcode_focus_v1 focus_a, focus_b;
+        ASSERT_EQ(vcs_zcode_focus_compose(
+                      &task, task_root, context_root, story_root,
+                      ZCL_ONTOLOGY_PROVED, 0, claim_roots, 2, &focus_a),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_compose(
+                      &task, task_root, context_root, story_root,
+                      ZCL_ONTOLOGY_PROVED, 0, claim_roots, 2, &focus_b),
+                  VCS_ZCODE_FOCUS_OK);
+        uint8_t focus_root_a[32], focus_root_b[32];
+        ASSERT_EQ(vcs_zcode_focus_root(&focus_a, focus_root_a),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_root(&focus_b, focus_root_b),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(memcmp(focus_root_a, focus_root_b, 32) == 0);
+        ASSERT_EQ(vcs_zcode_focus_claim_disjoint_status(
+                      &claim_a_at_b, &scope_a_at_b,
+                      &claim_b, &scope_b_at_b, 1500),
+                  ZCL_ONTOLOGY_PROVED);
+        ASSERT_EQ(vcs_zcode_focus_claim_authority_status(
+                      &focus_a, &task, &task_scope, &claim_a, &scope_a, 1500),
+                  ZCL_ONTOLOGY_PROVED);
+        ASSERT_EQ(vcs_zcode_focus_claim_authority_status(
+                      &focus_b, &task_at_b, &task_scope_at_b,
+                      &claim_b, &scope_b_at_b, 1500),
+                  ZCL_ONTOLOGY_PROVED);
+
+        uint8_t focus_wire[VCS_ZCODE_FOCUS_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_focus_serialize(&focus_a, focus_wire),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            focus_wire, sizeof(focus_wire), received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_focus_v1 focus_at_b;
+        ASSERT_EQ(vcs_zcode_focus_parse(
+                      received, sizeof(focus_wire), &focus_at_b),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_root(&focus_at_b, derived_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(memcmp(derived_root, focus_root_a, 32) == 0);
+        ASSERT(memcmp(received_claim_set_root,
+                      focus_at_b.claim_set_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_focus_claim_set_status(
+                      &focus_at_b, ordered_claims, ordered_scopes, 2, 1500),
+                  ZCL_ONTOLOGY_PROVED);
+        ASSERT_EQ(vcs_zcode_focus_claim_work_status(
+                      &focus_a, &task, &task_scope,
+                      &claim_b_at_a, &scope_b,
+                      received_claim_roots, received_claim_count,
+                      &request_b_at_a, &admission_b_at_a, 1500),
+                  ZCL_ONTOLOGY_PROVED);
+
+        /* Reports cross in both directions. Their semantic identities stay
+         * claim/focus-rooted even though each content carrier has its own
+         * manifest root. */
+        struct vcs_zcode_specialist_report_v1 report_a, report_b;
+        zwn_focus_report(&report_a, focus_root_a, claim_a_root, 0xa1,
+                         VCS_ZCODE_SPECIALIST_RETRIEVAL, 0xc1);
+        zwn_focus_report(&report_b, focus_root_b, claim_b_root, 0xa2,
+                         VCS_ZCODE_SPECIALIST_CODE, 0xd1);
+        memcpy(report_a.specialist_root, worker_a_key, 32);
+        memcpy(report_a.evidence_root, receipt_a_root, 32);
+        memcpy(report_a.result_root, receipt_a.output_root, 32);
+        memcpy(report_b.specialist_root, worker_b_key, 32);
+        memcpy(report_b.evidence_root, receipt_b_root, 32);
+        memcpy(report_b.result_root, receipt_b.output_root, 32);
+        uint8_t report_a_root[32], report_b_root[32];
+        uint8_t report_a_wire[VCS_ZCODE_SPECIALIST_REPORT_WIRE_BYTES];
+        uint8_t report_b_wire[VCS_ZCODE_SPECIALIST_REPORT_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_specialist_report_root(&report_a, report_a_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_specialist_report_root(&report_b, report_b_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_specialist_report_serialize(
+                      &report_a, report_a_wire), VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_specialist_report_serialize(
+                      &report_b, report_b_wire), VCS_ZCODE_FOCUS_OK);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            report_a_wire, sizeof(report_a_wire), received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_specialist_report_v1 report_a_at_b;
+        ASSERT_EQ(vcs_zcode_specialist_report_parse(
+                      received, sizeof(report_a_wire), &report_a_at_b),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_specialist_report_root(
+                      &report_a_at_b, derived_root), VCS_ZCODE_FOCUS_OK);
+        ASSERT(memcmp(derived_root, report_a_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_specialist_report_validate_for_work(
+                      &focus_at_b, &claim_a_at_b, claim_roots, 2,
+                      &task_at_b, &request_a_at_b, &receipt_a_at_b,
+                      &report_a_at_b),
+                  VCS_ZCODE_FOCUS_OK);
+
+        ASSERT(zwn_focus_wire_transfer(
+            &b, &a, &b_a, &a_b, params->pchMessageStart,
+            report_b_wire, sizeof(report_b_wire), received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_specialist_report_v1 report_b_at_a;
+        ASSERT_EQ(vcs_zcode_specialist_report_parse(
+                      received, sizeof(report_b_wire), &report_b_at_a),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_specialist_report_root(
+                      &report_b_at_a, derived_root), VCS_ZCODE_FOCUS_OK);
+        ASSERT(memcmp(derived_root, report_b_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_specialist_report_validate_for_work(
+                      &focus_a, &claim_b_at_a, claim_roots, 2,
+                      &task, &request_b_at_a, &receipt_b_at_a,
+                      &report_b_at_a),
+                  VCS_ZCODE_FOCUS_OK);
+
+        struct vcs_zcode_focus_handoff_v1 handoff;
+        memset(&handoff, 0, sizeof(handoff));
+        handoff.schema_version = VCS_ZCODE_FOCUS_VERSION;
+        handoff.status = ZCL_ONTOLOGY_PROVED;
+        memcpy(handoff.focus_root, focus_root_a, 32);
+        memcpy(handoff.report_root, report_a_root, 32);
+        memcpy(handoff.from_claim_root, claim_a_root, 32);
+        memcpy(handoff.to_specialist_root, claim_b.claimant_root, 32);
+        memcpy(handoff.next_claim_root, claim_b_root, 32);
+        memcpy(handoff.required_evidence_root,
+               focus_a.required_evidence_root, 32);
+        memcpy(handoff.continuation_root,
+               report_a.next_experiment_root, 32);
+        uint8_t handoff_root[32];
+        uint8_t handoff_wire[VCS_ZCODE_FOCUS_HANDOFF_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_focus_handoff_root(&handoff, handoff_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_handoff_serialize(&handoff, handoff_wire),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(zwn_focus_wire_transfer(
+            &a, &b, &a_b, &b_a, params->pchMessageStart,
+            handoff_wire, sizeof(handoff_wire), received, sizeof(received),
+            carrier_root, &retries));
+        struct vcs_zcode_focus_handoff_v1 handoff_at_b;
+        ASSERT_EQ(vcs_zcode_focus_handoff_parse(
+                      received, sizeof(handoff_wire), &handoff_at_b),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_handoff_root(&handoff_at_b, derived_root),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT(memcmp(derived_root, handoff_root, 32) == 0);
+        ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
+                      &focus_at_b, &task_at_b, &task_scope_at_b,
+                      ordered_claims, ordered_scopes, 2,
+                      from_index, next_index,
+                      &request_a_at_b, &admission_a_at_b,
+                      &request_b, &admission_b, &receipt_a_at_b,
+                      &report_a_at_b, &handoff_at_b, 1500),
+                  VCS_ZCODE_FOCUS_OK);
+        ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
+                      &focus_at_b, &task_at_b, &task_scope_at_b,
+                      ordered_claims, ordered_scopes, 2,
+                      from_index, next_index,
+                      &request_a_at_b, &admission_a_at_b,
+                      &request_b, &admission_b, &receipt_a_at_b,
+                      &report_a_at_b, &handoff_at_b, 2000),
+                  VCS_ZCODE_FOCUS_BINDING);
+        struct vcs_zcode_work_admission_v1 refused_b = admission_b;
+        refused_b.lease_generation = 0;
+        refused_b.deadline_unix = 0;
+        refused_b.slot = UINT16_MAX;
+        refused_b.disposition = VCS_ZCODE_WORK_ADMISSION_REFUSED;
+        refused_b.reason = VCS_ZCODE_WORK_ADMISSION_REASON_POLICY;
+        ASSERT(vcs_zcode_work_admission_seal(
+            &refused_b, worker_b_secret, worker_b_key));
+        ASSERT(vcs_zcode_work_admission_verify_for_request(
+            &request_b, &refused_b, worker_b_key));
+        ASSERT_EQ(vcs_zcode_focus_handoff_validate_for_work(
+                      &focus_at_b, &task_at_b, &task_scope_at_b,
+                      ordered_claims, ordered_scopes, 2,
+                      from_index, next_index,
+                      &request_a_at_b, &admission_a_at_b,
+                      &request_b, &refused_b, &receipt_a_at_b,
+                      &report_a_at_b, &handoff_at_b, 1500),
+                  VCS_ZCODE_FOCUS_BINDING);
+
+        char focus_hex[65], handoff_hex[65], receipt_hex[65];
+        zcl_hex_encode(focus_root_a, 32, focus_hex);
+        zcl_hex_encode(handoff_root, 32, handoff_hex);
+        zcl_hex_encode(receipt_a_root, 32, receipt_hex);
+        printf("{\"schema\":\"zcl.shared_focus_wire_fixture.v1\","
+               "\"status\":\"passed\","
+               "\"topology\":\"in_process_two_node_engines\","
+               "\"signer_identities\":2,\"claims\":2,"
+               "\"reports\":2,\"carrier_transfers\":17,"
+               "\"signed_requests\":2,\"signed_admissions\":2,"
+               "\"signed_receipts\":2,"
+               "\"retries\":%u,\"expiry_refused\":true,"
+               "\"scope_overlap\":\"DISPROVED\",\"prose_bytes\":0,"
+               "\"focus_root\":\"%s\",\"handoff_root\":\"%s\","
+               "\"work_receipt_root\":\"%s\"}\n",
+               retries, focus_hex, handoff_hex, receipt_hex);
+        ASSERT(retries == 0);
+
+        free(claim_set_wire);
+        claim_set_wire = NULL;
+        zwn_fixture_cleanup(&fixture);
+        PASS();
+    } _test_next:
+    free(claim_set_wire);
+    zwn_fixture_cleanup(&fixture);
+    return failures;
+}
+
 static int zwn_t_task_flight(const struct chain_params *params)
 {
     int failures = 0;
@@ -5296,6 +6049,7 @@ int test_zcode_swarm_net(void)
     failures += zwn_t_ordinary_c23_redundant(params);
     failures += zwn_t_attestation_flight(params);
     failures += zwn_t_task_flight(params);
+    failures += zwn_t_shared_focus_flight(params);
     failures += zwn_t_task_hostile_pointer(params);
     failures += zwn_t_attestation_hostile_pointer(params);
     failures += zwn_t_attestation_corrupt_wire(params);

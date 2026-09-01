@@ -6349,7 +6349,7 @@ static int test_zd_task_index(void)
         /* JSON escaping, not raw path length, owns the response bound. A
          * quote-heavy canonical workspace fails as a serialized typed error
          * before any CAS scan rather than disappearing at envelope encoding. */
-        char quote_segment[241];
+        char quote_segment[252];
         memset(quote_segment, '"', sizeof(quote_segment) - 1u);
         quote_segment[sizeof(quote_segment) - 1u] = '\0';
         char quote_dir_a[1024], quote_dir_b[1536];

@@ -1061,6 +1061,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_command.c", CAP_FS_READ|CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_activation_command.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_command.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "native handlers for the registry-owned `dev` tree: launches build/test child processes on the operator's behalf")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_hotswap.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_retrieval_command.c", CAP_FS_READ|CAP_FS_WRITE, "reads sealed retrieval evidence and writes bounded replay outputs for native developer commands")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_mutate_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
