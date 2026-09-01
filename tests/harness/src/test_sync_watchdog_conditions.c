@@ -8,6 +8,7 @@
 #include "conditions/sync_state_stuck.h"
 #include "framework/condition.h"
 #include "json/json.h"
+#include "jobs/reducer_frontier.h"
 #include "net/download.h"
 #include "net/protocol.h"
 #include "platform/clock.h"
@@ -75,6 +76,10 @@ static void reset_sync_watchdog(struct connman *cm,
     zcl_mutex_init(&cm->manager.cs_nodes);
     zcl_mutex_init(&dm->cs);
     zcl_mutex_init(&ms->cs_main);
+    /* active_chain_move_window_tip takes its own writer lock.  A zeroed
+     * pthread mutex happened to tolerate this fixture on POSIX, but a native
+     * Windows CRITICAL_SECTION must always be explicitly initialized. */
+    active_chain_init(&ms->chain_active);
     sync_monitor_init();
     sync_monitor_set_context(cm, dm, ms);
     condition_engine_set_main_state(ms);
@@ -134,6 +139,7 @@ int test_sync_watchdog_conditions(void)
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 6000);
+        reducer_frontier_provable_tip_reset();
         sync_monitor_init();
 
         struct json_value state;
@@ -168,6 +174,49 @@ int test_sync_watchdog_conditions(void)
         SYNC_WATCHDOG_CHECK("sync monitor dump exposes tip advance input",
                             ok);
         cleanup_sync_watchdog();
+        reducer_frontier_provable_tip_reset();
+    }
+
+    {
+        struct fake_clock clock;
+        fake_clock_install(&clock, 7000);
+        reducer_frontier_provable_tip_reset();
+        sync_monitor_init();
+
+        reducer_frontier_provable_tip_set(100);
+        bool ok = sync_monitor_tip_advance_age() == 0;
+
+        fake_clock_set(&clock, 7008);
+        ok = ok && sync_monitor_tip_advance_age() == 8;
+
+        reducer_frontier_provable_tip_set(101);
+        ok = ok && sync_monitor_tip_advance_age() == 0;
+
+        /* P2P intake cannot replace the reducer-owned progress witness after
+         * H* is published. */
+        sync_monitor_on_block_connected(500);
+        fake_clock_set(&clock, 7013);
+
+        struct json_value state;
+        json_init(&state);
+        ok = ok && sync_monitor_dump_state_json(&state, NULL);
+        ok = ok && json_get_int(json_get(
+            &state, "last_block_connected_height")) == 101;
+        ok = ok && json_get_int(json_get(
+            &state, "last_block_connected_time")) == 7008;
+        ok = ok && json_get_int(json_get(
+            &state, "tip_advance_age_seconds")) == 5;
+        json_free(&state);
+
+        /* A verified rewind is reducer activity and starts a fresh stall
+         * interval while the replacement branch advances. */
+        reducer_frontier_provable_tip_set(99);
+        ok = ok && sync_monitor_tip_advance_age() == 0;
+
+        SYNC_WATCHDOG_CHECK(
+            "sync monitor follows authoritative reducer progress", ok);
+        cleanup_sync_watchdog();
+        reducer_frontier_provable_tip_reset();
     }
 
     {
@@ -735,7 +784,6 @@ int test_sync_watchdog_conditions(void)
         dl_init(&dm);
         sync_monitor_set_context(&cm, &dm, &ms);
         block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
         bool ok = true;
         register_local_header_refill_needed();
 

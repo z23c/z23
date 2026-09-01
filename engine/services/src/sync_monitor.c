@@ -29,6 +29,11 @@
 
 static _Atomic int64_t g_last_block_connected_ts;
 static _Atomic int g_last_block_connected_height;
+/* The reducer-owned provable tip is the runtime serving authority.  P2P body
+ * intake can complete without moving that frontier, so its callback must not
+ * masquerade as finalized progress once H* has been published. */
+static _Atomic int g_last_observed_provable_tip;
+static pthread_mutex_t g_tip_progress_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_recoveries_total;
 static _Atomic int64_t g_last_recovery_time;
 static _Atomic int g_last_recovery_type;
@@ -54,6 +59,11 @@ static struct connman *g_condition_cm;
 static struct download_manager *g_condition_dm;
 static struct main_state *g_condition_ms;
 static struct msg_processor *g_condition_mp;
+
+#ifdef ZCL_TESTING
+/* Deterministic condition tests explicitly inject the legacy timestamp. */
+static _Atomic bool g_tip_advance_test_override;
+#endif
 
 static struct {
     bool active;
@@ -89,6 +99,10 @@ void sync_monitor_init(void)
     memset(g_last_recovery_trigger, 0, sizeof(g_last_recovery_trigger));
     atomic_store(&g_last_block_connected_ts, 0);
     atomic_store(&g_last_block_connected_height, -1);
+    atomic_store(&g_last_observed_provable_tip, -1);
+#ifdef ZCL_TESTING
+    atomic_store(&g_tip_advance_test_override, false);
+#endif
     atomic_store(&g_recoveries_total, 0);
     atomic_store(&g_last_recovery_time, 0);
     atomic_store(&g_last_recovery_type, WATCHDOG_NONE);
@@ -151,13 +165,44 @@ struct main_state *sync_monitor_main_state(void)
 
 void sync_monitor_on_block_connected(int height)
 {
+    /* Before the reducer publishes H*, this remains a useful boot/fresh-chain
+     * signal.  Afterwards only the independently verified reducer frontier is
+     * authoritative progress; receipt of another body is not tip advance. */
+    if (reducer_frontier_provable_tip_is_published())
+        return;
     atomic_store(&g_last_block_connected_ts,
                  (int64_t)platform_time_wall_time_t());
     atomic_store(&g_last_block_connected_height, height);
 }
 
+static void sync_monitor_observe_provable_tip(void)
+{
+#ifdef ZCL_TESTING
+    if (atomic_load(&g_tip_advance_test_override))
+        return;
+#endif
+    pthread_mutex_lock(&g_tip_progress_lock);
+    if (!reducer_frontier_provable_tip_is_published()) {
+        pthread_mutex_unlock(&g_tip_progress_lock);
+        return;
+    }
+    int current = reducer_frontier_provable_tip_cached();
+    if (current != atomic_load(&g_last_observed_provable_tip)) {
+        /* A decrease is progress too: it is an authoritative reorg/rewind and
+         * resets the stall clock while the reducer establishes the new branch.
+         * Publish the observation marker last so another reader that sees it
+         * also sees the matching height and timestamp. */
+        atomic_store(&g_last_block_connected_height, current);
+        atomic_store(&g_last_block_connected_ts,
+                     (int64_t)platform_time_wall_time_t());
+        atomic_store(&g_last_observed_provable_tip, current);
+    }
+    pthread_mutex_unlock(&g_tip_progress_lock);
+}
+
 int64_t sync_monitor_tip_advance_age(void)
 {
+    sync_monitor_observe_provable_tip();
     int64_t last = atomic_load(&g_last_block_connected_ts);
     if (last == 0)
         return -1; // raw-return-ok:sentinel
@@ -709,6 +754,9 @@ bool sync_monitor_dump_state_json(struct json_value *out, const char *key)
         return false;
     json_set_object(out);
 
+    /* Keep the three progress fields from one authority snapshot even when
+     * this diagnostic is the first reader after H* moves. */
+    sync_monitor_observe_provable_tip();
     struct watchdog_stats wd;
     sync_monitor_get_stats(&wd);
     json_push_kv_int (out, "last_block_connected_height",
@@ -811,6 +859,7 @@ void sync_monitor_test_set_local_recovery(bool active,
 
 void sync_monitor_test_set_tip_advance_ts(int64_t ts)
 {
+    atomic_store(&g_tip_advance_test_override, true);
     atomic_store(&g_last_block_connected_ts, ts);
 }
 #endif

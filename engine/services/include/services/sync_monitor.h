@@ -91,6 +91,9 @@ bool sync_monitor_active_next_child_exists(struct main_state *ms,
 void sync_monitor_get_local_recovery_stats(
     struct watchdog_local_recovery_stats *out);
 
+/* Pre-H* compatibility observation for fresh-chain/P2P intake. Once the
+ * reducer publishes its provable tip, tip_advance_age follows that verified
+ * frontier and body receipt alone no longer counts as progress. */
 void sync_monitor_on_block_connected(int height);
 int64_t sync_monitor_tip_advance_age(void);
 /* Lock-free best-known peer height from the latest tip-state evaluation.
