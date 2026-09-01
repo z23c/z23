@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="888" height="294" viewBox="0 0 888 294" role="img" aria-label="z23 discover describe zcode.package.source.reproduce">
-<rect width="888" height="294" rx="12" fill="#0b0f16"/>
-<rect x="0.5" y="0.5" width="887" height="293" rx="11.5" fill="none" stroke="#243044"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="888" height="315" viewBox="0 0 888 315" role="img" aria-label="z23 discover describe zcode.package.source.reproduce">
+<rect width="888" height="315" rx="12" fill="#0b0f16"/>
+<rect x="0.5" y="0.5" width="887" height="314" rx="11.5" fill="none" stroke="#243044"/>
 <path d="M0 44 h888" stroke="#1a2432"/>
 <circle cx="26" cy="22" r="5.5" fill="#ff6b5e"/><circle cx="46" cy="22" r="5.5" fill="#f2c14e"/><circle cx="66" cy="22" r="5.5" fill="#6bd18a"/>
 <text x="444" y="27" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#66788c" text-anchor="middle">z23 discover describe zcode.package.source.reproduce</text>
@@ -12,6 +12,7 @@
 <text y="181" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="40.8" textLength="100.8" lengthAdjust="spacing" fill="#5d7186">input       </tspan><tspan x="141.6" textLength="722.4" lengthAdjust="spacing" fill="#c3d2e2">  mode (positional), root (positional), namespace, sequence, not_before, expiry, plan…</tspan></text>
 <text y="202" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="40.8" textLength="100.8" lengthAdjust="spacing" fill="#5d7186">output      </tspan><tspan x="141.6" textLength="260.4" lengthAdjust="spacing" fill="#c3d2e2">  zcl.zcode_source_reproduce.v1</tspan></text>
 <text y="223" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="40.8" textLength="100.8" lengthAdjust="spacing" fill="#5d7186">policy      </tspan><tspan x="141.6" textLength="630.0" lengthAdjust="spacing" fill="#c3d2e2">  mutate · node · operator · foreground latency · high cost · 750 ms budget</tspan></text>
-<text y="244" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"></text>
-<text y="265" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="40.8" textLength="100.8" lengthAdjust="spacing" fill="#5d7186">example:    </tspan><tspan x="141.6" textLength="646.8" lengthAdjust="spacing" fill="#eef4fb" font-weight="bold">z23 zcode package source reproduce --input='{"mode":"plan","root":"&lt;64hex&gt;"}'</tspan></text>
+<text y="244" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="40.8" textLength="100.8" lengthAdjust="spacing" fill="#5d7186">aliases     </tspan><tspan x="141.6" textLength="268.8" lengthAdjust="spacing" fill="#c3d2e2">  zcode.package.source.reproduce</tspan></text>
+<text y="265" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"></text>
+<text y="286" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="40.8" textLength="100.8" lengthAdjust="spacing" fill="#5d7186">example:    </tspan><tspan x="141.6" textLength="646.8" lengthAdjust="spacing" fill="#eef4fb" font-weight="bold">z23 zcode package source reproduce --input='{"mode":"plan","root":"&lt;64hex&gt;"}'</tspan></text>
 </svg>

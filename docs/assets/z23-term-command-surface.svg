@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="888" height="441" viewBox="0 0 888 441" role="img" aria-label="z23 discover help">
-<rect width="888" height="441" rx="12" fill="#0b0f16"/>
-<rect x="0.5" y="0.5" width="887" height="440" rx="11.5" fill="none" stroke="#243044"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="888" height="462" viewBox="0 0 888 462" role="img" aria-label="z23 discover help">
+<rect width="888" height="462" rx="12" fill="#0b0f16"/>
+<rect x="0.5" y="0.5" width="887" height="461" rx="11.5" fill="none" stroke="#243044"/>
 <path d="M0 44 h888" stroke="#1a2432"/>
 <circle cx="26" cy="22" r="5.5" fill="#ff6b5e"/><circle cx="46" cy="22" r="5.5" fill="#f2c14e"/><circle cx="66" cy="22" r="5.5" fill="#6bd18a"/>
 <text x="444" y="27" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#66788c" text-anchor="middle">z23 discover help</text>
@@ -15,10 +15,11 @@
 <text y="244" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  discover   Search and describe the command registry          read  ready</tspan></text>
 <text y="265" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  code       Hierarchical source-code navigator                read  ready</tspan></text>
 <text y="286" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  vault      What this node owns, and what may act on it       read  ready</tspan></text>
-<text y="307" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  zcode      Create, verify and preserve public C23 work tog…  read  ready</tspan></text>
+<text y="307" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  zcode      Create, verify and preserve public C23 work       read  ready</tspan></text>
 <text y="328" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  metaverse  Sovereign digital property: catalog, rights, re…  read  ready</tspan></text>
 <text y="349" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  yardsale   For-sale-by-owner signed ads, settled bilateral…  read  ready</tspan></text>
 <text y="370" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  zses       Session invites                                   read  ready</tspan></text>
-<text y="391" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"></text>
-<text y="412" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="50.4" lengthAdjust="spacing" fill="#c3d2e2">next: </tspan><tspan x="74.4" textLength="235.2" lengthAdjust="spacing" fill="#eef4fb" font-weight="bold">z23 discover describe status</tspan></text>
+<text y="391" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="621.6" lengthAdjust="spacing" fill="#c3d2e2">  story      Rooted causal views of development work           read  ready</tspan></text>
+<text y="412" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"></text>
+<text y="433" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" xml:space="preserve"><tspan x="24.0" textLength="50.4" lengthAdjust="spacing" fill="#c3d2e2">next: </tspan><tspan x="74.4" textLength="235.2" lengthAdjust="spacing" fill="#eef4fb" font-weight="bold">z23 discover describe status</tspan></text>
 </svg>
