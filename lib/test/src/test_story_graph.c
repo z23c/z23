@@ -289,6 +289,22 @@ static int sg_canonical_work_projection(void)
 
         struct zcl_story_event_v1 changed_events[7];
         struct zcl_story_graph_v1 changed_graph;
+        struct zcl_story_work_facts_v1 awaiting = {
+            .state = "AWAITING_CANDIDATE",
+            .build_result = "not_started",
+            .test_result = "unknown",
+            .task_root = sg_hex(1),
+            .source_root = sg_hex(2),
+            .goal_root = sg_hex(3),
+            .agent_context_root = sg_hex(4),
+        };
+        ASSERT(zcl_story_graph_from_work_facts(
+            &awaiting, changed_events, &changed_graph));
+        ASSERT_EQ(changed_events[1].status, ZCL_ONTOLOGY_PROVED);
+        ASSERT_EQ(changed_events[2].status, ZCL_ONTOLOGY_UNKNOWN);
+        ASSERT_EQ(changed_events[3].status, ZCL_ONTOLOGY_UNKNOWN);
+        ASSERT_EQ(changed_events[6].status, ZCL_ONTOLOGY_UNKNOWN);
+
         facts.accepted_work_root = sg_hex(15);
         ASSERT(zcl_story_graph_from_work_facts(
             &facts, changed_events, &changed_graph));

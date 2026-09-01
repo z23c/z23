@@ -143,6 +143,7 @@ bool zcl_story_graph_from_work_facts(
 
     story_pick_root(candidate_source, source, scene);
     story_pick_root(patch, candidate, relation);
+    story_pick_root(relation, task, relation);
     story_pick_root(candidate, task, evidence);
     enum zcl_ontology_status edit_status =
         have_candidate && have_candidate_source && have_patch
